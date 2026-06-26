@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+SOURCE=/usr/share/tcc/hello.c
+OUTPUT=/tmp/tcc-hello
+
+rm -f "$OUTPUT"
+tcc -static -o "$OUTPUT" "$SOURCE"
+"$OUTPUT"
+rm -f "$OUTPUT"
