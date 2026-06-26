@@ -17,6 +17,8 @@ ROOTFS := $(BUILD)/rootfs
 PORT_OUT := ports/out
 BASH := $(PORT_OUT)/bash
 BUSYBOX := $(PORT_OUT)/busybox
+TCC_ROOT := $(PORT_OUT)/tcc-root
+TCC_STAMP := $(PORT_OUT)/.tcc-ready
 
 COMMON_CFLAGS := -std=gnu11 -Wall -Wextra -Werror -ffreestanding -fno-stack-protector \
 	-fno-pic -fno-pie -fno-builtin -fno-asynchronous-unwind-tables -fno-unwind-tables \
@@ -49,7 +51,7 @@ INITRD_FILES := $(shell find initrd -type f 2>/dev/null)
 WALLPAPER_SOURCE ?= assets/tunix-mountain-lake.jpg
 WALLPAPER_OUTPUT := initrd/usr/share/tunix/wallpaper.twl
 
-.PHONY: all run headless wallpaper clean
+.PHONY: all run headless wallpaper tcc tcc-check clean
 all: $(IMAGE)
 
 wallpaper: $(WALLPAPER_OUTPUT)
@@ -71,6 +73,16 @@ $(BASH): ports/build-bash.sh | $(BUILD)/.tools
 
 $(BUSYBOX): $(BASH) ports/build-busybox.sh | $(BUILD)/.tools
 	OUT="$(abspath $(PORT_OUT))" ./ports/build-busybox.sh
+
+$(TCC_STAMP): ports/build-tcc.sh | $(BUILD)/.tools
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" ./ports/build-tcc.sh
+	@touch $@
+
+tcc: $(TCC_STAMP)
+
+tcc-check: $(TCC_STAMP) ports/test-tcc.sh tests/tcc/headers.c tests/tcc/freestanding.c
+	TCC_ROOT="$(abspath $(TCC_ROOT))" ./ports/test-tcc.sh
 
 $(BUILD):
 	mkdir -p $@
