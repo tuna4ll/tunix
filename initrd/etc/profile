@@ -1,0 +1,11 @@
+export PATH=/bin:/sbin
+export HOME=/home
+export USER=root
+export LOGNAME=root
+export SHELL=/bin/bash
+export TERM=xterm-256color
+export COLORTERM=truecolor
+export INPUTRC=/etc/inputrc
+export HISTFILE=/home/.bash_history
+[ -r /etc/bashrc ] && . /etc/bashrc
+[ -r /etc/motd ] && cat /etc/motd

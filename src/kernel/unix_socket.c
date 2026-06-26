@@ -1,0 +1,275 @@
+#include <stddef.h>
+#include <stdint.h>
+#include "include/heap.h"
+#include "include/kstring.h"
+#include "include/pipe.h"
+#include "include/unix_socket.h"
+
+#define EADDRINUSE 98
+#define EAFNOSUPPORT 97
+#define EAGAIN 11
+#define EALREADY 114
+#define ECONNREFUSED 111
+#define EINVAL 22
+#define ENAMETOOLONG 36
+#define ENOTCONN 107
+#define EPIPE 32
+
+#define UNIX_MAX_LISTENERS 8
+#define UNIX_PENDING_MAX 8
+
+struct unix_channel {
+    struct pipe_buffer to_a;
+    struct pipe_buffer to_b;
+    int refs;
+    int a_open;
+    int b_open;
+};
+
+struct unix_socket {
+    int refs;
+    int listening;
+    int connected;
+    int side;
+    int backlog;
+    char path[108];
+    struct unix_channel *channel;
+    struct unix_socket *pending[UNIX_PENDING_MAX];
+    int pending_head;
+    int pending_tail;
+    int pending_count;
+};
+
+static struct unix_socket *listeners[UNIX_MAX_LISTENERS];
+
+static struct pipe_buffer *incoming(struct unix_socket *socket) {
+    if (!socket || !socket->channel) return NULL;
+    return socket->side == 0 ? &socket->channel->to_a : &socket->channel->to_b;
+}
+
+static struct pipe_buffer *outgoing(struct unix_socket *socket) {
+    if (!socket || !socket->channel) return NULL;
+    return socket->side == 0 ? &socket->channel->to_b : &socket->channel->to_a;
+}
+
+static int peer_open(struct unix_socket *socket) {
+    if (!socket || !socket->channel) return 0;
+    return socket->side == 0 ? socket->channel->b_open : socket->channel->a_open;
+}
+
+static void listener_unregister(struct unix_socket *socket) {
+    for (int index = 0; index < UNIX_MAX_LISTENERS; index++) {
+        if (listeners[index] == socket) listeners[index] = NULL;
+    }
+}
+
+struct unix_socket *unix_socket_create(void) {
+    struct unix_socket *socket = (struct unix_socket *)kmalloc(sizeof(*socket));
+    if (!socket) return NULL;
+    memset(socket, 0, sizeof(*socket));
+    socket->refs = 1;
+    socket->backlog = UNIX_PENDING_MAX;
+    return socket;
+}
+
+
+int unix_socket_pair(struct unix_socket **first, struct unix_socket **second) {
+    if (!first || !second) return -EINVAL;
+    *first = NULL;
+    *second = NULL;
+    struct unix_channel *channel = (struct unix_channel *)kmalloc(sizeof(*channel));
+    struct unix_socket *a = unix_socket_create();
+    struct unix_socket *b = unix_socket_create();
+    if (!channel || !a || !b) {
+        if (channel) kfree(channel);
+        if (a) unix_socket_unref(a);
+        if (b) unix_socket_unref(b);
+        return -EAGAIN;
+    }
+    memset(channel, 0, sizeof(*channel));
+    channel->refs = 2;
+    channel->a_open = 1;
+    channel->b_open = 1;
+    a->channel = channel;
+    a->side = 0;
+    a->connected = 1;
+    b->channel = channel;
+    b->side = 1;
+    b->connected = 1;
+    *first = a;
+    *second = b;
+    return 0;
+}
+
+void unix_socket_ref(struct unix_socket *socket) {
+    if (socket) socket->refs++;
+}
+
+void unix_socket_unref(struct unix_socket *socket) {
+    if (!socket || socket->refs <= 0) return;
+    socket->refs--;
+    if (socket->refs != 0) return;
+
+    listener_unregister(socket);
+    while (socket->pending_count > 0) {
+        struct unix_socket *pending = socket->pending[socket->pending_head];
+        socket->pending_head = (socket->pending_head + 1) % UNIX_PENDING_MAX;
+        socket->pending_count--;
+        unix_socket_unref(pending);
+    }
+
+    if (socket->channel) {
+        if (socket->side == 0) socket->channel->a_open = 0;
+        else socket->channel->b_open = 0;
+        socket->channel->refs--;
+        if (socket->channel->refs == 0) kfree(socket->channel);
+    }
+    kfree(socket);
+}
+
+static int copy_path(char destination[108], const struct tunix_sockaddr_un *address,
+                     size_t length) {
+    if (!address || length < sizeof(address->family) + 2 ||
+        address->family != TUNIX_AF_UNIX) return -EAFNOSUPPORT;
+    size_t maximum = length - sizeof(address->family);
+    if (maximum > sizeof(address->path)) maximum = sizeof(address->path);
+    size_t path_length = 0;
+    while (path_length < maximum && address->path[path_length]) path_length++;
+    if (path_length == 0) return -EINVAL;
+    if (path_length >= sizeof(address->path)) return -ENAMETOOLONG;
+    memcpy(destination, address->path, path_length);
+    destination[path_length] = '\0';
+    return 0;
+}
+
+int unix_socket_bind(struct unix_socket *socket, const struct tunix_sockaddr_un *address,
+                     size_t length) {
+    if (!socket || socket->connected || socket->listening || socket->path[0]) return -EINVAL;
+    char path[108];
+    int status = copy_path(path, address, length);
+    if (status < 0) return status;
+    for (int index = 0; index < UNIX_MAX_LISTENERS; index++) {
+        if (listeners[index] && strcmp(listeners[index]->path, path) == 0)
+            return -EADDRINUSE;
+    }
+    strncpy(socket->path, path, sizeof(socket->path) - 1);
+    return 0;
+}
+
+int unix_socket_listen(struct unix_socket *socket, int backlog) {
+    if (!socket || !socket->path[0] || socket->connected) return -EINVAL;
+    for (int index = 0; index < UNIX_MAX_LISTENERS; index++) {
+        if (listeners[index] == socket) {
+            socket->listening = 1;
+            return 0;
+        }
+    }
+    for (int index = 0; index < UNIX_MAX_LISTENERS; index++) {
+        if (!listeners[index]) {
+            listeners[index] = socket;
+            socket->listening = 1;
+            socket->backlog = backlog > 0 && backlog < UNIX_PENDING_MAX ? backlog : UNIX_PENDING_MAX;
+            return 0;
+        }
+    }
+    return -EAGAIN;
+}
+
+static struct unix_socket *find_listener(const char *path) {
+    for (int index = 0; index < UNIX_MAX_LISTENERS; index++) {
+        if (listeners[index] && listeners[index]->listening &&
+            strcmp(listeners[index]->path, path) == 0) return listeners[index];
+    }
+    return NULL;
+}
+
+int unix_socket_connect(struct unix_socket *socket, const struct tunix_sockaddr_un *address,
+                        size_t length) {
+    if (!socket) return -EINVAL;
+    if (socket->connected) return -EALREADY;
+    char path[108];
+    int status = copy_path(path, address, length);
+    if (status < 0) return status;
+    struct unix_socket *listener = find_listener(path);
+    if (!listener || listener->pending_count >= listener->backlog) return -ECONNREFUSED;
+
+    struct unix_channel *channel = (struct unix_channel *)kmalloc(sizeof(*channel));
+    struct unix_socket *server = unix_socket_create();
+    if (!channel || !server) {
+        if (channel) kfree(channel);
+        if (server) unix_socket_unref(server);
+        return -EAGAIN;
+    }
+    memset(channel, 0, sizeof(*channel));
+    channel->refs = 2;
+    channel->a_open = 1;
+    channel->b_open = 1;
+
+    socket->channel = channel;
+    socket->side = 0;
+    socket->connected = 1;
+    server->channel = channel;
+    server->side = 1;
+    server->connected = 1;
+
+    listener->pending[listener->pending_tail] = server;
+    listener->pending_tail = (listener->pending_tail + 1) % UNIX_PENDING_MAX;
+    listener->pending_count++;
+    return 0;
+}
+
+struct unix_socket *unix_socket_accept(struct unix_socket *socket) {
+    if (!socket || !socket->listening || socket->pending_count == 0) return NULL;
+    struct unix_socket *accepted = socket->pending[socket->pending_head];
+    socket->pending[socket->pending_head] = NULL;
+    socket->pending_head = (socket->pending_head + 1) % UNIX_PENDING_MAX;
+    socket->pending_count--;
+    return accepted;
+}
+
+int64_t unix_socket_read(struct unix_socket *socket, size_t size, void *buffer) {
+    if (!socket || !socket->connected || !socket->channel) return -ENOTCONN;
+    struct pipe_buffer *pipe = incoming(socket);
+    if (!pipe) return -ENOTCONN;
+    if (pipe->count == 0) return peer_open(socket) ? -EAGAIN : 0;
+    uint8_t *out = (uint8_t *)buffer;
+    size_t amount = size < pipe->count ? size : pipe->count;
+    for (size_t index = 0; index < amount; index++) {
+        out[index] = pipe->data[pipe->read_pos];
+        pipe->read_pos = (pipe->read_pos + 1) % PIPE_CAPACITY;
+    }
+    pipe->count -= amount;
+    return (int64_t)amount;
+}
+
+int64_t unix_socket_write(struct unix_socket *socket, size_t size, const void *buffer) {
+    if (!socket || !socket->connected || !socket->channel) return -ENOTCONN;
+    if (!peer_open(socket)) return -EPIPE;
+    struct pipe_buffer *pipe = outgoing(socket);
+    size_t available = PIPE_CAPACITY - pipe->count;
+    if (!available) return -EAGAIN;
+    const uint8_t *in = (const uint8_t *)buffer;
+    size_t amount = size < available ? size : available;
+    for (size_t index = 0; index < amount; index++) {
+        pipe->data[pipe->write_pos] = in[index];
+        pipe->write_pos = (pipe->write_pos + 1) % PIPE_CAPACITY;
+    }
+    pipe->count += amount;
+    return (int64_t)amount;
+}
+
+int unix_socket_read_ready(struct unix_socket *socket) {
+    if (!socket) return 0;
+    if (socket->listening) return socket->pending_count > 0;
+    if (!socket->connected || !socket->channel) return 0;
+    return incoming(socket)->count > 0 || !peer_open(socket);
+}
+
+int unix_socket_write_ready(struct unix_socket *socket) {
+    if (!socket || !socket->connected || !socket->channel || !peer_open(socket)) return 0;
+    return outgoing(socket)->count < PIPE_CAPACITY;
+}
+
+int unix_socket_is_listener(struct unix_socket *socket) {
+    return socket && socket->listening;
+}

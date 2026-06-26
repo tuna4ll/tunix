@@ -1,0 +1,9 @@
+[submodule "ports/src/bash"]
+	path = ports/src/bash
+	url = https://git.savannah.gnu.org/git/bash.git
+[submodule "ports/src/busybox"]
+	path = ports/src/busybox
+	url = https://github.com/mirror/busybox.git
+[submodule "ports/src/musl"]
+	path = ports/src/musl
+	url = https://git.musl-libc.org/git/musl

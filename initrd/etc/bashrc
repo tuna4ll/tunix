@@ -1,0 +1,14 @@
+case $- in
+    *i*) ;;
+    *) return ;;
+esac
+
+shopt -s checkwinsize histappend
+HISTCONTROL=ignoredups:erasedups
+HISTSIZE=1000
+HISTFILESIZE=2000
+
+printf '\033]0;Tunix Terminal\007'
+PS1='\[\033[1;36m\]tunix\[\033[0m\]:\[\033[1;34m\]\w\[\033[0m\]# '
+
+alias ll='ls -alh'

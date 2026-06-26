@@ -1,0 +1,11 @@
+set editing-mode emacs
+set bell-style none
+set completion-ignore-case on
+set show-all-if-ambiguous on
+set colored-stats on
+set mark-symlinked-directories on
+"\e[A": history-search-backward
+"\e[B": history-search-forward
+"\e[H": beginning-of-line
+"\e[F": end-of-line
+"\e[3~": delete-char

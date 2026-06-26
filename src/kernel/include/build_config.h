@@ -1,0 +1,6 @@
+#ifndef TUNIX_BUILD_CONFIG_H
+#define TUNIX_BUILD_CONFIG_H
+
+#define TUNIX_DEBUG_LOGS 0
+
+#endif

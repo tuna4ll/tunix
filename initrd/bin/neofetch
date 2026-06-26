@@ -1,0 +1,140 @@
+#!/bin/bash
+set -u
+show_logo=1
+use_color=1
+show_blocks=1
+usage() {
+    cat <<'USAGE'
+Usage: neofetch [options]
+Options:
+  --off              Disable the ASCII logo
+  --stdout           Disable ANSI colors and color blocks
+  --color_blocks off Disable the color blocks
+  --version           Print version information
+  --help              Show this help
+USAGE
+}
+while (($#)); do
+    case "$1" in
+        --off) show_logo=0 ;;
+        --stdout) use_color=0; show_blocks=0 ;;
+        --color_blocks)
+            shift
+            [[ ${1:-on} == off ]] && show_blocks=0
+            ;;
+        --version|-V)
+            printf 'Neofetch 7.1.0-tunix\n'
+            exit 0
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        --ascii_distro|--backend|--source) shift ;;
+    esac
+    shift
+done
+if ((use_color)); then
+    reset='\033[0m'
+    cyan='\033[1;36m'
+    blue='\033[1;34m'
+    dim='\033[2m'
+else
+    reset=''
+    cyan=''
+    blue=''
+    dim=''
+fi
+. /etc/os-release
+kernel_name=$(uname -s)
+kernel_release=$(uname -r)
+machine=$(uname -m)
+hostname=$(uname -n)
+username=$USER
+shell_version=${BASH_VERSION%%(*}
+term_name=$TERM
+busybox_version=1.36.1
+applet_count=0
+cpu_model='x86_64 processor'
+mem_total_kb=0
+mem_free_kb=0
+uptime_text='unknown'
+while IFS=$'\t' read -r key value; do
+    [[ $key == 'model name' ]] && cpu_model=${value#: } && break
+done < /proc/cpuinfo
+while read -r key value unit; do
+    case $key in
+        MemTotal:) mem_total_kb=$value ;;
+        MemFree:) mem_free_kb=$value ;;
+    esac
+done < /proc/meminfo
+read -r uptime_raw _ < /proc/uptime
+uptime_seconds=${uptime_raw%%.*}
+uptime_hours=$((uptime_seconds / 3600))
+uptime_minutes=$(((uptime_seconds / 60) % 60))
+uptime_secs=$((uptime_seconds % 60))
+printf -v uptime_text '%02d:%02d:%02d' "$uptime_hours" "$uptime_minutes" "$uptime_secs"
+mem_used_kb=$((mem_total_kb - mem_free_kb))
+mem_text="$((mem_used_kb / 1024)) MiB / $((mem_total_kb / 1024)) MiB"
+shopt -s nullglob
+for applet_path in /bin/*; do
+    applet_name=${applet_path##*/}
+    case "$applet_name" in
+        bash|busybox|neofetch|sh) continue ;;
+    esac
+    [[ -L $applet_path ]] && ((applet_count += 1))
+done
+shopt -u nullglob
+labels=("OS" "Host" "Kernel" "Architecture" "CPU" "Shell" "Terminal" "Uptime" "Resolution" "Memory")
+values=(
+    "$PRETTY_NAME $machine"
+    'QEMU Standard PC'
+    "$kernel_name $kernel_release"
+    "$machine"
+    "$cpu_model"
+    "GNU Bash $shell_version"
+    "Tunix TTY"
+    "$uptime_text"
+    '80x25 characters'
+    "$mem_text"
+)
+logo=(
+    '                      _.'"'"'      .'
+    ''"'"':'"'"'.               .'"'"''"'"'   __ __  .'
+    '  '"'"'.:._          ./  _ '"'"''"'"'     "-'"'"'.__'
+    '.'"'"''"'"''"'"'-: """-._    | .                "-"._'
+    ' '"'"'.     .    "._.'"'"'                       "'
+    '    '"'"'.   "-.___ .        .'"'"'          .  :o'"'"'.'
+    '      |   .----  .      .           .'"'"'     ('
+    '       '"'"'|  ----. '"'"'   ,.._                _-'"'"''
+    '        .'"'"' .---  |.""  .-:;.. _____.----'"'"''
+    '        |   .-""""    |      '"'"''
+    '      .'"'"'  _'"'"'         .'"'"'    _'"'"''
+    '     |_.-'"'"'            '"'"'-.'"'"''
+    ''
+    ''
+)
+printf '\n'
+if ((show_logo)); then
+    printf '%b%-48s%b%b%s@%s%b\n' "$cyan" "${logo[0]}" "$reset" "$cyan" "$username" "$hostname" "$reset"
+    printf '%b%-48s%b%b-----------%b\n' "$cyan" "${logo[1]}" "$reset" "$dim" "$reset"
+    for ((i = 0; i < ${#values[@]}; i++)); do
+        printf '%b%-48s%b%b%-13s%b %s\n' \
+            "$cyan" "${logo[i + 2]-}" "$reset" \
+            "$blue" "${labels[i]}:" "$reset" "${values[i]}"
+    done
+else
+    printf '%b%s@%s%b\n' "$cyan" "$username" "$hostname" "$reset"
+    printf '%b-----------%b\n' "$dim" "$reset"
+    for ((i = 0; i < ${#values[@]}; i++)); do
+        printf '%b%-13s%b %s\n' "$blue" "${labels[i]}:" "$reset" "${values[i]}"
+    done
+fi
+if ((show_blocks && use_color)); then
+    printf '\n             '
+    for code in 40 41 42 43 44 45 46 47; do printf '\033[%sm   ' "$code"; done
+    printf '\033[0m\n             '
+    for code in 100 101 102 103 104 105 106 107; do printf '\033[%sm   ' "$code"; done
+    printf '\033[0m\n'
+fi
+printf '\n'
