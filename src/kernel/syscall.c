@@ -142,6 +142,7 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 120, "syscall frame r
 
 #define AT_FDCWD (-100)
 #define AT_SYMLINK_NOFOLLOW 0x100
+#define AT_EACCESS 0x200
 #define AT_EMPTY_PATH 0x1000
 #define AT_REMOVEDIR 0x200
 #define AT_SYMLINK_FOLLOW 0x400
@@ -1377,7 +1378,7 @@ static int64_t sys_execve(struct syscall_frame *frame, uint64_t user_path, uint6
         argc = 1;
     }
     if (envc == 0) {
-        const char *defaults[] = {"PATH=/bin:/sbin", "HOME=/", "TERM=tunix", "USER=root", NULL};
+        const char *defaults[] = {"PATH=/usr/bin:/usr/sbin:/bin:/sbin", "HOME=/", "TERM=tunix", "USER=root", NULL};
         for (int i = 0; defaults[i]; i++) {
             strncpy(arguments->env_storage[i], defaults[i], MAX_EXEC_STRING - 1);
             arguments->envp[i] = arguments->env_storage[i];
@@ -1962,11 +1963,20 @@ void syscall_dispatch(struct syscall_frame *frame) {
         case SYS_STATX: frame->rax = (uint64_t)-(int64_t)ENOSYS; break;
         case SYS_RSEQ: frame->rax = (uint64_t)-(int64_t)ENOSYS; break;
         case SYS_FACCESSAT2: {
-            if (frame->r10 != 0) frame->rax = (uint64_t)-(int64_t)EINVAL;
-            else {
+            unsigned flags = (unsigned)frame->r10;
+            if (flags & ~(AT_EACCESS | AT_SYMLINK_NOFOLLOW)) {
+                frame->rax = (uint64_t)-(int64_t)EINVAL;
+            } else {
                 char path[256];
                 int status = copy_path_at((int)frame->rdi, frame->rsi, path);
-                frame->rax = (uint64_t)(status != 0 ? status : (vfs_lookup(path) ? 0 : -ENOENT));
+                if (status != 0) {
+                    frame->rax = (uint64_t)status;
+                } else {
+                    struct vfs_node *node = (flags & AT_SYMLINK_NOFOLLOW)
+                        ? vfs_lookup_nofollow(path)
+                        : vfs_lookup(path);
+                    frame->rax = (uint64_t)(node ? 0 : -(int64_t)ENOENT);
+                }
             }
             break;
         }

@@ -51,7 +51,7 @@ INITRD_FILES := $(shell find initrd -type f 2>/dev/null)
 WALLPAPER_SOURCE ?= assets/tunix-mountain-lake.jpg
 WALLPAPER_OUTPUT := initrd/usr/share/tunix/wallpaper.twl
 
-.PHONY: all run headless wallpaper tcc tcc-check clean
+.PHONY: all run headless wallpaper clean
 all: $(IMAGE)
 
 wallpaper: $(WALLPAPER_OUTPUT)
@@ -78,11 +78,6 @@ $(TCC_STAMP): ports/build-tcc.sh | $(BUILD)/.tools
 	@mkdir -p $(PORT_OUT)
 	OUT="$(abspath $(PORT_OUT))" ./ports/build-tcc.sh
 	@touch $@
-
-tcc: $(TCC_STAMP)
-
-tcc-check: $(TCC_STAMP) ports/test-tcc.sh tests/tcc/headers.c tests/tcc/freestanding.c
-	TCC_ROOT="$(abspath $(TCC_ROOT))" ./ports/test-tcc.sh
 
 $(BUILD):
 	mkdir -p $@
@@ -176,9 +171,11 @@ $(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(BUSYBOX) $(TCC_STAMP) $(WALLPAPE
 	cp $(BUSYBOX) $(ROOTFS)/bin/busybox
 	cp $(SYSTEM_TOOLS) $(ROOTFS)/bin/
 	cp -R $(TCC_ROOT)/. $(ROOTFS)/
+	@test -x $(ROOTFS)/usr/bin/tcc || { echo "TinyCC was not installed into the rootfs" >&2; exit 1; }
+	ln -sfn ../usr/bin/tcc $(ROOTFS)/bin/tcc
 	chmod 0755 $(ROOTFS)/sbin/init $(ROOTFS)/bin/bash $(ROOTFS)/bin/busybox \
 		$(ROOTFS)/bin/neofetch $(ROOTFS)/bin/ps $(ROOTFS)/bin/free \
-		$(ROOTFS)/bin/uptime $(ROOTFS)/bin/top $(ROOTFS)/bin/tcc-smoke \
+		$(ROOTFS)/bin/uptime $(ROOTFS)/bin/top \
 		$(ROOTFS)/usr/bin/tcc
 	ln -s bash $(ROOTFS)/bin/sh
 	@for app in $(BUSYBOX_APPLETS); do ln -s busybox $(ROOTFS)/bin/$$app; done

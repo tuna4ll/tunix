@@ -262,7 +262,7 @@ struct process *process_create_from_path(const char *path) {
 
     const char *argv[] = {path, NULL};
     const char *envp[] = {
-        "PATH=/bin:/sbin",
+        "PATH=/usr/bin:/usr/sbin:/bin:/sbin",
         "HOME=/",
         "TERM=tunix",
         "SHELL=/bin/bash",
