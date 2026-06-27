@@ -25,6 +25,7 @@ static size_t input_tail;
 static size_t input_count;
 static int shift_down;
 static int ctrl_down;
+static int alt_down;
 static int caps_lock;
 static int extended_prefix;
 
@@ -265,6 +266,7 @@ static int is_letter(char value) {
 void tty_reset_keyboard_state(void) {
     shift_down = 0;
     ctrl_down = 0;
+    alt_down = 0;
     extended_prefix = 0;
 }
 
@@ -283,6 +285,10 @@ void tty_handle_scancode(uint8_t code) {
         code &= 0x7FU;
         if (code == 0x1DU) {
             ctrl_down = released ? 0 : 1;
+            return;
+        }
+        if (code == 0x38U) {
+            alt_down = released ? 0 : 1;
             return;
         }
         if (released) return;
@@ -304,16 +310,36 @@ void tty_handle_scancode(uint8_t code) {
     if (code == 0xAAU || code == 0xB6U) { shift_down = 0; return; }
     if (code == 0x1DU) { ctrl_down = 1; return; }
     if (code == 0x9DU) { ctrl_down = 0; return; }
+    if (code == 0x38U) { alt_down = 1; return; }
+    if (code == 0xB8U) { alt_down = 0; return; }
     if (code == 0x3AU) { caps_lock = !caps_lock; return; }
     if (code == 0x01U) { (void)input_push(0x1BU); return; }
     if (code & 0x80U || code >= 128U) return;
+    if (code == 0x0EU) { (void)input_push(127U); return; }
+    if (code == 0x0FU && shift_down) { input_push_text("\x1b[Z"); return; }
+    switch (code) {
+        case 0x3BU: input_push_text("\x1bOP"); return;
+        case 0x3CU: input_push_text("\x1bOQ"); return;
+        case 0x3DU: input_push_text("\x1bOR"); return;
+        case 0x3EU: input_push_text("\x1bOS"); return;
+        case 0x3FU: input_push_text("\x1b[15~"); return;
+        case 0x40U: input_push_text("\x1b[17~"); return;
+        case 0x41U: input_push_text("\x1b[18~"); return;
+        case 0x42U: input_push_text("\x1b[19~"); return;
+        case 0x43U: input_push_text("\x1b[20~"); return;
+        case 0x44U: input_push_text("\x1b[21~"); return;
+        case 0x57U: input_push_text("\x1b[23~"); return;
+        case 0x58U: input_push_text("\x1b[24~"); return;
+        default: break;
+    }
     char value = shift_down ? shift_keymap[code] : keymap[code];
     if (!value) return;
     if (is_letter(keymap[code]) && caps_lock)
         value = shift_down ? keymap[code] : shift_keymap[code];
-    if (ctrl_down && (value == 'c' || value == 'C')) value = 3;
-    else if (ctrl_down && (value == 'd' || value == 'D')) value = 4;
+    if (ctrl_down && value >= 'a' && value <= 'z') value = (char)(value - 'a' + 1);
+    else if (ctrl_down && value >= 'A' && value <= 'Z') value = (char)(value - 'A' + 1);
     else if (ctrl_down && value >= '@' && value <= '_') value &= 0x1F;
+    if (alt_down && input_push(0x1BU) != 0) return;
     (void)input_push((uint8_t)value);
 }
 
@@ -437,7 +463,7 @@ void tty_init(void) {
     console_foreground_pgid = 0;
     canonical_length = canonical_offset = 0;
     input_head = input_tail = input_count = 0;
-    shift_down = ctrl_down = caps_lock = extended_prefix = 0;
+    shift_down = ctrl_down = alt_down = caps_lock = extended_prefix = 0;
     ansi_state = 0;
     ansi_param_count = ansi_current = 0;
     ansi_have_current = 0;
@@ -454,9 +480,6 @@ int tty_ioctl(unsigned long request, void *argument) {
         case TCSETSW:
         case TCSETSF:
             memcpy(&console_termios, argument, sizeof(console_termios));
-            if (console_termios.lflag & TTY_ICANON) {
-                console_termios.lflag |= TTY_ECHO | TTY_ECHOE | TTY_ECHOK;
-            }
             if (request == TCSETSF) {
                 canonical_length = canonical_offset = 0;
                 input_head = input_tail = input_count = 0;
