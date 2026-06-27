@@ -19,6 +19,8 @@ BASH := $(PORT_OUT)/bash
 BUSYBOX := $(PORT_OUT)/busybox
 TCC_ROOT := $(PORT_OUT)/tcc-root
 TCC_STAMP := $(PORT_OUT)/.tcc-ready
+NCURSES_ROOT := $(PORT_OUT)/ncurses-root
+NCURSES_STAMP := $(PORT_OUT)/.ncurses-ready
 
 COMMON_CFLAGS := -std=gnu11 -Wall -Wextra -Werror -ffreestanding -fno-stack-protector \
 	-fno-pic -fno-pie -fno-builtin -fno-asynchronous-unwind-tables -fno-unwind-tables \
@@ -73,6 +75,11 @@ $(BASH): ports/build-bash.sh | $(BUILD)/.tools
 
 $(BUSYBOX): $(BASH) ports/build-busybox.sh | $(BUILD)/.tools
 	OUT="$(abspath $(PORT_OUT))" ./ports/build-busybox.sh
+
+$(NCURSES_STAMP): $(BASH) ports/build-ncurses.sh ports/terminfo/tunix.ti | $(BUILD)/.tools
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" ./ports/build-ncurses.sh
+	@touch $@
 
 $(TCC_STAMP): ports/build-tcc.sh | $(BUILD)/.tools
 	@mkdir -p $(PORT_OUT)
