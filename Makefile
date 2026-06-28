@@ -43,7 +43,8 @@ KERNEL_OBJS := \
 	$(BUILD)/heap.o $(BUILD)/syscall.o $(BUILD)/syscall_entry.o \
 	$(BUILD)/vfs.o $(BUILD)/tarfs.o $(BUILD)/devfs.o $(BUILD)/unix_socket.o $(BUILD)/pty.o \
 	$(BUILD)/usercopy.o $(BUILD)/elf.o $(BUILD)/file.o \
-	$(BUILD)/pipe.o $(BUILD)/tty.o $(BUILD)/process.o $(BUILD)/procfs.o $(BUILD)/time.o $(BUILD)/random.o $(BUILD)/ata.o
+	$(BUILD)/pipe.o $(BUILD)/tty.o $(BUILD)/process.o $(BUILD)/procfs.o $(BUILD)/time.o $(BUILD)/random.o $(BUILD)/ata.o \
+	$(BUILD)/pci.o $(BUILD)/rtl8139.o
 
 USER_RUNTIME := $(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/sigreturn.o
 INIT := $(BUILD)/user/init
@@ -140,6 +141,9 @@ $(BUILD)/random.o: src/kernel/include/random.h src/kernel/include/time.h src/ker
 $(BUILD)/time.o: src/kernel/include/time.h src/kernel/include/io.h
 $(BUILD)/ata.o: src/kernel/include/ata.h src/kernel/include/io.h
 $(BUILD)/kprintf.o: src/kernel/include/klog.h
+
+$(BUILD)/rtl8139.o: src/kernel/net/rtl8139.c | $(BUILD)
+	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
 $(BUILD)/kprintf.o: src/kernel/lib/kprintf.c | $(BUILD)
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
