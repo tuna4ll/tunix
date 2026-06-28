@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <tunix/keymap.h>
 
 #define TCGETS      0x5401UL
 #define TCSETS      0x5402UL

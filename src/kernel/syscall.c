@@ -924,6 +924,16 @@ static int64_t sys_ioctl(int fd, unsigned long request, uint64_t user_argument) 
         if (request == TIOCGETD && copy_to_user(user_argument, &discipline, sizeof(discipline)) != 0) return -EFAULT;
         return 0;
     }
+    if (request == TUNIX_KDGKBMAP) {
+        struct tunix_keymap map;
+        if (tty_ioctl(request, &map) != 0) return -ENOTTY;
+        return copy_to_user(user_argument, &map, sizeof(map)) == 0 ? 0 : -EFAULT;
+    }
+    if (request == TUNIX_KDSKBMAP) {
+        struct tunix_keymap map;
+        if (copy_from_user(&map, user_argument, sizeof(map)) != 0) return -EFAULT;
+        return tty_ioctl(request, &map) == 0 ? 0 : -EINVAL;
+    }
     if (request == TIOCGWINSZ) {
         uint16_t rows;
         uint16_t columns;

@@ -26,10 +26,10 @@ NANO := $(PORT_OUT)/nano
 COMMON_CFLAGS := -std=gnu11 -Wall -Wextra -Werror -ffreestanding -fno-stack-protector \
 	-fno-pic -fno-pie -fno-builtin -fno-asynchronous-unwind-tables -fno-unwind-tables \
 	-mno-red-zone -m64 -Os -ffunction-sections -fdata-sections
-KERNEL_CFLAGS := $(COMMON_CFLAGS) -mcmodel=kernel -Isrc/kernel/include
+KERNEL_CFLAGS := $(COMMON_CFLAGS) -mcmodel=kernel -Isrc/kernel/include -Isrc/include
 KERNEL_LDFLAGS := -nostdlib -no-pie -Wl,-T,src/kernel/arch/x86_64/linker.ld \
 	-Wl,--gc-sections -Wl,--build-id=none -Wl,-z,max-page-size=0x1000
-USER_CFLAGS := $(COMMON_CFLAGS) -mcmodel=small -Isrc/libc/include
+USER_CFLAGS := $(COMMON_CFLAGS) -mcmodel=small -Isrc/libc/include -Isrc/include
 USER_LDFLAGS := -nostdlib -static -T src/userspace/linker.ld --build-id=none \
 	-z max-page-size=0x1000 --gc-sections
 
@@ -122,7 +122,7 @@ $(BUILD)/unix_socket.o: src/kernel/include/unix_socket.h src/kernel/include/pipe
 $(BUILD)/pty.o: src/kernel/include/pty.h src/kernel/include/tty.h src/kernel/include/file.h
 $(BUILD)/file.o: src/kernel/include/file.h src/kernel/include/vfs.h src/kernel/include/pty.h
 $(BUILD)/syscall.o: src/kernel/include/vfs.h src/kernel/include/tty.h src/kernel/include/pty.h src/kernel/include/process.h src/kernel/include/random.h src/kernel/include/time.h
-$(BUILD)/tty.o: src/kernel/include/input.h src/kernel/include/tty.h
+$(BUILD)/tty.o: src/kernel/include/input.h src/kernel/include/tty.h src/include/tunix/keymap.h
 $(BUILD)/process.o: src/kernel/include/process.h src/kernel/include/signal.h
 $(BUILD)/random.o: src/kernel/include/random.h src/kernel/include/time.h src/kernel/include/spinlock.h
 $(BUILD)/time.o: src/kernel/include/time.h src/kernel/include/io.h
@@ -151,7 +151,7 @@ $(KERNEL): $(KERNEL_OBJS)
 $(BUILD)/user/crt0.o: src/libc/crt0.S | $(BUILD)/user
 	$(CC) $(USER_CFLAGS) -c $< -o $@
 
-$(BUILD)/user/libc.o: src/libc/libc.c src/libc/include/tunix_libc.h | $(BUILD)/user
+$(BUILD)/user/libc.o: src/libc/libc.c src/libc/include/tunix_libc.h src/include/tunix/keymap.h | $(BUILD)/user
 	$(CC) $(USER_CFLAGS) -c $< -o $@
 
 $(BUILD)/user/sigreturn.o: src/libc/sigreturn.S | $(BUILD)/user

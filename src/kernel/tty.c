@@ -26,6 +26,7 @@ static size_t input_count;
 static int shift_down;
 static int ctrl_down;
 static int alt_down;
+static int altgr_down;
 static int caps_lock;
 static int extended_prefix;
 
@@ -38,7 +39,7 @@ static int ansi_private;
 static int saved_row;
 static int saved_col;
 
-static const char keymap[128] = {
+static const char default_keymap[128] = {
     [0x02]='1',[0x03]='2',[0x04]='3',[0x05]='4',[0x06]='5',[0x07]='6',[0x08]='7',[0x09]='8',[0x0A]='9',[0x0B]='0',
     [0x0C]='-',[0x0D]='=',[0x0E]='\b',[0x0F]='\t',[0x10]='q',[0x11]='w',[0x12]='e',[0x13]='r',[0x14]='t',[0x15]='y',
     [0x16]='u',[0x17]='i',[0x18]='o',[0x19]='p',[0x1A]='[',[0x1B]=']',[0x1C]='\r',[0x1E]='a',[0x1F]='s',[0x20]='d',
@@ -46,13 +47,125 @@ static const char keymap[128] = {
     [0x2C]='z',[0x2D]='x',[0x2E]='c',[0x2F]='v',[0x30]='b',[0x31]='n',[0x32]='m',[0x33]=',',[0x34]='.',[0x35]='/',[0x39]=' '
 };
 
-static const char shift_keymap[128] = {
+static const char default_shift_keymap[128] = {
     [0x02]='!',[0x03]='@',[0x04]='#',[0x05]='$',[0x06]='%',[0x07]='^',[0x08]='&',[0x09]='*',[0x0A]='(',[0x0B]=')',
     [0x0C]='_',[0x0D]='+',[0x10]='Q',[0x11]='W',[0x12]='E',[0x13]='R',[0x14]='T',[0x15]='Y',[0x16]='U',[0x17]='I',
     [0x18]='O',[0x19]='P',[0x1A]='{',[0x1B]='}',[0x1E]='A',[0x1F]='S',[0x20]='D',[0x21]='F',[0x22]='G',[0x23]='H',
     [0x24]='J',[0x25]='K',[0x26]='L',[0x27]=':',[0x28]='"',[0x29]='~',[0x2B]='|',[0x2C]='Z',[0x2D]='X',[0x2E]='C',
     [0x2F]='V',[0x30]='B',[0x31]='N',[0x32]='M',[0x33]='<',[0x34]='>',[0x35]='?',[0x39]=' '
 };
+
+static struct tunix_keymap active_keymap;
+
+static int input_push(uint8_t value);
+
+static int keymap_is_letter(unsigned keycode) {
+    return (active_keymap.letter_bitmap[keycode >> 3] &
+            (uint8_t)(1U << (keycode & 7U))) != 0;
+}
+
+static void keymap_mark_letter(unsigned keycode) {
+    active_keymap.letter_bitmap[keycode >> 3] |=
+        (uint8_t)(1U << (keycode & 7U));
+}
+
+static void keymap_set_name(const char *name) {
+    size_t i = 0;
+    while (i + 1U < sizeof(active_keymap.name) && name[i]) {
+        active_keymap.name[i] = name[i];
+        i++;
+    }
+    active_keymap.name[i] = 0;
+    while (++i < sizeof(active_keymap.name)) active_keymap.name[i] = 0;
+}
+
+static void keymap_load_default(void) {
+    memset(&active_keymap, 0, sizeof(active_keymap));
+    active_keymap.version = TUNIX_KEYMAP_ABI_VERSION;
+    keymap_set_name("us");
+    for (unsigned level = 0; level < TUNIX_KEYMAP_LEVELS; level++)
+        for (unsigned keycode = 0; keycode < TUNIX_KEYMAP_KEYCODES; keycode++)
+            active_keymap.symbols[level][keycode] = TUNIX_KEYSYM_NONE;
+    for (unsigned keycode = 0; keycode < TUNIX_KEYMAP_KEYCODES; keycode++) {
+        if (default_keymap[keycode])
+            active_keymap.symbols[0][keycode] = (uint8_t)default_keymap[keycode];
+        if (default_shift_keymap[keycode])
+            active_keymap.symbols[TUNIX_KEYMAP_LEVEL_SHIFT][keycode] =
+                (uint8_t)default_shift_keymap[keycode];
+        if (default_keymap[keycode] >= 'a' && default_keymap[keycode] <= 'z')
+            keymap_mark_letter(keycode);
+    }
+}
+
+static int keymap_valid_codepoint(uint32_t value) {
+    if (value == TUNIX_KEYSYM_NONE) return 1;
+    if (value > 0x10FFFFU) return 0;
+    return value < 0xD800U || value > 0xDFFFU;
+}
+
+static int keymap_validate(const struct tunix_keymap *map) {
+    if (!map || map->version != TUNIX_KEYMAP_ABI_VERSION) return -1;
+    int terminated = 0;
+    for (size_t i = 0; i < sizeof(map->name); i++) {
+        if (map->name[i] == 0) {
+            terminated = 1;
+            break;
+        }
+    }
+    if (!terminated) return -1;
+    for (unsigned level = 0; level < TUNIX_KEYMAP_LEVELS; level++)
+        for (unsigned keycode = 0; keycode < TUNIX_KEYMAP_KEYCODES; keycode++)
+            if (!keymap_valid_codepoint(map->symbols[level][keycode])) return -1;
+    return 0;
+}
+
+static int input_push_codepoint(uint32_t value) {
+    uint8_t encoded[4];
+    unsigned count;
+    if (value <= 0x7FU) {
+        encoded[0] = (uint8_t)value;
+        count = 1;
+    } else if (value <= 0x7FFU) {
+        encoded[0] = (uint8_t)(0xC0U | (value >> 6));
+        encoded[1] = (uint8_t)(0x80U | (value & 0x3FU));
+        count = 2;
+    } else if (value <= 0xFFFFU) {
+        encoded[0] = (uint8_t)(0xE0U | (value >> 12));
+        encoded[1] = (uint8_t)(0x80U | ((value >> 6) & 0x3FU));
+        encoded[2] = (uint8_t)(0x80U | (value & 0x3FU));
+        count = 3;
+    } else {
+        encoded[0] = (uint8_t)(0xF0U | (value >> 18));
+        encoded[1] = (uint8_t)(0x80U | ((value >> 12) & 0x3FU));
+        encoded[2] = (uint8_t)(0x80U | ((value >> 6) & 0x3FU));
+        encoded[3] = (uint8_t)(0x80U | (value & 0x3FU));
+        count = 4;
+    }
+    if (input_count + count > TTY_INPUT_CAPACITY) return -1;
+    for (unsigned i = 0; i < count; i++) (void)input_push(encoded[i]);
+    return 0;
+}
+
+static uint32_t keymap_lookup(unsigned keycode, unsigned level, int *direct_ctrl) {
+    unsigned candidate = level;
+    *direct_ctrl = 0;
+    for (;;) {
+        uint32_t value = active_keymap.symbols[candidate][keycode];
+        if (value != TUNIX_KEYSYM_NONE) {
+            *direct_ctrl = candidate == level &&
+                           (candidate & TUNIX_KEYMAP_LEVEL_CTRL) != 0;
+            return value;
+        }
+        if (candidate & TUNIX_KEYMAP_LEVEL_CTRL)
+            candidate &= ~TUNIX_KEYMAP_LEVEL_CTRL;
+        else if (candidate & TUNIX_KEYMAP_LEVEL_ALTGR)
+            candidate &= ~TUNIX_KEYMAP_LEVEL_ALTGR;
+        else if (candidate & TUNIX_KEYMAP_LEVEL_SHIFT)
+            candidate &= ~TUNIX_KEYMAP_LEVEL_SHIFT;
+        else
+            return TUNIX_KEYSYM_NONE;
+    }
+}
 
 static unsigned ansi_param(unsigned index, unsigned default_value) {
     if (index >= ansi_param_count || ansi_params[index] == 0) return default_value;
@@ -259,14 +372,12 @@ static int serial_try_read(void) {
     return -1;
 }
 
-static int is_letter(char value) {
-    return value >= 'a' && value <= 'z';
-}
 
 void tty_reset_keyboard_state(void) {
     shift_down = 0;
     ctrl_down = 0;
     alt_down = 0;
+    altgr_down = 0;
     extended_prefix = 0;
 }
 
@@ -288,7 +399,7 @@ void tty_handle_scancode(uint8_t code) {
             return;
         }
         if (code == 0x38U) {
-            alt_down = released ? 0 : 1;
+            altgr_down = released ? 0 : 1;
             return;
         }
         if (released) return;
@@ -332,15 +443,22 @@ void tty_handle_scancode(uint8_t code) {
         case 0x58U: input_push_text("\x1b[24~"); return;
         default: break;
     }
-    char value = shift_down ? shift_keymap[code] : keymap[code];
-    if (!value) return;
-    if (is_letter(keymap[code]) && caps_lock)
-        value = shift_down ? keymap[code] : shift_keymap[code];
-    if (ctrl_down && value >= 'a' && value <= 'z') value = (char)(value - 'a' + 1);
-    else if (ctrl_down && value >= 'A' && value <= 'Z') value = (char)(value - 'A' + 1);
-    else if (ctrl_down && value >= '@' && value <= '_') value &= 0x1F;
+    unsigned level = (shift_down ? TUNIX_KEYMAP_LEVEL_SHIFT : 0U) |
+                     (altgr_down ? TUNIX_KEYMAP_LEVEL_ALTGR : 0U) |
+                     (ctrl_down ? TUNIX_KEYMAP_LEVEL_CTRL : 0U);
+    if (caps_lock && keymap_is_letter(code)) level ^= TUNIX_KEYMAP_LEVEL_SHIFT;
+    int direct_ctrl = 0;
+    uint32_t value = keymap_lookup(code, level, &direct_ctrl);
+    if (value == TUNIX_KEYSYM_NONE) return;
+    if (ctrl_down && !direct_ctrl) {
+        if (value == ' ') value = 0;
+        else if (value >= 'a' && value <= 'z') value = value - 'a' + 1U;
+        else if (value >= 'A' && value <= 'Z') value = value - 'A' + 1U;
+        else if (value >= '@' && value <= '_') value &= 0x1FU;
+        else if (value == '?') value = 0x7FU;
+    }
     if (alt_down && input_push(0x1BU) != 0) return;
-    (void)input_push((uint8_t)value);
+    (void)input_push_codepoint(value);
 }
 
 void tty_poll_inputs(void) {
@@ -463,7 +581,8 @@ void tty_init(void) {
     console_foreground_pgid = 0;
     canonical_length = canonical_offset = 0;
     input_head = input_tail = input_count = 0;
-    shift_down = ctrl_down = alt_down = caps_lock = extended_prefix = 0;
+    shift_down = ctrl_down = alt_down = altgr_down = caps_lock = extended_prefix = 0;
+    keymap_load_default();
     ansi_state = 0;
     ansi_param_count = ansi_current = 0;
     ansi_have_current = 0;
@@ -496,6 +615,14 @@ int tty_ioctl(unsigned long request, void *argument) {
             return 0;
         case TIOCSETD:
             return *(const int *)argument == 0 ? 0 : -1;
+        case TUNIX_KDGKBMAP:
+            memcpy(argument, &active_keymap, sizeof(active_keymap));
+            return 0;
+        case TUNIX_KDSKBMAP:
+            if (keymap_validate((const struct tunix_keymap *)argument) != 0) return -1;
+            memcpy(&active_keymap, argument, sizeof(active_keymap));
+            tty_reset_keyboard_state();
+            return 0;
         default:
             return -1;
     }
