@@ -290,3 +290,11 @@ isr_common_stub:
     pop r15
     add rsp, 16
     iretq
+
+/* Legacy 8259 PIC IRQ1, remapped to IDT vector 0x21. */
+.global irq1
+irq1:
+    cli
+    push 0
+    push 33
+    jmp isr_common_stub

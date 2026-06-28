@@ -36,7 +36,7 @@ USER_LDFLAGS := -nostdlib -static -T src/userspace/linker.ld --build-id=none \
 KERNEL_OBJS := \
 	$(BUILD)/entry.o $(BUILD)/main.o $(BUILD)/serial.o \
 	$(BUILD)/kprintf.o $(BUILD)/kstring.o $(BUILD)/gdt.o \
-	$(BUILD)/idt.o $(BUILD)/isr.o $(BUILD)/isr_handler.o \
+	$(BUILD)/idt.o $(BUILD)/isr.o $(BUILD)/isr_handler.o $(BUILD)/pic.o \
 	$(BUILD)/pmm.o $(BUILD)/vmm.o $(BUILD)/framebuffer.o $(BUILD)/terminal_font.o $(BUILD)/terminal.o $(BUILD)/input.o \
 	$(BUILD)/heap.o $(BUILD)/syscall.o $(BUILD)/syscall_entry.o \
 	$(BUILD)/vfs.o $(BUILD)/tarfs.o $(BUILD)/devfs.o $(BUILD)/unix_socket.o $(BUILD)/pty.o \
@@ -55,7 +55,7 @@ INITRD_FILES := $(shell find initrd -type f 2>/dev/null)
 WALLPAPER_SOURCE ?= assets/tunix-mountain-lake.jpg
 WALLPAPER_OUTPUT := initrd/usr/share/tunix/wallpaper.twl
 
-.PHONY: all run headless wallpaper editor-check editor-qemu-check clean
+.PHONY: all run headless wallpaper editor-check editor-qemu-check loadkeys-check loadkeys-qemu-check clean
 all: $(IMAGE)
 
 wallpaper: $(WALLPAPER_OUTPUT)
@@ -116,8 +116,9 @@ $(BUILD)/syscall_entry.o: src/kernel/arch/x86_64/syscall_entry.S | $(BUILD)
 $(BUILD)/%.o: src/kernel/%.c | $(BUILD)
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
-$(BUILD)/main.o: src/kernel/include/input.h src/kernel/include/tty.h
+$(BUILD)/main.o: src/kernel/include/input.h src/kernel/include/tty.h src/kernel/include/pic.h
 $(BUILD)/input.o: src/kernel/include/input.h src/kernel/include/io.h src/kernel/include/tty.h
+$(BUILD)/pic.o: src/kernel/include/pic.h src/kernel/include/io.h
 $(BUILD)/devfs.o: src/kernel/include/vfs.h src/kernel/include/pty.h src/kernel/include/random.h src/kernel/include/time.h src/kernel/include/ata.h src/kernel/include/klog.h src/kernel/include/input.h
 $(BUILD)/unix_socket.o: src/kernel/include/unix_socket.h src/kernel/include/pipe.h
 $(BUILD)/pty.o: src/kernel/include/pty.h src/kernel/include/tty.h src/kernel/include/file.h
@@ -142,7 +143,7 @@ $(BUILD)/gdt.o: src/kernel/arch/x86_64/gdt.c | $(BUILD)
 $(BUILD)/idt.o: src/kernel/arch/x86_64/idt.c | $(BUILD)
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
-$(BUILD)/isr_handler.o: src/kernel/arch/x86_64/isr_handler.c | $(BUILD)
+$(BUILD)/isr_handler.o: src/kernel/arch/x86_64/isr_handler.c src/kernel/include/input.h src/kernel/include/pic.h | $(BUILD)
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
 $(KERNEL): $(KERNEL_OBJS)
@@ -222,6 +223,12 @@ editor-check:
 
 editor-qemu-check: $(IMAGE)
 	$(PYTHON) scripts/nano-qemu-smoke.py $(IMAGE) --qemu $(QEMU) --iterations 20
+
+loadkeys-check:
+	./scripts/test-loadkeys.sh
+
+loadkeys-qemu-check: $(IMAGE)
+	$(PYTHON) scripts/loadkeys-qemu-smoke.py $(IMAGE) --qemu $(QEMU)
 
 clean:
 	rm -rf $(BUILD) $(PORT_OUT)

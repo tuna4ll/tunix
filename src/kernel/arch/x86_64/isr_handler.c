@@ -1,4 +1,6 @@
 #include <stdint.h>
+#include "../../include/input.h"
+#include "../../include/pic.h"
 
 extern void kprintf(const char *fmt, ...);
 extern void panic(const char *msg);
@@ -22,6 +24,11 @@ const char *exception_messages[] = {
 };
 
 void isr_handler(struct registers *regs) {
+    if (regs->int_no == PIC_MASTER_VECTOR + 1U) {
+        input_irq();
+        pic_send_eoi((unsigned)regs->int_no);
+        return;
+    }
     kprintf("Received interrupt: %d\n", regs->int_no);
     if (regs->int_no < 32) {
         kprintf("Exception: %s\n", exception_messages[regs->int_no]);

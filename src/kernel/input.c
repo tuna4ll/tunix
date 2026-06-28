@@ -27,8 +27,28 @@ static int ps2_wait_write(void) {
     return -1;
 }
 
-static void ps2_command(uint8_t command) {
-    if (ps2_wait_write() == 0) outb(PS2_COMMAND_PORT, command);
+static int ps2_wait_read(uint8_t *status_out) {
+    for (unsigned i = 0; i < PS2_TIMEOUT; i++) {
+        uint8_t status = inb(PS2_STATUS_PORT);
+        if (status & PS2_STATUS_OUTPUT_FULL) {
+            if (status_out) *status_out = status;
+            return 0;
+        }
+        __asm__ volatile("pause");
+    }
+    return -1;
+}
+
+static int ps2_command(uint8_t command) {
+    if (ps2_wait_write() != 0) return -1;
+    outb(PS2_COMMAND_PORT, command);
+    return 0;
+}
+
+static int ps2_write_data(uint8_t value) {
+    if (ps2_wait_write() != 0) return -1;
+    outb(PS2_DATA_PORT, value);
+    return 0;
 }
 
 static void raw_push(uint8_t value) {
@@ -43,9 +63,31 @@ static void raw_push(uint8_t value) {
 }
 
 void input_init(void) {
-    ps2_command(0xA7U);
+    /* Configure the first PS/2 port for IRQ1 and translated set-1 scancodes.
+     * Initialization runs with CPU interrupts disabled, so controller replies
+     * can be consumed synchronously without racing the IRQ handler. */
+    (void)ps2_command(0xADU); /* Disable first port while changing config. */
+    (void)ps2_command(0xA7U); /* Keep the mouse/second port disabled. */
     while (inb(PS2_STATUS_PORT) & PS2_STATUS_OUTPUT_FULL)
         (void)inb(PS2_DATA_PORT);
+
+    uint8_t config_status = 0;
+    uint8_t config = 0;
+    if (ps2_command(0x20U) == 0 && ps2_wait_read(&config_status) == 0 &&
+        !(config_status & PS2_STATUS_AUX_DATA)) {
+        config = inb(PS2_DATA_PORT);
+        config |= 0x01U;  /* Enable keyboard IRQ1. */
+        config &= (uint8_t)~0x02U; /* Disable mouse IRQ12. */
+        config |= 0x40U;  /* Translate keyboard set 2 to set 1. */
+        if (ps2_command(0x60U) == 0) (void)ps2_write_data(config);
+    }
+    (void)ps2_command(0xAEU); /* Enable first port. */
+
+    /* Ensure keyboard scanning is enabled and consume the ACK before IRQ1 is
+     * unmasked. A missing ACK is harmless; polling remains available. */
+    if (ps2_write_data(0xF4U) == 0 && ps2_wait_read(&config_status) == 0)
+        (void)inb(PS2_DATA_PORT);
+
     raw_head = 0;
     raw_tail = 0;
     raw_count = 0;
@@ -53,7 +95,7 @@ void input_init(void) {
     tty_reset_keyboard_state();
 }
 
-void input_poll(void) {
+static void input_drain_controller(void) {
     for (;;) {
         uint8_t status = inb(PS2_STATUS_PORT);
         if (!(status & PS2_STATUS_OUTPUT_FULL)) return;
@@ -63,6 +105,16 @@ void input_poll(void) {
             tty_handle_scancode(value);
         }
     }
+}
+
+void input_poll(void) {
+    /* Kept as a fallback for early boot and hardware that does not deliver
+     * legacy IRQ1. Normal userspace input is captured by input_irq(). */
+    input_drain_controller();
+}
+
+void input_irq(void) {
+    input_drain_controller();
 }
 
 void input_scancode_open(void) {

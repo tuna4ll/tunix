@@ -6,6 +6,7 @@
 
 void input_init(void);
 void input_poll(void);
+void input_irq(void);
 void input_scancode_open(void);
 void input_scancode_close(void);
 int input_scancodes_ready(void);

@@ -10,6 +10,7 @@
 #include "include/input.h"
 #include "include/idt.h"
 #include "include/pmm.h"
+#include "include/pic.h"
 #include "include/process.h"
 #include "include/procfs.h"
 #include "include/random.h"
@@ -26,15 +27,6 @@
 extern void serial_init(void);
 extern void kprintf(const char *fmt, ...);
 extern void panic(const char *message);
-
-static inline void outb_local(uint16_t port, uint8_t value) {
-    __asm__ volatile("outb %0, %1" : : "a"(value), "Nd"(port));
-}
-
-static void disable_legacy_pic(void) {
-    outb_local(0x21, 0xFF);
-    outb_local(0xA1, 0xFF);
-}
 
 static uint64_t load_initramfs(const struct boot_manifest *manifest) {
     if (!manifest || manifest->magic != TUNIX_MANIFEST_MAGIC ||
@@ -59,7 +51,7 @@ static uint64_t load_initramfs(const struct boot_manifest *manifest) {
 void kmain(uint32_t mmap_count, uint64_t mmap_address, uint64_t manifest_address,
            uint64_t framebuffer_info_address) {
     __asm__ volatile("cli");
-    disable_legacy_pic();
+    pic_init();
     serial_init();
 #if TUNIX_DEBUG_LOGS
     kprintf("TUNIX: boot mmap=%u manifest=%p\n", mmap_count, (void *)manifest_address);
@@ -95,6 +87,7 @@ void kmain(uint32_t mmap_count, uint64_t mmap_address, uint64_t manifest_address
         panic("framebuffer terminal initialization failed");
     tty_init();
     input_init();
+    pic_unmask(1U);
     devfs_init();
 #if TUNIX_DEBUG_LOGS
     kprintf("TUNIX: VFS ramfs tarfs devfs ready\n");
