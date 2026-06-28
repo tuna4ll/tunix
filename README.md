@@ -2,7 +2,7 @@
 
 Tunix is a small and simple Unix-like operating system experiment for x86_64.
 
-<img width="1332" height="836" alt="image" src="https://github.com/user-attachments/assets/41174df4-e611-49d8-93de-04e438950905" />
+<img width="1332" height="836" alt="image" src="https://github.com/user-attachments/assets/4fb0a9b9-4753-4e6a-ba60-acc51211ebfd" />
 
 ## Features
 
