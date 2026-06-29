@@ -44,7 +44,7 @@ KERNEL_OBJS := \
 	$(BUILD)/vfs.o $(BUILD)/tarfs.o $(BUILD)/devfs.o $(BUILD)/unix_socket.o $(BUILD)/pty.o \
 	$(BUILD)/usercopy.o $(BUILD)/elf.o $(BUILD)/file.o \
 	$(BUILD)/pipe.o $(BUILD)/tty.o $(BUILD)/process.o $(BUILD)/procfs.o $(BUILD)/time.o $(BUILD)/random.o $(BUILD)/ata.o \
-	$(BUILD)/pci.o $(BUILD)/rtl8139.o $(BUILD)/net.o
+	$(BUILD)/pci.o $(BUILD)/rtl8139.o $(BUILD)/net.o $(BUILD)/inet_socket.o
 
 USER_RUNTIME := $(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/sigreturn.o
 INIT := $(BUILD)/user/init
@@ -146,6 +146,9 @@ $(BUILD)/rtl8139.o: src/kernel/net/rtl8139.c | $(BUILD)
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
 $(BUILD)/net.o: src/kernel/net/net.c | $(BUILD)
+	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
+
+$(BUILD)/inet_socket.o: src/kernel/net/inet_socket.c | $(BUILD)
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
 $(BUILD)/kprintf.o: src/kernel/lib/kprintf.c | $(BUILD)

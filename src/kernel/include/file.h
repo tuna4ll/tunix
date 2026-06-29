@@ -7,6 +7,7 @@
 struct vfs_node;
 struct pipe_buffer;
 struct unix_socket;
+struct inet_socket;
 struct pty_pair;
 
 #define FILE_KIND_VFS        1
@@ -15,6 +16,7 @@ struct pty_pair;
 #define FILE_KIND_SOCKET     4
 #define FILE_KIND_PTY_MASTER 5
 #define FILE_KIND_PTY_SLAVE  6
+#define FILE_KIND_INET_SOCKET 7
 
 struct file {
     int refs;
@@ -24,12 +26,14 @@ struct file {
     struct vfs_node *node;
     struct pipe_buffer *pipe;
     struct unix_socket *socket;
+    struct inet_socket *inet_socket;
     struct pty_pair *pty;
 };
 
 struct file *file_open_node(struct vfs_node *node, uint32_t flags);
 struct file *file_create_pipe_end(struct pipe_buffer *pipe, int write_end);
 struct file *file_create_socket(struct unix_socket *socket);
+struct file *file_create_inet_socket(struct inet_socket *socket);
 struct file *file_create_pty_endpoint(struct pty_pair *pty, int master,
                                       struct vfs_node *node, uint32_t flags);
 void file_ref(struct file *file);

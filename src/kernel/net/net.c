@@ -8,23 +8,6 @@
 
 extern void kprintf(const char *fmt, ...);
 
-/* The core stack can run before the userspace socket backend is added. */
-__attribute__((weak)) void inet_socket_receive_ipv4(const uint8_t *packet, size_t length,
-                                                     uint8_t protocol, uint32_t source,
-                                                     uint32_t destination) {
-    (void)packet; (void)length; (void)protocol; (void)source; (void)destination;
-}
-__attribute__((weak)) void inet_socket_receive_udp(const uint8_t *payload, size_t length,
-                                                    uint32_t source, uint16_t source_port,
-                                                    uint32_t destination, uint16_t destination_port) {
-    (void)payload; (void)length; (void)source; (void)source_port;
-    (void)destination; (void)destination_port;
-}
-__attribute__((weak)) void inet_socket_receive_ethernet(const uint8_t *frame, size_t length,
-                                                         uint16_t ethertype) {
-    (void)frame; (void)length; (void)ethertype;
-}
-
 #define ETHERTYPE_IPV4 0x0800U
 #define ETHERTYPE_ARP 0x0806U
 #define IPPROTO_ICMP 1U
