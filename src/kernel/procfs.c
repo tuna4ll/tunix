@@ -219,6 +219,20 @@ static void text_hex32(struct text_buffer *text, uint32_t value) {
         text_char(text, digits[(value >> shift) & 15U]);
 }
 
+static void text_hex8_lower(struct text_buffer *text, uint8_t value) {
+    static const char digits[] = "0123456789abcdef";
+    text_char(text, digits[value >> 4]);
+    text_char(text, digits[value & 15U]);
+}
+
+static void text_ipv4(struct text_buffer *text, uint32_t address) {
+    const uint8_t *bytes = (const uint8_t *)&address;
+    for (unsigned i = 0; i < 4; i++) {
+        if (i) text_char(text, '.');
+        text_unsigned(text, bytes[i]);
+    }
+}
+
 static int64_t proc_net_route_read(struct vfs_node *node, uint64_t offset,
                                     size_t size, void *output) {
     (void)node;
@@ -238,6 +252,18 @@ static int64_t proc_net_arp_read(struct vfs_node *node, uint64_t offset,
     (void)node;
     struct text_buffer text = {{0}, 0};
     text_string(&text, "IP address       HW type     Flags       HW address            Mask     Device\n");
+    struct net_arp_record records[16];
+    size_t count = net_arp_snapshot(records, sizeof(records) / sizeof(records[0]));
+    if (count > sizeof(records) / sizeof(records[0])) count = sizeof(records) / sizeof(records[0]);
+    for (size_t i = 0; i < count; i++) {
+        text_ipv4(&text, records[i].address);
+        text_string(&text, "       0x1         0x2         ");
+        for (unsigned byte = 0; byte < 6; byte++) {
+            if (byte) text_char(&text, ':');
+            text_hex8_lower(&text, records[i].mac[byte]);
+        }
+        text_string(&text, "     *        eth0\n");
+    }
     return text_read(&text, offset, size, output);
 }
 

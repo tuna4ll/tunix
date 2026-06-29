@@ -232,11 +232,14 @@ $(IMAGE): $(BUILD)/stage1.bin $(BUILD)/stage2.bin $(KERNEL) $(INITRAMFS) scripts
 run: $(IMAGE)
 	rm -f $(BUILD)/serial.log
 	$(QEMU) -machine pc -m 128M -drive format=raw,file=$(IMAGE) \
-		-serial file:$(BUILD)/serial.log -monitor none -no-reboot -no-shutdown
+		-serial file:$(BUILD)/serial.log -monitor none -no-reboot -no-shutdown \
+		-netdev user,id=net0 -device rtl8139,netdev=net0
 
 headless: $(IMAGE)
 	$(QEMU) -machine pc -m 128M -drive format=raw,file=$(IMAGE) \
-		-nographic -monitor none -serial stdio -no-reboot -no-shutdown
+		-nographic -monitor none -serial stdio -no-reboot -no-shutdown \
+		-netdev user,id=net0 -device rtl8139,netdev=net0
+
 
 editor-check:
 	ITERATIONS=20 ./scripts/test-editor-ports.sh

@@ -345,3 +345,16 @@ void net_set_interface_up(int up) { config.interface_up = up != 0; }
 uint64_t net_rx_packets(void) { return stack_rx; }
 uint64_t net_tx_packets(void) { return stack_tx; }
 uint64_t net_rx_dropped(void) { return stack_drop + rtl8139_rx_dropped(); }
+
+size_t net_arp_snapshot(struct net_arp_record *records, size_t capacity) {
+    size_t count = 0;
+    for (unsigned i = 0; i < ARP_CACHE_SIZE; i++) {
+        if (!arp_cache[i].ip) continue;
+        if (records && count < capacity) {
+            records[count].address = arp_cache[i].ip;
+            memcpy(records[count].mac, arp_cache[i].mac, sizeof(records[count].mac));
+        }
+        count++;
+    }
+    return count;
+}

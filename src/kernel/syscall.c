@@ -18,6 +18,7 @@
 #include "include/vmm.h"
 #include "include/unix_socket.h"
 #include "include/net/inet_socket.h"
+#include "include/net/net.h"
 
 extern void kprintf(const char *fmt, ...);
 
@@ -177,6 +178,9 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 120, "syscall frame r
 #define O_PATH 010000000
 #define O_TMPFILE 020200000
 #define O_SYNC 04010000
+
+#define MSG_DONTWAIT 0x40
+#define SIOCGIFCONF 0x8912U
 
 #define SEEK_SET 0
 #define SEEK_CUR 1
@@ -347,6 +351,20 @@ struct linux_msghdr {
 };
 
 _Static_assert(sizeof(struct linux_msghdr) == 56, "Linux x86_64 msghdr ABI mismatch");
+
+struct linux_ifconf {
+    int32_t length;
+    uint32_t __pad;
+    uint64_t buffer;
+};
+
+struct linux_ifreq {
+    char name[16];
+    uint8_t value[24];
+};
+
+_Static_assert(sizeof(struct linux_ifconf) == 16, "Linux x86_64 ifconf ABI mismatch");
+_Static_assert(sizeof(struct linux_ifreq) == 40, "Linux x86_64 ifreq ABI mismatch");
 
 struct linux_utsname {
     char sysname[65];
@@ -1120,6 +1138,29 @@ static int64_t sys_ioctl(int fd, unsigned long request, uint64_t user_argument) 
     struct process *process = process_current();
     if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->fds[fd]) return -EBADF;
     struct file *file = process->fds[fd];
+    if (file->kind == FILE_KIND_INET_SOCKET && request == SIOCGIFCONF) {
+        if (!user_argument) return -EFAULT;
+        struct linux_ifconf ifconf;
+        if (copy_from_user(&ifconf, user_argument, sizeof(ifconf)) != 0) return -EFAULT;
+        if (ifconf.length < 0) return -EINVAL;
+
+        struct linux_ifreq ifreq;
+        memset(&ifreq, 0, sizeof(ifreq));
+        memcpy(ifreq.name, "eth0", 5);
+        ifreq.value[0] = 2; /* AF_INET in sockaddr.sa_family */
+        const struct net_config *config = net_get_config();
+        memcpy(ifreq.value + 4, &config->address, sizeof(config->address));
+
+        if (!ifconf.buffer) {
+            ifconf.length = (int32_t)sizeof(ifreq);
+        } else if ((size_t)ifconf.length >= sizeof(ifreq)) {
+            if (copy_to_user(ifconf.buffer, &ifreq, sizeof(ifreq)) != 0) return -EFAULT;
+            ifconf.length = (int32_t)sizeof(ifreq);
+        } else {
+            ifconf.length = 0;
+        }
+        return copy_to_user(user_argument, &ifconf, sizeof(ifconf)) == 0 ? 0 : -EFAULT;
+    }
     if (file->kind == FILE_KIND_PTY_MASTER || file->kind == FILE_KIND_PTY_SLAVE)
         return pty_ioctl(file->pty, file->kind == FILE_KIND_PTY_MASTER,
                          request, user_argument);
@@ -2040,9 +2081,37 @@ void syscall_dispatch(struct syscall_frame *frame) {
         case SYS_CONNECT: frame->rax = (uint64_t)sys_connect((int)frame->rdi, frame->rsi, frame->rdx); break;
         case SYS_ACCEPT: frame->rax = (uint64_t)sys_accept((int)frame->rdi, frame->rsi, frame->rdx, 0); break;
         case SYS_SENDTO: frame->rax = (uint64_t)sys_sendto((int)frame->rdi, frame->rsi, frame->rdx, (int)frame->r10, frame->r8, frame->r9); break;
-        case SYS_RECVFROM: frame->rax = (uint64_t)sys_recvfrom((int)frame->rdi, frame->rsi, frame->rdx, (int)frame->r10, frame->r8, frame->r9); break;
+        case SYS_RECVFROM: {
+            int fd = (int)frame->rdi;
+            int flags = (int)frame->r10;
+            int64_t result = sys_recvfrom(fd, frame->rsi, frame->rdx, flags, frame->r8, frame->r9);
+            struct process *process = process_current();
+            struct file *file = process && fd >= 0 && fd < PROCESS_MAX_FDS ? process->fds[fd] : NULL;
+            if (result == -EAGAIN && file && !(file->flags & O_NONBLOCK) && !(flags & MSG_DONTWAIT)) {
+                frame->user_rip -= 2U;
+                frame->rax = SYS_RECVFROM;
+                process_yield_from_syscall(frame);
+            } else {
+                frame->rax = (uint64_t)result;
+            }
+            break;
+        }
         case SYS_SENDMSG: frame->rax = (uint64_t)sys_sendmsg((int)frame->rdi, frame->rsi, (int)frame->rdx); break;
-        case SYS_RECVMSG: frame->rax = (uint64_t)sys_recvmsg((int)frame->rdi, frame->rsi, (int)frame->rdx); break;
+        case SYS_RECVMSG: {
+            int fd = (int)frame->rdi;
+            int flags = (int)frame->rdx;
+            int64_t result = sys_recvmsg(fd, frame->rsi, flags);
+            struct process *process = process_current();
+            struct file *file = process && fd >= 0 && fd < PROCESS_MAX_FDS ? process->fds[fd] : NULL;
+            if (result == -EAGAIN && file && !(file->flags & O_NONBLOCK) && !(flags & MSG_DONTWAIT)) {
+                frame->user_rip -= 2U;
+                frame->rax = SYS_RECVMSG;
+                process_yield_from_syscall(frame);
+            } else {
+                frame->rax = (uint64_t)result;
+            }
+            break;
+        }
         case SYS_SHUTDOWN: frame->rax = 0; break;
         case SYS_BIND: frame->rax = (uint64_t)sys_bind((int)frame->rdi, frame->rsi, frame->rdx); break;
         case SYS_LISTEN: frame->rax = (uint64_t)sys_listen((int)frame->rdi, (int)frame->rsi); break;

@@ -16,6 +16,11 @@ struct net_config {
     int interface_up;
 };
 
+struct net_arp_record {
+    uint32_t address;
+    uint8_t mac[6];
+};
+
 void net_init(void);
 void net_poll(void);
 const struct net_config *net_get_config(void);
@@ -36,5 +41,6 @@ int net_send_udp(uint32_t source, uint16_t source_port, uint32_t destination,
 uint64_t net_rx_packets(void);
 uint64_t net_tx_packets(void);
 uint64_t net_rx_dropped(void);
+size_t net_arp_snapshot(struct net_arp_record *records, size_t capacity);
 
 #endif
