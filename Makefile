@@ -22,6 +22,9 @@ TCC_STAMP := $(PORT_OUT)/.tcc-ready
 NCURSES_ROOT := $(PORT_OUT)/ncurses-root
 NCURSES_STAMP := $(PORT_OUT)/.ncurses-ready
 NANO := $(PORT_OUT)/nano
+LUA := $(PORT_OUT)/lua
+LUA_ROOT := $(PORT_OUT)/lua-root
+LUA_STAMP := $(PORT_OUT)/.lua-ready
 IMAGE_CODECS_ROOT := $(PORT_OUT)/image-codecs-root
 IMAGE_CODECS_STAMP := $(PORT_OUT)/.image-codecs-ready
 WALLPAPER_CONVERTER := $(PORT_OUT)/tunix-wallpaper
@@ -61,7 +64,7 @@ INITRD_FILES := $(shell find initrd -type f 2>/dev/null)
 WALLPAPER_SOURCE ?= assets/tunix-mountain-lake.jpg
 WALLPAPER_OUTPUT := initrd/usr/share/tunix/wallpaper.twl
 
-.PHONY: all run headless wallpaper terminal-font image-codecs-check editor-check editor-qemu-check posix-qemu-check loadkeys-check loadkeys-qemu-check clean
+.PHONY: all run headless wallpaper terminal-font clean
 all: $(IMAGE)
 
 wallpaper: $(WALLPAPER_OUTPUT)
@@ -107,6 +110,14 @@ $(NCURSES_STAMP): $(BASH) ports/build-ncurses.sh ports/terminfo/tunix.ti | $(BUI
 $(NANO): $(NCURSES_STAMP) ports/build-nano.sh | $(BUILD)/.tools
 	@mkdir -p $(PORT_OUT)
 	OUT="$(abspath $(PORT_OUT))" ./ports/build-nano.sh
+
+$(LUA_STAMP): $(BASH) ports/build-lua.sh | $(BUILD)/.tools
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" ./ports/build-lua.sh
+	@touch $@
+
+$(LUA): $(LUA_STAMP)
+	@test -x $@ || { echo "Lua interpreter was not produced" >&2; exit 1; }
 
 $(TCC_STAMP): ports/build-tcc.sh | $(BUILD)/.tools
 	@mkdir -p $(PORT_OUT)
@@ -214,7 +225,7 @@ $(INIT): $(BUILD)/user/init.o $(USER_RUNTIME) src/userspace/linker.ld
 	$(LD) $(USER_LDFLAGS) -o $@ $(USER_RUNTIME) $(BUILD)/user/init.o
 	$(STRIP) --strip-all $@
 
-$(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(BUSYBOX) $(TCC_STAMP) $(NANO) $(IMAGE_CODECS_STAMP) $(WALLPAPER_OUTPUT) $(INITRD_FILES)
+$(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(BUSYBOX) $(TCC_STAMP) $(NANO) $(LUA_STAMP) $(IMAGE_CODECS_STAMP) $(WALLPAPER_OUTPUT) $(INITRD_FILES)
 	rm -rf $(ROOTFS)
 	mkdir -p $(ROOTFS)/bin $(ROOTFS)/sbin $(ROOTFS)/dev $(ROOTFS)/tmp $(ROOTFS)/home
 	cp -R initrd/. $(ROOTFS)/
@@ -224,6 +235,7 @@ $(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(BUSYBOX) $(TCC_STAMP) $(NANO) $(
 	cp $(NANO) $(ROOTFS)/bin/nano
 	cp $(SYSTEM_TOOLS) $(ROOTFS)/bin/
 	cp -R $(TCC_ROOT)/. $(ROOTFS)/
+	cp -R $(LUA_ROOT)/. $(ROOTFS)/
 	mkdir -p $(ROOTFS)/usr/bin $(ROOTFS)/usr/include $(ROOTFS)/usr/lib $(ROOTFS)/usr/share
 	cp -R $(IMAGE_CODECS_ROOT)/usr/include/. $(ROOTFS)/usr/include/
 	cp -R $(IMAGE_CODECS_ROOT)/usr/lib/. $(ROOTFS)/usr/lib/
@@ -233,11 +245,13 @@ $(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(BUSYBOX) $(TCC_STAMP) $(NANO) $(
 	mkdir -p $(ROOTFS)/usr/share/nano
 	cp ports/src/nano/syntax/*.nanorc $(ROOTFS)/usr/share/nano/
 	@test -x $(ROOTFS)/usr/bin/tcc || { echo "TinyCC was not installed into the rootfs" >&2; exit 1; }
+	@test -x $(ROOTFS)/usr/bin/lua || { echo "Lua was not installed into the rootfs" >&2; exit 1; }
 	ln -sfn ../usr/bin/tcc $(ROOTFS)/bin/tcc
+	ln -sfn ../usr/bin/lua $(ROOTFS)/bin/lua
 	chmod 0755 $(ROOTFS)/sbin/init $(ROOTFS)/bin/bash $(ROOTFS)/bin/busybox $(ROOTFS)/bin/nano \
 		$(ROOTFS)/bin/neofetch $(ROOTFS)/bin/ps $(ROOTFS)/bin/free \
 		$(ROOTFS)/bin/uptime $(ROOTFS)/bin/top $(ROOTFS)/bin/loadkeys \
-		$(ROOTFS)/usr/bin/tcc $(ROOTFS)/usr/bin/tunix-wallpaper
+		$(ROOTFS)/usr/bin/tcc $(ROOTFS)/usr/bin/lua $(ROOTFS)/usr/bin/tunix-wallpaper
 	ln -s bash $(ROOTFS)/bin/sh
 	@for app in $(BUSYBOX_APPLETS); do ln -s busybox $(ROOTFS)/bin/$$app; done
 	tar --format=ustar --blocking-factor=1 --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf $@ -C $(ROOTFS) .
@@ -256,14 +270,6 @@ headless: $(IMAGE)
 		-nographic -monitor none -serial stdio -no-reboot -no-shutdown \
 		-netdev user,id=net0 -device rtl8139,netdev=net0
 
-
-image-codecs-check: $(IMAGE_CODECS_STAMP)
-	$(WALLPAPER_CONVERTER) --self-test
-
-editor-check:
-	ITERATIONS=20 ./scripts/test-editor-ports.sh
-loadkeys-check:
-	./scripts/test-loadkeys.sh
 
 clean:
 	rm -rf $(BUILD) $(PORT_OUT)

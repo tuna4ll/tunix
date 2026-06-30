@@ -26,3 +26,6 @@
 [submodule "ports/src/libjpeg-turbo"]
 	path = ports/src/libjpeg-turbo
 	url = https://github.com/libjpeg-turbo/libjpeg-turbo.git
+[submodule "ports/src/lua"]
+	path = ports/src/lua
+	url = https://github.com/lua/lua.git
