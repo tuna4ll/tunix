@@ -17,3 +17,12 @@
 [submodule "ports/src/nano"]
 	path = ports/src/nano
 	url = https://git.savannah.gnu.org/git/nano.git
+[submodule "ports/src/zlib"]
+	path = ports/src/zlib
+	url = https://github.com/madler/zlib.git
+[submodule "ports/src/libpng"]
+	path = ports/src/libpng
+	url = https://github.com/pnggroup/libpng.git
+[submodule "ports/src/libjpeg-turbo"]
+	path = ports/src/libjpeg-turbo
+	url = https://github.com/libjpeg-turbo/libjpeg-turbo.git

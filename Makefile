@@ -22,6 +22,9 @@ TCC_STAMP := $(PORT_OUT)/.tcc-ready
 NCURSES_ROOT := $(PORT_OUT)/ncurses-root
 NCURSES_STAMP := $(PORT_OUT)/.ncurses-ready
 NANO := $(PORT_OUT)/nano
+IMAGE_CODECS_ROOT := $(PORT_OUT)/image-codecs-root
+IMAGE_CODECS_STAMP := $(PORT_OUT)/.image-codecs-ready
+WALLPAPER_CONVERTER := $(PORT_OUT)/tunix-wallpaper
 TERMINAL_FONT_SOURCE ?= assets/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf
 TERMINAL_FONT_DATA := $(BUILD)/generated/terminal_font_data.inc
 
@@ -58,15 +61,24 @@ INITRD_FILES := $(shell find initrd -type f 2>/dev/null)
 WALLPAPER_SOURCE ?= assets/tunix-mountain-lake.jpg
 WALLPAPER_OUTPUT := initrd/usr/share/tunix/wallpaper.twl
 
-.PHONY: all run headless wallpaper terminal-font editor-check editor-qemu-check posix-qemu-check loadkeys-check loadkeys-qemu-check clean
+.PHONY: all run headless wallpaper terminal-font image-codecs-check editor-check editor-qemu-check posix-qemu-check loadkeys-check loadkeys-qemu-check clean
 all: $(IMAGE)
 
 wallpaper: $(WALLPAPER_OUTPUT)
 
 terminal-font: $(TERMINAL_FONT_DATA)
 
-$(WALLPAPER_OUTPUT): $(WALLPAPER_SOURCE) scripts/convert-wallpaper.py
-	$(PYTHON) scripts/convert-wallpaper.py $(WALLPAPER_SOURCE) $(WALLPAPER_OUTPUT) --width 960 --height 540
+$(IMAGE_CODECS_STAMP): $(BASH) ports/build-image-codecs.sh tools/tunix-wallpaper.c | $(BUILD)/.tools
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" ./ports/build-image-codecs.sh
+	@touch $@
+
+$(WALLPAPER_CONVERTER): $(IMAGE_CODECS_STAMP)
+	@test -x $@ || { echo "wallpaper converter was not produced" >&2; exit 1; }
+
+$(WALLPAPER_OUTPUT): $(WALLPAPER_SOURCE) $(WALLPAPER_CONVERTER)
+	@mkdir -p $(dir $@)
+	$(WALLPAPER_CONVERTER) $(WALLPAPER_SOURCE) $(WALLPAPER_OUTPUT) --width 960 --height 540
 
 $(TERMINAL_FONT_DATA): $(TERMINAL_FONT_SOURCE) scripts/generate-terminal-font.py | $(BUILD)
 	@mkdir -p $(dir $@)
@@ -202,7 +214,7 @@ $(INIT): $(BUILD)/user/init.o $(USER_RUNTIME) src/userspace/linker.ld
 	$(LD) $(USER_LDFLAGS) -o $@ $(USER_RUNTIME) $(BUILD)/user/init.o
 	$(STRIP) --strip-all $@
 
-$(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(BUSYBOX) $(TCC_STAMP) $(NANO) $(WALLPAPER_OUTPUT) $(INITRD_FILES)
+$(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(BUSYBOX) $(TCC_STAMP) $(NANO) $(IMAGE_CODECS_STAMP) $(WALLPAPER_OUTPUT) $(INITRD_FILES)
 	rm -rf $(ROOTFS)
 	mkdir -p $(ROOTFS)/bin $(ROOTFS)/sbin $(ROOTFS)/dev $(ROOTFS)/tmp $(ROOTFS)/home
 	cp -R initrd/. $(ROOTFS)/
@@ -212,7 +224,11 @@ $(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(BUSYBOX) $(TCC_STAMP) $(NANO) $(
 	cp $(NANO) $(ROOTFS)/bin/nano
 	cp $(SYSTEM_TOOLS) $(ROOTFS)/bin/
 	cp -R $(TCC_ROOT)/. $(ROOTFS)/
-	mkdir -p $(ROOTFS)/usr/share
+	mkdir -p $(ROOTFS)/usr/bin $(ROOTFS)/usr/include $(ROOTFS)/usr/lib $(ROOTFS)/usr/share
+	cp -R $(IMAGE_CODECS_ROOT)/usr/include/. $(ROOTFS)/usr/include/
+	cp -R $(IMAGE_CODECS_ROOT)/usr/lib/. $(ROOTFS)/usr/lib/
+	cp $(WALLPAPER_CONVERTER) $(ROOTFS)/usr/bin/tunix-wallpaper
+	cp -R $(IMAGE_CODECS_ROOT)/usr/share/. $(ROOTFS)/usr/share/
 	cp -R $(NCURSES_ROOT)/usr/share/terminfo $(ROOTFS)/usr/share/
 	mkdir -p $(ROOTFS)/usr/share/nano
 	cp ports/src/nano/syntax/*.nanorc $(ROOTFS)/usr/share/nano/
@@ -221,7 +237,7 @@ $(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(BUSYBOX) $(TCC_STAMP) $(NANO) $(
 	chmod 0755 $(ROOTFS)/sbin/init $(ROOTFS)/bin/bash $(ROOTFS)/bin/busybox $(ROOTFS)/bin/nano \
 		$(ROOTFS)/bin/neofetch $(ROOTFS)/bin/ps $(ROOTFS)/bin/free \
 		$(ROOTFS)/bin/uptime $(ROOTFS)/bin/top $(ROOTFS)/bin/loadkeys \
-		$(ROOTFS)/usr/bin/tcc
+		$(ROOTFS)/usr/bin/tcc $(ROOTFS)/usr/bin/tunix-wallpaper
 	ln -s bash $(ROOTFS)/bin/sh
 	@for app in $(BUSYBOX_APPLETS); do ln -s busybox $(ROOTFS)/bin/$$app; done
 	tar --format=ustar --blocking-factor=1 --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf $@ -C $(ROOTFS) .
@@ -240,6 +256,9 @@ headless: $(IMAGE)
 		-nographic -monitor none -serial stdio -no-reboot -no-shutdown \
 		-netdev user,id=net0 -device rtl8139,netdev=net0
 
+
+image-codecs-check: $(IMAGE_CODECS_STAMP)
+	$(WALLPAPER_CONVERTER) --self-test
 
 editor-check:
 	ITERATIONS=20 ./scripts/test-editor-ports.sh
