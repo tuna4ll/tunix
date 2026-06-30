@@ -25,6 +25,10 @@
 #define ETIMEDOUT 110
 #define SIGSEGV 11
 #define IA32_FS_BASE 0xC0000100U
+#define FUTEX_OWNER_DIED 0x40000000U
+#define FUTEX_TID_MASK 0x3fffffffU
+#define ROBUST_LIST_LIMIT 2048U
+#define DEFAULT_TIMERSLACK_NS 50000ULL
 
 extern void process_enter_user(uint64_t entry, uint64_t user_stack, uint64_t cr3) __attribute__((noreturn));
 extern void kprintf(const char *fmt, ...);
@@ -39,6 +43,8 @@ extern void panic(const char *msg) __attribute__((noreturn));
 static struct process *queue;
 static struct process *current;
 static uint64_t next_pid = 1;
+
+static void signal_one_process(struct process *target, int signal_number);
 
 static struct process_memory *memory_create(uint64_t cr3, uint64_t brk_start,
                                             uint64_t brk_end, uint64_t mmap_base) {
@@ -250,6 +256,9 @@ struct process *process_create_from_path(const char *path) {
     process->sid = process->pid;
     process->state = PROCESS_READY;
     process->umask = 022;
+    process->signal_stack_flags = SS_DISABLE;
+    process->dumpable = 1;
+    process->timerslack_ns = DEFAULT_TIMERSLACK_NS;
     process->cwd = vfs_root;
     strncpy(process->name, file->name, sizeof(process->name) - 1);
     strncpy(process->exe_path, path, sizeof(process->exe_path) - 1);
@@ -475,11 +484,83 @@ static int notify_parent_of_job_change(struct process *child, int wait_flag, int
     return 1;
 }
 
+struct linux_robust_list_head_user {
+    uint64_t list_next;
+    int64_t futex_offset;
+    uint64_t list_op_pending;
+};
+
+static void robust_wake_address(struct process *process, uint64_t address) {
+    if (!process || (address & 3U) || address >= USER_ADDRESS_LIMIT) return;
+    uint32_t value;
+    if (vmm_copy_from_space(process->cr3, &value, address, sizeof(value)) != 0) return;
+    if ((value & FUTEX_TID_MASK) != (uint32_t)process->pid) return;
+    value = (value & ~FUTEX_TID_MASK) | FUTEX_OWNER_DIED;
+    if (vmm_copy_to_space(process->cr3, address, &value, sizeof(value)) != 0) return;
+    (void)process_futex_wake(address, 1);
+}
+
+static int robust_futex_address(uint64_t entry, int64_t offset, uint64_t *address) {
+    if (!address) return -1;
+    if (offset < 0) {
+        uint64_t amount = (uint64_t)(-offset);
+        if (entry < amount) return -1;
+        *address = entry - amount;
+    } else {
+        uint64_t amount = (uint64_t)offset;
+        if (entry > USER_ADDRESS_LIMIT - amount) return -1;
+        *address = entry + amount;
+    }
+    return 0;
+}
+
+static void process_handle_robust_list(struct process *process) {
+    if (!process || !process->robust_list_head ||
+        process->robust_list_length != sizeof(struct linux_robust_list_head_user)) return;
+
+    uint64_t head_address = process->robust_list_head;
+    struct linux_robust_list_head_user head;
+    if (vmm_copy_from_space(process->cr3, &head, head_address, sizeof(head)) != 0) return;
+
+    uint64_t entry = head.list_next;
+    for (unsigned count = 0; entry && entry != head_address && count < ROBUST_LIST_LIMIT; count++) {
+        uint64_t next;
+        if (vmm_copy_from_space(process->cr3, &next, entry, sizeof(next)) != 0) break;
+        uint64_t futex_address;
+        if (robust_futex_address(entry, head.futex_offset, &futex_address) == 0)
+            robust_wake_address(process, futex_address);
+        entry = next;
+    }
+
+    if (head.list_op_pending && head.list_op_pending != head_address) {
+        uint64_t futex_address;
+        if (robust_futex_address(head.list_op_pending, head.futex_offset, &futex_address) == 0)
+            robust_wake_address(process, futex_address);
+    }
+    process->robust_list_head = 0;
+    process->robust_list_length = 0;
+}
+
+static void notify_children_of_parent_death(struct process *parent) {
+    if (!parent || !queue) return;
+    struct process *item = queue;
+    do {
+        if (item != parent && item->ppid == parent->pid && item->state != PROCESS_DEAD) {
+            int signal_number = item->pdeath_signal;
+            item->ppid = 0;
+            if (signal_number > 0) signal_one_process(item, signal_number);
+        }
+        item = item->next;
+    } while (item != queue);
+}
+
 void process_exit_from_syscall(struct syscall_frame *frame, int status) {
     if (!current || !frame) panic("process: exit without current process");
     struct process *exiting = current;
     exiting->exit_status = status;
     exiting->state = PROCESS_ZOMBIE;
+    process_handle_robust_list(exiting);
+    notify_children_of_parent_death(exiting);
     if (exiting->clear_child_tid_user) {
         uint64_t clear_address = exiting->clear_child_tid_user;
         uint32_t zero = 0;
@@ -513,6 +594,13 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame) {
     child->cwd = parent->cwd;
     child->controlling_pty = parent->controlling_pty;
     child->umask = parent->umask;
+    child->signal_stack_pointer = parent->signal_stack_pointer;
+    child->signal_stack_size = parent->signal_stack_size;
+    child->signal_stack_flags = parent->signal_stack_flags;
+    child->dumpable = parent->dumpable;
+    child->no_new_privs = parent->no_new_privs;
+    child->timerslack_ns = parent->timerslack_ns;
+    child->thp_disable = parent->thp_disable;
     strncpy(child->name, parent->name, sizeof(child->name) - 1);
     strncpy(child->exe_path, parent->exe_path, sizeof(child->exe_path) - 1);
     child->cr3 = vmm_clone_address_space(parent->cr3);
@@ -586,6 +674,11 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
     child->cwd = parent->cwd;
     child->controlling_pty = parent->controlling_pty;
     child->umask = parent->umask;
+    child->signal_stack_flags = SS_DISABLE;
+    child->dumpable = parent->dumpable;
+    child->no_new_privs = parent->no_new_privs;
+    child->timerslack_ns = parent->timerslack_ns;
+    child->thp_disable = parent->thp_disable;
     strncpy(child->name, parent->name, sizeof(child->name) - 1);
     strncpy(child->exe_path, parent->exe_path, sizeof(child->exe_path) - 1);
     child->memory = parent->memory;
@@ -697,6 +790,7 @@ void process_exit_group_from_syscall(struct syscall_frame *frame, int status) {
         do {
             if (item != current && item->tgid == group && item->state != PROCESS_DEAD) {
                 item->exit_status = status;
+                process_handle_robust_list(item);
                 if (item->clear_child_tid_user) {
                     uint64_t clear_address = item->clear_child_tid_user;
                     uint32_t zero = 0;
@@ -747,6 +841,12 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
     current->brk_end = image.brk_end;
     current->mmap_base = image.mmap_base;
     current->fs_base = 0;
+    current->signal_stack_pointer = 0;
+    current->signal_stack_size = 0;
+    current->signal_stack_flags = SS_DISABLE;
+    current->robust_list_head = 0;
+    current->robust_list_length = 0;
+    current->dumpable = 1;
     strncpy(current->name, file->name, sizeof(current->name) - 1);
     strncpy(current->exe_path, path, sizeof(current->exe_path) - 1);
     set_process_cmdline(current, path, argv);
@@ -904,6 +1004,14 @@ static int next_pending_signal(struct process *process) {
     return 0;
 }
 
+static int on_signal_stack(const struct process *process, uint64_t user_rsp) {
+    if (!process || process->signal_stack_flags == SS_DISABLE ||
+        !process->signal_stack_size) return 0;
+    uint64_t base = process->signal_stack_pointer;
+    uint64_t limit = base + process->signal_stack_size;
+    return user_rsp >= base && user_rsp < limit;
+}
+
 void process_prepare_user_return(struct syscall_frame *frame) {
     if (!current || !frame || current->state != PROCESS_RUNNING || current->in_signal) return;
     int signal_number = next_pending_signal(current);
@@ -938,7 +1046,13 @@ void process_prepare_user_return(struct syscall_frame *frame) {
         return;
     }
 
-    uint64_t new_rsp = (frame->user_rsp & ~15ULL) - 8;
+    uint64_t stack_top = frame->user_rsp;
+    if ((action->flags & SA_ONSTACK) &&
+        current->signal_stack_flags != SS_DISABLE &&
+        !on_signal_stack(current, frame->user_rsp)) {
+        stack_top = current->signal_stack_pointer + current->signal_stack_size;
+    }
+    uint64_t new_rsp = (stack_top & ~15ULL) - 8;
     if (vmm_copy_to_space(current->cr3, new_rsp, &action->restorer, sizeof(action->restorer)) != 0) {
         process_exit_from_syscall(frame, 128 + SIGSEGV);
         return;

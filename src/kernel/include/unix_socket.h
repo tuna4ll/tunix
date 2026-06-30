@@ -30,5 +30,6 @@ int64_t unix_socket_write(struct unix_socket *socket, size_t size, const void *b
 int unix_socket_read_ready(struct unix_socket *socket);
 int unix_socket_write_ready(struct unix_socket *socket);
 int unix_socket_is_listener(struct unix_socket *socket);
+int unix_socket_shutdown(struct unix_socket *socket, int how);
 
 #endif

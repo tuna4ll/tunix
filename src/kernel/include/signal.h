@@ -24,6 +24,12 @@
 #define SIG_UNBLOCK 1
 #define SIG_SETMASK 2
 
+#define SA_ONSTACK 0x08000000ULL
+
+#define SS_ONSTACK 1
+#define SS_DISABLE 2
+#define MINSIGSTKSZ 2048ULL
+
 struct tunix_sigaction {
     uint64_t handler;
     uint64_t flags;

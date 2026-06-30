@@ -240,6 +240,35 @@ struct linux_clone_args {
 #define ARCH_SET_FS 0x1002
 #define ARCH_GET_FS 0x1003
 
+#define PR_SET_PDEATHSIG 1
+#define PR_GET_PDEATHSIG 2
+#define PR_GET_DUMPABLE 3
+#define PR_SET_DUMPABLE 4
+#define PR_GET_KEEPCAPS 7
+#define PR_SET_KEEPCAPS 8
+#define PR_SET_NAME 15
+#define PR_GET_NAME 16
+#define PR_GET_SECCOMP 21
+#define PR_CAPBSET_READ 23
+#define PR_CAPBSET_DROP 24
+#define PR_GET_SECUREBITS 27
+#define PR_SET_SECUREBITS 28
+#define PR_SET_TIMERSLACK 29
+#define PR_GET_TIMERSLACK 30
+#define PR_SET_PTRACER 0x59616d61
+#define PR_SET_CHILD_SUBREAPER 36
+#define PR_GET_CHILD_SUBREAPER 37
+#define PR_SET_NO_NEW_PRIVS 38
+#define PR_GET_NO_NEW_PRIVS 39
+#define PR_GET_TID_ADDRESS 40
+#define PR_SET_THP_DISABLE 41
+#define PR_GET_THP_DISABLE 42
+#define PR_CAP_AMBIENT 47
+#define PR_CAP_AMBIENT_IS_SET 1
+#define PR_CAP_AMBIENT_RAISE 2
+#define PR_CAP_AMBIENT_LOWER 3
+#define PR_CAP_AMBIENT_CLEAR_ALL 4
+
 
 #define EPERM 1
 #define E2BIG 7
@@ -281,6 +310,7 @@ struct linux_clone_args {
 #define ENETDOWN 100
 #define ENOTCONN 107
 #define EDESTADDRREQ 89
+#define ENOTSOCK 88
 
 #define FUTEX_WAIT 0
 #define FUTEX_WAKE 1
@@ -337,6 +367,15 @@ struct linux_iovec {
     uint64_t base;
     uint64_t length;
 };
+
+struct linux_sigaltstack {
+    uint64_t sp;
+    int32_t flags;
+    uint32_t __pad;
+    uint64_t size;
+};
+
+_Static_assert(sizeof(struct linux_sigaltstack) == 24, "Linux x86_64 sigaltstack ABI mismatch");
 
 struct linux_msghdr {
     uint64_t name;
@@ -938,6 +977,15 @@ static int64_t sys_connect(int fd, uint64_t user_address, uint64_t length) {
     return inet_socket_connect(inet_value, address, (size_t)length);
 }
 
+static int64_t sys_shutdown(int fd, int how) {
+    struct process *process = process_current();
+    if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->fds[fd]) return -EBADF;
+    struct file *file = process->fds[fd];
+    if (file->kind == FILE_KIND_SOCKET) return unix_socket_shutdown(file->socket, how);
+    if (file->kind == FILE_KIND_INET_SOCKET) return inet_socket_shutdown(file->inet_socket, how);
+    return -ENOTSOCK;
+}
+
 static int64_t sys_accept(int fd, uint64_t user_address, uint64_t user_length, int flags) {
     (void)user_address;
     (void)user_length;
@@ -1137,6 +1185,17 @@ static int64_t sys_ftruncate(int fd, uint64_t length) {
     struct file *file = process->fds[fd];
     if (file->kind != FILE_KIND_VFS || !file->node) return -EINVAL;
     return vfs_truncate(file->node, length) == 0 ? 0 : -EIO;
+}
+
+static int64_t sys_fsync(int fd) {
+    struct process *process = process_current();
+    if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->fds[fd]) return -EBADF;
+    struct file *file = process->fds[fd];
+    if (file->kind != FILE_KIND_VFS || !file->node) return -EINVAL;
+    uint32_t node_type = file->node->flags & 0xFFU;
+    if (node_type == VFS_FILE || node_type == VFS_DIRECTORY || node_type == VFS_BLOCKDEVICE)
+        return 0;
+    return -EINVAL;
 }
 
 static int64_t sys_ioctl(int fd, unsigned long request, uint64_t user_argument) {
@@ -1851,6 +1910,163 @@ static int64_t sys_arch_prctl(int code, uint64_t address) {
     return -EINVAL;
 }
 
+static int signal_stack_active(const struct process *process, uint64_t user_rsp) {
+    if (!process || process->signal_stack_flags == SS_DISABLE ||
+        !process->signal_stack_size) return 0;
+    uint64_t base = process->signal_stack_pointer;
+    uint64_t limit = base + process->signal_stack_size;
+    return user_rsp >= base && user_rsp < limit;
+}
+
+static int64_t sys_sigaltstack(struct syscall_frame *frame, uint64_t user_stack,
+                               uint64_t user_old_stack) {
+    struct process *process = process_current();
+    if (!process || !frame) return -EINVAL;
+    int on_stack = signal_stack_active(process, frame->user_rsp);
+
+    if (user_old_stack) {
+        struct linux_sigaltstack old_stack;
+        old_stack.sp = process->signal_stack_pointer;
+        old_stack.size = process->signal_stack_size;
+        old_stack.__pad = 0;
+        old_stack.flags = process->signal_stack_flags == SS_DISABLE
+            ? SS_DISABLE : (on_stack ? SS_ONSTACK : 0);
+        if (copy_to_user(user_old_stack, &old_stack, sizeof(old_stack)) != 0)
+            return -EFAULT;
+    }
+
+    if (!user_stack) return 0;
+    if (on_stack) return -EPERM;
+
+    struct linux_sigaltstack new_stack;
+    if (copy_from_user(&new_stack, user_stack, sizeof(new_stack)) != 0) return -EFAULT;
+    if (new_stack.flags & ~(SS_DISABLE)) return -EINVAL;
+
+    if (new_stack.flags & SS_DISABLE) {
+        process->signal_stack_pointer = 0;
+        process->signal_stack_size = 0;
+        process->signal_stack_flags = SS_DISABLE;
+        return 0;
+    }
+
+    if (new_stack.size < MINSIGSTKSZ) return -ENOMEM;
+    if (new_stack.sp >= USER_ADDRESS_LIMIT ||
+        new_stack.size > USER_ADDRESS_LIMIT - new_stack.sp) return -EINVAL;
+    process->signal_stack_pointer = new_stack.sp;
+    process->signal_stack_size = new_stack.size;
+    process->signal_stack_flags = 0;
+    return 0;
+}
+
+static int64_t sys_prctl(int option, uint64_t arg2, uint64_t arg3,
+                         uint64_t arg4, uint64_t arg5) {
+    struct process *process = process_current();
+    if (!process) return -EINVAL;
+
+    switch (option) {
+        case PR_SET_PDEATHSIG:
+            if (arg2 > TUNIX_NSIG) return -EINVAL;
+            process->pdeath_signal = (int)arg2;
+            return 0;
+        case PR_GET_PDEATHSIG: {
+            if (!arg2) return -EFAULT;
+            int value = process->pdeath_signal;
+            return copy_to_user(arg2, &value, sizeof(value)) == 0 ? 0 : -EFAULT;
+        }
+        case PR_GET_DUMPABLE:
+            return process->dumpable;
+        case PR_SET_DUMPABLE:
+            if (arg2 > 1) return -EINVAL;
+            process->dumpable = (int)arg2;
+            return 0;
+        case PR_SET_NAME: {
+            if (!arg2) return -EFAULT;
+            char name[16];
+            if (copy_from_user(name, arg2, sizeof(name)) != 0) return -EFAULT;
+            name[sizeof(name) - 1] = '\0';
+            memset(process->name, 0, sizeof(process->name));
+            strncpy(process->name, name, sizeof(process->name) - 1);
+            return 0;
+        }
+        case PR_GET_NAME: {
+            if (!arg2) return -EFAULT;
+            char name[16];
+            memset(name, 0, sizeof(name));
+            strncpy(name, process->name, sizeof(name) - 1);
+            return copy_to_user(arg2, name, sizeof(name)) == 0 ? 0 : -EFAULT;
+        }
+        case PR_SET_NO_NEW_PRIVS:
+            if (arg2 != 1 || arg3 || arg4 || arg5) return -EINVAL;
+            process->no_new_privs = 1;
+            return 0;
+        case PR_GET_NO_NEW_PRIVS:
+            return process->no_new_privs;
+        case PR_GET_TID_ADDRESS:
+            if (!arg2) return -EFAULT;
+            return copy_to_user(arg2, &process->clear_child_tid_user,
+                                sizeof(process->clear_child_tid_user)) == 0 ? 0 : -EFAULT;
+        case PR_SET_CHILD_SUBREAPER:
+            process->child_subreaper = arg2 != 0;
+            return 0;
+        case PR_GET_CHILD_SUBREAPER: {
+            if (!arg2) return -EFAULT;
+            int value = process->child_subreaper;
+            return copy_to_user(arg2, &value, sizeof(value)) == 0 ? 0 : -EFAULT;
+        }
+        case PR_SET_THP_DISABLE:
+            if (arg2 > 1) return -EINVAL;
+            process->thp_disable = (int)arg2;
+            return 0;
+        case PR_GET_THP_DISABLE:
+            return process->thp_disable;
+        case PR_SET_TIMERSLACK:
+            process->timerslack_ns = arg2 ? arg2 : 50000ULL;
+            return 0;
+        case PR_GET_TIMERSLACK:
+            return (int64_t)process->timerslack_ns;
+        case PR_GET_KEEPCAPS:
+        case PR_GET_SECUREBITS:
+        case PR_GET_SECCOMP:
+            return 0;
+        case PR_SET_KEEPCAPS:
+        case PR_SET_SECUREBITS:
+            return arg2 == 0 ? 0 : -EINVAL;
+        case PR_CAPBSET_READ:
+            return 0;
+        case PR_CAPBSET_DROP:
+        case PR_SET_PTRACER:
+            return 0;
+        case PR_CAP_AMBIENT:
+            if (arg2 == PR_CAP_AMBIENT_IS_SET) return 0;
+            if (arg2 == PR_CAP_AMBIENT_LOWER || arg2 == PR_CAP_AMBIENT_CLEAR_ALL) return 0;
+            if (arg2 == PR_CAP_AMBIENT_RAISE) return -EPERM;
+            return -EINVAL;
+        default:
+            return -EINVAL;
+    }
+}
+
+static int64_t sys_set_robust_list(uint64_t user_head, size_t length) {
+    struct process *process = process_current();
+    if (!process) return -EINVAL;
+    if (length != 24U) return -EINVAL;
+    if (user_head >= USER_ADDRESS_LIMIT) return -EFAULT;
+    process->robust_list_head = user_head;
+    process->robust_list_length = length;
+    return 0;
+}
+
+static int64_t sys_get_robust_list(int pid, uint64_t user_head_pointer,
+                                   uint64_t user_length_pointer) {
+    if (!user_head_pointer || !user_length_pointer) return -EFAULT;
+    struct process *target = pid == 0 ? process_current() : process_find((uint64_t)pid);
+    if (!target) return -ESRCH;
+    uint64_t head = target->robust_list_head;
+    uint64_t length = target->robust_list_length;
+    if (copy_to_user(user_head_pointer, &head, sizeof(head)) != 0) return -EFAULT;
+    return copy_to_user(user_length_pointer, &length, sizeof(length)) == 0 ? 0 : -EFAULT;
+}
+
 static int64_t sys_prlimit(uint64_t user_old_limit) {
     if (!user_old_limit) return 0;
     struct linux_rlimit value = {UINT64_MAX, UINT64_MAX};
@@ -2117,7 +2333,7 @@ void syscall_dispatch(struct syscall_frame *frame) {
             }
             break;
         }
-        case SYS_SHUTDOWN: frame->rax = 0; break;
+        case SYS_SHUTDOWN: frame->rax = (uint64_t)sys_shutdown((int)frame->rdi, (int)frame->rsi); break;
         case SYS_BIND: frame->rax = (uint64_t)sys_bind((int)frame->rdi, frame->rsi, frame->rdx); break;
         case SYS_LISTEN: frame->rax = (uint64_t)sys_listen((int)frame->rdi, (int)frame->rsi); break;
         case SYS_GETSOCKNAME: frame->rax = (uint64_t)sys_socket_name((int)frame->rdi, frame->rsi, frame->rdx, 0); break;
@@ -2176,7 +2392,7 @@ void syscall_dispatch(struct syscall_frame *frame) {
                 }
             } else frame->rax = (uint64_t)-(int64_t)EINVAL;
             break;
-        case SYS_FSYNC: frame->rax = 0; break;
+        case SYS_FSYNC: frame->rax = (uint64_t)sys_fsync((int)frame->rdi); break;
         case SYS_FTRUNCATE: frame->rax = (uint64_t)sys_ftruncate((int)frame->rdi, frame->rsi); break;
         case SYS_GETCWD: frame->rax = (uint64_t)sys_getcwd(frame->rdi, (size_t)frame->rsi); break;
         case SYS_CHDIR: frame->rax = (uint64_t)sys_chdir(frame->rdi); break;
@@ -2218,8 +2434,8 @@ void syscall_dispatch(struct syscall_frame *frame) {
             frame->rax = target ? target->sid : (uint64_t)-(int64_t)ESRCH;
             break;
         }
-        case SYS_SIGALTSTACK: frame->rax = 0; break;
-        case SYS_PRCTL: frame->rax = 0; break;
+        case SYS_SIGALTSTACK: frame->rax = (uint64_t)sys_sigaltstack(frame, frame->rdi, frame->rsi); break;
+        case SYS_PRCTL: frame->rax = (uint64_t)sys_prctl((int)frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8); break;
         case SYS_ARCH_PRCTL: frame->rax = (uint64_t)sys_arch_prctl((int)frame->rdi, frame->rsi); break;
         case SYS_FUTEX: {
             int operation = (int)frame->rsi;
@@ -2281,8 +2497,8 @@ void syscall_dispatch(struct syscall_frame *frame) {
         case SYS_READLINKAT: frame->rax = (uint64_t)sys_readlink_at((int)frame->rdi, frame->rsi, frame->rdx, (size_t)frame->r10); break;
         case SYS_FCHMODAT: frame->rax = (uint64_t)sys_chmod_at((int)frame->rdi, frame->rsi, (uint32_t)frame->rdx, 0); break;
         case SYS_UTIMENSAT: frame->rax = (uint64_t)sys_utimens_at((int)frame->rdi, frame->rsi, (int)frame->r10); break;
-        case SYS_SET_ROBUST_LIST: frame->rax = 0; break;
-        case SYS_GET_ROBUST_LIST: frame->rax = (uint64_t)-(int64_t)ENOSYS; break;
+        case SYS_SET_ROBUST_LIST: frame->rax = (uint64_t)sys_set_robust_list(frame->rdi, (size_t)frame->rsi); break;
+        case SYS_GET_ROBUST_LIST: frame->rax = (uint64_t)sys_get_robust_list((int)frame->rdi, frame->rsi, frame->rdx); break;
         case SYS_ACCEPT4: frame->rax = (uint64_t)sys_accept((int)frame->rdi, frame->rsi, frame->rdx, (int)frame->r10); break;
         case SYS_PIPE2: frame->rax = (uint64_t)sys_pipe(frame->rdi, (int)frame->rsi); break;
         case SYS_PRLIMIT64: frame->rax = (uint64_t)sys_prlimit(frame->r10); break;

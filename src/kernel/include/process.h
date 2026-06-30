@@ -55,6 +55,17 @@ struct process {
     uint64_t mmap_base;
     uint64_t fs_base;
     uint64_t clear_child_tid_user;
+    uint64_t robust_list_head;
+    uint64_t robust_list_length;
+    uint64_t signal_stack_pointer;
+    uint64_t signal_stack_size;
+    int signal_stack_flags;
+    int pdeath_signal;
+    int dumpable;
+    int no_new_privs;
+    int child_subreaper;
+    int thp_disable;
+    uint64_t timerslack_ns;
     uint64_t start_time_ns;
     uint64_t runtime_ns;
     uint64_t last_scheduled_ns;

@@ -21,6 +21,7 @@
 #define EADDRNOTAVAIL 99
 #define ENETDOWN 100
 #define ENOTCONN 107
+#define EPIPE 32
 #define EMSGSIZE 90
 
 #define MSG_PEEK 0x02
@@ -74,6 +75,8 @@ struct inet_socket {
     uint16_t peer_port;
     int connected;
     int bound;
+    int read_shutdown;
+    int write_shutdown;
     int broadcast;
     int header_included;
     uint8_t ttl;
@@ -206,6 +209,7 @@ int64_t inet_socket_sendto(struct inet_socket *socket, const void *data, size_t 
                            const void *address, size_t address_length) {
     (void)flags;
     if (!socket || !data) return -EINVAL;
+    if (socket->write_shutdown) return -EPIPE;
     const struct net_config *config = net_get_config();
     if (!config->link_up || !config->interface_up) return -ENETDOWN;
     if (socket->domain == TUNIX_AF_INET) {
@@ -245,6 +249,7 @@ int64_t inet_socket_sendto(struct inet_socket *socket, const void *data, size_t 
 int64_t inet_socket_recvfrom(struct inet_socket *socket, void *data, size_t length, int flags,
                              void *address, size_t *address_length) {
     if (!socket || !data) return -EINVAL;
+    if (socket->read_shutdown) return 0;
     net_poll();
     if (!socket->queue_count) return -EAGAIN;
     struct queued_packet *item = &socket->queue[socket->queue_head];
@@ -374,10 +379,23 @@ int inet_socket_ioctl(struct inet_socket *socket, unsigned long request, void *a
     }
 }
 
-int inet_socket_read_ready(struct inet_socket *socket) { net_poll(); return socket && socket->queue_count; }
+int inet_socket_read_ready(struct inet_socket *socket) { net_poll(); return socket && (socket->read_shutdown || socket->queue_count); }
 int inet_socket_write_ready(struct inet_socket *socket) {
     const struct net_config *cfg = net_get_config();
-    return socket && cfg->link_up && cfg->interface_up;
+    return socket && !socket->write_shutdown && cfg->link_up && cfg->interface_up;
+}
+int inet_socket_shutdown(struct inet_socket *socket, int how) {
+    if (!socket) return -EINVAL;
+    if (how < 0 || how > 2) return -EINVAL;
+    if (!socket->connected) return -ENOTCONN;
+    if (how == 0 || how == 2) {
+        socket->read_shutdown = 1;
+        socket->queue_head = 0;
+        socket->queue_tail = 0;
+        socket->queue_count = 0;
+    }
+    if (how == 1 || how == 2) socket->write_shutdown = 1;
+    return 0;
 }
 int64_t inet_socket_read(struct inet_socket *socket, size_t length, void *data) {
     return inet_socket_recvfrom(socket, data, length, 0, NULL, NULL);

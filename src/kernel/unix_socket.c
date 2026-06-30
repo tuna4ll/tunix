@@ -24,6 +24,10 @@ struct unix_channel {
     int refs;
     int a_open;
     int b_open;
+    int a_read_shutdown;
+    int a_write_shutdown;
+    int b_read_shutdown;
+    int b_write_shutdown;
 };
 
 struct unix_socket {
@@ -55,6 +59,33 @@ static struct pipe_buffer *outgoing(struct unix_socket *socket) {
 static int peer_open(struct unix_socket *socket) {
     if (!socket || !socket->channel) return 0;
     return socket->side == 0 ? socket->channel->b_open : socket->channel->a_open;
+}
+
+static int own_read_shutdown(struct unix_socket *socket) {
+    if (!socket || !socket->channel) return 0;
+    return socket->side == 0 ? socket->channel->a_read_shutdown : socket->channel->b_read_shutdown;
+}
+
+static int own_write_shutdown(struct unix_socket *socket) {
+    if (!socket || !socket->channel) return 0;
+    return socket->side == 0 ? socket->channel->a_write_shutdown : socket->channel->b_write_shutdown;
+}
+
+static int peer_read_shutdown(struct unix_socket *socket) {
+    if (!socket || !socket->channel) return 0;
+    return socket->side == 0 ? socket->channel->b_read_shutdown : socket->channel->a_read_shutdown;
+}
+
+static int peer_write_open(struct unix_socket *socket) {
+    if (!peer_open(socket)) return 0;
+    return socket->side == 0 ? !socket->channel->b_write_shutdown : !socket->channel->a_write_shutdown;
+}
+
+static void clear_pipe(struct pipe_buffer *pipe) {
+    if (!pipe) return;
+    pipe->read_pos = 0;
+    pipe->write_pos = 0;
+    pipe->count = 0;
 }
 
 static void listener_unregister(struct unix_socket *socket) {
@@ -229,9 +260,10 @@ struct unix_socket *unix_socket_accept(struct unix_socket *socket) {
 
 int64_t unix_socket_read(struct unix_socket *socket, size_t size, void *buffer) {
     if (!socket || !socket->connected || !socket->channel) return -ENOTCONN;
+    if (own_read_shutdown(socket)) return 0;
     struct pipe_buffer *pipe = incoming(socket);
     if (!pipe) return -ENOTCONN;
-    if (pipe->count == 0) return peer_open(socket) ? -EAGAIN : 0;
+    if (pipe->count == 0) return peer_write_open(socket) ? -EAGAIN : 0;
     uint8_t *out = (uint8_t *)buffer;
     size_t amount = size < pipe->count ? size : pipe->count;
     for (size_t index = 0; index < amount; index++) {
@@ -244,7 +276,7 @@ int64_t unix_socket_read(struct unix_socket *socket, size_t size, void *buffer) 
 
 int64_t unix_socket_write(struct unix_socket *socket, size_t size, const void *buffer) {
     if (!socket || !socket->connected || !socket->channel) return -ENOTCONN;
-    if (!peer_open(socket)) return -EPIPE;
+    if (own_write_shutdown(socket) || peer_read_shutdown(socket) || !peer_open(socket)) return -EPIPE;
     struct pipe_buffer *pipe = outgoing(socket);
     size_t available = PIPE_CAPACITY - pipe->count;
     if (!available) return -EAGAIN;
@@ -262,12 +294,29 @@ int unix_socket_read_ready(struct unix_socket *socket) {
     if (!socket) return 0;
     if (socket->listening) return socket->pending_count > 0;
     if (!socket->connected || !socket->channel) return 0;
-    return incoming(socket)->count > 0 || !peer_open(socket);
+    if (own_read_shutdown(socket)) return 1;
+    return incoming(socket)->count > 0 || !peer_write_open(socket);
 }
 
 int unix_socket_write_ready(struct unix_socket *socket) {
     if (!socket || !socket->connected || !socket->channel || !peer_open(socket)) return 0;
+    if (own_write_shutdown(socket) || peer_read_shutdown(socket)) return 0;
     return outgoing(socket)->count < PIPE_CAPACITY;
+}
+
+int unix_socket_shutdown(struct unix_socket *socket, int how) {
+    if (!socket || !socket->connected || !socket->channel) return -ENOTCONN;
+    if (how < 0 || how > 2) return -EINVAL;
+    if (how == 0 || how == 2) {
+        if (socket->side == 0) socket->channel->a_read_shutdown = 1;
+        else socket->channel->b_read_shutdown = 1;
+        clear_pipe(incoming(socket));
+    }
+    if (how == 1 || how == 2) {
+        if (socket->side == 0) socket->channel->a_write_shutdown = 1;
+        else socket->channel->b_write_shutdown = 1;
+    }
+    return 0;
 }
 
 int unix_socket_is_listener(struct unix_socket *socket) {
