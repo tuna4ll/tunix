@@ -79,8 +79,10 @@ static uint64_t load_initramfs(const struct boot_manifest *manifest) {
 
 void kmain(uint32_t mmap_count, uint64_t mmap_address, uint64_t manifest_address,
            uint64_t framebuffer_info_address) {
+#if TUNIX_BOOT_TIMINGS
     uint64_t boot_started = boot_read_tsc();
     uint64_t initramfs_started = boot_started;
+#endif
     __asm__ volatile("cli");
     pic_init();
     serial_init();
@@ -93,7 +95,9 @@ void kmain(uint32_t mmap_count, uint64_t mmap_address, uint64_t manifest_address
         manifest = (const struct boot_manifest *)0x00020000ULL;
     }
     uint64_t initramfs_size = load_initramfs(manifest);
+#if TUNIX_BOOT_TIMINGS
     uint64_t initramfs_cycles = boot_read_tsc() - initramfs_started;
+#endif
 #if TUNIX_DEBUG_LOGS
     kprintf("TUNIX: initramfs loaded from ATA, %u bytes\n", (unsigned)initramfs_size);
 #endif

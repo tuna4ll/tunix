@@ -2,6 +2,6 @@
 #define TUNIX_BUILD_CONFIG_H
 
 #define TUNIX_DEBUG_LOGS 0
-#define TUNIX_BOOT_TIMINGS 1
+#define TUNIX_BOOT_TIMINGS 0
 
 #endif
