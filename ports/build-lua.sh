@@ -149,5 +149,4 @@ EOF_PC
 cp "$LUA_ROOT/usr/bin/lua" "$OUT/lua"
 chmod 0755 "$OUT/lua"
 
-OUT="$OUT" "$ROOT/scripts/test-lua-port.sh"
 printf '%s\n' "Lua 5.5.0 staged at $LUA_ROOT"

@@ -249,10 +249,10 @@ static void clear_row_range(int row, int first_col, int last_col) {
            (size_t)(last_col - first_col + 1) * sizeof(console_cells[0]));
 }
 
-static void scroll_region_up(int top, int bottom, unsigned count) {
+static unsigned scroll_region_up(int top, int bottom, unsigned count) {
     if (top < 0) top = 0;
     if (bottom >= layout.rows) bottom = layout.rows - 1;
-    if (top > bottom) return;
+    if (top > bottom) return 0;
     unsigned height = (unsigned)(bottom - top + 1);
     if (!count) count = 1;
     if (count > height) count = height;
@@ -263,12 +263,13 @@ static void scroll_region_up(int top, int bottom, unsigned count) {
                 (size_t)remaining * row_bytes);
     }
     memset(cell_at(bottom - (int)count + 1, 0), 0, (size_t)count * row_bytes);
+    return count;
 }
 
-static void scroll_region_down(int top, int bottom, unsigned count) {
+static unsigned scroll_region_down(int top, int bottom, unsigned count) {
     if (top < 0) top = 0;
     if (bottom >= layout.rows) bottom = layout.rows - 1;
-    if (top > bottom) return;
+    if (top > bottom) return 0;
     unsigned height = (unsigned)(bottom - top + 1);
     if (!count) count = 1;
     if (count > height) count = height;
@@ -279,6 +280,7 @@ static void scroll_region_down(int top, int bottom, unsigned count) {
                 (size_t)remaining * row_bytes);
     }
     memset(cell_at(top, 0), 0, (size_t)count * row_bytes);
+    return count;
 }
 
 static void copy_cell_background(int row, int col) {
@@ -348,6 +350,40 @@ static void render_console(void) {
     if (cursor_visible) draw_cell_overlay(console_row, console_col, 1);
 }
 
+static void render_region_scroll_up(int top, int bottom, unsigned count) {
+    if (!count || top < 0 || bottom >= layout.rows || top > bottom) return;
+    uint32_t x = layout.content_x;
+    uint32_t y = layout.content_y + (uint32_t)top * layout.cell_height;
+    uint32_t width = (uint32_t)layout.columns * layout.cell_width;
+    uint32_t height = (uint32_t)(bottom - top + 1) * layout.cell_height;
+    uint32_t shift = count * layout.cell_height;
+    if (shift < height) {
+        framebuffer_copy_rect(x, y, x, y + shift, width, height - shift);
+    }
+    copy_backing_rect(x, y + height - shift, width, shift);
+}
+
+static void render_region_scroll_down(int top, int bottom, unsigned count) {
+    if (!count || top < 0 || bottom >= layout.rows || top > bottom) return;
+    uint32_t x = layout.content_x;
+    uint32_t y = layout.content_y + (uint32_t)top * layout.cell_height;
+    uint32_t width = (uint32_t)layout.columns * layout.cell_width;
+    uint32_t height = (uint32_t)(bottom - top + 1) * layout.cell_height;
+    uint32_t shift = count * layout.cell_height;
+    if (shift < height) {
+        framebuffer_copy_rect(x, y + shift, x, y, width, height - shift);
+    }
+    copy_backing_rect(x, y, width, shift);
+}
+
+static void erase_visible_cursor(void) {
+    if (cursor_visible) render_cell(console_row, console_col, 0);
+}
+
+static void redraw_visible_cursor(void) {
+    if (cursor_visible) render_cell(console_row, console_col, 1);
+}
+
 static void clamp_terminal_cursor(void) {
     if (console_row < 0) console_row = 0;
     if (console_col < 0) console_col = 0;
@@ -357,9 +393,9 @@ static void clamp_terminal_cursor(void) {
 
 static void terminal_scroll_if_needed(void) {
     if (console_row == scroll_bottom + 1) {
-        scroll_region_up(scroll_top, scroll_bottom, 1);
+        unsigned count = scroll_region_up(scroll_top, scroll_bottom, 1);
         console_row = scroll_bottom;
-        render_console();
+        render_region_scroll_up(scroll_top, scroll_bottom, count);
     } else if (console_row >= layout.rows) {
         console_row = layout.rows - 1;
     }
@@ -651,14 +687,18 @@ void terminal_set_scroll_region(int top, int bottom) {
 
 void terminal_insert_lines(unsigned count) {
     if (!terminal_ready || console_row < scroll_top || console_row > scroll_bottom) return;
-    scroll_region_down(console_row, scroll_bottom, count);
-    render_console();
+    erase_visible_cursor();
+    unsigned actual_count = scroll_region_down(console_row, scroll_bottom, count);
+    render_region_scroll_down(console_row, scroll_bottom, actual_count);
+    redraw_visible_cursor();
 }
 
 void terminal_delete_lines(unsigned count) {
     if (!terminal_ready || console_row < scroll_top || console_row > scroll_bottom) return;
-    scroll_region_up(console_row, scroll_bottom, count);
-    render_console();
+    erase_visible_cursor();
+    unsigned actual_count = scroll_region_up(console_row, scroll_bottom, count);
+    render_region_scroll_up(console_row, scroll_bottom, actual_count);
+    redraw_visible_cursor();
 }
 
 void terminal_insert_chars(unsigned count) {
@@ -702,14 +742,18 @@ void terminal_erase_chars(unsigned count) {
 
 void terminal_scroll_up(unsigned count) {
     if (!terminal_ready) return;
-    scroll_region_up(scroll_top, scroll_bottom, count);
-    render_console();
+    erase_visible_cursor();
+    unsigned actual_count = scroll_region_up(scroll_top, scroll_bottom, count);
+    render_region_scroll_up(scroll_top, scroll_bottom, actual_count);
+    redraw_visible_cursor();
 }
 
 void terminal_scroll_down(unsigned count) {
     if (!terminal_ready) return;
-    scroll_region_down(scroll_top, scroll_bottom, count);
-    render_console();
+    erase_visible_cursor();
+    unsigned actual_count = scroll_region_down(scroll_top, scroll_bottom, count);
+    render_region_scroll_down(scroll_top, scroll_bottom, actual_count);
+    redraw_visible_cursor();
 }
 
 void terminal_print_hex(uint32_t value) {

@@ -95,6 +95,12 @@ uint32_t framebuffer_pack_rgb(uint32_t rgb) {
     uint8_t red = (uint8_t)(rgb >> 16);
     uint8_t green = (uint8_t)(rgb >> 8);
     uint8_t blue = (uint8_t)rgb;
+    if (framebuffer.red_size == 8U && framebuffer.green_size == 8U &&
+        framebuffer.blue_size == 8U) {
+        return ((uint32_t)red << framebuffer.red_position) |
+               ((uint32_t)green << framebuffer.green_position) |
+               ((uint32_t)blue << framebuffer.blue_position);
+    }
     return (scale_component(red, framebuffer.red_size) << framebuffer.red_position) |
            (scale_component(green, framebuffer.green_size) << framebuffer.green_position) |
            (scale_component(blue, framebuffer.blue_size) << framebuffer.blue_position);
@@ -109,6 +115,47 @@ void framebuffer_put_native(uint32_t x, uint32_t y, uint32_t native_pixel) {
 
 void framebuffer_put_rgb(uint32_t x, uint32_t y, uint32_t rgb) {
     framebuffer_put_native(x, y, framebuffer_pack_rgb(rgb));
+}
+
+void framebuffer_copy_rect(uint32_t destination_x, uint32_t destination_y,
+                           uint32_t source_x, uint32_t source_y,
+                           uint32_t width, uint32_t height) {
+    if (!framebuffer.ready || !width || !height ||
+        destination_x >= framebuffer.width || source_x >= framebuffer.width ||
+        destination_y >= framebuffer.height || source_y >= framebuffer.height)
+        return;
+
+    uint32_t source_width = framebuffer.width - source_x;
+    uint32_t destination_width = framebuffer.width - destination_x;
+    uint32_t source_height = framebuffer.height - source_y;
+    uint32_t destination_height = framebuffer.height - destination_y;
+    if (width > source_width) width = source_width;
+    if (width > destination_width) width = destination_width;
+    if (height > source_height) height = source_height;
+    if (height > destination_height) height = destination_height;
+    if (!width || !height ||
+        (destination_x == source_x && destination_y == source_y))
+        return;
+
+    int copy_bottom_up = destination_y > source_y &&
+                         destination_y < source_y + height;
+    for (uint32_t row_index = 0; row_index < height; row_index++) {
+        uint32_t row = copy_bottom_up ? height - 1U - row_index : row_index;
+        volatile uint32_t *source = (volatile uint32_t *)(framebuffer.base +
+                                    (uint64_t)(source_y + row) * framebuffer.pitch) + source_x;
+        volatile uint32_t *destination = (volatile uint32_t *)(framebuffer.base +
+                                         (uint64_t)(destination_y + row) * framebuffer.pitch) +
+                                         destination_x;
+
+        if (destination_y + row == source_y + row &&
+            destination_x > source_x && destination_x < source_x + width) {
+            for (uint32_t column = width; column > 0; column--)
+                destination[column - 1U] = source[column - 1U];
+        } else {
+            for (uint32_t column = 0; column < width; column++)
+                destination[column] = source[column];
+        }
+    }
 }
 
 void framebuffer_fill_rgb(uint32_t rgb) {

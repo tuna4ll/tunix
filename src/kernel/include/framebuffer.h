@@ -24,6 +24,9 @@ uint8_t framebuffer_blue_position(void);
 uint32_t framebuffer_pack_rgb(uint32_t rgb);
 void framebuffer_put_rgb(uint32_t x, uint32_t y, uint32_t rgb);
 void framebuffer_put_native(uint32_t x, uint32_t y, uint32_t native_pixel);
+void framebuffer_copy_rect(uint32_t destination_x, uint32_t destination_y,
+                           uint32_t source_x, uint32_t source_y,
+                           uint32_t width, uint32_t height);
 void framebuffer_fill_rgb(uint32_t rgb);
 const uint8_t *framebuffer_font(void);
 uint32_t framebuffer_font_width(void);
