@@ -1,6 +1,10 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "include/file.h"
+#include "include/eventfd.h"
+#include "include/timerfd.h"
+#include "include/epoll.h"
+#include "include/inotify.h"
 #include "include/framebuffer.h"
 #include "include/input.h"
 #include "include/heap.h"
@@ -64,6 +68,7 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define SYS_PIPE 22
 #define SYS_SELECT 23
 #define SYS_SCHED_YIELD 24
+#define SYS_EPOLL_CREATE 213
 #define SYS_DUP 32
 #define SYS_DUP2 33
 #define SYS_NANOSLEEP 35
@@ -127,8 +132,14 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define SYS_SET_TID_ADDRESS 218
 #define SYS_CLOCK_GETTIME 228
 #define SYS_CLOCK_GETRES 229
+#define SYS_CLOCK_NANOSLEEP 230
+#define SYS_EPOLL_WAIT 232
+#define SYS_EPOLL_CTL 233
 #define SYS_EXIT_GROUP 231
 #define SYS_TGKILL 234
+#define SYS_INOTIFY_INIT 253
+#define SYS_INOTIFY_ADD_WATCH 254
+#define SYS_INOTIFY_RM_WATCH 255
 #define SYS_OPENAT 257
 #define SYS_MKDIRAT 258
 #define SYS_NEWFSTATAT 262
@@ -141,10 +152,18 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define SYS_PSELECT6 270
 #define SYS_PPOLL 271
 #define SYS_UTIMENSAT 280
+#define SYS_EPOLL_PWAIT 281
+#define SYS_TIMERFD_CREATE 283
+#define SYS_EVENTFD 284
+#define SYS_TIMERFD_SETTIME 286
+#define SYS_TIMERFD_GETTIME 287
 #define SYS_SET_ROBUST_LIST 273
 #define SYS_GET_ROBUST_LIST 274
 #define SYS_ACCEPT4 288
+#define SYS_EVENTFD2 290
+#define SYS_EPOLL_CREATE1 291
 #define SYS_PIPE2 293
+#define SYS_INOTIFY_INIT1 294
 #define SYS_DUP3 292
 #define SYS_PRLIMIT64 302
 #define SYS_RENAMEAT2 316
@@ -186,6 +205,31 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define O_SYNC 04010000
 
 #define MSG_DONTWAIT 0x40
+#define MSG_CTRUNC 0x08
+#define MSG_CMSG_CLOEXEC 0x40000000
+#define SOCK_NONBLOCK O_NONBLOCK
+#define SOCK_CLOEXEC O_CLOEXEC
+#define FD_CLOEXEC 1
+#define EFD_SEMAPHORE 1
+#define EFD_NONBLOCK O_NONBLOCK
+#define EFD_CLOEXEC O_CLOEXEC
+#define TFD_NONBLOCK O_NONBLOCK
+#define TFD_CLOEXEC O_CLOEXEC
+#define TFD_TIMER_ABSTIME 1
+#define EPOLL_CLOEXEC O_CLOEXEC
+#define EPOLL_CTL_ADD 1
+#define EPOLL_CTL_DEL 2
+#define EPOLL_CTL_MOD 3
+#define SOL_SOCKET 1
+#define SCM_RIGHTS 1
+#define SCM_CREDENTIALS 2
+#define SO_TYPE 3
+#define SO_ERROR 4
+#define SO_PASSCRED 16
+#define SO_PEERCRED 17
+#define SO_ACCEPTCONN 30
+#define IN_NONBLOCK O_NONBLOCK
+#define IN_CLOEXEC O_CLOEXEC
 #define SIOCGIFCONF 0x8912U
 
 #define SEEK_SET 0
@@ -308,6 +352,7 @@ struct linux_clone_args {
 #define ENOTEMPTY 39
 #define ELOOP 40
 #define EOPNOTSUPP 95
+#define ENOSPC 28
 #define ENAMETOOLONG 36
 #define ERANGE 34
 #define ETIMEDOUT 110
@@ -400,6 +445,27 @@ struct linux_msghdr {
 
 _Static_assert(sizeof(struct linux_msghdr) == 56, "Linux x86_64 msghdr ABI mismatch");
 
+struct linux_cmsghdr {
+    uint64_t length;
+    int32_t level;
+    int32_t type;
+};
+
+struct linux_ucred {
+    int32_t pid;
+    uint32_t uid;
+    uint32_t gid;
+};
+
+_Static_assert(sizeof(struct linux_cmsghdr) == 16, "Linux x86_64 cmsghdr ABI mismatch");
+
+static struct file *file_from_fd(int fd);
+static int install_new_file(struct file *file, int cloexec);
+
+static size_t cmsg_align(size_t value) {
+    return (value + sizeof(uint64_t) - 1U) & ~(sizeof(uint64_t) - 1U);
+}
+
 struct linux_ifconf {
     int32_t length;
     uint32_t __pad;
@@ -477,7 +543,7 @@ void syscall_init(void) {
 static int64_t sys_write(int fd, uint64_t user_buffer, size_t length) {
     struct process *process = process_current();
     if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->fds[fd]) return -EBADF;
-    uint8_t buffer[256];
+    uint8_t buffer[4096];
     size_t completed = 0;
     while (completed < length) {
         size_t chunk = length - completed;
@@ -498,7 +564,7 @@ static int64_t sys_write(int fd, uint64_t user_buffer, size_t length) {
 static int64_t sys_read(int fd, uint64_t user_buffer, size_t length) {
     struct process *process = process_current();
     if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->fds[fd]) return -EBADF;
-    uint8_t buffer[256];
+    uint8_t buffer[4096];
     size_t completed = 0;
     while (completed < length) {
         size_t chunk = length - completed;
@@ -515,37 +581,12 @@ static int64_t sys_read(int fd, uint64_t user_buffer, size_t length) {
 
 static int file_read_ready(struct file *file) {
     if (!file) return -1;
-    if (file->kind == FILE_KIND_PIPE_READ)
-        return file->pipe && (file->pipe->count > 0 || file->pipe->writers == 0);
-    if (file->kind == FILE_KIND_PIPE_WRITE) return 0;
-    if (file->kind == FILE_KIND_SOCKET) return unix_socket_read_ready(file->socket);
-    if (file->kind == FILE_KIND_INET_SOCKET) return inet_socket_read_ready(file->inet_socket);
-    if (file->kind == FILE_KIND_PTY_MASTER || file->kind == FILE_KIND_PTY_SLAVE)
-        return pty_read_ready(file->pty, file->kind == FILE_KIND_PTY_MASTER);
-    if (file->kind == FILE_KIND_INPUT)
-        return input_reader_ready(file->input_reader);
-    if (file->kind == FILE_KIND_FRAMEBUFFER) return 1;
-    if (file->kind != FILE_KIND_VFS || !file->node) return -1;
-    if (file->node->read_ready) return file->node->read_ready(file->node);
-    if ((file->node->flags & 0xFFU) == VFS_CHARDEVICE) return 0;
-    return 1;
+    return (file_poll_events(file, POLLIN) & (POLLIN | POLLHUP | POLLERR)) != 0;
 }
 
 static int file_write_ready(struct file *file) {
     if (!file) return -1;
-    if (file->kind == FILE_KIND_PIPE_WRITE) {
-        if (!file->pipe || file->pipe->readers == 0) return 1;
-        return file->pipe->count < PIPE_CAPACITY;
-    }
-    if (file->kind == FILE_KIND_PIPE_READ) return 0;
-    if (file->kind == FILE_KIND_SOCKET) return unix_socket_write_ready(file->socket);
-    if (file->kind == FILE_KIND_INET_SOCKET) return inet_socket_write_ready(file->inet_socket);
-    if (file->kind == FILE_KIND_PTY_MASTER || file->kind == FILE_KIND_PTY_SLAVE)
-        return pty_write_ready(file->pty, file->kind == FILE_KIND_PTY_MASTER);
-    if (file->kind == FILE_KIND_INPUT) return 0;
-    if (file->kind == FILE_KIND_FRAMEBUFFER) return 1;
-    if (file->kind != FILE_KIND_VFS || !file->node) return -1;
-    return 1;
+    return (file_poll_events(file, POLLOUT) & (POLLOUT | POLLERR)) != 0;
 }
 
 static void clear_io_wait(struct process *process) {
@@ -603,14 +644,7 @@ static int64_t sys_poll_once(uint64_t user_fds, uint64_t count, int commit_empty
             continue;
         }
         struct file *file = process->fds[fd];
-        if ((fds[i].events & POLLIN) && file_read_ready(file) > 0)
-            fds[i].revents |= POLLIN;
-        if ((fds[i].events & POLLOUT) && file_write_ready(file) > 0)
-            fds[i].revents |= POLLOUT;
-        if (file->kind == FILE_KIND_PIPE_READ && file->pipe && file->pipe->writers == 0)
-            fds[i].revents |= POLLHUP;
-        if (file->kind == FILE_KIND_PIPE_WRITE && file->pipe && file->pipe->readers == 0)
-            fds[i].revents |= POLLERR;
+        fds[i].revents = (int16_t)file_poll_events(file, (uint32_t)(uint16_t)fds[i].events);
         if (fds[i].revents) ready++;
     }
     if ((ready || commit_empty) && bytes && copy_to_user(user_fds, fds, bytes) != 0)
@@ -801,20 +835,21 @@ static int64_t open_at(int dirfd, uint64_t user_path, uint64_t flags, uint64_t m
     if (!(flags & O_PATH) && (flags & O_TRUNC) && kind == VFS_FILE &&
         vfs_truncate(node, 0) != 0) return -EIO;
 
+    uint32_t status_flags = (uint32_t)(flags & ~O_CLOEXEC);
     struct file *file;
     if (strcmp(path, "/dev/ptmx") == 0) {
-        file = pty_open_master(node, (uint32_t)flags);
+        file = pty_open_master(node, status_flags);
     } else if (strcmp(path, "/dev/tty") == 0) {
         if (process_current() && process_current()->controlling_pty) {
-            file = pty_open_controlling(node, (uint32_t)flags);
+            file = pty_open_controlling(node, status_flags);
         } else {
             struct vfs_node *console = vfs_lookup("/dev/console");
-            file = file_open_node(console, (uint32_t)flags);
+            file = file_open_node(console, status_flags);
         }
     } else if (strncmp(path, "/dev/pts/", 9) == 0) {
-        file = pty_open_slave(node, (uint32_t)flags);
+        file = pty_open_slave(node, status_flags);
     } else {
-        file = file_open_node(node, (uint32_t)flags);
+        file = file_open_node(node, status_flags);
     }
     if (!file) {
         if (strcmp(path, "/dev/tty") == 0) return -ENXIO;
@@ -822,7 +857,8 @@ static int64_t open_at(int dirfd, uint64_t user_path, uint64_t flags, uint64_t m
         return -ENOMEM;
     }
     if (flags & O_APPEND) file->offset = node->length;
-    int fd = process_install_file(process_current(), file, 0);
+    int fd = process_install_file_flags(process_current(), file, 0,
+        (flags & O_CLOEXEC) ? PROCESS_FD_CLOEXEC : 0);
     if (fd < 0) {
         file_unref(file);
         return -EMFILE;
@@ -834,11 +870,13 @@ static int64_t sys_close(int fd) {
     return process_close_fd(process_current(), fd) == 0 ? 0 : -EBADF;
 }
 
-static int64_t sys_dup(int oldfd, int minimum) {
+static int64_t sys_dup(int oldfd, int minimum, int cloexec) {
     struct process *process = process_current();
     if (!process || oldfd < 0 || oldfd >= PROCESS_MAX_FDS || !process->fds[oldfd]) return -EBADF;
+    if (minimum < 0 || minimum >= PROCESS_MAX_FDS) return -EINVAL;
     file_ref(process->fds[oldfd]);
-    int result = process_install_file(process, process->fds[oldfd], minimum);
+    int result = process_install_file_flags(process, process->fds[oldfd], minimum,
+        cloexec ? PROCESS_FD_CLOEXEC : 0);
     if (result < 0) {
         file_unref(process->fds[oldfd]);
         return -EMFILE;
@@ -846,25 +884,29 @@ static int64_t sys_dup(int oldfd, int minimum) {
     return result;
 }
 
-static int64_t sys_dup2(int oldfd, int newfd) {
+static int64_t sys_dup_to(int oldfd, int newfd, int cloexec, int reject_same) {
     struct process *process = process_current();
     if (!process || oldfd < 0 || oldfd >= PROCESS_MAX_FDS || !process->fds[oldfd]) return -EBADF;
     if (newfd < 0 || newfd >= PROCESS_MAX_FDS) return -EBADF;
-    if (oldfd == newfd) return newfd;
+    if (oldfd == newfd) return reject_same ? -EINVAL : newfd;
     if (process->fds[newfd]) process_close_fd(process, newfd);
     file_ref(process->fds[oldfd]);
     process->fds[newfd] = process->fds[oldfd];
+    process->fd_flags[newfd] = cloexec ? PROCESS_FD_CLOEXEC : 0;
     return newfd;
 }
 
 static int64_t sys_pipe(uint64_t user_fds, int flags) {
-    if (flags & ~O_CLOEXEC) return -EINVAL;
+    if (flags & ~(O_CLOEXEC | O_NONBLOCK)) return -EINVAL;
     struct file *read_end;
     struct file *write_end;
     if (pipe_create(&read_end, &write_end) != 0) return -EMFILE;
+    read_end->flags = (uint32_t)(flags & O_NONBLOCK);
+    write_end->flags = (uint32_t)(flags & O_NONBLOCK);
     struct process *process = process_current();
-    int read_fd = process_install_file(process, read_end, 0);
-    int write_fd = process_install_file(process, write_end, 0);
+    uint8_t fd_flags = (flags & O_CLOEXEC) ? PROCESS_FD_CLOEXEC : 0;
+    int read_fd = process_install_file_flags(process, read_end, 0, fd_flags);
+    int write_fd = process_install_file_flags(process, write_end, 0, fd_flags);
     if (read_fd < 0 || write_fd < 0) {
         if (read_fd >= 0) process_close_fd(process, read_fd); else file_unref(read_end);
         if (write_fd >= 0) process_close_fd(process, write_fd); else file_unref(write_end);
@@ -895,24 +937,26 @@ static struct inet_socket *inet_socket_from_fd(int fd) {
 
 static int64_t sys_socket(int domain, int type, int protocol) {
     int base_type = type & 0xF;
+    int type_flags = type & ~0xF;
+    if (type_flags & ~(SOCK_NONBLOCK | SOCK_CLOEXEC)) return -EINVAL;
+    struct process *process = process_current();
     if (domain == TUNIX_AF_UNIX) {
         if (base_type != TUNIX_SOCK_STREAM || protocol != 0) return -EOPNOTSUPP;
         struct unix_socket *socket = unix_socket_create();
         if (!socket) return -ENOMEM;
+        unix_socket_set_credentials(socket, process ? (int32_t)process->pid : 0, 0, 0);
         struct file *file = file_create_socket(socket);
         if (!file) { unix_socket_unref(socket); return -ENOMEM; }
-        int fd = process_install_file(process_current(), file, 0);
-        if (fd < 0) { file_unref(file); return -EMFILE; }
-        return fd;
+        file->flags = (uint32_t)(type_flags & SOCK_NONBLOCK);
+        return install_new_file(file, type_flags & SOCK_CLOEXEC);
     }
     if (domain == TUNIX_AF_INET || domain == TUNIX_AF_PACKET) {
-        struct inet_socket *socket = inet_socket_create(domain, type, protocol);
+        struct inet_socket *socket = inet_socket_create(domain, base_type, protocol);
         if (!socket) return base_type == TUNIX_SOCK_STREAM ? -EOPNOTSUPP : -EPROTONOSUPPORT;
         struct file *file = file_create_inet_socket(socket);
         if (!file) { inet_socket_unref(socket); return -ENOMEM; }
-        int fd = process_install_file(process_current(), file, 0);
-        if (fd < 0) { file_unref(file); return -EMFILE; }
-        return fd;
+        file->flags = (uint32_t)(type_flags & SOCK_NONBLOCK);
+        return install_new_file(file, type_flags & SOCK_CLOEXEC);
     }
     return -EAFNOSUPPORT;
 }
@@ -920,12 +964,18 @@ static int64_t sys_socket(int domain, int type, int protocol) {
 static int64_t sys_socketpair(int domain, int type, int protocol,
                               uint64_t user_fds) {
     int base_type = type & 0xF;
+    int type_flags = type & ~0xF;
+    if (type_flags & ~(SOCK_NONBLOCK | SOCK_CLOEXEC)) return -EINVAL;
     if (domain != TUNIX_AF_UNIX || base_type != TUNIX_SOCK_STREAM || protocol != 0)
         return -EOPNOTSUPP;
     struct unix_socket *first = NULL;
     struct unix_socket *second = NULL;
     int status = unix_socket_pair(&first, &second);
     if (status < 0) return status;
+    struct process *process = process_current();
+    int32_t pid = process ? (int32_t)process->pid : 0;
+    unix_socket_set_credentials(first, pid, 0, 0);
+    unix_socket_set_credentials(second, pid, 0, 0);
     struct file *first_file = file_create_socket(first);
     struct file *second_file = file_create_socket(second);
     if (!first_file || !second_file) {
@@ -933,9 +983,11 @@ static int64_t sys_socketpair(int domain, int type, int protocol,
         if (second_file) file_unref(second_file); else unix_socket_unref(second);
         return -ENOMEM;
     }
-    struct process *process = process_current();
-    int first_fd = process_install_file(process, first_file, 0);
-    int second_fd = process_install_file(process, second_file, 0);
+    first_file->flags = (uint32_t)(type_flags & SOCK_NONBLOCK);
+    second_file->flags = (uint32_t)(type_flags & SOCK_NONBLOCK);
+    uint8_t fd_flags = (type_flags & SOCK_CLOEXEC) ? PROCESS_FD_CLOEXEC : 0;
+    int first_fd = process_install_file_flags(process, first_file, 0, fd_flags);
+    int second_fd = process_install_file_flags(process, second_file, 0, fd_flags);
     if (first_fd < 0 || second_fd < 0) {
         if (first_fd >= 0) process_close_fd(process, first_fd); else file_unref(first_file);
         if (second_fd >= 0) process_close_fd(process, second_fd); else file_unref(second_file);
@@ -1013,7 +1065,9 @@ static int64_t sys_accept(int fd, uint64_t user_address, uint64_t user_length, i
         unix_socket_unref(accepted);
         return -ENOMEM;
     }
-    int new_fd = process_install_file(process_current(), file, 0);
+    file->flags = (uint32_t)(flags & O_NONBLOCK);
+    int new_fd = process_install_file_flags(process_current(), file, 0,
+        (flags & O_CLOEXEC) ? PROCESS_FD_CLOEXEC : 0);
     if (new_fd < 0) {
         file_unref(file);
         return -EMFILE;
@@ -1087,15 +1141,89 @@ static int copy_message_iovecs(const struct linux_msghdr *message, uint8_t *buff
     return 0;
 }
 
+static void release_file_array(struct file **files, size_t count) {
+    for (size_t index = 0; index < count; index++) if (files[index]) file_unref(files[index]);
+}
+
+static int collect_scm_rights(const struct linux_msghdr *message,
+                              struct file **files, size_t *file_count) {
+    *file_count = 0;
+    if (!message->control || !message->control_length) return 0;
+    size_t offset = 0;
+    while (offset + sizeof(struct linux_cmsghdr) <= message->control_length) {
+        struct linux_cmsghdr header;
+        if (copy_from_user(&header, message->control + offset, sizeof(header)) != 0) {
+            release_file_array(files, *file_count);
+            return -EFAULT;
+        }
+        if (header.length < sizeof(header) ||
+            header.length > message->control_length - offset) {
+            release_file_array(files, *file_count);
+            return -EINVAL;
+        }
+        size_t payload = (size_t)header.length - sizeof(header);
+        if (header.level == SOL_SOCKET && header.type == SCM_RIGHTS) {
+            if (payload % sizeof(int32_t)) {
+                release_file_array(files, *file_count);
+                return -EINVAL;
+            }
+            size_t amount = payload / sizeof(int32_t);
+            if (amount > 8U - *file_count) {
+                release_file_array(files, *file_count);
+                return -EMSGSIZE;
+            }
+            for (size_t index = 0; index < amount; index++) {
+                int32_t descriptor;
+                uint64_t user_fd = message->control + offset + sizeof(header) +
+                                   index * sizeof(descriptor);
+                if (copy_from_user(&descriptor, user_fd, sizeof(descriptor)) != 0) {
+                    release_file_array(files, *file_count);
+                    return -EFAULT;
+                }
+                struct file *file = file_from_fd(descriptor);
+                if (!file) {
+                    release_file_array(files, *file_count);
+                    return -EBADF;
+                }
+                file_ref(file);
+                files[(*file_count)++] = file;
+            }
+        }
+        size_t step = cmsg_align((size_t)header.length);
+        if (!step || step > message->control_length - offset) break;
+        offset += step;
+    }
+    return 0;
+}
+
 static int64_t sys_sendmsg(int fd, uint64_t user_message, int flags) {
-    struct inet_socket *socket = inet_socket_from_fd(fd);
-    if (!socket || !user_message) return -EBADF;
+    if (!user_message) return -EFAULT;
     struct linux_msghdr message;
     if (copy_from_user(&message, user_message, sizeof(message)) != 0) return -EFAULT;
-    uint8_t data[2048];
+    uint8_t data[4096];
     size_t length = 0;
     int status = copy_message_iovecs(&message, data, sizeof(data), &length, 1);
     if (status < 0) return status;
+
+    struct unix_socket *unix_value = socket_from_fd(fd);
+    if (unix_value) {
+        if (message.name) return -EISDIR;
+        struct file *files[8] = {0};
+        size_t file_count = 0;
+        status = collect_scm_rights(&message, files, &file_count);
+        if (status < 0) return status;
+        if (file_count && length == 0) {
+            release_file_array(files, file_count);
+            return -EINVAL;
+        }
+        int64_t result = unix_socket_send_with_rights(unix_value, length, data,
+                                                       files, file_count);
+        if (result < 0) release_file_array(files, file_count);
+        return result;
+    }
+
+    struct inet_socket *socket = inet_socket_from_fd(fd);
+    if (!socket) return -EBADF;
     uint8_t address[32];
     const void *address_pointer = NULL;
     if (message.name) {
@@ -1107,9 +1235,114 @@ static int64_t sys_sendmsg(int fd, uint64_t user_message, int flags) {
                               message.name ? message.name_length : 0U);
 }
 
+static int scatter_message_data(const struct linux_msghdr *message,
+                                const uint8_t *data, size_t length) {
+    size_t remaining = length;
+    size_t offset = 0;
+    for (uint64_t index = 0; index < message->iov_length && remaining; index++) {
+        struct linux_iovec iov;
+        if (copy_from_user(&iov, message->iov + index * sizeof(iov), sizeof(iov)) != 0)
+            return -EFAULT;
+        size_t amount = iov.length < remaining ? (size_t)iov.length : remaining;
+        if (amount && copy_to_user(iov.base, data + offset, amount) != 0) return -EFAULT;
+        offset += amount;
+        remaining -= amount;
+    }
+    return 0;
+}
+
+static int write_unix_control(struct linux_msghdr *message,
+                              struct unix_socket *socket,
+                              struct file **files, size_t file_count,
+                              int receive_flags) {
+    struct unix_credentials peer = {0, 0, 0};
+    int include_credentials = unix_socket_get_passcred(socket) &&
+        unix_socket_get_peer_credentials(socket, &peer) == 0;
+    size_t rights_length = file_count ?
+        sizeof(struct linux_cmsghdr) + file_count * sizeof(int32_t) : 0;
+    size_t rights_space = file_count ? cmsg_align(rights_length) : 0;
+    size_t credentials_length = include_credentials ?
+        sizeof(struct linux_cmsghdr) + sizeof(struct linux_ucred) : 0;
+    size_t credentials_space = include_credentials ? cmsg_align(credentials_length) : 0;
+    size_t required = rights_space + credentials_space;
+
+    if (!required) {
+        message->control_length = 0;
+        return 0;
+    }
+    if (!message->control || message->control_length < required) {
+        message->flags |= MSG_CTRUNC;
+        message->control_length = 0;
+        release_file_array(files, file_count);
+        return 0;
+    }
+
+    int installed[8];
+    size_t installed_count = 0;
+    for (size_t index = 0; index < file_count; index++) {
+        int descriptor = process_install_file_flags(process_current(), files[index], 0,
+            (receive_flags & MSG_CMSG_CLOEXEC) ? PROCESS_FD_CLOEXEC : 0);
+        if (descriptor < 0) {
+            for (size_t rollback = 0; rollback < installed_count; rollback++)
+                process_close_fd(process_current(), installed[rollback]);
+            for (size_t remaining = index; remaining < file_count; remaining++)
+                file_unref(files[remaining]);
+            message->flags |= MSG_CTRUNC;
+            message->control_length = 0;
+            return 0;
+        }
+        installed[installed_count++] = descriptor;
+    }
+
+    size_t offset = 0;
+    if (file_count) {
+        struct linux_cmsghdr header = {rights_length, SOL_SOCKET, SCM_RIGHTS};
+        if (copy_to_user(message->control + offset, &header, sizeof(header)) != 0 ||
+            copy_to_user(message->control + offset + sizeof(header), installed,
+                         installed_count * sizeof(installed[0])) != 0) {
+            for (size_t index = 0; index < installed_count; index++)
+                process_close_fd(process_current(), installed[index]);
+            return -EFAULT;
+        }
+        if (rights_space > rights_length) {
+            uint64_t zero = 0;
+            if (copy_to_user(message->control + offset + rights_length, &zero,
+                             rights_space - rights_length) != 0) {
+                for (size_t index = 0; index < installed_count; index++)
+                    process_close_fd(process_current(), installed[index]);
+                return -EFAULT;
+            }
+        }
+        offset += rights_space;
+    }
+    if (include_credentials) {
+        struct linux_cmsghdr header = {credentials_length, SOL_SOCKET,
+                                       SCM_CREDENTIALS};
+        struct linux_ucred credentials = {peer.pid, peer.uid, peer.gid};
+        if (copy_to_user(message->control + offset, &header, sizeof(header)) != 0 ||
+            copy_to_user(message->control + offset + sizeof(header), &credentials,
+                         sizeof(credentials)) != 0) {
+            for (size_t index = 0; index < installed_count; index++)
+                process_close_fd(process_current(), installed[index]);
+            return -EFAULT;
+        }
+        if (credentials_space > credentials_length) {
+            uint64_t zero = 0;
+            if (copy_to_user(message->control + offset + credentials_length, &zero,
+                             credentials_space - credentials_length) != 0) {
+                for (size_t index = 0; index < installed_count; index++)
+                    process_close_fd(process_current(), installed[index]);
+                return -EFAULT;
+            }
+        }
+        offset += credentials_space;
+    }
+    message->control_length = offset;
+    return 0;
+}
+
 static int64_t sys_recvmsg(int fd, uint64_t user_message, int flags) {
-    struct inet_socket *socket = inet_socket_from_fd(fd);
-    if (!socket || !user_message) return -EBADF;
+    if (!user_message) return -EFAULT;
     struct linux_msghdr message;
     if (copy_from_user(&message, user_message, sizeof(message)) != 0) return -EFAULT;
     if (message.iov_length > 16U) return -EINVAL;
@@ -1119,11 +1352,32 @@ static int64_t sys_recvmsg(int fd, uint64_t user_message, int flags) {
         struct linux_iovec iov;
         if (copy_from_user(&iov, message.iov + index * sizeof(iov), sizeof(iov)) != 0)
             return -EFAULT;
-        if (iov.length > 2048U - capacity) return -EMSGSIZE;
+        if (iov.length > 4096U - capacity) return -EMSGSIZE;
         capacity += (size_t)iov.length;
     }
 
-    uint8_t data[2048];
+    uint8_t data[4096];
+    struct unix_socket *unix_value = socket_from_fd(fd);
+    if (unix_value) {
+        struct file *files[8] = {0};
+        size_t file_count = 0;
+        int64_t result = unix_socket_recv_with_rights(unix_value, capacity, data,
+                                                       files, 8, &file_count);
+        if (result < 0) return result;
+        if (scatter_message_data(&message, data, (size_t)result) != 0) {
+            release_file_array(files, file_count);
+            return -EFAULT;
+        }
+        message.name_length = 0;
+        message.flags = 0;
+        int status = write_unix_control(&message, unix_value, files, file_count, flags);
+        if (status < 0) return status;
+        if (copy_to_user(user_message, &message, sizeof(message)) != 0) return -EFAULT;
+        return result;
+    }
+
+    struct inet_socket *socket = inet_socket_from_fd(fd);
+    if (!socket) return -EBADF;
     uint8_t address[32];
     size_t address_length = message.name_length < sizeof(address)
         ? message.name_length : sizeof(address);
@@ -1131,19 +1385,7 @@ static int64_t sys_recvmsg(int fd, uint64_t user_message, int flags) {
                                            message.name ? address : NULL,
                                            message.name ? &address_length : NULL);
     if (result < 0) return result;
-
-    size_t remaining = (size_t)result;
-    size_t offset = 0;
-    for (uint64_t index = 0; index < message.iov_length && remaining; index++) {
-        struct linux_iovec iov;
-        if (copy_from_user(&iov, message.iov + index * sizeof(iov), sizeof(iov)) != 0)
-            return -EFAULT;
-        size_t amount = iov.length < remaining ? (size_t)iov.length : remaining;
-        if (amount && copy_to_user(iov.base, data + offset, amount) != 0) return -EFAULT;
-        offset += amount;
-        remaining -= amount;
-    }
-
+    if (scatter_message_data(&message, data, (size_t)result) != 0) return -EFAULT;
     if (message.name) {
         if (copy_to_user(message.name, address, address_length) != 0) return -EFAULT;
         message.name_length = (uint32_t)address_length;
@@ -1155,10 +1397,26 @@ static int64_t sys_recvmsg(int fd, uint64_t user_message, int flags) {
 }
 
 static int64_t sys_socket_name(int fd, uint64_t user_address, uint64_t user_length, int peer) {
-    struct inet_socket *socket = inet_socket_from_fd(fd);
-    if (!socket || !user_address || !user_length) return -EBADF;
+    if (!user_address || !user_length) return -EFAULT;
     uint32_t supplied;
     if (copy_from_user(&supplied, user_length, sizeof(supplied)) != 0) return -EFAULT;
+
+    struct unix_socket *unix_value = socket_from_fd(fd);
+    if (unix_value) {
+        struct tunix_sockaddr_un address;
+        size_t actual_length = 0;
+        int status = unix_socket_get_name(unix_value, peer, &address, &actual_length);
+        if (status < 0) return status;
+        size_t copy_length = supplied < actual_length ? supplied : actual_length;
+        if (copy_length && copy_to_user(user_address, &address, copy_length) != 0)
+            return -EFAULT;
+        uint32_t output_length = (uint32_t)actual_length;
+        return copy_to_user(user_length, &output_length, sizeof(output_length)) == 0 ?
+            0 : -EFAULT;
+    }
+
+    struct inet_socket *socket = inet_socket_from_fd(fd);
+    if (!socket) return -EBADF;
     uint8_t address[32];
     size_t length = supplied < sizeof(address) ? supplied : sizeof(address);
     int status = peer ? inet_socket_getpeername(socket, address, &length)
@@ -1169,7 +1427,17 @@ static int64_t sys_socket_name(int fd, uint64_t user_address, uint64_t user_leng
     return copy_to_user(user_length, &output_length, sizeof(output_length)) == 0 ? 0 : -EFAULT;
 }
 
-static int64_t sys_setsockopt(int fd, int level, int option, uint64_t user_value, size_t length) {
+static int64_t sys_setsockopt(int fd, int level, int option,
+                                  uint64_t user_value, size_t length) {
+    struct unix_socket *unix_value = socket_from_fd(fd);
+    if (unix_value) {
+        if (level != SOL_SOCKET || option != SO_PASSCRED || length < sizeof(int32_t))
+            return -EOPNOTSUPP;
+        int32_t enabled;
+        if (copy_from_user(&enabled, user_value, sizeof(enabled)) != 0) return -EFAULT;
+        unix_socket_set_passcred(unix_value, enabled != 0);
+        return 0;
+    }
     struct inet_socket *socket = inet_socket_from_fd(fd);
     if (!socket) return -EBADF;
     if (length > 256U) return -EINVAL;
@@ -1178,12 +1446,43 @@ static int64_t sys_setsockopt(int fd, int level, int option, uint64_t user_value
     return inet_socket_setsockopt(socket, level, option, value, length);
 }
 
-static int64_t sys_getsockopt(int fd, int level, int option, uint64_t user_value,
-                              uint64_t user_length) {
-    struct inet_socket *socket = inet_socket_from_fd(fd);
-    if (!socket || !user_length) return -EBADF;
+static int64_t sys_getsockopt(int fd, int level, int option,
+                              uint64_t user_value, uint64_t user_length) {
+    if (!user_length) return -EFAULT;
     uint32_t supplied;
     if (copy_from_user(&supplied, user_length, sizeof(supplied)) != 0) return -EFAULT;
+    struct unix_socket *unix_value = socket_from_fd(fd);
+    if (unix_value) {
+        if (level != SOL_SOCKET) return -EOPNOTSUPP;
+        if (option == SO_TYPE || option == SO_ERROR || option == SO_ACCEPTCONN) {
+            if (supplied < sizeof(int32_t)) return -EINVAL;
+            int32_t value = option == SO_TYPE ? TUNIX_SOCK_STREAM :
+                (option == SO_ACCEPTCONN ? unix_socket_is_listener(unix_value) : 0);
+            if (copy_to_user(user_value, &value, sizeof(value)) != 0) return -EFAULT;
+            uint32_t length = sizeof(value);
+            return copy_to_user(user_length, &length, sizeof(length)) == 0 ? 0 : -EFAULT;
+        }
+        if (option == SO_PEERCRED) {
+            if (supplied < sizeof(struct linux_ucred)) return -EINVAL;
+            struct unix_credentials peer;
+            int status = unix_socket_get_peer_credentials(unix_value, &peer);
+            if (status < 0) return status;
+            struct linux_ucred value = {peer.pid, peer.uid, peer.gid};
+            if (copy_to_user(user_value, &value, sizeof(value)) != 0) return -EFAULT;
+            uint32_t length = sizeof(value);
+            return copy_to_user(user_length, &length, sizeof(length)) == 0 ? 0 : -EFAULT;
+        }
+        if (option == SO_PASSCRED) {
+            if (supplied < sizeof(int32_t)) return -EINVAL;
+            int32_t enabled = unix_socket_get_passcred(unix_value);
+            if (copy_to_user(user_value, &enabled, sizeof(enabled)) != 0) return -EFAULT;
+            uint32_t length = sizeof(enabled);
+            return copy_to_user(user_length, &length, sizeof(length)) == 0 ? 0 : -EFAULT;
+        }
+        return -EOPNOTSUPP;
+    }
+    struct inet_socket *socket = inet_socket_from_fd(fd);
+    if (!socket) return -EBADF;
     uint8_t value[256];
     size_t length = supplied < sizeof(value) ? supplied : sizeof(value);
     int status = inet_socket_getsockopt(socket, level, option, value, &length);
@@ -2222,6 +2521,157 @@ static int64_t sys_clone3_fork_compat(struct syscall_frame *frame,
     return sys_clone_fork_compat(frame, flags, args.stack_size ? args.stack + args.stack_size : args.stack, args.parent_tid, args.child_tid, args.tls);
 }
 
+
+static struct file *file_from_fd(int fd) {
+    struct process *process = process_current();
+    if (!process || fd < 0 || fd >= PROCESS_MAX_FDS) return NULL;
+    return process->fds[fd];
+}
+
+static int install_new_file(struct file *file, int cloexec) {
+    if (!file) return -ENOMEM;
+    int fd = process_install_file_flags(process_current(), file, 0,
+        cloexec ? PROCESS_FD_CLOEXEC : 0);
+    if (fd < 0) {
+        file_unref(file);
+        return -EMFILE;
+    }
+    return fd;
+}
+
+static int64_t sys_eventfd(uint64_t initial_value, int flags, int legacy) {
+    int supported = EFD_SEMAPHORE | EFD_NONBLOCK | EFD_CLOEXEC;
+    if (flags & ~supported) return -EINVAL;
+    if (legacy && flags) return -EINVAL;
+    struct eventfd_context *context = eventfd_create(initial_value,
+                                                     flags & EFD_SEMAPHORE);
+    if (!context) return -ENOMEM;
+    struct file *file = file_create_eventfd(context,
+        (uint32_t)(flags & EFD_NONBLOCK));
+    if (!file) {
+        eventfd_destroy(context);
+        return -ENOMEM;
+    }
+    return install_new_file(file, flags & EFD_CLOEXEC);
+}
+
+static int64_t sys_timerfd_create(int clock_id, int flags) {
+    if (flags & ~(TFD_NONBLOCK | TFD_CLOEXEC)) return -EINVAL;
+    struct timerfd_context *context = timerfd_create(clock_id);
+    if (!context) return -EINVAL;
+    struct file *file = file_create_timerfd(context,
+        (uint32_t)(flags & TFD_NONBLOCK));
+    if (!file) {
+        timerfd_destroy(context);
+        return -ENOMEM;
+    }
+    return install_new_file(file, flags & TFD_CLOEXEC);
+}
+
+static int64_t sys_timerfd_settime(int fd, int flags, uint64_t user_new,
+                                   uint64_t user_old) {
+    if (!user_new || (flags & ~TFD_TIMER_ABSTIME)) return -EINVAL;
+    struct file *file = file_from_fd(fd);
+    if (!file || file->kind != FILE_KIND_TIMERFD) return -EBADF;
+    struct tunix_itimerspec new_value;
+    struct tunix_itimerspec old_value;
+    if (copy_from_user(&new_value, user_new, sizeof(new_value)) != 0) return -EFAULT;
+    int status = timerfd_settime(file->timerfd, flags, &new_value,
+                                 user_old ? &old_value : NULL);
+    if (status < 0) return status;
+    if (user_old && copy_to_user(user_old, &old_value, sizeof(old_value)) != 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int64_t sys_timerfd_gettime(int fd, uint64_t user_value) {
+    if (!user_value) return -EFAULT;
+    struct file *file = file_from_fd(fd);
+    if (!file || file->kind != FILE_KIND_TIMERFD) return -EBADF;
+    struct tunix_itimerspec value;
+    int status = timerfd_gettime(file->timerfd, &value);
+    if (status < 0) return status;
+    return copy_to_user(user_value, &value, sizeof(value)) == 0 ? 0 : -EFAULT;
+}
+
+static int64_t sys_epoll_create(int flags) {
+    if (flags & ~EPOLL_CLOEXEC) return -EINVAL;
+    struct epoll_context *context = epoll_create();
+    if (!context) return -ENOMEM;
+    struct file *file = file_create_epoll(context, 0);
+    if (!file) {
+        epoll_destroy(context);
+        return -ENOMEM;
+    }
+    return install_new_file(file, flags & EPOLL_CLOEXEC);
+}
+
+static int64_t sys_epoll_ctl(int epoll_fd, int operation, int target_fd,
+                             uint64_t user_event) {
+    struct file *epoll_file = file_from_fd(epoll_fd);
+    struct file *target_file = file_from_fd(target_fd);
+    if (!epoll_file || epoll_file->kind != FILE_KIND_EPOLL || !target_file)
+        return -EBADF;
+    if (epoll_file == target_file) return -EINVAL;
+    struct tunix_epoll_event event;
+    if (operation != EPOLL_CTL_DEL) {
+        if (!user_event || copy_from_user(&event, user_event, sizeof(event)) != 0)
+            return -EFAULT;
+    } else {
+        memset(&event, 0, sizeof(event));
+    }
+    if (operation == EPOLL_CTL_ADD)
+        return epoll_ctl_add(epoll_file->epoll, target_fd, target_file, &event);
+    if (operation == EPOLL_CTL_MOD)
+        return epoll_ctl_mod(epoll_file->epoll, target_fd, target_file, &event);
+    if (operation == EPOLL_CTL_DEL)
+        return epoll_ctl_del(epoll_file->epoll, target_fd, target_file);
+    return -EINVAL;
+}
+
+static int64_t sys_epoll_wait_once(int epoll_fd, uint64_t user_events,
+                                   int maximum, int commit_empty) {
+    if (!user_events || maximum <= 0 || maximum > 128) return -EINVAL;
+    struct file *file = file_from_fd(epoll_fd);
+    if (!file || file->kind != FILE_KIND_EPOLL) return -EBADF;
+    struct tunix_epoll_event events[128];
+    int ready = epoll_collect(file->epoll, events, maximum);
+    if (ready < 0) return ready;
+    if ((ready || commit_empty) && ready > 0 &&
+        copy_to_user(user_events, events, (size_t)ready * sizeof(events[0])) != 0)
+        return -EFAULT;
+    return ready;
+}
+
+static int64_t sys_inotify_init(int flags) {
+    if (flags & ~(IN_NONBLOCK | IN_CLOEXEC)) return -EINVAL;
+    struct inotify_context *context = inotify_create();
+    if (!context) return -ENOMEM;
+    struct file *file = file_create_inotify(context,
+        (uint32_t)(flags & IN_NONBLOCK));
+    if (!file) {
+        inotify_destroy(context);
+        return -ENOMEM;
+    }
+    return install_new_file(file, flags & IN_CLOEXEC);
+}
+
+static int64_t sys_inotify_add_watch(int fd, uint64_t user_path, uint32_t mask) {
+    struct file *file = file_from_fd(fd);
+    if (!file || file->kind != FILE_KIND_INOTIFY) return -EBADF;
+    char path[256];
+    if (copy_string_from_user(path, sizeof(path), user_path) < 0) return -EFAULT;
+    struct vfs_node *node = vfs_lookup(path);
+    if (!node) return -ENOENT;
+    return inotify_add_watch(file->inotify, node, mask);
+}
+
+static int64_t sys_inotify_rm_watch(int fd, int descriptor) {
+    struct file *file = file_from_fd(fd);
+    if (!file || file->kind != FILE_KIND_INOTIFY) return -EBADF;
+    return inotify_remove_watch(file->inotify, descriptor);
+}
+
 void syscall_dispatch(struct syscall_frame *frame) {
     if (!frame) return;
     process_account_runtime();
@@ -2247,7 +2697,19 @@ void syscall_dispatch(struct syscall_frame *frame) {
             }
             break;
         }
-        case SYS_WRITE: frame->rax = (uint64_t)sys_write((int)frame->rdi, frame->rsi, (size_t)frame->rdx); break;
+        case SYS_WRITE: {
+            int fd = (int)frame->rdi;
+            int64_t result = sys_write(fd, frame->rsi, (size_t)frame->rdx);
+            struct file *file = file_from_fd(fd);
+            if (result == -EAGAIN && file && !(file->flags & O_NONBLOCK)) {
+                frame->user_rip -= 2U;
+                frame->rax = SYS_WRITE;
+                process_yield_from_syscall(frame);
+            } else {
+                frame->rax = (uint64_t)result;
+            }
+            break;
+        }
         case SYS_OPEN: frame->rax = (uint64_t)open_at(AT_FDCWD, frame->rdi, frame->rsi, frame->rdx); break;
         case SYS_CLOSE: frame->rax = (uint64_t)sys_close((int)frame->rdi); break;
         case SYS_POLL: {
@@ -2369,11 +2831,16 @@ void syscall_dispatch(struct syscall_frame *frame) {
             break;
         }
         case SYS_SCHED_YIELD: frame->rax = 0; process_yield_from_syscall(frame); break;
-        case SYS_DUP: frame->rax = (uint64_t)sys_dup((int)frame->rdi, 0); break;
-        case SYS_DUP2: frame->rax = (uint64_t)sys_dup2((int)frame->rdi, (int)frame->rsi); break;
+        case SYS_EPOLL_CREATE:
+            frame->rax = frame->rdi == 0 ? (uint64_t)-(int64_t)EINVAL :
+                         (uint64_t)sys_epoll_create(0);
+            break;
+        case SYS_DUP: frame->rax = (uint64_t)sys_dup((int)frame->rdi, 0, 0); break;
+        case SYS_DUP2: frame->rax = (uint64_t)sys_dup_to((int)frame->rdi, (int)frame->rsi, 0, 0); break;
         case SYS_DUP3:
             if (frame->rdx & ~O_CLOEXEC) frame->rax = (uint64_t)-(int64_t)EINVAL;
-            else frame->rax = (uint64_t)sys_dup2((int)frame->rdi, (int)frame->rsi);
+            else frame->rax = (uint64_t)sys_dup_to((int)frame->rdi, (int)frame->rsi,
+                                                   (frame->rdx & O_CLOEXEC) != 0, 1);
             break;
         case SYS_NANOSLEEP: {
             struct linux_timespec request;
@@ -2391,6 +2858,25 @@ void syscall_dispatch(struct syscall_frame *frame) {
             else if (!retry_io_wait(frame, SYS_NANOSLEEP, duration)) frame->rax = 0;
             break;
         }
+        case SYS_EPOLL_WAIT:
+        case SYS_EPOLL_PWAIT: {
+            int timeout_ms = (int)frame->r10;
+            int64_t timeout_ns = timeout_ms_to_ns(timeout_ms);
+            int64_t result = sys_epoll_wait_once((int)frame->rdi, frame->rsi,
+                                                  (int)frame->rdx, timeout_ms == 0);
+            if (result != 0 || timeout_ms == 0) {
+                clear_io_wait(process_current());
+                frame->rax = (uint64_t)result;
+            } else if (!retry_io_wait(frame, syscall_number, timeout_ns)) {
+                frame->rax = (uint64_t)sys_epoll_wait_once((int)frame->rdi, frame->rsi,
+                                                            (int)frame->rdx, 1);
+            }
+            break;
+        }
+        case SYS_EPOLL_CTL:
+            frame->rax = (uint64_t)sys_epoll_ctl((int)frame->rdi, (int)frame->rsi,
+                                                 (int)frame->rdx, frame->r10);
+            break;
         case SYS_SOCKET: frame->rax = (uint64_t)sys_socket((int)frame->rdi, (int)frame->rsi, (int)frame->rdx); break;
         case SYS_CONNECT: frame->rax = (uint64_t)sys_connect((int)frame->rdi, frame->rsi, frame->rdx); break;
         case SYS_ACCEPT: frame->rax = (uint64_t)sys_accept((int)frame->rdi, frame->rsi, frame->rdx, 0); break;
@@ -2467,24 +2953,36 @@ void syscall_dispatch(struct syscall_frame *frame) {
         case SYS_KILL: frame->rax = (uint64_t)process_send_signal((int64_t)frame->rdi, (int)frame->rsi); break;
         case SYS_TGKILL: frame->rax = (uint64_t)process_send_signal((int64_t)frame->rsi, (int)frame->rdx); break;
         case SYS_UNAME: frame->rax = (uint64_t)sys_uname(frame->rdi); break;
-        case SYS_FCNTL:
-            if ((int)frame->rsi == F_DUPFD || (int)frame->rsi == F_DUPFD_CLOEXEC) frame->rax = (uint64_t)sys_dup((int)frame->rdi, (int)frame->rdx);
-            else if ((int)frame->rsi == F_GETFD || (int)frame->rsi == F_SETFD) frame->rax = 0;
-            else if ((int)frame->rsi == F_GETFL) {
-                struct process *p = process_current(); int fd = (int)frame->rdi;
-                frame->rax = (!p || fd < 0 || fd >= PROCESS_MAX_FDS || !p->fds[fd]) ? (uint64_t)-(int64_t)EBADF : p->fds[fd]->flags;
-            } else if ((int)frame->rsi == F_SETFL) {
-                struct process *p = process_current();
-                int fd = (int)frame->rdi;
-                if (!p || fd < 0 || fd >= PROCESS_MAX_FDS || !p->fds[fd])
-                    frame->rax = (uint64_t)-(int64_t)EBADF;
+        case SYS_FCNTL: {
+            struct process *process = process_current();
+            int fd = (int)frame->rdi;
+            int command = (int)frame->rsi;
+            if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->fds[fd]) {
+                frame->rax = (uint64_t)-(int64_t)EBADF;
+            } else if (command == F_DUPFD || command == F_DUPFD_CLOEXEC) {
+                frame->rax = (uint64_t)sys_dup(fd, (int)frame->rdx,
+                    command == F_DUPFD_CLOEXEC);
+            } else if (command == F_GETFD) {
+                frame->rax = (process->fd_flags[fd] & PROCESS_FD_CLOEXEC) ? FD_CLOEXEC : 0;
+            } else if (command == F_SETFD) {
+                if (frame->rdx & ~(uint64_t)FD_CLOEXEC)
+                    frame->rax = (uint64_t)-(int64_t)EINVAL;
                 else {
-                    p->fds[fd]->flags = (p->fds[fd]->flags & ~(uint32_t)O_NONBLOCK) |
-                                        ((uint32_t)frame->rdx & (uint32_t)O_NONBLOCK);
+                    process->fd_flags[fd] = (frame->rdx & FD_CLOEXEC) ? PROCESS_FD_CLOEXEC : 0;
                     frame->rax = 0;
                 }
-            } else frame->rax = (uint64_t)-(int64_t)EINVAL;
+            } else if (command == F_GETFL) {
+                frame->rax = process->fds[fd]->flags;
+            } else if (command == F_SETFL) {
+                process->fds[fd]->flags =
+                    (process->fds[fd]->flags & ~(uint32_t)O_NONBLOCK) |
+                    ((uint32_t)frame->rdx & (uint32_t)O_NONBLOCK);
+                frame->rax = 0;
+            } else {
+                frame->rax = (uint64_t)-(int64_t)EINVAL;
+            }
             break;
+        }
         case SYS_FSYNC: frame->rax = (uint64_t)sys_fsync((int)frame->rdi); break;
         case SYS_FTRUNCATE: frame->rax = (uint64_t)sys_ftruncate((int)frame->rdi, frame->rsi); break;
         case SYS_GETCWD: frame->rax = (uint64_t)sys_getcwd(frame->rdi, (size_t)frame->rsi); break;
@@ -2571,6 +3069,68 @@ void syscall_dispatch(struct syscall_frame *frame) {
             frame->rax = frame->rsi && copy_to_user(frame->rsi, &value, sizeof(value)) != 0 ? (uint64_t)-(int64_t)EFAULT : 0;
             break;
         }
+        case SYS_CLOCK_NANOSLEEP: {
+            if ((int)frame->rdi != 0 && (int)frame->rdi != 1 && (int)frame->rdi != 7) {
+                frame->rax = (uint64_t)-(int64_t)EINVAL;
+                break;
+            }
+            if (frame->rsi & ~1ULL) {
+                frame->rax = (uint64_t)-(int64_t)EINVAL;
+                break;
+            }
+            struct linux_timespec request;
+            if (copy_from_user(&request, frame->rdx, sizeof(request)) != 0 ||
+                request.tv_sec < 0 || request.tv_nsec < 0 ||
+                request.tv_nsec >= 1000000000LL) {
+                frame->rax = (uint64_t)-(int64_t)EINVAL;
+                break;
+            }
+            uint64_t requested = (uint64_t)request.tv_sec * 1000000000ULL +
+                                 (uint64_t)request.tv_nsec;
+            int64_t duration;
+            if (frame->rsi & 1ULL) {
+                uint64_t now = (int)frame->rdi == 0 ? time_realtime_ns() : time_uptime_ns();
+                duration = requested <= now ? 0 :
+                    (requested - now > (uint64_t)INT64_MAX ? INT64_MAX :
+                     (int64_t)(requested - now));
+            } else {
+                duration = requested > (uint64_t)INT64_MAX ? INT64_MAX : (int64_t)requested;
+            }
+            if (duration == 0) frame->rax = 0;
+            else if (!retry_io_wait(frame, SYS_CLOCK_NANOSLEEP, duration)) frame->rax = 0;
+            break;
+        }
+        case SYS_INOTIFY_INIT: frame->rax = (uint64_t)sys_inotify_init(0); break;
+        case SYS_INOTIFY_ADD_WATCH:
+            frame->rax = (uint64_t)sys_inotify_add_watch((int)frame->rdi, frame->rsi,
+                                                         (uint32_t)frame->rdx);
+            break;
+        case SYS_INOTIFY_RM_WATCH:
+            frame->rax = (uint64_t)sys_inotify_rm_watch((int)frame->rdi, (int)frame->rsi);
+            break;
+        case SYS_TIMERFD_CREATE:
+            frame->rax = (uint64_t)sys_timerfd_create((int)frame->rdi, (int)frame->rsi);
+            break;
+        case SYS_EVENTFD:
+            frame->rax = (uint64_t)sys_eventfd((uint32_t)frame->rdi, 0, 1);
+            break;
+        case SYS_TIMERFD_SETTIME:
+            frame->rax = (uint64_t)sys_timerfd_settime((int)frame->rdi,
+                (int)frame->rsi, frame->rdx, frame->r10);
+            break;
+        case SYS_TIMERFD_GETTIME:
+            frame->rax = (uint64_t)sys_timerfd_gettime((int)frame->rdi, frame->rsi);
+            break;
+        case SYS_EVENTFD2:
+            frame->rax = (uint64_t)sys_eventfd((uint32_t)frame->rdi,
+                                               (int)frame->rsi, 0);
+            break;
+        case SYS_EPOLL_CREATE1:
+            frame->rax = (uint64_t)sys_epoll_create((int)frame->rdi);
+            break;
+        case SYS_INOTIFY_INIT1:
+            frame->rax = (uint64_t)sys_inotify_init((int)frame->rdi);
+            break;
         case SYS_OPENAT: frame->rax = (uint64_t)open_at((int)frame->rdi, frame->rsi, frame->rdx, frame->r10); break;
         case SYS_MKDIRAT: frame->rax = (uint64_t)sys_mkdir_at((int)frame->rdi, frame->rsi, frame->rdx); break;
         case SYS_NEWFSTATAT:

@@ -13,6 +13,7 @@
 #define T_O_APPEND 02000
 #define T_O_NONBLOCK 04000
 #define T_O_DIRECTORY 0200000
+#define T_O_CLOEXEC 02000000
 #define T_AT_FDCWD (-100)
 #define T_EAGAIN 11
 #define T_EINTR 4
@@ -51,7 +52,13 @@
 #define T_FUTEX_PRIVATE_FLAG 128
 #define T_AF_UNIX 1
 #define T_SOCK_STREAM 1
+#define T_SOCK_NONBLOCK T_O_NONBLOCK
+#define T_SOCK_CLOEXEC T_O_CLOEXEC
 
+
+struct t_epoll_event;
+struct t_itimerspec;
+struct t_msghdr;
 
 struct t_sockaddr_un {
     uint16_t family;
@@ -87,10 +94,13 @@ struct t_sigaction {
     uint64_t mask;
 };
 
+#ifndef TUNIX_T_TIMESPEC_DEFINED
+#define TUNIX_T_TIMESPEC_DEFINED
 struct t_timespec {
     int64_t tv_sec;
     int64_t tv_nsec;
 };
+#endif
 
 struct t_linux_dirent64 {
     uint64_t ino;
@@ -122,11 +132,21 @@ int t_socket(int domain, int type, int protocol);
 int t_bind(int fd, const struct t_sockaddr_un *address, unsigned long length);
 int t_listen(int fd, int backlog);
 int t_accept(int fd);
+int t_accept4(int fd, int flags);
+int t_getsockname(int fd, struct t_sockaddr_un *address, unsigned int *length);
+int t_getpeername(int fd, struct t_sockaddr_un *address, unsigned int *length);
 int t_connect(int fd, const struct t_sockaddr_un *address, unsigned long length);
 int t_socketpair(int domain, int type, int protocol, int fds[2]);
+long t_sendmsg(int fd, const struct t_msghdr *message, int flags);
+long t_recvmsg(int fd, struct t_msghdr *message, int flags);
+int t_setsockopt(int fd, int level, int option, const void *value, unsigned long length);
+int t_getsockopt(int fd, int level, int option, void *value, unsigned int *length);
 long t_lseek(int fd, long offset, int whence);
 int t_pipe(int fds[2]);
+int t_pipe2(int fds[2], int flags);
 int t_dup2(int oldfd, int newfd);
+int t_dup3(int oldfd, int newfd, int flags);
+int t_fcntl(int fd, int command, long argument);
 long t_fork(void);
 int t_execve(const char *path, char *const argv[], char *const envp[]);
 long t_waitpid(long pid, int *status, int options);
@@ -155,6 +175,20 @@ int t_uname(struct t_utsname *name);
 void t_yield(void);
 int t_clock_gettime(struct t_timespec *time);
 int t_nanosleep(const struct t_timespec *request, struct t_timespec *remaining);
+int t_clock_nanosleep(int clock_id, int flags, const struct t_timespec *request,
+                      struct t_timespec *remaining);
+int t_eventfd(unsigned int initial_value, int flags);
+int t_timerfd_create(int clock_id, int flags);
+int t_timerfd_settime(int fd, int flags, const struct t_itimerspec *new_value,
+                      struct t_itimerspec *old_value);
+int t_timerfd_gettime(int fd, struct t_itimerspec *value);
+int t_epoll_create1(int flags);
+int t_epoll_ctl(int epoll_fd, int operation, int fd, struct t_epoll_event *event);
+int t_epoll_wait(int epoll_fd, struct t_epoll_event *events, int maximum,
+                 int timeout_ms);
+int t_inotify_init1(int flags);
+int t_inotify_add_watch(int fd, const char *path, uint32_t mask);
+int t_inotify_rm_watch(int fd, int watch_descriptor);
 int t_futex(uint32_t *address, int operation, uint32_t value, const struct t_timespec *timeout);
 void t_sleep_ms(uint64_t milliseconds);
 

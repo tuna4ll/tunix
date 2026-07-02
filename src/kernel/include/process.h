@@ -6,7 +6,8 @@
 #include "signal.h"
 #include "syscall.h"
 
-#define PROCESS_MAX_FDS 64
+#define PROCESS_MAX_FDS 256
+#define PROCESS_FD_CLOEXEC 1U
 #define PROCESS_READY 0
 #define PROCESS_RUNNING 1
 #define PROCESS_BLOCKED 2
@@ -79,6 +80,7 @@ struct process {
     struct pty_pair *controlling_pty;
     struct syscall_frame saved_frame;
     struct file *fds[PROCESS_MAX_FDS];
+    uint8_t fd_flags[PROCESS_MAX_FDS];
 
     int64_t wait_pid;
     uint64_t wait_status_user;
@@ -117,6 +119,9 @@ void process_reap_deferred(void);
 void process_exit_from_syscall(struct syscall_frame *frame, int status);
 void process_exit_group_from_syscall(struct syscall_frame *frame, int status);
 int process_install_file(struct process *process, struct file *file, int minimum_fd);
+int process_install_file_flags(struct process *process, struct file *file, int minimum_fd, uint8_t flags);
+uint8_t process_get_fd_flags(const struct process *process, int fd);
+int process_set_fd_flags(struct process *process, int fd, uint8_t flags);
 int process_close_fd(struct process *process, int fd);
 int64_t process_fork_from_syscall(struct syscall_frame *frame);
 int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,

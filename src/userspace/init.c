@@ -1,7 +1,10 @@
 #include "tunix_libc.h"
 
 static char *const shell_environment[] = {
-    "HOME=/home",
+    "HOME=/home/root",
+    "XDG_RUNTIME_DIR=/run/user/0",
+    "XDG_CONFIG_HOME=/home/root/.config",
+    "XDG_CACHE_HOME=/home/root/.cache",
     "PATH=/bin:/usr/bin",
     "SHELL=/bin/bash",
     "TERM=tunix-256color",
@@ -82,8 +85,19 @@ int main(int argc, char **argv, char **envp) {
     (void)argv;
     (void)envp;
 
-    t_mkdir("/tmp", 0777);
+    int previous_umask = t_umask(0);
+    t_mkdir("/tmp", 01777);
+    t_mkdir("/run", 0755);
+    t_mkdir("/run/dbus", 0755);
+    t_mkdir("/run/user", 0755);
+    t_mkdir("/run/user/0", 0700);
+    t_mkdir("/var", 0755);
+    t_mkdir("/var/tmp", 01777);
     t_mkdir("/home", 0755);
+    t_mkdir("/home/root", 0700);
+    t_mkdir("/home/root/.config", 0700);
+    t_mkdir("/home/root/.cache", 0700);
+    t_umask(previous_umask);
     if (load_console_keymap() != 0)
         t_puterr("init: warning: configured console keymap could not be loaded\n");
 

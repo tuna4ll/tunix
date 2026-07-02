@@ -141,22 +141,40 @@ struct process *process_find(uint64_t pid) {
     return NULL;
 }
 
-int process_install_file(struct process *process, struct file *file, int minimum_fd) {
+int process_install_file_flags(struct process *process, struct file *file,
+                               int minimum_fd, uint8_t flags) {
     if (!process || !file) return -1;
     if (minimum_fd < 0) minimum_fd = 0;
     for (int fd = minimum_fd; fd < PROCESS_MAX_FDS; fd++) {
         if (!process->fds[fd]) {
             process->fds[fd] = file;
+            process->fd_flags[fd] = flags & PROCESS_FD_CLOEXEC;
             return fd;
         }
     }
     return -1;
 }
 
+int process_install_file(struct process *process, struct file *file, int minimum_fd) {
+    return process_install_file_flags(process, file, minimum_fd, 0);
+}
+
+uint8_t process_get_fd_flags(const struct process *process, int fd) {
+    if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->fds[fd]) return 0;
+    return process->fd_flags[fd];
+}
+
+int process_set_fd_flags(struct process *process, int fd, uint8_t flags) {
+    if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->fds[fd]) return -1;
+    process->fd_flags[fd] = flags & PROCESS_FD_CLOEXEC;
+    return 0;
+}
+
 int process_close_fd(struct process *process, int fd) {
     if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->fds[fd]) return -1;
     struct file *file = process->fds[fd];
     process->fds[fd] = NULL;
+    process->fd_flags[fd] = 0;
     file_unref(file);
     return 0;
 }
@@ -728,6 +746,7 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame) {
     for (int fd = 0; fd < PROCESS_MAX_FDS; fd++) {
         if (parent->fds[fd]) {
             child->fds[fd] = parent->fds[fd];
+            child->fd_flags[fd] = parent->fd_flags[fd];
             file_ref(child->fds[fd]);
         }
     }
@@ -790,6 +809,7 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
     for (int fd = 0; fd < PROCESS_MAX_FDS; fd++) {
         if (parent->fds[fd]) {
             child->fds[fd] = parent->fds[fd];
+            child->fd_flags[fd] = parent->fd_flags[fd];
             file_ref(child->fds[fd]);
         }
     }
@@ -944,6 +964,10 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
     }
     current->signal_pending = 0;
     current->in_signal = 0;
+    for (int fd = 0; fd < PROCESS_MAX_FDS; fd++) {
+        if (current->fds[fd] && (current->fd_flags[fd] & PROCESS_FD_CLOEXEC))
+            process_close_fd(current, fd);
+    }
 
     memset(frame, 0, sizeof(*frame));
     frame->user_rip = current->entry;
