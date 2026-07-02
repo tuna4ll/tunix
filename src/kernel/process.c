@@ -5,6 +5,7 @@
 #include "include/file.h"
 #include "include/gdt.h"
 #include "include/heap.h"
+#include "include/interrupt.h"
 #include "include/kstring.h"
 #include "include/process.h"
 #include "include/procfs.h"
@@ -29,6 +30,7 @@
 #define FUTEX_TID_MASK 0x3fffffffU
 #define ROBUST_LIST_LIMIT 2048U
 #define DEFAULT_TIMERSLACK_NS 50000ULL
+#define PROCESS_DEFAULT_QUANTUM_TICKS 5U
 
 extern void process_enter_user(uint64_t entry, uint64_t user_stack, uint64_t cr3) __attribute__((noreturn));
 extern void kprintf(const char *fmt, ...);
@@ -369,12 +371,61 @@ static struct process *next_runnable(struct process *after) {
 
 static void activate_process(struct process *process) {
     current = process;
+    if (!process->time_slice_ticks)
+        process->time_slice_ticks = PROCESS_DEFAULT_QUANTUM_TICKS;
     process->last_scheduled_ns = time_uptime_ns();
     process->state = PROCESS_RUNNING;
     set_kernel_stack(process->kernel_stack_top);
     syscall_set_kernel_stack(process->kernel_stack_top);
     vmm_activate(process->cr3);
     wrmsr(IA32_FS_BASE, process->fs_base);
+}
+
+static void save_interrupt_context(struct syscall_frame *destination,
+                                   const struct interrupt_frame *source) {
+    destination->r15 = source->r15;
+    destination->r14 = source->r14;
+    destination->r13 = source->r13;
+    destination->r12 = source->r12;
+    destination->rbp = source->rbp;
+    destination->rbx = source->rbx;
+    destination->r9 = source->r9;
+    destination->r8 = source->r8;
+    destination->r10 = source->r10;
+    destination->rdx = source->rdx;
+    destination->rsi = source->rsi;
+    destination->rdi = source->rdi;
+    destination->rax = source->rax;
+    destination->rcx = source->rcx;
+    destination->r11 = source->r11;
+    destination->user_rip = source->rip;
+    destination->user_rflags = source->rflags;
+    destination->user_rsp = source->rsp;
+}
+
+static void load_interrupt_context(struct interrupt_frame *destination,
+                                   const struct syscall_frame *source) {
+    destination->ds = 0x1b;
+    destination->r15 = source->r15;
+    destination->r14 = source->r14;
+    destination->r13 = source->r13;
+    destination->r12 = source->r12;
+    destination->r11 = source->r11;
+    destination->r10 = source->r10;
+    destination->r9 = source->r9;
+    destination->r8 = source->r8;
+    destination->rbp = source->rbp;
+    destination->rdi = source->rdi;
+    destination->rsi = source->rsi;
+    destination->rdx = source->rdx;
+    destination->rcx = source->rcx;
+    destination->rbx = source->rbx;
+    destination->rax = source->rax;
+    destination->rip = source->user_rip;
+    destination->cs = 0x23;
+    destination->rflags = source->user_rflags | 0x2ULL;
+    destination->rsp = source->user_rsp;
+    destination->ss = 0x1b;
 }
 
 static int switch_to_next(struct syscall_frame *frame, struct process *after) {
@@ -391,6 +442,37 @@ void process_start_first(void) {
     activate_process(first);
     process_enter_user(first->entry, first->user_stack_top, first->cr3);
     panic("process_enter_user returned");
+}
+
+void process_timer_interrupt(struct interrupt_frame *frame) {
+    if (!frame || (frame->cs & 3U) != 3U || !current ||
+        current->state != PROCESS_RUNNING) return;
+
+    process_account_runtime();
+    save_interrupt_context(&current->saved_frame, frame);
+
+    struct syscall_frame resume = current->saved_frame;
+    if (current->time_slice_ticks) current->time_slice_ticks--;
+    if (!current->time_slice_ticks) {
+        struct process *preempted = current;
+        preempted->state = PROCESS_READY;
+        struct process *next = next_runnable(preempted);
+        if (next && next != preempted) {
+            preempted->involuntary_switches++;
+            resume = next->saved_frame;
+            activate_process(next);
+        } else {
+            preempted->state = PROCESS_RUNNING;
+            preempted->time_slice_ticks = PROCESS_DEFAULT_QUANTUM_TICKS;
+            current = preempted;
+        }
+    }
+
+    /* Timer return is also a safe point for signals sent to CPU-bound tasks. */
+    process_prepare_user_return(&resume);
+    if (!current || current->state != PROCESS_RUNNING) return;
+    current->saved_frame = resume;
+    load_interrupt_context(frame, &resume);
 }
 
 void process_yield_from_syscall(struct syscall_frame *frame) {

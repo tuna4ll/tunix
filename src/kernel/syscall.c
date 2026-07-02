@@ -28,10 +28,12 @@ extern void kprintf(const char *fmt, ...);
 #define KDEBUG(...) do { } while (0)
 #endif
 
-_Static_assert(sizeof(struct syscall_frame) == 128, "syscall frame/assembly ABI mismatch");
+_Static_assert(sizeof(struct syscall_frame) == 144, "syscall frame/assembly ABI mismatch");
 _Static_assert(offsetof(struct syscall_frame, rax) == 96, "syscall frame rax offset mismatch");
-_Static_assert(offsetof(struct syscall_frame, user_rip) == 104, "syscall frame rip offset mismatch");
-_Static_assert(offsetof(struct syscall_frame, user_rsp) == 120, "syscall frame rsp offset mismatch");
+_Static_assert(offsetof(struct syscall_frame, rcx) == 104, "syscall frame rcx offset mismatch");
+_Static_assert(offsetof(struct syscall_frame, r11) == 112, "syscall frame r11 offset mismatch");
+_Static_assert(offsetof(struct syscall_frame, user_rip) == 120, "syscall frame rip offset mismatch");
+_Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame rsp offset mismatch");
 
 #define USER_BRK_LIMIT 0x00005F0000000000ULL
 

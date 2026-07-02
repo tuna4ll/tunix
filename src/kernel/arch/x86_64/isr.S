@@ -291,6 +291,14 @@ isr_common_stub:
     add rsp, 16
     iretq
 
+/* Legacy 8259 PIC IRQ0 timer, remapped to IDT vector 0x20. */
+.global irq0
+irq0:
+    cli
+    push 0
+    push 32
+    jmp isr_common_stub
+
 /* Legacy 8259 PIC IRQ1, remapped to IDT vector 0x21. */
 .global irq1
 irq1:

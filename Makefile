@@ -50,7 +50,7 @@ USER_LDFLAGS := -nostdlib -static -T src/userspace/linker.ld --build-id=none \
 KERNEL_OBJS := \
 	$(BUILD)/entry.o $(BUILD)/main.o $(BUILD)/serial.o \
 	$(BUILD)/kprintf.o $(BUILD)/kstring.o $(BUILD)/gdt.o \
-	$(BUILD)/idt.o $(BUILD)/isr.o $(BUILD)/isr_handler.o $(BUILD)/pic.o \
+	$(BUILD)/idt.o $(BUILD)/isr.o $(BUILD)/isr_handler.o $(BUILD)/pic.o $(BUILD)/timer.o \
 	$(BUILD)/pmm.o $(BUILD)/vmm.o $(BUILD)/framebuffer.o $(BUILD)/terminal_font.o $(BUILD)/terminal.o $(BUILD)/input.o \
 	$(BUILD)/heap.o $(BUILD)/syscall.o $(BUILD)/syscall_entry.o \
 	$(BUILD)/vfs.o $(BUILD)/tarfs.o $(BUILD)/devfs.o $(BUILD)/unix_socket.o $(BUILD)/pty.o \
@@ -63,7 +63,8 @@ INIT := $(BUILD)/user/init
 PROCUTIL := $(BUILD)/user/procutil.o
 LOADKEYS := $(BUILD)/user/loadkeys
 SLEEP := $(BUILD)/user/sleep
-SYSTEM_TOOLS := $(BUILD)/user/ps $(BUILD)/user/free $(BUILD)/user/uptime $(BUILD)/user/top $(LOADKEYS) $(SLEEP)
+PREEMPT_TEST := $(BUILD)/user/preempt-test
+SYSTEM_TOOLS := $(BUILD)/user/ps $(BUILD)/user/free $(BUILD)/user/uptime $(BUILD)/user/top $(LOADKEYS) $(SLEEP) $(PREEMPT_TEST)
 BUSYBOX_APPLETS := awk basename cat chmod clear cp cut date dd dirname du echo egrep env expr false \
 	fgrep find grep head id ls md5sum mkdir mv printenv printf pwd readlink realpath rm \
 	rmdir sed seq sha256sum sort stat tail tee test touch tr true uname uniq wc which xargs yes hwclock ifconfig route arp ping nslookup udhcpc netstat
@@ -202,6 +203,7 @@ $(BUILD)/main.o: src/kernel/include/input.h src/kernel/include/tty.h src/kernel/
 	src/kernel/include/boot_manifest.h $(BOOT_CONFIG_STAMP)
 $(BUILD)/input.o: src/kernel/include/input.h src/kernel/include/io.h src/kernel/include/tty.h
 $(BUILD)/pic.o: src/kernel/include/pic.h src/kernel/include/io.h
+$(BUILD)/timer.o: src/kernel/include/timer.h src/kernel/include/interrupt.h src/kernel/include/process.h src/kernel/include/io.h
 $(BUILD)/devfs.o: src/kernel/include/vfs.h src/kernel/include/pty.h src/kernel/include/random.h src/kernel/include/time.h src/kernel/include/ata.h src/kernel/include/klog.h src/kernel/include/input.h
 $(BUILD)/unix_socket.o: src/kernel/include/unix_socket.h src/kernel/include/pipe.h
 $(BUILD)/pty.o: src/kernel/include/pty.h src/kernel/include/tty.h src/kernel/include/file.h
@@ -210,7 +212,7 @@ $(BUILD)/syscall.o: src/kernel/include/vfs.h src/kernel/include/tty.h src/kernel
 $(BUILD)/terminal_font.o: $(TERMINAL_FONT_DATA) src/kernel/include/terminal_font.h
 $(BUILD)/terminal.o: src/kernel/include/terminal_font.h src/kernel/include/terminal.h
 $(BUILD)/tty.o: src/kernel/include/input.h src/kernel/include/tty.h src/kernel/include/terminal.h src/include/tunix/keymap.h
-$(BUILD)/process.o: src/kernel/include/process.h src/kernel/include/signal.h
+$(BUILD)/process.o: src/kernel/include/process.h src/kernel/include/signal.h src/kernel/include/interrupt.h
 $(BUILD)/random.o: src/kernel/include/random.h src/kernel/include/time.h src/kernel/include/spinlock.h
 $(BUILD)/time.o: src/kernel/include/time.h src/kernel/include/io.h
 $(BUILD)/ata.o: src/kernel/include/ata.h src/kernel/include/io.h src/kernel/include/pci.h
@@ -237,7 +239,7 @@ $(BUILD)/gdt.o: src/kernel/arch/x86_64/gdt.c | $(BUILD)
 $(BUILD)/idt.o: src/kernel/arch/x86_64/idt.c | $(BUILD)
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
-$(BUILD)/isr_handler.o: src/kernel/arch/x86_64/isr_handler.c src/kernel/include/input.h src/kernel/include/pic.h | $(BUILD)
+$(BUILD)/isr_handler.o: src/kernel/arch/x86_64/isr_handler.c src/kernel/include/input.h src/kernel/include/interrupt.h src/kernel/include/pic.h src/kernel/include/timer.h | $(BUILD)
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
 $(KERNEL): $(KERNEL_OBJS)
@@ -274,6 +276,10 @@ $(LOADKEYS): $(BUILD)/user/loadkeys.o $(BUILD)/user/loadkeys_parser.o $(USER_RUN
 
 $(SLEEP): $(BUILD)/user/sleep.o $(USER_RUNTIME) src/userspace/linker.ld
 	$(LD) $(USER_LDFLAGS) -o $@ $(USER_RUNTIME) $(BUILD)/user/sleep.o
+	$(STRIP) --strip-all $@
+
+$(PREEMPT_TEST): $(BUILD)/user/preempt_test.o $(USER_RUNTIME) src/userspace/linker.ld
+	$(LD) $(USER_LDFLAGS) -o $@ $(USER_RUNTIME) $(BUILD)/user/preempt_test.o
 	$(STRIP) --strip-all $@
 
 $(INIT): $(BUILD)/user/init.o $(USER_RUNTIME) src/userspace/linker.ld
@@ -314,7 +320,7 @@ $(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(BUSYBOX) $(TCC_STAMP) $(NANO) $(
 	ln -sfn ../usr/bin/lua $(ROOTFS)/bin/lua
 	chmod 0755 $(ROOTFS)/sbin/init $(ROOTFS)/bin/bash $(ROOTFS)/bin/busybox $(ROOTFS)/bin/nano \
 		$(ROOTFS)/bin/neofetch $(ROOTFS)/bin/ps $(ROOTFS)/bin/free \
-		$(ROOTFS)/bin/uptime $(ROOTFS)/bin/top $(ROOTFS)/bin/loadkeys $(ROOTFS)/bin/sleep \
+		$(ROOTFS)/bin/uptime $(ROOTFS)/bin/top $(ROOTFS)/bin/loadkeys $(ROOTFS)/bin/sleep $(ROOTFS)/bin/preempt-test \
 		$(ROOTFS)/usr/bin/tcc $(ROOTFS)/usr/bin/lua $(ROOTFS)/usr/bin/tunix-wallpaper \
 		$(ROOTFS)/usr/bin/dynamic-hello $(ROOTFS)/usr/bin/dynamic-nopie \
 		$(ROOTFS)/usr/bin/dlopen-test $(ROOTFS)/usr/bin/pthread-test \
@@ -323,6 +329,7 @@ $(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(BUSYBOX) $(TCC_STAMP) $(NANO) $(
 		$(ROOTFS)/lib/ld-musl-x86_64.so.1 \
 		$(ROOTFS)/lib/libc.so
 	@test -x $(ROOTFS)/bin/sleep || { echo "native sleep utility was not installed" >&2; exit 1; }
+	@test -x $(ROOTFS)/bin/preempt-test || { echo "scheduler preemption test was not installed" >&2; exit 1; }
 	ln -s bash $(ROOTFS)/bin/sh
 	@for app in $(BUSYBOX_APPLETS); do ln -s busybox $(ROOTFS)/bin/$$app; done
 	tar --format=ustar --blocking-factor=1 --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf $@ -C $(ROOTFS) .

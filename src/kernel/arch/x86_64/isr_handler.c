@@ -1,16 +1,11 @@
 #include <stdint.h>
 #include "../../include/input.h"
+#include "../../include/interrupt.h"
 #include "../../include/pic.h"
+#include "../../include/timer.h"
 
 extern void kprintf(const char *fmt, ...);
 extern void panic(const char *msg);
-
-struct registers {
-    uint64_t ds;
-    uint64_t rax, rbx, rcx, rdx, rsi, rdi, rbp, r8, r9, r10, r11, r12, r13, r14, r15;
-    uint64_t int_no, err_code;
-    uint64_t rip, cs, rflags, rsp, ss;
-};
 
 const char *exception_messages[] = {
     "Division By Zero", "Debug", "Non Maskable Interrupt", "Breakpoint",
@@ -23,7 +18,12 @@ const char *exception_messages[] = {
     "Hypervisor Injection", "VMM Communication", "Security", "Reserved"
 };
 
-void isr_handler(struct registers *regs) {
+void isr_handler(struct interrupt_frame *regs) {
+    if (regs->int_no == PIC_MASTER_VECTOR) {
+        timer_irq(regs);
+        pic_send_eoi((unsigned)regs->int_no);
+        return;
+    }
     if (regs->int_no == PIC_MASTER_VECTOR + 1U) {
         input_irq();
         pic_send_eoi((unsigned)regs->int_no);

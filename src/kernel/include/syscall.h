@@ -17,6 +17,8 @@ struct syscall_frame {
     uint64_t rsi;
     uint64_t rdi;
     uint64_t rax;
+    uint64_t rcx;
+    uint64_t r11;
     uint64_t user_rip;
     uint64_t user_rflags;
     uint64_t user_rsp;

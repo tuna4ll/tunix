@@ -20,6 +20,7 @@
 
 struct vfs_node;
 struct pty_pair;
+struct interrupt_frame;
 
 struct process_memory {
     uint64_t cr3;
@@ -70,6 +71,8 @@ struct process {
     uint64_t start_time_ns;
     uint64_t runtime_ns;
     uint64_t last_scheduled_ns;
+    uint32_t time_slice_ticks;
+    uint64_t involuntary_switches;
     char cmdline[512];
     uint64_t cmdline_length;
     struct vfs_node *cwd;
@@ -108,6 +111,7 @@ uint64_t process_current_tid(void);
 uint64_t process_current_ppid(void);
 void process_start_first(void) __attribute__((noreturn));
 void process_yield_from_syscall(struct syscall_frame *frame);
+void process_timer_interrupt(struct interrupt_frame *frame);
 void process_run_child_first_from_syscall(struct syscall_frame *frame, uint64_t child_pid);
 void process_reap_deferred(void);
 void process_exit_from_syscall(struct syscall_frame *frame, int status);

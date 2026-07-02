@@ -18,6 +18,7 @@
 #include "include/syscall.h"
 #include "include/tarfs.h"
 #include "include/time.h"
+#include "include/timer.h"
 #include "include/tty.h"
 #include "include/vfs.h"
 #include "include/terminal.h"
@@ -149,6 +150,8 @@ void kmain(uint32_t mmap_count, uint64_t mmap_address, uint64_t manifest_address
     procfs_init();
     syscall_init();
     if (!process_create_from_path("/sbin/init")) panic("cannot create /sbin/init");
+    timer_init();
+    pic_unmask(0U);
 #if TUNIX_BOOT_TIMINGS
     boot_log_stage("devices/process/init ELF", &stage_started);
     boot_log_cycles("kernel boot total", boot_read_tsc() - boot_started);
