@@ -85,7 +85,7 @@ terminal-font: $(TERMINAL_FONT_DATA)
 
 $(IMAGE_CODECS_STAMP): $(BASH) ports/build-image-codecs.sh tools/tunix-wallpaper.c | $(BUILD)/.tools
 	@mkdir -p $(PORT_OUT)
-	OUT="$(abspath $(PORT_OUT))" ./ports/build-image-codecs.sh
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-image-codecs.sh
 	@touch $@
 
 
@@ -95,7 +95,7 @@ $(MUSL_SHARED_STAMP): ports/build-musl-shared.sh \
 	tools/dynamic-runtime/dlopen-test.c \
 	tools/dynamic-runtime/pthread-test.c
 	@mkdir -p $(PORT_OUT)
-	OUT="$(abspath $(PORT_OUT))" ./ports/build-musl-shared.sh
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-musl-shared.sh
 	@test -x $(MUSL_SHARED_ROOT)/lib/ld-musl-x86_64.so.1 || { echo "shared musl loader was not produced" >&2; exit 1; }
 	@test -x $(MUSL_SHARED_ROOT)/usr/bin/dynamic-runtime-check || { echo "dynamic runtime checks were not produced" >&2; exit 1; }
 	@touch $@
@@ -115,7 +115,7 @@ $(IMAGE_CODECS_SHARED_STAMP): $(MUSL_SHARED_STAMP) \
 	ports/src/libpng/CMakeLists.txt \
 	ports/src/libjpeg-turbo/CMakeLists.txt
 	@mkdir -p $(PORT_OUT)
-	OUT="$(abspath $(PORT_OUT))" ./ports/build-image-codecs-shared.sh
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-image-codecs-shared.sh
 	@test -f $(DESKTOP_SYSROOT)/usr/lib/libz.so || { echo "shared zlib was not installed into the desktop sysroot" >&2; exit 1; }
 	@test -f $(DESKTOP_SYSROOT)/usr/lib/libpng16.so || { echo "shared libpng was not installed into the desktop sysroot" >&2; exit 1; }
 	@test -f $(DESKTOP_SYSROOT)/usr/lib/libjpeg.so || { echo "shared libjpeg was not installed into the desktop sysroot" >&2; exit 1; }
@@ -141,7 +141,7 @@ $(TERMINAL_FONT_DATA): $(TERMINAL_FONT_SOURCE) scripts/generate-terminal-font.py
 
 $(BUILD)/.tools:
 	@mkdir -p $(BUILD)
-	@for tool in $(CC) $(LD) $(NASM) $(STRIP) $(AR) $(PYTHON) make tar; do \
+	@for tool in $(CC) $(LD) $(NASM) $(STRIP) $(AR) $(PYTHON) bash make tar; do \
 		command -v $$tool >/dev/null 2>&1 || { echo "missing required tool: $$tool" >&2; exit 1; }; \
 	done
 	@touch $@
@@ -149,23 +149,23 @@ $(BUILD)/.tools:
 
 $(BASH): ports/build-bash.sh | $(BUILD)/.tools
 	@mkdir -p $(PORT_OUT)
-	OUT="$(abspath $(PORT_OUT))" ./ports/build-bash.sh
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-bash.sh
 
 $(BUSYBOX): $(BASH) ports/build-busybox.sh | $(BUILD)/.tools
-	OUT="$(abspath $(PORT_OUT))" ./ports/build-busybox.sh
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-busybox.sh
 
 $(NCURSES_STAMP): $(BASH) ports/build-ncurses.sh ports/terminfo/tunix.ti | $(BUILD)/.tools
 	@mkdir -p $(PORT_OUT)
-	OUT="$(abspath $(PORT_OUT))" ./ports/build-ncurses.sh
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-ncurses.sh
 	@touch $@
 
 $(NANO): $(NCURSES_STAMP) ports/build-nano.sh | $(BUILD)/.tools
 	@mkdir -p $(PORT_OUT)
-	OUT="$(abspath $(PORT_OUT))" ./ports/build-nano.sh
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-nano.sh
 
 $(LUA_STAMP): $(BASH) ports/build-lua.sh | $(BUILD)/.tools
 	@mkdir -p $(PORT_OUT)
-	OUT="$(abspath $(PORT_OUT))" ./ports/build-lua.sh
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-lua.sh
 	@touch $@
 
 $(LUA): $(LUA_STAMP)
@@ -173,7 +173,7 @@ $(LUA): $(LUA_STAMP)
 
 $(TCC_STAMP): ports/build-tcc.sh | $(BUILD)/.tools
 	@mkdir -p $(PORT_OUT)
-	OUT="$(abspath $(PORT_OUT))" ./ports/build-tcc.sh
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-tcc.sh
 	@touch $@
 
 $(BUILD):

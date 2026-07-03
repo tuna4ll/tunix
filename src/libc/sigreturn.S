@@ -6,3 +6,4 @@ __tunix_sigreturn:
     syscall
     ud2
 .size __tunix_sigreturn, .-__tunix_sigreturn
+.section .note.GNU-stack,"",@progbits

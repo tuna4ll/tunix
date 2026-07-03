@@ -11,3 +11,4 @@ _start:
     call __tunix_start
     ud2
 .size _start, .-_start
+.section .note.GNU-stack,"",@progbits
