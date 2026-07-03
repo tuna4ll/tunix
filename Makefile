@@ -76,7 +76,7 @@ INITRD_FILES := $(shell find initrd -type f 2>/dev/null)
 WALLPAPER_SOURCE ?= assets/tunix-mountain-lake.jpg
 WALLPAPER_OUTPUT := initrd/usr/share/tunix/wallpaper.twl
 
-.PHONY: all run headless wallpaper terminal-font dynamic-runtime-check shared-image-codecs-check clean
+.PHONY: all run headless qemu-ci wallpaper terminal-font dynamic-runtime-check shared-image-codecs-check clean
 all: $(IMAGE)
 
 wallpaper: $(WALLPAPER_OUTPUT)
@@ -384,6 +384,9 @@ headless: $(IMAGE)
 	$(QEMU) -machine pc -m 128M -drive format=raw,file=$(IMAGE) \
 		-nographic -monitor none -serial stdio -no-reboot -no-shutdown \
 		-netdev user,id=net0 -device rtl8139,netdev=net0
+
+qemu-ci: $(IMAGE)
+	QEMU="$(QEMU)" bash .github/scripts/qemu-ci-smoke.sh $(IMAGE) $(BUILD)/qemu-ci.log
 
 
 clean:

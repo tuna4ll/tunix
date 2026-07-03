@@ -100,6 +100,7 @@ int main(int argc, char **argv, char **envp) {
     t_umask(previous_umask);
     if (load_console_keymap() != 0)
         t_puterr("init: warning: configured console keymap could not be loaded\n");
+    t_puterr("TUNIX_CI_BOOT_OK\n");
 
     char *shell[] = {"/bin/bash", "--login", "-i", 0};
     for (;;) {

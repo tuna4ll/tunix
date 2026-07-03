@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-image-and-boot:
+    name: build-image-and-boot
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf \
+            automake \
+            autopoint \
+            binutils \
+            build-essential \
+            ca-certificates \
+            cmake \
+            file \
+            gettext \
+            git \
+            libtool \
+            make \
+            nasm \
+            pkg-config \
+            python3 \
+            python3-pil \
+            qemu-system-x86 \
+            tar \
+            texinfo \
+            xz-utils
+
+      - name: Build disk image
+        run: make all
+
+      - name: Run host runtime checks
+        run: |
+          make dynamic-runtime-check
+          make shared-image-codecs-check
+
+      - name: Boot smoke test
+        run: make qemu-ci
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: tunix-ci-${{ github.sha }}
+          path: |
+            build/tunix.img
+            build/kernel.elf
+            build/initramfs.img
+            build/qemu-ci.log
+          if-no-files-found: warn
+          retention-days: 14
