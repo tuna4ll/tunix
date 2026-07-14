@@ -52,6 +52,18 @@ struct udp_header {
     uint16_t checksum;
 } __attribute__((packed));
 
+struct tcp_header {
+    uint16_t source_port;
+    uint16_t destination_port;
+    uint32_t seq;
+    uint32_t ack;
+    uint8_t data_offset;
+    uint8_t flags;
+    uint16_t window;
+    uint16_t checksum;
+    uint16_t urgent;
+} __attribute__((packed));
+
 struct icmp_header {
     uint8_t type;
     uint8_t code;
@@ -240,6 +252,53 @@ int net_send_udp(uint32_t source, uint16_t source_port, uint32_t destination,
     return net_send_ipv4(destination, IPPROTO_UDP, packet, sizeof(*header) + length, 64, 0);
 }
 
+static uint16_t tcp_checksum(uint32_t source, uint32_t destination,
+                             const void *segment, size_t length) {
+    uint32_t sum = 0;
+    const uint8_t *s = (const uint8_t *)&source;
+    const uint8_t *d = (const uint8_t *)&destination;
+    for (unsigned i = 0; i < 4; i += 2) {
+        sum += ((uint16_t)s[i] << 8) | s[i + 1];
+        sum += ((uint16_t)d[i] << 8) | d[i + 1];
+    }
+    sum += IPPROTO_TCP;
+    sum += (uint16_t)length;
+    const uint8_t *bytes = (const uint8_t *)segment;
+    size_t remaining = length;
+    while (remaining >= 2) {
+        sum += ((uint16_t)bytes[0] << 8) | bytes[1];
+        bytes += 2; remaining -= 2;
+    }
+    if (remaining) sum += (uint16_t)bytes[0] << 8;
+    while (sum >> 16) sum = (sum & 0xFFFFU) + (sum >> 16);
+    return (uint16_t)~sum;
+}
+
+int net_send_tcp(uint32_t source, uint16_t source_port, uint32_t destination,
+                 uint16_t destination_port, uint32_t seq, uint32_t ack, uint8_t flags,
+                 uint16_t window, const void *payload, size_t length) {
+    if (length > 1024U) return -1;
+    if (length + sizeof(struct tcp_header) > NET_MTU - sizeof(struct ipv4_header)) return -1;
+    uint8_t packet[sizeof(struct tcp_header) + 1024U];
+    struct tcp_header *header = (struct tcp_header *)packet;
+    memset(header, 0, sizeof(*header));
+    header->source_port = net_htons(source_port);
+    header->destination_port = net_htons(destination_port);
+    header->seq = net_htonl(seq);
+    header->ack = net_htonl(ack);
+    header->data_offset = (uint8_t)((sizeof(struct tcp_header) / 4U) << 4);
+    header->flags = flags;
+    header->window = net_htons(window);
+    header->checksum = 0;
+    if (length) memcpy(packet + sizeof(*header), payload, length);
+    /* net_send_ipv4 always stamps config.address as the IP source, so the
+       pseudo-header must use the same value regardless of the source hint. */
+    (void)source;
+    header->checksum = net_htons(tcp_checksum(config.address, destination, packet,
+                                              sizeof(*header) + length));
+    return net_send_ipv4(destination, IPPROTO_TCP, packet, sizeof(*header) + length, 64, 0);
+}
+
 static void handle_arp(const uint8_t *data, size_t length) {
     if (length < sizeof(struct arp_packet)) return;
     const struct arp_packet *packet = (const struct arp_packet *)data;
@@ -297,6 +356,19 @@ static void handle_ipv4(const uint8_t *data, size_t length) {
         inet_socket_receive_udp(payload + sizeof(*udp), udp_length - sizeof(*udp), ip->source,
                                 net_htons(udp->source_port), ip->destination,
                                 net_htons(udp->destination_port));
+    } else if (ip->protocol == IPPROTO_TCP && payload_length >= sizeof(struct tcp_header)) {
+        const struct tcp_header *tcp = (const struct tcp_header *)payload;
+        size_t data_offset = (size_t)((tcp->data_offset >> 4) & 0x0FU) * 4U;
+        if (data_offset < sizeof(struct tcp_header) || data_offset > payload_length) {
+            stack_drop++; return;
+        }
+        if (tcp_checksum(ip->source, ip->destination, payload, payload_length) != 0) {
+            stack_drop++; return;
+        }
+        inet_socket_receive_tcp(ip->source, net_htons(tcp->source_port), ip->destination,
+                                net_htons(tcp->destination_port), net_htonl(tcp->seq),
+                                net_htonl(tcp->ack), tcp->flags, net_htons(tcp->window),
+                                payload + data_offset, payload_length - data_offset);
     } else {
         inet_socket_receive_ipv4(data, total_length, ip->protocol, ip->source, ip->destination);
     }
@@ -335,7 +407,19 @@ void net_init(void) {
     }
 }
 
-void net_poll(void) { if (config.link_up) rtl8139_poll(receive_frame); }
+void net_poll(void) {
+    if (!config.link_up) return;
+    rtl8139_poll(receive_frame);
+    /* Drive TCP retransmit/TIME_WAIT timers. Guarded so a segment sent from
+       inside the sweep (which may re-enter net_poll via cold-ARP resolution)
+       does not recurse into the timer sweep again. */
+    static int timing;
+    if (!timing) {
+        timing = 1;
+        inet_socket_tcp_timer_poll();
+        timing = 0;
+    }
+}
 const struct net_config *net_get_config(void) { return &config; }
 void net_set_address(uint32_t value) { config.address = value; }
 void net_set_netmask(uint32_t value) { config.netmask = value; }

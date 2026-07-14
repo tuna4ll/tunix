@@ -61,7 +61,13 @@ void inet_socket_receive_ipv4(const uint8_t *packet, size_t length, uint8_t prot
 void inet_socket_receive_udp(const uint8_t *payload, size_t length, uint32_t source,
                              uint16_t source_port, uint32_t destination, uint16_t destination_port);
 void inet_socket_receive_ethernet(const uint8_t *frame, size_t length, uint16_t ethertype);
+void inet_socket_receive_tcp(uint32_t source, uint16_t source_port, uint32_t destination,
+                             uint16_t destination_port, uint32_t seq, uint32_t ack, uint8_t flags,
+                             uint16_t window, const uint8_t *payload, size_t length);
+void inet_socket_tcp_timer_poll(void);
+int inet_socket_peer_closed(struct inet_socket *socket);
 void inet_socket_proc_udp(char *buffer, size_t capacity, size_t *length);
 void inet_socket_proc_raw(char *buffer, size_t capacity, size_t *length);
+void inet_socket_proc_tcp(char *buffer, size_t capacity, size_t *length);
 
 #endif

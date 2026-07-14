@@ -71,7 +71,7 @@ GLIB_COMPAT_TEST := $(BUILD)/user/glib-compat-test
 SYSTEM_TOOLS := $(BUILD)/user/ps $(BUILD)/user/free $(BUILD)/user/uptime $(BUILD)/user/top $(LOADKEYS) $(SLEEP) $(PREEMPT_TEST) $(INPUT_TEST) $(FB_TEST) $(GLIB_COMPAT_TEST)
 BUSYBOX_APPLETS := awk basename cat chmod clear cp cut date dd dirname du echo egrep env expr false \
 	fgrep find grep head id ls md5sum mkdir mv printenv printf pwd readlink realpath rm \
-	rmdir sed seq sha256sum sort stat tail tee test touch tr true uname uniq wc which xargs yes hwclock ifconfig route arp ping nslookup udhcpc netstat
+	rmdir sed seq sha256sum sort stat tail tee test touch tr true uname uniq wc which xargs yes hwclock ifconfig route arp ping nslookup udhcpc netstat nc wget
 INITRD_FILES := $(shell find initrd -type f 2>/dev/null)
 WALLPAPER_SOURCE ?= assets/tunix-mountain-lake.jpg
 WALLPAPER_OUTPUT := initrd/usr/share/tunix/wallpaper.twl

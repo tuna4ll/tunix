@@ -287,7 +287,7 @@ static int64_t proc_net_tcp_read(struct vfs_node *node, uint64_t offset,
                                   size_t size, void *output) {
     (void)node;
     struct text_buffer text = {{0}, 0};
-    text_string(&text, "  sl  local_address rem_address   st\n");
+    inet_socket_proc_tcp(text.data, sizeof(text.data), &text.length);
     return text_read(&text, offset, size, output);
 }
 

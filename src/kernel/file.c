@@ -280,6 +280,7 @@ uint32_t file_poll_events(struct file *file, uint32_t requested) {
     } else if (file->kind == FILE_KIND_INET_SOCKET) {
         if (inet_socket_read_ready(file->inet_socket)) events |= pollin;
         if (inet_socket_write_ready(file->inet_socket)) events |= pollout;
+        if (inet_socket_peer_closed(file->inet_socket)) events |= pollhup | pollrdhup;
     } else if (file->kind == FILE_KIND_PTY_MASTER || file->kind == FILE_KIND_PTY_SLAVE) {
         int master = file->kind == FILE_KIND_PTY_MASTER;
         if (pty_read_ready(file->pty, master)) events |= pollin;

@@ -365,6 +365,7 @@ struct linux_clone_args {
 #define ENOTCONN 107
 #define EDESTADDRREQ 89
 #define ENOTSOCK 88
+#define EINPROGRESS 115
 
 #define FUTEX_WAIT 0
 #define FUTEX_WAKE 1
@@ -2880,7 +2881,24 @@ void syscall_dispatch(struct syscall_frame *frame) {
                                                  (int)frame->rdx, frame->r10);
             break;
         case SYS_SOCKET: frame->rax = (uint64_t)sys_socket((int)frame->rdi, (int)frame->rsi, (int)frame->rdx); break;
-        case SYS_CONNECT: frame->rax = (uint64_t)sys_connect((int)frame->rdi, frame->rsi, frame->rdx); break;
+        case SYS_CONNECT: {
+            int fd = (int)frame->rdi;
+            int64_t result = sys_connect(fd, frame->rsi, frame->rdx);
+            struct process *process = process_current();
+            struct file *file = process && fd >= 0 && fd < PROCESS_MAX_FDS ? process->fds[fd] : NULL;
+            /* A TCP connect() is asynchronous: it returns -EINPROGRESS while the
+               handshake is in flight. Block by re-issuing the syscall (each retry
+               pumps net_poll) unless the socket is non-blocking. */
+            if (result == -EINPROGRESS && file && file->kind == FILE_KIND_INET_SOCKET &&
+                !(file->flags & O_NONBLOCK)) {
+                frame->user_rip -= 2U;
+                frame->rax = SYS_CONNECT;
+                process_yield_from_syscall(frame);
+            } else {
+                frame->rax = (uint64_t)result;
+            }
+            break;
+        }
         case SYS_ACCEPT: frame->rax = (uint64_t)sys_accept((int)frame->rdi, frame->rsi, frame->rdx, 0); break;
         case SYS_SENDTO: frame->rax = (uint64_t)sys_sendto((int)frame->rdi, frame->rsi, frame->rdx, (int)frame->r10, frame->r8, frame->r9); break;
         case SYS_RECVFROM: {

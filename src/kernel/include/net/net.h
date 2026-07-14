@@ -6,6 +6,13 @@
 
 #define NET_MTU 1500U
 
+#define IPPROTO_TCP 6U
+#define TCP_FIN 0x01U
+#define TCP_SYN 0x02U
+#define TCP_RST 0x04U
+#define TCP_PSH 0x08U
+#define TCP_ACK 0x10U
+
 struct net_config {
     uint8_t mac[6];
     uint32_t address;
@@ -38,6 +45,9 @@ int net_send_ipv4(uint32_t destination, uint8_t protocol, const void *payload, s
                   uint8_t ttl, int header_included);
 int net_send_udp(uint32_t source, uint16_t source_port, uint32_t destination,
                  uint16_t destination_port, const void *payload, size_t length);
+int net_send_tcp(uint32_t source, uint16_t source_port, uint32_t destination,
+                 uint16_t destination_port, uint32_t seq, uint32_t ack, uint8_t flags,
+                 uint16_t window, const void *payload, size_t length);
 uint64_t net_rx_packets(void);
 uint64_t net_tx_packets(void);
 uint64_t net_rx_dropped(void);
