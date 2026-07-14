@@ -34,6 +34,10 @@ MUSL_SHARED_ROOT := $(PORT_OUT)/musl-shared-root
 BOOT_CONFIG_STAMP := $(BUILD)/.boot-config-ready
 MUSL_SHARED_STAMP := $(PORT_OUT)/.musl-shared-ready
 WALLPAPER_CONVERTER := $(PORT_OUT)/tunix-wallpaper
+MBEDTLS_ROOT := $(PORT_OUT)/mbedtls-root
+MBEDTLS_STAMP := $(PORT_OUT)/.mbedtls-ready
+HTTPS_GET := $(PORT_OUT)/https-get
+SSL_HELPER := $(PORT_OUT)/openssl
 TERMINAL_FONT_SOURCE ?= assets/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf
 TERMINAL_FONT_DATA := $(BUILD)/generated/terminal_font_data.inc
 
@@ -176,6 +180,11 @@ $(TCC_STAMP): ports/build-tcc.sh | $(BUILD)/.tools
 	OUT="$(abspath $(PORT_OUT))" bash ports/build-tcc.sh
 	@touch $@
 
+$(MBEDTLS_STAMP): $(BASH) ports/build-mbedtls.sh tools/https-get.c tools/ssl-helper.c ports/src/mbedtls/CMakeLists.txt | $(BUILD)/.tools
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-mbedtls.sh
+	@touch $@
+
 $(BUILD):
 	mkdir -p $@
 
@@ -310,7 +319,7 @@ $(INIT): $(BUILD)/user/init.o $(USER_RUNTIME) src/userspace/linker.ld
 	$(LD) $(USER_LDFLAGS) -o $@ $(USER_RUNTIME) $(BUILD)/user/init.o
 	$(STRIP) --strip-all $@
 
-$(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(BUSYBOX) $(TCC_STAMP) $(NANO) $(LUA_STAMP) $(IMAGE_CODECS_STAMP) $(MUSL_SHARED_STAMP) $(IMAGE_CODECS_SHARED_STAMP) $(WALLPAPER_OUTPUT) $(INITRD_FILES)
+$(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(BUSYBOX) $(TCC_STAMP) $(NANO) $(LUA_STAMP) $(IMAGE_CODECS_STAMP) $(MUSL_SHARED_STAMP) $(IMAGE_CODECS_SHARED_STAMP) $(MBEDTLS_STAMP) $(WALLPAPER_OUTPUT) $(INITRD_FILES)
 	rm -rf $(ROOTFS)
 	mkdir -p $(ROOTFS)/bin $(ROOTFS)/sbin $(ROOTFS)/dev $(ROOTFS)/tmp \
 		$(ROOTFS)/run/dbus $(ROOTFS)/run/user/0 $(ROOTFS)/var/tmp \
@@ -336,12 +345,19 @@ $(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(BUSYBOX) $(TCC_STAMP) $(NANO) $(
 	cp -R $(IMAGE_CODECS_ROOT)/usr/lib/. $(ROOTFS)/usr/lib/
 	cp -R $(IMAGE_CODECS_SHARED_ROOT)/. $(ROOTFS)/
 	cp $(WALLPAPER_CONVERTER) $(ROOTFS)/usr/bin/tunix-wallpaper
+	cp $(HTTPS_GET) $(ROOTFS)/usr/bin/https-get
+	ln -sfn ../usr/bin/https-get $(ROOTFS)/bin/https-get
+	cp $(SSL_HELPER) $(ROOTFS)/usr/bin/openssl
+	ln -sfn ../usr/bin/openssl $(ROOTFS)/bin/openssl
 	cp -R $(IMAGE_CODECS_ROOT)/usr/share/. $(ROOTFS)/usr/share/
 	cp -R $(NCURSES_ROOT)/usr/share/terminfo $(ROOTFS)/usr/share/
 	mkdir -p $(ROOTFS)/usr/share/nano
 	cp ports/src/nano/syntax/*.nanorc $(ROOTFS)/usr/share/nano/
 	@test -x $(ROOTFS)/usr/bin/tcc || { echo "TinyCC was not installed into the rootfs" >&2; exit 1; }
 	@test -x $(ROOTFS)/usr/bin/lua || { echo "Lua was not installed into the rootfs" >&2; exit 1; }
+	@test -x $(ROOTFS)/usr/bin/https-get || { echo "https-get was not installed into the rootfs" >&2; exit 1; }
+	@test -x $(ROOTFS)/usr/bin/openssl || { echo "openssl (ssl-helper) was not installed into the rootfs" >&2; exit 1; }
+	@test -f $(ROOTFS)/etc/ssl/cert.pem || { echo "TLS CA bundle was not installed into the rootfs" >&2; exit 1; }
 	@test -x $(ROOTFS)/lib/ld-musl-x86_64.so.1 || { echo "shared musl loader was not installed into the rootfs" >&2; exit 1; }
 	@test -x $(ROOTFS)/usr/bin/dynamic-runtime-check || { echo "dynamic runtime checks were not installed into the rootfs" >&2; exit 1; }
 	@test -x $(ROOTFS)/usr/bin/shared-image-codecs-check || { echo "shared image codec checks were not installed into the rootfs" >&2; exit 1; }

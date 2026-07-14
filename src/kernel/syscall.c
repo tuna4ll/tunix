@@ -1348,16 +1348,25 @@ static int64_t sys_recvmsg(int fd, uint64_t user_message, int flags) {
     if (copy_from_user(&message, user_message, sizeof(message)) != 0) return -EFAULT;
     if (message.iov_length > 16U) return -EINVAL;
 
+    /* Bounce buffer for a single datagram/stream read, kept small to stay well
+       within the 16 KiB kernel stack. A caller may legitimately offer more room
+       than we stage in one call -- musl's getaddrinfo() path (lookup_name.c
+       ABUF_SIZE) hands us a 4800-byte iovec even though the DNS reply is tiny --
+       so clamp the accepted capacity to the buffer instead of rejecting the
+       request with -EMSGSIZE; a datagram larger than this is simply truncated. */
+    uint8_t data[4096];
+
     size_t capacity = 0;
     for (uint64_t index = 0; index < message.iov_length; index++) {
         struct linux_iovec iov;
         if (copy_from_user(&iov, message.iov + index * sizeof(iov), sizeof(iov)) != 0)
             return -EFAULT;
-        if (iov.length > 4096U - capacity) return -EMSGSIZE;
+        if (iov.length >= sizeof(data) - capacity) {
+            capacity = sizeof(data);
+            break;
+        }
         capacity += (size_t)iov.length;
     }
-
-    uint8_t data[4096];
     struct unix_socket *unix_value = socket_from_fd(fd);
     if (unix_value) {
         struct file *files[8] = {0};

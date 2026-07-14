@@ -29,3 +29,7 @@
 [submodule "ports/src/lua"]
 	path = ports/src/lua
 	url = https://github.com/lua/lua.git
+[submodule "ports/src/mbedtls"]
+	path = ports/src/mbedtls
+	url = https://github.com/Mbed-TLS/mbedtls
+	branch = mbedtls-3.6
