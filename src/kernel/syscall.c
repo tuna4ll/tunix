@@ -1830,6 +1830,7 @@ static int map_zero_pages(struct process *process, uint64_t start, uint64_t end,
     for (uint64_t address = start; address < end; address += 4096) {
         if (vmm_translate(process->cr3, address, NULL, NULL) == 0) continue;
         uint64_t physical = (uint64_t)pmm_alloc_page();
+        if (!physical) return -1;
         memset(vmm_phys_to_virt(physical), 0, 4096);
         if (vmm_map_page_in(process->cr3, address, physical, flags | PAGE_USER | PAGE_PRESENT) != 0) {
             pmm_free_page((void *)physical);
@@ -2108,6 +2109,7 @@ static int64_t sys_execve(struct syscall_frame *frame, uint64_t user_path, uint6
     int status = copy_path_at(AT_FDCWD, user_path, path);
     if (status != 0) return status;
     struct exec_arguments *arguments = (struct exec_arguments *)kmalloc(sizeof(*arguments));
+    if (!arguments) return -ENOMEM;
     memset(arguments, 0, sizeof(*arguments));
     int argc = copy_exec_vector(user_argv, arguments->argv_storage, arguments->argv);
     int envc = copy_exec_vector(user_envp, arguments->env_storage, arguments->envp);

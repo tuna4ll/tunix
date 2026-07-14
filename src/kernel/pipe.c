@@ -10,6 +10,7 @@
 int pipe_create(struct file **read_end, struct file **write_end) {
     if (!read_end || !write_end) return -1;
     struct pipe_buffer *pipe = (struct pipe_buffer *)kmalloc(sizeof(*pipe));
+    if (!pipe) return -1;
     memset(pipe, 0, sizeof(*pipe));
     *read_end = file_create_pipe_end(pipe, 0);
     *write_end = file_create_pipe_end(pipe, 1);

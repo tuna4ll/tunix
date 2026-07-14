@@ -185,10 +185,12 @@ static void close_all_files(struct process *process) {
     }
 }
 
-static void allocate_kernel_stack(struct process *process) {
+static int allocate_kernel_stack(struct process *process) {
     uint8_t *kernel_stack = (uint8_t *)kmalloc(KERNEL_STACK_SIZE);
+    if (!kernel_stack) return -1;
     process->kernel_stack_base = (uint64_t)kernel_stack;
     process->kernel_stack_top = ((uint64_t)kernel_stack + KERNEL_STACK_SIZE) & ~15ULL;
+    return 0;
 }
 
 static void destroy_process_resources(struct process *process) {
@@ -314,7 +316,12 @@ struct process *process_create_from_path(const char *path) {
         return NULL;
     }
 
-    allocate_kernel_stack(process);
+    if (allocate_kernel_stack(process) != 0) {
+        kprintf("process: kernel stack allocation failed for %s\n", path);
+        memory_unref(process->memory);
+        kfree(process);
+        return NULL;
+    }
     process->saved_frame.user_rip = process->entry;
     process->saved_frame.user_rsp = process->user_stack_top;
     process->saved_frame.user_rflags = 0x202;
@@ -690,6 +697,7 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame) {
     if (!current || !frame) return -EINVAL;
     struct process *parent = current;
     struct process *child = (struct process *)kmalloc(sizeof(*child));
+    if (!child) return -EINVAL;
     memset(child, 0, sizeof(*child));
 
     child->pid = next_pid++;
@@ -736,7 +744,11 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame) {
     child->last_scheduled_ns = 0;
     child->cmdline_length = parent->cmdline_length;
     memcpy(child->cmdline, parent->cmdline, sizeof(child->cmdline));
-    allocate_kernel_stack(child);
+    if (allocate_kernel_stack(child) != 0) {
+        memory_unref(child->memory);
+        kfree(child);
+        return -EINVAL;
+    }
 
     child->saved_frame = *frame;
     child->saved_frame.rax = 0;
@@ -798,7 +810,11 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
     child->start_time_ns = time_uptime_ns();
     child->cmdline_length = parent->cmdline_length;
     memcpy(child->cmdline, parent->cmdline, sizeof(child->cmdline));
-    allocate_kernel_stack(child);
+    if (allocate_kernel_stack(child) != 0) {
+        memory_unref(child->memory);
+        kfree(child);
+        return -EINVAL;
+    }
 
     child->saved_frame = *frame;
     child->saved_frame.rax = 0;

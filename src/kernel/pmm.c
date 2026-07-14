@@ -100,7 +100,7 @@ void pmm_init(uint32_t mmap_count, uint64_t mmap_addr,
 
 
 void *pmm_alloc_page(void) {
-    if (!free_pages) panic("PMM: out of physical pages");
+    if (!free_pages) return NULL;
 
     for (uint64_t pass = 0; pass < 2; pass++) {
         uint64_t begin = pass == 0 ? next_hint : 0;
@@ -121,6 +121,7 @@ void *pmm_alloc_page(void) {
 }
 
 void pmm_free_page(void *physical_address) {
+    if (!physical_address) return;
     uint64_t address = (uint64_t)physical_address;
     if ((address & (PMM_PAGE_SIZE - 1)) || address >= total_pages * PMM_PAGE_SIZE) {
         panic("PMM: invalid free");

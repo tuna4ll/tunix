@@ -186,6 +186,7 @@ static int map_segment_pages(struct process *process,
             continue;
         }
         uint64_t physical = (uint64_t)pmm_alloc_page();
+        if (!physical) return -1;
         memset(vmm_phys_to_virt(physical), 0, 4096);
         if (vmm_map_page_in(process->cr3, address, physical,
                             PAGE_USER | PAGE_PRESENT | PAGE_WRITE) != 0) {
@@ -463,6 +464,7 @@ int elf_load_process(struct process *process, struct vfs_node *file,
     uint64_t stack_bottom = USER_STACK_TOP - USER_STACK_PAGES * 4096ULL;
     for (uint64_t address = stack_bottom; address < USER_STACK_TOP; address += 4096) {
         uint64_t physical = (uint64_t)pmm_alloc_page();
+        if (!physical) return -1;
         memset(vmm_phys_to_virt(physical), 0, 4096);
         if (vmm_map_page_in(process->cr3, address, physical,
                             PAGE_PRESENT | PAGE_WRITE | PAGE_USER) != 0) {

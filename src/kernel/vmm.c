@@ -437,6 +437,10 @@ static uint64_t clone_user_table(uint64_t source_physical, int level) {
                     return 0;
                 }
                 uint64_t page_physical = (uint64_t)pmm_alloc_page();
+                if (!page_physical) {
+                    destroy_user_table(destination_physical, level);
+                    return 0;
+                }
                 memcpy((void *)(KERNEL_BASE + page_physical),
                        (void *)(KERNEL_BASE + source_page), 4096);
                 destination[index] = page_physical | preserved_flags;
