@@ -48,3 +48,4 @@ make clean
 
 - [Build and Run](docs/build-and-run.md)
 - [Ports](docs/ports.md)
+- [Syscalls and Scheduler](docs/syscalls-and-scheduler.md)
