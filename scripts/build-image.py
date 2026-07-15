@@ -12,6 +12,8 @@ INITRAMFS_LBA = KERNEL_LBA + KERNEL_SECTORS
 MANIFEST_MAGIC = 0x4D414E49
 MANIFEST_VERSION = 3
 MAX_INITRAMFS_BYTES = 32 * 1024 * 1024
+DATA_REGION_ALIGN_SECTORS = 2048
+DATA_REGION_BYTES = 64 * 1024 * 1024
 
 
 def read(path: str) -> bytes:
@@ -67,7 +69,12 @@ def main() -> None:
     ).ljust(SECTOR_SIZE, b"\0")
 
     minimum_size = (INITRAMFS_LBA + initramfs_sectors + 1) * SECTOR_SIZE
-    image_size = max(16 * 1024 * 1024, (minimum_size + 1024 * 1024 - 1) & ~(1024 * 1024 - 1))
+    data_lba = -(-(INITRAMFS_LBA + initramfs_sectors) // DATA_REGION_ALIGN_SECTORS) * DATA_REGION_ALIGN_SECTORS
+    image_size = max(
+        16 * 1024 * 1024,
+        (minimum_size + 1024 * 1024 - 1) & ~(1024 * 1024 - 1),
+        data_lba * SECTOR_SIZE + DATA_REGION_BYTES,
+    )
     image = bytearray(image_size)
     image[0:SECTOR_SIZE] = stage1
     image[SECTOR_SIZE:SECTOR_SIZE + len(stage2)] = stage2
@@ -81,6 +88,8 @@ def main() -> None:
     print(f"image: {output} ({image_size} bytes)")
     print(f"kernel: {len(kernel)}/{KERNEL_SECTORS * SECTOR_SIZE} bytes crc32={crc32(kernel):08x}")
     print(f"initramfs: {len(initramfs)} bytes/{initramfs_sectors} sectors crc32={crc32(initramfs):08x}")
+    data_sectors = image_size // SECTOR_SIZE - data_lba
+    print(f"ext2 data region: lba {data_lba}, {data_sectors} sectors ({data_sectors * SECTOR_SIZE // (1024 * 1024)} MiB)")
 
 
 if __name__ == "__main__":

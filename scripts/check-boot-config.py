@@ -23,6 +23,18 @@ def parse_kernel_limit(header: Path) -> int:
     return int(match.group(1)) * 1024 * 1024
 
 
+def parse_data_region_align(header: Path) -> int:
+    text = header.read_text(encoding="utf-8")
+    match = re.search(
+        r"^#define\s+TUNIX_DATA_REGION_ALIGN_SECTORS\s+(\d+)ULL\s*$",
+        text,
+        re.MULTILINE,
+    )
+    if match is None:
+        raise SystemExit(f"cannot parse TUNIX_DATA_REGION_ALIGN_SECTORS from {header}")
+    return int(match.group(1))
+
+
 def main() -> None:
     if len(sys.argv) != 4:
         raise SystemExit(
@@ -34,6 +46,7 @@ def main() -> None:
     stamp = Path(sys.argv[3])
 
     kernel_limit = parse_kernel_limit(header)
+    kernel_align = parse_data_region_align(header)
     image_namespace = runpy.run_path(str(build_image))
     image_limit = image_namespace.get("MAX_INITRAMFS_BYTES")
     if not isinstance(image_limit, int):
@@ -43,11 +56,20 @@ def main() -> None:
             "initramfs limit mismatch: "
             f"kernel={kernel_limit} bytes image-builder={image_limit} bytes"
         )
+    image_align = image_namespace.get("DATA_REGION_ALIGN_SECTORS")
+    if not isinstance(image_align, int):
+        raise SystemExit(f"DATA_REGION_ALIGN_SECTORS is missing from {build_image}")
+    if kernel_align != image_align:
+        raise SystemExit(
+            "data region alignment mismatch: "
+            f"kernel={kernel_align} sectors image-builder={image_align} sectors"
+        )
 
     digest = hashlib.sha256()
     digest.update(header.read_bytes())
     digest.update(build_image.read_bytes())
     digest.update(str(kernel_limit).encode("ascii"))
+    digest.update(str(kernel_align).encode("ascii"))
     content = f"{digest.hexdigest()} {kernel_limit}\n"
 
     stamp.parent.mkdir(parents=True, exist_ok=True)

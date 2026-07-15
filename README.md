@@ -7,7 +7,9 @@ Tunix is a small Unix-like operating system experiment for x86_64. It includes a
 ## Features
 
 - Custom bootloader and kernel code
-- Initramfs-backed root filesystem
+- Persistent ext2 root filesystem on the boot disk (Linux-mountable); the
+  initramfs only seeds it on first boot
+- tmpfs-like volatile `/tmp`, `/run`, `/dev`, `/proc`
 - Framebuffer terminal with keyboard input
 - Basic VFS, devfs, procfs, process, and syscall support
 - BusyBox, Bash, TinyCC, nano, Lua, and selected libraries
@@ -49,3 +51,4 @@ make clean
 - [Build and Run](docs/build-and-run.md)
 - [Ports](docs/ports.md)
 - [Syscalls and Scheduler](docs/syscalls-and-scheduler.md)
+- [Persistent Filesystem](docs/persistent-filesystem.md)

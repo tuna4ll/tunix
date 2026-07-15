@@ -14,6 +14,7 @@
 #define VFS_OWNED_DATA  0x200U
 #define VFS_INPUTDEVICE 0x400U
 #define VFS_FRAMEBUFFER 0x800U
+#define VFS_VOLATILE    0x1000U
 
 struct vfs_node;
 struct file;
@@ -33,6 +34,7 @@ struct vfs_node {
     uint32_t mode;
     uint32_t uid;
     uint32_t gid;
+    uint32_t disk_inode;
     uint64_t inode;
     uint64_t length;
     uint64_t capacity;
@@ -54,6 +56,25 @@ struct dirent {
     uint64_t ino;
     uint32_t type;
 };
+
+/*
+ * Persistence hooks: a filesystem driver can register these to observe
+ * every mutation of the in-memory tree and mirror it to backing storage.
+ * Handlers filter on node/parent state (e.g. disk_inode) themselves.
+ */
+struct vfs_persist_ops {
+    void (*created)(struct vfs_node *node);
+    void (*removed)(struct vfs_node *node);
+    void (*moved)(struct vfs_node *node, struct vfs_node *old_parent,
+                  const char *old_name);
+    void (*written)(struct vfs_node *node, uint64_t offset, uint64_t size);
+    void (*truncated)(struct vfs_node *node);
+    void (*meta_changed)(struct vfs_node *node);
+};
+
+void vfs_set_persist_ops(const struct vfs_persist_ops *ops);
+void vfs_notify_meta_changed(struct vfs_node *node);
+void vfs_setup_memory_file(struct vfs_node *node);
 
 extern struct vfs_node *vfs_root;
 

@@ -16,6 +16,7 @@
 #include "include/procfs.h"
 #include "include/random.h"
 #include "include/syscall.h"
+#include "include/ext2.h"
 #include "include/tarfs.h"
 #include "include/time.h"
 #include "include/timer.h"
@@ -52,6 +53,16 @@ static void boot_log_stage(const char *name, uint64_t *started) {
 #endif
 
 static int initramfs_used_dma;
+static uint32_t data_region_lba;
+
+static uint32_t compute_data_region_lba(const struct boot_manifest *manifest) {
+    if (!manifest || manifest->magic != TUNIX_MANIFEST_MAGIC ||
+        manifest->version != TUNIX_MANIFEST_VERSION) return 0;
+    uint64_t end = manifest->initramfs_lba + manifest->initramfs_sectors;
+    uint64_t aligned = (end + TUNIX_DATA_REGION_ALIGN_SECTORS - 1ULL) &
+                       ~(TUNIX_DATA_REGION_ALIGN_SECTORS - 1ULL);
+    return aligned > 0x0FFFFFFFULL ? 0 : (uint32_t)aligned;
+}
 
 static uint64_t load_initramfs(const struct boot_manifest *manifest) {
     if (!manifest || manifest->magic != TUNIX_MANIFEST_MAGIC ||
@@ -95,12 +106,17 @@ void kmain(uint32_t mmap_count, uint64_t mmap_address, uint64_t manifest_address
     if (!manifest || manifest->magic != TUNIX_MANIFEST_MAGIC) {
         manifest = (const struct boot_manifest *)0x00020000ULL;
     }
-    uint64_t initramfs_size = load_initramfs(manifest);
+    data_region_lba = compute_data_region_lba(manifest);
+    int root_on_disk = data_region_lba && ext2fs_probe(data_region_lba) == 0;
+    uint64_t initramfs_size = root_on_disk ? 0 : load_initramfs(manifest);
 #if TUNIX_BOOT_TIMINGS
     uint64_t initramfs_cycles = boot_read_tsc() - initramfs_started;
 #endif
 #if TUNIX_DEBUG_LOGS
-    kprintf("TUNIX: initramfs loaded from ATA, %u bytes\n", (unsigned)initramfs_size);
+    if (root_on_disk)
+        kprintf("TUNIX: ext2 root found on disk, skipping initramfs\n");
+    else
+        kprintf("TUNIX: initramfs loaded from ATA, %u bytes\n", (unsigned)initramfs_size);
 #endif
 
     gdt_init();
@@ -129,9 +145,18 @@ void kmain(uint32_t mmap_count, uint64_t mmap_address, uint64_t manifest_address
 #endif
 
     vfs_init();
-    if (tarfs_unpack(INITRAMFS_PHYSICAL, initramfs_size) < 0) panic("initramfs unpack failed");
+    if (root_on_disk) {
+        if (ext2fs_mount_root(data_region_lba) != 0)
+            panic("persistent root filesystem load failed");
+    } else {
+        if (tarfs_unpack(INITRAMFS_PHYSICAL, initramfs_size) < 0)
+            panic("initramfs unpack failed");
+        if (data_region_lba && ext2fs_seed_root(data_region_lba) != 0)
+            kprintf("TUNIX: root persistence unavailable, running from RAM\n");
+    }
 #if TUNIX_BOOT_TIMINGS
-    boot_log_stage("initramfs VFS indexing", &stage_started);
+    boot_log_stage(root_on_disk ? "ext2 root load" : "initramfs VFS indexing + ext2 seed",
+                   &stage_started);
 #endif
     if (terminal_init("/usr/share/tunix/wallpaper.twl") != 0)
         panic("framebuffer terminal initialization failed");
@@ -144,7 +169,7 @@ void kmain(uint32_t mmap_count, uint64_t mmap_address, uint64_t manifest_address
     if (input_mouse_available()) pic_unmask(12U);
     devfs_init();
 #if TUNIX_DEBUG_LOGS
-    kprintf("TUNIX: VFS ramfs tarfs devfs ready\n");
+    kprintf("TUNIX: VFS rootfs devfs ready\n");
 #endif
 
     process_init();

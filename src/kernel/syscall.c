@@ -16,6 +16,7 @@
 #include "include/random.h"
 #include "include/signal.h"
 #include "include/syscall.h"
+#include "include/ext2.h"
 #include "include/time.h"
 #include "include/tty.h"
 #include "include/usercopy.h"
@@ -98,6 +99,9 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define SYS_UNAME 63
 #define SYS_FCNTL 72
 #define SYS_FSYNC 74
+#define SYS_FDATASYNC 75
+#define SYS_SYNC 162
+#define SYS_SYNCFS 306
 #define SYS_FTRUNCATE 77
 #define SYS_GETCWD 79
 #define SYS_CHDIR 80
@@ -1517,8 +1521,10 @@ static int64_t sys_fsync(int fd) {
     if (file->kind == FILE_KIND_FRAMEBUFFER) return 0;
     if (file->kind != FILE_KIND_VFS || !file->node) return -EINVAL;
     uint32_t node_type = file->node->flags & 0xFFU;
-    if (node_type == VFS_FILE || node_type == VFS_DIRECTORY || node_type == VFS_BLOCKDEVICE)
+    if (node_type == VFS_FILE || node_type == VFS_DIRECTORY || node_type == VFS_BLOCKDEVICE) {
+        if (ext2fs_owns(file->node) && ext2fs_fsync_node(file->node) != 0) return -EIO;
         return 0;
+    }
     return -EINVAL;
 }
 
@@ -1813,6 +1819,7 @@ static int64_t sys_chmod_at(int dirfd, uint64_t user_path, uint32_t mode, int fl
     if (!node) return -ENOENT;
     if (node->flags & VFS_READONLY) return -EROFS;
     node->mode = mode & 07777U;
+    vfs_notify_meta_changed(node);
     return 0;
 }
 
@@ -1823,6 +1830,7 @@ static int64_t sys_fchmod(int fd, uint32_t mode) {
     if (file->kind != FILE_KIND_VFS || !file->node) return -EBADF;
     if (file->node->flags & VFS_READONLY) return -EROFS;
     file->node->mode = mode & 07777U;
+    vfs_notify_meta_changed(file->node);
     return 0;
 }
 
@@ -3013,6 +3021,9 @@ void syscall_dispatch(struct syscall_frame *frame) {
             break;
         }
         case SYS_FSYNC: frame->rax = (uint64_t)sys_fsync((int)frame->rdi); break;
+        case SYS_FDATASYNC: frame->rax = (uint64_t)sys_fsync((int)frame->rdi); break;
+        case SYS_SYNCFS: frame->rax = (uint64_t)sys_fsync((int)frame->rdi); break;
+        case SYS_SYNC: frame->rax = (uint64_t)ext2fs_sync(); break;
         case SYS_FTRUNCATE: frame->rax = (uint64_t)sys_ftruncate((int)frame->rdi, frame->rsi); break;
         case SYS_GETCWD: frame->rax = (uint64_t)sys_getcwd(frame->rdi, (size_t)frame->rsi); break;
         case SYS_CHDIR: frame->rax = (uint64_t)sys_chdir(frame->rdi); break;

@@ -17,6 +17,9 @@
 
 #define ATA_CMD_READ_PIO 0x20
 #define ATA_CMD_READ_DMA 0xC8
+#define ATA_CMD_WRITE_PIO 0x30
+#define ATA_CMD_WRITE_DMA 0xCA
+#define ATA_CMD_FLUSH_CACHE 0xE7
 #define ATA_CMD_IDENTIFY 0xEC
 #define ATA_SR_BSY       0x80
 #define ATA_SR_DRQ       0x08
@@ -53,9 +56,28 @@ static inline uint64_t ata_pointer_physical(const void *pointer) {
     return value;
 }
 
+/*
+ * DMA needs physically contiguous memory. Raw physical addresses and the
+ * kernel image mapping (KERNEL_VIRTUAL_BASE + first GiB) qualify; kernel
+ * heap mappings above that are pieced together from arbitrary pages, so
+ * their virtual-minus-base "physical" address would be garbage.
+ */
+static int ata_dma_pointer_valid(const void *pointer) {
+    uint64_t value = (uint64_t)(uintptr_t)pointer;
+    if (value < KERNEL_VIRTUAL_BASE) return 1;
+    return value - KERNEL_VIRTUAL_BASE < 0x40000000ULL;
+}
+
 static inline void ata_read_words(uint16_t *destination, size_t word_count) {
     __asm__ volatile("cld; rep insw"
                      : "+D"(destination), "+c"(word_count)
+                     : "d"((uint16_t)ATA_DATA)
+                     : "memory");
+}
+
+static inline void ata_write_words(const uint16_t *source, size_t word_count) {
+    __asm__ volatile("cld; rep outsw"
+                     : "+S"(source), "+c"(word_count)
                      : "d"((uint16_t)ATA_DATA)
                      : "memory");
 }
@@ -130,13 +152,16 @@ static int ata_build_prdt(uint64_t destination, uint32_t byte_count) {
     return 0;
 }
 
-static int ata_dma_read_chunk(uint32_t lba, uint32_t sectors, uint64_t destination) {
+static int ata_dma_transfer_chunk(uint32_t lba, uint32_t sectors,
+                                  uint64_t buffer_physical, int to_device) {
     uint32_t bytes = sectors * ATA_SECTOR_SIZE;
-    if (ata_build_prdt(destination, bytes) != 0) return -1;
+    if (ata_build_prdt(buffer_physical, bytes) != 0) return -1;
 
     uint64_t prdt_physical = ata_pointer_physical(dma_prdt);
     if (prdt_physical > 0xFFFFFFFFULL) return -1;
 
+    uint8_t direction = to_device ? 0U : BM_COMMAND_READ;
+    uint8_t ata_command = to_device ? ATA_CMD_WRITE_DMA : ATA_CMD_READ_DMA;
     uint16_t command_port = dma_io_base;
     uint16_t status_port = (uint16_t)(dma_io_base + 2U);
     uint16_t prdt_port = (uint16_t)(dma_io_base + 4U);
@@ -154,9 +179,9 @@ static int ata_dma_read_chunk(uint32_t lba, uint32_t sectors, uint64_t destinati
     outb(ATA_LBA2, (uint8_t)(lba >> 16));
 
     __asm__ volatile("" : : : "memory");
-    outb(command_port, BM_COMMAND_READ);
-    outb(ATA_COMMAND, ATA_CMD_READ_DMA);
-    outb(command_port, BM_COMMAND_READ | BM_COMMAND_START);
+    outb(command_port, direction);
+    outb(ATA_COMMAND, ata_command);
+    outb(command_port, (uint8_t)(direction | BM_COMMAND_START));
 
     int result = -1;
     for (uint32_t timeout = 0; timeout < 100000000U; timeout++) {
@@ -172,7 +197,7 @@ static int ata_dma_read_chunk(uint32_t lba, uint32_t sectors, uint64_t destinati
         __asm__ volatile("pause");
     }
 
-    outb(command_port, BM_COMMAND_READ);
+    outb(command_port, direction);
     uint8_t final_bus_status = inb(status_port);
     outb(status_port, BM_STATUS_ERROR | BM_STATUS_IRQ);
     __asm__ volatile("" : : : "memory");
@@ -209,15 +234,17 @@ uint32_t ata_disk_sectors(void) {
     return cached_sectors;
 }
 
-int ata_dma_read28(uint32_t lba, uint32_t sectors, void *destination) {
-    if (!destination || sectors == 0 || lba > 0x0FFFFFFFU ||
+static int ata_dma_transfer28(uint32_t lba, uint32_t sectors,
+                              const void *buffer, int to_device) {
+    if (!buffer || sectors == 0 || lba > 0x0FFFFFFFU ||
         sectors > 0x10000000U - lba) return -1;
+    if (!ata_dma_pointer_valid(buffer)) return -1;
     if (ata_dma_probe() != 0) return -1;
 
     uint32_t disk_sectors = ata_disk_sectors();
     if (disk_sectors && (lba >= disk_sectors || sectors > disk_sectors - lba)) return -1;
 
-    uint64_t physical = ata_pointer_physical(destination);
+    uint64_t physical = ata_pointer_physical(buffer);
     uint64_t total_bytes = (uint64_t)sectors * ATA_SECTOR_SIZE;
     if (physical > 0xFFFFFFFFULL || total_bytes > 0x100000000ULL - physical) return -1;
 
@@ -225,12 +252,20 @@ int ata_dma_read28(uint32_t lba, uint32_t sectors, void *destination) {
     uint32_t current_lba = lba;
     while (remaining) {
         uint32_t batch = remaining > ATA_DMA_MAX_SECTORS ? ATA_DMA_MAX_SECTORS : remaining;
-        if (ata_dma_read_chunk(current_lba, batch, physical) != 0) return -1;
+        if (ata_dma_transfer_chunk(current_lba, batch, physical, to_device) != 0) return -1;
         current_lba += batch;
         remaining -= batch;
         physical += (uint64_t)batch * ATA_SECTOR_SIZE;
     }
     return 0;
+}
+
+int ata_dma_read28(uint32_t lba, uint32_t sectors, void *destination) {
+    return ata_dma_transfer28(lba, sectors, destination, 0);
+}
+
+int ata_dma_write28(uint32_t lba, uint32_t sectors, const void *source) {
+    return ata_dma_transfer28(lba, sectors, source, 1);
 }
 
 int ata_pio_read28(uint32_t lba, uint32_t sectors, void *destination) {
@@ -261,6 +296,53 @@ int ata_pio_read28(uint32_t lba, uint32_t sectors, void *destination) {
             output += 256U;
         }
 
+        current_lba += batch;
+        remaining -= batch;
+    }
+    return 0;
+}
+
+int ata_flush_cache(void) {
+    if (ata_wait_not_busy() < 0) return -1;
+    outb(ATA_HDDEVSEL, 0xE0U);
+    io_wait();
+    outb(ATA_COMMAND, ATA_CMD_FLUSH_CACHE);
+    int status = ata_wait_not_busy();
+    if (status < 0 || (status & (ATA_SR_ERR | ATA_SR_DF))) return -1;
+    return 0;
+}
+
+int ata_pio_write28(uint32_t lba, uint32_t sectors, const void *source) {
+    if (!source || sectors == 0 || lba > 0x0FFFFFFFU ||
+        sectors > 0x10000000U - lba) return -1;
+
+    uint32_t disk_sectors = ata_disk_sectors();
+    if (disk_sectors && (lba >= disk_sectors || sectors > disk_sectors - lba)) return -1;
+
+    const uint16_t *input = (const uint16_t *)source;
+    uint32_t remaining = sectors;
+    uint32_t current_lba = lba;
+
+    while (remaining) {
+        uint8_t batch = (uint8_t)(remaining > 255U ? 255U : remaining);
+
+        if (ata_wait_not_busy() < 0) return -1;
+        outb(ATA_HDDEVSEL, (uint8_t)(0xE0U | ((current_lba >> 24) & 0x0FU)));
+        io_wait();
+        outb(ATA_SECCOUNT0, batch);
+        outb(ATA_LBA0, (uint8_t)current_lba);
+        outb(ATA_LBA1, (uint8_t)(current_lba >> 8));
+        outb(ATA_LBA2, (uint8_t)(current_lba >> 16));
+        outb(ATA_COMMAND, ATA_CMD_WRITE_PIO);
+
+        for (uint32_t sector = 0; sector < batch; sector++) {
+            if (ata_wait_drq() != 0) return -1;
+            ata_write_words(input, 256U);
+            input += 256U;
+        }
+
+        int status = ata_wait_not_busy();
+        if (status < 0 || (status & (ATA_SR_ERR | ATA_SR_DF))) return -1;
         current_lba += batch;
         remaining -= batch;
     }

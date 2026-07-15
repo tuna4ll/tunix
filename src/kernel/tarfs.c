@@ -93,13 +93,13 @@ int tarfs_unpack(uint64_t initramfs_physical_address, uint64_t initramfs_size) {
                 while (target_length < sizeof(header->linkname) && header->linkname[target_length]) target_length++;
                 memcpy(target, header->linkname, target_length);
                 target[target_length] = '\0';
-                struct vfs_node *link = vfs_create_symlink(path, target, VFS_READONLY);
+                struct vfs_node *link = vfs_create_symlink(path, target, 0);
                 if (!link) return -1;
                 if (mode) link->mode = mode & 07777U;
                 files++;
                 KDEBUG("TarFS: %s -> %s\n", path, target);
             } else if (header->typeflag == '0' || header->typeflag == '\0') {
-                struct vfs_node *file = vfs_create_file(path, archive + offset + 512, size, VFS_READONLY, 0);
+                struct vfs_node *file = vfs_create_file(path, archive + offset + 512, size, 0, 0);
                 if (!file) return -1;
                 if (mode) file->mode = mode & 07777U;
                 files++;

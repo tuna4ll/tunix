@@ -10,6 +10,18 @@
 
 struct vfs_node *vfs_root;
 static uint64_t next_inode = 1;
+static const struct vfs_persist_ops *persist_ops;
+
+#define PERSIST(op, ...) \
+    do { if (persist_ops && persist_ops->op) persist_ops->op(__VA_ARGS__); } while (0)
+
+void vfs_set_persist_ops(const struct vfs_persist_ops *ops) {
+    persist_ops = ops;
+}
+
+void vfs_notify_meta_changed(struct vfs_node *node) {
+    PERSIST(meta_changed, node);
+}
 
 static int valid_component(const char *name) {
     return name && name[0] && strcmp(name, ".") != 0 && strcmp(name, "..") != 0;
@@ -169,6 +181,7 @@ struct vfs_node *vfs_mkdir_p(const char *path) {
         if (!next) {
             next = vfs_alloc_node(component, VFS_DIRECTORY);
             if (!next || vfs_attach(current, next) != 0) return NULL;
+            PERSIST(created, next);
         } else if ((next->flags & 0xFFU) == VFS_SYMLINK) {
             char next_path[VFS_PATH_MAX];
             if (vfs_node_path(next, next_path, sizeof(next_path)) != 0) return NULL;
@@ -238,8 +251,17 @@ static int64_t memory_write(struct vfs_node *node, uint64_t offset, size_t size,
     if (ensure_capacity(node, end) != 0) return -1;
     memcpy((uint8_t *)node->data + offset, buffer, size);
     if (end > node->length) node->length = end;
-    if (size) inotify_notify(node, TUNIX_IN_MODIFY, NULL, 0);
+    if (size) {
+        inotify_notify(node, TUNIX_IN_MODIFY, NULL, 0);
+        PERSIST(written, node, offset, size);
+    }
     return (int64_t)size;
+}
+
+void vfs_setup_memory_file(struct vfs_node *node) {
+    if (!node) return;
+    node->read = memory_read;
+    if (!(node->flags & VFS_READONLY)) node->write = memory_write;
 }
 
 struct vfs_node *vfs_create_file(const char *path, const void *data,
@@ -268,6 +290,7 @@ struct vfs_node *vfs_create_file(const char *path, const void *data,
         return NULL;
     }
     inotify_notify(parent, TUNIX_IN_CREATE, name, 0);
+    PERSIST(created, node);
     return node;
 }
 
@@ -289,6 +312,7 @@ struct vfs_node *vfs_create_file_node(const char *path, uint32_t mode) {
         return NULL;
     }
     inotify_notify(parent, TUNIX_IN_CREATE, name, 0);
+    PERSIST(created, node);
     return node;
 }
 
@@ -308,6 +332,7 @@ struct vfs_node *vfs_create_directory(const char *path, uint32_t mode) {
         return NULL;
     }
     inotify_notify(parent, TUNIX_IN_CREATE, name, 0);
+    PERSIST(created, node);
     return node;
 }
 
@@ -334,6 +359,7 @@ struct vfs_node *vfs_create_symlink(const char *path, const char *target,
         return NULL;
     }
     inotify_notify(parent, TUNIX_IN_CREATE, name, 0);
+    PERSIST(created, node);
     return node;
 }
 
@@ -382,6 +408,7 @@ int vfs_remove(const char *path, int remove_directory) {
     inotify_notify(parent, TUNIX_IN_DELETE, name, 0);
     inotify_notify(node, TUNIX_IN_DELETE_SELF, NULL, 0);
     inotify_invalidate(node);
+    PERSIST(removed, node);
     if (detach_child(parent, node) != 0) return -1;
     destroy_node(node);
     return 0;
@@ -410,6 +437,7 @@ int vfs_rename(const char *old_path, const char *new_path) {
         inotify_notify(new_parent, TUNIX_IN_DELETE, new_name, 0);
         inotify_notify(existing, TUNIX_IN_DELETE_SELF, NULL, 0);
         inotify_invalidate(existing);
+        PERSIST(removed, existing);
         if (detach_child(new_parent, existing) != 0) return -1;
         destroy_node(existing);
     }
@@ -422,6 +450,7 @@ int vfs_rename(const char *old_path, const char *new_path) {
     strncpy(node->name, new_name, sizeof(node->name) - 1);
     node->name[sizeof(node->name) - 1] = '\0';
     if (vfs_attach(new_parent, node) != 0) return -1;
+    PERSIST(moved, node, old_parent, old_name);
     return 0;
 }
 
@@ -431,6 +460,7 @@ int vfs_truncate(struct vfs_node *node, uint64_t length) {
     if (length > node->length) memset((uint8_t *)node->data + node->length, 0, (size_t)(length - node->length));
     node->length = length;
     inotify_notify(node, TUNIX_IN_MODIFY, NULL, 0);
+    PERSIST(truncated, node);
     return 0;
 }
 

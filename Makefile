@@ -58,7 +58,7 @@ KERNEL_OBJS := \
 	$(BUILD)/pmm.o $(BUILD)/vmm.o $(BUILD)/framebuffer.o $(BUILD)/terminal_font.o $(BUILD)/terminal.o $(BUILD)/input.o \
 	$(BUILD)/heap.o $(BUILD)/syscall.o $(BUILD)/syscall_entry.o \
 	$(BUILD)/eventfd.o $(BUILD)/timerfd.o $(BUILD)/epoll.o $(BUILD)/inotify.o \
-	$(BUILD)/vfs.o $(BUILD)/tarfs.o $(BUILD)/devfs.o $(BUILD)/unix_socket.o $(BUILD)/pty.o \
+	$(BUILD)/vfs.o $(BUILD)/tarfs.o $(BUILD)/ext2.o $(BUILD)/devfs.o $(BUILD)/unix_socket.o $(BUILD)/pty.o \
 	$(BUILD)/usercopy.o $(BUILD)/elf.o $(BUILD)/file.o \
 	$(BUILD)/pipe.o $(BUILD)/tty.o $(BUILD)/process.o $(BUILD)/procfs.o $(BUILD)/time.o $(BUILD)/random.o $(BUILD)/ata.o \
 	$(BUILD)/pci.o $(BUILD)/rtl8139.o $(BUILD)/net.o $(BUILD)/inet_socket.o
@@ -75,7 +75,7 @@ GLIB_COMPAT_TEST := $(BUILD)/user/glib-compat-test
 SYSTEM_TOOLS := $(BUILD)/user/ps $(BUILD)/user/free $(BUILD)/user/uptime $(BUILD)/user/top $(LOADKEYS) $(SLEEP) $(PREEMPT_TEST) $(INPUT_TEST) $(FB_TEST) $(GLIB_COMPAT_TEST)
 BUSYBOX_APPLETS := awk basename cat chmod clear cp cut date dd dirname du echo egrep env expr false \
 	fgrep find grep head id ls md5sum mkdir mv printenv printf pwd readlink realpath rm \
-	rmdir sed seq sha256sum sort stat tail tee test touch tr true uname uniq wc which xargs yes hwclock ifconfig route arp ping nslookup udhcpc netstat nc wget
+	rmdir sed seq sha256sum sort stat sync tail tee test touch tr true uname uniq wc which xargs yes hwclock ifconfig route arp ping nslookup udhcpc netstat nc wget
 INITRD_FILES := $(shell find initrd -type f 2>/dev/null)
 WALLPAPER_SOURCE ?= assets/tunix-mountain-lake.jpg
 WALLPAPER_OUTPUT := initrd/usr/share/tunix/wallpaper.twl
@@ -213,7 +213,7 @@ $(BOOT_CONFIG_STAMP): src/kernel/include/boot_manifest.h scripts/build-image.py 
 	$(PYTHON) scripts/check-boot-config.py src/kernel/include/boot_manifest.h scripts/build-image.py $@
 
 $(BUILD)/main.o: src/kernel/include/input.h src/kernel/include/tty.h src/kernel/include/pic.h \
-	src/kernel/include/boot_manifest.h $(BOOT_CONFIG_STAMP)
+	src/kernel/include/boot_manifest.h src/kernel/include/ext2.h $(BOOT_CONFIG_STAMP)
 $(BUILD)/input.o: src/kernel/include/input.h src/kernel/include/io.h src/kernel/include/tty.h src/include/tunix/input_event.h
 $(BUILD)/pic.o: src/kernel/include/pic.h src/kernel/include/io.h
 $(BUILD)/timer.o: src/kernel/include/timer.h src/kernel/include/interrupt.h src/kernel/include/process.h src/kernel/include/io.h
@@ -225,12 +225,16 @@ $(BUILD)/epoll.o: src/kernel/include/epoll.h src/kernel/include/file.h
 $(BUILD)/inotify.o: src/kernel/include/inotify.h src/kernel/include/vfs.h
 $(BUILD)/pty.o: src/kernel/include/pty.h src/kernel/include/tty.h src/kernel/include/file.h
 $(BUILD)/file.o: src/kernel/include/file.h src/kernel/include/vfs.h src/kernel/include/pty.h src/kernel/include/input.h src/kernel/include/framebuffer.h src/kernel/include/eventfd.h src/kernel/include/timerfd.h src/kernel/include/epoll.h src/kernel/include/inotify.h
-$(BUILD)/syscall.o: src/kernel/include/vfs.h src/kernel/include/tty.h src/kernel/include/pty.h src/kernel/include/process.h src/kernel/include/random.h src/kernel/include/time.h src/kernel/include/input.h src/kernel/include/framebuffer.h src/kernel/include/eventfd.h src/kernel/include/timerfd.h src/kernel/include/epoll.h src/kernel/include/inotify.h
+$(BUILD)/syscall.o: src/kernel/include/vfs.h src/kernel/include/tty.h src/kernel/include/pty.h src/kernel/include/process.h src/kernel/include/random.h src/kernel/include/time.h src/kernel/include/input.h src/kernel/include/framebuffer.h src/kernel/include/eventfd.h src/kernel/include/timerfd.h src/kernel/include/epoll.h src/kernel/include/inotify.h src/kernel/include/ext2.h
 $(BUILD)/terminal_font.o: $(TERMINAL_FONT_DATA) src/kernel/include/terminal_font.h
 $(BUILD)/terminal.o: src/kernel/include/terminal_font.h src/kernel/include/terminal.h src/kernel/include/framebuffer.h
 $(BUILD)/tty.o: src/kernel/include/input.h src/kernel/include/tty.h src/kernel/include/terminal.h src/include/tunix/keymap.h
 $(BUILD)/process.o: src/kernel/include/process.h src/kernel/include/signal.h src/kernel/include/interrupt.h
+# struct vfs_node is embedded across the whole kernel; a layout change must
+# rebuild every object or stale offsets corrupt the tree at runtime.
+$(KERNEL_OBJS): src/kernel/include/vfs.h
 $(BUILD)/vfs.o: src/kernel/include/vfs.h src/kernel/include/inotify.h
+$(BUILD)/ext2.o: src/kernel/include/ext2.h src/kernel/include/ata.h src/kernel/include/vfs.h src/kernel/include/heap.h src/kernel/include/time.h src/kernel/include/random.h src/kernel/include/kstring.h src/kernel/include/build_config.h
 $(BUILD)/random.o: src/kernel/include/random.h src/kernel/include/time.h src/kernel/include/spinlock.h
 $(BUILD)/time.o: src/kernel/include/time.h src/kernel/include/io.h
 $(BUILD)/ata.o: src/kernel/include/ata.h src/kernel/include/io.h src/kernel/include/pci.h
