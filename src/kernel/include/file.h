@@ -8,6 +8,7 @@ struct vfs_node;
 struct pipe_buffer;
 struct unix_socket;
 struct inet_socket;
+struct netlink_socket;
 struct pty_pair;
 struct input_reader;
 struct eventfd_context;
@@ -28,6 +29,7 @@ struct inotify_context;
 #define FILE_KIND_TIMERFD     11
 #define FILE_KIND_EPOLL       12
 #define FILE_KIND_INOTIFY     13
+#define FILE_KIND_NETLINK_SOCKET 14
 
 struct file {
     int refs;
@@ -38,6 +40,7 @@ struct file {
     struct pipe_buffer *pipe;
     struct unix_socket *socket;
     struct inet_socket *inet_socket;
+    struct netlink_socket *netlink_socket;
     struct pty_pair *pty;
     struct input_reader *input_reader;
     struct eventfd_context *eventfd;
@@ -50,6 +53,7 @@ struct file *file_open_node(struct vfs_node *node, uint32_t flags);
 struct file *file_create_pipe_end(struct pipe_buffer *pipe, int write_end);
 struct file *file_create_socket(struct unix_socket *socket);
 struct file *file_create_inet_socket(struct inet_socket *socket);
+struct file *file_create_netlink_socket(struct netlink_socket *socket);
 struct file *file_create_eventfd(struct eventfd_context *context, uint32_t flags);
 struct file *file_create_timerfd(struct timerfd_context *context, uint32_t flags);
 struct file *file_create_epoll(struct epoll_context *context, uint32_t flags);

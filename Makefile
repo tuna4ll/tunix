@@ -16,7 +16,28 @@ INITRAMFS := $(BUILD)/initramfs.img
 ROOTFS := $(BUILD)/rootfs
 PORT_OUT := ports/out
 BASH := $(PORT_OUT)/bash
-BUSYBOX := $(PORT_OUT)/busybox
+COREUTILS_ROOT := $(PORT_OUT)/coreutils-root
+COREUTILS_STAMP := $(PORT_OUT)/.coreutils-ready
+GREP_ROOT := $(PORT_OUT)/grep-root
+GREP_STAMP := $(PORT_OUT)/.grep-ready
+SED_ROOT := $(PORT_OUT)/sed-root
+SED_STAMP := $(PORT_OUT)/.sed-ready
+GAWK_ROOT := $(PORT_OUT)/gawk-root
+GAWK_STAMP := $(PORT_OUT)/.gawk-ready
+FINDUTILS_ROOT := $(PORT_OUT)/findutils-root
+FINDUTILS_STAMP := $(PORT_OUT)/.findutils-ready
+DIFFUTILS_ROOT := $(PORT_OUT)/diffutils-root
+DIFFUTILS_STAMP := $(PORT_OUT)/.diffutils-ready
+TAR_ROOT := $(PORT_OUT)/tar-root
+TAR_STAMP := $(PORT_OUT)/.tar-ready
+GZIP_ROOT := $(PORT_OUT)/gzip-root
+GZIP_STAMP := $(PORT_OUT)/.gzip-ready
+IPROUTE2_ROOT := $(PORT_OUT)/iproute2-root
+IPROUTE2_STAMP := $(PORT_OUT)/.iproute2-ready
+GNU_PORT_STAMPS := $(COREUTILS_STAMP) $(GREP_STAMP) $(SED_STAMP) $(GAWK_STAMP) \
+	$(FINDUTILS_STAMP) $(DIFFUTILS_STAMP) $(TAR_STAMP) $(GZIP_STAMP)
+GNU_PORT_ROOTS := $(COREUTILS_ROOT) $(GREP_ROOT) $(SED_ROOT) $(GAWK_ROOT) \
+	$(FINDUTILS_ROOT) $(DIFFUTILS_ROOT) $(TAR_ROOT) $(GZIP_ROOT)
 TCC_ROOT := $(PORT_OUT)/tcc-root
 TCC_STAMP := $(PORT_OUT)/.tcc-ready
 BINUTILS_ROOT := $(PORT_OUT)/binutils-root
@@ -65,7 +86,7 @@ KERNEL_OBJS := \
 	$(BUILD)/vfs.o $(BUILD)/tarfs.o $(BUILD)/ext2.o $(BUILD)/devfs.o $(BUILD)/unix_socket.o $(BUILD)/pty.o \
 	$(BUILD)/usercopy.o $(BUILD)/elf.o $(BUILD)/file.o \
 	$(BUILD)/pipe.o $(BUILD)/tty.o $(BUILD)/process.o $(BUILD)/procfs.o $(BUILD)/time.o $(BUILD)/random.o $(BUILD)/ata.o \
-	$(BUILD)/pci.o $(BUILD)/rtl8139.o $(BUILD)/net.o $(BUILD)/inet_socket.o
+	$(BUILD)/pci.o $(BUILD)/rtl8139.o $(BUILD)/net.o $(BUILD)/inet_socket.o $(BUILD)/netlink.o
 
 USER_RUNTIME := $(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/sigreturn.o
 INIT := $(BUILD)/user/init
@@ -77,9 +98,6 @@ INPUT_TEST := $(BUILD)/user/input-test
 FB_TEST := $(BUILD)/user/fb-test
 GLIB_COMPAT_TEST := $(BUILD)/user/glib-compat-test
 SYSTEM_TOOLS := $(BUILD)/user/ps $(BUILD)/user/free $(BUILD)/user/uptime $(BUILD)/user/top $(LOADKEYS) $(SLEEP) $(PREEMPT_TEST) $(INPUT_TEST) $(FB_TEST) $(GLIB_COMPAT_TEST)
-BUSYBOX_APPLETS := awk basename cat chmod clear cp cut date dd dirname du echo egrep env expr false \
-	fgrep find grep head id ls md5sum mkdir mv printenv printf pwd readlink realpath rm \
-	rmdir sed seq sha256sum sort stat sync tail tee test touch tr true uname uniq wc which xargs yes hwclock ifconfig route arp ping nslookup udhcpc netstat nc wget
 INITRD_FILES := $(shell find initrd -type f 2>/dev/null)
 WALLPAPER_SOURCE ?= assets/tunix-mountain-lake.jpg
 WALLPAPER_OUTPUT := initrd/usr/share/tunix/wallpaper.twl
@@ -159,8 +177,65 @@ $(BASH): ports/build-bash.sh | $(BUILD)/.tools
 	@mkdir -p $(PORT_OUT)
 	OUT="$(abspath $(PORT_OUT))" bash ports/build-bash.sh
 
-$(BUSYBOX): $(BASH) ports/build-busybox.sh | $(BUILD)/.tools
-	OUT="$(abspath $(PORT_OUT))" bash ports/build-busybox.sh
+# GNU userland ports. Each stages a self-contained /usr tree into
+# $(PORT_OUT)/<name>-root via the shared ports/lib/gnu-port.sh helper. They
+# depend on $(BASH) only to serialize the one-time static musl toolchain build.
+$(COREUTILS_STAMP): $(BASH) ports/build-coreutils.sh ports/lib/gnu-port.sh | $(BUILD)/.tools
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-coreutils.sh
+	@test -x $(COREUTILS_ROOT)/usr/bin/ls || { echo "coreutils was not produced" >&2; exit 1; }
+	@touch $@
+
+$(GREP_STAMP): $(BASH) ports/build-grep.sh ports/lib/gnu-port.sh | $(BUILD)/.tools
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-grep.sh
+	@test -x $(GREP_ROOT)/usr/bin/grep || { echo "grep was not produced" >&2; exit 1; }
+	@touch $@
+
+$(SED_STAMP): $(BASH) ports/build-sed.sh ports/lib/gnu-port.sh | $(BUILD)/.tools
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-sed.sh
+	@test -x $(SED_ROOT)/usr/bin/sed || { echo "sed was not produced" >&2; exit 1; }
+	@touch $@
+
+$(GAWK_STAMP): $(BASH) ports/build-gawk.sh ports/lib/gnu-port.sh | $(BUILD)/.tools
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-gawk.sh
+	@test -x $(GAWK_ROOT)/usr/bin/gawk || { echo "gawk was not produced" >&2; exit 1; }
+	@touch $@
+
+$(FINDUTILS_STAMP): $(BASH) ports/build-findutils.sh ports/lib/gnu-port.sh | $(BUILD)/.tools
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-findutils.sh
+	@test -x $(FINDUTILS_ROOT)/usr/bin/find || { echo "findutils was not produced" >&2; exit 1; }
+	@touch $@
+
+$(DIFFUTILS_STAMP): $(BASH) ports/build-diffutils.sh ports/lib/gnu-port.sh | $(BUILD)/.tools
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-diffutils.sh
+	@test -x $(DIFFUTILS_ROOT)/usr/bin/diff || { echo "diffutils was not produced" >&2; exit 1; }
+	@touch $@
+
+$(TAR_STAMP): $(BASH) ports/build-tar.sh ports/lib/gnu-port.sh | $(BUILD)/.tools
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-tar.sh
+	@test -x $(TAR_ROOT)/usr/bin/tar || { echo "tar was not produced" >&2; exit 1; }
+	@touch $@
+
+$(GZIP_STAMP): $(BASH) ports/build-gzip.sh ports/lib/gnu-port.sh | $(BUILD)/.tools
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-gzip.sh
+	@test -x $(GZIP_ROOT)/usr/bin/gzip || { echo "gzip was not produced" >&2; exit 1; }
+	@touch $@
+
+# iproute2's ip/ss drive the kernel AF_NETLINK/rtnetlink implementation
+# (src/kernel/net/netlink.c). Not an autotools port -- its own configure/make.
+$(IPROUTE2_STAMP): $(BASH) ports/build-iproute2.sh ports/lib/gnu-port.sh | $(BUILD)/.tools
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-iproute2.sh
+	@test -x $(IPROUTE2_ROOT)/usr/sbin/ip || { echo "iproute2 ip was not produced" >&2; exit 1; }
+	@test -x $(IPROUTE2_ROOT)/usr/sbin/ss || { echo "iproute2 ss was not produced" >&2; exit 1; }
+	@touch $@
 
 $(NCURSES_STAMP): $(BASH) ports/build-ncurses.sh ports/terminfo/tunix.ti | $(BUILD)/.tools
 	@mkdir -p $(PORT_OUT)
@@ -268,6 +343,9 @@ $(BUILD)/net.o: src/kernel/net/net.c | $(BUILD)
 $(BUILD)/inet_socket.o: src/kernel/net/inet_socket.c | $(BUILD)
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
+$(BUILD)/netlink.o: src/kernel/net/netlink.c src/kernel/include/net/netlink.h | $(BUILD)
+	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
+
 $(BUILD)/kprintf.o: src/kernel/lib/kprintf.c | $(BUILD)
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
@@ -342,7 +420,7 @@ $(INIT): $(BUILD)/user/init.o $(USER_RUNTIME) src/userspace/linker.ld
 	$(LD) $(USER_LDFLAGS) -o $@ $(USER_RUNTIME) $(BUILD)/user/init.o
 	$(STRIP) --strip-all $@
 
-$(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(BUSYBOX) $(TCC_STAMP) $(BINUTILS_STAMP) $(NANO) $(TTY_CLOCK) $(TTY_TETRIS) $(LUA_STAMP) $(IMAGE_CODECS_STAMP) $(MUSL_SHARED_STAMP) $(IMAGE_CODECS_SHARED_STAMP) $(MBEDTLS_STAMP) $(WALLPAPER_OUTPUT) $(INITRD_FILES)
+$(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAMP) $(TCC_STAMP) $(BINUTILS_STAMP) $(NANO) $(TTY_CLOCK) $(TTY_TETRIS) $(LUA_STAMP) $(IMAGE_CODECS_STAMP) $(MUSL_SHARED_STAMP) $(IMAGE_CODECS_SHARED_STAMP) $(MBEDTLS_STAMP) $(WALLPAPER_OUTPUT) $(INITRD_FILES)
 	rm -rf $(ROOTFS)
 	mkdir -p $(ROOTFS)/bin $(ROOTFS)/sbin $(ROOTFS)/dev $(ROOTFS)/tmp \
 		$(ROOTFS)/run/dbus $(ROOTFS)/run/user/0 $(ROOTFS)/var/tmp \
@@ -354,7 +432,6 @@ $(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(BUSYBOX) $(TCC_STAMP) $(BINUTILS
 	cp -R initrd/. $(ROOTFS)/
 	cp $(INIT) $(ROOTFS)/sbin/init
 	cp $(BASH) $(ROOTFS)/bin/bash
-	cp $(BUSYBOX) $(ROOTFS)/bin/busybox
 	cp $(NANO) $(ROOTFS)/bin/nano
 	cp $(TTY_CLOCK) $(ROOTFS)/bin/tty-clock
 	cp $(TTY_TETRIS) $(ROOTFS)/bin/tty-tetris
@@ -363,6 +440,8 @@ $(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(BUSYBOX) $(TCC_STAMP) $(BINUTILS
 	cp -R $(BINUTILS_ROOT)/. $(ROOTFS)/
 	cp -R $(LUA_ROOT)/. $(ROOTFS)/
 	cp -R $(MUSL_SHARED_ROOT)/. $(ROOTFS)/
+	for root in $(GNU_PORT_ROOTS); do cp -R $$root/. $(ROOTFS)/; done
+	cp -R $(IPROUTE2_ROOT)/. $(ROOTFS)/
 	mkdir -p $(ROOTFS)/usr/bin $(ROOTFS)/usr/include/tunix $(ROOTFS)/usr/lib $(ROOTFS)/usr/share
 	cp src/include/tunix/input_event.h $(ROOTFS)/usr/include/tunix/input_event.h
 	cp src/include/tunix/framebuffer.h $(ROOTFS)/usr/include/tunix/framebuffer.h
@@ -384,6 +463,16 @@ $(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(BUSYBOX) $(TCC_STAMP) $(BINUTILS
 	@test -x $(ROOTFS)/usr/bin/ld || { echo "binutils linker was not installed into the rootfs" >&2; exit 1; }
 	@test -x $(ROOTFS)/usr/bin/ar || { echo "binutils archiver was not installed into the rootfs" >&2; exit 1; }
 	@test -x $(ROOTFS)/usr/bin/lua || { echo "Lua was not installed into the rootfs" >&2; exit 1; }
+	@test -x $(ROOTFS)/usr/bin/ls || { echo "coreutils was not installed into the rootfs" >&2; exit 1; }
+	@test -x $(ROOTFS)/usr/bin/grep || { echo "grep was not installed into the rootfs" >&2; exit 1; }
+	@test -x $(ROOTFS)/usr/bin/sed || { echo "sed was not installed into the rootfs" >&2; exit 1; }
+	@test -x $(ROOTFS)/usr/bin/awk || { echo "gawk was not installed into the rootfs" >&2; exit 1; }
+	@test -x $(ROOTFS)/usr/bin/find || { echo "findutils was not installed into the rootfs" >&2; exit 1; }
+	@test -x $(ROOTFS)/usr/bin/diff || { echo "diffutils was not installed into the rootfs" >&2; exit 1; }
+	@test -x $(ROOTFS)/usr/bin/tar || { echo "tar was not installed into the rootfs" >&2; exit 1; }
+	@test -x $(ROOTFS)/usr/bin/gzip || { echo "gzip was not installed into the rootfs" >&2; exit 1; }
+	@test -x $(ROOTFS)/usr/sbin/ip || { echo "iproute2 ip was not installed into the rootfs" >&2; exit 1; }
+	@test -x $(ROOTFS)/usr/sbin/ss || { echo "iproute2 ss was not installed into the rootfs" >&2; exit 1; }
 	@test -x $(ROOTFS)/usr/bin/https-get || { echo "https-get was not installed into the rootfs" >&2; exit 1; }
 	@test -x $(ROOTFS)/usr/bin/openssl || { echo "openssl (ssl-helper) was not installed into the rootfs" >&2; exit 1; }
 	@test -f $(ROOTFS)/etc/ssl/cert.pem || { echo "TLS CA bundle was not installed into the rootfs" >&2; exit 1; }
@@ -399,7 +488,7 @@ $(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(BUSYBOX) $(TCC_STAMP) $(BINUTILS
 	for tool in as ld ar nm ranlib objcopy objdump readelf size strings strip addr2line; do \
 		ln -sfn ../usr/bin/$$tool $(ROOTFS)/bin/$$tool; \
 	done
-	chmod 0755 $(ROOTFS)/sbin/init $(ROOTFS)/bin/bash $(ROOTFS)/bin/busybox $(ROOTFS)/bin/nano \
+	chmod 0755 $(ROOTFS)/sbin/init $(ROOTFS)/bin/bash $(ROOTFS)/bin/nano \
 		$(ROOTFS)/bin/tty-clock $(ROOTFS)/bin/tty-tetris \
 		$(ROOTFS)/bin/neofetch $(ROOTFS)/bin/ps $(ROOTFS)/bin/free \
 		$(ROOTFS)/bin/uptime $(ROOTFS)/bin/top $(ROOTFS)/bin/loadkeys $(ROOTFS)/bin/sleep $(ROOTFS)/bin/preempt-test $(ROOTFS)/bin/input-test $(ROOTFS)/bin/fb-test $(ROOTFS)/bin/glib-compat-test \
@@ -422,7 +511,6 @@ $(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(BUSYBOX) $(TCC_STAMP) $(BINUTILS
 	@test -x $(ROOTFS)/bin/fb-test || { echo "framebuffer test was not installed" >&2; exit 1; }
 	@test -x $(ROOTFS)/bin/glib-compat-test || { echo "GLib compatibility test was not installed" >&2; exit 1; }
 	ln -s bash $(ROOTFS)/bin/sh
-	@for app in $(BUSYBOX_APPLETS); do ln -s busybox $(ROOTFS)/bin/$$app; done
 	tar --format=ustar --blocking-factor=1 --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf $@ -C $(ROOTFS) .
 
 $(IMAGE): $(BUILD)/stage1.bin $(BUILD)/stage2.bin $(KERNEL) $(INITRAMFS) scripts/build-image.py $(BOOT_CONFIG_STAMP)
@@ -431,12 +519,12 @@ $(IMAGE): $(BUILD)/stage1.bin $(BUILD)/stage2.bin $(KERNEL) $(INITRAMFS) scripts
 
 run: $(IMAGE)
 	rm -f $(BUILD)/serial.log
-	$(QEMU) -machine pc -m 128M -drive format=raw,file=$(IMAGE) \
+	$(QEMU) -machine pc -m 256M -drive format=raw,file=$(IMAGE) \
 		-serial file:$(BUILD)/serial.log -monitor none -no-reboot -no-shutdown \
 		-netdev user,id=net0 -device rtl8139,netdev=net0
 
 headless: $(IMAGE)
-	$(QEMU) -machine pc -m 128M -drive format=raw,file=$(IMAGE) \
+	$(QEMU) -machine pc -m 256M -drive format=raw,file=$(IMAGE) \
 		-nographic -monitor none -serial stdio -no-reboot -no-shutdown \
 		-netdev user,id=net0 -device rtl8139,netdev=net0
 

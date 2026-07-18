@@ -5,7 +5,11 @@
 
 #define TUNIX_MANIFEST_MAGIC 0x4D414E49U
 #define TUNIX_MANIFEST_VERSION 3U
-#define TUNIX_INITRAMFS_MAX_BYTES (64ULL * 1024ULL * 1024ULL)
+/* Must stay in sync with MAX_INITRAMFS_BYTES in scripts/build-image.py.  Bounded
+ * by stage2's low identity map (128 MiB) minus INITRAMFS_PHYSICAL (32 MiB):
+ * load_initramfs() runs before vmm_init(), so its PIO fallback stores through
+ * stage2's mappings.  Raising this requires widening .map_low_128m first. */
+#define TUNIX_INITRAMFS_MAX_BYTES (96ULL * 1024ULL * 1024ULL)
 #define TUNIX_INITRAMFS_MAX_SECTORS (TUNIX_INITRAMFS_MAX_BYTES / 512ULL)
 #define TUNIX_DATA_REGION_ALIGN_SECTORS 2048ULL
 

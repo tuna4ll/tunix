@@ -120,11 +120,35 @@ if grep -q -- '--tcc-switches' <<<"$configure_help"; then
     configure_args+=(--tcc-switches=-static)
 fi
 
+# TinyCC's Makefile stamps a version string by shelling out to git at *parse*
+# time (Makefile:242-246), including "git diff --quiet" to test for a dirty
+# tree.  We build out-of-tree in ports/out/, which sits inside the Tunix working
+# copy, so that diff runs against the whole superproject -- every submodule,
+# gnulib included -- across the WSL /mnt/c DrvFs boundary.  That takes ~90s of
+# pure syscall overhead per make process and looks exactly like a hang, since
+# make prints "Entering directory" and then blocks before any compile line.
+#
+# Overriding both variables on the make command line makes GNU make skip those
+# assignments entirely, so git is never invoked.  We take the hash from the
+# TinyCC checkout itself, which is also the more correct provenance: upstream's
+# version string would otherwise describe Tunix's HEAD, not TinyCC's.
+tcc_branch=$(git -C "$TCC_SOURCE" rev-parse --abbrev-ref HEAD 2>/dev/null || echo no)
+if [[ "$tcc_branch" == no ]]; then
+    TCC_GITHASH=no
+else
+    TCC_GITHASH=$(git -C "$TCC_SOURCE" log -1 --date=short \
+        --pretty="format:%cd $tcc_branch@%h" 2>/dev/null || echo no)
+fi
+# GITMODF is upstream's dirty-tree marker; left empty because computing it is
+# the expensive step we are avoiding.  Setting GITHASH=no disables the whole
+# block, in which case TCC_GITHASH is simply not defined.
+tcc_version_vars=( GITHASH="$TCC_GITHASH" GITMODF="" )
+
 (
     cd "$TCC_BUILD"
     env CC="$TCC_CC" AR="$HOST_AR" RANLIB="$HOST_RANLIB" \
         "$TCC_SOURCE/configure" "${configure_args[@]}"
-    make -j"$JOBS" tcc
+    make -j"$JOBS" "${tcc_version_vars[@]}" tcc
 )
 
 # libtcc1.a is built by the freshly-created TCC, not by the host compiler.
@@ -155,14 +179,14 @@ RUNTIME_CC
 } > "$TCC_RUNTIME_AR"
 chmod 0755 "$TCC_RUNTIME_CC" "$TCC_RUNTIME_AR"
 
-make -C "$TCC_BUILD/lib" -j"$JOBS" \
+make -C "$TCC_BUILD/lib" -j"$JOBS" "${tcc_version_vars[@]}" \
     XCC=../tcc-runtime-cc \
     XAR=../tcc-runtime-ar
 
 cp -a "$SYSROOT/usr/include/." "$TCC_ROOT/usr/include/"
 cp -a "$SYSROOT/usr/lib/." "$TCC_ROOT/usr/lib/"
 
-make -C "$TCC_BUILD" install \
+make -C "$TCC_BUILD" install "${tcc_version_vars[@]}" \
     bindir="$TCC_ROOT/usr/bin" \
     libdir="$TCC_ROOT/usr/lib" \
     tccdir="$TCC_ROOT/usr/lib/tcc" \

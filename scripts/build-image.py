@@ -11,7 +11,11 @@ KERNEL_SECTORS = 512
 INITRAMFS_LBA = KERNEL_LBA + KERNEL_SECTORS
 MANIFEST_MAGIC = 0x4D414E49
 MANIFEST_VERSION = 3
-MAX_INITRAMFS_BYTES = 64 * 1024 * 1024
+# Must stay in sync with TUNIX_INITRAMFS_MAX_BYTES in
+# src/kernel/include/boot_manifest.h.  The ceiling is set by stage2's low
+# identity map (128 MiB) minus INITRAMFS_PHYSICAL (32 MiB), since the kernel
+# loads the archive before installing its own page tables.
+MAX_INITRAMFS_BYTES = 96 * 1024 * 1024
 DATA_REGION_ALIGN_SECTORS = 2048
 DATA_REGION_BYTES = 64 * 1024 * 1024
 

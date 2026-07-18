@@ -1,21 +1,21 @@
 /*
  * ssl-helper: a minimal `openssl s_client` shim for Tunix, backed by mbedTLS.
  *
- * BusyBox wget (FEATURE_WGET_OPENSSL) implements HTTPS by spawning an external
- * TLS helper as if it were OpenSSL:
+ * It implements the `openssl s_client` contract that HTTPS-capable clients use
+ * to delegate TLS to an external helper:
  *
  *     openssl s_client -quiet -connect HOST:PORT [-servername NAME] \
  *             [-verify 100 -verify_return_error -verify_hostname NAME | -verify_ip IP]
  *
- * The helper inherits a socketpair on fd 0/1 (the *plaintext* side that wget
- * reads and writes) and is expected to open its own TCP connection to
+ * The helper inherits a socketpair on fd 0/1 (the *plaintext* side that the
+ * caller reads and writes) and is expected to open its own TCP connection to
  * HOST:PORT, run the TLS handshake and then shuttle cleartext between fd 0/1
  * and the encrypted connection. Certificate verification is the helper's job:
  * with -verify_return_error a bad certificate must abort before any data flows.
  *
- * We install this program as /usr/bin/openssl so wget's BB_EXECVP("openssl")
- * finds it. It only understands `s_client`; anything else is rejected. DNS now
- * works through getaddrinfo(), and TLS reuses the same mbedTLS setup as
+ * We install this program as /usr/bin/openssl so an execvp("openssl") from a
+ * client finds it. It only understands `s_client`; anything else is rejected.
+ * DNS works through getaddrinfo(), and TLS reuses the same mbedTLS setup as
  * https-get (SNI + verification against /etc/ssl/cert.pem).
  */
 #include <stdio.h>

@@ -13,6 +13,7 @@
 #include "include/vfs.h"
 #include "include/unix_socket.h"
 #include "include/net/inet_socket.h"
+#include "include/net/netlink.h"
 
 #define EAGAIN 11
 #define EBADF 9
@@ -30,6 +31,7 @@ struct file *file_open_node(struct vfs_node *node, uint32_t flags) {
     file->pipe = NULL;
     file->socket = NULL;
     file->inet_socket = NULL;
+    file->netlink_socket = NULL;
     file->pty = NULL;
     file->input_reader = NULL;
     file->eventfd = NULL;
@@ -63,6 +65,7 @@ struct file *file_create_pipe_end(struct pipe_buffer *pipe, int write_end) {
     file->pipe = pipe;
     file->socket = NULL;
     file->inet_socket = NULL;
+    file->netlink_socket = NULL;
     file->pty = NULL;
     file->input_reader = NULL;
     file->eventfd = NULL;
@@ -87,6 +90,7 @@ struct file *file_create_socket(struct unix_socket *socket) {
     file->pipe = NULL;
     file->socket = socket;
     file->inet_socket = NULL;
+    file->netlink_socket = NULL;
     file->pty = NULL;
     file->input_reader = NULL;
     file->eventfd = NULL;
@@ -108,6 +112,29 @@ struct file *file_create_inet_socket(struct inet_socket *socket) {
     file->pipe = NULL;
     file->socket = NULL;
     file->inet_socket = socket;
+    file->netlink_socket = NULL;
+    file->pty = NULL;
+    file->input_reader = NULL;
+    file->eventfd = NULL;
+    file->timerfd = NULL;
+    file->epoll = NULL;
+    file->inotify = NULL;
+    return file;
+}
+
+struct file *file_create_netlink_socket(struct netlink_socket *socket) {
+    if (!socket) return NULL;
+    struct file *file = (struct file *)kmalloc(sizeof(*file));
+    if (!file) return NULL;
+    file->refs = 1;
+    file->kind = FILE_KIND_NETLINK_SOCKET;
+    file->flags = 0;
+    file->offset = 0;
+    file->node = NULL;
+    file->pipe = NULL;
+    file->socket = NULL;
+    file->inet_socket = NULL;
+    file->netlink_socket = socket;
     file->pty = NULL;
     file->input_reader = NULL;
     file->eventfd = NULL;
@@ -128,6 +155,7 @@ static struct file *file_create_special(int kind, uint32_t flags) {
     file->pipe = NULL;
     file->socket = NULL;
     file->inet_socket = NULL;
+    file->netlink_socket = NULL;
     file->pty = NULL;
     file->input_reader = NULL;
     file->eventfd = NULL;
@@ -211,6 +239,8 @@ void file_unref(struct file *file) {
         unix_socket_unref(file->socket);
     if (file->kind == FILE_KIND_INET_SOCKET && file->inet_socket)
         inet_socket_unref(file->inet_socket);
+    if (file->kind == FILE_KIND_NETLINK_SOCKET && file->netlink_socket)
+        netlink_socket_unref(file->netlink_socket);
     if ((file->kind == FILE_KIND_PTY_MASTER || file->kind == FILE_KIND_PTY_SLAVE) && file->pty)
         pty_close_endpoint(file->pty, file->kind == FILE_KIND_PTY_MASTER);
     kfree(file);
@@ -221,6 +251,7 @@ int64_t file_read(struct file *file, size_t size, void *buffer) {
     if (file->kind == FILE_KIND_PIPE_READ) return pipe_read(file->pipe, size, buffer);
     if (file->kind == FILE_KIND_SOCKET) return unix_socket_read(file->socket, size, buffer);
     if (file->kind == FILE_KIND_INET_SOCKET) return inet_socket_read(file->inet_socket, size, buffer);
+    if (file->kind == FILE_KIND_NETLINK_SOCKET) return netlink_socket_read(file->netlink_socket, size, buffer);
     if (file->kind == FILE_KIND_PTY_MASTER || file->kind == FILE_KIND_PTY_SLAVE)
         return pty_read(file->pty, file->kind == FILE_KIND_PTY_MASTER, size, buffer);
     if (file->kind == FILE_KIND_INPUT)
@@ -243,6 +274,7 @@ int64_t file_write(struct file *file, size_t size, const void *buffer) {
     if (!file || !buffer) return -EBADF;
     if (file->kind == FILE_KIND_SOCKET) return unix_socket_write(file->socket, size, buffer);
     if (file->kind == FILE_KIND_INET_SOCKET) return inet_socket_write(file->inet_socket, size, buffer);
+    if (file->kind == FILE_KIND_NETLINK_SOCKET) return netlink_socket_write(file->netlink_socket, size, buffer);
     if (file->kind == FILE_KIND_PTY_MASTER || file->kind == FILE_KIND_PTY_SLAVE)
         return pty_write(file->pty, file->kind == FILE_KIND_PTY_MASTER, size, buffer);
     if (file->kind == FILE_KIND_PIPE_WRITE) {
@@ -281,6 +313,9 @@ uint32_t file_poll_events(struct file *file, uint32_t requested) {
         if (inet_socket_read_ready(file->inet_socket)) events |= pollin;
         if (inet_socket_write_ready(file->inet_socket)) events |= pollout;
         if (inet_socket_peer_closed(file->inet_socket)) events |= pollhup | pollrdhup;
+    } else if (file->kind == FILE_KIND_NETLINK_SOCKET) {
+        if (netlink_socket_read_ready(file->netlink_socket)) events |= pollin;
+        if (netlink_socket_write_ready(file->netlink_socket)) events |= pollout;
     } else if (file->kind == FILE_KIND_PTY_MASTER || file->kind == FILE_KIND_PTY_SLAVE) {
         int master = file->kind == FILE_KIND_PTY_MASTER;
         if (pty_read_ready(file->pty, master)) events |= pollin;

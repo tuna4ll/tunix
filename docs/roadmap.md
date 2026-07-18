@@ -7,8 +7,8 @@ to the kernel and userspace that already exist.
 ## 1. TCP Stack
 
 Tunix already has RTL8139, ARP, IPv4, ICMP, UDP, raw sockets, packet sockets,
-and BusyBox network tools. The missing network primitive is `AF_INET`
-`SOCK_STREAM`.
+and `AF_NETLINK`/rtnetlink with the iproute2 `ip` and `ss` tools. The missing
+network primitive is `AF_INET` `SOCK_STREAM`.
 
 First target:
 
@@ -28,7 +28,7 @@ Done when:
 
 - A tiny Tunix-native TCP client can fetch a plain HTTP response from QEMU user
   networking.
-- BusyBox or a small custom tool can open a TCP connection without raw socket
+- A small custom tool can open a TCP connection without raw socket
   workarounds.
 
 ## 2. Persistent File System

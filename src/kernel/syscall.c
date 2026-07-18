@@ -25,6 +25,7 @@
 #include "include/vmm.h"
 #include "include/unix_socket.h"
 #include "include/net/inet_socket.h"
+#include "include/net/netlink.h"
 #include "include/net/net.h"
 
 extern void kprintf(const char *fmt, ...);
@@ -944,6 +945,13 @@ static struct inet_socket *inet_socket_from_fd(int fd) {
     return file->kind == FILE_KIND_INET_SOCKET ? file->inet_socket : NULL;
 }
 
+static struct netlink_socket *netlink_socket_from_fd(int fd) {
+    struct process *process = process_current();
+    if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->fds[fd]) return NULL;
+    struct file *file = process->fds[fd];
+    return file->kind == FILE_KIND_NETLINK_SOCKET ? file->netlink_socket : NULL;
+}
+
 static int64_t sys_socket(int domain, int type, int protocol) {
     int base_type = type & 0xF;
     int type_flags = type & ~0xF;
@@ -964,6 +972,17 @@ static int64_t sys_socket(int domain, int type, int protocol) {
         if (!socket) return base_type == TUNIX_SOCK_STREAM ? -EOPNOTSUPP : -EPROTONOSUPPORT;
         struct file *file = file_create_inet_socket(socket);
         if (!file) { inet_socket_unref(socket); return -ENOMEM; }
+        file->flags = (uint32_t)(type_flags & SOCK_NONBLOCK);
+        return install_new_file(file, type_flags & SOCK_CLOEXEC);
+    }
+    if (domain == TUNIX_AF_NETLINK) {
+        /* Netlink is message-oriented (SOCK_RAW/SOCK_DGRAM); the protocol
+           argument selects the netlink family (NETLINK_ROUTE, SOCK_DIAG). */
+        if (base_type != TUNIX_SOCK_RAW && base_type != TUNIX_SOCK_DGRAM) return -EPROTONOSUPPORT;
+        struct netlink_socket *socket = netlink_socket_create(protocol);
+        if (!socket) return -EPROTONOSUPPORT;
+        struct file *file = file_create_netlink_socket(socket);
+        if (!file) { netlink_socket_unref(socket); return -ENOMEM; }
         file->flags = (uint32_t)(type_flags & SOCK_NONBLOCK);
         return install_new_file(file, type_flags & SOCK_CLOEXEC);
     }
@@ -1026,6 +1045,13 @@ static int64_t sys_bind(int fd, uint64_t user_address, uint64_t length) {
         int status = copy_sockaddr_un(user_address, length, &address);
         return status < 0 ? status : unix_socket_bind(unix_value, &address, (size_t)length);
     }
+    struct netlink_socket *netlink_value = netlink_socket_from_fd(fd);
+    if (netlink_value) {
+        uint8_t address[32];
+        if (length > sizeof(address)) length = sizeof(address);
+        if (length && copy_from_user(address, user_address, (size_t)length) != 0) return -EFAULT;
+        return netlink_socket_bind(netlink_value, length ? address : NULL, (size_t)length);
+    }
     struct inet_socket *inet_value = inet_socket_from_fd(fd);
     if (!inet_value || !user_address || length < 2 || length > 32) return -EBADF;
     uint8_t address[32];
@@ -1086,6 +1112,13 @@ static int64_t sys_accept(int fd, uint64_t user_address, uint64_t user_length, i
 
 static int64_t sys_sendto(int fd, uint64_t user_data, size_t length, int flags,
                           uint64_t user_address, uint64_t address_length) {
+    struct netlink_socket *netlink = netlink_socket_from_fd(fd);
+    if (netlink) {
+        if (length > 4096U) return -EMSGSIZE;
+        uint8_t request[4096];
+        if (length && copy_from_user(request, user_data, length) != 0) return -EFAULT;
+        return netlink_socket_sendto(netlink, request, length, flags, NULL, 0);
+    }
     struct inet_socket *socket = inet_socket_from_fd(fd);
     if (!socket) return -EBADF;
     if (length > 2048U) return -EMSGSIZE;
@@ -1103,6 +1136,26 @@ static int64_t sys_sendto(int fd, uint64_t user_data, size_t length, int flags,
 
 static int64_t sys_recvfrom(int fd, uint64_t user_data, size_t length, int flags,
                             uint64_t user_address, uint64_t user_address_length) {
+    struct netlink_socket *netlink = netlink_socket_from_fd(fd);
+    if (netlink) {
+        if (length > 4096U) length = 4096U;
+        uint8_t data[4096];
+        struct tunix_sockaddr_nl nl_address;
+        size_t nl_length = sizeof(nl_address);
+        int64_t result = netlink_socket_recvfrom(netlink, data, length, flags,
+                                                 user_address ? &nl_address : NULL,
+                                                 user_address ? &nl_length : NULL);
+        if (result < 0) return result;
+        if (result && copy_to_user(user_data, data, (size_t)result) != 0) return -EFAULT;
+        if (user_address) {
+            if (copy_to_user(user_address, &nl_address, nl_length) != 0) return -EFAULT;
+            if (user_address_length) {
+                uint32_t output_length = (uint32_t)nl_length;
+                if (copy_to_user(user_address_length, &output_length, sizeof(output_length)) != 0) return -EFAULT;
+            }
+        }
+        return result;
+    }
     struct inet_socket *socket = inet_socket_from_fd(fd);
     if (!socket) return -EBADF;
     if (length > 2048U) length = 2048U;
@@ -1230,6 +1283,10 @@ static int64_t sys_sendmsg(int fd, uint64_t user_message, int flags) {
         if (result < 0) release_file_array(files, file_count);
         return result;
     }
+
+    struct netlink_socket *netlink = netlink_socket_from_fd(fd);
+    if (netlink)
+        return netlink_socket_sendto(netlink, data, length, flags, NULL, 0);
 
     struct inet_socket *socket = inet_socket_from_fd(fd);
     if (!socket) return -EBADF;
@@ -1394,6 +1451,26 @@ static int64_t sys_recvmsg(int fd, uint64_t user_message, int flags) {
         return result;
     }
 
+    struct netlink_socket *netlink = netlink_socket_from_fd(fd);
+    if (netlink) {
+        struct tunix_sockaddr_nl nl_address;
+        size_t nl_length = sizeof(nl_address);
+        int64_t result = netlink_socket_recvfrom(netlink, data, capacity, flags,
+                                                 message.name ? &nl_address : NULL,
+                                                 message.name ? &nl_length : NULL);
+        if (result < 0) return result;
+        if (scatter_message_data(&message, data, (size_t)result) != 0) return -EFAULT;
+        if (message.name) {
+            size_t copy = message.name_length < nl_length ? message.name_length : nl_length;
+            if (copy && copy_to_user(message.name, &nl_address, copy) != 0) return -EFAULT;
+            message.name_length = (uint32_t)nl_length;
+        }
+        message.control_length = 0;
+        message.flags = 0;
+        if (copy_to_user(user_message, &message, sizeof(message)) != 0) return -EFAULT;
+        return result;
+    }
+
     struct inet_socket *socket = inet_socket_from_fd(fd);
     if (!socket) return -EBADF;
     uint8_t address[32];
@@ -1433,6 +1510,18 @@ static int64_t sys_socket_name(int fd, uint64_t user_address, uint64_t user_leng
             0 : -EFAULT;
     }
 
+    struct netlink_socket *netlink = netlink_socket_from_fd(fd);
+    if (netlink) {
+        if (peer) return -EOPNOTSUPP;
+        struct tunix_sockaddr_nl nl;
+        size_t length = sizeof(nl);
+        int status = netlink_socket_getsockname(netlink, &nl, &length);
+        if (status < 0) return status;
+        size_t copy = supplied < length ? supplied : length;
+        if (copy && copy_to_user(user_address, &nl, copy) != 0) return -EFAULT;
+        uint32_t output_length = (uint32_t)length;
+        return copy_to_user(user_length, &output_length, sizeof(output_length)) == 0 ? 0 : -EFAULT;
+    }
     struct inet_socket *socket = inet_socket_from_fd(fd);
     if (!socket) return -EBADF;
     uint8_t address[32];
@@ -1454,6 +1543,12 @@ static int64_t sys_setsockopt(int fd, int level, int option,
         int32_t enabled;
         if (copy_from_user(&enabled, user_value, sizeof(enabled)) != 0) return -EFAULT;
         unix_socket_set_passcred(unix_value, enabled != 0);
+        return 0;
+    }
+    if (netlink_socket_from_fd(fd)) {
+        /* iproute2 sets SO_SNDBUF/SO_RCVBUF and a few SOL_NETLINK options while
+           opening the socket; accept them so rtnl_open() does not bail out. */
+        (void)level; (void)option; (void)user_value; (void)length;
         return 0;
     }
     struct inet_socket *socket = inet_socket_from_fd(fd);
@@ -1498,6 +1593,16 @@ static int64_t sys_getsockopt(int fd, int level, int option,
             return copy_to_user(user_length, &length, sizeof(length)) == 0 ? 0 : -EFAULT;
         }
         return -EOPNOTSUPP;
+    }
+    if (netlink_socket_from_fd(fd)) {
+        /* Report a plausible buffer size for any query so iproute2's socket
+           setup path never trips on an error. */
+        (void)level; (void)option;
+        int32_t value = 32768;
+        if (supplied < sizeof(value)) return -EINVAL;
+        if (copy_to_user(user_value, &value, sizeof(value)) != 0) return -EFAULT;
+        uint32_t output_length = sizeof(value);
+        return copy_to_user(user_length, &output_length, sizeof(output_length)) == 0 ? 0 : -EFAULT;
     }
     struct inet_socket *socket = inet_socket_from_fd(fd);
     if (!socket) return -EBADF;

@@ -1,9 +1,6 @@
 [submodule "ports/src/bash"]
 	path = ports/src/bash
 	url = https://git.savannah.gnu.org/git/bash.git
-[submodule "ports/src/busybox"]
-	path = ports/src/busybox
-	url = https://github.com/mirror/busybox.git
 [submodule "ports/src/musl"]
 	path = ports/src/musl
 	url = https://git.musl-libc.org/git/musl
@@ -42,3 +39,30 @@
 [submodule "ports/src/binutils"]
 	path = ports/src/binutils
 	url = https://sourceware.org/git/binutils-gdb.git
+[submodule "ports/src/coreutils/coreutils"]
+	path = ports/src/coreutils/coreutils
+	url = https://github.com/coreutils/coreutils
+[submodule "ports/src/grep"]
+	path = ports/src/grep
+	url = https://git.savannah.gnu.org/git/grep.git
+[submodule "ports/src/sed"]
+	path = ports/src/sed
+	url = https://git.savannah.gnu.org/git/sed.git
+[submodule "ports/src/findutils"]
+	path = ports/src/findutils
+	url = https://git.savannah.gnu.org/git/findutils.git
+[submodule "ports/src/diffutils"]
+	path = ports/src/diffutils
+	url = https://git.savannah.gnu.org/git/diffutils.git
+[submodule "ports/src/tar"]
+	path = ports/src/tar
+	url = https://git.savannah.gnu.org/git/tar.git
+[submodule "ports/src/gawk"]
+	path = ports/src/gawk
+	url = https://git.savannah.gnu.org/git/gawk.git
+[submodule "ports/src/gzip"]
+	path = ports/src/gzip
+	url = https://git.savannah.gnu.org/git/gzip.git
+[submodule "ports/src/iproute2"]
+	path = ports/src/iproute2
+	url = https://git.kernel.org/pub/scm/network/iproute2/iproute2.git
