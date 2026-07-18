@@ -135,6 +135,7 @@ static int64_t proc_meminfo_read(struct vfs_node *node, uint64_t offset,
     text_string(&text, "MemUsed:        "); text_unsigned(&text, used); text_string(&text, " kB\n");
     text_string(&text, "Buffers:        0 kB\nCached:         0 kB\n");
     text_string(&text, "SwapTotal:      0 kB\nSwapFree:       0 kB\n");
+    text_string(&text, "Shmem:          0 kB\nSReclaimable:   0 kB\n");
     return text_read(&text, offset, size, output);
 }
 
@@ -180,6 +181,17 @@ static int64_t proc_stat_read(struct vfs_node *node, uint64_t offset,
     text_string(&text, "cpu  "); text_unsigned(&text, runtime_ticks);
     text_string(&text, " 0 0 "); text_unsigned(&text, idle_ticks);
     text_string(&text, " 0 0 0 0 0 0\n");
+    /* Tunix is uniprocessor, but the aggregate "cpu" line alone leaves per-CPU
+       consumers (htop's CPU meter) reading zeroes, so mirror it as cpu0. */
+    text_string(&text, "cpu0 "); text_unsigned(&text, runtime_ticks);
+    text_string(&text, " 0 0 "); text_unsigned(&text, idle_ticks);
+    text_string(&text, " 0 0 0 0 0 0\n");
+    uint64_t now = time_epoch_seconds();
+    uint64_t uptime_seconds = time_uptime_ns() / 1000000000ULL;
+    text_string(&text, "btime ");
+    text_unsigned(&text, now > uptime_seconds ? now - uptime_seconds : 0);
+    text_char(&text, '\n');
+    text_string(&text, "ctxt 0\n");
     text_string(&text, "processes "); text_unsigned(&text, process_created_count()); text_char(&text, '\n');
     text_string(&text, "procs_running "); text_unsigned(&text, process_runnable_count()); text_char(&text, '\n');
     text_string(&text, "procs_blocked "); text_unsigned(&text, process_blocked_count()); text_char(&text, '\n');
@@ -322,8 +334,12 @@ static int64_t proc_status_read(struct vfs_node *node, uint64_t offset,
 
     text_string(&text, "Name:\t"); text_string(&text, process->name); text_char(&text, '\n');
     text_string(&text, "State:\t"); text_string(&text, state_name(process)); text_char(&text, '\n');
+    text_string(&text, "Tgid:\t"); text_unsigned(&text, process->tgid); text_char(&text, '\n');
     text_string(&text, "Pid:\t"); text_unsigned(&text, process->pid); text_char(&text, '\n');
     text_string(&text, "PPid:\t"); text_unsigned(&text, process->ppid); text_char(&text, '\n');
+    /* Tunix runs everything as root; getuid(2) reports 0 to match. */
+    text_string(&text, "Uid:\t0\t0\t0\t0\n");
+    text_string(&text, "Gid:\t0\t0\t0\t0\n");
     text_string(&text, "Pgid:\t"); text_unsigned(&text, process->pgid); text_char(&text, '\n');
     text_string(&text, "Sid:\t"); text_unsigned(&text, process->sid); text_char(&text, '\n');
     text_string(&text, "VmSize:\t"); text_unsigned(&text, memory_kb); text_string(&text, " kB\n");
@@ -335,6 +351,10 @@ static int64_t proc_status_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
+/* Linux /proc/<pid>/stat. Field numbers below follow proc(5); consumers such
+   as htop walk the fields positionally and reject a process outright if the
+   line runs short, so every field through (52) is emitted even when Tunix has
+   no meaningful value for it. */
 static int64_t proc_pid_stat_read(struct vfs_node *node, uint64_t offset,
                                   size_t size, void *output) {
     struct process *process = process_find(node_pid(node));
@@ -344,18 +364,64 @@ static int64_t proc_pid_stat_read(struct vfs_node *node, uint64_t offset,
     uint64_t ticks = process_runtime_ns(process) / 10000000ULL;
     uint64_t start = process->start_time_ns / 10000000ULL;
 
-    text_unsigned(&text, process->pid);
-    text_string(&text, " ("); text_string(&text, process->name); text_string(&text, ") ");
-    text_char(&text, state_code(process)); text_char(&text, ' ');
-    text_unsigned(&text, process->ppid); text_char(&text, ' ');
-    text_unsigned(&text, process->pgid); text_char(&text, ' ');
-    text_unsigned(&text, process->sid);
-    text_string(&text, " 0 0 0 0 0 0 0 0 0 ");
-    text_unsigned(&text, ticks);
-    text_string(&text, " 0 0 0 20 0 1 0 ");
-    text_unsigned(&text, start); text_char(&text, ' ');
-    text_unsigned(&text, rss_pages * 4096ULL); text_char(&text, ' ');
-    text_signed(&text, (int64_t)rss_pages);
+    text_unsigned(&text, process->pid);                                 /* (1) pid */
+    text_string(&text, " ("); text_string(&text, process->name);
+    text_string(&text, ") ");                                           /* (2) comm */
+    text_char(&text, state_code(process)); text_char(&text, ' ');       /* (3) state */
+    text_unsigned(&text, process->ppid); text_char(&text, ' ');         /* (4) ppid */
+    text_unsigned(&text, process->pgid); text_char(&text, ' ');         /* (5) pgrp */
+    text_unsigned(&text, process->sid); text_char(&text, ' ');          /* (6) session */
+    text_string(&text, "0 ");                                           /* (7) tty_nr */
+    text_signed(&text, -1); text_char(&text, ' ');                      /* (8) tpgid */
+    text_string(&text, "0 ");                                           /* (9) flags */
+    text_string(&text, "0 0 0 0 ");                     /* (10-13) min/maj faults */
+    text_unsigned(&text, ticks); text_char(&text, ' ');                 /* (14) utime */
+    text_string(&text, "0 ");                                           /* (15) stime */
+    text_string(&text, "0 0 ");                                  /* (16-17) c[us]time */
+    text_string(&text, "20 ");                                          /* (18) priority */
+    text_string(&text, "0 ");                                           /* (19) nice */
+    text_string(&text, "1 ");                                           /* (20) num_threads */
+    text_string(&text, "0 ");                                           /* (21) itrealvalue */
+    text_unsigned(&text, start); text_char(&text, ' ');                 /* (22) starttime */
+    text_unsigned(&text, rss_pages * 4096ULL); text_char(&text, ' ');   /* (23) vsize */
+    text_unsigned(&text, rss_pages); text_char(&text, ' ');             /* (24) rss */
+    /* (25-38) rsslim, text/data/stack bounds, signal masks, wchan, swap counts.
+       Tunix does not track these; zero keeps the field count correct. */
+    text_string(&text, "0 0 0 0 0 0 0 0 0 0 0 0 0 0 ");
+    text_string(&text, "0 ");                                           /* (39) processor */
+    text_string(&text, "0 0 ");                          /* (40-41) rt_priority, policy */
+    text_string(&text, "0 0 0 ");            /* (42-44) blkio, guest times */
+    text_string(&text, "0 0 0 0 0 0 0 ");        /* (45-51) start/end data, brk, args, env */
+    text_string(&text, "0");                                            /* (52) exit_code */
+    text_char(&text, '\n');
+    return text_read(&text, offset, size, output);
+}
+
+/* Linux /proc/<pid>/statm: seven page counts. Tunix has no separate text/data
+   accounting, so resident pages stand in for the size and data fields. */
+static int64_t proc_pid_statm_read(struct vfs_node *node, uint64_t offset,
+                                   size_t size, void *output) {
+    struct process *process = process_find(node_pid(node));
+    if (!process) return 0;
+    struct text_buffer text = {{0}, 0};
+    uint64_t pages = vmm_count_user_pages(process->cr3);
+
+    text_unsigned(&text, pages); text_char(&text, ' ');   /* size */
+    text_unsigned(&text, pages); text_char(&text, ' ');   /* resident */
+    text_string(&text, "0 ");                             /* shared */
+    text_string(&text, "0 ");                             /* text */
+    text_string(&text, "0 ");                             /* lib */
+    text_unsigned(&text, pages); text_char(&text, ' ');   /* data */
+    text_string(&text, "0\n");                            /* dt */
+    return text_read(&text, offset, size, output);
+}
+
+static int64_t proc_pid_comm_read(struct vfs_node *node, uint64_t offset,
+                                  size_t size, void *output) {
+    struct process *process = process_find(node_pid(node));
+    if (!process) return 0;
+    struct text_buffer text = {{0}, 0};
+    text_string(&text, process->name);
     text_char(&text, '\n');
     return text_read(&text, offset, size, output);
 }
@@ -382,17 +448,40 @@ static struct vfs_node *virtual_file(struct vfs_node *parent, const char *name,
     return node;
 }
 
-static void decimal_path(uint64_t pid, const char *suffix, char output[64]) {
+#define PROC_PATH_MAX 96
+
+static size_t path_append_string(char *output, size_t at, const char *text) {
+    while (*text && at + 1 < PROC_PATH_MAX) output[at++] = *text++;
+    return at;
+}
+
+static size_t path_append_decimal(char *output, size_t at, uint64_t value) {
     char digits[32];
     size_t count = 0;
     do {
-        digits[count++] = (char)('0' + pid % 10ULL);
-        pid /= 10ULL;
-    } while (pid);
-    size_t at = 0;
-    output[at++] = '/'; output[at++] = 'p'; output[at++] = 'r'; output[at++] = 'o'; output[at++] = 'c'; output[at++] = '/';
-    while (count) output[at++] = digits[--count];
-    if (suffix) while (*suffix && at + 1 < 64) output[at++] = *suffix++;
+        digits[count++] = (char)('0' + value % 10ULL);
+        value /= 10ULL;
+    } while (value);
+    while (count && at + 1 < PROC_PATH_MAX) output[at++] = digits[--count];
+    return at;
+}
+
+/* "/proc/<pid>" followed by the optional suffix. */
+static void decimal_path(uint64_t pid, const char *suffix, char output[PROC_PATH_MAX]) {
+    size_t at = path_append_string(output, 0, "/proc/");
+    at = path_append_decimal(output, at, pid);
+    if (suffix) at = path_append_string(output, at, suffix);
+    output[at] = '\0';
+}
+
+/* "/proc/<pid>/task/<pid>" followed by the optional suffix. Tunix has no real
+   threads, so a process is its own single task entry. */
+static void task_path(uint64_t pid, const char *suffix, char output[PROC_PATH_MAX]) {
+    size_t at = path_append_string(output, 0, "/proc/");
+    at = path_append_decimal(output, at, pid);
+    at = path_append_string(output, at, "/task/");
+    at = path_append_decimal(output, at, pid);
+    if (suffix) at = path_append_string(output, at, suffix);
     output[at] = '\0';
 }
 
@@ -423,22 +512,46 @@ void procfs_init(void) {
     }
 }
 
+static void populate_process_files(struct vfs_node *directory, uint64_t pid) {
+    if (!vfs_find_child(directory, "status")) virtual_file(directory, "status", proc_status_read, pid);
+    if (!vfs_find_child(directory, "stat")) virtual_file(directory, "stat", proc_pid_stat_read, pid);
+    if (!vfs_find_child(directory, "cmdline")) virtual_file(directory, "cmdline", proc_cmdline_read, pid);
+    if (!vfs_find_child(directory, "statm")) virtual_file(directory, "statm", proc_pid_statm_read, pid);
+    if (!vfs_find_child(directory, "comm")) virtual_file(directory, "comm", proc_pid_comm_read, pid);
+}
+
 void procfs_register_process(struct process *process) {
     if (!process) return;
-    char path[64];
+    char path[PROC_PATH_MAX];
     decimal_path(process->pid, NULL, path);
     struct vfs_node *directory = vfs_mkdir_p(path);
     if (!directory) return;
     directory->mode = 0555;
-    if (!vfs_find_child(directory, "status")) virtual_file(directory, "status", proc_status_read, process->pid);
-    if (!vfs_find_child(directory, "stat")) virtual_file(directory, "stat", proc_pid_stat_read, process->pid);
-    if (!vfs_find_child(directory, "cmdline")) virtual_file(directory, "cmdline", proc_cmdline_read, process->pid);
+    populate_process_files(directory, process->pid);
+
+    /* Linux always exposes a per-thread view under task/<tid>/, and tools such
+       as htop read the main thread's stat from there rather than from
+       /proc/<pid>/stat. Mirror the process as its own single task. */
+    task_path(process->pid, NULL, path);
+    struct vfs_node *task = vfs_mkdir_p(path);
+    if (!task) return;
+    task->mode = 0555;
+    populate_process_files(task, process->pid);
 }
 
 void procfs_unregister_process(uint64_t pid) {
-    char path[64];
+    char path[PROC_PATH_MAX];
+    task_path(pid, "/status", path); (void)vfs_remove(path, 0);
+    task_path(pid, "/stat", path); (void)vfs_remove(path, 0);
+    task_path(pid, "/cmdline", path); (void)vfs_remove(path, 0);
+    task_path(pid, "/statm", path); (void)vfs_remove(path, 0);
+    task_path(pid, "/comm", path); (void)vfs_remove(path, 0);
+    task_path(pid, NULL, path); (void)vfs_remove(path, 1);
+    decimal_path(pid, "/task", path); (void)vfs_remove(path, 1);
     decimal_path(pid, "/status", path); (void)vfs_remove(path, 0);
     decimal_path(pid, "/stat", path); (void)vfs_remove(path, 0);
     decimal_path(pid, "/cmdline", path); (void)vfs_remove(path, 0);
+    decimal_path(pid, "/statm", path); (void)vfs_remove(path, 0);
+    decimal_path(pid, "/comm", path); (void)vfs_remove(path, 0);
     decimal_path(pid, NULL, path); (void)vfs_remove(path, 1);
 }

@@ -66,3 +66,6 @@
 [submodule "ports/src/iproute2"]
 	path = ports/src/iproute2
 	url = https://git.kernel.org/pub/scm/network/iproute2/iproute2.git
+[submodule "ports/src/htop"]
+	path = ports/src/htop
+	url = https://github.com/htop-dev/htop

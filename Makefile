@@ -47,6 +47,7 @@ NCURSES_STAMP := $(PORT_OUT)/.ncurses-ready
 NANO := $(PORT_OUT)/nano
 TTY_CLOCK := $(PORT_OUT)/tty-clock
 TTY_TETRIS := $(PORT_OUT)/tty-tetris
+HTOP := $(PORT_OUT)/htop
 LUA := $(PORT_OUT)/lua
 LUA_ROOT := $(PORT_OUT)/lua-root
 LUA_STAMP := $(PORT_OUT)/.lua-ready
@@ -254,6 +255,10 @@ $(TTY_TETRIS): $(BASH) ports/build-tty-tetris.sh | $(BUILD)/.tools
 	@mkdir -p $(PORT_OUT)
 	OUT="$(abspath $(PORT_OUT))" bash ports/build-tty-tetris.sh
 
+$(HTOP): $(NCURSES_STAMP) ports/build-htop.sh | $(BUILD)/.tools
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-htop.sh
+
 $(LUA_STAMP): $(BASH) ports/build-lua.sh | $(BUILD)/.tools
 	@mkdir -p $(PORT_OUT)
 	OUT="$(abspath $(PORT_OUT))" bash ports/build-lua.sh
@@ -420,7 +425,7 @@ $(INIT): $(BUILD)/user/init.o $(USER_RUNTIME) src/userspace/linker.ld
 	$(LD) $(USER_LDFLAGS) -o $@ $(USER_RUNTIME) $(BUILD)/user/init.o
 	$(STRIP) --strip-all $@
 
-$(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAMP) $(TCC_STAMP) $(BINUTILS_STAMP) $(NANO) $(TTY_CLOCK) $(TTY_TETRIS) $(LUA_STAMP) $(IMAGE_CODECS_STAMP) $(MUSL_SHARED_STAMP) $(IMAGE_CODECS_SHARED_STAMP) $(MBEDTLS_STAMP) $(WALLPAPER_OUTPUT) $(INITRD_FILES)
+$(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAMP) $(TCC_STAMP) $(BINUTILS_STAMP) $(NANO) $(TTY_CLOCK) $(TTY_TETRIS) $(HTOP) $(LUA_STAMP) $(IMAGE_CODECS_STAMP) $(MUSL_SHARED_STAMP) $(IMAGE_CODECS_SHARED_STAMP) $(MBEDTLS_STAMP) $(WALLPAPER_OUTPUT) $(INITRD_FILES)
 	rm -rf $(ROOTFS)
 	mkdir -p $(ROOTFS)/bin $(ROOTFS)/sbin $(ROOTFS)/dev $(ROOTFS)/tmp \
 		$(ROOTFS)/run/dbus $(ROOTFS)/run/user/0 $(ROOTFS)/var/tmp \
@@ -435,6 +440,7 @@ $(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAM
 	cp $(NANO) $(ROOTFS)/bin/nano
 	cp $(TTY_CLOCK) $(ROOTFS)/bin/tty-clock
 	cp $(TTY_TETRIS) $(ROOTFS)/bin/tty-tetris
+	cp $(HTOP) $(ROOTFS)/bin/htop
 	cp $(SYSTEM_TOOLS) $(ROOTFS)/bin/
 	cp -R $(TCC_ROOT)/. $(ROOTFS)/
 	cp -R $(BINUTILS_ROOT)/. $(ROOTFS)/
@@ -489,7 +495,7 @@ $(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAM
 		ln -sfn ../usr/bin/$$tool $(ROOTFS)/bin/$$tool; \
 	done
 	chmod 0755 $(ROOTFS)/sbin/init $(ROOTFS)/bin/bash $(ROOTFS)/bin/nano \
-		$(ROOTFS)/bin/tty-clock $(ROOTFS)/bin/tty-tetris \
+		$(ROOTFS)/bin/tty-clock $(ROOTFS)/bin/tty-tetris $(ROOTFS)/bin/htop \
 		$(ROOTFS)/bin/neofetch $(ROOTFS)/bin/ps $(ROOTFS)/bin/free \
 		$(ROOTFS)/bin/uptime $(ROOTFS)/bin/top $(ROOTFS)/bin/loadkeys $(ROOTFS)/bin/sleep $(ROOTFS)/bin/preempt-test $(ROOTFS)/bin/input-test $(ROOTFS)/bin/fb-test $(ROOTFS)/bin/glib-compat-test \
 		$(ROOTFS)/usr/bin/tcc $(ROOTFS)/usr/bin/lua $(ROOTFS)/usr/bin/tunix-wallpaper \
@@ -505,6 +511,7 @@ $(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAM
 		$(ROOTFS)/lib/libc.so
 	@test -x $(ROOTFS)/bin/tty-clock || { echo "tty-clock was not installed into the rootfs" >&2; exit 1; }
 	@test -x $(ROOTFS)/bin/tty-tetris || { echo "tty-tetris was not installed into the rootfs" >&2; exit 1; }
+	@test -x $(ROOTFS)/bin/htop || { echo "htop was not installed into the rootfs" >&2; exit 1; }
 	@test -x $(ROOTFS)/bin/sleep || { echo "native sleep utility was not installed" >&2; exit 1; }
 	@test -x $(ROOTFS)/bin/preempt-test || { echo "scheduler preemption test was not installed" >&2; exit 1; }
 	@test -x $(ROOTFS)/bin/input-test || { echo "input event test was not installed" >&2; exit 1; }
