@@ -30,14 +30,26 @@ Plain `make run` without a rebuild keeps everything.
 
 The image builder reserves at least 64 MiB after the initramfs (1 MiB
 aligned; `DATA_REGION_BYTES` in `scripts/build-image.py`), and the kernel
-formats it as **rev-1 ext2**: 4 KiB blocks, 128-byte inodes, 8192 inodes,
-a single block group (up to 128 MiB), and the `filetype` dirent feature —
-the same core format the Linux ext4 driver mounts natively.
+formats it as **rev-1 ext2**: 4 KiB blocks, 128-byte inodes, 8192 inodes per
+group, and the `filetype` dirent feature — the same core format the Linux ext4
+driver mounts natively.
+
+A block bitmap is one block, so a group covers 32768 blocks (128 MiB). The
+driver formats as many groups as the region needs, up to `EXT2_MAX_GROUPS`
+(128, or 16 GiB — well past the ATA driver's 28-bit LBA reach). Every group is
+laid out the same way, with a superblock and group descriptor table at its
+head; group 0 holds the primary copies and the rest hold backups, which are
+written once at format time and, as on Linux, are not kept up to date
+afterwards.
 
 ```
-| block 0: superblock @1024 | 1: group desc | 2: block bitmap |
-| 3: inode bitmap | 4..259: inode table | 260...: data |
+group g, relative to block g * 32768:
+| +0: superblock @1024 | +1: group descriptors | +2: block bitmap |
+| +3: inode bitmap | +4..+259: inode table | +260...: data |
 ```
+
+A filesystem that fits in one group has exactly the layout the driver used
+before it grew multi-group support.
 
 Files use the classic 12 direct + single + double indirect block map.
 Symlinks shorter than 60 bytes are stored inline in the inode.
@@ -92,9 +104,12 @@ processes; no locking is needed.
   update can leave the filesystem inconsistent (repair with `e2fsck` from
   Linux, or rebuild the image for a fresh seed). Ordinary shutdowns and QEMU
   exits are safe because every operation is written through immediately.
-- 8192 inodes, single block group (≤128 MiB). The tree is also cached in
-  RAM, so total filesystem content is bounded by kernel heap headroom as
-  well (96 MiB).
+- 8192 inodes per group, and at most `EXT2_MAX_GROUPS` groups, so the on-disk
+  ceiling is 16 GiB. That is no longer the binding limit: the whole tree is
+  cached in RAM at mount, so filesystem *content* is bounded by the kernel
+  heap (`HEAP_MAX_SIZE`, 768 MiB) and by how much RAM the guest was given.
+  A region much larger than the guest's memory can be formatted but not
+  filled.
 - Deleting system files persists too — `rm /bin/bash` really bricks the
   installed system, exactly like on Linux; rebuild the image to reinstall.
 - Timestamps persist at second granularity; `utimensat` changes are not
