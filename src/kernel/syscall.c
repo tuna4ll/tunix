@@ -131,8 +131,15 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define SYS_GETRLIMIT 97
 #define SYS_GETRUSAGE 98
 #define SYS_GETUID 102
+#define SYS_SETUID 105
+#define SYS_SETGID 106
 #define SYS_GETGID 104
 #define SYS_GETEUID 107
+#define SYS_SETREUID 113
+#define SYS_SETREGID 114
+#define SYS_SETRESUID 117
+#define SYS_SETRESGID 119
+#define SYS_FALLOCATE 285
 #define SYS_GETEGID 108
 #define SYS_GETGROUPS 115
 #define SYS_SETPGID 109
@@ -381,6 +388,7 @@ struct linux_clone_args {
 #define ELOOP 40
 #define EOPNOTSUPP 95
 #define ENOSPC 28
+#define EFBIG 27
 #define ENAMETOOLONG 36
 #define ERANGE 34
 #define ETIMEDOUT 110
@@ -1715,8 +1723,56 @@ static int64_t sys_ftruncate(int fd, uint64_t length) {
     return vfs_truncate(file->node, length) == 0 ? 0 : -EIO;
 }
 
+/*
+ * fallocate(2), enough of it to reserve space.
+ *
+ * Wayland clients allocate their shm buffers with memfd_create() followed by
+ * posix_fallocate(), which musl implements with this syscall. Without it the
+ * call returns ENOSYS and weston's clients die with "creating a buffer file
+ * failed: Function not implemented" -- so this is what stands between a
+ * compositor that starts and one that can draw.
+ *
+ * Only mode 0 (allocate, growing the file if needed) is supported. The punching
+ * and collapsing modes describe operations on extents that neither memfd nor
+ * the ext2 driver models, so they are refused rather than silently ignored.
+ */
+static int64_t sys_fallocate(int fd, int mode, uint64_t offset, uint64_t length) {
+    struct process *process = process_current();
+    if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->fds[fd]) return -EBADF;
+    if (mode != 0) return -EOPNOTSUPP;
+    if ((int64_t)offset < 0 || (int64_t)length < 0) return -EINVAL;
+    if (length > UINT64_MAX - offset) return -EFBIG;
+
+    struct file *file = process->fds[fd];
+    uint64_t needed = offset + length;
+
+    if (file->kind == FILE_KIND_MEMFD) {
+        /* Growing only: fallocate never shrinks. */
+        if (needed <= memfd_size(file->memfd)) return 0;
+        return memfd_truncate(file->memfd, needed) == 0 ? 0 : -ENOSPC;
+    }
+    if (file->kind == FILE_KIND_VFS && file->node) {
+        if (needed <= file->node->length) return 0;
+        return vfs_truncate(file->node, needed) == 0 ? 0 : -ENOSPC;
+    }
+    return -ENODEV;
+}
+
 /* Resolves the descriptor and takes the lock; the blocking retry lives in the
    dispatcher, where the syscall frame is available to rewind. */
+/* uid_t is 32 bits, so "leave this one alone" arrives as 0xFFFFFFFF. */
+#define UNCHANGED_ID ((uint64_t)0xFFFFFFFFU)
+
+/* True when every supplied id is root or "unchanged"; see the setuid cases. */
+static int identity_change_allowed(uint64_t first, uint64_t second, uint64_t third) {
+    const uint64_t values[3] = { first, second, third };
+    for (int index = 0; index < 3; index++) {
+        uint32_t value = (uint32_t)values[index];
+        if (value != 0U && value != 0xFFFFFFFFU) return 0;
+    }
+    return 1;
+}
+
 static int64_t sys_flock(int fd, int operation) {
     struct process *process = process_current();
     if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->fds[fd]) return -EBADF;
@@ -3725,6 +3781,10 @@ void syscall_dispatch(struct syscall_frame *frame) {
         case SYS_MEMFD_CREATE:
             frame->rax = (uint64_t)sys_memfd_create(frame->rdi, (uint32_t)frame->rsi);
             break;
+        case SYS_FALLOCATE:
+            frame->rax = (uint64_t)sys_fallocate((int)frame->rdi, (int)frame->rsi,
+                                                 frame->rdx, frame->r10);
+            break;
         /* The legacy signalfd takes no flags; signalfd4 is what libc calls. */
         case SYS_SIGNALFD:
             frame->rax = (uint64_t)sys_signalfd((int)frame->rdi, frame->rsi,
@@ -3756,6 +3816,33 @@ void syscall_dispatch(struct syscall_frame *frame) {
         case SYS_GETGID:
         case SYS_GETEUID:
         case SYS_GETEGID: frame->rax = 0; break;
+        /*
+         * Tunix has exactly one identity: everything runs as root and the
+         * getuid family above always answers 0. So the setters can only ever
+         * be asked to stay where they are -- 0, or -1 for "leave unchanged".
+         * Both succeed; anything else is a request to become a user that does
+         * not exist, which is EPERM.
+         *
+         * These matter because ordinary programs drop privileges as a matter of
+         * course. Weston calls seteuid() before spawning its helper clients,
+         * musl implements that as setresuid(-1, uid, -1), and without it the
+         * helpers die and the compositor quits with "cannot run at all".
+         */
+        case SYS_SETUID:
+        case SYS_SETGID:
+            frame->rax = identity_change_allowed(frame->rdi, UNCHANGED_ID, UNCHANGED_ID) ?
+                0 : (uint64_t)-(int64_t)EPERM;
+            break;
+        case SYS_SETREUID:
+        case SYS_SETREGID:
+            frame->rax = identity_change_allowed(frame->rdi, frame->rsi, UNCHANGED_ID) ?
+                0 : (uint64_t)-(int64_t)EPERM;
+            break;
+        case SYS_SETRESUID:
+        case SYS_SETRESGID:
+            frame->rax = identity_change_allowed(frame->rdi, frame->rsi, frame->rdx) ?
+                0 : (uint64_t)-(int64_t)EPERM;
+            break;
         case SYS_GETGROUPS:
             if ((int64_t)frame->rdi < 0) frame->rax = (uint64_t)-(int64_t)EINVAL;
             else frame->rax = 0;

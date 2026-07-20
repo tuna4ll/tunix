@@ -1,0 +1,67 @@
+shared: make cairo optional
+
+weston asks for cairo and libpng unconditionally, but the only things that link
+the resulting cairo-shared library are the demo clients, the GL renderer's
+window borders and xwayland -- all three disabled in a headless, pixman-only
+build. Requiring them anyway would drag a zlib -> libpng -> freetype -> cairo
+chain into the image for code that is never compiled.
+
+Hand the consumers an empty dependency instead when cairo is absent.
+
+Revisit when weston-terminal or the demo clients are wanted: those genuinely
+need cairo, and then the answer is to port it rather than keep this patch.
+
+diff --git a/shared/meson.build b/shared/meson.build
+index daff4246..4cbfa0d7 100644
+--- a/shared/meson.build
++++ b/shared/meson.build
+@@ -48,10 +48,14 @@ srcs_cairo_shared = [
+ 	'frame.c',
+ ]
+ 
++dep_cairo = dependency('cairo', required: false)
++dep_libpng_shared = dependency('libpng', required: false)
++have_cairo_shared = dep_cairo.found() and dep_libpng_shared.found()
++
+ deps_cairo_shared = [
+ 	dep_libshared,
+-	dependency('cairo'),
+-	dependency('libpng'),
++	dep_cairo,
++	dep_libpng_shared,
+ 	dep_pixman,
+ 	dep_libm,
+ ]
+@@ -87,17 +91,21 @@ if get_option('image-webp')
+ 	config_h.set('HAVE_WEBP', '1')
+ endif
+ 
+-lib_cairo_shared = static_library(
+-	'cairo-shared',
+-	srcs_cairo_shared,
+-	include_directories: common_inc,
+-	dependencies: deps_cairo_shared,
+-	install: false
+-)
+-dep_lib_cairo_shared = declare_dependency(
+-	link_with: lib_cairo_shared,
+-	dependencies: deps_cairo_shared
+-)
++if have_cairo_shared
++	lib_cairo_shared = static_library(
++		'cairo-shared',
++		srcs_cairo_shared,
++		include_directories: common_inc,
++		dependencies: deps_cairo_shared,
++		install: false
++	)
++	dep_lib_cairo_shared = declare_dependency(
++		link_with: lib_cairo_shared,
++		dependencies: deps_cairo_shared
++	)
++else
++	dep_lib_cairo_shared = declare_dependency()
++endif
+ 
+ dep_matrix_c = declare_dependency(
+ 	sources: 'matrix.c',

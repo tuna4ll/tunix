@@ -84,6 +84,17 @@ LIBXKBCOMMON_ROOT := $(PORT_OUT)/libxkbcommon-root
 LIBXKBCOMMON_STAMP := $(PORT_OUT)/.libxkbcommon-ready
 XKEYBOARD_CONFIG_ROOT := $(PORT_OUT)/xkeyboard-config-root
 XKEYBOARD_CONFIG_STAMP := $(PORT_OUT)/.xkeyboard-config-ready
+WAYLAND_PROTOCOLS_STAMP := $(PORT_OUT)/.wayland-protocols-ready
+LIBEVDEV_ROOT := $(PORT_OUT)/libevdev-root
+LIBEVDEV_STAMP := $(PORT_OUT)/.libevdev-ready
+LIBUDEV_ZERO_ROOT := $(PORT_OUT)/libudev-zero-root
+LIBUDEV_ZERO_STAMP := $(PORT_OUT)/.libudev-zero-ready
+LIBINPUT_ROOT := $(PORT_OUT)/libinput-root
+LIBINPUT_STAMP := $(PORT_OUT)/.libinput-ready
+CAIRO_ROOT := $(PORT_OUT)/cairo-root
+CAIRO_STAMP := $(PORT_OUT)/.cairo-ready
+WESTON_ROOT := $(PORT_OUT)/weston-root
+WESTON_STAMP := $(PORT_OUT)/.weston-ready
 LIBDRM_ROOT := $(PORT_OUT)/libdrm-root
 LIBDRM_STAMP := $(PORT_OUT)/.libdrm-ready
 MESA_ROOT := $(PORT_OUT)/mesa-root
@@ -234,6 +245,56 @@ $(XKEYBOARD_CONFIG_STAMP): ports/build-xkeyboard-config.sh \
 	@mkdir -p $(PORT_OUT)
 	OUT="$(abspath $(PORT_OUT))" bash ports/build-xkeyboard-config.sh
 	@test -f $(XKEYBOARD_CONFIG_ROOT)/usr/share/xkeyboard-config-2/rules/evdev || { echo "the xkb database was not produced" >&2; exit 1; }
+	@touch $@
+
+# Weston's remaining dependencies. wayland-protocols is build-time only (XML
+# that wayland-scanner turns into C), so it stages nothing into the image.
+$(WAYLAND_PROTOCOLS_STAMP): ports/build-wayland-protocols.sh \
+	ports/src/wayland-protocols/meson.build
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-wayland-protocols.sh
+	@touch $@
+
+$(LIBEVDEV_STAMP): $(MUSL_CROSS_STAMP) ports/build-libevdev.sh ports/lib/cross-port.sh \
+	ports/src/libevdev/meson.build
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-libevdev.sh
+	@test -L $(LIBEVDEV_ROOT)/usr/lib/libevdev.so.2 || { echo "libevdev was not produced" >&2; exit 1; }
+	@touch $@
+
+$(LIBUDEV_ZERO_STAMP): $(MUSL_CROSS_STAMP) ports/build-libudev-zero.sh \
+	ports/lib/cross-port.sh ports/src/libudev-zero/Makefile
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-libudev-zero.sh
+	@test -f $(LIBUDEV_ZERO_ROOT)/usr/lib/libudev.so.1 || { echo "libudev-zero was not produced" >&2; exit 1; }
+	@touch $@
+
+$(LIBINPUT_STAMP): $(LIBEVDEV_STAMP) $(LIBUDEV_ZERO_STAMP) ports/build-libinput.sh \
+	ports/lib/cross-port.sh ports/src/libinput/meson.build
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-libinput.sh
+	@test -L $(LIBINPUT_ROOT)/usr/lib/libinput.so.10 || { echo "libinput was not produced" >&2; exit 1; }
+	@touch $@
+
+# zlib, libpng, freetype and cairo, cross-built for the graphics sysroot.
+$(CAIRO_STAMP): $(PIXMAN_STAMP) ports/build-cairo.sh ports/lib/cross-port.sh \
+	ports/src/cairo/meson.build ports/src/freetype/meson.build
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-cairo.sh
+	@test -L $(CAIRO_ROOT)/usr/lib/libcairo.so.2 || { echo "cairo was not produced" >&2; exit 1; }
+	@touch $@
+
+# The compositor. Headless backend and the pixman software renderer, so it needs
+# no GPU and no /dev/dri.
+$(WESTON_STAMP): $(WAYLAND_STAMP) $(WAYLAND_PROTOCOLS_STAMP) $(PIXMAN_STAMP) \
+	$(LIBXKBCOMMON_STAMP) $(LIBINPUT_STAMP) $(CAIRO_STAMP) $(LIBDRM_STAMP) \
+	ports/build-weston.sh ports/lib/cross-port.sh \
+	ports/src/patches/weston/0001-shared-make-cairo-optional.patch \
+	ports/src/weston/meson.build
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-weston.sh
+	@test -x $(WESTON_ROOT)/usr/bin/weston || { echo "weston was not produced" >&2; exit 1; }
+	@test -f $(WESTON_ROOT)/usr/lib/libweston-14/headless-backend.so || { echo "the headless backend was not produced" >&2; exit 1; }
 	@touch $@
 
 $(LIBDRM_STAMP): $(MUSL_CROSS_STAMP) ports/build-libdrm.sh ports/lib/cross-port.sh \
@@ -570,7 +631,7 @@ $(INIT): $(BUILD)/user/init.o $(USER_RUNTIME) src/userspace/linker.ld
 	$(LD) $(USER_LDFLAGS) -o $@ $(USER_RUNTIME) $(BUILD)/user/init.o
 	$(STRIP) --strip-all $@
 
-$(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAMP) $(GIT_STAMP) $(TCC_STAMP) $(BINUTILS_STAMP) $(NANO) $(TTY_CLOCK) $(TTY_TETRIS) $(HTOP) $(FASTFETCH_STAMP) $(LUA_STAMP) $(IMAGE_CODECS_STAMP) $(MUSL_SHARED_STAMP) $(IMAGE_CODECS_SHARED_STAMP) $(MBEDTLS_STAMP) $(LIBFFI_STAMP) $(WAYLAND_STAMP) $(PIXMAN_STAMP) $(LIBXKBCOMMON_STAMP) $(XKEYBOARD_CONFIG_STAMP) $(LIBDRM_STAMP) $(MESA_STAMP) $(WALLPAPER_OUTPUT) $(INITRD_FILES)
+$(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAMP) $(GIT_STAMP) $(TCC_STAMP) $(BINUTILS_STAMP) $(NANO) $(TTY_CLOCK) $(TTY_TETRIS) $(HTOP) $(FASTFETCH_STAMP) $(LUA_STAMP) $(IMAGE_CODECS_STAMP) $(MUSL_SHARED_STAMP) $(IMAGE_CODECS_SHARED_STAMP) $(MBEDTLS_STAMP) $(LIBFFI_STAMP) $(WAYLAND_STAMP) $(PIXMAN_STAMP) $(LIBXKBCOMMON_STAMP) $(XKEYBOARD_CONFIG_STAMP) $(LIBEVDEV_STAMP) $(LIBUDEV_ZERO_STAMP) $(LIBINPUT_STAMP) $(CAIRO_STAMP) $(WESTON_STAMP) $(LIBDRM_STAMP) $(MESA_STAMP) $(WALLPAPER_OUTPUT) $(INITRD_FILES)
 	rm -rf $(ROOTFS)
 	mkdir -p $(ROOTFS)/bin $(ROOTFS)/sbin $(ROOTFS)/dev $(ROOTFS)/tmp \
 		$(ROOTFS)/run/dbus $(ROOTFS)/run/user/0 $(ROOTFS)/var/tmp \
@@ -607,6 +668,11 @@ $(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAM
 	cp -R $(PIXMAN_ROOT)/. $(ROOTFS)/
 	cp -R $(LIBXKBCOMMON_ROOT)/. $(ROOTFS)/
 	cp -R $(XKEYBOARD_CONFIG_ROOT)/. $(ROOTFS)/
+	cp -R $(LIBEVDEV_ROOT)/. $(ROOTFS)/
+	cp -R $(LIBUDEV_ZERO_ROOT)/. $(ROOTFS)/
+	cp -R $(LIBINPUT_ROOT)/. $(ROOTFS)/
+	cp -R $(CAIRO_ROOT)/. $(ROOTFS)/
+	cp -R $(WESTON_ROOT)/. $(ROOTFS)/
 	cp -R $(LIBDRM_ROOT)/. $(ROOTFS)/
 	cp -R $(MESA_ROOT)/. $(ROOTFS)/
 	cp $(WALLPAPER_CONVERTER) $(ROOTFS)/usr/bin/tunix-wallpaper
@@ -663,6 +729,10 @@ $(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAM
 	@test -x $(ROOTFS)/usr/bin/xkb-test || { echo "the xkb test was not installed into the rootfs" >&2; exit 1; }
 	@test -f $(ROOTFS)/usr/share/xkeyboard-config-2/rules/evdev || { echo "the xkb database was not installed into the rootfs" >&2; exit 1; }
 	@test -L $(ROOTFS)/usr/share/X11/xkb || { echo "the xkb config root symlink is missing from the rootfs" >&2; exit 1; }
+	@test -L $(ROOTFS)/usr/lib/libinput.so.10 || { echo "libinput was not installed into the rootfs" >&2; exit 1; }
+	@test -L $(ROOTFS)/usr/lib/libcairo.so.2 || { echo "cairo was not installed into the rootfs" >&2; exit 1; }
+	@test -x $(ROOTFS)/usr/bin/weston || { echo "weston was not installed into the rootfs" >&2; exit 1; }
+	@test -f $(ROOTFS)/usr/lib/libweston-14/headless-backend.so || { echo "the weston headless backend was not installed into the rootfs" >&2; exit 1; }
 	@test -L $(ROOTFS)/usr/lib/libdrm.so.2 || { echo "libdrm was not installed into the rootfs" >&2; exit 1; }
 	@test -L $(ROOTFS)/usr/lib/libEGL.so.1 || { echo "mesa libEGL was not installed into the rootfs" >&2; exit 1; }
 	@test -L $(ROOTFS)/usr/lib/libGLESv2.so.2 || { echo "mesa libGLESv2 was not installed into the rootfs" >&2; exit 1; }

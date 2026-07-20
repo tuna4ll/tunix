@@ -103,3 +103,24 @@
 [submodule "ports/src/xkeyboard-config"]
 	path = ports/src/xkeyboard-config
 	url = https://gitlab.freedesktop.org/xkeyboard-config/xkeyboard-config.git
+[submodule "ports/src/weston"]
+	path = ports/src/weston
+	url = https://gitlab.freedesktop.org/wayland/weston.git
+[submodule "ports/src/wayland-protocols"]
+	path = ports/src/wayland-protocols
+	url = https://gitlab.freedesktop.org/wayland/wayland-protocols.git
+[submodule "ports/src/libevdev"]
+	path = ports/src/libevdev
+	url = https://gitlab.freedesktop.org/libevdev/libevdev.git
+[submodule "ports/src/libudev-zero"]
+	path = ports/src/libudev-zero
+	url = https://github.com/illiliti/libudev-zero.git
+[submodule "ports/src/libinput"]
+	path = ports/src/libinput
+	url = https://gitlab.freedesktop.org/libinput/libinput.git
+[submodule "ports/src/freetype"]
+	path = ports/src/freetype
+	url = https://gitlab.freedesktop.org/freetype/freetype.git
+[submodule "ports/src/cairo"]
+	path = ports/src/cairo
+	url = https://gitlab.freedesktop.org/cairo/cairo.git
