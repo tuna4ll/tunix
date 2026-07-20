@@ -28,6 +28,11 @@
    of copying: it is mapped read-only in every owner, and the first write takes
    a fault that vmm_handle_cow_fault() turns into a private copy. */
 #define PAGE_COW      (1ULL << 10)
+/* Software bit. Marks a page belonging to a MAP_SHARED mapping, where the whole
+   point is that writes *are* visible to the other owners. fork() must hand this
+   one straight through -- copying it, whether eagerly or on write, would
+   silently break the sharing. */
+#define PAGE_SHARED   (1ULL << 11)
 #define PAGE_NX       (1ULL << 63)
 
 void vmm_init(void);

@@ -8,6 +8,7 @@
 #include "include/epoll.h"
 #include "include/inotify.h"
 #include "include/input.h"
+#include "include/memfd.h"
 #include "include/pipe.h"
 #include "include/pty.h"
 #include "include/vfs.h"
@@ -177,6 +178,12 @@ struct file *file_create_timerfd(struct timerfd_context *context, uint32_t flags
     return file;
 }
 
+struct file *file_create_memfd(struct memfd_object *object, uint32_t flags) {
+    struct file *file = file_create_special(FILE_KIND_MEMFD, flags);
+    if (file) file->memfd = object;
+    return file;
+}
+
 struct file *file_create_epoll(struct epoll_context *context, uint32_t flags) {
     struct file *file = file_create_special(FILE_KIND_EPOLL, flags);
     if (file) file->epoll = context;
@@ -247,6 +254,8 @@ void file_unref(struct file *file) {
         epoll_destroy(file->epoll);
     if (file->kind == FILE_KIND_INOTIFY && file->inotify)
         inotify_destroy(file->inotify);
+    if (file->kind == FILE_KIND_MEMFD && file->memfd)
+        memfd_destroy(file->memfd);
     if (file->kind == FILE_KIND_SOCKET && file->socket)
         unix_socket_unref(file->socket);
     if (file->kind == FILE_KIND_INET_SOCKET && file->inet_socket)
@@ -276,6 +285,13 @@ int64_t file_read(struct file *file, size_t size, void *buffer) {
         return timerfd_read(file->timerfd, size, buffer);
     if (file->kind == FILE_KIND_INOTIFY)
         return inotify_read(file->inotify, size, buffer);
+    /* A memfd carries a file offset like a regular file, so that reading it
+       without mapping it behaves the way any other descriptor would. */
+    if (file->kind == FILE_KIND_MEMFD) {
+        int64_t moved = memfd_read(file->memfd, file->offset, size, buffer);
+        if (moved > 0) file->offset += (uint64_t)moved;
+        return moved;
+    }
     if (file->kind != FILE_KIND_VFS || !file->node) return -EBADF;
     int64_t result = vfs_read(file->node, file->offset, size, buffer);
     if (result > 0) file->offset += (uint64_t)result;
@@ -297,6 +313,11 @@ int64_t file_write(struct file *file, size_t size, const void *buffer) {
         return framebuffer_file_write(file, size, buffer);
     if (file->kind == FILE_KIND_EVENTFD)
         return eventfd_write(file->eventfd, size, buffer);
+    if (file->kind == FILE_KIND_MEMFD) {
+        int64_t moved = memfd_write(file->memfd, file->offset, size, buffer);
+        if (moved > 0) file->offset += (uint64_t)moved;
+        return moved;
+    }
     if (file->kind != FILE_KIND_VFS || !file->node) return -EBADF;
     int64_t result = vfs_write(file->node, file->offset, size, buffer);
     if (result > 0) file->offset += (uint64_t)result;

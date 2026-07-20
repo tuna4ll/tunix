@@ -105,6 +105,7 @@ KERNEL_OBJS := \
 	$(BUILD)/pmm.o $(BUILD)/vmm.o $(BUILD)/framebuffer.o $(BUILD)/terminal_font.o $(BUILD)/terminal.o $(BUILD)/input.o \
 	$(BUILD)/heap.o $(BUILD)/syscall.o $(BUILD)/syscall_entry.o \
 	$(BUILD)/eventfd.o $(BUILD)/timerfd.o $(BUILD)/epoll.o $(BUILD)/inotify.o \
+	$(BUILD)/memfd.o \
 	$(BUILD)/vfs.o $(BUILD)/tarfs.o $(BUILD)/ext2.o $(BUILD)/devfs.o $(BUILD)/unix_socket.o $(BUILD)/pty.o \
 	$(BUILD)/usercopy.o $(BUILD)/elf.o $(BUILD)/file.o \
 	$(BUILD)/pipe.o $(BUILD)/tty.o $(BUILD)/process.o $(BUILD)/procfs.o $(BUILD)/time.o $(BUILD)/random.o $(BUILD)/ata.o \
@@ -141,7 +142,8 @@ $(MUSL_SHARED_STAMP): ports/build-musl-shared.sh \
 	tools/dynamic-runtime/dynamic-hello.c \
 	tools/dynamic-runtime/libtunix-dynamic.c \
 	tools/dynamic-runtime/dlopen-test.c \
-	tools/dynamic-runtime/pthread-test.c
+	tools/dynamic-runtime/pthread-test.c \
+	tools/dynamic-runtime/shm-test.c
 	@mkdir -p $(PORT_OUT)
 	OUT="$(abspath $(PORT_OUT))" bash ports/build-musl-shared.sh
 	@test -x $(MUSL_SHARED_ROOT)/lib/ld-musl-x86_64.so.1 || { echo "shared musl loader was not produced" >&2; exit 1; }
@@ -407,9 +409,10 @@ $(BUILD)/eventfd.o: src/kernel/include/eventfd.h
 $(BUILD)/timerfd.o: src/kernel/include/timerfd.h src/kernel/include/time.h
 $(BUILD)/epoll.o: src/kernel/include/epoll.h src/kernel/include/file.h
 $(BUILD)/inotify.o: src/kernel/include/inotify.h src/kernel/include/vfs.h
+$(BUILD)/memfd.o: src/kernel/include/memfd.h src/kernel/include/pmm.h src/kernel/include/vmm.h
 $(BUILD)/pty.o: src/kernel/include/pty.h src/kernel/include/tty.h src/kernel/include/file.h
-$(BUILD)/file.o: src/kernel/include/file.h src/kernel/include/vfs.h src/kernel/include/pty.h src/kernel/include/input.h src/kernel/include/framebuffer.h src/kernel/include/eventfd.h src/kernel/include/timerfd.h src/kernel/include/epoll.h src/kernel/include/inotify.h
-$(BUILD)/syscall.o: src/kernel/include/vfs.h src/kernel/include/tty.h src/kernel/include/pty.h src/kernel/include/process.h src/kernel/include/random.h src/kernel/include/time.h src/kernel/include/input.h src/kernel/include/framebuffer.h src/kernel/include/eventfd.h src/kernel/include/timerfd.h src/kernel/include/epoll.h src/kernel/include/inotify.h src/kernel/include/ext2.h
+$(BUILD)/file.o: src/kernel/include/file.h src/kernel/include/vfs.h src/kernel/include/pty.h src/kernel/include/input.h src/kernel/include/framebuffer.h src/kernel/include/eventfd.h src/kernel/include/timerfd.h src/kernel/include/epoll.h src/kernel/include/inotify.h src/kernel/include/memfd.h
+$(BUILD)/syscall.o: src/kernel/include/vfs.h src/kernel/include/tty.h src/kernel/include/pty.h src/kernel/include/process.h src/kernel/include/random.h src/kernel/include/time.h src/kernel/include/input.h src/kernel/include/framebuffer.h src/kernel/include/eventfd.h src/kernel/include/timerfd.h src/kernel/include/epoll.h src/kernel/include/inotify.h src/kernel/include/memfd.h src/kernel/include/ext2.h
 $(BUILD)/terminal_font.o: $(TERMINAL_FONT_DATA) src/kernel/include/terminal_font.h
 $(BUILD)/terminal.o: src/kernel/include/terminal_font.h src/kernel/include/terminal.h src/kernel/include/framebuffer.h
 $(BUILD)/tty.o: src/kernel/include/input.h src/kernel/include/tty.h src/kernel/include/terminal.h src/include/tunix/keymap.h
@@ -582,6 +585,7 @@ $(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAM
 	@test -f $(ROOTFS)/etc/ssl/cert.pem || { echo "TLS CA bundle was not installed into the rootfs" >&2; exit 1; }
 	@test -x $(ROOTFS)/lib/ld-musl-x86_64.so.1 || { echo "shared musl loader was not installed into the rootfs" >&2; exit 1; }
 	@test -x $(ROOTFS)/usr/bin/dynamic-runtime-check || { echo "dynamic runtime checks were not installed into the rootfs" >&2; exit 1; }
+	@test -x $(ROOTFS)/usr/bin/shm-test || { echo "shared-memory test was not installed into the rootfs" >&2; exit 1; }
 	@test -x $(ROOTFS)/usr/bin/shared-image-codecs-check || { echo "shared image codec checks were not installed into the rootfs" >&2; exit 1; }
 	@test -L $(ROOTFS)/usr/lib/libz.so.1 || { echo "shared zlib runtime was not installed into the rootfs" >&2; exit 1; }
 	@test -L $(ROOTFS)/usr/lib/libpng16.so.16 || { echo "shared libpng runtime was not installed into the rootfs" >&2; exit 1; }

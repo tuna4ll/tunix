@@ -100,8 +100,12 @@ ln -s libtunix_dynamic.so.1 "$RUNTIME_ROOT/usr/lib/libtunix_dynamic.so"
     -o "$RUNTIME_ROOT/usr/bin/dlopen-test"
 "$MUSL_CC" -O2 -fPIE -pie "$SOURCE/pthread-test.c" -pthread \
     -o "$RUNTIME_ROOT/usr/bin/pthread-test"
+# The shared-memory primitives Wayland is built on: memfd, MAP_SHARED and
+# passing the descriptor over SCM_RIGHTS.
+"$MUSL_CC" -O2 -fPIE -pie "$SOURCE/shm-test.c" \
+    -o "$RUNTIME_ROOT/usr/bin/shm-test"
 
-for binary in dynamic-hello dynamic-nopie dlopen-test pthread-test; do
+for binary in dynamic-hello dynamic-nopie dlopen-test pthread-test shm-test; do
     interp=$($READELF -l "$RUNTIME_ROOT/usr/bin/$binary" | \
         sed -n 's/.*Requesting program interpreter: \([^]]*\).*/\1/p')
     [[ "$interp" == "/lib/$loader_name" ]] || \
@@ -125,9 +129,11 @@ library_path="$RUNTIME_ROOT/lib:$SYSROOT/usr/lib:$RUNTIME_ROOT/usr/lib"
     "$RUNTIME_ROOT/usr/bin/dlopen-test" "$LIBRARY"
 "$host_loader" --library-path "$library_path" \
     "$RUNTIME_ROOT/usr/bin/pthread-test"
+"$host_loader" --library-path "$library_path" \
+    "$RUNTIME_ROOT/usr/bin/shm-test"
 
 "$HOST_STRIP" --strip-unneeded "$LIBRARY"
-for binary in dynamic-hello dynamic-nopie dlopen-test pthread-test; do
+for binary in dynamic-hello dynamic-nopie dlopen-test pthread-test shm-test; do
     "$HOST_STRIP" --strip-all "$RUNTIME_ROOT/usr/bin/$binary"
 done
 
@@ -138,6 +144,7 @@ set -eu
 /usr/bin/dynamic-nopie tunix-check
 /usr/bin/dlopen-test
 /usr/bin/pthread-test
+/usr/bin/shm-test
 printf '%s\n' 'dynamic-runtime-check: PASS'
 EOF_CHECK
 chmod 0755 "$RUNTIME_ROOT/usr/bin/dynamic-runtime-check"

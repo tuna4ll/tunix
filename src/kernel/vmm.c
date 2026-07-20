@@ -454,6 +454,17 @@ static uint64_t clone_user_table(uint64_t source_physical, int level) {
                     return 0;
                 }
                 /*
+                 * A MAP_SHARED page is inherited as-is: both processes keep
+                 * writing to the same memory, which is the entire contract.
+                 * Marking it copy-on-write would give the child a private copy
+                 * on its first store and silently break wl_shm-style buffer
+                 * sharing.
+                 */
+                if ((entry & PAGE_SHARED) && pmm_page_ref(source_page) == 0) {
+                    destination[index] = entry;
+                    continue;
+                }
+                /*
                  * Share rather than copy. A writable page becomes read-only and
                  * copy-on-write in *both* address spaces, so whichever side
                  * writes first takes the fault and gets its own copy. A page

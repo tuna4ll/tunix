@@ -5,6 +5,7 @@
 #include "include/timerfd.h"
 #include "include/epoll.h"
 #include "include/inotify.h"
+#include "include/memfd.h"
 #include "include/framebuffer.h"
 #include "include/input.h"
 #include "include/heap.h"
@@ -183,6 +184,7 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define SYS_PRLIMIT64 302
 #define SYS_RENAMEAT2 316
 #define SYS_GETRANDOM 318
+#define SYS_MEMFD_CREATE 319
 #define SYS_STATX 332
 #define SYS_RSEQ 334
 #define SYS_CLONE3 435
@@ -248,6 +250,8 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define SO_ACCEPTCONN 30
 #define IN_NONBLOCK O_NONBLOCK
 #define IN_CLOEXEC O_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#define MFD_ALLOW_SEALING 0x0002U
 #define SIOCGIFCONF 0x8912U
 
 #define SEEK_SET 0
@@ -1697,6 +1701,10 @@ static int64_t sys_ftruncate(int fd, uint64_t length) {
     struct process *process = process_current();
     if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->fds[fd]) return -EBADF;
     struct file *file = process->fds[fd];
+    /* This is how a memfd gets its size: a Wayland client creates one and
+       immediately ftruncates it to the buffer size before mapping it. */
+    if (file->kind == FILE_KIND_MEMFD)
+        return memfd_truncate(file->memfd, length) == 0 ? 0 : -ENOMEM;
     if (file->kind != FILE_KIND_VFS || !file->node) return -EINVAL;
     return vfs_truncate(file->node, length) == 0 ? 0 : -EIO;
 }
@@ -2268,6 +2276,34 @@ static int map_zero_pages(struct process *process, uint64_t start, uint64_t end,
     return 0;
 }
 
+/*
+ * Map a memfd's pages into the address space. Unlike map_zero_pages this maps
+ * pages that already exist and belong to someone else, taking a reference on
+ * each: that is what makes the mapping *shared* rather than a copy, so a write
+ * here is visible to every other process that mapped the same object.
+ *
+ * PAGE_SHARED keeps fork from turning them into copy-on-write pages.
+ */
+static int map_shared_object(struct process *process, uint64_t start,
+                             uint64_t end, struct memfd_object *object,
+                             uint64_t file_offset, uint64_t flags) {
+    for (uint64_t address = start; address < end; address += 4096) {
+        uint64_t index = (file_offset + (address - start)) / 4096ULL;
+        uint64_t physical = memfd_page(object, index);
+        /* Past the end of the object: Linux would fault with SIGBUS on access.
+           Leaving the page unmapped gets the same observable behaviour. */
+        if (!physical) continue;
+        if (vmm_translate(process->cr3, address, NULL, NULL) == 0) continue;
+        if (pmm_page_ref(physical) != 0) return -1;
+        if (vmm_map_page_in(process->cr3, address, physical,
+                            flags | PAGE_USER | PAGE_PRESENT | PAGE_SHARED) != 0) {
+            pmm_free_page((void *)physical);
+            return -1;
+        }
+    }
+    return 0;
+}
+
 static void unmap_pages(struct process *process, uint64_t start, uint64_t end) {
     for (uint64_t address = start; address < end; address += 4096) {
         uint64_t physical;
@@ -2365,6 +2401,22 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
     if (!(flags & MAP_ANONYMOUS)) {
         if (fd < 0 || fd >= PROCESS_MAX_FDS || !process->fds[fd]) return -EBADF;
         file = process->fds[fd];
+        /* A shared memfd mapping is the one case where two processes really do
+           end up on the same physical pages, so it bypasses the copy-the-file
+           path below entirely. */
+        if (file->kind == FILE_KIND_MEMFD) {
+            if (!(flags & MAP_SHARED)) return -EINVAL;
+            if (map_shared_object(process, base, base + length, file->memfd,
+                                  offset, page_flags) != 0) {
+                unmap_pages(process, base, base + length);
+                return -ENOMEM;
+            }
+            if (advance_mmap_base) {
+                process->mmap_base = base + length + 4096;
+                if (process->memory) process->memory->mmap_base = process->mmap_base;
+            }
+            return (int64_t)base;
+        }
         if ((file->kind != FILE_KIND_VFS && file->kind != FILE_KIND_FRAMEBUFFER) ||
             !file->node) return -ENODEV;
         if (file->node->mmap) {
@@ -2381,6 +2433,11 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
     }
 
     uint64_t allocation_flags = file ? (page_flags | PAGE_WRITE) : page_flags;
+    /* MAP_SHARED|MAP_ANONYMOUS has to survive fork as shared memory rather than
+       being copied per process, which is what PAGE_SHARED tells the clone to
+       do. Without a file behind it there is nothing to share with beyond the
+       processes that inherit the mapping. */
+    if ((flags & MAP_SHARED) && (flags & MAP_ANONYMOUS)) allocation_flags |= PAGE_SHARED;
     if (map_zero_pages(process, base, base + length, allocation_flags) != 0) {
         unmap_pages(process, base, base + length);
         return -ENOMEM;
@@ -2442,8 +2499,21 @@ static int64_t sys_mprotect(uint64_t address, uint64_t length, int prot) {
     for (uint64_t page = address; page < address + length; page += 4096) {
         uint64_t old_flags;
         if (vmm_translate(process->cr3, page, NULL, &old_flags) != 0) return -ENOMEM;
-        uint64_t effective_flags = flags | (old_flags & PAGE_DEVICE);
+        uint64_t effective_flags = flags | (old_flags & (PAGE_DEVICE | PAGE_SHARED));
         if (nx_enabled && (old_flags & PAGE_DEVICE)) effective_flags |= PAGE_NX;
+        /*
+         * A copy-on-write page must not be handed write permission here: it is
+         * still shared with whoever forked it, and granting the write directly
+         * would let the two processes scribble on each other's memory. Keep it
+         * read-only and copy-on-write so the next store faults and gets a
+         * private copy, which is the permission the caller actually asked for.
+         *
+         * Dropping write permission instead clears the marker, so that a later
+         * store gets the SIGSEGV the caller asked for rather than a silent copy.
+         */
+        if (old_flags & PAGE_COW) {
+            if (prot & PROT_WRITE) effective_flags = (effective_flags & ~PAGE_WRITE) | PAGE_COW;
+        }
         if (vmm_protect_page_in(process->cr3, page, effective_flags) != 0) return -ENOMEM;
     }
     return 0;
@@ -3000,6 +3070,28 @@ static int64_t sys_eventfd(uint64_t initial_value, int flags, int legacy) {
         return -ENOMEM;
     }
     return install_new_file(file, flags & EFD_CLOEXEC);
+}
+
+/*
+ * memfd_create(2). The name argument only shows up in /proc on Linux and is
+ * ignored here beyond validating that it is readable. Sealing is not
+ * implemented: MFD_ALLOW_SEALING is accepted and does nothing, because a client
+ * that asks for it still works without it, whereas failing the call outright
+ * would send libwayland down its /dev/shm fallback, which Tunix does not have.
+ */
+static int64_t sys_memfd_create(uint64_t user_name, uint32_t flags) {
+    if (flags & ~(uint32_t)(MFD_CLOEXEC | MFD_ALLOW_SEALING)) return -EINVAL;
+    char name[256];
+    if (copy_string_from_user(name, sizeof(name), user_name) < 0) return -EFAULT;
+
+    struct memfd_object *object = memfd_create_object();
+    if (!object) return -ENOMEM;
+    struct file *file = file_create_memfd(object, 0);
+    if (!file) {
+        memfd_destroy(object);
+        return -ENOMEM;
+    }
+    return install_new_file(file, flags & MFD_CLOEXEC);
 }
 
 static int64_t sys_timerfd_create(int clock_id, int flags) {
@@ -3562,6 +3654,9 @@ void syscall_dispatch(struct syscall_frame *frame) {
         case SYS_SYNCFS: frame->rax = (uint64_t)sys_fsync((int)frame->rdi); break;
         case SYS_SYNC: frame->rax = (uint64_t)ext2fs_sync(); break;
         case SYS_FTRUNCATE: frame->rax = (uint64_t)sys_ftruncate((int)frame->rdi, frame->rsi); break;
+        case SYS_MEMFD_CREATE:
+            frame->rax = (uint64_t)sys_memfd_create(frame->rdi, (uint32_t)frame->rsi);
+            break;
         case SYS_GETCWD: frame->rax = (uint64_t)sys_getcwd(frame->rdi, (size_t)frame->rsi); break;
         case SYS_CHDIR: frame->rax = (uint64_t)sys_chdir(frame->rdi); break;
         case SYS_FCHDIR: frame->rax = (uint64_t)sys_fchdir((int)frame->rdi); break;
