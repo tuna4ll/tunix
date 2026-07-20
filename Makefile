@@ -37,6 +37,10 @@ GNUMAKE_ROOT := $(PORT_OUT)/make-root
 GNUMAKE_STAMP := $(PORT_OUT)/.make-ready
 IPROUTE2_ROOT := $(PORT_OUT)/iproute2-root
 IPROUTE2_STAMP := $(PORT_OUT)/.iproute2-ready
+CURL_ROOT := $(PORT_OUT)/curl-root
+CURL_STAMP := $(PORT_OUT)/.curl-ready
+GIT_ROOT := $(PORT_OUT)/git-root
+GIT_STAMP := $(PORT_OUT)/.git-ready
 GNU_PORT_STAMPS := $(COREUTILS_STAMP) $(GREP_STAMP) $(SED_STAMP) $(GAWK_STAMP) \
 	$(FINDUTILS_STAMP) $(DIFFUTILS_STAMP) $(TAR_STAMP) $(GZIP_STAMP) \
 	$(GNUMAKE_STAMP)
@@ -251,6 +255,24 @@ $(IPROUTE2_STAMP): $(BASH) ports/build-iproute2.sh ports/lib/gnu-port.sh | $(BUI
 	@test -x $(IPROUTE2_ROOT)/usr/sbin/ss || { echo "iproute2 ss was not produced" >&2; exit 1; }
 	@touch $@
 
+# libcurl (static, mbedTLS backend) gives git its https transport. Depends on
+# the mbedtls stamp for the TLS libraries it links against.
+$(CURL_STAMP): $(MBEDTLS_STAMP) ports/build-curl.sh ports/lib/gnu-port.sh | $(BUILD)/.tools
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-curl.sh
+	@test -f $(CURL_ROOT)/usr/lib/libcurl.a || { echo "libcurl was not produced" >&2; exit 1; }
+	@touch $@
+
+# git drives its own Makefile (its ./configure only feeds the same one), builds
+# a private static zlib (its one hard dependency), and links libcurl+mbedTLS for
+# https:// -- hence the curl and mbedtls stamp prerequisites.
+$(GIT_STAMP): $(BASH) $(CURL_STAMP) $(MBEDTLS_STAMP) ports/build-git.sh ports/lib/gnu-port.sh | $(BUILD)/.tools
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-git.sh
+	@test -x $(GIT_ROOT)/usr/bin/git || { echo "git was not produced" >&2; exit 1; }
+	@test -e $(GIT_ROOT)/usr/libexec/git-core/git-remote-https || { echo "git https helper was not produced" >&2; exit 1; }
+	@touch $@
+
 $(NCURSES_STAMP): $(BASH) ports/build-ncurses.sh ports/terminfo/tunix.ti | $(BUILD)/.tools
 	@mkdir -p $(PORT_OUT)
 	OUT="$(abspath $(PORT_OUT))" bash ports/build-ncurses.sh
@@ -445,7 +467,7 @@ $(INIT): $(BUILD)/user/init.o $(USER_RUNTIME) src/userspace/linker.ld
 	$(LD) $(USER_LDFLAGS) -o $@ $(USER_RUNTIME) $(BUILD)/user/init.o
 	$(STRIP) --strip-all $@
 
-$(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAMP) $(TCC_STAMP) $(BINUTILS_STAMP) $(NANO) $(TTY_CLOCK) $(TTY_TETRIS) $(HTOP) $(FASTFETCH_STAMP) $(LUA_STAMP) $(IMAGE_CODECS_STAMP) $(MUSL_SHARED_STAMP) $(IMAGE_CODECS_SHARED_STAMP) $(MBEDTLS_STAMP) $(WALLPAPER_OUTPUT) $(INITRD_FILES)
+$(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAMP) $(GIT_STAMP) $(TCC_STAMP) $(BINUTILS_STAMP) $(NANO) $(TTY_CLOCK) $(TTY_TETRIS) $(HTOP) $(FASTFETCH_STAMP) $(LUA_STAMP) $(IMAGE_CODECS_STAMP) $(MUSL_SHARED_STAMP) $(IMAGE_CODECS_SHARED_STAMP) $(MBEDTLS_STAMP) $(WALLPAPER_OUTPUT) $(INITRD_FILES)
 	rm -rf $(ROOTFS)
 	mkdir -p $(ROOTFS)/bin $(ROOTFS)/sbin $(ROOTFS)/dev $(ROOTFS)/tmp \
 		$(ROOTFS)/run/dbus $(ROOTFS)/run/user/0 $(ROOTFS)/var/tmp \
@@ -469,6 +491,7 @@ $(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAM
 	cp -R $(MUSL_SHARED_ROOT)/. $(ROOTFS)/
 	for root in $(GNU_PORT_ROOTS); do cp -R $$root/. $(ROOTFS)/; done
 	cp -R $(IPROUTE2_ROOT)/. $(ROOTFS)/
+	cp -R $(GIT_ROOT)/. $(ROOTFS)/
 	mkdir -p $(ROOTFS)/usr/bin $(ROOTFS)/usr/include/tunix $(ROOTFS)/usr/lib $(ROOTFS)/usr/share
 	cp src/include/tunix/input_event.h $(ROOTFS)/usr/include/tunix/input_event.h
 	cp src/include/tunix/framebuffer.h $(ROOTFS)/usr/include/tunix/framebuffer.h
@@ -506,6 +529,9 @@ $(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAM
 	@test -x $(ROOTFS)/usr/bin/gzip || { echo "gzip was not installed into the rootfs" >&2; exit 1; }
 	@test -x $(ROOTFS)/usr/sbin/ip || { echo "iproute2 ip was not installed into the rootfs" >&2; exit 1; }
 	@test -x $(ROOTFS)/usr/sbin/ss || { echo "iproute2 ss was not installed into the rootfs" >&2; exit 1; }
+	@test -x $(ROOTFS)/usr/bin/git || { echo "git was not installed into the rootfs" >&2; exit 1; }
+	@test -d $(ROOTFS)/usr/share/git-core/templates || { echo "git templates were not installed into the rootfs" >&2; exit 1; }
+	@test -e $(ROOTFS)/usr/libexec/git-core/git-remote-https || { echo "git https helper was not installed into the rootfs" >&2; exit 1; }
 	@test -x $(ROOTFS)/usr/bin/https-get || { echo "https-get was not installed into the rootfs" >&2; exit 1; }
 	@test -x $(ROOTFS)/usr/bin/openssl || { echo "openssl (ssl-helper) was not installed into the rootfs" >&2; exit 1; }
 	@test -f $(ROOTFS)/etc/ssl/cert.pem || { echo "TLS CA bundle was not installed into the rootfs" >&2; exit 1; }
@@ -558,14 +584,21 @@ $(IMAGE): $(BUILD)/stage1.bin $(BUILD)/stage2.bin $(KERNEL) $(INITRAMFS) scripts
 	$(PYTHON) scripts/build-image.py $@ $(BUILD)/stage1.bin $(BUILD)/stage2.bin $(KERNEL) $(INITRAMFS)
 	$(PYTHON) scripts/check-boot-image.py $@ $(INITRAMFS)
 
+# 2 GiB (was 256M): Tunix keeps file data in RAM, so `git clone` of a real repo
+# needs headroom for the pack plus git's own working set. The PMM only manages
+# the first PMM_DIRECT_MAP_LIMIT (1 GiB) of physical RAM -- the kernel's direct
+# map is exactly 1 GiB -- so at most ~1 GiB is usable and the surplus here is
+# ignored; 2 GiB is given only so QEMU surely presents a full contiguous 1 GiB
+# below the cap despite low-memory holes. The kernel heap grows from the PMM on
+# demand up to HEAP_MAX_SIZE. The CI boot smoke test stays at 256M (clones nothing).
 run: $(IMAGE)
 	rm -f $(BUILD)/serial.log
-	$(QEMU) -machine pc -m 256M -drive format=raw,file=$(IMAGE) \
+	$(QEMU) -machine pc -m 2048M -drive format=raw,file=$(IMAGE) \
 		-serial file:$(BUILD)/serial.log -monitor none -no-reboot -no-shutdown \
 		-netdev user,id=net0 -device rtl8139,netdev=net0
 
 headless: $(IMAGE)
-	$(QEMU) -machine pc -m 256M -drive format=raw,file=$(IMAGE) \
+	$(QEMU) -machine pc -m 2048M -drive format=raw,file=$(IMAGE) \
 		-nographic -monitor none -serial stdio -no-reboot -no-shutdown \
 		-netdev user,id=net0 -device rtl8139,netdev=net0
 

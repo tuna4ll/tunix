@@ -82,6 +82,11 @@ struct process {
     struct file *fds[PROCESS_MAX_FDS];
     uint8_t fd_flags[PROCESS_MAX_FDS];
 
+    /* Set only while blocked inside wait4(). PROCESS_BLOCKED on its own does
+       not mean "waiting for a child" -- a rewound read/write sleeping on a wait
+       channel is blocked too -- and the wakeup path writes the reaped pid into
+       saved_frame.rax, so it must never fire on a non-wait4 sleeper. */
+    int wait4_active;
     int64_t wait_pid;
     uint64_t wait_status_user;
     int wait_options;

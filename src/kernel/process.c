@@ -650,9 +650,11 @@ static void notify_parent_of_exit(struct process *child) {
     }
 
     parent->signal_pending |= signal_bit(SIGCHLD);
-    if (parent->state == PROCESS_BLOCKED && child_matches(child, parent, parent->wait_pid)) {
+    if (parent->wait4_active && parent->state == PROCESS_BLOCKED &&
+        child_matches(child, parent, parent->wait_pid)) {
         if (store_wait_status(parent, child, parent->wait_status_user) == 0) parent->saved_frame.rax = child->pid;
         else parent->saved_frame.rax = (uint64_t)-(int64_t)EINVAL;
+        parent->wait4_active = 0;
         parent->wait_pid = 0;
         parent->wait_status_user = 0;
         parent->wait_options = 0;
@@ -666,7 +668,7 @@ static int notify_parent_of_job_change(struct process *child, int wait_flag, int
     if (!parent) return 0;
 
     parent->signal_pending |= signal_bit(SIGCHLD);
-    if (parent->state != PROCESS_BLOCKED ||
+    if (!parent->wait4_active || parent->state != PROCESS_BLOCKED ||
         !child_matches(child, parent, parent->wait_pid) ||
         !(parent->wait_options & wait_flag)) return 0;
 
@@ -674,6 +676,7 @@ static int notify_parent_of_job_change(struct process *child, int wait_flag, int
         parent->saved_frame.rax = child->pid;
     else
         parent->saved_frame.rax = (uint64_t)-(int64_t)EINVAL;
+    parent->wait4_active = 0;
     parent->wait_pid = 0;
     parent->wait_status_user = 0;
     parent->wait_options = 0;
@@ -1152,11 +1155,13 @@ int64_t process_waitpid_from_syscall(struct syscall_frame *frame, int64_t pid,
 
     parent->saved_frame = *frame;
     parent->state = PROCESS_BLOCKED;
+    parent->wait4_active = 1;
     parent->wait_pid = pid;
     parent->wait_status_user = status_user;
     parent->wait_options = options;
     if (switch_to_next(frame, parent) != 0) {
         parent->state = PROCESS_RUNNING;
+        parent->wait4_active = 0;
         parent->wait_pid = 0;
         parent->wait_status_user = 0;
         parent->wait_options = 0;
@@ -1183,7 +1188,19 @@ static void signal_one_process(struct process *target, int signal_number) {
         target->futex_wait_active = 0;
         target->futex_wait_address = 0;
         target->futex_wait_deadline_ns = 0;
-        target->saved_frame.rax = (uint64_t)-(int64_t)EINTR;
+        /* Do NOT stamp -EINTR over a syscall that block_and_retry() rewound to
+         * be retried: its saved rax still holds the syscall *number*, which the
+         * rewound %rip will re-issue on resume. process_prepare_user_return()
+         * decides that frame's fate when the signal is actually taken -- restart
+         * it (SA_RESTART) or convert it to -EINTR and step past the syscall.
+         * Clobbering rax here would feed -EINTR (-4) back as a syscall number,
+         * which lands in the ENOSYS default and surfaces to userspace as a
+         * bogus "read error: Function not implemented". Non-rewound sleepers
+         * (wait4, etc.) have no retry %rip, so -EINTR is their correct return. */
+        if (!target->syscall_rewound)
+            target->saved_frame.rax = (uint64_t)-(int64_t)EINTR;
+        target->wait4_active = 0;
+        target->wait_channel = NULL;
         target->wait_pid = 0;
         target->wait_status_user = 0;
         target->wait_options = 0;

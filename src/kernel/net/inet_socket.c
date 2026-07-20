@@ -31,9 +31,19 @@
 #define EINPROGRESS 115
 
 /* TCP tuning. Rings are per-connection byte streams; MSS caps segment payload
-   to what net_send_tcp accepts. Timers use time_uptime_ns() deadlines. */
-#define TCP_RING 8192U
+   to what net_send_tcp accepts. Timers use time_uptime_ns() deadlines.
+
+   TCP_RING is also the receive window we advertise, so it sets the bandwidth-
+   delay product: at the ~60 ms round trip to a public host, 8 KiB capped a bulk
+   download at ~130 KB/s. 16 KiB doubles that and still fits comfortably inside
+   the 32 KiB NIC RX ring (see rtl8139.c) once Ethernet/IP/TCP framing is added
+   -- the NIC ring must stay larger than a full window, because nothing drains
+   it while the process is off doing work between reads. */
+#define TCP_RING 16384U
 #define TCP_MSS 1024U
+/* Assumed peer segment size until a segment tells us otherwise; used only to
+   scale the window-update threshold below. */
+#define TCP_PEER_MSS_INIT 1460U
 #define TCP_RTO_INIT_NS   200000000ULL   /* 200 ms  */
 #define TCP_RTO_MAX_NS   4000000000ULL   /* 4 s     */
 #define TCP_MAX_RETRIES  8
@@ -70,6 +80,8 @@ struct tcp_control_block {
     uint8_t rx[TCP_RING];         /* in-order received inbound bytes  */
     size_t rx_head;
     size_t rx_len;
+    uint16_t rcv_wnd_adv;         /* window our last segment advertised */
+    uint16_t peer_mss;            /* largest payload the peer has sent   */
     uint64_t rto_ns;
     uint64_t rto_deadline_ns;     /* 0 = retransmit timer disarmed    */
     unsigned retransmit_count;
@@ -196,12 +208,51 @@ static void tcp_arm_rto(struct tcp_control_block *tcp) {
 static void tcp_transmit(struct inet_socket *s, uint32_t seq, uint8_t flags,
                          const uint8_t *data, size_t length) {
     struct tcp_control_block *tcp = s->tcp;
+    /* Remember what the peer will believe our window to be. tcp_recv() compares
+       against this to decide when silence has become a stall. */
+    tcp->rcv_wnd_adv = tcp_rx_window(tcp);
     net_send_tcp(s->local_address, s->local_port, s->peer_address, s->peer_port,
-                 seq, tcp->rcv_nxt, flags, tcp_rx_window(tcp), data, length);
+                 seq, tcp->rcv_nxt, flags, tcp->rcv_wnd_adv, data, length);
 }
 
 static void tcp_send_ack(struct inet_socket *s) {
     tcp_transmit(s, s->tcp->snd_nxt, TCP_ACK, NULL, 0);
+}
+
+/*
+ * Announce a receive window that a read has reopened (RFC 1122 4.2.3.3).
+ *
+ * During a bulk download nothing else is transmitted: the peer streams, we ACK
+ * from tcp_input(), and each of those ACKs advertises the space left *at that
+ * moment*, which shrinks toward zero as the ring fills. Draining the ring from
+ * tcp_recv() reopens it, but unless we say so the peer keeps believing the last,
+ * tiny figure. A peer whose remaining window is under its own MSS will not send
+ * a runt segment (silly-window avoidance); it parks on its persist timer, which
+ * backs off to seconds. Observed against GitHub: the window stalled at ~1.1 KiB
+ * and the transfer moved 1112 bytes every 5 s -- roughly 280 B/s -- until the
+ * server gave up mid-pack, surfacing as "curl 56 ssl_read returned (-0x0000)"
+ * (mbedTLS EOF) with a variable "N bytes of body are still expected".
+ *
+ * Announce when the reopened space is worth a segment to the peer: at least two
+ * of its MSS, or half the ring. Comparing against rcv_wnd_adv (what the peer
+ * actually believes, recorded by tcp_transmit) rather than a fixed threshold is
+ * what makes this correct -- the previous rule tested the free space against our
+ * own 1 KiB send MSS and so never fired at a 1112-byte window.
+ */
+static void tcp_send_window_update(struct inet_socket *s) {
+    struct tcp_control_block *tcp = s->tcp;
+    if (tcp->state != TCP_ESTABLISHED && tcp->state != TCP_CLOSE_WAIT) return;
+    size_t window = TCP_RING - tcp->rx_len;
+    if (window <= tcp->rcv_wnd_adv) return;
+    size_t opened = window - tcp->rcv_wnd_adv;
+    size_t threshold = 2U * (size_t)(tcp->peer_mss ? tcp->peer_mss : TCP_PEER_MSS_INIT);
+    if (threshold > TCP_RING / 2U) threshold = TCP_RING / 2U;
+    /* The second test rescues the case the peer cannot escape on its own: it
+       believes it has less than a segment of room, so it will not send at all. */
+    if (opened >= threshold ||
+        (tcp->rcv_wnd_adv < (tcp->peer_mss ? tcp->peer_mss : TCP_PEER_MSS_INIT) &&
+         window >= (size_t)(tcp->peer_mss ? tcp->peer_mss : TCP_PEER_MSS_INIT)))
+        tcp_send_ack(s);
 }
 
 /* Push unsent data respecting the peer's advertised window and the MSS. */
@@ -272,6 +323,7 @@ static int tcp_connect(struct inet_socket *socket, uint32_t address, uint16_t po
     if (!socket->local_address) socket->local_address = config->address;
     socket->peer_address = address;
     socket->peer_port = port;
+    tcp->peer_mss = TCP_PEER_MSS_INIT;
     tcp->iss = tcp_generate_iss();
     tcp->snd_una = tcp->iss;
     tcp->snd_nxt = tcp->iss + 1U;   /* SYN consumes one sequence number */
@@ -366,6 +418,11 @@ static void tcp_input(struct inet_socket *s, uint32_t seq, uint32_t ack, uint8_t
 
     if (flags & TCP_ACK) tcp_process_ack(s, ack);
 
+    /* We send no MSS option, so the peer picks its own segment size; learn it
+       from the wire rather than guess, since the window-update threshold and
+       the peer's own silly-window avoidance are both scaled by it. */
+    if (length > tcp->peer_mss) tcp->peer_mss = (uint16_t)length;
+
     if (length > 0 && seq == tcp->rcv_nxt && !tcp->peer_fin) {
         size_t space = TCP_RING - tcp->rx_len;
         size_t take = length < space ? length : space;
@@ -424,6 +481,7 @@ static int64_t tcp_recv(struct inet_socket *s, void *data, size_t length, int fl
     if (!(flags & MSG_PEEK)) {
         tcp->rx_head = (tcp->rx_head + take) % TCP_RING;
         tcp->rx_len -= take;
+        if (take > 0) tcp_send_window_update(s);
     }
     return (int64_t)take;
 }

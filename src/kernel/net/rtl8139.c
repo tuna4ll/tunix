@@ -9,9 +9,24 @@
 
 #define RTL_VENDOR 0x10ECU
 #define RTL_DEVICE 0x8139U
-#define RX_RING_BYTES 8192U
+/* The RX ring is drained only from net_poll() at syscall time -- there is no
+ * RX interrupt -- so between two recv() calls a whole TCP window's worth of
+ * back-to-back frames can land here untouched. At 8 KiB the ring was smaller
+ * than one 8 KiB TCP window once Ethernet/IP/TCP framing is added, so a bulk
+ * download (git clone) overran it; the overrun then trips the invalid-descriptor
+ * path in rtl8139_poll(), which resets the chip and discards the *entire* ring,
+ * losing a chunk of the stream and eventually killing the connection. 32 KiB
+ * gives several windows of slack. Keep RCR's RBLEN field (below) in sync. */
+#define RX_RING_BYTES 32768U
 #define RX_BUFFER_BYTES (RX_RING_BYTES + 16U + 1536U)
 #define TX_BUFFER_BYTES 2048U
+
+/* Receive Configuration Register: accept broadcast/multicast/physical-match and
+ * run promiscuous (AAP), no RX threshold, max DMA burst, WRAP=1, and RBLEN in
+ * bits [12:11] selecting the ring size. RBLEN encodes 8K=0b00, 16K=0b01,
+ * 32K=0b10, 64K=0b11; 0x1000 is the 32K setting matching RX_RING_BYTES above.
+ * (Was 0xE78F = 8K.) */
+#define RCR_CONFIG 0x0000F78FU
 
 #define REG_IDR0 0x00U
 #define REG_TSD0 0x10U
@@ -72,7 +87,7 @@ int rtl8139_init(void) {
              (uint32_t)vmm_virt_to_phys_direct(tx_buffer[index]));
     outw((uint16_t)(io_base + REG_IMR), 0U);
     outw((uint16_t)(io_base + REG_ISR), 0xFFFFU);
-    outl((uint16_t)(io_base + REG_RCR), 0x0000E78FU);
+    outl((uint16_t)(io_base + REG_RCR), RCR_CONFIG);
     outl((uint16_t)(io_base + REG_TCR), 0x03000700U);
     outb((uint16_t)(io_base + REG_CMD), CMD_RX_ENABLE | CMD_TX_ENABLE);
     rx_offset = 0;
@@ -120,7 +135,7 @@ void rtl8139_poll(rtl8139_receive_fn receive) {
             outb((uint16_t)(io_base + REG_CMD), CMD_RESET);
             if (wait_clear((uint16_t)(io_base + REG_CMD), CMD_RESET, 100000000ULL) == 0) {
                 outl((uint16_t)(io_base + REG_RBSTART), (uint32_t)vmm_virt_to_phys_direct(rx_buffer));
-                outl((uint16_t)(io_base + REG_RCR), 0x0000E78FU);
+                outl((uint16_t)(io_base + REG_RCR), RCR_CONFIG);
                 outb((uint16_t)(io_base + REG_CMD), CMD_RX_ENABLE | CMD_TX_ENABLE);
             }
             rx_offset = 0;

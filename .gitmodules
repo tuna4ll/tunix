@@ -72,3 +72,9 @@
 [submodule "ports/src/make"]
 	path = ports/src/make
 	url = https://git.savannah.gnu.org/git/make.git
+[submodule "ports/src/git"]
+	path = ports/src/git
+	url = https://github.com/git/git.git
+[submodule "ports/src/curl"]
+	path = ports/src/curl
+	url = https://github.com/curl/curl.git

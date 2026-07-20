@@ -58,6 +58,9 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define SYS_MPROTECT 10
 #define SYS_MUNMAP 11
 #define SYS_BRK 12
+#define SYS_MSYNC 26
+#define SYS_MADVISE 28
+#define SYS_FADVISE64 221
 #define SYS_RT_SIGACTION 13
 #define SYS_RT_SIGPROCMASK 14
 #define SYS_RT_SIGRETURN 15
@@ -116,6 +119,7 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define SYS_MKDIR 83
 #define SYS_RMDIR 84
 #define SYS_UNLINK 87
+#define SYS_SYMLINK 88
 #define SYS_READLINK 89
 #define SYS_CHMOD 90
 #define SYS_FCHMOD 91
@@ -146,6 +150,7 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define SYS_EPOLL_WAIT 232
 #define SYS_EPOLL_CTL 233
 #define SYS_EXIT_GROUP 231
+#define SYS_TKILL 200
 #define SYS_TGKILL 234
 #define SYS_INOTIFY_INIT 253
 #define SYS_INOTIFY_ADD_WATCH 254
@@ -3160,6 +3165,15 @@ void syscall_dispatch(struct syscall_frame *frame) {
         case SYS_LSEEK: frame->rax = (uint64_t)sys_lseek((int)frame->rdi, (int64_t)frame->rsi, (int)frame->rdx); break;
         case SYS_MMAP: frame->rax = (uint64_t)sys_mmap(frame->rdi, frame->rsi, (int)frame->rdx, (int)frame->r10, (int)frame->r8, frame->r9); break;
         case SYS_MPROTECT: frame->rax = (uint64_t)sys_mprotect(frame->rdi, frame->rsi, (int)frame->rdx); break;
+        /* Advisory memory/file hints: our VM eagerly backs every mapping and the
+         * page cache is write-through, so there is nothing to prefetch, flush or
+         * drop. Returning 0 (rather than ENOSYS) matters because these are public
+         * libc wrappers that set errno on failure -- a stale ENOSYS then leaks
+         * into later errno checks. madvise/msync/posix_fadvise are all defined as
+         * best-effort, so a no-op is a conforming implementation. */
+        case SYS_MADVISE: frame->rax = 0; break;
+        case SYS_MSYNC: frame->rax = 0; break;
+        case SYS_FADVISE64: frame->rax = 0; break;
         case SYS_MUNMAP: frame->rax = (uint64_t)sys_munmap(frame->rdi, frame->rsi); break;
         case SYS_BRK: frame->rax = (uint64_t)sys_brk(frame->rdi); break;
         case SYS_RT_SIGACTION: frame->rax = (uint64_t)sys_sigaction((int)frame->rdi, frame->rsi, frame->rdx, frame->r10); break;
@@ -3499,6 +3513,9 @@ void syscall_dispatch(struct syscall_frame *frame) {
             break;
         }
         case SYS_KILL: frame->rax = (uint64_t)process_send_signal((int64_t)frame->rdi, (int)frame->rsi); break;
+        /* Single-threaded here: a tid is a pid, so tkill(tid,sig) is kill(pid,sig).
+         * musl's raise()/abort() route through tkill. */
+        case SYS_TKILL: frame->rax = (uint64_t)process_send_signal((int64_t)frame->rdi, (int)frame->rsi); break;
         case SYS_TGKILL: frame->rax = (uint64_t)process_send_signal((int64_t)frame->rsi, (int)frame->rdx); break;
         case SYS_UNAME: frame->rax = (uint64_t)sys_uname(frame->rdi); break;
         case SYS_FCNTL: {
@@ -3698,6 +3715,7 @@ void syscall_dispatch(struct syscall_frame *frame) {
             break;
         case SYS_UNLINKAT: frame->rax = (uint64_t)sys_unlink_at((int)frame->rdi, frame->rsi, (int)frame->rdx); break;
         case SYS_RENAMEAT: frame->rax = (uint64_t)sys_rename_at((int)frame->rdi, frame->rsi, (int)frame->rdx, frame->r10, 0); break;
+        case SYS_SYMLINK: frame->rax = (uint64_t)sys_symlink_at(frame->rdi, AT_FDCWD, frame->rsi); break;
         case SYS_SYMLINKAT: frame->rax = (uint64_t)sys_symlink_at(frame->rdi, (int)frame->rsi, frame->rdx); break;
         case SYS_READLINKAT: frame->rax = (uint64_t)sys_readlink_at((int)frame->rdi, frame->rsi, frame->rdx, (size_t)frame->r10); break;
         case SYS_FCHMODAT: frame->rax = (uint64_t)sys_chmod_at((int)frame->rdi, frame->rsi, (uint32_t)frame->rdx, 0); break;
@@ -3750,8 +3768,11 @@ void syscall_dispatch(struct syscall_frame *frame) {
             break;
         }
         default:
-            KDEBUG("syscall: ENOSYS pid=%u nr=%llu\n",
-                    (unsigned)process_current_pid(), (unsigned long long)frame->rax);
+            /* Gated behind TUNIX_DEBUG_LOGS so an unimplemented syscall never
+             * bleeds onto the user's terminal in normal use. kprintf has no
+             * length modifiers (no %llu); syscall numbers are small, so %u. */
+            KDEBUG("syscall: ENOSYS pid=%u nr=%u\n",
+                    (unsigned)process_current_pid(), (unsigned)syscall_number);
             frame->rax = (uint64_t)-(int64_t)ENOSYS;
             break;
     }

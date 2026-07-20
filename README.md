@@ -12,7 +12,9 @@ Tunix is a small Unix-like operating system experiment for x86_64. It includes a
 - tmpfs-like volatile `/tmp`, `/run`, `/dev`, `/proc`
 - Framebuffer terminal with keyboard input
 - Basic VFS, devfs, procfs, process, and syscall support
-- GNU userland (coreutils, grep, sed, gawk, findutils, diffutils, tar, gzip), Bash, TinyCC, nano, Lua, and selected libraries
+- GNU userland (coreutils, grep, sed, gawk, findutils, diffutils, tar, gzip, make), Bash, TinyCC, binutils, nano, Lua, and selected libraries
+- Git, with an `https://` transport via a static libcurl built against mbedTLS
+  (so `git clone https://…` works); `ssh://` remotes are not supported
 
 ## Quick Start
 

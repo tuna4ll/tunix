@@ -5,7 +5,15 @@
 
 #define HEAP_START 0xFFFFFFFFC0000000
 #define HEAP_INITIAL_SIZE (1024 * 1024)
-#define HEAP_MAX_SIZE (96ULL * 1024 * 1024)
+/* The heap grows on demand from the PMM, so this ceiling costs nothing until
+ * hit; if physical RAM runs out first heap_grow() just fails gracefully. It was
+ * 96 MiB, which capped Tunix's in-RAM filesystem (file data lives in kmalloc'd
+ * buffers via memory_write) far too low: `git clone` of a real repo writes a
+ * multi-MB pack into RAM and, with the capacity-doubling realloc's transient
+ * ~2x peak, exhausted the heap and surfaced as EPERM write errors. 768 MiB sits
+ * comfortably inside the 1 GiB virtual window above HEAP_START and lets a clone
+ * fit when QEMU is given enough RAM (see the run targets' -m). */
+#define HEAP_MAX_SIZE (768ULL * 1024 * 1024)
 #define HEAP_PAGE_SIZE 4096ULL
 #define HEAP_MAGIC 0x1234ABCD
 
