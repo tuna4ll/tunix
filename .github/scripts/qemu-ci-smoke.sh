@@ -10,7 +10,9 @@ success_marker=${TUNIX_CI_SUCCESS_MARKER:-TUNIX_CI_BOOT_OK}
 mkdir -p "$(dirname "$log")"
 rm -f "$log"
 
-"$qemu" -machine pc -m 256M -drive "format=raw,file=$image" \
+# 256M is no longer enough: the initramfs is unpacked at the 32 MiB mark and the
+# archive alone is well over 100 MiB, before the ext2 seed and the kernel heap.
+"$qemu" -machine pc -m 1024M -drive "format=raw,file=$image" \
     -nographic -monitor none -serial stdio -no-reboot -no-shutdown \
     -netdev user,id=net0 -device rtl8139,netdev=net0 \
     >"$log" 2>&1 &

@@ -28,6 +28,9 @@
 
 : "${ROOT:?gnu-port.sh: ROOT must be set before sourcing}"
 
+# shellcheck source=ports/lib/kernel-headers.sh
+source "$ROOT/ports/lib/kernel-headers.sh"
+
 JOBS=${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)}
 OUT=${OUT:-$ROOT/ports/out}
 MUSL_SOURCE="$ROOT/ports/src/musl"
@@ -89,34 +92,10 @@ gnu_port_ensure_toolchain() {
 # The musl-gcc wrapper compiles with -nostdinc, so it never sees the host's
 # /usr/include/linux. Several gnulib modules (copy-file-range, fiemap, ...)
 # include Linux UAPI headers, which are libc-independent, so we drop the host's
-# kernel headers into the shared musl sysroot. Idempotent: keyed on version.h.
+# kernel headers into the shared musl sysroot. The copy itself is shared with
+# ports/build-musl-cross.sh, whose sysroot needs the same headers.
 gnu_port_ensure_kernel_headers() {
-    local incdir="$SYSROOT/usr/include"
-    # Sentinel (not version.h): only a fully-completed install counts, so an
-    # aborted partial copy is retried rather than skipped.
-    [[ -f "$incdir/.tunix-kernel-headers" ]] && return 0
-
-    [[ -d /usr/include/linux ]] || gnu_port_fail \
-        "Linux kernel UAPI headers not found on the host; install them (e.g. 'sudo apt-get install linux-libc-dev')"
-
-    mkdir -p "$incdir"
-    # The sysroot may live on a case-insensitive filesystem (e.g. a Windows
-    # drive mounted under WSL), where the netfilter headers' upper/lowercase
-    # pairs (xt_MARK.h vs xt_mark.h) collide. We never use those, so tolerate
-    # the copy errors and assert the headers we actually depend on afterwards.
-    cp -a /usr/include/linux "$incdir/" 2>/dev/null || true
-    [[ -d /usr/include/asm-generic ]] && { cp -a /usr/include/asm-generic "$incdir/" 2>/dev/null || true; }
-    # asm/ is arch-specific and lives under a multiarch path on Debian/Ubuntu;
-    # prefer that real directory, and dereference if /usr/include/asm is a symlink.
-    if [[ -d /usr/include/x86_64-linux-gnu/asm ]]; then
-        cp -a /usr/include/x86_64-linux-gnu/asm "$incdir/" 2>/dev/null || true
-    elif [[ -d /usr/include/asm ]]; then
-        cp -aL /usr/include/asm "$incdir/" 2>/dev/null || true
-    fi
-
-    [[ -f "$incdir/linux/version.h" ]] || gnu_port_fail "failed to stage linux/version.h into the sysroot"
-    [[ -f "$incdir/asm/unistd.h" || -f "$incdir/asm/types.h" ]] || gnu_port_fail "failed to stage asm/ kernel headers into the sysroot"
-    : > "$incdir/.tunix-kernel-headers"
+    tunix_install_kernel_headers "$SYSROOT/usr/include" gnu_port_fail
 }
 
 # GNU packages tracked from git ship only configure.ac; ./configure has to be

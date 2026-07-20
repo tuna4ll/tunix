@@ -13,9 +13,9 @@ MANIFEST_MAGIC = 0x4D414E49
 MANIFEST_VERSION = 3
 # Must stay in sync with TUNIX_INITRAMFS_MAX_BYTES in
 # src/kernel/include/boot_manifest.h.  The ceiling is set by stage2's low
-# identity map (128 MiB) minus INITRAMFS_PHYSICAL (32 MiB), since the kernel
+# identity map (256 MiB) minus INITRAMFS_PHYSICAL (32 MiB), since the kernel
 # loads the archive before installing its own page tables.
-MAX_INITRAMFS_BYTES = 96 * 1024 * 1024
+MAX_INITRAMFS_BYTES = 224 * 1024 * 1024
 DATA_REGION_ALIGN_SECTORS = 2048
 # 128 MiB is the most the ext2 driver can address: region_usable_blocks() caps
 # the filesystem at EXT2_BLOCKS_PER_GROUP (32768) 4 KiB blocks, because the

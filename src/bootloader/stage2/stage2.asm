@@ -472,23 +472,28 @@ pm32_entry:
     mov dword [0x11000], 0x12003
     mov dword [0x11FF0], 0x12003
 
-    ; Identity-map the low 128 MiB as 2 MiB pages.  This must cover the whole
+    ; Identity-map the low 256 MiB as 2 MiB pages.  This must cover the whole
     ; initramfs window: the kernel loads the archive to INITRAMFS_PHYSICAL
     ; (32 MiB) before it installs its own page tables, so the ATA PIO fallback
     ; in load_initramfs() stores through *these* mappings.  DMA bypasses the
     ; MMU and would survive a shorter map, but the PIO path would fault.
     ; Keep this >= INITRAMFS_PHYSICAL + MAX_INITRAMFS_BYTES.
+    ;
+    ; 128 entries still fit in the single page-directory at 0x12000 (512 entries
+    ; = 1 GiB), so widening the window costs no extra page tables.  Mapping is
+    ; not the same as requiring: a machine with less RAM than this never touches
+    ; the high end of the window, it just needs enough memory for the archive.
     mov edi, 0x12000
     xor ebx, ebx
-    mov ecx, 64
-.map_low_128m:
+    mov ecx, 128
+.map_low_256m:
     mov eax, ebx
     or eax, 0x83
     mov [edi], eax
     mov dword [edi + 4], 0
     add ebx, 0x200000
     add edi, 8
-    loop .map_low_128m
+    loop .map_low_256m
 
     mov eax, cr4
     or eax, 1 << 5

@@ -68,6 +68,16 @@ IMAGE_CODECS_SHARED_ROOT := $(PORT_OUT)/image-codecs-shared-root
 IMAGE_CODECS_SHARED_STAMP := $(PORT_OUT)/.image-codecs-shared-ready
 DESKTOP_SYSROOT := $(PORT_OUT)/desktop-sysroot
 MUSL_SHARED_ROOT := $(PORT_OUT)/musl-shared-root
+# Graphics stack. These are the only ports built with a real cross toolchain
+# rather than the musl-gcc wrapper, because mesa is C++ and the host libstdc++
+# is unusable against musl; see ports/build-musl-cross.sh.
+MUSL_CROSS := $(PORT_OUT)/musl-cross
+MUSL_CROSS_STAMP := $(PORT_OUT)/.musl-cross-ready
+GRAPHICS_SYSROOT := $(PORT_OUT)/graphics-sysroot
+LIBDRM_ROOT := $(PORT_OUT)/libdrm-root
+LIBDRM_STAMP := $(PORT_OUT)/.libdrm-ready
+MESA_ROOT := $(PORT_OUT)/mesa-root
+MESA_STAMP := $(PORT_OUT)/.mesa-ready
 BOOT_CONFIG_STAMP := $(BUILD)/.boot-config-ready
 MUSL_SHARED_STAMP := $(PORT_OUT)/.musl-shared-ready
 WALLPAPER_CONVERTER := $(PORT_OUT)/tunix-wallpaper
@@ -114,7 +124,7 @@ INITRD_FILES := $(shell find initrd -type f 2>/dev/null)
 WALLPAPER_SOURCE ?= assets/tunix-mountain-lake.jpg
 WALLPAPER_OUTPUT := initrd/usr/share/tunix/wallpaper.twl
 
-.PHONY: all run headless qemu-ci wallpaper terminal-font dynamic-runtime-check shared-image-codecs-check clean
+.PHONY: all run headless qemu-ci wallpaper terminal-font dynamic-runtime-check shared-image-codecs-check gl-check clean
 all: $(IMAGE)
 
 wallpaper: $(WALLPAPER_OUTPUT)
@@ -160,6 +170,39 @@ $(IMAGE_CODECS_SHARED_STAMP): $(MUSL_SHARED_STAMP) \
 	@test -f $(DESKTOP_SYSROOT)/usr/lib/libturbojpeg.so || { echo "shared TurboJPEG was not installed into the desktop sysroot" >&2; exit 1; }
 	@test -x $(IMAGE_CODECS_SHARED_ROOT)/usr/bin/shared-image-codecs-check || { echo "shared image codec checks were not produced" >&2; exit 1; }
 	@touch $@
+
+$(MUSL_CROSS_STAMP): ports/build-musl-cross.sh ports/lib/kernel-headers.sh \
+	ports/src/musl-cross-make/Makefile
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-musl-cross.sh
+	@test -x $(MUSL_CROSS)/bin/x86_64-linux-musl-g++ || { echo "the musl cross toolchain was not produced" >&2; exit 1; }
+	@touch $@
+
+$(LIBDRM_STAMP): $(MUSL_CROSS_STAMP) ports/build-libdrm.sh ports/lib/cross-port.sh \
+	ports/src/libdrm/meson.build
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-libdrm.sh
+	@test -L $(LIBDRM_ROOT)/usr/lib/libdrm.so.2 || { echo "libdrm was not produced" >&2; exit 1; }
+	@test -f $(GRAPHICS_SYSROOT)/usr/lib/pkgconfig/libdrm.pc || { echo "libdrm was not installed into the graphics sysroot" >&2; exit 1; }
+	@touch $@
+
+$(MESA_STAMP): $(LIBDRM_STAMP) ports/build-mesa.sh ports/lib/cross-port.sh \
+	tools/tunix-gl-demo.c src/include/tunix/framebuffer.h \
+	ports/src/mesa/meson.build
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-mesa.sh
+	@test -L $(MESA_ROOT)/usr/lib/libEGL.so.1 || { echo "mesa libEGL was not produced" >&2; exit 1; }
+	@test -L $(MESA_ROOT)/usr/lib/libGLESv2.so.2 || { echo "mesa libGLESv2 was not produced" >&2; exit 1; }
+	@test -L $(MESA_ROOT)/usr/lib/libgbm.so.1 || { echo "mesa libgbm was not produced" >&2; exit 1; }
+	@test -x $(MESA_ROOT)/usr/bin/tunix-gl-demo || { echo "the GL demo was not produced" >&2; exit 1; }
+	@touch $@
+
+# Renders one offscreen frame on the build host, using the target loader. Proves
+# the shipped libraries initialise a softpipe context without needing to boot.
+gl-check: $(MESA_STAMP)
+	$(MUSL_CROSS)/x86_64-linux-musl/lib/libc.so \
+		--library-path $(MUSL_CROSS)/x86_64-linux-musl/lib:$(abspath $(MESA_ROOT))/usr/lib:$(abspath $(LIBDRM_ROOT))/usr/lib \
+		$(MESA_ROOT)/usr/bin/tunix-gl-demo --probe
 
 shared-image-codecs-check: $(IMAGE_CODECS_SHARED_STAMP)
 	$(MUSL_SHARED_ROOT)/lib/ld-musl-x86_64.so.1 \
@@ -467,7 +510,7 @@ $(INIT): $(BUILD)/user/init.o $(USER_RUNTIME) src/userspace/linker.ld
 	$(LD) $(USER_LDFLAGS) -o $@ $(USER_RUNTIME) $(BUILD)/user/init.o
 	$(STRIP) --strip-all $@
 
-$(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAMP) $(GIT_STAMP) $(TCC_STAMP) $(BINUTILS_STAMP) $(NANO) $(TTY_CLOCK) $(TTY_TETRIS) $(HTOP) $(FASTFETCH_STAMP) $(LUA_STAMP) $(IMAGE_CODECS_STAMP) $(MUSL_SHARED_STAMP) $(IMAGE_CODECS_SHARED_STAMP) $(MBEDTLS_STAMP) $(WALLPAPER_OUTPUT) $(INITRD_FILES)
+$(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAMP) $(GIT_STAMP) $(TCC_STAMP) $(BINUTILS_STAMP) $(NANO) $(TTY_CLOCK) $(TTY_TETRIS) $(HTOP) $(FASTFETCH_STAMP) $(LUA_STAMP) $(IMAGE_CODECS_STAMP) $(MUSL_SHARED_STAMP) $(IMAGE_CODECS_SHARED_STAMP) $(MBEDTLS_STAMP) $(LIBDRM_STAMP) $(MESA_STAMP) $(WALLPAPER_OUTPUT) $(INITRD_FILES)
 	rm -rf $(ROOTFS)
 	mkdir -p $(ROOTFS)/bin $(ROOTFS)/sbin $(ROOTFS)/dev $(ROOTFS)/tmp \
 		$(ROOTFS)/run/dbus $(ROOTFS)/run/user/0 $(ROOTFS)/var/tmp \
@@ -499,6 +542,8 @@ $(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAM
 	cp -R $(IMAGE_CODECS_ROOT)/usr/include/. $(ROOTFS)/usr/include/
 	cp -R $(IMAGE_CODECS_ROOT)/usr/lib/. $(ROOTFS)/usr/lib/
 	cp -R $(IMAGE_CODECS_SHARED_ROOT)/. $(ROOTFS)/
+	cp -R $(LIBDRM_ROOT)/. $(ROOTFS)/
+	cp -R $(MESA_ROOT)/. $(ROOTFS)/
 	cp $(WALLPAPER_CONVERTER) $(ROOTFS)/usr/bin/tunix-wallpaper
 	cp $(HTTPS_GET) $(ROOTFS)/usr/bin/https-get
 	ln -sfn ../usr/bin/https-get $(ROOTFS)/bin/https-get
@@ -542,6 +587,15 @@ $(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAM
 	@test -L $(ROOTFS)/usr/lib/libpng16.so.16 || { echo "shared libpng runtime was not installed into the rootfs" >&2; exit 1; }
 	@test -L $(ROOTFS)/usr/lib/libjpeg.so.62 || { echo "shared libjpeg runtime was not installed into the rootfs" >&2; exit 1; }
 	@test -L $(ROOTFS)/usr/lib/libturbojpeg.so.0 || { echo "shared TurboJPEG runtime was not installed into the rootfs" >&2; exit 1; }
+	@test -L $(ROOTFS)/usr/lib/libdrm.so.2 || { echo "libdrm was not installed into the rootfs" >&2; exit 1; }
+	@test -L $(ROOTFS)/usr/lib/libEGL.so.1 || { echo "mesa libEGL was not installed into the rootfs" >&2; exit 1; }
+	@test -L $(ROOTFS)/usr/lib/libGLESv2.so.2 || { echo "mesa libGLESv2 was not installed into the rootfs" >&2; exit 1; }
+	@test -L $(ROOTFS)/usr/lib/libgbm.so.1 || { echo "mesa libgbm was not installed into the rootfs" >&2; exit 1; }
+	@test -n "$$(ls $(ROOTFS)/usr/lib/libgallium-*.so 2>/dev/null)" || { echo "the gallium megadriver was not installed into the rootfs" >&2; exit 1; }
+	@test -f $(ROOTFS)/usr/lib/gbm/dri_gbm.so || { echo "the GBM backend was not installed into the rootfs" >&2; exit 1; }
+	@test -L $(ROOTFS)/usr/lib/libstdc++.so.6 || { echo "the C++ runtime was not installed into the rootfs" >&2; exit 1; }
+	@test -f $(ROOTFS)/usr/lib/libgcc_s.so.1 || { echo "the gcc unwinder was not installed into the rootfs" >&2; exit 1; }
+	@test -x $(ROOTFS)/usr/bin/tunix-gl-demo || { echo "tunix-gl-demo was not installed into the rootfs" >&2; exit 1; }
 	ln -sfn ../usr/bin/tcc $(ROOTFS)/bin/tcc
 	ln -sfn ../usr/bin/lua $(ROOTFS)/bin/lua
 	ln -sfn ../usr/bin/fastfetch $(ROOTFS)/bin/fastfetch

@@ -78,3 +78,13 @@
 [submodule "ports/src/curl"]
 	path = ports/src/curl
 	url = https://github.com/curl/curl.git
+[submodule "ports/src/libdrm"]
+	path = ports/src/libdrm
+	url = https://gitlab.freedesktop.org/mesa/drm.git
+[submodule "ports/src/mesa"]
+	path = ports/src/mesa
+	url = https://gitlab.freedesktop.org/mesa/mesa.git
+	branch = 26.2
+[submodule "ports/src/musl-cross-make"]
+	path = ports/src/musl-cross-make
+	url = https://github.com/richfelker/musl-cross-make
