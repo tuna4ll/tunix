@@ -20,6 +20,9 @@
 
 #define EAGAIN 11
 #define EBADF 9
+#define EINVAL 22
+/* EWOULDBLOCK is EAGAIN on Linux, and flock reports contention with it. */
+#define EWOULDBLOCK EAGAIN
 #define EPIPE 32
 
 struct file *file_open_node(struct vfs_node *node, uint32_t flags) {
@@ -169,6 +172,66 @@ const void *file_write_wait_channel(struct file *file) {
     return NULL;
 }
 
+/*
+ * Advisory whole-file locking, flock(2) style.
+ *
+ * The lock belongs to the *open file description*, not to the descriptor or the
+ * process, which is why the holder is this struct file: dup() and fork() share
+ * one, so they share the lock, while a second open() of the same path gets its
+ * own and contends. libwayland relies on exactly that to stop two compositors
+ * claiming the same socket name.
+ */
+void file_flock_release(struct file *file) {
+    if (!file || !file->flock_type || !file->node) {
+        if (file) file->flock_type = 0;
+        return;
+    }
+    if (file->flock_type == FILE_LOCK_EX) {
+        if (file->node->flock_exclusive == file) file->node->flock_exclusive = NULL;
+    } else if (file->node->flock_shared) {
+        file->node->flock_shared--;
+    }
+    file->flock_type = 0;
+}
+
+int file_flock(struct file *file, int operation) {
+    if (!file) return -EBADF;
+    /* Only node-backed descriptors carry a lockable identity here; a pipe or
+       socket has no shared object for a second opener to contend with. */
+    if (file->kind != FILE_KIND_VFS || !file->node) return -EINVAL;
+
+    int mode = operation & ~FILE_LOCK_NB;
+    struct vfs_node *node = file->node;
+
+    if (mode == FILE_LOCK_UN) {
+        file_flock_release(file);
+        return 0;
+    }
+    if (mode != FILE_LOCK_SH && mode != FILE_LOCK_EX) return -EINVAL;
+
+    /* Someone else's exclusive lock blocks both kinds of request. */
+    if (node->flock_exclusive && node->flock_exclusive != file) return -EWOULDBLOCK;
+
+    if (mode == FILE_LOCK_EX) {
+        /* Any shared holder other than ourselves blocks an exclusive lock. */
+        uint32_t others = node->flock_shared;
+        if (file->flock_type == FILE_LOCK_SH && others) others--;
+        if (others) return -EWOULDBLOCK;
+        file_flock_release(file);
+        node->flock_exclusive = file;
+        file->flock_type = FILE_LOCK_EX;
+        return 0;
+    }
+
+    /* Shared: re-taking it is a no-op, and downgrading from exclusive is
+       allowed without ever dropping the lock in between. */
+    if (file->flock_type == FILE_LOCK_SH) return 0;
+    file_flock_release(file);
+    node->flock_shared++;
+    file->flock_type = FILE_LOCK_SH;
+    return 0;
+}
+
 void file_ref(struct file *file) {
     if (file) file->refs++;
 }
@@ -177,6 +240,9 @@ void file_unref(struct file *file) {
     if (!file || file->refs <= 0) return;
     file->refs--;
     if (file->refs != 0) return;
+    /* The last descriptor referring to this open file description is going
+       away, which is exactly when flock releases its lock. */
+    file_flock_release(file);
     if ((file->kind == FILE_KIND_PIPE_READ || file->kind == FILE_KIND_PIPE_WRITE) && file->pipe)
         pipe_release(file->pipe, file->kind == FILE_KIND_PIPE_WRITE);
     if (file->kind == FILE_KIND_VFS && file->node && file->node->close)

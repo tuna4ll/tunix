@@ -102,10 +102,16 @@ c_link_args = ['-L$GRAPHICS_SYSROOT/usr/lib', '-Wl,-rpath-link,$GRAPHICS_SYSROOT
 cpp_link_args = ['-L$GRAPHICS_SYSROOT/usr/lib', '-Wl,-rpath-link,$GRAPHICS_SYSROOT/usr/lib']
 
 [properties]
-# Not sys_root: the cross gcc already knows its own sysroot for libc, and
-# pointing meson at a second one would confuse the compiler search paths. We
-# only need pkg-config to look in the graphics sysroot, with its prefixes
-# rewritten to point there.
+# meson uses both of these for pkg-config on the *host* machine only: the search
+# path, and PKG_CONFIG_SYSROOT_DIR to rewrite the -I/-L prefixes in .pc files
+# that were installed with prefix=/usr. Setting them here rather than exporting
+# them into the environment matters, because an exported PKG_CONFIG_LIBDIR also
+# hijacks meson's native lookups -- which is how a cross build ends up unable to
+# find a build-time tool like wayland-scanner that is installed on the host.
+#
+# sys_root only feeds pkg-config; the cross gcc keeps using its own sysroot for
+# libc, which is why the compiler search paths stay untouched.
+sys_root = '$GRAPHICS_SYSROOT'
 pkg_config_libdir = '$GRAPHICS_SYSROOT/usr/lib/pkgconfig'
 
 [host_machine]
@@ -117,12 +123,13 @@ endian = 'little'
 EOF_CROSS
 }
 
-# The .pc files in the graphics sysroot are installed with prefix=/usr, so
-# consumers must be told where that /usr really lives. meson's pkg_config_libdir
-# handles the search path; this handles the prefix rewriting.
+# Where the graphics sysroot lives is described to meson by the cross file, per
+# machine. The environment must stay clear of pkg-config overrides, because
+# those apply to *both* machines: a PKG_CONFIG_LIBDIR pointing at the target
+# sysroot makes meson unable to find build-time tools installed on the host.
 cross_port_export_pkg_config() {
-    export PKG_CONFIG_LIBDIR="$GRAPHICS_SYSROOT/usr/lib/pkgconfig"
-    export PKG_CONFIG_SYSROOT_DIR="$GRAPHICS_SYSROOT"
+    unset PKG_CONFIG_LIBDIR
+    unset PKG_CONFIG_SYSROOT_DIR
     unset PKG_CONFIG_PATH
 }
 

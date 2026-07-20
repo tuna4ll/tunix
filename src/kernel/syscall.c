@@ -107,6 +107,7 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define SYS_KILL 62
 #define SYS_UNAME 63
 #define SYS_FCNTL 72
+#define SYS_FLOCK 73
 #define SYS_FSYNC 74
 #define SYS_FDATASYNC 75
 #define SYS_STATFS 137
@@ -1712,6 +1713,14 @@ static int64_t sys_ftruncate(int fd, uint64_t length) {
         return memfd_truncate(file->memfd, length) == 0 ? 0 : -ENOMEM;
     if (file->kind != FILE_KIND_VFS || !file->node) return -EINVAL;
     return vfs_truncate(file->node, length) == 0 ? 0 : -EIO;
+}
+
+/* Resolves the descriptor and takes the lock; the blocking retry lives in the
+   dispatcher, where the syscall frame is available to rewind. */
+static int64_t sys_flock(int fd, int operation) {
+    struct process *process = process_current();
+    if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->fds[fd]) return -EBADF;
+    return file_flock(process->fds[fd], operation);
 }
 
 static int64_t sys_fsync(int fd) {
@@ -3697,6 +3706,22 @@ void syscall_dispatch(struct syscall_frame *frame) {
         case SYS_SYNCFS: frame->rax = (uint64_t)sys_fsync((int)frame->rdi); break;
         case SYS_SYNC: frame->rax = (uint64_t)ext2fs_sync(); break;
         case SYS_FTRUNCATE: frame->rax = (uint64_t)sys_ftruncate((int)frame->rdi, frame->rsi); break;
+        case SYS_FLOCK: {
+            int operation = (int)frame->rsi;
+            int64_t result = sys_flock((int)frame->rdi, operation);
+            /* Without LOCK_NB a contended lock waits instead of failing. The
+               retry rewinds the syscall and yields, so the process re-attempts
+               it after other work runs -- there is no per-lock wait queue, and
+               a lock this coarse is not worth one. */
+            if (result == -EAGAIN && !(operation & FILE_LOCK_NB)) {
+                if (!retry_io_wait(frame, SYS_FLOCK, -1))
+                    frame->rax = (uint64_t)result;
+            } else {
+                clear_io_wait(process_current());
+                frame->rax = (uint64_t)result;
+            }
+            break;
+        }
         case SYS_MEMFD_CREATE:
             frame->rax = (uint64_t)sys_memfd_create(frame->rdi, (uint32_t)frame->rsi);
             break;

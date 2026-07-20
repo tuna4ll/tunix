@@ -74,6 +74,10 @@ MUSL_SHARED_ROOT := $(PORT_OUT)/musl-shared-root
 MUSL_CROSS := $(PORT_OUT)/musl-cross
 MUSL_CROSS_STAMP := $(PORT_OUT)/.musl-cross-ready
 GRAPHICS_SYSROOT := $(PORT_OUT)/graphics-sysroot
+LIBFFI_ROOT := $(PORT_OUT)/libffi-root
+LIBFFI_STAMP := $(PORT_OUT)/.libffi-ready
+WAYLAND_ROOT := $(PORT_OUT)/wayland-root
+WAYLAND_STAMP := $(PORT_OUT)/.wayland-ready
 LIBDRM_ROOT := $(PORT_OUT)/libdrm-root
 LIBDRM_STAMP := $(PORT_OUT)/.libdrm-ready
 MESA_ROOT := $(PORT_OUT)/mesa-root
@@ -144,7 +148,8 @@ $(MUSL_SHARED_STAMP): ports/build-musl-shared.sh \
 	tools/dynamic-runtime/dlopen-test.c \
 	tools/dynamic-runtime/pthread-test.c \
 	tools/dynamic-runtime/shm-test.c \
-	tools/dynamic-runtime/signalfd-test.c
+	tools/dynamic-runtime/signalfd-test.c \
+	tools/dynamic-runtime/kill-blocked-test.c
 	@mkdir -p $(PORT_OUT)
 	OUT="$(abspath $(PORT_OUT))" bash ports/build-musl-shared.sh
 	@test -x $(MUSL_SHARED_ROOT)/lib/ld-musl-x86_64.so.1 || { echo "shared musl loader was not produced" >&2; exit 1; }
@@ -179,6 +184,24 @@ $(MUSL_CROSS_STAMP): ports/build-musl-cross.sh ports/lib/kernel-headers.sh \
 	@mkdir -p $(PORT_OUT)
 	OUT="$(abspath $(PORT_OUT))" bash ports/build-musl-cross.sh
 	@test -x $(MUSL_CROSS)/bin/x86_64-linux-musl-g++ || { echo "the musl cross toolchain was not produced" >&2; exit 1; }
+	@touch $@
+
+$(LIBFFI_STAMP): $(MUSL_CROSS_STAMP) ports/build-libffi.sh ports/lib/cross-port.sh \
+	ports/src/libffi/configure.ac
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-libffi.sh
+	@test -L $(LIBFFI_ROOT)/usr/lib/libffi.so.8 || { echo "libffi was not produced" >&2; exit 1; }
+	@touch $@
+
+# libwayland is the protocol library every compositor and client is built
+# against; it needs libffi for its message dispatch.
+$(WAYLAND_STAMP): $(LIBFFI_STAMP) ports/build-wayland.sh ports/lib/cross-port.sh \
+	tools/wayland-roundtrip-test.c ports/src/wayland/meson.build
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-wayland.sh
+	@test -L $(WAYLAND_ROOT)/usr/lib/libwayland-server.so.0 || { echo "libwayland-server was not produced" >&2; exit 1; }
+	@test -L $(WAYLAND_ROOT)/usr/lib/libwayland-client.so.0 || { echo "libwayland-client was not produced" >&2; exit 1; }
+	@test -x $(WAYLAND_ROOT)/usr/bin/wayland-roundtrip-test || { echo "the wayland roundtrip test was not produced" >&2; exit 1; }
 	@touch $@
 
 $(LIBDRM_STAMP): $(MUSL_CROSS_STAMP) ports/build-libdrm.sh ports/lib/cross-port.sh \
@@ -515,7 +538,7 @@ $(INIT): $(BUILD)/user/init.o $(USER_RUNTIME) src/userspace/linker.ld
 	$(LD) $(USER_LDFLAGS) -o $@ $(USER_RUNTIME) $(BUILD)/user/init.o
 	$(STRIP) --strip-all $@
 
-$(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAMP) $(GIT_STAMP) $(TCC_STAMP) $(BINUTILS_STAMP) $(NANO) $(TTY_CLOCK) $(TTY_TETRIS) $(HTOP) $(FASTFETCH_STAMP) $(LUA_STAMP) $(IMAGE_CODECS_STAMP) $(MUSL_SHARED_STAMP) $(IMAGE_CODECS_SHARED_STAMP) $(MBEDTLS_STAMP) $(LIBDRM_STAMP) $(MESA_STAMP) $(WALLPAPER_OUTPUT) $(INITRD_FILES)
+$(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAMP) $(GIT_STAMP) $(TCC_STAMP) $(BINUTILS_STAMP) $(NANO) $(TTY_CLOCK) $(TTY_TETRIS) $(HTOP) $(FASTFETCH_STAMP) $(LUA_STAMP) $(IMAGE_CODECS_STAMP) $(MUSL_SHARED_STAMP) $(IMAGE_CODECS_SHARED_STAMP) $(MBEDTLS_STAMP) $(LIBFFI_STAMP) $(WAYLAND_STAMP) $(LIBDRM_STAMP) $(MESA_STAMP) $(WALLPAPER_OUTPUT) $(INITRD_FILES)
 	rm -rf $(ROOTFS)
 	mkdir -p $(ROOTFS)/bin $(ROOTFS)/sbin $(ROOTFS)/dev $(ROOTFS)/tmp \
 		$(ROOTFS)/run/dbus $(ROOTFS)/run/user/0 $(ROOTFS)/var/tmp \
@@ -547,6 +570,8 @@ $(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAM
 	cp -R $(IMAGE_CODECS_ROOT)/usr/include/. $(ROOTFS)/usr/include/
 	cp -R $(IMAGE_CODECS_ROOT)/usr/lib/. $(ROOTFS)/usr/lib/
 	cp -R $(IMAGE_CODECS_SHARED_ROOT)/. $(ROOTFS)/
+	cp -R $(LIBFFI_ROOT)/. $(ROOTFS)/
+	cp -R $(WAYLAND_ROOT)/. $(ROOTFS)/
 	cp -R $(LIBDRM_ROOT)/. $(ROOTFS)/
 	cp -R $(MESA_ROOT)/. $(ROOTFS)/
 	cp $(WALLPAPER_CONVERTER) $(ROOTFS)/usr/bin/tunix-wallpaper
@@ -594,6 +619,10 @@ $(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAM
 	@test -L $(ROOTFS)/usr/lib/libpng16.so.16 || { echo "shared libpng runtime was not installed into the rootfs" >&2; exit 1; }
 	@test -L $(ROOTFS)/usr/lib/libjpeg.so.62 || { echo "shared libjpeg runtime was not installed into the rootfs" >&2; exit 1; }
 	@test -L $(ROOTFS)/usr/lib/libturbojpeg.so.0 || { echo "shared TurboJPEG runtime was not installed into the rootfs" >&2; exit 1; }
+	@test -L $(ROOTFS)/usr/lib/libffi.so.8 || { echo "libffi was not installed into the rootfs" >&2; exit 1; }
+	@test -L $(ROOTFS)/usr/lib/libwayland-server.so.0 || { echo "libwayland-server was not installed into the rootfs" >&2; exit 1; }
+	@test -L $(ROOTFS)/usr/lib/libwayland-client.so.0 || { echo "libwayland-client was not installed into the rootfs" >&2; exit 1; }
+	@test -x $(ROOTFS)/usr/bin/wayland-roundtrip-test || { echo "the wayland roundtrip test was not installed into the rootfs" >&2; exit 1; }
 	@test -L $(ROOTFS)/usr/lib/libdrm.so.2 || { echo "libdrm was not installed into the rootfs" >&2; exit 1; }
 	@test -L $(ROOTFS)/usr/lib/libEGL.so.1 || { echo "mesa libEGL was not installed into the rootfs" >&2; exit 1; }
 	@test -L $(ROOTFS)/usr/lib/libGLESv2.so.2 || { echo "mesa libGLESv2 was not installed into the rootfs" >&2; exit 1; }

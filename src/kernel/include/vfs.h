@@ -60,6 +60,11 @@ struct vfs_node {
        directory. The tree itself is not counted: a node with refs == 0 is
        owned solely by its parent's child list. */
     uint32_t refs;
+    /* Advisory whole-file locks (flock). The lock belongs to the open file
+       description, so the holder is tracked on struct file and only the
+       aggregate state lives here. */
+    struct file *flock_exclusive;
+    uint32_t flock_shared;
 };
 
 struct dirent {

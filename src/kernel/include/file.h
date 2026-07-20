@@ -53,6 +53,9 @@ struct file {
     struct inotify_context *inotify;
     struct memfd_object *memfd;
     struct signalfd_context *signalfd;
+    /* LOCK_SH or LOCK_EX while this open file description holds an advisory
+       lock on file->node, 0 otherwise. */
+    int flock_type;
 };
 
 struct file *file_open_node(struct vfs_node *node, uint32_t flags);
@@ -70,6 +73,16 @@ struct file *file_create_pty_endpoint(struct pty_pair *pty, int master,
                                       struct vfs_node *node, uint32_t flags);
 void file_ref(struct file *file);
 void file_unref(struct file *file);
+
+/* flock(2) operations, as the ABI defines them. */
+#define FILE_LOCK_SH 1
+#define FILE_LOCK_EX 2
+#define FILE_LOCK_NB 4
+#define FILE_LOCK_UN 8
+/* Take or release an advisory lock. Returns 0 on success, -EWOULDBLOCK when the
+   lock is contended, or another negative errno. */
+int file_flock(struct file *file, int operation);
+void file_flock_release(struct file *file);
 int64_t file_read(struct file *file, size_t size, void *buffer);
 int64_t file_write(struct file *file, size_t size, const void *buffer);
 /*

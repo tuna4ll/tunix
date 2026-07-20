@@ -88,3 +88,9 @@
 [submodule "ports/src/musl-cross-make"]
 	path = ports/src/musl-cross-make
 	url = https://github.com/richfelker/musl-cross-make
+[submodule "ports/src/libffi"]
+	path = ports/src/libffi
+	url = https://github.com/libffi/libffi
+[submodule "ports/src/wayland"]
+	path = ports/src/wayland
+	url = https://gitlab.freedesktop.org/wayland/wayland.git

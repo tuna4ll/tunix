@@ -99,6 +99,33 @@ make gl-check          # renders one frame on the build host
 /usr/bin/tunix-gl-demo # renders to the framebuffer inside Tunix
 ```
 
+## Wayland
+
+`libffi` and `libwayland` are the first two ports on the way to Weston. They
+use the same cross toolchain and graphics sysroot as libdrm and mesa.
+
+`wayland-scanner` is a build-time code generator, so the port does not build it
+for the target. In a cross build meson resolves it from the **host** and
+requires the version to match the library being built exactly, because the C
+glue it generates is compiled into that library:
+
+```sh
+pacman -S wayland      # provides a host wayland-scanner
+```
+
+`/usr/bin/wayland-roundtrip-test` is the end-to-end check. It runs a real
+server and a real client in one process tree and exercises the pieces the
+kernel work was for: a listening unix socket, a `wl_display_roundtrip` (libffi
+dispatching a marshalled call), and a `wl_shm` pool whose `memfd` travels over
+`SCM_RIGHTS` and is mapped by the server.
+
+One trap worth knowing about on a Windows working copy: libffi's
+`.gitattributes` marks everything `text=auto`, so a checkout rewrites its shell
+scripts with CRLF line endings. `configure` then fails to source
+`configure.host`, which is not fatal — it silently leaves the architecture
+undetected and the build dies much later. Set `core.eol=lf` and re-check out
+the submodule; `ports/build-libffi.sh` detects the symptom and says so.
+
 Do not make a port install directly into `initrd/` or `build/rootfs/`. The Makefile owns final rootfs assembly.
 
 ## How to Port
