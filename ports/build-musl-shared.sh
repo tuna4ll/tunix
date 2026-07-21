@@ -110,8 +110,12 @@ ln -s libtunix_dynamic.so.1 "$RUNTIME_ROOT/usr/lib/libtunix_dynamic.so"
 # Killing a process that is asleep inside a rewound blocking syscall.
 "$MUSL_CC" -O2 -fPIE -pie "$SOURCE/kill-blocked-test.c" \
     -o "$RUNTIME_ROOT/usr/bin/kill-blocked-test"
+# The pseudo-terminal sequence a terminal emulator runs through forkpty(). Not
+# run on the host: it would take the build shell's controlling terminal.
+"$MUSL_CC" -O2 -fPIE -pie "$SOURCE/pty-test.c" \
+    -o "$RUNTIME_ROOT/usr/bin/pty-test"
 
-for binary in dynamic-hello dynamic-nopie dlopen-test pthread-test shm-test signalfd-test kill-blocked-test; do
+for binary in dynamic-hello dynamic-nopie dlopen-test pthread-test shm-test signalfd-test kill-blocked-test pty-test; do
     interp=$($READELF -l "$RUNTIME_ROOT/usr/bin/$binary" | \
         sed -n 's/.*Requesting program interpreter: \([^]]*\).*/\1/p')
     [[ "$interp" == "/lib/$loader_name" ]] || \
@@ -143,7 +147,7 @@ library_path="$RUNTIME_ROOT/lib:$SYSROOT/usr/lib:$RUNTIME_ROOT/usr/lib"
     "$RUNTIME_ROOT/usr/bin/kill-blocked-test"
 
 "$HOST_STRIP" --strip-unneeded "$LIBRARY"
-for binary in dynamic-hello dynamic-nopie dlopen-test pthread-test shm-test signalfd-test kill-blocked-test; do
+for binary in dynamic-hello dynamic-nopie dlopen-test pthread-test shm-test signalfd-test kill-blocked-test pty-test; do
     "$HOST_STRIP" --strip-all "$RUNTIME_ROOT/usr/bin/$binary"
 done
 
@@ -157,6 +161,7 @@ set -eu
 /usr/bin/shm-test
 /usr/bin/signalfd-test
 /usr/bin/kill-blocked-test
+/usr/bin/pty-test
 printf '%s\n' 'dynamic-runtime-check: PASS'
 EOF_CHECK
 chmod 0755 "$RUNTIME_ROOT/usr/bin/dynamic-runtime-check"

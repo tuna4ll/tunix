@@ -24,7 +24,11 @@ set -euo pipefail
 #                    inert on Tunix.
 #   xwayland         an X server is a project of its own
 #   image-jpeg/webp  decoders for backgrounds we do not ship
-#   demo-clients     they need cairo
+#   demo-clients     several of them want pangocairo, which is not ported
+#
+# weston-terminal *is* built (-Dtools=terminal): it is what the panel's one
+# launcher starts, and it needs nothing beyond the toy toolkit -- wayland-client,
+# cairo, xkbcommon and wayland-cursor, all of which are already here.
 #
 # The tests are also off: they assume a full session and a runnable target.
 #
@@ -118,7 +122,7 @@ meson setup "$BUILD/obj" "$BUILD/src" \
     -Ddemo-clients=false \
     -Dwcap-decode=false \
     -Dsimple-clients= \
-    -Dtools= \
+    -Dtools=terminal \
     -Dtests=false \
     -Ddoc=false
 
@@ -133,6 +137,8 @@ DESTDIR="$ROOT_DIR" meson install -C "$BUILD/obj" --no-rebuild
     cross_port_fail "the headless backend module was not installed"
 [[ -f "$ROOT_DIR/usr/lib/libweston-14/drm-backend.so" ]] || \
     cross_port_fail "the drm backend module was not installed"
+[[ -x "$ROOT_DIR/usr/bin/weston-terminal" ]] || \
+    cross_port_fail "weston-terminal was not produced"
 
 interp=$("$READELF" -l "$ROOT_DIR/usr/bin/weston" | \
     sed -n 's/.*Requesting program interpreter: \([^]]*\).*/\1/p')

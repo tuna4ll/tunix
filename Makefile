@@ -171,7 +171,8 @@ $(MUSL_SHARED_STAMP): ports/build-musl-shared.sh \
 	tools/dynamic-runtime/pthread-test.c \
 	tools/dynamic-runtime/shm-test.c \
 	tools/dynamic-runtime/signalfd-test.c \
-	tools/dynamic-runtime/kill-blocked-test.c
+	tools/dynamic-runtime/kill-blocked-test.c \
+	tools/dynamic-runtime/pty-test.c
 	@mkdir -p $(PORT_OUT)
 	OUT="$(abspath $(PORT_OUT))" bash ports/build-musl-shared.sh
 	@test -x $(MUSL_SHARED_ROOT)/lib/ld-musl-x86_64.so.1 || { echo "shared musl loader was not produced" >&2; exit 1; }
@@ -320,6 +321,7 @@ $(WESTON_STAMP): $(WAYLAND_STAMP) $(WAYLAND_PROTOCOLS_STAMP) $(PIXMAN_STAMP) \
 	@test -x $(WESTON_ROOT)/usr/bin/weston || { echo "weston was not produced" >&2; exit 1; }
 	@test -f $(WESTON_ROOT)/usr/lib/libweston-14/headless-backend.so || { echo "the headless backend was not produced" >&2; exit 1; }
 	@test -f $(WESTON_ROOT)/usr/lib/libweston-14/drm-backend.so || { echo "the drm backend was not produced" >&2; exit 1; }
+	@test -x $(WESTON_ROOT)/usr/bin/weston-terminal || { echo "weston-terminal was not produced" >&2; exit 1; }
 	@touch $@
 
 $(LIBDRM_STAMP): $(MUSL_CROSS_STAMP) ports/build-libdrm.sh ports/lib/cross-port.sh \

@@ -1798,6 +1798,15 @@ static int64_t sys_fsync(int fd) {
 static int64_t sys_ioctl(int fd, unsigned long request, uint64_t user_argument) {
     struct process *process = process_current();
     if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->fds[fd]) return -EBADF;
+    /*
+     * An ioctl request is 32 bits. libc declares ioctl() as taking an int, so
+     * any request with the read direction set -- 0x8xxxxxxx, which is every
+     * _IOR: TIOCGPTN, EVIOCGVERSION, RTC_RD_TIME -- is negative as an int and
+     * arrives here sign-extended to 64 bits. Linux truncates because its
+     * handler takes an unsigned int; do the same, or every exact comparison
+     * below silently misses and the caller is told ENOTTY.
+     */
+    request &= 0xFFFFFFFFUL;
     struct file *file = process->fds[fd];
     if (file->kind == FILE_KIND_INET_SOCKET && request == SIOCGIFCONF) {
         if (!user_argument) return -EFAULT;
