@@ -21,6 +21,10 @@ int64_t input_read_scancodes(size_t size, void *buffer);
 struct input_reader *input_reader_open(unsigned device_id);
 void input_reader_close(struct input_reader *reader);
 int input_reader_ready(struct input_reader *reader);
+/* Linux's evdev ioctls. Takes the reader because EVIOCSCLOCKID and EVIOCGRAB
+   are per-descriptor state, not per-device. */
+int64_t input_reader_ioctl(struct input_reader *reader, unsigned device_id,
+                           unsigned long request, uint64_t user_argument);
 int64_t input_reader_read(struct input_reader *reader, size_t size, void *buffer);
 
 #endif

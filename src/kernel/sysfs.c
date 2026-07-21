@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
+#include "include/devnum.h"
 #include "include/drm.h"
 
 #include "include/kstring.h"
@@ -29,12 +30,6 @@
  * failed scandir of *either* directory as a failure of the whole enumeration.
  */
 
-/* Linux's numbers, because that is what userspace expects to see. */
-#define SYSFS_DRM_MAJOR 226
-#define SYSFS_INPUT_MAJOR 13
-/* event0.. are minor 64 and up on Linux; libinput only reads it back out. */
-#define SYSFS_INPUT_EVENT_MINOR_BASE 64
-
 static void append_string(char *out, size_t limit, size_t *used, const char *text) {
     while (*text && *used + 1 < limit) out[(*used)++] = *text++;
 }
@@ -55,7 +50,7 @@ static void append_number(char *out, size_t limit, size_t *used, uint32_t value)
  * /sys/dev/char entry that points back at it.
  */
 static void publish_device(const char *name, const char *devname,
-                           const char *subsystem,
+                           const char *subsystem, const char *extra,
                            uint32_t major, uint32_t minor) {
     char path[128];
     size_t used = 0;
@@ -68,7 +63,7 @@ static void publish_device(const char *name, const char *devname,
        consumer gets from the sysfs entry back to /dev -- libudev-zero simply
        prefixes it with "/dev/", so it is a path relative to /dev and not
        always the same as the sysfs name: card0 lives at dri/card0. */
-    char uevent[192];
+    char uevent[256];
     size_t length = 0;
     append_string(uevent, sizeof(uevent), &length, "MAJOR=");
     append_number(uevent, sizeof(uevent), &length, major);
@@ -79,6 +74,11 @@ static void publish_device(const char *name, const char *devname,
     append_string(uevent, sizeof(uevent), &length, "\nSUBSYSTEM=");
     append_string(uevent, sizeof(uevent), &length, subsystem);
     append_string(uevent, sizeof(uevent), &length, "\n");
+    /* Whatever else a consumer needs tagged. On Linux these come from udev's
+       input_id builtin, which classifies a device by probing its evdev bits;
+       there is nothing to probe here, so the answer is stated. libinput
+       refuses any device that is not tagged, however well it works. */
+    if (extra) append_string(uevent, sizeof(uevent), &length, extra);
 
     char file[160];
     used = 0;
@@ -122,7 +122,8 @@ void sysfs_init(void) {
     if (!vfs_mkdir_p("/sys/dev/block")) return;
 
     if (drm_available())
-        publish_device("card0", "dri/card0", "drm", SYSFS_DRM_MAJOR, 0);
+        publish_device("card0", "dri/card0", "drm", NULL, DEV_MAJOR_DRM,
+                       DEV_MINOR_DRM_CARD0);
 
     /* devfs attaches a fixed pair of evdev nodes, event0 for the keyboard and
        event1 for the mouse; this mirrors that rather than inventing an
@@ -140,7 +141,13 @@ void sysfs_init(void) {
         append_string(devname, sizeof(devname), &devname_used, name);
         devname[devname_used] = '\0';
 
-        publish_device(name, devname, "input", SYSFS_INPUT_MAJOR,
-                       SYSFS_INPUT_EVENT_MINOR_BASE + device);
+        /* event0 is the keyboard, event1 the mouse -- devfs attaches them in
+           that order, and libinput wants each one told which it is. */
+        const char *tags = device == 0U
+            ? "ID_INPUT=1\nID_INPUT_KEYBOARD=1\n"
+            : "ID_INPUT=1\nID_INPUT_MOUSE=1\n";
+
+        publish_device(name, devname, "input", tags, DEV_MAJOR_INPUT,
+                       DEV_MINOR_INPUT_EVENT_BASE + device);
     }
 }

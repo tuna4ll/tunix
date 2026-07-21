@@ -1825,8 +1825,17 @@ static int64_t sys_ioctl(int fd, unsigned long request, uint64_t user_argument) 
     if (file->kind == FILE_KIND_PTY_MASTER || file->kind == FILE_KIND_PTY_SLAVE)
         return pty_ioctl(file->pty, file->kind == FILE_KIND_PTY_MASTER,
                          request, user_argument);
-    if (file->kind == FILE_KIND_INPUT && file->node && file->node->ioctl)
-        return file->node->ioctl(file->node, request, user_argument);
+    if (file->kind == FILE_KIND_INPUT && file->node) {
+        /* Tunix's own EVIOCGINFO is answered by the node; everything in the
+           'E' group is evdev and needs the reader, because EVIOCSCLOCKID and
+           EVIOCGRAB belong to the descriptor rather than the device. */
+        if (((request >> 8) & 0xFFU) == (unsigned)'E')
+            return input_reader_ioctl(file->input_reader,
+                                      (unsigned)(uintptr_t)file->node->data,
+                                      request, user_argument);
+        if (file->node->ioctl)
+            return file->node->ioctl(file->node, request, user_argument);
+    }
     if (file->kind == FILE_KIND_FRAMEBUFFER)
         return framebuffer_file_ioctl(file, request, user_argument);
     if (file->kind == FILE_KIND_INET_SOCKET) {
@@ -1902,6 +1911,13 @@ static void fill_stat(struct vfs_node *node, struct linux_stat *stat) {
                     (kind == VFS_BLOCKDEVICE ? 0060000U :
                     (kind == VFS_SYMLINK ? 0120000U : 0100000U)));
     stat->st_mode = type | (node->mode & 0777U);
+    if (kind == VFS_CHARDEVICE || kind == VFS_BLOCKDEVICE) {
+        /* Linux's encoding: 20 bits of minor split around 12 bits of major. */
+        uint64_t major = node->dev_major;
+        uint64_t minor = node->dev_minor;
+        stat->st_rdev = ((major & 0xFFFULL) << 8) | (minor & 0xFFULL) |
+                        ((major & ~0xFFFULL) << 32) | ((minor & ~0xFFULL) << 12);
+    }
     /* ext2 rev 0 has no sub-second field, so the nanosecond parts stay zero. */
     stat->st_atim.tv_sec = (int64_t)node->atime;
     stat->st_mtim.tv_sec = (int64_t)node->mtime;
@@ -2066,6 +2082,11 @@ static void fill_statx(const struct linux_stat *basic_in, struct linux_statx *ou
     out->stx_atime.tv_sec = basic.st_atim.tv_sec;
     out->stx_mtime.tv_sec = basic.st_mtim.tv_sec;
     out->stx_ctime.tv_sec = basic.st_ctim.tv_sec;
+    /* statx splits what stat packs into one field. */
+    out->stx_rdev_major = (uint32_t)(((basic.st_rdev >> 8) & 0xFFFU) |
+                                     ((basic.st_rdev >> 32) & ~0xFFFU));
+    out->stx_rdev_minor = (uint32_t)((basic.st_rdev & 0xFFU) |
+                                     ((basic.st_rdev >> 12) & ~0xFFU));
 }
 
 static int64_t sys_statx(int dirfd, uint64_t user_path, int flags,

@@ -9,8 +9,8 @@
 #   SEATD_VTBOUND=0          turns off VT binding. Tunix has no virtual
 #                            terminals, and without this libseat issues VT
 #                            ioctls that cannot be answered.
-#   --continue-without-input there is no evdev layer yet, so weston would
-#                            otherwise refuse to start with no input devices.
+# Keyboard and mouse come from /dev/input/event0 and event1 through libinput,
+# so no --continue-without-input is needed.
 #
 # Anything after `startx` is passed straight through to weston.
 set -e
@@ -19,4 +19,4 @@ export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/tmp}
 export LIBSEAT_BACKEND=builtin
 export SEATD_VTBOUND=0
 
-exec weston --backend=drm --continue-without-input --no-config "$@"
+exec weston --backend=drm --no-config "$@"

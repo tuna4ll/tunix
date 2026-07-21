@@ -45,6 +45,12 @@ struct vfs_node {
     uint64_t inode;
     uint64_t length;
     uint64_t capacity;
+    /* Device number for character and block devices, as st_rdev reports it.
+       Linux's numbers, because that is what userspace matches on: libinput
+       fstat()s an evdev node and asks udev to find the device with that rdev,
+       so a zero here makes the device invisible however well it works. */
+    uint32_t dev_major;
+    uint32_t dev_minor;
     void *data;
     vfs_read_fn read;
     vfs_write_fn write;

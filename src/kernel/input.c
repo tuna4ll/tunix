@@ -6,10 +6,17 @@
 #include "include/kstring.h"
 #include "include/time.h"
 #include "include/tty.h"
+#include "include/usercopy.h"
 #include "../include/tunix/input_event.h"
 
 #define EAGAIN 11
 #define EINVAL 22
+#define EFAULT 14
+#define ENOENT 2
+#define ENOTTY 25
+
+#define input_copy_to_user copy_to_user
+#define input_copy_from_user copy_from_user
 
 #define PS2_STATUS_PORT  0x64U
 #define PS2_COMMAND_PORT 0x64U
@@ -27,12 +34,34 @@
 #define INPUT_READER_CAPACITY 128U
 #define INPUT_KEY_STATE_SIZE 256U
 
+#define EVDEV_CLOCK_REALTIME 0
+#define EVDEV_CLOCK_MONOTONIC 1
+
+/*
+ * The queue holds a plain nanosecond timestamp rather than the timeval the
+ * device reports, because the clock is a property of the *reader*: EVIOCSCLOCKID
+ * lets each descriptor pick realtime or monotonic, and libinput switches to
+ * monotonic the moment it opens the device. Converting at read time is what
+ * makes that possible without keeping two copies of every event.
+ */
+struct input_record {
+    uint64_t time_ns;
+    uint16_t type;
+    uint16_t code;
+    int32_t value;
+};
+
 struct input_reader {
     unsigned device_id;
-    struct tunix_input_event events[INPUT_READER_CAPACITY];
+    struct input_record events[INPUT_READER_CAPACITY];
     size_t head;
     size_t tail;
     size_t count;
+    /* CLOCK_REALTIME (0) or CLOCK_MONOTONIC (1), chosen with EVIOCSCLOCKID. */
+    int clock_id;
+    /* EVIOCGRAB is exclusive access. Nothing here multiplexes a device between
+       compositors, so the grab is recorded and honoured but never contested. */
+    int grabbed;
     struct input_reader *next;
 };
 
@@ -163,13 +192,13 @@ static unsigned ps2_mouse_negotiate_wheel(void) {
 }
 
 static void reader_push(struct input_reader *reader,
-                        const struct tunix_input_event *event) {
+                        const struct input_record *event) {
     if (!reader || !event) return;
     if (reader->count == INPUT_READER_CAPACITY) {
         reader->head = 0;
         reader->tail = 0;
         reader->count = 0;
-        struct tunix_input_event dropped = {
+        struct input_record dropped = {
             .time_ns = event->time_ns,
             .type = TUNIX_EV_SYN,
             .code = TUNIX_SYN_DROPPED,
@@ -186,7 +215,7 @@ static void reader_push(struct input_reader *reader,
 
 static void input_emit_at(unsigned device_id, uint64_t timestamp,
                           uint16_t type, uint16_t code, int32_t value) {
-    struct tunix_input_event event = {
+    struct input_record event = {
         .time_ns = timestamp,
         .type = type,
         .code = code,
@@ -531,6 +560,213 @@ int input_reader_ready(struct input_reader *reader) {
     return ready;
 }
 
+/* --- evdev ioctls -------------------------------------------------------- */
+
+/*
+ * Linux's evdev interface, which is what libinput speaks. Like the DRM ioctls
+ * these are matched by decoding the request rather than against fully encoded
+ * constants: EVIOCGNAME, EVIOCGBIT and friends carry their buffer length and
+ * their axis in the request itself, so there is no single constant to compare
+ * against.
+ */
+#define EVDEV_IOCTL_TYPE 'E'
+#define EVDEV_IOCTL_TYPE_OF(request) (((request) >> 8) & 0xFFU)
+#define EVDEV_IOCTL_NR(request) ((request) & 0xFFU)
+#define EVDEV_IOCTL_SIZE(request) (((request) >> 16) & 0x3FFFU)
+
+#define EVIOCGVERSION_NR 0x01
+#define EVIOCGID_NR 0x02
+#define EVIOCGNAME_NR 0x06
+#define EVIOCGPHYS_NR 0x07
+#define EVIOCGUNIQ_NR 0x08
+#define EVIOCGPROP_NR 0x09
+#define EVIOCGKEY_NR 0x18
+#define EVIOCGLED_NR 0x19
+#define EVIOCGSND_NR 0x1a
+#define EVIOCGSW_NR 0x1b
+#define EVIOCGBIT_NR 0x20   /* .. 0x3f, one per event type */
+#define EVIOCGABS_NR 0x40   /* .. 0x7f, one per absolute axis */
+#define EVIOCGRAB_NR 0x90
+#define EVIOCREVOKE_NR 0x91
+#define EVIOCSCLOCKID_NR 0xa0
+
+/* The version every evdev driver in Linux reports. */
+#define EVDEV_VERSION 0x010001
+
+#define EV_MSC 0x04
+#define EV_LED 0x11
+#define EV_SW 0x05
+#define EV_MAX 0x1f
+#define KEY_MAX 0x2ff
+
+struct evdev_id {
+    uint16_t bustype;
+    uint16_t vendor;
+    uint16_t product;
+    uint16_t version;
+};
+
+#define BUS_I8042 0x11
+
+static void bitmap_set(uint8_t *bits, size_t limit, unsigned bit) {
+    if (bit / 8U >= limit) return;
+    bits[bit / 8U] |= (uint8_t)(1U << (bit % 8U));
+}
+
+/*
+ * Which event types a device produces. Getting this wrong is not a degradation:
+ * libinput classifies a device purely from its bits, so a keyboard that also
+ * claimed EV_REL would be taken for a pointer.
+ */
+static void evdev_event_type_bits(unsigned device_id, uint8_t *bits, size_t limit) {
+    memset(bits, 0, limit);
+    bitmap_set(bits, limit, TUNIX_EV_SYN);
+    bitmap_set(bits, limit, TUNIX_EV_KEY);
+    if (device_id == TUNIX_INPUT_DEVICE_MOUSE) bitmap_set(bits, limit, TUNIX_EV_REL);
+}
+
+static void evdev_key_bits(unsigned device_id, uint8_t *bits, size_t limit) {
+    memset(bits, 0, limit);
+    if (device_id == TUNIX_INPUT_DEVICE_MOUSE) {
+        bitmap_set(bits, limit, TUNIX_BTN_LEFT);
+        bitmap_set(bits, limit, TUNIX_BTN_RIGHT);
+        bitmap_set(bits, limit, TUNIX_BTN_MIDDLE);
+        if (mouse_device_id == 4U) {
+            bitmap_set(bits, limit, TUNIX_BTN_SIDE);
+            bitmap_set(bits, limit, TUNIX_BTN_EXTRA);
+        }
+        return;
+    }
+    /* Every keycode the scancode tables can produce. They are contiguous from
+       KEY_ESC to KEY_COMPOSE apart from gaps Linux leaves reserved, and
+       claiming a reserved one costs nothing. */
+    for (unsigned key = TUNIX_KEY_ESC; key <= TUNIX_KEY_COMPOSE; key++)
+        bitmap_set(bits, limit, key);
+}
+
+static void evdev_rel_bits(unsigned device_id, uint8_t *bits, size_t limit) {
+    memset(bits, 0, limit);
+    if (device_id != TUNIX_INPUT_DEVICE_MOUSE) return;
+    bitmap_set(bits, limit, TUNIX_REL_X);
+    bitmap_set(bits, limit, TUNIX_REL_Y);
+    if (mouse_packet_size == 4U) bitmap_set(bits, limit, TUNIX_REL_WHEEL);
+}
+
+/* Copy at most `size` bytes of a bitmap out, and report how many went. */
+static int64_t evdev_copy_out(uint64_t user_argument, const void *source,
+                              size_t available, size_t size) {
+    if (!user_argument) return -EINVAL;
+    size_t copy = size < available ? size : available;
+    if (input_copy_to_user(user_argument, source, copy) != 0) return -EFAULT;
+    return (int64_t)copy;
+}
+
+int64_t input_reader_ioctl(struct input_reader *reader, unsigned device_id,
+                           unsigned long request, uint64_t user_argument) {
+    if (EVDEV_IOCTL_TYPE_OF(request) != (unsigned)EVDEV_IOCTL_TYPE) return -ENOTTY;
+    unsigned nr = EVDEV_IOCTL_NR(request);
+    size_t size = EVDEV_IOCTL_SIZE(request);
+
+    /* Big enough for KEY_MAX, which is the largest bitmap evdev defines. */
+    uint8_t bits[(KEY_MAX / 8U) + 1U];
+
+    if (nr == EVIOCGVERSION_NR) {
+        int32_t version = EVDEV_VERSION;
+        return evdev_copy_out(user_argument, &version, sizeof(version), size) < 0
+                   ? -EFAULT : 0;
+    }
+
+    if (nr == EVIOCGID_NR) {
+        /* An i8042 device with no meaningful vendor or product id -- which is
+           the truth, and what a PS/2 controller reports on Linux too. */
+        struct evdev_id id = { .bustype = BUS_I8042, .vendor = 0,
+                               .product = 0, .version = 0 };
+        return evdev_copy_out(user_argument, &id, sizeof(id), size) < 0
+                   ? -EFAULT : 0;
+    }
+
+    if (nr == EVIOCGNAME_NR) {
+        struct tunix_input_device_info info;
+        if (input_get_device_info(device_id, &info) != 0) return -EINVAL;
+        size_t length = 0;
+        while (length < sizeof(info.name) && info.name[length]) length++;
+        return evdev_copy_out(user_argument, info.name, length + 1U, size);
+    }
+
+    /* No physical topology and no serial number to report. ENOENT is what
+       Linux answers for an absent string, and libevdev treats it as absent
+       rather than as a failure. */
+    if (nr == EVIOCGPHYS_NR || nr == EVIOCGUNIQ_NR) return -ENOENT;
+
+    if (nr == EVIOCGPROP_NR) {
+        /* INPUT_PROP_*: nothing here is a pointing stick, a buttonpad or a
+           direct-touch device. */
+        memset(bits, 0, sizeof(bits));
+        return evdev_copy_out(user_argument, bits, size, size);
+    }
+
+    if (nr >= EVIOCGBIT_NR && nr <= EVIOCGBIT_NR + EV_MAX) {
+        unsigned event_type = nr - EVIOCGBIT_NR;
+        switch (event_type) {
+        case 0: evdev_event_type_bits(device_id, bits, sizeof(bits)); break;
+        case TUNIX_EV_KEY: evdev_key_bits(device_id, bits, sizeof(bits)); break;
+        case TUNIX_EV_REL: evdev_rel_bits(device_id, bits, sizeof(bits)); break;
+        /* Absolute axes, LEDs, switches, sound, force feedback: none. */
+        default: memset(bits, 0, sizeof(bits)); break;
+        }
+        return evdev_copy_out(user_argument, bits, size, size);
+    }
+
+    /* Current state of the keys, LEDs, switches and sound. Only the key state
+       is real; the rest are permanently clear. */
+    if (nr == EVIOCGKEY_NR) {
+        memset(bits, 0, sizeof(bits));
+        uint64_t flags = interrupt_save();
+        for (unsigned key = 0; key < INPUT_KEY_STATE_SIZE; key++)
+            if (key_down[key]) bitmap_set(bits, sizeof(bits), key);
+        interrupt_restore(flags);
+        return evdev_copy_out(user_argument, bits, size, size);
+    }
+    if (nr == EVIOCGLED_NR || nr == EVIOCGSND_NR || nr == EVIOCGSW_NR) {
+        memset(bits, 0, sizeof(bits));
+        return evdev_copy_out(user_argument, bits, size, size);
+    }
+
+    /* There are no absolute axes, so there is no axis to describe. */
+    if (nr >= EVIOCGABS_NR && nr < EVIOCGABS_NR + 0x40U) return -EINVAL;
+
+    if (nr == EVIOCSCLOCKID_NR) {
+        int32_t clock_id = 0;
+        if (input_copy_from_user(&clock_id, user_argument, sizeof(clock_id)) != 0)
+            return -EFAULT;
+        if (clock_id != EVDEV_CLOCK_REALTIME && clock_id != EVDEV_CLOCK_MONOTONIC)
+            return -EINVAL;
+        if (reader) reader->clock_id = clock_id;
+        return 0;
+    }
+
+    if (nr == EVIOCGRAB_NR) {
+        /* The argument is a flag, not a pointer: non-zero grabs. */
+        if (reader) reader->grabbed = user_argument != 0;
+        return 0;
+    }
+
+    /* Revoking is seatd handing the device back on session switch. There are no
+       sessions to switch between, but refusing makes seatd log an error on
+       every close, so the request is accepted and simply drains the queue. */
+    if (nr == EVIOCREVOKE_NR) {
+        if (reader) {
+            uint64_t flags = interrupt_save();
+            reader->head = reader->tail = reader->count = 0;
+            reader->grabbed = 0;
+            interrupt_restore(flags);
+        }
+        return 0;
+    }
+
+    return -EINVAL;
+}
+
 int64_t input_reader_read(struct input_reader *reader, size_t size, void *buffer) {
     if (!reader || !buffer) return -EINVAL;
     if (size < sizeof(struct tunix_input_event)) return -EINVAL;
@@ -543,10 +779,25 @@ int64_t input_reader_read(struct input_reader *reader, size_t size, void *buffer
         return -EAGAIN;
     }
 
+    /* Realtime is uptime plus the boot epoch; monotonic is uptime as-is. */
+    uint64_t epoch_offset = 0;
+    if (reader->clock_id == EVDEV_CLOCK_REALTIME) {
+        uint64_t uptime = time_uptime_ns();
+        uint64_t now = time_epoch_seconds() * 1000000000ULL;
+        epoch_offset = now > uptime ? now - uptime : 0;
+    }
+
     struct tunix_input_event *out = (struct tunix_input_event *)buffer;
     size_t completed = 0;
     while (completed < event_capacity && reader->count) {
-        out[completed++] = reader->events[reader->head];
+        const struct input_record *record = &reader->events[reader->head];
+        uint64_t stamp = record->time_ns + epoch_offset;
+        out[completed].tv_sec = (int64_t)(stamp / 1000000000ULL);
+        out[completed].tv_usec = (int64_t)((stamp % 1000000000ULL) / 1000ULL);
+        out[completed].type = record->type;
+        out[completed].code = record->code;
+        out[completed].value = record->value;
+        completed++;
         reader->head = (reader->head + 1U) % INPUT_READER_CAPACITY;
         reader->count--;
     }

@@ -149,14 +149,26 @@ struct tunix_input_device_info {
 #define TUNIX_BTN_SIDE   0x113U
 #define TUNIX_BTN_EXTRA  0x114U
 
+/*
+ * The record /dev/input/event* delivers. This is Linux's `struct input_event`
+ * exactly -- 64-bit timeval followed by type/code/value -- and it has to stay
+ * that way: libinput reads it straight off the descriptor into its own
+ * definition, and a layout of our own would be silently misparsed rather than
+ * rejected.
+ *
+ * The timestamp's clock is per-descriptor and selected with EVIOCSCLOCKID;
+ * it is the realtime clock until a reader asks for CLOCK_MONOTONIC, which
+ * libinput does immediately.
+ */
 struct tunix_input_event {
-    uint64_t time_ns;
+    int64_t tv_sec;
+    int64_t tv_usec;
     uint16_t type;
     uint16_t code;
     int32_t value;
 };
 
-_Static_assert(sizeof(struct tunix_input_event) == 16U,
-               "Tunix input event ABI must remain 16 bytes");
+_Static_assert(sizeof(struct tunix_input_event) == 24U,
+               "the input event must stay Linux's struct input_event");
 
 #endif

@@ -72,8 +72,10 @@ static void print_event(const struct monitored_input *input,
     }
     t_puts(" value=");
     print_number((long)event->value);
-    t_puts(" time_ns=");
-    print_number((long)event->time_ns);
+    t_puts(" time=");
+    print_number((long)event->tv_sec);
+    t_puts(".");
+    print_number((long)event->tv_usec);
     t_puts("\n");
 }
 
@@ -91,13 +93,129 @@ static int open_input(struct monitored_input *input, const char *path) {
     return 0;
 }
 
+/* --- evdev self-check ---------------------------------------------------- */
+
+/*
+ * The Linux evdev interface, checked without touching the hardware.
+ *
+ * This is what libinput does before it will look at a device at all, and it is
+ * worth having separately: when weston says "not using input device" it does
+ * not say which of a dozen probes disagreed with it.
+ */
+
+#define EVIOC_R(nr, size) (0x80000000UL | ((unsigned long)(size) << 16) | \
+                           ((unsigned long)'E' << 8) | (unsigned long)(nr))
+#define EVIOC_W(nr, size) (0x40000000UL | ((unsigned long)(size) << 16) | \
+                           ((unsigned long)'E' << 8) | (unsigned long)(nr))
+
+#define EVIOCGVERSION EVIOC_R(0x01, 4)
+#define EVIOCGID EVIOC_R(0x02, 8)
+#define EVIOCGNAME(len) EVIOC_R(0x06, len)
+#define EVIOCGBIT(ev, len) EVIOC_R(0x20 + (ev), len)
+#define EVIOCSCLOCKID EVIOC_W(0xa0, 4)
+#define EVIOCGRAB EVIOC_W(0x90, 4)
+
+static int evdev_failures;
+
+static void evdev_check(int ok, const char *what) {
+    t_puts(ok ? "evdev: ok   " : "evdev: FAIL ");
+    t_puts(what);
+    t_puts("\n");
+    if (!ok) evdev_failures++;
+}
+
+static int bit_is_set(const unsigned char *bits, unsigned bit) {
+    return (bits[bit / 8U] >> (bit % 8U)) & 1U;
+}
+
+static int evdev_selftest(const char *path, int expect_pointer) {
+    int fd = t_open(path, T_O_RDWR | T_O_NONBLOCK, 0);
+    t_puts("evdev: ");
+    t_puts(path);
+    t_puts("\n");
+    if (fd < 0) {
+        evdev_check(0, "open");
+        return 1;
+    }
+
+    int32_t version = 0;
+    evdev_check(t_ioctl(fd, EVIOCGVERSION, &version) == 0 && version != 0,
+                "EVIOCGVERSION");
+
+    uint16_t id[4] = { 0, 0, 0, 0 };
+    evdev_check(t_ioctl(fd, EVIOCGID, id) == 0 && id[0] != 0,
+                "EVIOCGID reports a bus type");
+
+    char name[64];
+    t_memset(name, 0, sizeof(name));
+    evdev_check(t_ioctl(fd, EVIOCGNAME(sizeof(name)), name) > 0 && name[0],
+                "EVIOCGNAME");
+    t_puts("evdev:      name=");
+    t_puts(name);
+    t_puts("\n");
+
+    unsigned char types[4];
+    t_memset(types, 0, sizeof(types));
+    evdev_check(t_ioctl(fd, EVIOCGBIT(0, sizeof(types)), types) > 0 &&
+                bit_is_set(types, TUNIX_EV_KEY),
+                "EVIOCGBIT(0) reports EV_KEY");
+    /* A keyboard that also claimed EV_REL would be taken for a pointer, so the
+       absence matters as much as the presence. */
+    evdev_check(bit_is_set(types, TUNIX_EV_REL) == (expect_pointer != 0),
+                expect_pointer ? "EV_REL is present on the pointer"
+                               : "EV_REL is absent on the keyboard");
+
+    unsigned char keys[96];
+    t_memset(keys, 0, sizeof(keys));
+    evdev_check(t_ioctl(fd, EVIOCGBIT(TUNIX_EV_KEY, sizeof(keys)), keys) > 0,
+                "EVIOCGBIT(EV_KEY)");
+    if (expect_pointer) {
+        evdev_check(bit_is_set(keys, TUNIX_BTN_LEFT), "the pointer has BTN_LEFT");
+    } else {
+        evdev_check(bit_is_set(keys, TUNIX_KEY_A) && bit_is_set(keys, TUNIX_KEY_ENTER),
+                    "the keyboard has ordinary keys");
+    }
+
+    if (expect_pointer) {
+        unsigned char rel[4];
+        t_memset(rel, 0, sizeof(rel));
+        evdev_check(t_ioctl(fd, EVIOCGBIT(TUNIX_EV_REL, sizeof(rel)), rel) > 0 &&
+                    bit_is_set(rel, TUNIX_REL_X) && bit_is_set(rel, TUNIX_REL_Y),
+                    "EVIOCGBIT(EV_REL) reports X and Y");
+    }
+
+    /* libinput switches every device to the monotonic clock immediately and
+       gives up on one that will not. */
+    int32_t monotonic = 1;
+    evdev_check(t_ioctl(fd, EVIOCSCLOCKID, &monotonic) == 0,
+                "EVIOCSCLOCKID(CLOCK_MONOTONIC)");
+
+    evdev_check(t_ioctl(fd, EVIOCGRAB, (void *)1) == 0, "EVIOCGRAB");
+    evdev_check(t_ioctl(fd, EVIOCGRAB, (void *)0) == 0, "EVIOCGRAB release");
+
+    t_close(fd);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     struct monitored_input inputs[MAX_INPUT_FDS];
     struct t_pollfd pollfds[MAX_INPUT_FDS];
     unsigned count = 0;
 
+    if (argc == 2 && argv[1][0] == '-') {
+        /* --evdev: probe the Linux interface and exit, no input required. */
+        evdev_selftest("/dev/input/event0", 0);
+        evdev_selftest("/dev/input/event1", 1);
+        if (evdev_failures) {
+            t_puts("evdev: FAIL\n");
+            return 1;
+        }
+        t_puts("evdev: PASS\n");
+        return 0;
+    }
+
     if (argc > 2) {
-        t_puterr("usage: input-test [/dev/input/eventN]\n");
+        t_puterr("usage: input-test [--evdev | /dev/input/eventN]\n");
         return 2;
     }
 

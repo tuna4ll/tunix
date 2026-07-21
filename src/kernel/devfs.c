@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include "include/ata.h"
 #include "include/devfs.h"
+#include "include/devnum.h"
 #include "include/klog.h"
 #include "include/kstring.h"
 #include "include/input.h"
@@ -272,6 +273,8 @@ void devfs_init(void) {
                                                   0660, drm_device_read, NULL,
                                                   drm_device_read_ready);
             if (card) {
+                card->dev_major = DEV_MAJOR_DRM;
+                card->dev_minor = DEV_MINOR_DRM_CARD0;
                 card->ioctl = drm_node_ioctl;
                 card->mmap = drm_device_mmap;
                 /* Open/close counting is how the console gets the display back
@@ -292,19 +295,25 @@ void devfs_init(void) {
             keyboard->close = keyboard_close;
         }
 
+        /* 0660 rather than 0440: evdev is opened read-write, because ioctls
+           like EVIOCGRAB and EVIOCSCLOCKID are writes to the device. */
         struct vfs_node *event0 = attach_device(input, "event0",
-            VFS_CHARDEVICE | VFS_INPUTDEVICE, 0440, NULL, NULL, NULL);
+            VFS_CHARDEVICE | VFS_INPUTDEVICE, 0660, NULL, NULL, NULL);
         if (event0) {
             event0->data = (void *)(uintptr_t)TUNIX_INPUT_DEVICE_KEYBOARD;
             event0->ioctl = input_event_ioctl;
+            event0->dev_major = DEV_MAJOR_INPUT;
+            event0->dev_minor = DEV_MINOR_INPUT_EVENT_BASE + 0U;
         }
 
         if (input_mouse_available()) {
             struct vfs_node *event1 = attach_device(input, "event1",
-                VFS_CHARDEVICE | VFS_INPUTDEVICE, 0440, NULL, NULL, NULL);
+                VFS_CHARDEVICE | VFS_INPUTDEVICE, 0660, NULL, NULL, NULL);
             if (event1) {
                 event1->data = (void *)(uintptr_t)TUNIX_INPUT_DEVICE_MOUSE;
                 event1->ioctl = input_event_ioctl;
+                event1->dev_major = DEV_MAJOR_INPUT;
+                event1->dev_minor = DEV_MINOR_INPUT_EVENT_BASE + 1U;
             }
             (void)vfs_create_symlink("/dev/input/mouse0", "/dev/input/event1", 0);
         }
