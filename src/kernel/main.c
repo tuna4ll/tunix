@@ -4,6 +4,8 @@
 #include "include/boot_manifest.h"
 #include "include/boot_framebuffer.h"
 #include "include/devfs.h"
+#include "include/sysfs.h"
+#include "include/sysfs.h"
 #include "include/gdt.h"
 #include "include/framebuffer.h"
 #include "include/heap.h"
@@ -168,6 +170,8 @@ void kmain(uint32_t mmap_count, uint64_t mmap_address, uint64_t manifest_address
     pic_unmask(1U);
     if (input_mouse_available()) pic_unmask(12U);
     devfs_init();
+    /* After devfs: the entries describe the devices it just attached. */
+    sysfs_init();
 #if TUNIX_DEBUG_LOGS
     kprintf("TUNIX: VFS rootfs devfs ready\n");
 #endif
