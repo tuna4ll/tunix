@@ -1,20 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build Weston for Tunix -- headless backend, software renderer.
+# Build Weston for Tunix -- DRM and headless backends, software renderer.
 #
-# This is the milestone the whole Wayland chain was for: a real compositor,
-# running on Tunix, with no graphics hardware in the picture. The headless
-# backend renders into memory and presents nowhere, which is exactly right for
-# proving that the *system* works -- unix sockets, SCM_RIGHTS, memfd, epoll,
-# signalfd, flock -- before a line of DRM driver exists.
+# The headless backend renders into memory and presents nowhere, which is what
+# proved the *system* works: unix sockets, SCM_RIGHTS, memfd, epoll, signalfd,
+# flock. The DRM backend is the one that puts pixels on the actual screen,
+# through /dev/dri/card0. Both are built; headless stays the default so a
+# machine with no usable display still gets a compositor.
 #
-# Everything that needs a display, a GPU or a session is off:
+# What the DRM backend drags in, and why it is finally possible:
 #
-#   backend-drm      needs /dev/dri, which Tunix does not have yet
-#   renderer-gl      weston's pixman renderer composites on the CPU instead
+#   libseat          weston 14's only launcher. Its builtin backend plus
+#                    SEATD_VTBOUND=0 avoids both a daemon and the VT ioctls
+#                    Tunix has no virtual terminals for -- see build-seatd.sh.
+#   libdisplay-info  required unconditionally; parses EDID we never supply.
+#   libudev          libudev-zero over the synthetic /sys, to find card0.
+#
+# Still off, and why:
+#
+#   renderer-gl      weston's pixman renderer composites on the CPU instead --
+#                    and with GL off, backend-drm does not need gbm, which is
+#                    inert on Tunix.
 #   xwayland         an X server is a project of its own
-#   launcher-libseat seat management; headless opens no privileged device
 #   image-jpeg/webp  decoders for backgrounds we do not ship
 #   demo-clients     they need cairo
 #
@@ -52,7 +60,8 @@ version=$(sed -n "s/^[[:space:]]*version[[:space:]]*:[[:space:]]*'\([0-9.]*\)'.*
     cross_port_fail "expected weston $EXPECTED_VERSION, found ${version:-unknown}"
 
 # Weston's core requires all of these regardless of which backend is enabled.
-for module in wayland-server wayland-client pixman-1 xkbcommon libevdev libinput libdrm; do
+for module in wayland-server wayland-client pixman-1 xkbcommon libevdev libinput libdrm \
+              libseat libdisplay-info libudev; do
     [[ -f "$GRAPHICS_SYSROOT/usr/lib/pkgconfig/$module.pc" ]] || cross_port_fail \
         "$module is not in the graphics sysroot; build its port first"
 done
@@ -90,7 +99,7 @@ meson setup "$BUILD/obj" "$BUILD/src" \
     --buildtype=release \
     -Dbackend-headless=true \
     -Dbackend-default=headless \
-    -Dbackend-drm=false \
+    -Dbackend-drm=true \
     -Dbackend-drm-screencast-vaapi=false \
     -Dbackend-pipewire=false \
     -Dbackend-rdp=false \
@@ -122,6 +131,8 @@ DESTDIR="$ROOT_DIR" meson install -C "$BUILD/obj" --no-rebuild
 # a runtime "failed to load backend".
 [[ -f "$ROOT_DIR/usr/lib/libweston-14/headless-backend.so" ]] || \
     cross_port_fail "the headless backend module was not installed"
+[[ -f "$ROOT_DIR/usr/lib/libweston-14/drm-backend.so" ]] || \
+    cross_port_fail "the drm backend module was not installed"
 
 interp=$("$READELF" -l "$ROOT_DIR/usr/bin/weston" | \
     sed -n 's/.*Requesting program interpreter: \([^]]*\).*/\1/p')
@@ -136,5 +147,5 @@ cross_port_finalize_root "$ROOT_DIR"
 "$CROSS_STRIP" --strip-all "$ROOT_DIR/usr/bin/weston" 2>/dev/null || true
 
 size=$(du -sh "$ROOT_DIR" | cut -f1)
-printf 'weston %s (headless, pixman renderer) staged at %s (%s)\n' \
+printf 'weston %s (drm + headless, pixman renderer) staged at %s (%s)\n' \
     "$version" "$ROOT_DIR" "$size"

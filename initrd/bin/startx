@@ -1,0 +1,22 @@
+#!/bin/bash
+# Start Weston on the real display.
+#
+# Everything here is knowledge that is not discoverable from weston's own help:
+#
+#   LIBSEAT_BACKEND=builtin  weston 14 will only talk to a seat through libseat,
+#                            and there is no seatd daemon on Tunix; the builtin
+#                            backend runs the seat server inside weston itself.
+#   SEATD_VTBOUND=0          turns off VT binding. Tunix has no virtual
+#                            terminals, and without this libseat issues VT
+#                            ioctls that cannot be answered.
+#   --continue-without-input there is no evdev layer yet, so weston would
+#                            otherwise refuse to start with no input devices.
+#
+# Anything after `startx` is passed straight through to weston.
+set -e
+
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/tmp}
+export LIBSEAT_BACKEND=builtin
+export SEATD_VTBOUND=0
+
+exec weston --backend=drm --continue-without-input --no-config "$@"

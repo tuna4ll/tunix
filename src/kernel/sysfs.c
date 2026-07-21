@@ -54,7 +54,8 @@ static void append_number(char *out, size_t limit, size_t *used, uint32_t value)
  * Register one device: its directory, its uevent, its subsystem link, and the
  * /sys/dev/char entry that points back at it.
  */
-static void publish_device(const char *name, const char *subsystem,
+static void publish_device(const char *name, const char *devname,
+                           const char *subsystem,
                            uint32_t major, uint32_t minor) {
     char path[128];
     size_t used = 0;
@@ -64,7 +65,9 @@ static void publish_device(const char *name, const char *subsystem,
     if (!vfs_mkdir_p(path)) return;
 
     /* uevent: the properties udev hands to its callers. DEVNAME is how a
-       consumer gets from the sysfs entry back to /dev. */
+       consumer gets from the sysfs entry back to /dev -- libudev-zero simply
+       prefixes it with "/dev/", so it is a path relative to /dev and not
+       always the same as the sysfs name: card0 lives at dri/card0. */
     char uevent[192];
     size_t length = 0;
     append_string(uevent, sizeof(uevent), &length, "MAJOR=");
@@ -72,7 +75,7 @@ static void publish_device(const char *name, const char *subsystem,
     append_string(uevent, sizeof(uevent), &length, "\nMINOR=");
     append_number(uevent, sizeof(uevent), &length, minor);
     append_string(uevent, sizeof(uevent), &length, "\nDEVNAME=");
-    append_string(uevent, sizeof(uevent), &length, name);
+    append_string(uevent, sizeof(uevent), &length, devname);
     append_string(uevent, sizeof(uevent), &length, "\nSUBSYSTEM=");
     append_string(uevent, sizeof(uevent), &length, subsystem);
     append_string(uevent, sizeof(uevent), &length, "\n");
@@ -118,7 +121,8 @@ void sysfs_init(void) {
        either of its two scan directories cannot be opened. */
     if (!vfs_mkdir_p("/sys/dev/block")) return;
 
-    if (drm_available()) publish_device("card0", "drm", SYSFS_DRM_MAJOR, 0);
+    if (drm_available())
+        publish_device("card0", "dri/card0", "drm", SYSFS_DRM_MAJOR, 0);
 
     /* devfs attaches a fixed pair of evdev nodes, event0 for the keyboard and
        event1 for the mouse; this mirrors that rather than inventing an
@@ -130,7 +134,13 @@ void sysfs_init(void) {
         append_string(name, sizeof(name), &used, "event");
         append_number(name, sizeof(name), &used, device);
         name[used] = '\0';
-        publish_device(name, "input", SYSFS_INPUT_MAJOR,
+        char devname[40];
+        size_t devname_used = 0;
+        append_string(devname, sizeof(devname), &devname_used, "input/");
+        append_string(devname, sizeof(devname), &devname_used, name);
+        devname[devname_used] = '\0';
+
+        publish_device(name, devname, "input", SYSFS_INPUT_MAJOR,
                        SYSFS_INPUT_EVENT_MINOR_BASE + device);
     }
 }

@@ -146,7 +146,8 @@ struct netlink_socket {
 static uint32_t netlink_next_portid = 0;
 
 struct netlink_socket *netlink_socket_create(int protocol) {
-    if (protocol != TUNIX_NETLINK_ROUTE && protocol != TUNIX_NETLINK_SOCK_DIAG) return NULL;
+    if (protocol != TUNIX_NETLINK_ROUTE && protocol != TUNIX_NETLINK_SOCK_DIAG &&
+        protocol != TUNIX_NETLINK_KOBJECT_UEVENT) return NULL;
     struct netlink_socket *socket = (struct netlink_socket *)kmalloc(sizeof(*socket));
     if (!socket) return NULL;
     memset(socket, 0, sizeof(*socket));
@@ -437,6 +438,10 @@ int64_t netlink_socket_sendto(struct netlink_socket *socket, const void *data, s
     (void)address_length;
     if (!socket) return -EINVAL;
     netlink_assign_portid(socket);
+
+    /* Nothing ever asks the uevent family a question, and it has no replies to
+       give: accept the write and stay silent. */
+    if (socket->protocol == TUNIX_NETLINK_KOBJECT_UEVENT) return (int64_t)length;
 
     size_t cap = 8192;
     struct nl_builder builder = {0};

@@ -93,6 +93,10 @@ LIBINPUT_ROOT := $(PORT_OUT)/libinput-root
 LIBINPUT_STAMP := $(PORT_OUT)/.libinput-ready
 CAIRO_ROOT := $(PORT_OUT)/cairo-root
 CAIRO_STAMP := $(PORT_OUT)/.cairo-ready
+LIBDISPLAY_INFO_ROOT := $(PORT_OUT)/libdisplay-info-root
+LIBDISPLAY_INFO_STAMP := $(PORT_OUT)/.libdisplay-info-ready
+SEATD_ROOT := $(PORT_OUT)/seatd-root
+SEATD_STAMP := $(PORT_OUT)/.seatd-ready
 WESTON_ROOT := $(PORT_OUT)/weston-root
 WESTON_STAMP := $(PORT_OUT)/.weston-ready
 LIBDRM_ROOT := $(PORT_OUT)/libdrm-root
@@ -140,8 +144,9 @@ SLEEP := $(BUILD)/user/sleep
 PREEMPT_TEST := $(BUILD)/user/preempt-test
 INPUT_TEST := $(BUILD)/user/input-test
 FB_TEST := $(BUILD)/user/fb-test
+FB_SHOT := $(BUILD)/user/fb-shot
 GLIB_COMPAT_TEST := $(BUILD)/user/glib-compat-test
-SYSTEM_TOOLS := $(BUILD)/user/ps $(BUILD)/user/free $(BUILD)/user/uptime $(BUILD)/user/top $(LOADKEYS) $(SLEEP) $(PREEMPT_TEST) $(INPUT_TEST) $(FB_TEST) $(GLIB_COMPAT_TEST)
+SYSTEM_TOOLS := $(BUILD)/user/ps $(BUILD)/user/free $(BUILD)/user/uptime $(BUILD)/user/top $(LOADKEYS) $(SLEEP) $(PREEMPT_TEST) $(INPUT_TEST) $(FB_TEST) $(FB_SHOT) $(GLIB_COMPAT_TEST)
 INITRD_FILES := $(shell find initrd -type f 2>/dev/null)
 WALLPAPER_SOURCE ?= assets/tunix-mountain-lake.jpg
 WALLPAPER_OUTPUT := initrd/usr/share/tunix/wallpaper.twl
@@ -284,10 +289,29 @@ $(CAIRO_STAMP): $(PIXMAN_STAMP) ports/build-cairo.sh ports/lib/cross-port.sh \
 	@test -L $(CAIRO_ROOT)/usr/lib/libcairo.so.2 || { echo "cairo was not produced" >&2; exit 1; }
 	@touch $@
 
-# The compositor. Headless backend and the pixman software renderer, so it needs
-# no GPU and no /dev/dri.
+# EDID parsing. Nothing on Tunix supplies an EDID, but weston's drm backend
+# requires the library unconditionally.
+$(LIBDISPLAY_INFO_STAMP): $(MUSL_CROSS_STAMP) ports/build-libdisplay-info.sh \
+	ports/lib/cross-port.sh ports/src/libdisplay-info/meson.build
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-libdisplay-info.sh
+	@test -L $(LIBDISPLAY_INFO_ROOT)/usr/lib/libdisplay-info.so.2 || { echo "libdisplay-info was not produced" >&2; exit 1; }
+	@touch $@
+
+# Session management. weston 14 has no launcher other than libseat, so the drm
+# backend cannot run without it; the builtin backend keeps it in-process.
+$(SEATD_STAMP): $(MUSL_CROSS_STAMP) ports/build-seatd.sh ports/lib/cross-port.sh \
+	ports/src/seatd/meson.build
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-seatd.sh
+	@test -f $(SEATD_ROOT)/usr/lib/libseat.so.1 || { echo "libseat was not produced" >&2; exit 1; }
+	@touch $@
+
+# The compositor. DRM and headless backends with the pixman software renderer,
+# so it drives /dev/dri/card0 without needing a GPU.
 $(WESTON_STAMP): $(WAYLAND_STAMP) $(WAYLAND_PROTOCOLS_STAMP) $(PIXMAN_STAMP) \
 	$(LIBXKBCOMMON_STAMP) $(LIBINPUT_STAMP) $(CAIRO_STAMP) $(LIBDRM_STAMP) \
+	$(LIBDISPLAY_INFO_STAMP) $(SEATD_STAMP) \
 	ports/build-weston.sh ports/lib/cross-port.sh \
 	ports/src/patches/weston/0001-shared-make-cairo-optional.patch \
 	ports/src/weston/meson.build
@@ -295,6 +319,7 @@ $(WESTON_STAMP): $(WAYLAND_STAMP) $(WAYLAND_PROTOCOLS_STAMP) $(PIXMAN_STAMP) \
 	OUT="$(abspath $(PORT_OUT))" bash ports/build-weston.sh
 	@test -x $(WESTON_ROOT)/usr/bin/weston || { echo "weston was not produced" >&2; exit 1; }
 	@test -f $(WESTON_ROOT)/usr/lib/libweston-14/headless-backend.so || { echo "the headless backend was not produced" >&2; exit 1; }
+	@test -f $(WESTON_ROOT)/usr/lib/libweston-14/drm-backend.so || { echo "the drm backend was not produced" >&2; exit 1; }
 	@touch $@
 
 $(LIBDRM_STAMP): $(MUSL_CROSS_STAMP) ports/build-libdrm.sh ports/lib/cross-port.sh \
@@ -623,6 +648,10 @@ $(FB_TEST): $(BUILD)/user/fb_test.o $(USER_RUNTIME) src/userspace/linker.ld
 	$(LD) $(USER_LDFLAGS) -o $@ $(USER_RUNTIME) $(BUILD)/user/fb_test.o
 	$(STRIP) --strip-all $@
 
+$(FB_SHOT): $(BUILD)/user/fb_shot.o $(USER_RUNTIME) src/userspace/linker.ld
+	$(LD) $(USER_LDFLAGS) -o $@ $(USER_RUNTIME) $(BUILD)/user/fb_shot.o
+	$(STRIP) --strip-all $@
+
 $(GLIB_COMPAT_TEST): $(BUILD)/user/glib_compat_test.o $(USER_RUNTIME) src/userspace/linker.ld
 	$(LD) $(USER_LDFLAGS) -o $@ $(USER_RUNTIME) $(BUILD)/user/glib_compat_test.o
 	$(STRIP) --strip-all $@
@@ -631,7 +660,7 @@ $(INIT): $(BUILD)/user/init.o $(USER_RUNTIME) src/userspace/linker.ld
 	$(LD) $(USER_LDFLAGS) -o $@ $(USER_RUNTIME) $(BUILD)/user/init.o
 	$(STRIP) --strip-all $@
 
-$(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAMP) $(GIT_STAMP) $(TCC_STAMP) $(BINUTILS_STAMP) $(NANO) $(TTY_CLOCK) $(TTY_TETRIS) $(HTOP) $(FASTFETCH_STAMP) $(LUA_STAMP) $(IMAGE_CODECS_STAMP) $(MUSL_SHARED_STAMP) $(IMAGE_CODECS_SHARED_STAMP) $(MBEDTLS_STAMP) $(LIBFFI_STAMP) $(WAYLAND_STAMP) $(PIXMAN_STAMP) $(LIBXKBCOMMON_STAMP) $(XKEYBOARD_CONFIG_STAMP) $(LIBEVDEV_STAMP) $(LIBUDEV_ZERO_STAMP) $(LIBINPUT_STAMP) $(CAIRO_STAMP) $(WESTON_STAMP) $(LIBDRM_STAMP) $(MESA_STAMP) $(WALLPAPER_OUTPUT) $(INITRD_FILES)
+$(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAMP) $(GIT_STAMP) $(TCC_STAMP) $(BINUTILS_STAMP) $(NANO) $(TTY_CLOCK) $(TTY_TETRIS) $(HTOP) $(FASTFETCH_STAMP) $(LUA_STAMP) $(IMAGE_CODECS_STAMP) $(MUSL_SHARED_STAMP) $(IMAGE_CODECS_SHARED_STAMP) $(MBEDTLS_STAMP) $(LIBFFI_STAMP) $(WAYLAND_STAMP) $(PIXMAN_STAMP) $(LIBXKBCOMMON_STAMP) $(XKEYBOARD_CONFIG_STAMP) $(LIBEVDEV_STAMP) $(LIBUDEV_ZERO_STAMP) $(LIBINPUT_STAMP) $(CAIRO_STAMP) $(LIBDISPLAY_INFO_STAMP) $(SEATD_STAMP) $(WESTON_STAMP) $(LIBDRM_STAMP) $(MESA_STAMP) $(WALLPAPER_OUTPUT) $(INITRD_FILES)
 	rm -rf $(ROOTFS)
 	mkdir -p $(ROOTFS)/bin $(ROOTFS)/sbin $(ROOTFS)/dev $(ROOTFS)/tmp \
 		$(ROOTFS)/run/dbus $(ROOTFS)/run/user/0 $(ROOTFS)/var/tmp \
@@ -672,6 +701,8 @@ $(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAM
 	cp -R $(LIBUDEV_ZERO_ROOT)/. $(ROOTFS)/
 	cp -R $(LIBINPUT_ROOT)/. $(ROOTFS)/
 	cp -R $(CAIRO_ROOT)/. $(ROOTFS)/
+	cp -R $(LIBDISPLAY_INFO_ROOT)/. $(ROOTFS)/
+	cp -R $(SEATD_ROOT)/. $(ROOTFS)/
 	cp -R $(WESTON_ROOT)/. $(ROOTFS)/
 	cp -R $(LIBDRM_ROOT)/. $(ROOTFS)/
 	cp -R $(MESA_ROOT)/. $(ROOTFS)/
@@ -733,6 +764,9 @@ $(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAM
 	@test -L $(ROOTFS)/usr/lib/libcairo.so.2 || { echo "cairo was not installed into the rootfs" >&2; exit 1; }
 	@test -x $(ROOTFS)/usr/bin/weston || { echo "weston was not installed into the rootfs" >&2; exit 1; }
 	@test -f $(ROOTFS)/usr/lib/libweston-14/headless-backend.so || { echo "the weston headless backend was not installed into the rootfs" >&2; exit 1; }
+	@test -f $(ROOTFS)/usr/lib/libweston-14/drm-backend.so || { echo "the weston drm backend was not installed into the rootfs" >&2; exit 1; }
+	@test -f $(ROOTFS)/usr/lib/libseat.so.1 || { echo "libseat was not installed into the rootfs" >&2; exit 1; }
+	@test -e $(ROOTFS)/usr/lib/libdisplay-info.so.2 || { echo "libdisplay-info was not installed into the rootfs" >&2; exit 1; }
 	@test -L $(ROOTFS)/usr/lib/libdrm.so.2 || { echo "libdrm was not installed into the rootfs" >&2; exit 1; }
 	@test -x $(ROOTFS)/usr/bin/drm-test || { echo "the drm test was not installed into the rootfs" >&2; exit 1; }
 	@test -L $(ROOTFS)/usr/lib/libEGL.so.1 || { echo "mesa libEGL was not installed into the rootfs" >&2; exit 1; }
@@ -754,7 +788,7 @@ $(INITRAMFS): $(INIT) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAM
 	done
 	chmod 0755 $(ROOTFS)/sbin/init $(ROOTFS)/bin/bash $(ROOTFS)/bin/nano \
 		$(ROOTFS)/bin/tty-clock $(ROOTFS)/bin/tty-tetris $(ROOTFS)/bin/htop \
-		$(ROOTFS)/bin/neofetch $(ROOTFS)/bin/ps $(ROOTFS)/bin/free \
+		$(ROOTFS)/bin/neofetch $(ROOTFS)/bin/startx $(ROOTFS)/bin/fb-shot $(ROOTFS)/bin/ps $(ROOTFS)/bin/free \
 		$(ROOTFS)/bin/uptime $(ROOTFS)/bin/top $(ROOTFS)/bin/loadkeys $(ROOTFS)/bin/sleep $(ROOTFS)/bin/preempt-test $(ROOTFS)/bin/input-test $(ROOTFS)/bin/fb-test $(ROOTFS)/bin/glib-compat-test \
 		$(ROOTFS)/usr/bin/tcc $(ROOTFS)/usr/bin/lua $(ROOTFS)/usr/bin/fastfetch \
 		$(ROOTFS)/usr/bin/tunix-wallpaper \

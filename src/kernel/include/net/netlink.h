@@ -10,6 +10,12 @@
 #define TUNIX_AF_NETLINK 16
 #define TUNIX_NETLINK_ROUTE 0
 #define TUNIX_NETLINK_SOCK_DIAG 4
+/* Hotplug notifications. Tunix has no hotplug -- every device exists from boot
+   -- so a socket on this family is permanently silent. It exists because
+   libudev's monitor is created before any device is enumerated, and udev
+   consumers (weston's input layer among them) treat a failure to create the
+   monitor as a failure to find any device at all. */
+#define TUNIX_NETLINK_KOBJECT_UEVENT 15
 
 struct netlink_socket;
 

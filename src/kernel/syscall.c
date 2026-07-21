@@ -2501,8 +2501,17 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
             !file->node) return -ENODEV;
         if (file->node->mmap) {
             if (!(flags & MAP_SHARED)) return -EINVAL;
+            /*
+             * A device mapping is the device's memory, not the process's, so it
+             * must survive fork as the same memory: PAGE_SHARED stops the clone
+             * turning it copy-on-write. Weston forks to launch its shell
+             * clients while holding its DRM dumb buffers mapped -- without
+             * this, every frame it drew afterwards went into a private copy and
+             * the screen stayed on whatever was there before.
+             */
             int64_t status = file->node->mmap(file->node, file, process->cr3,
-                                              base, length, offset, page_flags);
+                                              base, length, offset,
+                                              page_flags | PAGE_SHARED);
             if (status < 0) return status;
             if (advance_mmap_base) {
                 process->mmap_base = base + length + 4096;

@@ -124,3 +124,9 @@
 [submodule "ports/src/cairo"]
 	path = ports/src/cairo
 	url = https://gitlab.freedesktop.org/cairo/cairo.git
+[submodule "ports/src/libdisplay-info"]
+	path = ports/src/libdisplay-info
+	url = https://gitlab.freedesktop.org/emersion/libdisplay-info.git
+[submodule "ports/src/seatd"]
+	path = ports/src/seatd
+	url = https://git.sr.ht/~kennylevinsen/seatd

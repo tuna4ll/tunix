@@ -55,15 +55,53 @@ extern void kprintf(const char *fmt, ...);
 #define DRM_NR_MODE_MAP_DUMB 0xb3
 #define DRM_NR_MODE_DESTROY_DUMB 0xb4
 #define DRM_NR_MODE_ADDFB2 0xb8
+#define DRM_NR_MODE_GETPROPERTY 0xaa
+#define DRM_NR_MODE_SETPROPERTY 0xab
+#define DRM_NR_MODE_GETPLANERESOURCES 0xb5
+#define DRM_NR_MODE_GETPLANE 0xb6
+#define DRM_NR_MODE_SETPLANE 0xb7
+#define DRM_NR_MODE_OBJ_GETPROPERTIES 0xb9
+#define DRM_NR_MODE_OBJ_SETPROPERTY 0xba
 
 #define DRM_CAP_DUMB_BUFFER 0x1
 #define DRM_CAP_PRIME 0x5
+#define DRM_CAP_TIMESTAMP_MONOTONIC 0x6
+#define DRM_CAP_CURSOR_WIDTH 0x8
+#define DRM_CAP_CURSOR_HEIGHT 0x9
 #define DRM_CAP_ADDFB2_MODIFIERS 0x10
 
 /* The single set of object ids this device ever reports. */
 #define DRM_CRTC_ID 1
 #define DRM_CONNECTOR_ID 2
 #define DRM_ENCODER_ID 3
+#define DRM_PLANE_ID 4
+
+/*
+ * The one property this device exposes.
+ *
+ * Weston refuses to run without DRM_CLIENT_CAP_UNIVERSAL_PLANES, and a universal
+ * plane is only usable if its "type" says what it is -- weston reads that
+ * property and bails out on a plane whose type it cannot resolve. So a single
+ * enum property, on a single primary plane, is the whole property system here.
+ */
+#define DRM_PROP_TYPE_ID 10
+
+#define DRM_MODE_OBJECT_CRTC 0xcccccccc
+#define DRM_MODE_OBJECT_CONNECTOR 0xc0c0c0c0
+#define DRM_MODE_OBJECT_ENCODER 0xe0e0e0e0
+#define DRM_MODE_OBJECT_PLANE 0xeeeeeeee
+
+#define DRM_MODE_PROP_IMMUTABLE (1 << 2)
+#define DRM_MODE_PROP_ENUM (1 << 3)
+
+#define DRM_PLANE_TYPE_OVERLAY 0
+#define DRM_PLANE_TYPE_PRIMARY 1
+#define DRM_PLANE_TYPE_CURSOR 2
+
+#define DRM_PROP_NAME_LEN 32
+
+/* The scanout is XRGB8888 and there is no format conversion anywhere here. */
+#define DRM_FORMAT_XRGB8888 0x34325258
 
 #define DRM_MODE_CONNECTED 1
 #define DRM_MODE_SUBPIXEL_UNKNOWN 1
@@ -214,6 +252,44 @@ struct drm_mode_map_dumb {
 
 struct drm_mode_destroy_dumb {
     uint32_t handle;
+};
+
+struct drm_mode_get_plane_res {
+    uint64_t plane_id_ptr;
+    uint32_t count_planes;
+};
+
+struct drm_mode_get_plane {
+    uint32_t plane_id;
+    uint32_t crtc_id;
+    uint32_t fb_id;
+    uint32_t possible_crtcs;
+    uint32_t gamma_size;
+    uint32_t count_format_types;
+    uint64_t format_type_ptr;
+};
+
+struct drm_mode_get_property {
+    uint64_t values_ptr;
+    uint64_t enum_blob_ptr;
+    uint32_t prop_id;
+    uint32_t flags;
+    char name[DRM_PROP_NAME_LEN];
+    uint32_t count_values;
+    uint32_t count_enum_blobs;
+};
+
+struct drm_mode_property_enum {
+    uint64_t value;
+    char name[DRM_PROP_NAME_LEN];
+};
+
+struct drm_mode_obj_get_properties {
+    uint64_t props_ptr;
+    uint64_t prop_values_ptr;
+    uint32_t count_props;
+    uint32_t obj_id;
+    uint32_t obj_type;
 };
 
 typedef char drm_modeinfo_size_check[
@@ -434,6 +510,13 @@ static int64_t ioctl_get_cap(uint64_t user_argument) {
     if (copy_from_user(&cap, user_argument, sizeof(cap)) != 0) return -EFAULT;
     switch (cap.capability) {
     case DRM_CAP_DUMB_BUFFER: cap.value = 1; break;
+    /* Page-flip completions are stamped from the monotonic uptime clock, which
+       is what this claims -- and weston refuses the device outright without it. */
+    case DRM_CAP_TIMESTAMP_MONOTONIC: cap.value = 1; break;
+    /* There is no hardware cursor; these are the sizes a client should assume
+       for a software one, and libdrm's callers expect *some* answer. */
+    case DRM_CAP_CURSOR_WIDTH:
+    case DRM_CAP_CURSOR_HEIGHT: cap.value = 64; break;
     /* No buffer sharing between processes yet, so no PRIME and no modifiers. */
     case DRM_CAP_PRIME:
     case DRM_CAP_ADDFB2_MODIFIERS:
@@ -521,6 +604,101 @@ static int64_t ioctl_get_crtc(uint64_t user_argument) {
     fill_mode(&crtc.mode);
     crtc.count_connectors = 0;
     return copy_to_user(user_argument, &crtc, sizeof(crtc)) == 0 ? 0 : -EFAULT;
+}
+
+/*
+ * Planes.
+ *
+ * There is exactly one, the primary plane of the only CRTC, and it cannot be
+ * moved, scaled or composited -- SETPLANE is refused. It exists because
+ * DRM_CLIENT_CAP_UNIVERSAL_PLANES is not optional for weston: it enumerates
+ * planes, and a plane whose "type" property it cannot read is a fatal error.
+ */
+static int64_t ioctl_get_plane_resources(uint64_t user_argument) {
+    struct drm_mode_get_plane_res res;
+    if (copy_from_user(&res, user_argument, sizeof(res)) != 0) return -EFAULT;
+
+    uint32_t plane = DRM_PLANE_ID;
+    if (copy_array_out(res.plane_id_ptr, res.count_planes, &plane,
+                       sizeof(plane), 1) != 0) return -EFAULT;
+    res.count_planes = 1;
+    return copy_to_user(user_argument, &res, sizeof(res)) == 0 ? 0 : -EFAULT;
+}
+
+static int64_t ioctl_get_plane(uint64_t user_argument) {
+    struct drm_mode_get_plane plane;
+    if (copy_from_user(&plane, user_argument, sizeof(plane)) != 0) return -EFAULT;
+    if (plane.plane_id != DRM_PLANE_ID) return -ENOENT;
+
+    uint32_t format = DRM_FORMAT_XRGB8888;
+    if (copy_array_out(plane.format_type_ptr, plane.count_format_types,
+                       &format, sizeof(format), 1) != 0) return -EFAULT;
+
+    plane.crtc_id = active_fb_id ? DRM_CRTC_ID : 0;
+    plane.fb_id = active_fb_id;
+    plane.possible_crtcs = 1U; /* the CRTC at pipe 0, the only one */
+    plane.gamma_size = 0;
+    plane.count_format_types = 1;
+    return copy_to_user(user_argument, &plane, sizeof(plane)) == 0 ? 0 : -EFAULT;
+}
+
+/* The three names Linux gives the plane types, in value order. */
+static const char *const plane_type_names[] = { "Overlay", "Primary", "Cursor" };
+
+static int64_t ioctl_get_property(uint64_t user_argument) {
+    struct drm_mode_get_property property;
+    if (copy_from_user(&property, user_argument, sizeof(property)) != 0) return -EFAULT;
+    if (property.prop_id != DRM_PROP_TYPE_ID) return -ENOENT;
+
+    /* An enum property carries no values array; its choices live in the enum
+       blob, one drm_mode_property_enum per name. */
+    struct drm_mode_property_enum choices[3];
+    memset(choices, 0, sizeof(choices));
+    for (unsigned index = 0; index < 3U; index++) {
+        choices[index].value = index;
+        strncpy(choices[index].name, plane_type_names[index], DRM_PROP_NAME_LEN - 1);
+    }
+    if (copy_array_out(property.enum_blob_ptr, property.count_enum_blobs,
+                       choices, sizeof(choices[0]), 3) != 0) return -EFAULT;
+
+    memset(property.name, 0, sizeof(property.name));
+    strncpy(property.name, "type", sizeof(property.name) - 1);
+    property.flags = DRM_MODE_PROP_ENUM | DRM_MODE_PROP_IMMUTABLE;
+    property.count_values = 0;
+    property.count_enum_blobs = 3;
+    return copy_to_user(user_argument, &property, sizeof(property)) == 0 ? 0 : -EFAULT;
+}
+
+static int64_t ioctl_obj_get_properties(uint64_t user_argument) {
+    struct drm_mode_obj_get_properties request;
+    if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
+
+    /* Only the plane has a property. CRTCs and connectors report none, which is
+       legal and which weston copes with -- it only needs the call to succeed. */
+    uint32_t count = 0;
+    uint32_t ids[1];
+    uint64_t values[1];
+    if (request.obj_type == DRM_MODE_OBJECT_PLANE) {
+        if (request.obj_id != DRM_PLANE_ID) return -ENOENT;
+        ids[0] = DRM_PROP_TYPE_ID;
+        values[0] = DRM_PLANE_TYPE_PRIMARY;
+        count = 1;
+    } else if (request.obj_type == DRM_MODE_OBJECT_CRTC) {
+        if (request.obj_id != DRM_CRTC_ID) return -ENOENT;
+    } else if (request.obj_type == DRM_MODE_OBJECT_CONNECTOR) {
+        if (request.obj_id != DRM_CONNECTOR_ID) return -ENOENT;
+    } else if (request.obj_type == DRM_MODE_OBJECT_ENCODER) {
+        if (request.obj_id != DRM_ENCODER_ID) return -ENOENT;
+    } else {
+        return -EINVAL;
+    }
+
+    if (copy_array_out(request.props_ptr, request.count_props, ids,
+                       sizeof(ids[0]), count) != 0 ||
+        copy_array_out(request.prop_values_ptr, request.count_props, values,
+                       sizeof(values[0]), count) != 0) return -EFAULT;
+    request.count_props = count;
+    return copy_to_user(user_argument, &request, sizeof(request)) == 0 ? 0 : -EFAULT;
 }
 
 /*
@@ -806,6 +984,16 @@ int64_t drm_file_ioctl(struct file *file, unsigned long request,
     case DRM_NR_SET_MASTER:
     case DRM_NR_GET_MAGIC:
     case DRM_NR_AUTH_MAGIC: return 0;
+    case DRM_NR_MODE_GETPLANERESOURCES: return ioctl_get_plane_resources(user_argument);
+    case DRM_NR_MODE_GETPLANE: return ioctl_get_plane(user_argument);
+    case DRM_NR_MODE_GETPROPERTY: return ioctl_get_property(user_argument);
+    case DRM_NR_MODE_OBJ_GETPROPERTIES: return ioctl_obj_get_properties(user_argument);
+    /* Every property here is immutable, and the one plane cannot be moved:
+       there is a single scanout and SETCRTC/PAGE_FLIP are the only ways to
+       change what is on it. */
+    case DRM_NR_MODE_SETPROPERTY:
+    case DRM_NR_MODE_OBJ_SETPROPERTY:
+    case DRM_NR_MODE_SETPLANE: return -EINVAL;
     case DRM_NR_MODE_GETRESOURCES: return ioctl_get_resources(user_argument);
     case DRM_NR_MODE_GETCONNECTOR: return ioctl_get_connector(user_argument);
     case DRM_NR_MODE_GETENCODER: return ioctl_get_encoder(user_argument);
