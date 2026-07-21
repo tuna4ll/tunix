@@ -75,8 +75,21 @@ mkdir -p "$BUILD" "$NCURSES_ROOT/usr/share/terminfo"
 TIC="$BUILD/progs/tic"
 [[ -x "$TIC" ]] || fail "the host-runnable tic utility was not built"
 cat "$NCURSES_SOURCE/misc/terminfo.src" "$TERMINFO_SOURCE" > "$combined_terminfo"
-"$TIC" -x -e 'tunix,tunix-256color' \
+# tunix* describe the kernel's own console. The xterm entries are for terminal
+# emulators: weston-terminal sets TERM=xterm, as every graphical emulator does,
+# and without the entry ncurses refuses to start at all -- nano and clear both
+# exit with "unknown terminal type" inside a window that works perfectly.
+# Entries reached through use= are inlined by tic, so only the names actually
+# put in TERM need listing here.
+"$TIC" -x -e 'tunix,tunix-256color,xterm,xterm-256color' \
     -o "$NCURSES_ROOT/usr/share/terminfo" "$combined_terminfo"
+
+# The first-letter directory is named in hex on this build ("78" for x), so the
+# entries are looked for by name rather than at a guessed path.
+for entry in tunix xterm xterm-256color; do
+    found=$(find "$NCURSES_ROOT/usr/share/terminfo" -type f -name "$entry" -print -quit)
+    [[ -n "$found" ]] || fail "terminfo entry $entry was not compiled"
+done
 
 # Keep compatibility names expected by configure scripts and static linkers.
 cd "$NCURSES_ROOT/usr/lib"
