@@ -26,13 +26,19 @@ set -euo pipefail
 #
 # Still off, and why:
 #
-#   xwayland         an X server is a project of its own
+#   xwayland         an X server is a project of its own -- which is also why
+#                    there is no xclock here: the demo clients are the answer to
+#                    "something to look at", and they are native Wayland
 #   image-jpeg/webp  decoders for backgrounds we do not ship
-#   demo-clients     several of them want pangocairo, which is not ported
 #
 # weston-terminal *is* built (-Dtools=terminal): it is what the panel's one
 # launcher starts, and it needs nothing beyond the toy toolkit -- wayland-client,
 # cairo, xkbcommon and wayland-cursor, all of which are already here.
+#
+# The demo clients are on. They are the toy toolkit too, so they cost nothing
+# new; patch 0002 makes the one that wants pangocairo skip itself rather than
+# fail the build for all the others. weston-simple-shm comes from
+# -Dsimple-clients=shm and is plain wayland-client, no toolkit at all.
 #
 # The tests are also off: they assume a full session and a runnable target.
 #
@@ -123,9 +129,9 @@ meson setup "$BUILD/obj" "$BUILD/src" \
     -Dcolor-management-lcms=false \
     -Dimage-jpeg=false \
     -Dimage-webp=false \
-    -Ddemo-clients=false \
+    -Ddemo-clients=true \
     -Dwcap-decode=false \
-    -Dsimple-clients= \
+    -Dsimple-clients=shm \
     -Dtools=terminal \
     -Dtests=false \
     -Ddoc=false
@@ -145,6 +151,9 @@ DESTDIR="$ROOT_DIR" meson install -C "$BUILD/obj" --no-rebuild
     cross_port_fail "weston-terminal was not produced"
 [[ -f "$ROOT_DIR/usr/lib/libweston-14/gl-renderer.so" ]] || \
     cross_port_fail "the gl renderer module was not produced"
+# One demo client, as proof that patch 0002 skipped only what it had to.
+[[ -x "$ROOT_DIR/usr/bin/weston-flower" ]] || \
+    cross_port_fail "the demo clients were not produced"
 
 interp=$("$READELF" -l "$ROOT_DIR/usr/bin/weston" | \
     sed -n 's/.*Requesting program interpreter: \([^]]*\).*/\1/p')

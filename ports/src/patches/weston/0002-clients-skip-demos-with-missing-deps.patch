@@ -1,0 +1,37 @@
+Skip demo clients whose dependencies are missing, instead of failing the build.
+
+-Ddemo-clients is all-or-nothing, and one entry in the list -- the text editor
+-- wants pangocairo, which Tunix does not have. Upstream turns that into a hard
+error, so a single unported dependency costs every other demo: flower, smoke,
+image, clickdot, resizor, stacking, dnd and the rest, all of which need nothing
+beyond the toy toolkit that is already here.
+
+Skipping the ones that cannot be built, with a warning naming what they wanted,
+keeps the rest and makes the set self-adjusting: port pango later and the editor
+starts building with no change here.
+
+--- a/clients/meson.build
++++ b/clients/meson.build
+@@ -344,14 +344,21 @@
+ 		t_name = 'weston-' + t.get('basename')
+ 		t_srcs = [ t.get('basename') + '.c' ] + t.get('add_sources', [])
+ 		t_deps = [ dep_toytoolkit, t.get('dep_objs', []) ]
++		t_skip = false
+ 		foreach depname : t.get('deps', [])
+ 			dep = dependency(depname, required: false)
+ 			if not dep.found()
+-				error('@0@ requires \'@1@\' which was not found. If you rather not build this, set \'-Ddemo-clients=false\'.'.format(t_name, depname))
++				warning('@0@ requires \'@1@\' which was not found; skipping it.'.format(t_name, depname))
++				t_skip = true
++				break
+ 			endif
+ 			t_deps += dep
+ 		endforeach
+ 
++		if t_skip
++			continue
++		endif
++
+ 		executable(
+ 			t_name, t_srcs,
+ 			include_directories: common_inc,
