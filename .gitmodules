@@ -166,3 +166,6 @@
 [submodule "ports/src/gtk"]
 	path = ports/src/gtk
 	url = https://gitlab.gnome.org/GNOME/gtk.git
+[submodule "ports/src/dinit"]
+	path = ports/src/dinit
+	url = https://github.com/davmac314/dinit.git

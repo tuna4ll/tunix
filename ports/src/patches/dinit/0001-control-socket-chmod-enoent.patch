@@ -1,0 +1,14 @@
+--- a/src/dinit.cc
++++ b/src/dinit.cc
+@@ -1031,7 +1031,10 @@
+ 
+         // No connections can be made until we listen, so it is fine to change the permissions now
+         // (and anyway there is no way to atomically create the socket and set permissions):
+-        if (chmod(saddrname, S_IRUSR | S_IWUSR) == -1) {
++        // ENOENT is tolerated: on Tunix, binding a unix socket registers the path in a
++        // kernel table without creating a filesystem node, so there is nothing to chmod.
++        // The socket itself works regardless.
++        if (chmod(saddrname, S_IRUSR | S_IWUSR) == -1 && errno != ENOENT) {
+             log(loglevel_t::ERROR, "Error setting control socket permissions: ", strerror(errno));
+             close(sockfd);
+             return false;
