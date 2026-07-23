@@ -18,6 +18,14 @@
 
 struct epoll_entry {
     int active;
+    /* EPOLLONESHOT has fired. A disarmed entry reports *nothing* -- not even
+       EPOLLERR/EPOLLHUP, which are otherwise always reported -- until an
+       EPOLL_CTL_MOD re-arms it. dasynq (dinit's event library) leans on
+       exactly this: it "disables" a watch by re-arming with events set to
+       just EPOLLONESHOT, so a hung-up pipe under a disabled watch must fall
+       silent after one report or every epoll_wait returns instantly and the
+       caller's drain loop never terminates. */
+    int disarmed;
     int fd;
     struct file *file;
     uint32_t events;
@@ -62,6 +70,7 @@ int epoll_ctl_add(struct epoll_context *context, int fd, struct file *file,
         struct epoll_entry *entry = &context->entries[index];
         if (!entry->active) {
             entry->active = 1;
+            entry->disarmed = 0;
             entry->fd = fd;
             entry->file = file;
             entry->events = event->events;
@@ -80,6 +89,7 @@ int epoll_ctl_mod(struct epoll_context *context, int fd, struct file *file,
     if (!entry) return -ENOENT;
     entry->events = event->events;
     entry->data = event->data;
+    entry->disarmed = 0;
     return 0;
 }
 
@@ -98,7 +108,7 @@ int epoll_collect(struct epoll_context *context,
     int ready = 0;
     for (int index = 0; index < EPOLL_MAX_ENTRIES && ready < maximum; index++) {
         struct epoll_entry *entry = &context->entries[index];
-        if (!entry->active || !entry->file) continue;
+        if (!entry->active || !entry->file || entry->disarmed) continue;
         uint32_t requested = entry->events & ~(EPOLLET | EPOLLONESHOT);
         uint32_t occurred = file_poll_events(entry->file, requested | EPOLLERR |
                                                            EPOLLHUP | EPOLLRDHUP);
@@ -107,7 +117,7 @@ int epoll_collect(struct epoll_context *context,
         events[ready].events = occurred;
         events[ready].data = entry->data;
         ready++;
-        if (entry->events & EPOLLONESHOT) entry->events &= EPOLLONESHOT | EPOLLET;
+        if (entry->events & EPOLLONESHOT) entry->disarmed = 1;
     }
     return ready;
 }
@@ -116,7 +126,7 @@ int epoll_read_ready(struct epoll_context *context) {
     if (!context) return 0;
     for (int index = 0; index < EPOLL_MAX_ENTRIES; index++) {
         struct epoll_entry *entry = &context->entries[index];
-        if (!entry->active || !entry->file) continue;
+        if (!entry->active || !entry->file || entry->disarmed) continue;
         uint32_t requested = entry->events & ~(EPOLLET | EPOLLONESHOT);
         uint32_t occurred = file_poll_events(entry->file, requested | EPOLLERR |
                                                            EPOLLHUP | EPOLLRDHUP);
