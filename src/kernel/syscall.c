@@ -107,6 +107,11 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define SYS_EXIT 60
 #define SYS_WAIT4 61
 #define SYS_KILL 62
+#define SYS_CHOWN 92
+#define SYS_FCHOWN 93
+#define SYS_LCHOWN 94
+#define SYS_WAITID 247
+#define SYS_FCHOWNAT 260
 #define SYS_UNAME 63
 #define SYS_FCNTL 72
 #define SYS_FLOCK 73
@@ -2301,6 +2306,31 @@ static int64_t sys_chmod_at(int dirfd, uint64_t user_path, uint32_t mode, int fl
     return 0;
 }
 
+/*
+ * The chown family. Tunix is single-user: everything is uid 0, gid 0, and
+ * stat reports exactly that, so any ownership a caller asks for is already
+ * a no-op or unrepresentable. The path/descriptor is still validated --
+ * "chown a file that is not there" must keep failing -- but nothing is
+ * recorded. dinit is the caller that made this matter: it fchown()s every
+ * service logfile it opens and treats failure as fatal for the service.
+ */
+static int64_t sys_chown_at(int dirfd, uint64_t user_path, int flags) {
+    if (flags & ~AT_SYMLINK_NOFOLLOW) return -EINVAL;
+    char path[256];
+    int status = copy_path_at(dirfd, user_path, path);
+    if (status != 0) return status;
+    struct vfs_node *node = (flags & AT_SYMLINK_NOFOLLOW) ? vfs_lookup_nofollow(path) : vfs_lookup(path);
+    if (!node) return -ENOENT;
+    if (node->flags & VFS_READONLY) return -EROFS;
+    return 0;
+}
+
+static int64_t sys_fchown(int fd) {
+    struct process *process = process_current();
+    if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) return -EBADF;
+    return 0;
+}
+
 static int64_t sys_fchmod(int fd, uint32_t mode) {
     struct process *process = process_current();
     if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) return -EBADF;
@@ -3902,6 +3932,33 @@ void syscall_dispatch(struct syscall_frame *frame) {
             if (process_current() == caller) frame->rax = (uint64_t)result;
             break;
         }
+        case SYS_WAITID: {
+            /* idtype/id translated to wait4's pid convention; frame->r8 is the
+             * struct rusage pointer, accepted and ignored exactly like wait4's. */
+            int idtype = (int)frame->rdi;
+            int64_t id = (int64_t)frame->rsi;
+            int options = (int)frame->r10;
+            int64_t pid_spec;
+            if (idtype == 0) pid_spec = -1;                     /* P_ALL */
+            else if (idtype == 1 && id > 0) pid_spec = id;      /* P_PID */
+            else if (idtype == 2 && id > 0) pid_spec = -id;     /* P_PGID */
+            else { frame->rax = (uint64_t)-(int64_t)EINVAL; break; }
+            if ((options & ~(WNOHANG | WEXITED | WSTOPPED | WCONTINUED)) ||
+                !(options & (WEXITED | WSTOPPED | WCONTINUED))) {
+                frame->rax = (uint64_t)-(int64_t)EINVAL;
+                break;
+            }
+            int64_t result = process_waitid_from_syscall(pid_spec, frame->rdx,
+                                                         options);
+            if (result == -EAGAIN) {
+                if (!retry_io_wait(frame, SYS_WAITID, -1))
+                    frame->rax = (uint64_t)-(int64_t)ECHILD;
+            } else {
+                clear_io_wait(process_current());
+                frame->rax = (uint64_t)result;
+            }
+            break;
+        }
         case SYS_KILL: frame->rax = (uint64_t)process_send_signal((int64_t)frame->rdi, (int)frame->rsi); break;
         /* Single-threaded here: a tid is a pid, so tkill(tid,sig) is kill(pid,sig).
          * musl's raise()/abort() route through tkill. */
@@ -3985,6 +4042,10 @@ void syscall_dispatch(struct syscall_frame *frame) {
         case SYS_READLINK: frame->rax = (uint64_t)sys_readlink_at(AT_FDCWD, frame->rdi, frame->rsi, (size_t)frame->rdx); break;
         case SYS_CHMOD: frame->rax = (uint64_t)sys_chmod_at(AT_FDCWD, frame->rdi, (uint32_t)frame->rsi, 0); break;
         case SYS_FCHMOD: frame->rax = (uint64_t)sys_fchmod((int)frame->rdi, (uint32_t)frame->rsi); break;
+        case SYS_CHOWN: frame->rax = (uint64_t)sys_chown_at(AT_FDCWD, frame->rdi, 0); break;
+        case SYS_LCHOWN: frame->rax = (uint64_t)sys_chown_at(AT_FDCWD, frame->rdi, AT_SYMLINK_NOFOLLOW); break;
+        case SYS_FCHOWN: frame->rax = (uint64_t)sys_fchown((int)frame->rdi); break;
+        case SYS_FCHOWNAT: frame->rax = (uint64_t)sys_chown_at((int)frame->rdi, frame->rsi, (int)frame->r8); break;
         case SYS_UMASK: frame->rax = process_set_umask((uint32_t)frame->rdi); break;
         case SYS_GETTIMEOFDAY: frame->rax = (uint64_t)sys_gettimeofday(frame->rdi); break;
         case SYS_GETRLIMIT: frame->rax = (uint64_t)sys_prlimit(frame->rsi); break;

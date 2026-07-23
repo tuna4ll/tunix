@@ -1356,6 +1356,100 @@ int64_t process_waitpid_from_syscall(struct syscall_frame *frame, int64_t pid,
     return 0;
 }
 
+/*
+ * waitid(2), the non-blocking core. dinit's event library (dasynq) reaps every
+ * service exit through waitid(P_ALL, 0, &info, WNOHANG | WEXITED); with wait4
+ * alone a service manager stays permanently blind to its children -- services
+ * hang in STARTING and their processes pile up as zombies.
+ *
+ * The siginfo_t written back is the x86_64 Linux layout: 128 bytes, the
+ * SIGCHLD union member starting at offset 16. Only the fields a waiter can
+ * consume are filled; the rest stay zero.
+ *
+ * Returns 0 with the record stored (or, for WNOHANG with nothing ready, with
+ * si_pid zero, which is how Linux reports it), -EAGAIN when the caller should
+ * block and retry, or a negative errno.
+ */
+struct waitid_siginfo {
+    int32_t si_signo;
+    int32_t si_errno;
+    int32_t si_code;
+    int32_t pad0;
+    int32_t si_pid;
+    uint32_t si_uid;
+    int32_t si_status;
+    uint8_t pad1[128 - 28];
+};
+
+#define CLD_EXITED 1
+#define CLD_KILLED 2
+#define CLD_STOPPED 5
+#define CLD_CONTINUED 6
+
+int64_t process_waitid_from_syscall(int64_t pid_spec, uint64_t info_user,
+                                    int options) {
+    if (!current || !info_user) return -EINVAL;
+    struct process *parent = current;
+    struct waitid_siginfo info;
+    memset(&info, 0, sizeof(info));
+
+    int has_child = 0;
+    struct process *item = queue;
+    if (item) {
+        do {
+            if (child_matches(item, parent, pid_spec)) {
+                has_child = 1;
+                if ((options & WEXITED) && item->state == PROCESS_ZOMBIE) {
+                    info.si_signo = SIGCHLD;
+                    info.si_pid = (int32_t)item->pid;
+                    if (item->termination_signal) {
+                        info.si_code = CLD_KILLED;
+                        info.si_status = item->termination_signal & 0x7F;
+                    } else {
+                        info.si_code = CLD_EXITED;
+                        info.si_status = item->exit_status & 0xFF;
+                    }
+                    if (vmm_copy_to_space(parent->cr3, info_user, &info,
+                                          sizeof(info)) != 0) return -EFAULT;
+                    item->state = PROCESS_DEAD;
+                    return 0;
+                }
+                if ((options & WSTOPPED) && item->state == PROCESS_STOPPED &&
+                    !item->stop_reported) {
+                    info.si_signo = SIGCHLD;
+                    info.si_pid = (int32_t)item->pid;
+                    info.si_code = CLD_STOPPED;
+                    info.si_status = item->stop_signal & 0xFF;
+                    if (vmm_copy_to_space(parent->cr3, info_user, &info,
+                                          sizeof(info)) != 0) return -EFAULT;
+                    item->stop_reported = 1;
+                    return 0;
+                }
+                if ((options & WCONTINUED) && item->continued_pending) {
+                    info.si_signo = SIGCHLD;
+                    info.si_pid = (int32_t)item->pid;
+                    info.si_code = CLD_CONTINUED;
+                    info.si_status = SIGCONT;
+                    if (vmm_copy_to_space(parent->cr3, info_user, &info,
+                                          sizeof(info)) != 0) return -EFAULT;
+                    item->continued_pending = 0;
+                    return 0;
+                }
+            }
+            item = item->next;
+        } while (item != queue);
+    }
+    if (!has_child) return -ECHILD;
+    if (options & WNOHANG) {
+        /* "si_pid and si_signo are set to zero" -- waitid(2). The whole
+           record is zeroed, which satisfies both the letter and dasynq. */
+        if (vmm_copy_to_space(parent->cr3, info_user, &info, sizeof(info)) != 0)
+            return -EFAULT;
+        return 0;
+    }
+    return -EAGAIN;
+}
+
 static void signal_one_process(struct process *target, int signal_number) {
     if (signal_number == 0) return;
     if (signal_number == SIGKILL && target->state == PROCESS_STOPPED)

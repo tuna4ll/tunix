@@ -18,6 +18,10 @@
 #define WNOHANG 1
 #define WUNTRACED 2
 #define WCONTINUED 8
+/* waitid(2) only. WSTOPPED shares WUNTRACED's value, as on Linux. */
+#define WSTOPPED 2
+#define WEXITED 4
+#define WNOWAIT 0x01000000
 
 struct vfs_node;
 struct pty_pair;
@@ -210,6 +214,8 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
                                   const char *const argv[], const char *const envp[]);
 int64_t process_waitpid_from_syscall(struct syscall_frame *frame, int64_t pid,
                                      uint64_t status_user, int options);
+int64_t process_waitid_from_syscall(int64_t pid_spec, uint64_t info_user,
+                                    int options);
 int process_send_signal(int64_t pid, int signal_number);
 int process_setpgid(int64_t pid, int64_t pgid);
 int64_t process_setsid(void);
