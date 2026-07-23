@@ -2,7 +2,7 @@
 
 Tunix is a small Unix-like operating system experiment for x86_64. It includes a custom bootloader, kernel, initramfs-based userspace, framebuffer terminal, and a small set of ported userland tools.
 
-<img width="1332" height="836" alt="image" src="https://github.com/user-attachments/assets/4fb0a9b9-4753-4e6a-ba60-acc51211ebfd" />
+<img width="1332" height="836" alt="image" src="https://github.com/user-attachments/assets/c0717756-b161-40ac-8da3-a04712c13183" />
 
 ## Features
 
