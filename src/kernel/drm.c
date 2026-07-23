@@ -688,9 +688,9 @@ static int64_t ioctl_prime_fd_to_handle(uint64_t user_argument) {
     struct drm_prime_handle request;
     if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
     struct process *process = process_current();
-    if (!process || request.fd < 0 || request.fd >= PROCESS_MAX_FDS ||
-        !process->fds[request.fd]) return -EBADF;
-    struct file *file = process->fds[request.fd];
+    if (!process || !process->files || request.fd < 0 || request.fd >= PROCESS_MAX_FDS ||
+        !process->files->fds[request.fd]) return -EBADF;
+    struct file *file = process->files->fds[request.fd];
     if (file->kind != FILE_KIND_DMABUF) return -EINVAL;
     if (!buffer_find(file->dmabuf_handle)) return -ENOENT;
     request.handle = file->dmabuf_handle;

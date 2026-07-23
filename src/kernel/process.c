@@ -212,12 +212,12 @@ struct process *process_find(uint64_t pid) {
 
 int process_install_file_flags(struct process *process, struct file *file,
                                int minimum_fd, uint8_t flags) {
-    if (!process || !file) return -1;
+    if (!process || !process->files || !file) return -1;
     if (minimum_fd < 0) minimum_fd = 0;
     for (int fd = minimum_fd; fd < PROCESS_MAX_FDS; fd++) {
-        if (!process->fds[fd]) {
-            process->fds[fd] = file;
-            process->fd_flags[fd] = flags & PROCESS_FD_CLOEXEC;
+        if (!process->files->fds[fd]) {
+            process->files->fds[fd] = file;
+            process->files->fd_flags[fd] = flags & PROCESS_FD_CLOEXEC;
             return fd;
         }
     }
@@ -229,29 +229,67 @@ int process_install_file(struct process *process, struct file *file, int minimum
 }
 
 uint8_t process_get_fd_flags(const struct process *process, int fd) {
-    if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->fds[fd]) return 0;
-    return process->fd_flags[fd];
+    if (!process || !process->files || fd < 0 || fd >= PROCESS_MAX_FDS ||
+        !process->files->fds[fd]) return 0;
+    return process->files->fd_flags[fd];
 }
 
 int process_set_fd_flags(struct process *process, int fd, uint8_t flags) {
-    if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->fds[fd]) return -1;
-    process->fd_flags[fd] = flags & PROCESS_FD_CLOEXEC;
+    if (!process || !process->files || fd < 0 || fd >= PROCESS_MAX_FDS ||
+        !process->files->fds[fd]) return -1;
+    process->files->fd_flags[fd] = flags & PROCESS_FD_CLOEXEC;
     return 0;
 }
 
 int process_close_fd(struct process *process, int fd) {
-    if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->fds[fd]) return -1;
-    struct file *file = process->fds[fd];
-    process->fds[fd] = NULL;
-    process->fd_flags[fd] = 0;
+    if (!process || !process->files || fd < 0 || fd >= PROCESS_MAX_FDS ||
+        !process->files->fds[fd]) return -1;
+    struct file *file = process->files->fds[fd];
+    process->files->fds[fd] = NULL;
+    process->files->fd_flags[fd] = 0;
     file_unref(file);
     return 0;
 }
 
-static void close_all_files(struct process *process) {
+static struct file_table *file_table_create(void) {
+    struct file_table *table = (struct file_table *)kmalloc(sizeof(*table));
+    if (!table) return NULL;
+    memset(table, 0, sizeof(*table));
+    table->refs = 1;
+    return table;
+}
+
+/* fork: the child gets its own table holding new references to the same open
+   files -- descriptors diverge from here, file offsets stay shared. */
+static struct file_table *file_table_clone(const struct file_table *source) {
+    struct file_table *table = file_table_create();
+    if (!table || !source) return table;
     for (int fd = 0; fd < PROCESS_MAX_FDS; fd++) {
-        if (process->fds[fd]) process_close_fd(process, fd);
+        if (source->fds[fd]) {
+            table->fds[fd] = source->fds[fd];
+            table->fd_flags[fd] = source->fd_flags[fd];
+            file_ref(table->fds[fd]);
+        }
     }
+    return table;
+}
+
+/* Drop this process's reference to its descriptor table; the files close only
+   when the last thread sharing the table lets go. */
+static void process_release_files(struct process *process) {
+    if (!process || !process->files) return;
+    struct file_table *table = process->files;
+    process->files = NULL;
+    if (--table->refs > 0) return;
+    for (int fd = 0; fd < PROCESS_MAX_FDS; fd++) {
+        if (table->fds[fd]) {
+            struct file *file = table->fds[fd];
+            table->fds[fd] = NULL;
+            table->fd_flags[fd] = 0;
+            file_unref(file);
+        }
+    }
+    kfree(table);
 }
 
 /* Defined with the scheduler, below, but needed by process creation above it. */
@@ -326,11 +364,11 @@ void process_reap_deferred(void) {
 static void install_console(struct process *process) {
     struct vfs_node *console_node = vfs_lookup("/dev/console");
     struct file *console = file_open_node(console_node, 2);
-    process->fds[0] = console;
+    process->files->fds[0] = console;
     file_ref(console);
-    process->fds[1] = console;
+    process->files->fds[1] = console;
     file_ref(console);
-    process->fds[2] = console;
+    process->files->fds[2] = console;
 }
 
 struct process *process_create_from_path(const char *path) {
@@ -356,6 +394,12 @@ struct process *process_create_from_path(const char *path) {
     process->signal_stack_flags = SS_DISABLE;
     process->dumpable = 1;
     process->timerslack_ns = DEFAULT_TIMERSLACK_NS;
+    process->files = file_table_create();
+    if (!process->files) {
+        kprintf("process: descriptor-table allocation failed for %s\n", path);
+        kfree(process);
+        return NULL;
+    }
     process->cwd = vfs_root;
     vfs_node_ref(process->cwd);
     strncpy(process->name, file->name, sizeof(process->name) - 1);
@@ -363,6 +407,7 @@ struct process *process_create_from_path(const char *path) {
     process->cr3 = vmm_create_address_space();
     if (!process->cr3) {
         kprintf("process: address-space creation failed for %s\n", path);
+        process_release_files(process);
         kfree(process);
         return NULL;
     }
@@ -381,6 +426,7 @@ struct process *process_create_from_path(const char *path) {
     if (elf_load_process(process, file, argv, envp) != 0) {
         kprintf("process: invalid ELF64: %s\n", path);
         vmm_destroy_address_space(process->cr3);
+        process_release_files(process);
         kfree(process);
         return NULL;
     }
@@ -388,6 +434,7 @@ struct process *process_create_from_path(const char *path) {
                                     process->brk_end, process->mmap_base);
     if (!process->memory) {
         vmm_destroy_address_space(process->cr3);
+        process_release_files(process);
         kfree(process);
         return NULL;
     }
@@ -396,6 +443,7 @@ struct process *process_create_from_path(const char *path) {
     if (allocate_kernel_stack(process) != 0) {
         kprintf("process: kernel stack allocation failed for %s\n", path);
         memory_unref(process->memory);
+        process_release_files(process);
         kfree(process);
         return NULL;
     }
@@ -891,7 +939,7 @@ void process_exit_from_syscall(struct syscall_frame *frame, int status) {
         exiting->clear_child_tid_user = 0;
         (void)process_futex_wake(clear_address, 1);
     }
-    close_all_files(exiting);
+    process_release_files(exiting);
     if (exiting->is_thread) exiting->state = PROCESS_DEAD;
     else notify_parent_of_exit(exiting);
     KDEBUG("process: pid=%u exited status=%d\n", (unsigned)exiting->pid, status);
@@ -976,12 +1024,12 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame) {
     child->signal_blocked = parent->signal_blocked;
     memcpy(child->signal_actions, parent->signal_actions, sizeof(child->signal_actions));
 
-    for (int fd = 0; fd < PROCESS_MAX_FDS; fd++) {
-        if (parent->fds[fd]) {
-            child->fds[fd] = parent->fds[fd];
-            child->fd_flags[fd] = parent->fd_flags[fd];
-            file_ref(child->fds[fd]);
-        }
+    child->files = file_table_clone(parent->files);
+    if (!child->files) {
+        memory_unref(child->memory);
+        kfree((void *)child->kernel_stack_base);
+        kfree(child);
+        return -EAGAIN;
     }
 
     enqueue(child);
@@ -1048,18 +1096,16 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
     child->signal_blocked = parent->signal_blocked;
     memcpy(child->signal_actions, parent->signal_actions, sizeof(child->signal_actions));
 
-    for (int fd = 0; fd < PROCESS_MAX_FDS; fd++) {
-        if (parent->fds[fd]) {
-            child->fds[fd] = parent->fds[fd];
-            child->fd_flags[fd] = parent->fd_flags[fd];
-            file_ref(child->fds[fd]);
-        }
-    }
+    /* CLONE_FILES: threads share one descriptor table, they do not copy it.
+       An fd any thread opens (or closes) from here on is immediately visible
+       to every sibling. */
+    child->files = parent->files;
+    child->files->refs++;
 
     uint32_t tid = (uint32_t)child->pid;
     if ((flags & 0x00100000ULL) && parent_tid_user &&
         vmm_copy_to_space(parent->cr3, parent_tid_user, &tid, sizeof(tid)) != 0) {
-        close_all_files(child);
+        process_release_files(child);
         memory_unref(child->memory);
         kfree((void *)child->kernel_stack_base);
         kfree(child);
@@ -1068,7 +1114,7 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
     if ((flags & (0x01000000ULL | 0x00200000ULL)) && child_tid_user) {
         if ((flags & 0x01000000ULL) &&
             vmm_copy_to_space(child->cr3, child_tid_user, &tid, sizeof(tid)) != 0) {
-            close_all_files(child);
+            process_release_files(child);
             memory_unref(child->memory);
             kfree((void *)child->kernel_stack_base);
             kfree(child);
@@ -1181,7 +1227,7 @@ void process_exit_group_from_syscall(struct syscall_frame *frame, int status) {
                     (void)process_futex_wake(clear_address, 1);
                 }
                 item->state = PROCESS_DEAD;
-                close_all_files(item);
+                process_release_files(item);
             }
             item = item->next;
         } while (item != queue);
@@ -1243,7 +1289,7 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
     current->signal_pending = 0;
     current->in_signal = 0;
     for (int fd = 0; fd < PROCESS_MAX_FDS; fd++) {
-        if (current->fds[fd] && (current->fd_flags[fd] & PROCESS_FD_CLOEXEC))
+        if (current->files->fds[fd] && (current->files->fd_flags[fd] & PROCESS_FD_CLOEXEC))
             process_close_fd(current, fd);
     }
 

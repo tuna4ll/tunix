@@ -52,6 +52,14 @@ struct process_memory {
     struct process_file_mapping mappings[PROCESS_MAX_FILE_MAPPINGS];
 };
 
+/* One descriptor table, shared by every thread of a thread group (fork gives
+   the child its own deep copy). refs counts the processes pointing at it. */
+struct file_table {
+    int refs;
+    struct file *fds[PROCESS_MAX_FDS];
+    uint8_t fd_flags[PROCESS_MAX_FDS];
+};
+
 struct process {
     uint64_t pid;
     uint64_t tgid;
@@ -108,8 +116,14 @@ struct process {
     struct vfs_node *cwd;
     struct pty_pair *controlling_pty;
     struct syscall_frame saved_frame;
-    struct file *fds[PROCESS_MAX_FDS];
-    uint8_t fd_flags[PROCESS_MAX_FDS];
+    /* The descriptor table is a separate refcounted object because threads
+       share it (CLONE_FILES): an fd opened by any thread of a group must be
+       visible to every other thread immediately, and a per-thread copy taken
+       at clone time is not that. GLib is where the difference stops being
+       theoretical -- its worker thread read()s an inotify fd the main thread
+       opened after the worker started, and with copied tables that read
+       returns EBADF, which GLib treats as fatal. fork still deep-copies. */
+    struct file_table *files;
 
     /* Set only while blocked inside wait4(). PROCESS_BLOCKED on its own does
        not mean "waiting for a child" -- a rewound read/write sleeping on a wait
