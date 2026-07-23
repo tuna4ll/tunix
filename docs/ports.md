@@ -128,6 +128,26 @@ the submodule; `ports/build-libffi.sh` detects the symptom and says so.
 
 Do not make a port install directly into `initrd/` or `build/rootfs/`. The Makefile owns final rootfs assembly.
 
+## Init (dinit)
+
+`ports/build-dinit.sh` builds dinit with the cross toolchain and links it
+**statically**: PID 1 must never fail to boot because the dynamic loader or
+`libstdc++.so` went missing from the image, and a static musl binary can even
+be smoke-tested on the build host (same syscall ABI, no loader). The Makefile
+symlinks `/sbin/init` to it; the boot services live in `initrd/etc/dinit.d`
+(`rcS` for filesystem setup, `keymap`, and `startx`, which is what brings up
+weston at boot) with the global service environment in
+`initrd/etc/dinit/environment`.
+
+The one patch tolerates `chmod()` on the control socket failing with `ENOENT`:
+Tunix binds unix sockets into a kernel table without creating a filesystem
+node, and dinit otherwise treats that as a fatal startup error.
+
+dinit is also why the kernel grew `waitid(2)`, the `chown` family, and real
+`EPOLLONESHOT` disarming — its event library (dasynq) reaps children with
+`waitid`, `fchown()`s every logfile, and "disables" epoll watches by re-arming
+them with only `EPOLLONESHOT` set, expecting them to fall silent afterwards.
+
 ## How to Port
 
 1. Add or initialize the upstream source under `ports/src/<name>`.

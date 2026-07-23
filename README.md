@@ -15,8 +15,9 @@ Tunix is a small Unix-like operating system experiment for x86_64. It includes a
 - GNU userland (coreutils, grep, sed, gawk, findutils, diffutils, tar, gzip, make), Bash, TinyCC, binutils, nano, Lua, and selected libraries
 - Git, with an `https://` transport via a static libcurl built against mbedTLS
   (so `git clone https://…` works); `ssh://` remotes are not supported
-- Weston (Wayland) desktop on a DRM display, and GTK 3 with the Wayland
-  backend: `startx`, then launch `gtk3-widget-factory` from the panel
+- dinit as PID 1: services under `/etc/dinit.d`, controlled with `dinitctl`
+- Weston (Wayland) desktop on a DRM display, started automatically at boot,
+  and GTK 3 with the Wayland backend (`gtk3-widget-factory` in the panel)
 
 ## Quick Start
 
