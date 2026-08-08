@@ -423,3 +423,12 @@
 	path = ports/src/cpython
 	url = https://github.com/python/cpython.git
 	shallow = true
+[submodule "ports/src/zstd"]
+	path = ports/src/zstd
+	url = https://github.com/facebook/zstd
+[submodule "ports/src/libarchive"]
+	path = ports/src/libarchive
+	url = https://github.com/libarchive/libarchive
+[submodule "ports/src/openssl"]
+	path = ports/src/openssl
+	url = https://github.com/openssl/openssl
