@@ -1762,10 +1762,16 @@ run: $(IMAGE)
 # and the text console draws into the VGA framebuffer, both of which only exist
 # on the VGA-compatible variant. QEMU shows that framebuffer until the driver
 # sets a scanout, and again once it gives one back.
+# xres/yres: what the device answers GET_DISPLAY_INFO with. Left at its default
+# it reports 1280x800, or -- once a window manager has told QEMU how big the
+# window is -- whatever that window happens to be, which on a fresh virtio-vga
+# is the VGA adapter's 640x480. None of those is the mode the bootloader set, so
+# the device, the framebuffer and the scanout each named a different size.
+QEMU_GPU_RESOLUTION ?= xres=1280,yres=720
 run-gpu: $(IMAGE)
 	rm -f $(BUILD)/serial.log
 	$(QEMU) -machine pc,accel=kvm:tcg -cpu host -smp $(QEMU_SMP) -m 4096M -drive format=raw,file=$(IMAGE) \
-		-vga none -device virtio-vga \
+		-vga none -device virtio-vga,$(QEMU_GPU_RESOLUTION) \
 		-serial file:$(BUILD)/serial.log -monitor none -no-reboot -no-shutdown \
 		-netdev user,id=net0 -device rtl8139,netdev=net0 $(QEMU_AUDIO)
 

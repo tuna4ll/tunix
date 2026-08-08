@@ -68,6 +68,27 @@ left off. This is why `run-gpu` uses `virtio-vga` and not `virtio-gpu-pci`: the
 VGA-compatible variant is the one that has a framebuffer for the bootloader to
 set a mode in and for the console to draw into.
 
+## Resolution
+
+Three things name a size and they have to be the same one:
+
+- the mode the bootloader sets over VBE, which becomes the kernel framebuffer
+  and, through `MODE_GETCONNECTOR`, the only mode DRM reports
+- the rect a scanout is set to, which is the framebuffer's
+- whatever the device answers `GET_DISPLAY_INFO` with
+
+The third is the odd one out. Left alone, QEMU answers with the `xres`/`yres`
+properties — 1280x800 by default — and once a window manager has told it how big
+the window is, with the window instead. On a fresh `virtio-vga` that is the VGA
+adapter's 640x480, which is why `run-gpu` pins `xres=1280,yres=720` to the mode
+the bootloader actually sets. Override `QEMU_GPU_RESOLUTION` to move all of it.
+
+Nothing in the guest resizes itself to follow the host window: the driver reads
+the display size once, at probe, and reports it. A QEMU window smaller than the
+guest mode is a host-side window, not a smaller desktop — QEMU scales the
+scanout down into it. "View → Zoom To Fit", or resizing the window, is the fix
+for that, and `-display gtk,zoom-to-fit=on` sets it from the start.
+
 ## What is deliberately not here
 
 **3D.** Nothing negotiates `VIRTIO_GPU_F_VIRGL`, so the device comes up in 2D
