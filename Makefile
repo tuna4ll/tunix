@@ -286,6 +286,17 @@ LIGHTDM_GREETER_STAMP := $(PORT_OUT)/.lightdm-gtk-greeter-ready
 # CPython, shared so ctypes and third-party extensions can be dlopen'd.
 CPYTHON_ROOT := $(PORT_OUT)/cpython-root
 CPYTHON_STAMP := $(PORT_OUT)/.cpython-ready
+# xbps, the Void Linux package manager, and the three libraries under it. An
+# .xbps package is a zstd-compressed tar that libarchive opens; OpenSSL is what
+# xbps verifies repository signatures and speaks HTTPS with.
+ZSTD_ROOT := $(PORT_OUT)/zstd-root
+ZSTD_STAMP := $(PORT_OUT)/.zstd-ready
+OPENSSL_ROOT := $(PORT_OUT)/openssl-root
+OPENSSL_STAMP := $(PORT_OUT)/.openssl-ready
+LIBARCHIVE_ROOT := $(PORT_OUT)/libarchive-root
+LIBARCHIVE_STAMP := $(PORT_OUT)/.libarchive-ready
+XBPS_ROOT := $(PORT_OUT)/xbps-root
+XBPS_STAMP := $(PORT_OUT)/.xbps-ready
 BOOT_CONFIG_STAMP := $(BUILD)/.boot-config-ready
 MUSL_SHARED_STAMP := $(PORT_OUT)/.musl-shared-ready
 MBEDTLS_ROOT := $(PORT_OUT)/mbedtls-root
@@ -539,6 +550,39 @@ $(WESTON_STAMP): $(WAYLAND_STAMP) $(WAYLAND_PROTOCOLS_STAMP) $(PIXMAN_STAMP) \
 	@test -f $(WESTON_ROOT)/usr/lib/libweston-14/drm-backend.so || { echo "the drm backend was not produced" >&2; exit 1; }
 	@test -x $(WESTON_ROOT)/usr/bin/weston-terminal || { echo "weston-terminal was not produced" >&2; exit 1; }
 	@test -f $(WESTON_ROOT)/usr/lib/libweston-14/gl-renderer.so || { echo "the gl renderer was not produced" >&2; exit 1; }
+	@touch $@
+
+$(ZSTD_STAMP): $(MUSL_CROSS_STAMP) ports/build-zstd.sh ports/lib/cross-port.sh \
+	ports/src/zstd/lib/zstd.h
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-zstd.sh
+	@test -f $(ZSTD_ROOT)/usr/lib/libzstd.so.1 || { echo "libzstd was not produced" >&2; exit 1; }
+	@touch $@
+
+$(OPENSSL_STAMP): $(MUSL_CROSS_STAMP) ports/build-openssl.sh ports/lib/cross-port.sh \
+	ports/src/openssl/Configure
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-openssl.sh
+	@test -f $(OPENSSL_ROOT)/usr/lib/libcrypto.so.3 || { echo "libcrypto was not produced" >&2; exit 1; }
+	@test -f $(OPENSSL_ROOT)/usr/lib/libssl.so.3 || { echo "libssl was not produced" >&2; exit 1; }
+	@touch $@
+
+# IMAGE_CODECS_SHARED_STAMP: libarchive links the shared zlib from there.
+$(LIBARCHIVE_STAMP): $(ZSTD_STAMP) $(OPENSSL_STAMP) $(IMAGE_CODECS_SHARED_STAMP) \
+	ports/build-libarchive.sh ports/lib/cross-port.sh \
+	ports/src/libarchive/configure.ac
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-libarchive.sh
+	@test -f $(LIBARCHIVE_ROOT)/usr/lib/libarchive.so.13 || { echo "libarchive was not produced" >&2; exit 1; }
+	@touch $@
+
+# A tarball port: xbps ships a signing key whose name contains a colon, which
+# cannot be checked out on Windows. See ports/build-xbps.sh.
+$(XBPS_STAMP): $(LIBARCHIVE_STAMP) ports/build-xbps.sh ports/lib/cross-port.sh
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-xbps.sh
+	@test -x $(XBPS_ROOT)/usr/bin/xbps-install || { echo "xbps-install was not produced" >&2; exit 1; }
+	@test -x $(XBPS_ROOT)/usr/bin/xbps-query || { echo "xbps-query was not produced" >&2; exit 1; }
 	@touch $@
 
 $(LIBDRM_STAMP): $(MUSL_CROSS_STAMP) ports/build-libdrm.sh ports/lib/cross-port.sh \
@@ -1412,7 +1456,7 @@ $(SND_TEST): $(BUILD)/user/snd_test.o $(USER_RUNTIME) src/userspace/linker.ld
 	$(LD) $(USER_LDFLAGS) -o $@ $(USER_RUNTIME) $(BUILD)/user/snd_test.o
 	$(STRIP) --strip-all $@
 
-$(INITRAMFS): $(DINIT_STAMP) $(SHADOW_STAMP) $(SUDO_STAMP) $(LINUX_PAM_STAMP) $(LIGHTDM_STAMP) $(LIGHTDM_GREETER_STAMP) $(CPYTHON_STAMP) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAMP) $(CURL_STAMP) $(GIT_STAMP) $(TCC_STAMP) $(BINUTILS_STAMP) $(NANO) $(TTY_CLOCK) $(TTY_TETRIS) $(HTOP) $(FASTFETCH_STAMP) $(LUA_STAMP) $(IMAGE_CODECS_STAMP) $(MUSL_SHARED_STAMP) $(IMAGE_CODECS_SHARED_STAMP) $(MBEDTLS_STAMP) $(LIBFFI_STAMP) $(WAYLAND_STAMP) $(PIXMAN_STAMP) $(LIBXKBCOMMON_STAMP) $(XKEYBOARD_CONFIG_STAMP) $(LIBEVDEV_STAMP) $(ALSA_LIB_STAMP) $(LIBUDEV_ZERO_STAMP) $(LIBINPUT_STAMP) $(CAIRO_STAMP) $(LIBDISPLAY_INFO_STAMP) $(SEATD_STAMP) $(WESTON_STAMP) $(LIBDRM_STAMP) $(MESA_STAMP) $(LLVM_STAMP) $(GLIB_STAMP) $(PANGO_STAMP) $(GDK_PIXBUF_STAMP) $(GTK3_STAMP) $(LIBXFCE4UTIL_STAMP) $(XFCONF_STAMP) $(LIBXFCE4UI_STAMP) $(THUNAR_STAMP) $(XCB_STAMP) $(LIBX11_STAMP) $(XEXT_STAMP) $(FONTSTACK_STAMP) $(XSERVER_STAMP) $(XCB_UTIL_STAMP) $(STARTUP_NOTIFICATION_STAMP) $(LIBSM_STAMP) $(LIBWNCK_STAMP) $(XFWM4_STAMP) $(DBUS_STAMP) $(GARCON_STAMP) $(LIBXFCE4WINDOWING_STAMP) $(XFCE4_PANEL_STAMP) $(XFCE4_SESSION_STAMP) $(XFDESKTOP_STAMP) $(LIBXML2_STAMP) $(XFCE4_SETTINGS_STAMP) $(VTE_STAMP) $(XFCE4_TERMINAL_STAMP) $(WELCOME_STAMP) $(ICU_STAMP) $(SQLITE_STAMP) $(LIBWEBP_STAMP) $(WOFF2_STAMP) $(LIBGCRYPT_STAMP) $(LIBTASN1_STAMP) $(GMP_STAMP) $(NETTLE_STAMP) $(GNUTLS_STAMP) $(GLIB_NETWORKING_STAMP) $(LIBSOUP_STAMP) $(WEBKITGTK_STAMP) $(SDL2_STAMP) $(SDL2_NET_STAMP) $(SDL2_MIXER_STAMP) $(CHOCOLATE_DOOM_STAMP) $(INITRD_FILES)
+$(INITRAMFS): $(DINIT_STAMP) $(SHADOW_STAMP) $(SUDO_STAMP) $(LINUX_PAM_STAMP) $(LIGHTDM_STAMP) $(LIGHTDM_GREETER_STAMP) $(CPYTHON_STAMP) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAMP) $(CURL_STAMP) $(GIT_STAMP) $(TCC_STAMP) $(BINUTILS_STAMP) $(NANO) $(TTY_CLOCK) $(TTY_TETRIS) $(HTOP) $(FASTFETCH_STAMP) $(LUA_STAMP) $(IMAGE_CODECS_STAMP) $(MUSL_SHARED_STAMP) $(IMAGE_CODECS_SHARED_STAMP) $(MBEDTLS_STAMP) $(LIBFFI_STAMP) $(WAYLAND_STAMP) $(PIXMAN_STAMP) $(LIBXKBCOMMON_STAMP) $(XKEYBOARD_CONFIG_STAMP) $(LIBEVDEV_STAMP) $(ALSA_LIB_STAMP) $(LIBUDEV_ZERO_STAMP) $(LIBINPUT_STAMP) $(CAIRO_STAMP) $(LIBDISPLAY_INFO_STAMP) $(SEATD_STAMP) $(WESTON_STAMP) $(LIBDRM_STAMP) $(MESA_STAMP) $(LLVM_STAMP) $(GLIB_STAMP) $(PANGO_STAMP) $(GDK_PIXBUF_STAMP) $(GTK3_STAMP) $(LIBXFCE4UTIL_STAMP) $(XFCONF_STAMP) $(LIBXFCE4UI_STAMP) $(THUNAR_STAMP) $(XCB_STAMP) $(LIBX11_STAMP) $(XEXT_STAMP) $(FONTSTACK_STAMP) $(XSERVER_STAMP) $(XCB_UTIL_STAMP) $(STARTUP_NOTIFICATION_STAMP) $(LIBSM_STAMP) $(LIBWNCK_STAMP) $(XFWM4_STAMP) $(DBUS_STAMP) $(GARCON_STAMP) $(LIBXFCE4WINDOWING_STAMP) $(XFCE4_PANEL_STAMP) $(XFCE4_SESSION_STAMP) $(XFDESKTOP_STAMP) $(LIBXML2_STAMP) $(XFCE4_SETTINGS_STAMP) $(VTE_STAMP) $(XFCE4_TERMINAL_STAMP) $(WELCOME_STAMP) $(ICU_STAMP) $(SQLITE_STAMP) $(LIBWEBP_STAMP) $(WOFF2_STAMP) $(LIBGCRYPT_STAMP) $(LIBTASN1_STAMP) $(GMP_STAMP) $(NETTLE_STAMP) $(GNUTLS_STAMP) $(GLIB_NETWORKING_STAMP) $(LIBSOUP_STAMP) $(WEBKITGTK_STAMP) $(SDL2_STAMP) $(SDL2_NET_STAMP) $(SDL2_MIXER_STAMP) $(CHOCOLATE_DOOM_STAMP) $(XBPS_STAMP) $(INITRD_FILES)
 	rm -rf $(ROOTFS)
 	mkdir -p $(ROOTFS)/bin $(ROOTFS)/sbin $(ROOTFS)/dev $(ROOTFS)/tmp \
 		$(ROOTFS)/run/dbus $(ROOTFS)/run/user/0 $(ROOTFS)/run/user/1000 \
@@ -1524,6 +1568,10 @@ $(INITRAMFS): $(DINIT_STAMP) $(SHADOW_STAMP) $(SUDO_STAMP) $(LINUX_PAM_STAMP) $(
 	cp -R $(SDL2_NET_ROOT)/. $(ROOTFS)/
 	cp -R $(SDL2_MIXER_ROOT)/. $(ROOTFS)/
 	cp -R $(CHOCOLATE_DOOM_ROOT)/. $(ROOTFS)/
+	cp -R $(ZSTD_ROOT)/. $(ROOTFS)/
+	cp -R $(OPENSSL_ROOT)/. $(ROOTFS)/
+	cp -R $(LIBARCHIVE_ROOT)/. $(ROOTFS)/
+	cp -R $(XBPS_ROOT)/. $(ROOTFS)/
 	# The shared MIME database, which is how GIO answers g_content_type_guess()
 	# and therefore how WebKit decides a file:// URL is html rather than plain
 	# text. Only the compiled lookup tables are needed, not the per-type XML the
@@ -1570,6 +1618,13 @@ $(INITRAMFS): $(DINIT_STAMP) $(SHADOW_STAMP) $(SUDO_STAMP) $(LINUX_PAM_STAMP) $(
 	@test -x $(ROOTFS)/usr/bin/https-get || { echo "https-get was not installed into the rootfs" >&2; exit 1; }
 	@test -x $(ROOTFS)/usr/bin/openssl || { echo "openssl (ssl-helper) was not installed into the rootfs" >&2; exit 1; }
 	@test -f $(ROOTFS)/etc/ssl/cert.pem || { echo "TLS CA bundle was not installed into the rootfs" >&2; exit 1; }
+	# The same trust in OpenSSL's layout: a directory of certificates found by a
+	# hash of the subject. GnuTLS and mbedTLS read the bundle above, but a
+	# program that asks OpenSSL for its default cert *directory* -- xbps's
+	# bundled libfetch does exactly that -- finds nothing without this.
+	$(PYTHON) scripts/split-ca-bundle.py $(ROOTFS)/etc/ssl/cert.pem $(ROOTFS)/etc/ssl/certs
+	openssl rehash $(ROOTFS)/etc/ssl/certs
+	@test -n "$$(find $(ROOTFS)/etc/ssl/certs -name '*.0' -print -quit)" || { echo "the CA directory has no hash links (is the host openssl too old?)" >&2; exit 1; }
 	@test -x $(ROOTFS)/lib/ld-musl-x86_64.so.1 || { echo "shared musl loader was not installed into the rootfs" >&2; exit 1; }
 	@test -x $(ROOTFS)/usr/bin/dynamic-runtime-check || { echo "dynamic runtime checks were not installed into the rootfs" >&2; exit 1; }
 	@test -x $(ROOTFS)/usr/bin/shm-test || { echo "shared-memory test was not installed into the rootfs" >&2; exit 1; }
