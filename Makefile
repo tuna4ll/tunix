@@ -343,7 +343,7 @@ SND_TEST := $(BUILD)/user/snd-test
 SYSTEM_TOOLS := $(BUILD)/user/ps $(BUILD)/user/free $(BUILD)/user/uptime $(BUILD)/user/top $(LOADKEYS) $(SLEEP) $(PREEMPT_TEST) $(SMP_TEST) $(INPUT_TEST) $(FB_TEST) $(FB_SHOT) $(GLIB_COMPAT_TEST) $(SND_TEST)
 INITRD_FILES := $(shell find initrd -type f 2>/dev/null)
 
-.PHONY: all run headless qemu-ci terminal-font dynamic-runtime-check shared-image-codecs-check gl-check clean
+.PHONY: all run run-gpu headless qemu-ci terminal-font dynamic-runtime-check shared-image-codecs-check gl-check clean
 all: $(IMAGE)
 
 terminal-font: $(TERMINAL_FONT_DATA)
@@ -1755,6 +1755,17 @@ QEMU_SMP ?= 4
 run: $(IMAGE)
 	rm -f $(BUILD)/serial.log
 	$(QEMU) -machine pc,accel=kvm:tcg -cpu host -smp $(QEMU_SMP) -m 4096M -drive format=raw,file=$(IMAGE) \
+		-serial file:$(BUILD)/serial.log -monitor none -no-reboot -no-shutdown \
+		-netdev user,id=net0 -device rtl8139,netdev=net0 $(QEMU_AUDIO)
+
+# virtio-vga rather than virtio-gpu-pci: the bootloader sets the mode over VBE
+# and the text console draws into the VGA framebuffer, both of which only exist
+# on the VGA-compatible variant. QEMU shows that framebuffer until the driver
+# sets a scanout, and again once it gives one back.
+run-gpu: $(IMAGE)
+	rm -f $(BUILD)/serial.log
+	$(QEMU) -machine pc,accel=kvm:tcg -cpu host -smp $(QEMU_SMP) -m 4096M -drive format=raw,file=$(IMAGE) \
+		-vga none -device virtio-vga \
 		-serial file:$(BUILD)/serial.log -monitor none -no-reboot -no-shutdown \
 		-netdev user,id=net0 -device rtl8139,netdev=net0 $(QEMU_AUDIO)
 
