@@ -8,10 +8,11 @@ struct file;
 struct vfs_node;
 
 /*
- * A DRM/KMS device with no GPU behind it, in the spirit of Linux's simpledrm:
- * the scanout is the framebuffer the bootloader handed us, and the only memory
- * objects are dumb buffers -- plain pages userspace maps and draws into with
- * the CPU.
+ * A DRM/KMS device in the spirit of Linux's simpledrm: the only memory objects
+ * are dumb buffers -- plain pages userspace maps and draws into with the CPU.
+ * The scanout is the framebuffer the bootloader handed us, unless there is a
+ * virtio-gpu, in which case a dumb buffer is scanned out where it lies (see
+ * virtgpu.h).
  *
  * This exists because /dev/fb0 and the TUNIX_FBIO_* ioctls are ours alone.
  * Everything in the Linux graphics world -- mesa's GBM, weston's drm backend,

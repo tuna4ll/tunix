@@ -9,6 +9,7 @@
 #include "include/pmm.h"
 #include "include/process.h"
 #include "include/usercopy.h"
+#include "include/virtgpu.h"
 #include "include/vmm.h"
 
 extern void kprintf(const char *fmt, ...);
@@ -332,6 +333,9 @@ struct drm_dumb_buffer {
     uint64_t size;        /* page-aligned byte count */
     uint64_t page_count;
     uint64_t *pages;      /* physical addresses */
+    /* The host resource these pages back, created on first present and 0 on a
+       machine with no virtio-gpu. */
+    uint32_t virtio_resource;
     /* Holders beyond the handle itself: every PRIME descriptor exported from
        this buffer counts. DESTROY_DUMB drops the handle's reference, but the
        pages stay until the last descriptor is closed. */
@@ -438,6 +442,8 @@ static struct drm_framebuffer *framebuffer_find(uint32_t id) {
 static void buffer_release(struct drm_dumb_buffer *buffer) {
     if (!buffer || !buffer->handle) return;
     if (buffer->refs > 1) { buffer->refs--; return; }
+    /* Before the pages go: the host is still reading them through the resource. */
+    if (buffer->virtio_resource) virtgpu_resource_destroy(buffer->virtio_resource);
     for (uint64_t index = 0; index < buffer->page_count; index++) {
         if (buffer->pages[index]) pmm_free_page((void *)buffer->pages[index]);
     }
@@ -812,9 +818,28 @@ static int64_t ioctl_obj_get_properties(uint64_t user_argument) {
 }
 
 /*
- * Present a framebuffer: copy it into the scanout. A real driver would point
- * the CRTC at the buffer instead, but the display here is a fixed region handed
- * over by the bootloader, so presenting means blitting.
+ * With a virtio-gpu behind the display there is a real scanout to point at, so
+ * the buffer's own pages become the host resource and presenting costs three
+ * commands instead of a screenful of memcpy.
+ */
+static int present_via_virtgpu(const struct drm_framebuffer *fb,
+                               struct drm_dumb_buffer *buffer) {
+    uint32_t stride_pixels = buffer->pitch / 4U;
+    if (!stride_pixels || !buffer->height) return -1;
+    if (!buffer->virtio_resource) {
+        buffer->virtio_resource = virtgpu_resource_create(stride_pixels, buffer->height,
+                                                          buffer->pages, buffer->page_count);
+        if (!buffer->virtio_resource) return -1;
+    }
+    uint32_t width = fb->width < stride_pixels ? fb->width : stride_pixels;
+    uint32_t height = fb->height < buffer->height ? fb->height : buffer->height;
+    return virtgpu_present(buffer->virtio_resource, width, height);
+}
+
+/*
+ * Present a framebuffer. Without a GPU the display is a fixed region the
+ * bootloader handed over and there is no CRTC to reprogram, so presenting
+ * means blitting into it.
  */
 static int present_framebuffer(uint32_t fb_id) {
     struct drm_framebuffer *fb = framebuffer_find(fb_id);
@@ -828,6 +853,8 @@ static int present_framebuffer(uint32_t fb_id) {
        client that only queries the device leaves the console alone. */
     int status = framebuffer_claim_graphics(&drm_display_owner);
     if (status != 0) return status;
+
+    if (virtgpu_available() && present_via_virtgpu(fb, buffer) == 0) return 0;
 
     uint8_t *scanout = framebuffer_scanout();
     if (!scanout) return -EPERM;
@@ -866,6 +893,7 @@ static int64_t ioctl_set_crtc(uint64_t user_argument) {
        display back, so the console reappears instead of the last frame. */
     if (!crtc.fb_id) {
         active_fb_id = 0;
+        virtgpu_scanout_disable();
         (void)framebuffer_release_graphics(&drm_display_owner, 0);
         return 0;
     }
@@ -1111,6 +1139,7 @@ int64_t drm_file_ioctl(struct file *file, unsigned long request,
        though -- that is how a compositor hands the console over on VT switch. */
     case DRM_NR_DROP_MASTER:
         active_fb_id = 0;
+        virtgpu_scanout_disable();
         (void)framebuffer_release_graphics(&drm_display_owner, 0);
         return 0;
     case DRM_NR_SET_MASTER:
@@ -1201,6 +1230,7 @@ void drm_device_close(struct vfs_node *node) {
     if (open_count) return;
     active_fb_id = 0;
     event_head = event_tail = event_count = 0;
+    virtgpu_scanout_disable();
     (void)framebuffer_release_graphics(&drm_display_owner, 0);
 }
 
