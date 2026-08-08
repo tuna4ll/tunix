@@ -29,6 +29,7 @@
 #include "include/acpi.h"
 #include "include/apic.h"
 #include "include/smp.h"
+#include "include/virtgpu.h"
 #include "include/xhci.h"
 
 #define INITRAMFS_PHYSICAL 0x02000000ULL
@@ -148,6 +149,9 @@ void kmain(uint32_t mmap_count, uint64_t mmap_address, uint64_t manifest_address
        ends up with two, which the input layer already copes with. Absent or
        broken is not fatal -- the rest of the system does not depend on it. */
     (void)xhci_init();
+    /* Absent on a machine with a plain VGA adapter, in which case drm.c keeps
+       blitting into the framebuffer the bootloader handed over. */
+    (void)virtgpu_init();
 #if TUNIX_BOOT_TIMINGS
     boot_log_stage("memory/framebuffer/network init", &stage_started);
 #endif
