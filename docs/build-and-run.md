@@ -63,7 +63,14 @@ Run without a graphical QEMU window:
 make headless
 ```
 
-Both targets boot `build/tunix.img` with 128 MiB of RAM and an RTL8139 network
+Run with a virtio-gpu instead of the emulated VGA adapter, which is what the
+kernel's virtio-gpu driver needs to find — see [virtio-gpu](virtio-gpu.md):
+
+```sh
+make run-gpu
+```
+
+All three boot `build/tunix.img` with 128 MiB of RAM and an RTL8139 network
 device. The graphical run writes serial output to:
 
 ```text

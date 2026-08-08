@@ -36,6 +36,9 @@ Tunix is a small Unix-like operating system experiment for x86_64. It includes a
 - A graphical login: LightDM with lightdm-gtk-greeter owns the display from
   boot, authenticating through Linux-PAM — see
   [Display Manager](docs/display-manager.md)
+- A virtio-gpu driver, so the display is scanned out where it lies instead of
+  being copied into the framebuffer every frame; `make run-gpu` — see
+  [virtio-gpu](docs/virtio-gpu.md)
 
 ## Quick Start
 
@@ -79,3 +82,4 @@ make clean
 - [Persistent Filesystem](docs/persistent-filesystem.md)
 - [Users and Permissions](docs/users-and-permissions.md)
 - [Display Manager](docs/display-manager.md)
+- [virtio-gpu](docs/virtio-gpu.md)
