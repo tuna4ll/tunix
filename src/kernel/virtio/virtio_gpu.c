@@ -167,6 +167,15 @@ static void begin(uint32_t type) {
     request.hdr.type = type;
 }
 
+/*
+ * Round-trip the queue and read back the size the host says the display is.
+ *
+ * That size is not the mode: the host answers with its own window once
+ * something has told it how big that is, so it moves when a window is dragged
+ * and disagrees with the mode the bootloader set. Nothing here scans out at it
+ * -- the scanout rect is the framebuffer's -- so this is a probe that the
+ * device answers at all, and the size is kept only to be asked for.
+ */
 static int query_display_info(void) {
     begin(VIRTIO_GPU_CMD_GET_DISPLAY_INFO);
     if (submit(sizeof(request.hdr), NULL, 0, sizeof(response)) != 0) return -1;
@@ -192,7 +201,7 @@ int virtgpu_init(void) {
         return -1;
     }
     ready = 1;
-    kprintf("TUNIX: virtio-gpu ready, display %ux%u\n", display_width, display_height);
+    kprintf("TUNIX: virtio-gpu ready\n");
     return 0;
 }
 

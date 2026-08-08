@@ -77,17 +77,24 @@ Three things name a size and they have to be the same one:
 - the rect a scanout is set to, which is the framebuffer's
 - whatever the device answers `GET_DISPLAY_INFO` with
 
-The third is the odd one out. Left alone, QEMU answers with the `xres`/`yres`
-properties — 1280x800 by default — and once a window manager has told it how big
-the window is, with the window instead. On a fresh `virtio-vga` that is the VGA
-adapter's 640x480, which is why `run-gpu` pins `xres=1280,yres=720` to the mode
-the bootloader actually sets. Override `QEMU_GPU_RESOLUTION` to move all of it.
+Only the first two matter. The third is **not a mode**: QEMU answers with the
+`xres`/`yres` properties until a window manager tells it how big the window is,
+and with the window from then on. So it moves when the window is dragged, and on
+a fresh `virtio-vga` it starts at the VGA adapter's 640x480 — nothing to do with
+what the bootloader set. Nothing here scans out at it, and the driver no longer
+prints it, because a boot log that reports the host's window as "the display" is
+worth an afternoon of chasing the wrong thing.
 
-Nothing in the guest resizes itself to follow the host window: the driver reads
-the display size once, at probe, and reports it. A QEMU window smaller than the
-guest mode is a host-side window, not a smaller desktop — QEMU scales the
-scanout down into it. "View → Zoom To Fit", or resizing the window, is the fix
-for that, and `-display gtk,zoom-to-fit=on` sets it from the start.
+`run-gpu` still passes `xres=1280,yres=720` (`QEMU_GPU_RESOLUTION`), which keeps
+that number coherent when there is no window to override it — a headless run.
+
+**A small window is a host window, not a small desktop.** QEMU opens it at
+640x480 and does not reliably grow it when the bootloader sets 1280x720, so the
+desktop ends up letterboxed. `run-gpu` passes `-display gtk,zoom-to-fit=on`
+(`QEMU_GPU_DISPLAY`) so the guest fills whatever the window is and maximising it
+gives a full-size desktop; `QEMU_GPU_DISPLAY=gtk,full-screen=on` skips the step.
+The guest is unaffected either way — DRM reports one mode, the bootloader's, and
+nothing reads the host's ui_info.
 
 ## What is deliberately not here
 
@@ -107,8 +114,7 @@ nothing above this that could ask for one.
 On `make run-gpu`, against QEMU 11.0.2 with `virtio-vga`:
 
 - the device probes at `1af4:1050`, negotiates `VERSION_1` only, and
-  `GET_DISPLAY_INFO` round-trips — `TUNIX: virtio-gpu ready, display 1280x800`
-  on the serial log
+  `GET_DISPLAY_INFO` round-trips — `TUNIX: virtio-gpu ready` on the serial log
 - the LightDM greeter and, after logging in, the full Xfce session — wallpaper,
   panel, window manager, the welcome window — render through the scanout. Both
   were confirmed with the blit fallback compiled out, so nothing was reaching
