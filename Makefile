@@ -326,6 +326,7 @@ KERNEL_OBJS := \
 	$(BUILD)/pipe.o $(BUILD)/tty.o $(BUILD)/process.o $(BUILD)/procfs.o $(BUILD)/time.o $(BUILD)/random.o $(BUILD)/ata.o \
 	$(BUILD)/acpi.o $(BUILD)/apic.o $(BUILD)/xhci.o \
 	$(BUILD)/sound.o $(BUILD)/hda.o \
+	$(BUILD)/virtio_pci.o $(BUILD)/virtio_ring.o \
 	$(BUILD)/pci.o $(BUILD)/rtl8139.o $(BUILD)/net.o $(BUILD)/inet_socket.o $(BUILD)/netlink.o
 
 USER_RUNTIME := $(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/sigreturn.o
@@ -1303,6 +1304,12 @@ $(BUILD)/sound.o: src/kernel/audio/sound.c | $(BUILD)
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
 $(BUILD)/hda.o: src/kernel/audio/hda.c | $(BUILD)
+	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
+
+$(BUILD)/virtio_pci.o: src/kernel/virtio/virtio_pci.c | $(BUILD)
+	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
+
+$(BUILD)/virtio_ring.o: src/kernel/virtio/virtio_ring.c | $(BUILD)
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
 $(BUILD)/acpi.o: src/kernel/acpi.c | $(BUILD)

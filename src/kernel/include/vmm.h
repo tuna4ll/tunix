@@ -45,6 +45,7 @@
  *   0x100000  ACPI tables         (2 MiB)    src/kernel/acpi.c
  *   0x400000  local APIC, IOAPIC  (8 KiB)    src/kernel/apic.c
  *   0x500000  HD Audio registers  (16 KiB)   src/kernel/audio/hda.c
+ *   0x600000  virtio BARs         (384 KiB)  src/kernel/virtio/virtio_pci.c
  */
 #define USER_ADDRESS_LIMIT 0x0000800000000000ULL
 
