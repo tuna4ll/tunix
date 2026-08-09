@@ -1,5 +1,7 @@
 build/
 ports/out/
+# Its own repository: github.com/tunixos/tunix-ports
+tunix-ports/
 *.o
 *.elf
 *.bin

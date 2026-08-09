@@ -97,6 +97,7 @@ colon is an ordinary character.
 
 ```
 architecture=x86_64-musl
+repository=https://tunixos.github.io/tunix-ports/current/x86_64-musl
 repository=https://repo-default.voidlinux.org/current/musl
 ```
 
@@ -104,6 +105,12 @@ repository=https://repo-default.voidlinux.org/current/musl
 nothing else, but a musl userland is a different package set from a glibc one
 and Void names it separately. Without the override xbps would ask for `x86_64`
 packages and install binaries linked against a libc this system does not have.
+
+**The order of the two repositories is the priority.** xbps searches the pool in
+the order it was configured and takes the first repository that has the package,
+regardless of which one has the newer version — `xbps-install tty-clock` installs
+the Tunix build even though Void's `tty-clock-2.3_2` is newer. Void's set is
+there for everything Tunix does not package itself.
 
 The image also grew an `/etc/ssl/certs` directory — the same trust as the
 existing `/etc/ssl/cert.pem`, split per certificate and hash-linked, because
@@ -143,6 +150,46 @@ Do you want to import this public key? [Y/n]
 
 and `-y` does **not** answer it — upstream calls that prompt unconditionally.
 Answer it once per repository.
+
+## Tunix's own repository
+
+Void's repository is somebody else's package set.
+[tunix-ports](https://github.com/tunixos/tunix-ports) is ours: a separate
+repository of package templates that GitHub Actions builds into `.xbps` packages
+and publishes over GitHub Pages, so a Tunix machine can install software that
+was built *for* Tunix rather than borrowed.
+
+It is the **first** repository in the image's configuration, so nothing has to be
+passed on the command line:
+
+```sh
+xbps-install -S
+xbps-install -y tty-clock
+```
+
+The packages are compiled in a Void musl container, because its compiler already
+targets the same musl the image is built with and the image ships `xbps-create`
+— the same two facts that make Void's binaries usable here in the first place.
+They are built **static**, so they depend on nothing: Tunix's own libc and
+ncurses live in the image and no package owns them.
+
+Two details are worth carrying over from that repository's
+[README](https://github.com/tunixos/tunix-ports#readme): xbps demands an RSA
+signature on every package served from a *remote* repository, so the publishing
+key is not optional; and a package containing hard links cannot be unpacked
+here, which the build checks for before it ever reaches the machine.
+
+The published URL has been exercised end to end — from a musl root rather than
+from Tunix, so it says nothing about the syscall surface, but it does prove the
+repository itself:
+
+```
+[*] Updating repository `https://tunixos.github.io/tunix-ports/current/x86_64-musl/x86_64-musl-repodata'
+`…/x86_64-musl' repository has been RSA signed by "Tunix ports (github.com/tunixos/tunix-ports)"
+Fingerprint: fd:2b:de:5f:0e:5b:68:fd:4a:79:3e:c0:d5:80:ca:6f
+tty-clock-2.0.20211121_1: verifying RSA signature...
+2 downloaded, 2 installed, 0 updated, 2 configured, 0 removed, 0 on hold.
+```
 
 ## Limits
 
