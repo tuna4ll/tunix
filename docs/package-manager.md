@@ -1,44 +1,47 @@
 # Package manager
 
-Tunix ships **xbps**, the Void Linux package manager, and can install binary
-packages from Void's own `x86_64-musl` repository.
+Tunix ships **xbps**, the Void Linux package manager, pointed at two
+repositories: [tunix-ports](https://github.com/tunixos/tunix-ports), which is
+ours, and Void's own `x86_64-musl` set behind it.
 
-That is possible for one reason: Void is one of the few distributions that
+Void's is usable for one reason: Void is one of the few distributions that
 builds a complete **musl** package set, and Tunix's userland is musl too — the
 same version, `1.2.6`. A Void musl binary asks for `/lib/ld-musl-x86_64.so.1`,
 which is exactly what the image already provides.
 
 ```sh
-xbps-install -r /void -S       # sync the repository index
-xbps-install -r /void -y tree  # install into /void
-/void/usr/bin/tree --version
+xbps-install -S            # sync the repository indexes
+xbps-install -y tty-clock  # install into /
+tty-clock -v
 ```
 
-## Why `-r`
+## Installing into `/`
 
-`-r` is an install-time prefix: xbps writes the package tree, and its own
-database, under the directory given rather than under `/`.
+Packages install into the root filesystem, the ordinary way, and xbps records
+them in `/var/db/xbps`. Nothing is isolated and nothing needs to be: the
+packages in Tunix's own repository are **static**, so each one owns its files
+under `/usr/bin` and pulls nothing else in.
 
-```
-/void/usr/bin/…
-/void/usr/lib/…
-/void/var/db/xbps/     the record of what is installed there
-```
+There used to be a `/void` prefix here — every install went through
+`xbps-install -r /void` so that Void's libraries could not land on top of the
+image's. With a repository of our own in front of Void's, the normal case no
+longer touches Void at all, and the alternate root is gone.
 
-This keeps Void's file set away from Tunix's own. The image already carries
-hand-built glib, gtk3, cairo and musl; installing Void's versions of the same
-libraries over them would replace what a running desktop is linked against.
-
-**`-r` moves the configuration too**, which is easy to be caught by: xbps reads
-`<root>/etc/xbps.d`, so `xbps-install -r /void` never looks at `/etc/xbps.d` and
-finds no repository at all — the symptom is `Package 'x' not found in repository
-pool` with nothing else wrong. The image therefore ships the same configuration
-at `/void/etc/xbps.d/00-repository-main.conf`. For any other root, either seed
-it the same way or pass the config directory explicitly:
+**Installing a *Void* package still needs that care.** Void's packages are
+dynamically linked and bring their dependencies with them, and one of those
+dependencies is Void's `musl` — which would write `/lib/ld-musl-x86_64.so.1`
+over the loader every binary on the system is running. So give Void's packages a
+root of their own:
 
 ```sh
-xbps-install -r /elsewhere -C /etc/xbps.d -S
+xbps-install -r /void -C /etc/xbps.d -S
+xbps-install -r /void -C /etc/xbps.d -y tree
 ```
+
+`-C` is not optional there. **`-r` moves the configuration too**: xbps reads
+`<root>/etc/xbps.d`, so an `-r /void` without `-C` never looks at `/etc/xbps.d`,
+finds no repository at all, and says `Package 'x' not found in repository pool`
+with nothing else wrong.
 
 **`-r` isolates the install, not the execution.** A binary's ELF interpreter
 path is absolute and baked in, so `/void/usr/bin/jq` runs with *Tunix's* loader
@@ -50,8 +53,7 @@ out:
 LD_LIBRARY_PATH=/void/usr/lib /void/usr/bin/jq .
 ```
 
-or, equivalently, by invoking the loader directly — the form
-`make dynamic-runtime-check` already uses:
+or, equivalently, by invoking the loader directly:
 
 ```sh
 /lib/ld-musl-x86_64.so.1 --library-path /void/usr/lib /void/usr/bin/jq .
@@ -119,7 +121,10 @@ rather than for a bundle.
 
 ## Verified
 
-A boot with QEMU's user networking, installing `tree` from Void's own server:
+A boot with QEMU's user networking, installing `tree` from Void's own server.
+Recorded when the image still seeded `/void/etc/xbps.d` itself, so the commands
+carried no `-C`; the output is otherwise what an `-r /void -C /etc/xbps.d`
+install prints today:
 
 ```
 [*] Updating repository `https://repo-default.voidlinux.org/current/musl/x86_64-musl-repodata'

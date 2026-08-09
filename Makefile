@@ -1572,14 +1572,6 @@ $(INITRAMFS): $(DINIT_STAMP) $(SHADOW_STAMP) $(SUDO_STAMP) $(LINUX_PAM_STAMP) $(
 	cp -R $(OPENSSL_ROOT)/. $(ROOTFS)/
 	cp -R $(LIBARCHIVE_ROOT)/. $(ROOTFS)/
 	cp -R $(XBPS_ROOT)/. $(ROOTFS)/
-	# The same repository configuration again, under /void.
-	#
-	# -r moves more than the install prefix: xbps reads its configuration from
-	# <root>/etc/xbps.d, so `xbps-install -r /void` never looks at /etc/xbps.d
-	# and comes up with no repository at all. Seeding the alternate root is what
-	# makes the documented command work without also passing -C.
-	mkdir -p $(ROOTFS)/void/etc/xbps.d
-	cp initrd/etc/xbps.d/00-repository-main.conf $(ROOTFS)/void/etc/xbps.d/
 	# The shared MIME database, which is how GIO answers g_content_type_guess()
 	# and therefore how WebKit decides a file:// URL is html rather than plain
 	# text. Only the compiled lookup tables are needed, not the per-type XML the

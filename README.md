@@ -36,8 +36,9 @@ Tunix is a small Unix-like operating system experiment for x86_64. It includes a
 - A graphical login: LightDM with lightdm-gtk-greeter owns the display from
   boot, authenticating through Linux-PAM — see
   [Display Manager](docs/display-manager.md)
-- A package manager: xbps, installing binary packages from Void Linux's own
-  `x86_64-musl` repository — `xbps-install -r /void -S tree` — see
+- A package manager: xbps, installing from Tunix's own binary repository
+  ([tunix-ports](https://github.com/tunixos/tunix-ports), built and published by
+  CI) with Void Linux's `x86_64-musl` set behind it — `xbps-install -S && xbps-install -y tty-clock` — see
   [Package Manager](docs/package-manager.md)
 - A virtio-gpu driver, so the display is scanned out where it lies instead of
   being copied into the framebuffer every frame; `make run-gpu` — see

@@ -12,8 +12,8 @@ set -euo pipefail
 # The key is then *not* staged for the image, for the same reason: ports/out and
 # build/rootfs are on the Windows side too. Nothing is lost by it. xbps offers
 # to import a repository's key on first use and writes it under whichever root
-# it was given, so an `xbps-install -r /void` puts it in /void/var/db/xbps/keys
-# on the Tunix ext2 filesystem, where a colon is an ordinary character.
+# it was given, so a first sync puts it in /var/db/xbps/keys on the Tunix ext2
+# filesystem, where a colon is an ordinary character.
 #
 # Output layout:
 #   $OUT/xbps-root/usr/bin     xbps-install, xbps-query and the rest
