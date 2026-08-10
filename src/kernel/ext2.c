@@ -841,6 +841,9 @@ static int create_one(struct vfs_node *node) {
     if (!node->parent || !node->parent->disk_inode || node->disk_inode) return -1;
     uint32_t kind = node->flags & 0xFFU;
     if (node->flags & VFS_VOLATILE) return 1;
+    /* A name for a file elsewhere in the tree; the walk comes back for it once
+       every inode exists, since the file it names may not yet. */
+    if (node->link_target) return 1;
     if (kind != VFS_FILE && kind != VFS_DIRECTORY && kind != VFS_SYMLINK)
         return 1;
 
@@ -914,6 +917,27 @@ static int create_one(struct vfs_node *node) {
     return 0;
 }
 
+/* Give an inode that already exists a further directory entry. */
+static int link_one(struct vfs_node *link) {
+    struct vfs_node *target = link->link_target;
+    if (!link->parent || !link->parent->disk_inode || !target ||
+        !target->disk_inode) return -1;
+    if (dir_add_entry(link->parent->disk_inode, link->name, target->disk_inode,
+                      dirent_type_for(target)) != 0) return -1;
+    inode_links_adjust(target->disk_inode, 1);
+    return 0;
+}
+
+/* Take one name off an inode that has others. The inode, its blocks and its
+   contents all stay: what is being removed is the entry, not the file. */
+static int unlink_one(struct vfs_node *body, uint32_t parent_ino,
+                      const char *name) {
+    if (!body || !body->disk_inode) return -1;
+    dir_remove_entry(parent_ino, name);
+    inode_links_adjust(body->disk_inode, -1);
+    return 0;
+}
+
 static int remove_one(struct vfs_node *node, uint32_t parent_ino,
                       const char *name) {
     uint32_t ino = node->disk_inode;
@@ -950,9 +974,32 @@ static void persist_subtree(struct vfs_node *node, unsigned depth) {
         persist_subtree(child, depth + 1U);
 }
 
+/* The second pass of a subtree flush: every inode exists by now, so a name
+   standing for one can be written whichever order the walk reached them in. */
+static void persist_links(struct vfs_node *node, unsigned depth) {
+    if (depth > EXT2_MAX_DEPTH) return;
+    for (struct vfs_node *child = node->children; child; child = child->next) {
+        if (child->link_target) {
+            if (link_one(child) != 0) seed_errors++;
+        } else if ((child->flags & 0xFFU) == VFS_DIRECTORY &&
+                   !(child->flags & VFS_VOLATILE)) {
+            persist_links(child, depth + 1U);
+        }
+    }
+}
+
 static void unpersist_subtree(struct vfs_node *node, uint32_t parent_ino,
                               const char *name, unsigned depth) {
+    if (node->link_target) {
+        unlink_one(node->link_target, parent_ino, name);
+        return;
+    }
     if (!node->disk_inode || depth > EXT2_MAX_DEPTH) return;
+    /* Other names still reach these blocks, so only the entry may go. */
+    if (node->links > 1) {
+        unlink_one(node, parent_ino, name);
+        return;
+    }
     if ((node->flags & 0xFFU) == VFS_DIRECTORY) {
         for (struct vfs_node *child = node->children; child; child = child->next)
             unpersist_subtree(child, node->disk_inode, child->name, depth + 1U);
@@ -973,9 +1020,43 @@ static void ext2_event_created(struct vfs_node *node) {
         flush_meta();
 }
 
+/* The node handed over is the entry being removed, which for a hard link owns
+   no inode of its own -- so what to do is decided by how many names the file
+   has left, not by which of them this is. */
 static void ext2_event_removed(struct vfs_node *node) {
-    if (!ext2_tracks(node) || !node->parent || !node->parent->disk_inode) return;
-    remove_one(node, node->parent->disk_inode, node->name);
+    if (!ext2_mounted_flag || ext2_loading || !node || !node->parent ||
+        !node->parent->disk_inode) return;
+    uint32_t parent_ino = node->parent->disk_inode;
+
+    struct vfs_node *body = node->link_target ? node->link_target : node;
+    if (!body->disk_inode) return;
+    if (node->link_target || body->links > 1) unlink_one(body, parent_ino, node->name);
+    else remove_one(node, parent_ino, node->name);
+    flush_meta();
+}
+
+static void ext2_event_linked(struct vfs_node *link) {
+    if (!ext2_mounted_flag || ext2_loading || !link || !link->link_target) return;
+    /* Nothing to write when either end is not on the disk in the first place,
+       as under /tmp: the link lives in memory with the file it names. */
+    if (!ext2_tracks(link->link_target) || !link->parent ||
+        !link->parent->disk_inode) return;
+    if (link_one(link) != 0) kprintf("EXT2: cannot link %s\n", link->name);
+    else flush_meta();
+}
+
+/* The file has lost the last of its names, having outlived its own. */
+static void ext2_event_released(struct vfs_node *node) {
+    if (!ext2_tracks(node)) return;
+    uint32_t ino = node->disk_inode;
+    struct ext2_inode inode;
+    if (inode_read(ino, &inode) != 0) return;
+    if (!inode_is_fast_symlink(&inode)) inode_release_blocks(&inode);
+    inode.i_links_count = 0;
+    inode.i_dtime = epoch32();
+    inode_write(ino, &inode);
+    free_inode(ino, 0);
+    node->disk_inode = 0;
     flush_meta();
 }
 
@@ -984,6 +1065,21 @@ static void ext2_event_moved(struct vfs_node *node, struct vfs_node *old_parent,
     if (!ext2_mounted_flag || ext2_loading || !node) return;
     uint32_t old_parent_ino = old_parent ? old_parent->disk_inode : 0;
     uint32_t new_parent_ino = node->parent ? node->parent->disk_inode : 0;
+
+    /* Renaming a hard link moves an entry between directories: the count only
+       changes when one end of the move is not on the disk. */
+    if (node->link_target) {
+        struct vfs_node *target = node->link_target;
+        if (!ext2_tracks(target)) return;
+        if (old_parent_ino) dir_remove_entry(old_parent_ino, old_name);
+        if (new_parent_ino)
+            dir_add_entry(new_parent_ino, node->name, target->disk_inode,
+                          dirent_type_for(target));
+        if (!old_parent_ino != !new_parent_ino)
+            inode_links_adjust(target->disk_inode, new_parent_ino ? 1 : -1);
+        flush_meta();
+        return;
+    }
 
     if (node->disk_inode && old_parent_ino && new_parent_ino) {
         dir_remove_entry(old_parent_ino, old_name);
@@ -1001,6 +1097,7 @@ static void ext2_event_moved(struct vfs_node *node, struct vfs_node *old_parent,
         flush_meta();
     } else if (!node->disk_inode && new_parent_ino) {
         persist_subtree(node, 0);
+        if ((node->flags & 0xFFU) == VFS_DIRECTORY) persist_links(node, 0);
         flush_meta();
     }
 }
@@ -1051,6 +1148,8 @@ static const struct vfs_persist_ops ext2_persist_ops = {
     .written = ext2_event_written,
     .truncated = ext2_event_truncated,
     .meta_changed = ext2_event_meta_changed,
+    .linked = ext2_event_linked,
+    .released = ext2_event_released,
     .fetch = ext2_fetch_data,
 };
 
@@ -1268,6 +1367,67 @@ static int load_symlink_target(struct ext2_inode *inode, char **out) {
     return 0;
 }
 
+/*
+ * Inodes met more than once while the tree is being read back. A second entry
+ * for an inode is the second name of one file, not a second file, and loading
+ * it as its own node would give the two names separate contents. Only inodes
+ * the disk says have several names are tracked, so an ordinary tree pays for
+ * nothing.
+ */
+struct link_seen {
+    uint32_t ino;
+    struct vfs_node *node;
+};
+
+static struct link_seen *links_seen;
+static uint32_t links_seen_capacity;
+static uint32_t links_seen_count;
+
+static struct vfs_node *links_seen_find(uint32_t ino) {
+    if (!links_seen_capacity) return NULL;
+    uint32_t mask = links_seen_capacity - 1U;
+    for (uint32_t at = ino & mask; links_seen[at].ino; at = (at + 1U) & mask)
+        if (links_seen[at].ino == ino) return links_seen[at].node;
+    return NULL;
+}
+
+static void links_seen_insert(struct link_seen *table, uint32_t capacity,
+                              uint32_t ino, struct vfs_node *node) {
+    uint32_t mask = capacity - 1U;
+    uint32_t at = ino & mask;
+    while (table[at].ino) at = (at + 1U) & mask;
+    table[at].ino = ino;
+    table[at].node = node;
+}
+
+static int links_seen_add(uint32_t ino, struct vfs_node *node) {
+    /* Grown at half full: linear probing falls apart past that. */
+    if ((links_seen_count + 1U) * 2U > links_seen_capacity) {
+        uint32_t capacity = links_seen_capacity ? links_seen_capacity * 2U : 64U;
+        struct link_seen *table =
+            (struct link_seen *)kmalloc(capacity * sizeof(*table));
+        if (!table) return -1;
+        memset(table, 0, capacity * sizeof(*table));
+        for (uint32_t at = 0; at < links_seen_capacity; at++)
+            if (links_seen[at].ino)
+                links_seen_insert(table, capacity, links_seen[at].ino,
+                                  links_seen[at].node);
+        if (links_seen) kfree(links_seen);
+        links_seen = table;
+        links_seen_capacity = capacity;
+    }
+    links_seen_insert(links_seen, links_seen_capacity, ino, node);
+    links_seen_count++;
+    return 0;
+}
+
+static void links_seen_reset(void) {
+    if (links_seen) kfree(links_seen);
+    links_seen = NULL;
+    links_seen_capacity = 0;
+    links_seen_count = 0;
+}
+
 static int load_directory(uint32_t dir_ino, struct vfs_node *dir_node,
                           unsigned depth) {
     if (depth > EXT2_MAX_DEPTH) return -1;
@@ -1306,6 +1466,14 @@ static int load_directory(uint32_t dir_ino, struct vfs_node *dir_node,
             if (inode_read(child_ino, &child) != 0) continue;
             uint16_t format = child.i_mode & 0xF000U;
             struct vfs_node *node = NULL;
+
+            if (format != EXT2_S_IFDIR && child.i_links_count > 1U) {
+                struct vfs_node *first = links_seen_find(child_ino);
+                if (first) {
+                    if (vfs_attach_link(dir_node, name, first)) restored++;
+                    continue;
+                }
+            }
 
             if (format == EXT2_S_IFDIR) {
                 node = vfs_alloc_node(name, VFS_DIRECTORY);
@@ -1357,6 +1525,9 @@ static int load_directory(uint32_t dir_ino, struct vfs_node *dir_node,
                 node->disk_inode = child_ino;
                 restored++;
             }
+
+            if (node && child.i_links_count > 1U)
+                links_seen_add(child_ino, node);
         }
     }
     kfree(block_data);
@@ -1523,6 +1694,7 @@ int ext2fs_mount_root(uint32_t region_lba) {
     ext2_loading = 1;
     int restored = load_directory(EXT2_ROOT_INO, ext2_root, 0);
     ext2_loading = 0;
+    links_seen_reset();
     if (restored < 0) {
         kprintf("EXT2: root filesystem load failed\n");
         ext2_root->disk_inode = 0;
@@ -1559,6 +1731,7 @@ int ext2fs_seed_root(uint32_t region_lba) {
     seed_errors = 0;
     for (struct vfs_node *child = vfs_root->children; child; child = child->next)
         persist_subtree(child, 0);
+    persist_links(vfs_root, 0);
     if (seed_errors) {
         kprintf("EXT2: seeding failed for %d entries, persistence disabled\n",
                 seed_errors);
