@@ -32,7 +32,7 @@ int t_sigprocmask(int h,const uint64_t*s,uint64_t*o){return (int)t_syscall4(14,h
 void *t_mmap(void *a,size_t n,int p,int f,int fd,uint64_t o){long r=t_syscall6(9,(long)a,(long)n,p,f,fd,(long)o);return r<0?T_MAP_FAILED:(void *)(uintptr_t)r;}
 int t_munmap(void *a,size_t n){return (int)t_syscall2(11,(long)a,(long)n);} int t_mprotect(void*a,size_t n,int p){return (int)t_syscall3(10,(long)a,(long)n,p);} int t_ftruncate(int f,uint64_t n){return (int)t_syscall2(77,f,(long)n);}
 int t_chdir(const char *p){return (int)t_syscall1(80,(long)p);} char *t_getcwd(char *b,size_t n){long r=t_syscall2(79,(long)b,(long)n);return r<0?0:b;}
-int t_mkdir(const char *p,int m){return (int)t_syscall2(83,(long)p,m);} int t_umask(int m){return (int)t_syscall1(95,m);} int t_unlink(const char *p){return (int)t_syscall1(87,(long)p);} long t_getdents64(int f,void *b,size_t n){return t_syscall3(217,f,(long)b,(long)n);}
+int t_mkdir(const char *p,int m){return (int)t_syscall2(83,(long)p,m);} int t_umask(int m){return (int)t_syscall1(95,m);} int t_unlink(const char *p){return (int)t_syscall1(87,(long)p);} int t_link(const char *e,const char *n){return (int)t_syscall2(86,(long)e,(long)n);} int t_stat(const char *p,struct t_stat *s){return (int)t_syscall2(4,(long)p,(long)s);} long t_getdents64(int f,void *b,size_t n){return t_syscall3(217,f,(long)b,(long)n);}
 int t_uname(struct t_utsname *n){return (int)t_syscall1(63,(long)n);} void t_yield(void){(void)t_syscall0(24);}
 int t_clock_gettime(struct t_timespec *time){return (int)t_syscall2(228,1,(long)time);}
 int t_nanosleep(const struct t_timespec *request,struct t_timespec *remaining){return (int)t_syscall2(35,(long)request,(long)remaining);}

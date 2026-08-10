@@ -351,7 +351,8 @@ FB_TEST := $(BUILD)/user/fb-test
 FB_SHOT := $(BUILD)/user/fb-shot
 GLIB_COMPAT_TEST := $(BUILD)/user/glib-compat-test
 SND_TEST := $(BUILD)/user/snd-test
-SYSTEM_TOOLS := $(BUILD)/user/ps $(BUILD)/user/free $(BUILD)/user/uptime $(BUILD)/user/top $(LOADKEYS) $(SLEEP) $(PREEMPT_TEST) $(SMP_TEST) $(INPUT_TEST) $(FB_TEST) $(FB_SHOT) $(GLIB_COMPAT_TEST) $(SND_TEST)
+LINK_TEST := $(BUILD)/user/link-test
+SYSTEM_TOOLS := $(BUILD)/user/ps $(BUILD)/user/free $(BUILD)/user/uptime $(BUILD)/user/top $(LOADKEYS) $(SLEEP) $(PREEMPT_TEST) $(SMP_TEST) $(INPUT_TEST) $(FB_TEST) $(FB_SHOT) $(GLIB_COMPAT_TEST) $(SND_TEST) $(LINK_TEST)
 INITRD_FILES := $(shell find initrd -type f 2>/dev/null)
 
 .PHONY: all run run-gpu headless qemu-ci terminal-font dynamic-runtime-check shared-image-codecs-check gl-check clean
@@ -1436,6 +1437,10 @@ $(SMP_TEST): $(BUILD)/user/smp_test.o $(USER_RUNTIME) src/userspace/linker.ld
 	$(LD) $(USER_LDFLAGS) -o $@ $(USER_RUNTIME) $(BUILD)/user/smp_test.o
 	$(STRIP) --strip-all $@
 
+$(LINK_TEST): $(BUILD)/user/link_test.o $(USER_RUNTIME) src/userspace/linker.ld
+	$(LD) $(USER_LDFLAGS) -o $@ $(USER_RUNTIME) $(BUILD)/user/link_test.o
+	$(STRIP) --strip-all $@
+
 $(INPUT_TEST): $(BUILD)/user/input_test.o $(USER_RUNTIME) src/userspace/linker.ld
 	$(LD) $(USER_LDFLAGS) -o $@ $(USER_RUNTIME) $(BUILD)/user/input_test.o
 	$(STRIP) --strip-all $@
@@ -1743,7 +1748,7 @@ $(INITRAMFS): $(DINIT_STAMP) $(SHADOW_STAMP) $(SUDO_STAMP) $(LINUX_PAM_STAMP) $(
 		$(ROOTFS)/bin/bash $(ROOTFS)/bin/nano \
 		$(ROOTFS)/bin/tty-clock $(ROOTFS)/bin/tty-tetris $(ROOTFS)/bin/htop \
 		$(ROOTFS)/bin/neofetch $(ROOTFS)/bin/startx $(ROOTFS)/bin/tunix-session $(ROOTFS)/bin/console-login $(ROOTFS)/bin/fb-shot $(ROOTFS)/bin/ps $(ROOTFS)/bin/free \
-		$(ROOTFS)/bin/uptime $(ROOTFS)/bin/top $(ROOTFS)/bin/loadkeys $(ROOTFS)/bin/sleep $(ROOTFS)/bin/preempt-test $(ROOTFS)/bin/smp-test $(ROOTFS)/bin/input-test $(ROOTFS)/bin/fb-test $(ROOTFS)/bin/glib-compat-test $(ROOTFS)/bin/snd-test \
+		$(ROOTFS)/bin/uptime $(ROOTFS)/bin/top $(ROOTFS)/bin/loadkeys $(ROOTFS)/bin/sleep $(ROOTFS)/bin/preempt-test $(ROOTFS)/bin/smp-test $(ROOTFS)/bin/input-test $(ROOTFS)/bin/fb-test $(ROOTFS)/bin/glib-compat-test $(ROOTFS)/bin/snd-test $(ROOTFS)/bin/link-test \
 		$(ROOTFS)/usr/bin/tcc $(ROOTFS)/usr/bin/lua $(ROOTFS)/usr/bin/fastfetch \
 		$(ROOTFS)/usr/bin/browse \
 		$(ROOTFS)/usr/bin/as $(ROOTFS)/usr/bin/ld $(ROOTFS)/usr/bin/ar \
@@ -1768,6 +1773,7 @@ $(INITRAMFS): $(DINIT_STAMP) $(SHADOW_STAMP) $(SUDO_STAMP) $(LINUX_PAM_STAMP) $(
 	@test -x $(ROOTFS)/bin/fb-test || { echo "framebuffer test was not installed" >&2; exit 1; }
 	@test -x $(ROOTFS)/bin/glib-compat-test || { echo "GLib compatibility test was not installed" >&2; exit 1; }
 	@test -x $(ROOTFS)/bin/snd-test || { echo "sound test was not installed" >&2; exit 1; }
+	@test -x $(ROOTFS)/bin/link-test || { echo "hard link test was not installed" >&2; exit 1; }
 	@test -x $(ROOTFS)/usr/bin/alsa-test || { echo "alsa-test was not installed" >&2; exit 1; }
 	@test -f $(ROOTFS)/usr/share/alsa/alsa.conf || { echo "the alsa configuration tree was not installed" >&2; exit 1; }
 	@test -L $(ROOTFS)/sbin/init || { echo "/sbin/init is not the dinit symlink" >&2; exit 1; }

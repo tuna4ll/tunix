@@ -80,6 +80,22 @@ struct t_utsname {
     char domainname[65];
 };
 
+/* The kernel's stat layout, as far as anything here needs to read it. */
+struct t_stat {
+    uint64_t dev;
+    uint64_t ino;
+    uint64_t nlink;
+    uint32_t mode;
+    uint32_t uid;
+    uint32_t gid;
+    uint32_t pad;
+    uint64_t rdev;
+    int64_t size;
+    int64_t blksize;
+    int64_t blocks;
+    uint64_t reserved[9];
+};
+
 struct t_winsize {
     uint16_t rows;
     uint16_t cols;
@@ -170,6 +186,8 @@ char *t_getcwd(char *buffer, size_t size);
 int t_mkdir(const char *path, int mode);
 int t_umask(int mask);
 int t_unlink(const char *path);
+int t_link(const char *existing_path, const char *new_path);
+int t_stat(const char *path, struct t_stat *out);
 long t_getdents64(int fd, void *buffer, size_t size);
 int t_uname(struct t_utsname *name);
 void t_yield(void);
