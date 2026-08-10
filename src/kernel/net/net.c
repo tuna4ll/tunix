@@ -77,6 +77,32 @@ struct arp_entry {
     uint64_t updated_ns;
 };
 
+/*
+ * Loopback.
+ *
+ * A packet addressed to 127.0.0.0/8 (or to our own address) never reaches the
+ * adapter: it is queued here and handed back to the receive path by net_poll().
+ * Delivering it inline instead would recurse -- handling a SYN sends a SYN-ACK,
+ * which is another local packet, from inside the handler that is still running
+ * -- and a queue is what breaks that cycle rather than bounding it.
+ */
+/* The queue has to hold a full send window in each direction. A sender fills
+   the peer's window before waiting for an acknowledgement -- 16 segments at the
+   16 KiB window and 1 KiB MSS the socket layer uses -- so a shorter queue drops
+   what a wire would have carried, and every drop costs a retransmit timeout. */
+#define LOOPBACK_QUEUE 40
+#define LOOPBACK_BURST 128
+
+struct loopback_packet {
+    size_t length;
+    uint8_t data[NET_MTU];
+};
+
+static struct loopback_packet loopback_ring[LOOPBACK_QUEUE];
+static unsigned loopback_head;
+static unsigned loopback_count;
+static uint64_t loopback_dropped;
+
 static struct net_config config;
 static struct arp_entry arp_cache[ARP_CACHE_SIZE];
 static unsigned arp_replace;
@@ -102,6 +128,33 @@ uint16_t net_checksum(const void *data, size_t length) {
     if (length) sum += (uint16_t)bytes[0] << 8;
     while (sum >> 16) sum = (sum & 0xFFFFU) + (sum >> 16);
     return (uint16_t)~sum;
+}
+
+int net_is_loopback(uint32_t address) {
+    return (net_htonl(address) & NET_LOOPBACK_MASK) == NET_LOOPBACK_NETWORK;
+}
+
+/* Our own address is reachable without the wire too, and answering it over
+   loopback is what makes a server bound to it reachable from this machine. */
+static int address_is_local(uint32_t address) {
+    return net_is_loopback(address) || (config.address && address == config.address);
+}
+
+uint32_t net_source_for(uint32_t destination) {
+    if (net_is_loopback(destination)) return net_htonl(NET_LOOPBACK_ADDRESS);
+    return config.address;
+}
+
+static int loopback_enqueue(const void *packet, size_t length) {
+    if (!length || length > NET_MTU) return -1;
+    if (loopback_count >= LOOPBACK_QUEUE) { loopback_dropped++; return -1; }
+    struct loopback_packet *slot =
+        &loopback_ring[(loopback_head + loopback_count) % LOOPBACK_QUEUE];
+    memcpy(slot->data, packet, length);
+    slot->length = length;
+    loopback_count++;
+    stack_tx++;
+    return 0;
 }
 
 static int mac_equal(const uint8_t *left, const uint8_t *right) {
@@ -189,14 +242,19 @@ static const uint8_t *resolve_mac(uint32_t destination) {
 
 int net_send_ipv4(uint32_t destination, uint8_t protocol, const void *payload, size_t length,
                   uint8_t ttl, int header_included) {
-    if (!payload || !config.interface_up) return -1;
+    if (!payload) return -1;
     if (header_included) {
         if (length < sizeof(struct ipv4_header) || length > NET_MTU) return -1;
         const struct ipv4_header *provided = (const struct ipv4_header *)payload;
+        if (address_is_local(provided->destination))
+            return loopback_enqueue(payload, length);
+        if (!config.interface_up) return -1;
         const uint8_t *mac = resolve_mac(provided->destination);
         return mac ? net_send_ethernet(mac, ETHERTYPE_IPV4, payload, length) : -1;
     }
     if (length + sizeof(struct ipv4_header) > NET_MTU) return -1;
+    int local = address_is_local(destination);
+    if (!local && !config.interface_up) return -1;
     uint8_t packet[NET_MTU];
     struct ipv4_header *header = (struct ipv4_header *)packet;
     memset(header, 0, sizeof(*header));
@@ -206,10 +264,11 @@ int net_send_ipv4(uint32_t destination, uint8_t protocol, const void *payload, s
     header->fragment = net_htons(0x4000U);
     header->ttl = ttl ? ttl : 64U;
     header->protocol = protocol;
-    header->source = config.address;
+    header->source = net_source_for(destination);
     header->destination = destination;
     header->checksum = net_htons(net_checksum(header, sizeof(*header)));
     memcpy(packet + sizeof(*header), payload, length);
+    if (local) return loopback_enqueue(packet, sizeof(*header) + length);
     const uint8_t *mac = resolve_mac(destination);
     return mac ? net_send_ethernet(mac, ETHERTYPE_IPV4, packet, sizeof(*header) + length) : -1;
 }
@@ -246,8 +305,10 @@ int net_send_udp(uint32_t source, uint16_t source_port, uint32_t destination,
     header->length = net_htons((uint16_t)(sizeof(*header) + length));
     header->checksum = 0;
     memcpy(packet + sizeof(*header), payload, length);
-    uint32_t actual_source = source ? source : config.address;
-    header->checksum = net_htons(udp_checksum(actual_source, destination, packet,
+    /* The pseudo-header has to carry the address net_send_ipv4 will stamp, not
+       the caller's hint, or a loopback packet fails its own checksum. */
+    (void)source;
+    header->checksum = net_htons(udp_checksum(net_source_for(destination), destination, packet,
                                               sizeof(*header) + length));
     return net_send_ipv4(destination, IPPROTO_UDP, packet, sizeof(*header) + length, 64, 0);
 }
@@ -291,10 +352,10 @@ int net_send_tcp(uint32_t source, uint16_t source_port, uint32_t destination,
     header->window = net_htons(window);
     header->checksum = 0;
     if (length) memcpy(packet + sizeof(*header), payload, length);
-    /* net_send_ipv4 always stamps config.address as the IP source, so the
-       pseudo-header must use the same value regardless of the source hint. */
+    /* net_send_ipv4 picks the IP source itself, so the pseudo-header must use
+       the same value regardless of the source hint. */
     (void)source;
-    header->checksum = net_htons(tcp_checksum(config.address, destination, packet,
+    header->checksum = net_htons(tcp_checksum(net_source_for(destination), destination, packet,
                                               sizeof(*header) + length));
     return net_send_ipv4(destination, IPPROTO_TCP, packet, sizeof(*header) + length, 64, 0);
 }
@@ -312,6 +373,7 @@ static void handle_arp(const uint8_t *data, size_t length) {
 
 static int address_accept(uint32_t destination) {
     if (!destination || destination == 0xFFFFFFFFU) return 1;
+    if (net_is_loopback(destination)) return 1;
     if (destination == config.address) return 1;
     if (config.netmask && destination == (config.address | ~config.netmask)) return 1;
     return 0;
@@ -323,7 +385,7 @@ static void handle_icmp(const struct ipv4_header *ip, const uint8_t *data, size_
     if (net_checksum(data, length) != 0) return;
     inet_socket_receive_ipv4((const uint8_t *)ip, (size_t)net_htons(ip->total_length),
                              IPPROTO_ICMP, ip->source, ip->destination);
-    if (icmp->type == 8 && icmp->code == 0 && ip->destination == config.address) {
+    if (icmp->type == 8 && icmp->code == 0 && address_is_local(ip->destination)) {
         uint8_t reply[NET_MTU];
         memcpy(reply, data, length);
         struct icmp_header *response = (struct icmp_header *)reply;
@@ -407,7 +469,27 @@ void net_init(void) {
     }
 }
 
+/* Hand queued local packets back to the receive path. Bounded rather than
+   drained to empty: handling one can queue the next (a SYN produces a SYN-ACK),
+   and a burst cap is what stops two sockets talking to each other from holding
+   the processor here. */
+static void loopback_drain(void) {
+    static int draining;
+    if (draining) return;
+    draining = 1;
+    for (unsigned served = 0; served < LOOPBACK_BURST && loopback_count; served++) {
+        struct loopback_packet *slot = &loopback_ring[loopback_head];
+        loopback_head = (loopback_head + 1U) % LOOPBACK_QUEUE;
+        loopback_count--;
+        stack_rx++;
+        handle_ipv4(slot->data, slot->length);
+    }
+    draining = 0;
+}
+
 void net_poll(void) {
+    /* Before the link check: loopback works on a machine with no adapter. */
+    loopback_drain();
     if (!config.link_up) return;
     rtl8139_poll(receive_frame);
     /* Drive TCP retransmit/TIME_WAIT timers. Guarded so a segment sent from
@@ -428,7 +510,7 @@ void net_set_dns(uint32_t value) { config.dns = value; }
 void net_set_interface_up(int up) { config.interface_up = up != 0; }
 uint64_t net_rx_packets(void) { return stack_rx; }
 uint64_t net_tx_packets(void) { return stack_tx; }
-uint64_t net_rx_dropped(void) { return stack_drop + rtl8139_rx_dropped(); }
+uint64_t net_rx_dropped(void) { return stack_drop + loopback_dropped + rtl8139_rx_dropped(); }
 
 size_t net_arp_snapshot(struct net_arp_record *records, size_t capacity) {
     size_t count = 0;

@@ -6,6 +6,11 @@
 
 #define NET_MTU 1500U
 
+/* 127.0.0.0/8, in host order. */
+#define NET_LOOPBACK_NETWORK 0x7F000000U
+#define NET_LOOPBACK_MASK    0xFF000000U
+#define NET_LOOPBACK_ADDRESS 0x7F000001U
+
 #define IPPROTO_TCP 6U
 #define TCP_FIN 0x01U
 #define TCP_SYN 0x02U
@@ -37,6 +42,10 @@ void net_set_gateway(uint32_t gateway);
 void net_set_dns(uint32_t dns);
 void net_set_interface_up(int up);
 uint16_t net_checksum(const void *data, size_t length);
+/* Whether an address is one this machine answers on without a wire. */
+int net_is_loopback(uint32_t address);
+/* The source address a packet to `destination` goes out with. */
+uint32_t net_source_for(uint32_t destination);
 uint16_t net_htons(uint16_t value);
 uint32_t net_htonl(uint32_t value);
 int net_send_ethernet(const uint8_t destination[6], uint16_t type, const void *payload, size_t length);
