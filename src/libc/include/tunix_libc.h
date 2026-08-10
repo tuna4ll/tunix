@@ -65,6 +65,14 @@ struct t_sockaddr_un {
     char path[108];
 };
 
+/* Port and address are network order, as the kernel reads them. */
+struct t_sockaddr_in {
+    uint16_t family;
+    uint16_t port;
+    uint32_t address;
+    uint8_t zero[8];
+};
+
 struct t_pollfd {
     int32_t fd;
     int16_t events;
@@ -148,6 +156,11 @@ int t_socket(int domain, int type, int protocol);
 int t_bind(int fd, const struct t_sockaddr_un *address, unsigned long length);
 int t_listen(int fd, int backlog);
 int t_accept(int fd);
+int t_bind_in(int fd, const struct t_sockaddr_in *address);
+int t_connect_in(int fd, const struct t_sockaddr_in *address);
+/* Fills in the peer address when one is given. */
+int t_accept_in(int fd, struct t_sockaddr_in *address);
+int t_shutdown(int fd, int how);
 int t_accept4(int fd, int flags);
 int t_getsockname(int fd, struct t_sockaddr_un *address, unsigned int *length);
 int t_getpeername(int fd, struct t_sockaddr_un *address, unsigned int *length);

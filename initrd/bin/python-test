@@ -93,11 +93,8 @@ def signals():
 def sockets():
     """Unix domain sockets, which is what a desktop actually talks over.
 
-    Deliberately not a TCP listen/accept: Tunix's inet layer is client-side
-    only -- sys_accept resolves the descriptor as a unix socket and answers
-    EBADF for anything else -- so asserting a server socket here would be
-    asserting a feature the kernel does not claim to have. X11, Wayland and
-    D-Bus all run over the path below.
+    X11, Wayland and D-Bus all run over the path below. The TCP equivalent is
+    a separate check now that the inet layer has a server side too.
     """
     import socket, threading
 
@@ -141,18 +138,53 @@ def sockets():
 
 
 def inet_sockets():
-    """The client side of the TCP stack, as far as it goes without a peer."""
-    import socket
+    """A TCP server and client, both on this machine.
 
-    handle = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    handle.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    handle.settimeout(5)
-    family = handle.family
-    handle.close()
+    This needs two things that used to be missing together: 127.0.0.1 has to
+    come back up the stack instead of going to the adapter, and a socket has to
+    be able to wait for a connection. Neither is observable without the other.
+    """
+    import socket, threading
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 8137))
+    listener.listen(2)
+    port = listener.getsockname()[1]
+
+    seen = []
+
+    def serve():
+        connection, peer = listener.accept()
+        seen.append(peer)
+        seen.append(connection.recv(64))
+        connection.sendall(b"pong")
+        connection.close()
+
+    server = threading.Thread(target=serve)
+    server.start()
+
+    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client.connect(("127.0.0.1", port))
+    client.sendall(b"ping")
+    answer = client.recv(64)
+    client.close()
+    server.join(10)
+    listener.close()
+
+    assert seen and seen[0][0] == "127.0.0.1", "peer was %r" % (seen[:1],)
+    assert seen[1:] == [b"ping"], "server got %r" % (seen[1:],)
+    assert answer == b"pong", "client got %r" % answer
 
     datagram = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    datagram.bind(("127.0.0.1", 8138))
+    datagram.sendto(b"loop", ("127.0.0.1", 8138))
+    datagram.settimeout(10)
+    back, source = datagram.recvfrom(64)
     datagram.close()
-    return "AF_INET stream and datagram sockets open and close (%s)" % family.name
+    assert back == b"loop", "datagram came back as %r" % back
+    assert source[0] == "127.0.0.1", "datagram came from %r" % (source,)
+
+    return "tcp accept/connect and a udp round trip, both over 127.0.0.1"
 
 
 def polling():
