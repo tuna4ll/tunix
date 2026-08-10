@@ -20,6 +20,10 @@ Tunix is a small Unix-like operating system experiment for x86_64. It includes a
 - GNU userland (coreutils, grep, sed, gawk, findutils, diffutils, tar, gzip, make), Bash, TinyCC, binutils, nano, Lua, and selected libraries
 - CPython 3.14, built shared so `ctypes` and C extensions load; `python-test`
   exercises threads, subprocess, signals, sockets, epoll, mmap and sqlite3
+- Networking with both ends of TCP: `bind`/`listen`/`accept` as well as
+  `connect`, and a real loopback, so a server and its client can both run on
+  this machine — `tcp-test` proves it over `127.0.0.1`; see
+  [Networking](docs/networking.md)
 - `curl`, and Git's `https://` transport, both out of one static curl port
   built against mbedTLS — so `curl https://…` and `git clone https://…` work.
   The tool speaks http, https and file over IPv4; `ssh://` remotes are not
@@ -86,6 +90,7 @@ make clean
 - [Multiprocessor](docs/multiprocessor.md)
 - [Memory Layout](docs/memory-layout.md)
 - [Persistent Filesystem](docs/persistent-filesystem.md)
+- [Networking](docs/networking.md)
 - [Users and Permissions](docs/users-and-permissions.md)
 - [Display Manager](docs/display-manager.md)
 - [virtio-gpu](docs/virtio-gpu.md)
