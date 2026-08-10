@@ -40,6 +40,10 @@ void inet_socket_ref(struct inet_socket *socket);
 void inet_socket_unref(struct inet_socket *socket);
 int inet_socket_bind(struct inet_socket *socket, const void *address, size_t length);
 int inet_socket_connect(struct inet_socket *socket, const void *address, size_t length);
+int inet_socket_listen(struct inet_socket *socket, int backlog);
+int inet_socket_is_listener(struct inet_socket *socket);
+/* The oldest completed connection, or NULL. The caller takes its reference. */
+struct inet_socket *inet_socket_accept(struct inet_socket *listener);
 int64_t inet_socket_sendto(struct inet_socket *socket, const void *data, size_t length, int flags,
                            const void *address, size_t address_length);
 int64_t inet_socket_recvfrom(struct inet_socket *socket, void *data, size_t length, int flags,

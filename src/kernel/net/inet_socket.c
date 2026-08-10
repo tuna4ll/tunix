@@ -50,9 +50,14 @@
 #define TCP_TIME_WAIT_NS 10000000000ULL  /* 10 s (shortened 2*MSL) */
 #define TCP_ORPHAN_NS    30000000000ULL  /* max lifetime of an orphaned TCB */
 
+/* A listener may hold this many connections the application has not taken yet,
+   whether still shaking hands or ready; listen()'s backlog caps it further. */
+#define TCP_BACKLOG_MAX 16
+
 enum tcp_state {
     TCP_CLOSED = 0,
     TCP_SYN_SENT,
+    TCP_SYN_RECEIVED,
     TCP_ESTABLISHED,
     TCP_FIN_WAIT_1,
     TCP_FIN_WAIT_2,
@@ -146,6 +151,14 @@ struct inet_socket {
     int header_included;
     uint8_t ttl;
     int orphan;                          /* fd closed but TCB still closing */
+    /* Listening sockets have no control block of their own: they hold a list
+       of the connections arriving on their port, each of which does. A
+       connection stays on that list until accept() takes it. */
+    int listening;
+    unsigned backlog;
+    struct inet_socket *pending;         /* head of the list, on a listener */
+    struct inet_socket *listener;        /* the listener it arrived on      */
+    struct inet_socket *sibling;         /* next connection on that list    */
     struct tcp_control_block *tcp;       /* non-NULL only for SOCK_STREAM   */
     struct queued_packet queue[SOCKET_QUEUE];
     unsigned queue_head;
@@ -275,7 +288,54 @@ static void tcp_output(struct inet_socket *s) {
     }
 }
 
+static unsigned pending_count(const struct inet_socket *listener) {
+    unsigned count = 0;
+    for (const struct inet_socket *s = listener->pending; s; s = s->sibling) count++;
+    return count;
+}
+
+static void pending_append(struct inet_socket *listener, struct inet_socket *child) {
+    child->listener = listener;
+    child->sibling = NULL;
+    struct inet_socket **at = &listener->pending;
+    while (*at) at = &(*at)->sibling;
+    *at = child;
+}
+
+static void pending_detach(struct inet_socket *child) {
+    struct inet_socket *listener = child->listener;
+    if (!listener) return;
+    struct inet_socket **at = &listener->pending;
+    while (*at && *at != child) at = &(*at)->sibling;
+    if (*at) *at = child->sibling;
+    child->listener = NULL;
+    child->sibling = NULL;
+}
+
+/* Tell the peer the connection is over. Used where there is no longer anything
+   that could answer it -- a connection nobody will ever accept. */
+static void tcp_reset_peer(struct inet_socket *s) {
+    if (!s->tcp) return;
+    net_send_tcp(s->local_address, s->local_port, s->peer_address, s->peer_port,
+                 s->tcp->snd_nxt, s->tcp->rcv_nxt, TCP_RST | TCP_ACK, 0, NULL, 0);
+}
+
 static void tcp_free(struct inet_socket *socket) {
+    pending_detach(socket);
+    /* Closing a listener takes every connection it was holding with it. The
+       list is cut loose first so each child's own detach has nothing to walk. */
+    struct inet_socket *child = socket->pending;
+    socket->pending = NULL;
+    while (child) {
+        struct inet_socket *next = child->sibling;
+        child->listener = NULL;
+        child->sibling = NULL;
+        if (child->tcp && child->tcp->state != TCP_CLOSED) tcp_reset_peer(child);
+        unregister_socket(child);
+        if (child->tcp) kfree(child->tcp);
+        kfree(child);
+        child = next;
+    }
     unregister_socket(socket);
     if (socket->tcp) kfree(socket->tcp);
     kfree(socket);
@@ -313,14 +373,19 @@ static int tcp_connect(struct inet_socket *socket, uint32_t address, uint16_t po
     }
     if (!address || !port) return -EINVAL;
     const struct net_config *config = net_get_config();
-    if (!config->link_up || !config->interface_up) return -ENETDOWN;
+    /* Loopback needs no adapter, so the link only gates what leaves the machine. */
+    if (!net_is_loopback(address) && (!config->link_up || !config->interface_up))
+        return -ENETDOWN;
     tcp = (struct tcp_control_block *)kmalloc(sizeof(*tcp));
     if (!tcp) return -ENOMEM;
     memset(tcp, 0, sizeof(*tcp));
     socket->tcp = tcp;
     if (!socket->local_port) socket->local_port = allocate_port();
     if (!socket->local_port) { socket->tcp = NULL; kfree(tcp); return -EADDRINUSE; }
-    if (!socket->local_address) socket->local_address = config->address;
+    /* The address the reply will be addressed to, which for a loopback peer is
+       not our adapter's: taking config->address here left the four-tuple
+       unable to match its own SYN-ACK. */
+    if (!socket->local_address) socket->local_address = net_source_for(address);
     socket->peer_address = address;
     socket->peer_port = port;
     tcp->peer_mss = TCP_PEER_MSS_INIT;
@@ -414,6 +479,21 @@ static void tcp_input(struct inet_socket *s, uint32_t seq, uint32_t ack, uint8_t
             tcp_send_ack(s);
         }
         return;
+    }
+
+    /* The third leg of an incoming handshake. Deliberately not a return: the
+       ACK that completes it may carry the client's first bytes, and dropping
+       them would make the connection lose its opening request. */
+    if (tcp->state == TCP_SYN_RECEIVED) {
+        if (flags & TCP_SYN) {   /* our SYN-ACK was lost; say it again */
+            tcp_transmit(s, tcp->iss, TCP_SYN | TCP_ACK, NULL, 0);
+            return;
+        }
+        if (!(flags & TCP_ACK) || ack != tcp->iss + 1U) return;
+        tcp->snd_una = ack;
+        tcp->snd_nxt = ack;
+        tcp->state = TCP_ESTABLISHED;
+        tcp->rto_deadline_ns = 0;
     }
 
     if (flags & TCP_ACK) tcp_process_ack(s, ack);
@@ -529,9 +609,59 @@ void inet_socket_tcp_timer_poll(void) {
             tcp->rto_deadline_ns = 0;
         }
         if (tcp->rto_deadline_ns && now >= tcp->rto_deadline_ns) tcp_retransmit(s);
-        if (s->orphan && (tcp->state == TCP_CLOSED || now >= tcp->orphan_deadline_ns))
+        if (s->orphan && (tcp->state == TCP_CLOSED || now >= tcp->orphan_deadline_ns)) {
             tcp_free(s);
+            continue;
+        }
+        /* A connection that failed or was reset before anyone accepted it has
+           no owner to notice, so nothing else would ever free it. */
+        if (s->listener && tcp->state == TCP_CLOSED) tcp_free(s);
     }
+}
+
+/* A connection arriving on a listening socket gets its own socket immediately,
+   in SYN_RECEIVED, so the rest of the handshake is matched by the four-tuple
+   like any other connection. It becomes visible to accept() only once the
+   handshake finishes. */
+static struct inet_socket *tcp_open_child(struct inet_socket *listener, uint32_t source,
+                                          uint16_t source_port, uint32_t destination,
+                                          uint16_t destination_port, uint32_t seq,
+                                          uint16_t window) {
+    if (pending_count(listener) >= listener->backlog) return NULL;
+    struct inet_socket *child = (struct inet_socket *)kmalloc(sizeof(*child));
+    if (!child) return NULL;
+    memset(child, 0, sizeof(*child));
+    child->refs = 1;                     /* held by the stack until accepted */
+    child->domain = TUNIX_AF_INET;
+    child->type = TUNIX_SOCK_STREAM;
+    child->protocol = listener->protocol;
+    child->ttl = 64;
+    child->local_address = destination;
+    child->local_port = destination_port;
+    child->peer_address = source;
+    child->peer_port = source_port;
+    child->tcp = (struct tcp_control_block *)kmalloc(sizeof(*child->tcp));
+    if (!child->tcp) { kfree(child); return NULL; }
+    memset(child->tcp, 0, sizeof(*child->tcp));
+    if (register_socket(child) != 0) {
+        kfree(child->tcp);
+        kfree(child);
+        return NULL;
+    }
+
+    struct tcp_control_block *tcp = child->tcp;
+    tcp->peer_mss = TCP_PEER_MSS_INIT;
+    tcp->snd_wnd = window;
+    tcp->irs = seq;
+    tcp->rcv_nxt = seq + 1U;             /* the SYN consumes one sequence */
+    tcp->iss = tcp_generate_iss();
+    tcp->snd_una = tcp->iss;
+    tcp->snd_nxt = tcp->iss + 1U;
+    tcp->state = TCP_SYN_RECEIVED;
+    pending_append(listener, child);
+    tcp_transmit(child, tcp->iss, TCP_SYN | TCP_ACK, NULL, 0);
+    tcp_arm_rto(tcp);
+    return child;
 }
 
 void inet_socket_receive_tcp(uint32_t source, uint16_t source_port, uint32_t destination,
@@ -546,6 +676,21 @@ void inet_socket_receive_tcp(uint32_t source, uint16_t source_port, uint32_t des
         tcp_input(s, seq, ack, flags, window, payload, length);
         return;
     }
+
+    if ((flags & (TCP_SYN | TCP_ACK | TCP_RST)) == TCP_SYN) {
+        for (unsigned i = 0; i < MAX_INET_SOCKETS; i++) {
+            struct inet_socket *s = sockets[i];
+            if (!s || !s->listening || s->type != TUNIX_SOCK_STREAM) continue;
+            if (s->local_port != destination_port) continue;
+            if (s->local_address && s->local_address != destination) continue;
+            /* A full backlog drops the SYN rather than refusing it, so the
+               peer retransmits into a queue that may have drained by then. */
+            (void)tcp_open_child(s, source, source_port, destination,
+                                 destination_port, seq, window);
+            return;
+        }
+    }
+
     /* Unmatched segment: reset the peer so it stops retransmitting. */
     if (!(flags & TCP_RST)) {
         uint32_t rst_seq = (flags & TCP_ACK) ? ack : 0U;
@@ -632,6 +777,40 @@ int inet_socket_bind(struct inet_socket *socket, const void *address, size_t len
     return -EAFNOSUPPORT;
 }
 
+int inet_socket_is_listener(struct inet_socket *socket) {
+    return socket && socket->listening;
+}
+
+int inet_socket_listen(struct inet_socket *socket, int backlog) {
+    if (!socket || socket->domain != TUNIX_AF_INET ||
+        socket->type != TUNIX_SOCK_STREAM) return -EOPNOTSUPP;
+    if (socket->tcp) return -EINVAL;     /* already a connection of its own */
+    if (!socket->local_port) {
+        socket->local_port = allocate_port();
+        if (!socket->local_port) return -EADDRINUSE;
+    }
+    unsigned wanted = backlog <= 0 ? 1U : (unsigned)backlog;
+    socket->backlog = wanted > TCP_BACKLOG_MAX ? TCP_BACKLOG_MAX : wanted;
+    socket->listening = 1;
+    return 0;
+}
+
+/* Hand over the oldest connection whose handshake is done. The reference the
+   stack held on it goes with it, so the caller owns it from here. */
+struct inet_socket *inet_socket_accept(struct inet_socket *listener) {
+    if (!listener || !listener->listening) return NULL;
+    net_poll();
+    for (struct inet_socket *s = listener->pending; s; s = s->sibling) {
+        if (!s->tcp || s->tcp->state == TCP_SYN_RECEIVED) continue;
+        /* One that died before anyone took it is left for the timer sweep. */
+        if (s->tcp->state == TCP_CLOSED) continue;
+        pending_detach(s);
+        s->connected = 1;
+        return s;
+    }
+    return NULL;
+}
+
 int inet_socket_connect(struct inet_socket *socket, const void *address, size_t length) {
     if (!socket || socket->domain != TUNIX_AF_INET || !address ||
         length < sizeof(struct tunix_sockaddr_in)) return -EINVAL;
@@ -668,7 +847,7 @@ int64_t inet_socket_sendto(struct inet_socket *socket, const void *data, size_t 
     if (socket->type == TUNIX_SOCK_STREAM) return tcp_send(socket, data, length);
     if (socket->write_shutdown) return -EPIPE;
     const struct net_config *config = net_get_config();
-    if (!config->link_up || !config->interface_up) return -ENETDOWN;
+    int link = config->link_up && config->interface_up;
     if (socket->domain == TUNIX_AF_INET) {
         uint32_t destination = socket->peer_address;
         uint16_t port = socket->peer_port;
@@ -680,6 +859,7 @@ int64_t inet_socket_sendto(struct inet_socket *socket, const void *data, size_t 
             port = net_htons(in->port);
         }
         if (!destination) return -EDESTADDRREQ;
+        if (!link && !net_is_loopback(destination)) return -ENETDOWN;
         if (!socket->local_port) socket->local_port = allocate_port();
         if (socket->type == TUNIX_SOCK_DGRAM) {
             if (!port) return -EDESTADDRREQ;
@@ -692,6 +872,7 @@ int64_t inet_socket_sendto(struct inet_socket *socket, const void *data, size_t 
         return (int64_t)length;
     }
     if (socket->domain == TUNIX_AF_PACKET) {
+        if (!link) return -ENETDOWN;
         if (socket->type == TUNIX_SOCK_PACKET || socket->type == TUNIX_SOCK_RAW) {
             return net_send_raw_ethernet(data, length) == 0 ? (int64_t)length : -EAGAIN;
         }
@@ -847,6 +1028,14 @@ int inet_socket_ioctl(struct inet_socket *socket, unsigned long request, void *a
 int inet_socket_read_ready(struct inet_socket *socket) {
     net_poll();
     if (!socket) return 0;
+    /* A listener is readable when it has a connection to hand over -- that is
+       what every poll-driven server waits on before calling accept. */
+    if (socket->listening) {
+        for (struct inet_socket *s = socket->pending; s; s = s->sibling)
+            if (s->tcp && s->tcp->state != TCP_SYN_RECEIVED &&
+                s->tcp->state != TCP_CLOSED) return 1;
+        return 0;
+    }
     if (socket->tcp) {
         struct tcp_control_block *tcp = socket->tcp;
         return tcp->rx_len > 0 || tcp->peer_fin || tcp->pending_error ||
@@ -991,21 +1180,25 @@ void inet_socket_proc_raw(char *buffer, size_t capacity, size_t *length) {
 void inet_socket_proc_tcp(char *buffer, size_t capacity, size_t *length) {
     /* Map our enum tcp_state to the Linux /proc/net/tcp state codes. */
     static const char *const codes[] = {
-        "07", "02", "01", "04", "05", "0B", "06", "08", "09"
+        "07", "02", "03", "01", "04", "05", "0B", "06", "08", "09"
     };
     text_string(buffer, capacity, length, "  sl  local_address rem_address   st\n");
     unsigned slot = 0;
     for (unsigned i = 0; i < MAX_INET_SOCKETS; i++) {
         struct inet_socket *s = sockets[i];
-        if (!s || !s->tcp || s->type != TUNIX_SOCK_STREAM) continue;
+        if (!s || s->type != TUNIX_SOCK_STREAM) continue;
+        if (!s->tcp && !s->listening) continue;
         text_char(buffer, capacity, length, ' '); text_hex4(buffer, capacity, length, (uint16_t)slot++);
         text_string(buffer, capacity, length, ": "); text_hex8(buffer, capacity, length, s->local_address);
         text_char(buffer, capacity, length, ':'); text_hex4(buffer, capacity, length, s->local_port);
         text_char(buffer, capacity, length, ' '); text_hex8(buffer, capacity, length, s->peer_address);
         text_char(buffer, capacity, length, ':'); text_hex4(buffer, capacity, length, s->peer_port);
         text_char(buffer, capacity, length, ' ');
-        int state = s->tcp->state;
-        text_string(buffer, capacity, length, (state >= 0 && state <= 8) ? codes[state] : "07");
+        int state = s->tcp ? s->tcp->state : -1;
+        /* 0A is Linux's TCP_LISTEN, which our own enum has no member for --
+           a listener is a socket without a control block, not a state. */
+        text_string(buffer, capacity, length,
+                    state < 0 ? "0A" : ((state <= 9) ? codes[state] : "07"));
         text_char(buffer, capacity, length, '\n');
     }
 }
