@@ -1234,7 +1234,9 @@ static int64_t sys_bind(int fd, uint64_t user_address, uint64_t length) {
 
 static int64_t sys_listen(int fd, int backlog) {
     struct unix_socket *socket = socket_from_fd(fd);
-    return socket ? unix_socket_listen(socket, backlog) : -EBADF;
+    if (socket) return unix_socket_listen(socket, backlog);
+    struct inet_socket *inet_value = inet_socket_from_fd(fd);
+    return inet_value ? inet_socket_listen(inet_value, backlog) : -EBADF;
 }
 
 static int64_t sys_connect(int fd, uint64_t user_address, uint64_t length) {
@@ -1260,19 +1262,11 @@ static int64_t sys_shutdown(int fd, int how) {
     return -ENOTSOCK;
 }
 
-static int64_t sys_accept(int fd, uint64_t user_address, uint64_t user_length, int flags) {
-    (void)user_address;
-    (void)user_length;
-    if (flags & ~(O_NONBLOCK | O_CLOEXEC)) return -EINVAL;
-    struct unix_socket *listener = socket_from_fd(fd);
-    if (!listener || !unix_socket_is_listener(listener)) return -EBADF;
-    struct unix_socket *accepted = unix_socket_accept(listener);
-    if (!accepted) return -EAGAIN;
-    struct file *file = file_create_socket(accepted);
-    if (!file) {
-        unix_socket_unref(accepted);
-        return -ENOMEM;
-    }
+/* Hand the finished socket to a descriptor. Shared by both address families,
+   which differ only in what the file wraps and what an address looks like. */
+static int64_t install_accepted(struct file *file, int flags,
+                                const void *address, size_t address_length,
+                                uint64_t user_address, uint64_t user_length) {
     file->flags = (uint32_t)(flags & O_NONBLOCK);
     int new_fd = process_install_file_flags(process_current(), file, 0,
         (flags & O_CLOEXEC) ? PROCESS_FD_CLOEXEC : 0);
@@ -1280,7 +1274,49 @@ static int64_t sys_accept(int fd, uint64_t user_address, uint64_t user_length, i
         file_unref(file);
         return -EMFILE;
     }
+    /* The peer address is written last: failing to copy it out must not undo
+       an accept that has already taken the connection off the queue. */
+    if (user_address && user_length && address_length) {
+        uint32_t capacity = 0;
+        if (copy_from_user(&capacity, user_length, sizeof(capacity)) == 0) {
+            size_t copy = capacity < address_length ? capacity : address_length;
+            if (copy) (void)copy_to_user(user_address, address, copy);
+            uint32_t reported = (uint32_t)address_length;
+            (void)copy_to_user(user_length, &reported, sizeof(reported));
+        }
+    }
     return new_fd;
+}
+
+static int64_t sys_accept(int fd, uint64_t user_address, uint64_t user_length, int flags) {
+    if (flags & ~(O_NONBLOCK | O_CLOEXEC)) return -EINVAL;
+    struct unix_socket *listener = socket_from_fd(fd);
+    if (listener) {
+        if (!unix_socket_is_listener(listener)) return -EINVAL;
+        struct unix_socket *accepted = unix_socket_accept(listener);
+        if (!accepted) return -EAGAIN;
+        struct file *file = file_create_socket(accepted);
+        if (!file) {
+            unix_socket_unref(accepted);
+            return -ENOMEM;
+        }
+        return install_accepted(file, flags, NULL, 0, user_address, user_length);
+    }
+
+    struct inet_socket *inet_listener = inet_socket_from_fd(fd);
+    if (!inet_listener) return -EBADF;
+    if (!inet_socket_is_listener(inet_listener)) return -EINVAL;
+    struct inet_socket *accepted = inet_socket_accept(inet_listener);
+    if (!accepted) return -EAGAIN;
+    struct tunix_sockaddr_in peer;
+    size_t peer_length = sizeof(peer);
+    if (inet_socket_getpeername(accepted, &peer, &peer_length) != 0) peer_length = 0;
+    struct file *file = file_create_inet_socket(accepted);
+    if (!file) {
+        inet_socket_unref(accepted);
+        return -ENOMEM;
+    }
+    return install_accepted(file, flags, &peer, peer_length, user_address, user_length);
 }
 
 /*
