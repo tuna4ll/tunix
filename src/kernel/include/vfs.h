@@ -22,6 +22,8 @@
 /* Some process maps these pages: they must never be freed or refetched under
    it. Set when mmap shares the contents instead of copying them. */
 #define VFS_PINNED_DATA 0x8000U
+/* A further name for a file that already exists elsewhere. See vfs_link(). */
+#define VFS_HARDLINK    0x10000U
 
 struct vfs_node;
 struct file;
@@ -75,6 +77,12 @@ struct vfs_node {
     struct vfs_node *parent;
     struct vfs_node *children;
     struct vfs_node *next;
+    /* Set on a hard link, and only there: the node holding the contents this
+       name stands for. Every lookup collapses onto it, so nothing above the
+       VFS ever sees the link itself. */
+    struct vfs_node *link_target;
+    /* Names this node answers to. One for everything that is not linked. */
+    uint32_t links;
     /* Holders outside the directory tree, such as a process's current working
        directory. The tree itself is not counted: a node with refs == 0 is
        owned solely by its parent's child list. */
@@ -111,6 +119,10 @@ struct vfs_persist_ops {
     void (*written)(struct vfs_node *node, uint64_t offset, uint64_t size);
     void (*truncated)(struct vfs_node *node);
     void (*meta_changed)(struct vfs_node *node);
+    /* A hard link was made; the node is the new name, not the contents. */
+    void (*linked)(struct vfs_node *link);
+    /* The last name of a node that outlived its own directory entry is gone. */
+    void (*released)(struct vfs_node *node);
     /* Fill in a VFS_LAZY_DATA node's contents. 0 on success. */
     int (*fetch)(struct vfs_node *node);
 };
@@ -148,6 +160,14 @@ void vfs_init(void);
 struct vfs_node *vfs_alloc_node(const char *name, uint32_t flags);
 int vfs_attach(struct vfs_node *parent, struct vfs_node *child);
 struct vfs_node *vfs_find_child(struct vfs_node *directory, const char *name);
+/* The directory entry itself, hard links left unresolved. Only the code that
+   has to act on the name rather than on the contents wants this. */
+struct vfs_node *vfs_find_entry(struct vfs_node *directory, const char *name);
+/* Give `target` a further name. Directories are refused. */
+int vfs_link(struct vfs_node *target, const char *path);
+/* Attach a name for an existing node directly, for a tree being rebuilt. */
+struct vfs_node *vfs_attach_link(struct vfs_node *parent, const char *name,
+                                 struct vfs_node *target);
 struct vfs_node *vfs_lookup(const char *path);
 struct vfs_node *vfs_lookup_nofollow(const char *path);
 struct vfs_node *vfs_mkdir_p(const char *path);

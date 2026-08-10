@@ -77,7 +77,7 @@ void vfs_release_data(struct vfs_node *node) {
  * anything mapped into a process.
  */
 uint64_t vfs_reclaim_file_data(struct vfs_node *node) {
-    if (!node) return 0;
+    if (!node || node->link_target) return 0;
 
     uint64_t reclaimed = 0;
     if ((node->flags & 0xFFU) == VFS_FILE) {
@@ -111,6 +111,7 @@ struct vfs_node *vfs_alloc_node(const char *name, uint32_t flags) {
     strncpy(node->name, name ? name : "", sizeof(node->name) - 1);
     node->flags = flags;
     node->inode = next_inode++;
+    node->links = 1;
     uint32_t kind = flags & 0xFFU;
     node->mode = kind == VFS_DIRECTORY ? 0755 : (kind == VFS_SYMLINK ? 0777 : 0644);
     vfs_stamp_times(node, VFS_TIME_ATIME | VFS_TIME_MTIME | VFS_TIME_CTIME);
@@ -136,13 +137,21 @@ int vfs_attach(struct vfs_node *parent, struct vfs_node *child) {
     return 0;
 }
 
-struct vfs_node *vfs_find_child(struct vfs_node *directory, const char *name) {
+struct vfs_node *vfs_find_entry(struct vfs_node *directory, const char *name) {
     if (!directory || !name || (directory->flags & 0xFFU) != VFS_DIRECTORY) return NULL;
     if (directory->refresh) directory->refresh(directory);
     for (struct vfs_node *node = directory->children; node; node = node->next) {
         if (strcmp(node->name, name) == 0) return node;
     }
     return NULL;
+}
+
+/* Resolving here is what keeps hard links out of the rest of the kernel: every
+   path walk goes through this, so a second name reaches the same node as the
+   first and nothing downstream has to know which one it was reached by. */
+struct vfs_node *vfs_find_child(struct vfs_node *directory, const char *name) {
+    struct vfs_node *node = vfs_find_entry(directory, name);
+    return node && node->link_target ? node->link_target : node;
 }
 
 static const char *next_component(const char *path, char component[128]) {
@@ -504,6 +513,47 @@ struct vfs_node *vfs_attach_symlink(struct vfs_node *parent, const char *name,
     return node;
 }
 
+struct vfs_node *vfs_attach_link(struct vfs_node *parent, const char *name,
+                                 struct vfs_node *target) {
+    if (!parent || !name || !target) return NULL;
+    if (target->link_target) target = target->link_target;
+    uint32_t kind = target->flags & 0xFFU;
+    if (kind == VFS_DIRECTORY) return NULL;
+
+    /* The kind is copied so readdir can answer without following the link. */
+    struct vfs_node *link = vfs_alloc_node(name, kind | VFS_HARDLINK);
+    if (!link) return NULL;
+    link->link_target = target;
+    if (vfs_attach(parent, link) != 0) {
+        kfree(link);
+        return NULL;
+    }
+    target->links++;
+    /* The reference is what lets the contents outlive their own name. */
+    vfs_node_ref(target);
+    return link;
+}
+
+int vfs_link(struct vfs_node *target, const char *path) {
+    char parent_path[256];
+    char name[128];
+    if (!target || split_parent(path, parent_path, name) != 0) return -1;
+    if (target->link_target) target = target->link_target;
+    if ((target->flags & 0xFFU) == VFS_DIRECTORY) return -1;
+    if (target->flags & VFS_READONLY) return -1;
+
+    struct vfs_node *parent = vfs_lookup(parent_path);
+    if (!parent || (parent->flags & 0xFFU) != VFS_DIRECTORY) return -1;
+    if (vfs_find_entry(parent, name)) return -1;
+    struct vfs_node *link = vfs_attach_link(parent, name, target);
+    if (!link) return -1;
+
+    vfs_stamp_times(target, VFS_TIME_CTIME);
+    inotify_notify(parent, TUNIX_IN_CREATE, name, 0);
+    PERSIST(linked, link);
+    return 0;
+}
+
 int64_t vfs_readlink(struct vfs_node *node, void *buffer, size_t size) {
     if (!node || !buffer || (node->flags & 0xFFU) != VFS_SYMLINK || !node->data) return -1;
     size_t length = (size_t)node->length;
@@ -521,6 +571,20 @@ int64_t vfs_readlink(struct vfs_node *node, void *buffer, size_t size) {
  */
 static void destroy_node(struct vfs_node *node) {
     if (!node) return;
+    /* A hard link owns nothing but its name, so it goes on its own. Dropping
+       the last name of a node that has already lost its own is what finally
+       releases the contents -- and what tells the filesystem to free them. */
+    if (node->link_target) {
+        struct vfs_node *target = node->link_target;
+        node->link_target = NULL;
+        kfree(node);
+        if (target->links) target->links--;
+        if (!target->links && (target->flags & VFS_ORPHANED))
+            PERSIST(released, target);
+        vfs_node_unref(target);
+        return;
+    }
+    if (node->links) node->links--;
     if (node->refs) {
         node->flags |= VFS_ORPHANED;
         return;
@@ -571,15 +635,21 @@ int vfs_remove(const char *path, int remove_directory) {
     if (split_parent(path, parent_path, name) != 0) return -1;
     struct vfs_node *parent = vfs_lookup(parent_path);
     if (!parent || (parent->flags & 0xFFU) != VFS_DIRECTORY) return -1;
-    struct vfs_node *node = vfs_find_child(parent, name);
-    if (!node || (node->flags & VFS_READONLY)) return -1;
+    struct vfs_node *node = vfs_find_entry(parent, name);
+    if (!node) return -1;
+    struct vfs_node *body = node->link_target ? node->link_target : node;
+    if (body->flags & VFS_READONLY) return -1;
     uint32_t kind = node->flags & 0xFFU;
     if (remove_directory) {
         if (kind != VFS_DIRECTORY || node->children) return -1;
     } else if (kind == VFS_DIRECTORY) return -1;
     inotify_notify(parent, TUNIX_IN_DELETE, name, 0);
-    inotify_notify(node, TUNIX_IN_DELETE_SELF, NULL, 0);
-    inotify_invalidate(node);
+    /* Only the last name takes the contents with it; watchers of a file that
+       still has another name have not seen it deleted. */
+    if (body->links <= 1) {
+        inotify_notify(body, TUNIX_IN_DELETE_SELF, NULL, 0);
+        inotify_invalidate(body);
+    }
     PERSIST(removed, node);
     if (detach_child(parent, node) != 0) return -1;
     destroy_node(node);
@@ -596,19 +666,26 @@ int vfs_rename(const char *old_path, const char *new_path) {
     if (!old_parent || !new_parent ||
         (old_parent->flags & 0xFFU) != VFS_DIRECTORY ||
         (new_parent->flags & 0xFFU) != VFS_DIRECTORY) return -1;
-    struct vfs_node *node = vfs_find_child(old_parent, old_name);
-    if (!node || (node->flags & VFS_READONLY)) return -1;
+    struct vfs_node *node = vfs_find_entry(old_parent, old_name);
+    if (!node) return -1;
+    if ((node->link_target ? node->link_target : node)->flags & VFS_READONLY)
+        return -1;
 
-    struct vfs_node *existing = vfs_find_child(new_parent, new_name);
+    struct vfs_node *existing = vfs_find_entry(new_parent, new_name);
     if (existing && existing != node) {
-        if (existing->flags & VFS_READONLY) return -1;
+        if ((existing->link_target ? existing->link_target : existing)->flags &
+            VFS_READONLY) return -1;
         uint32_t existing_kind = existing->flags & 0xFFU;
         uint32_t node_kind = node->flags & 0xFFU;
         if ((existing_kind == VFS_DIRECTORY) != (node_kind == VFS_DIRECTORY)) return -1;
         if (existing_kind == VFS_DIRECTORY && existing->children) return -1;
+        struct vfs_node *body =
+            existing->link_target ? existing->link_target : existing;
         inotify_notify(new_parent, TUNIX_IN_DELETE, new_name, 0);
-        inotify_notify(existing, TUNIX_IN_DELETE_SELF, NULL, 0);
-        inotify_invalidate(existing);
+        if (body->links <= 1) {
+            inotify_notify(body, TUNIX_IN_DELETE_SELF, NULL, 0);
+            inotify_invalidate(body);
+        }
         PERSIST(removed, existing);
         if (detach_child(new_parent, existing) != 0) return -1;
         destroy_node(existing);
@@ -617,7 +694,8 @@ int vfs_rename(const char *old_path, const char *new_path) {
     uint32_t cookie = inotify_next_cookie();
     inotify_notify(old_parent, TUNIX_IN_MOVED_FROM, old_name, cookie);
     inotify_notify(new_parent, TUNIX_IN_MOVED_TO, new_name, cookie);
-    inotify_notify(node, TUNIX_IN_MOVE_SELF, NULL, cookie);
+    inotify_notify(node->link_target ? node->link_target : node,
+                   TUNIX_IN_MOVE_SELF, NULL, cookie);
     if (detach_child(old_parent, node) != 0) return -1;
     strncpy(node->name, new_name, sizeof(node->name) - 1);
     node->name[sizeof(node->name) - 1] = '\0';
@@ -659,7 +737,9 @@ int vfs_readdir(struct vfs_node *directory, uint64_t index, struct dirent *out) 
     if (!node) return 0;
     memset(out, 0, sizeof(*out));
     strncpy(out->name, node->name, sizeof(out->name) - 1);
-    out->ino = node->inode;
+    /* Two names for one file have to report one inode, or nothing looking for
+       hard links -- tar, cp -l, du -- can pair them up. */
+    out->ino = node->link_target ? node->link_target->inode : node->inode;
     out->type = node->flags & 0xFFU;
     return 1;
 }
