@@ -10,6 +10,8 @@ Tunix is a small Unix-like operating system experiment for x86_64. It includes a
 - Persistent ext2 root filesystem on the boot disk (Linux-mountable); the
   initramfs only seeds it on first boot
 - tmpfs-like volatile `/tmp`, `/run`, `/dev`, `/proc`
+- Hard links: `link()`/`linkat()`, `st_nlink`, and a file that outlives the
+  name it was created under — `link-test` checks it on both filesystems
 - Framebuffer terminal with keyboard input
 - Basic VFS, devfs, procfs, process, and syscall support
 - Symmetric multiprocessing: every processor the firmware describes is started

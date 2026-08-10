@@ -78,6 +78,23 @@ and the VFS invokes them on every mutation:
 | move in/out of a volatile dir | persist/unpersist the whole subtree |
 | unlink/rmdir | remove dirent, free blocks and inode |
 | chmod | rewrite inode mode/uid/gid |
+| link | add a dirent for the existing inode, raise its link count |
+| unlink of a file with other names | remove the dirent, lower the link count |
+
+## Hard links
+
+`link()` and `linkat()` give a file a second name. In the tree a name is a
+node, so the further names are nodes that carry nothing but a name and a
+pointer to the one holding the contents; `vfs_find_child()` resolves them, so
+every path walk lands on the same node and nothing above the VFS has to know
+which name it arrived through. Directories are refused, and `st_nlink` reports
+how many names a file answers to.
+
+The contents outlive the name they were made under: unlinking a file that has
+other names removes the entry and lowers the count, and only the last name to
+go frees the inode and its blocks. On mount, an inode met a second time becomes
+a further name for the node already loaded rather than a second copy of the
+file — the alternative is two names whose contents drift apart.
 
 `sync`/`fsync`/`fdatasync`/`syncfs` force the ATA cache flush; `fsync` also
 rewrites the file's blocks, which covers writes made through shared `mmap`
