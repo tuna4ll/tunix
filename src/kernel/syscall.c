@@ -139,6 +139,8 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define SYS_RENAME 82
 #define SYS_MKDIR 83
 #define SYS_RMDIR 84
+#define SYS_MOUNT 165
+#define SYS_UMOUNT2 166
 #define SYS_LINK 86
 #define SYS_UNLINK 87
 #define SYS_SYMLINK 88
@@ -2664,6 +2666,41 @@ static int64_t sys_link_at(int old_dirfd, uint64_t user_old_path,
     return vfs_link(node, new_path) == 0 ? 0 : -EIO;
 }
 
+/*
+ * mount(2). Only root may change what the filesystem tree looks like, since a
+ * mount is visible to every process on the machine -- there are no mount
+ * namespaces here to confine it to the caller.
+ */
+static int64_t sys_mount(uint64_t user_source, uint64_t user_target,
+                         uint64_t user_type, uint64_t flags, uint64_t user_data) {
+    (void)user_data;                     /* no filesystem takes options yet */
+    const struct credentials *cred = cred_current();
+    if (cred && cred->euid != 0) return -EPERM;
+    if (flags > 0xFFFFFFFFULL) return -EINVAL;
+
+    char source[256], target[256], type[64];
+    source[0] = '\0';
+    type[0] = '\0';
+    if (user_source && copy_string_from_user(source, sizeof(source), user_source) < 0)
+        return -EFAULT;
+    if (copy_string_from_user(target, sizeof(target), user_target) < 0) return -EFAULT;
+    if (user_type && copy_string_from_user(type, sizeof(type), user_type) < 0)
+        return -EFAULT;
+    return vfs_mount(user_source ? source : NULL, target,
+                     user_type ? type : "", (uint32_t)flags);
+}
+
+/* umount2(2). The flags Linux takes are all about how hard to try when the
+   filesystem is busy, and nothing here can be busy in that sense. */
+static int64_t sys_umount2(uint64_t user_target, int flags) {
+    (void)flags;
+    const struct credentials *cred = cred_current();
+    if (cred && cred->euid != 0) return -EPERM;
+    char target[256];
+    if (copy_string_from_user(target, sizeof(target), user_target) < 0) return -EFAULT;
+    return vfs_umount(target);
+}
+
 static int64_t sys_symlink_at(uint64_t user_target, int new_dirfd,
                               uint64_t user_link_path) {
     char target[256], link_path[256];
@@ -5034,6 +5071,8 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         case SYS_RENAMEAT: frame->rax = (uint64_t)sys_rename_at((int)frame->rdi, frame->rsi, (int)frame->rdx, frame->r10, 0); break;
         case SYS_SYMLINK: frame->rax = (uint64_t)sys_symlink_at(frame->rdi, AT_FDCWD, frame->rsi); break;
         case SYS_SYMLINKAT: frame->rax = (uint64_t)sys_symlink_at(frame->rdi, (int)frame->rsi, frame->rdx); break;
+        case SYS_MOUNT: frame->rax = (uint64_t)sys_mount(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8); break;
+        case SYS_UMOUNT2: frame->rax = (uint64_t)sys_umount2(frame->rdi, (int)frame->rsi); break;
         case SYS_LINK: frame->rax = (uint64_t)sys_link_at(AT_FDCWD, frame->rdi, AT_FDCWD, frame->rsi, 0); break;
         case SYS_LINKAT: frame->rax = (uint64_t)sys_link_at((int)frame->rdi, frame->rsi, (int)frame->rdx, frame->r10, (int)frame->r8); break;
         case SYS_READLINKAT: frame->rax = (uint64_t)sys_readlink_at((int)frame->rdi, frame->rsi, frame->rdx, (size_t)frame->r10); break;
