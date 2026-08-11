@@ -9,7 +9,8 @@ Tunix is a small Unix-like operating system experiment for x86_64. It includes a
 - Custom bootloader and kernel code
 - Persistent ext2 root filesystem on the boot disk (Linux-mountable); the
   initramfs only seeds it on first boot
-- tmpfs-like volatile `/tmp`, `/run`, `/dev`, `/proc`
+- `mount`/`umount`: a real mount table, tmpfs mountable anywhere, bind mounts,
+  and a `/proc/mounts` that reports it — see [Mounting](docs/mounting.md)
 - Hard links: `link()`/`linkat()`, `st_nlink`, and a file that outlives the
   name it was created under — `link-test` checks it on both filesystems
 - Framebuffer terminal with keyboard input
@@ -90,6 +91,7 @@ make clean
 - [Multiprocessor](docs/multiprocessor.md)
 - [Memory Layout](docs/memory-layout.md)
 - [Persistent Filesystem](docs/persistent-filesystem.md)
+- [Mounting](docs/mounting.md)
 - [Networking](docs/networking.md)
 - [Users and Permissions](docs/users-and-permissions.md)
 - [Display Manager](docs/display-manager.md)
