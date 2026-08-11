@@ -23,13 +23,19 @@ set -euo pipefail
 # GCC finds cc1 and libgcc relative to its own argv[0], so a driver at
 # /opt/gcc/usr/bin/gcc looks for the rest of the toolchain under /opt/gcc/usr --
 # but the *system* header and library directories are not relocated, so
-# /usr/include and /usr/lib are still the image's own musl. That is the split we
+# /usr/include and /usr/lib are still Tunix's own musl. That is the split we
 # want: Void supplies the compiler, Tunix supplies the libc.
+#
+# This port also stages that libc: /usr/include and /usr/lib come from the
+# static musl sysroot ports/build-binutils.sh builds. TinyCC used to put them
+# there, and it is gone.
 #
 # Output layout:
 #   $OUT/gcc-root/opt/gcc/       the compiler
-#   $OUT/gcc-root/usr/bin/       the wrappers
-#   $OUT/gcc-root/usr/lib/       libc.so link, libssp_nonshared.a
+#   $OUT/gcc-root/usr/bin/       the gcc, cc and cpp wrappers
+#   $OUT/gcc-root/usr/include/   musl's headers, the ones gcc compiles against
+#   $OUT/gcc-root/usr/lib/       musl's static libc and crt objects, plus the
+#                                libc.so/libgcc_s.so linker names
 #   $OUT/gcc-sysroot/            a copy of what the image's /usr looks like,
 #                                used to compile and run a test program here
 
@@ -67,7 +73,7 @@ cross_port_require_tools find sed tr "$READELF"
 [[ -x "$XBPS_ROOT/usr/bin/xbps-install" ]] || cross_port_fail \
     "xbps is missing; run ports/build-xbps.sh first"
 [[ -d "$MUSL_SYSROOT/usr/include/sys" ]] || cross_port_fail \
-    "the static musl sysroot is missing; run ports/build-tcc.sh first"
+    "the static musl sysroot is missing; run ports/build-binutils.sh first"
 [[ -x "$BINUTILS_ROOT/usr/bin/as" ]] || cross_port_fail \
     "binutils is missing; run ports/build-binutils.sh first"
 [[ -f "$MUSL_SHARED_ROOT/lib/libc.so" ]] || cross_port_fail \
@@ -129,7 +135,7 @@ echo "build-gcc: staging $FULL_VERSION (compiler directory $GCC_VERSION)"
 
 rm -rf "$GCC_ROOT"
 mkdir -p "$GCC_ROOT$PREFIX/usr/bin" "$GCC_ROOT$PREFIX/usr/lib/gcc/$TARGET_TRIPLE" \
-    "$GCC_ROOT/usr/bin" "$GCC_ROOT/usr/lib"
+    "$GCC_ROOT/usr/bin" "$GCC_ROOT/usr/lib" "$GCC_ROOT/usr/include"
 
 cp -a "$STAGE/usr/bin/gcc" "$STAGE/usr/bin/cpp" "$GCC_ROOT$PREFIX/usr/bin/"
 cp -a "$STAGE/usr/lib/gcc/$TARGET_TRIPLE/." "$GCC_ROOT$PREFIX/usr/lib/gcc/$TARGET_TRIPLE/"
@@ -202,10 +208,15 @@ if [[ -f "$STAGE/usr/lib/libssp_nonshared.a" ]]; then
     cp -a "$STAGE/usr/lib/libssp_nonshared.a" "$GCC_ROOT/usr/lib/"
 fi
 
-# Void's own headers are deliberately not taken. The image's /usr/include is
-# already a complete musl 1.2.6 sysroot with the Linux UAPI headers beside it,
-# and it is the one tcc compiles against too -- two sets of libc headers on one
-# machine is how you get a program that compiles and then does not run.
+# The C library the image compiles against: musl's headers and its static libc,
+# straight out of the sysroot the binutils port builds, which is also what every
+# static port here was compiled against. Void's own musl-devel is deliberately
+# not taken -- two sets of libc headers on one machine is how you get a program
+# that compiles and then does not run.
+cp -a "$MUSL_SYSROOT/usr/include/." "$GCC_ROOT/usr/include/"
+cp -a "$MUSL_SYSROOT/usr/lib/." "$GCC_ROOT/usr/lib/"
+[[ -f "$GCC_ROOT/usr/include/stdio.h" && -f "$GCC_ROOT/usr/lib/libc.a" ]] || \
+    cross_port_fail "the musl sysroot did not stage into the image tree"
 
 # ---------------------------------------------------------------- wrappers
 
@@ -223,6 +234,10 @@ EOF_WRAPPER
     chmod 0755 "$GCC_ROOT/usr/bin/$tool"
 done
 
+# cc is gcc now. It used to be tcc, and a great deal of software -- configure
+# scripts above all -- knows no other name for the compiler.
+ln -sfn gcc "$GCC_ROOT/usr/bin/cc"
+
 # Two linker names the image has never needed before, because nothing on it was
 # ever linked *here*. A dynamic link resolves -lc against the shared musl, which
 # lives in /lib, and -lgcc_s against the unwinder the graphics ports already
@@ -239,8 +254,7 @@ find "$GCC_ROOT" -name '*:*' -print -delete
 # compile against Tunix's musl rather than the build host's glibc.
 rm -rf "$GCC_SYSROOT"
 mkdir -p "$GCC_SYSROOT/usr/include" "$GCC_SYSROOT/usr/lib" "$GCC_SYSROOT/lib"
-cp -a "$MUSL_SYSROOT/usr/include/." "$GCC_SYSROOT/usr/include/"
-cp -a "$MUSL_SYSROOT/usr/lib/." "$GCC_SYSROOT/usr/lib/"
+cp -a "$GCC_ROOT/usr/include/." "$GCC_SYSROOT/usr/include/"
 cp -a "$GCC_ROOT/usr/lib/." "$GCC_SYSROOT/usr/lib/"
 # The image's unwinder, staged there by cross_port_stage_cxx_runtime.
 cp -a "$CROSS_SYSROOT/lib/libgcc_s.so.1" "$GCC_SYSROOT/usr/lib/"

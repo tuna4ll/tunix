@@ -51,8 +51,6 @@ GNU_PORT_STAMPS := $(COREUTILS_STAMP) $(GREP_STAMP) $(SED_STAMP) $(GAWK_STAMP) \
 GNU_PORT_ROOTS := $(COREUTILS_ROOT) $(GREP_ROOT) $(SED_ROOT) $(GAWK_ROOT) \
 	$(FINDUTILS_ROOT) $(DIFFUTILS_ROOT) $(TAR_ROOT) $(GZIP_ROOT) \
 	$(GNUMAKE_ROOT)
-TCC_ROOT := $(PORT_OUT)/tcc-root
-TCC_STAMP := $(PORT_OUT)/.tcc-ready
 BINUTILS_ROOT := $(PORT_OUT)/binutils-root
 BINUTILS_STAMP := $(PORT_OUT)/.binutils-ready
 GCC_ROOT := $(PORT_OUT)/gcc-root
@@ -1234,11 +1232,6 @@ $(LUA_STAMP): $(BASH) ports/build-lua.sh | $(BUILD)/.tools
 $(LUA): $(LUA_STAMP)
 	@test -x $@ || { echo "Lua interpreter was not produced" >&2; exit 1; }
 
-$(TCC_STAMP): ports/build-tcc.sh | $(BUILD)/.tools
-	@mkdir -p $(PORT_OUT)
-	OUT="$(abspath $(PORT_OUT))" bash ports/build-tcc.sh
-	@touch $@
-
 $(BINUTILS_STAMP): ports/build-binutils.sh | $(BUILD)/.tools
 	@mkdir -p $(PORT_OUT)
 	OUT="$(abspath $(PORT_OUT))" bash ports/build-binutils.sh
@@ -1249,7 +1242,7 @@ $(BINUTILS_STAMP): ports/build-binutils.sh | $(BUILD)/.tools
 # gcc is not built here: it is fetched from Void's musl repository with our own
 # xbps, which is why this depends on the whole of that path -- and on the ports
 # whose files it is checked against before being staged.
-$(GCC_STAMP): $(XBPS_STAMP) $(TCC_STAMP) $(BINUTILS_STAMP) $(MUSL_SHARED_STAMP) \
+$(GCC_STAMP): $(XBPS_STAMP) $(BINUTILS_STAMP) $(MUSL_SHARED_STAMP) \
 		$(MUSL_CROSS_STAMP) ports/build-gcc.sh ports/lib/cross-port.sh
 	@mkdir -p $(PORT_OUT)
 	OUT="$(abspath $(PORT_OUT))" bash ports/build-gcc.sh
@@ -1492,7 +1485,7 @@ $(SND_TEST): $(BUILD)/user/snd_test.o $(USER_RUNTIME) src/userspace/linker.ld
 	$(LD) $(USER_LDFLAGS) -o $@ $(USER_RUNTIME) $(BUILD)/user/snd_test.o
 	$(STRIP) --strip-all $@
 
-$(INITRAMFS): $(DINIT_STAMP) $(SHADOW_STAMP) $(SUDO_STAMP) $(LINUX_PAM_STAMP) $(LIGHTDM_STAMP) $(LIGHTDM_GREETER_STAMP) $(CPYTHON_STAMP) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAMP) $(CURL_STAMP) $(GIT_STAMP) $(TCC_STAMP) $(BINUTILS_STAMP) $(NANO) $(TTY_CLOCK) $(TTY_TETRIS) $(HTOP) $(FASTFETCH_STAMP) $(LUA_STAMP) $(IMAGE_CODECS_STAMP) $(MUSL_SHARED_STAMP) $(IMAGE_CODECS_SHARED_STAMP) $(MBEDTLS_STAMP) $(LIBFFI_STAMP) $(WAYLAND_STAMP) $(PIXMAN_STAMP) $(LIBXKBCOMMON_STAMP) $(XKEYBOARD_CONFIG_STAMP) $(LIBEVDEV_STAMP) $(ALSA_LIB_STAMP) $(LIBUDEV_ZERO_STAMP) $(LIBINPUT_STAMP) $(CAIRO_STAMP) $(LIBDISPLAY_INFO_STAMP) $(SEATD_STAMP) $(WESTON_STAMP) $(LIBDRM_STAMP) $(MESA_STAMP) $(LLVM_STAMP) $(GLIB_STAMP) $(PANGO_STAMP) $(GDK_PIXBUF_STAMP) $(GTK3_STAMP) $(LIBXFCE4UTIL_STAMP) $(XFCONF_STAMP) $(LIBXFCE4UI_STAMP) $(THUNAR_STAMP) $(XCB_STAMP) $(LIBX11_STAMP) $(XEXT_STAMP) $(FONTSTACK_STAMP) $(XSERVER_STAMP) $(XCB_UTIL_STAMP) $(STARTUP_NOTIFICATION_STAMP) $(LIBSM_STAMP) $(LIBWNCK_STAMP) $(XFWM4_STAMP) $(DBUS_STAMP) $(GARCON_STAMP) $(LIBXFCE4WINDOWING_STAMP) $(XFCE4_PANEL_STAMP) $(XFCE4_SESSION_STAMP) $(XFDESKTOP_STAMP) $(LIBXML2_STAMP) $(XFCE4_SETTINGS_STAMP) $(VTE_STAMP) $(XFCE4_TERMINAL_STAMP) $(WELCOME_STAMP) $(ICU_STAMP) $(SQLITE_STAMP) $(LIBWEBP_STAMP) $(WOFF2_STAMP) $(LIBGCRYPT_STAMP) $(LIBTASN1_STAMP) $(GMP_STAMP) $(NETTLE_STAMP) $(GNUTLS_STAMP) $(GLIB_NETWORKING_STAMP) $(LIBSOUP_STAMP) $(WEBKITGTK_STAMP) $(SDL2_STAMP) $(SDL2_NET_STAMP) $(SDL2_MIXER_STAMP) $(CHOCOLATE_DOOM_STAMP) $(XBPS_STAMP) $(GCC_STAMP) $(INITRD_FILES)
+$(INITRAMFS): $(DINIT_STAMP) $(SHADOW_STAMP) $(SUDO_STAMP) $(LINUX_PAM_STAMP) $(LIGHTDM_STAMP) $(LIGHTDM_GREETER_STAMP) $(CPYTHON_STAMP) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAMP) $(CURL_STAMP) $(GIT_STAMP) $(BINUTILS_STAMP) $(NANO) $(TTY_CLOCK) $(TTY_TETRIS) $(HTOP) $(FASTFETCH_STAMP) $(LUA_STAMP) $(IMAGE_CODECS_STAMP) $(MUSL_SHARED_STAMP) $(IMAGE_CODECS_SHARED_STAMP) $(MBEDTLS_STAMP) $(LIBFFI_STAMP) $(WAYLAND_STAMP) $(PIXMAN_STAMP) $(LIBXKBCOMMON_STAMP) $(XKEYBOARD_CONFIG_STAMP) $(LIBEVDEV_STAMP) $(ALSA_LIB_STAMP) $(LIBUDEV_ZERO_STAMP) $(LIBINPUT_STAMP) $(CAIRO_STAMP) $(LIBDISPLAY_INFO_STAMP) $(SEATD_STAMP) $(WESTON_STAMP) $(LIBDRM_STAMP) $(MESA_STAMP) $(LLVM_STAMP) $(GLIB_STAMP) $(PANGO_STAMP) $(GDK_PIXBUF_STAMP) $(GTK3_STAMP) $(LIBXFCE4UTIL_STAMP) $(XFCONF_STAMP) $(LIBXFCE4UI_STAMP) $(THUNAR_STAMP) $(XCB_STAMP) $(LIBX11_STAMP) $(XEXT_STAMP) $(FONTSTACK_STAMP) $(XSERVER_STAMP) $(XCB_UTIL_STAMP) $(STARTUP_NOTIFICATION_STAMP) $(LIBSM_STAMP) $(LIBWNCK_STAMP) $(XFWM4_STAMP) $(DBUS_STAMP) $(GARCON_STAMP) $(LIBXFCE4WINDOWING_STAMP) $(XFCE4_PANEL_STAMP) $(XFCE4_SESSION_STAMP) $(XFDESKTOP_STAMP) $(LIBXML2_STAMP) $(XFCE4_SETTINGS_STAMP) $(VTE_STAMP) $(XFCE4_TERMINAL_STAMP) $(WELCOME_STAMP) $(ICU_STAMP) $(SQLITE_STAMP) $(LIBWEBP_STAMP) $(WOFF2_STAMP) $(LIBGCRYPT_STAMP) $(LIBTASN1_STAMP) $(GMP_STAMP) $(NETTLE_STAMP) $(GNUTLS_STAMP) $(GLIB_NETWORKING_STAMP) $(LIBSOUP_STAMP) $(WEBKITGTK_STAMP) $(SDL2_STAMP) $(SDL2_NET_STAMP) $(SDL2_MIXER_STAMP) $(CHOCOLATE_DOOM_STAMP) $(XBPS_STAMP) $(GCC_STAMP) $(INITRD_FILES)
 	rm -rf $(ROOTFS)
 	mkdir -p $(ROOTFS)/bin $(ROOTFS)/sbin $(ROOTFS)/dev $(ROOTFS)/tmp \
 		$(ROOTFS)/run/dbus $(ROOTFS)/run/user/0 $(ROOTFS)/run/user/1000 \
@@ -1524,7 +1517,6 @@ $(INITRAMFS): $(DINIT_STAMP) $(SHADOW_STAMP) $(SUDO_STAMP) $(LINUX_PAM_STAMP) $(
 	cp $(TTY_TETRIS) $(ROOTFS)/bin/tty-tetris
 	cp $(HTOP) $(ROOTFS)/bin/htop
 	cp $(SYSTEM_TOOLS) $(ROOTFS)/bin/
-	cp -R $(TCC_ROOT)/. $(ROOTFS)/
 	cp -R $(BINUTILS_ROOT)/. $(ROOTFS)/
 	cp -R $(GCC_ROOT)/. $(ROOTFS)/
 	cp -R $(LUA_ROOT)/. $(ROOTFS)/
@@ -1634,8 +1626,10 @@ $(INITRAMFS): $(DINIT_STAMP) $(SHADOW_STAMP) $(SUDO_STAMP) $(LINUX_PAM_STAMP) $(
 	chmod 0755 $(ROOTFS)/bin/clear $(ROOTFS)/bin/tput $(ROOTFS)/bin/tset
 	mkdir -p $(ROOTFS)/usr/share/nano
 	cp ports/src/nano/syntax/*.nanorc $(ROOTFS)/usr/share/nano/
-	@test -x $(ROOTFS)/usr/bin/tcc || { echo "TinyCC was not installed into the rootfs" >&2; exit 1; }
 	@test -x $(ROOTFS)/usr/bin/gcc || { echo "gcc was not installed into the rootfs" >&2; exit 1; }
+	@test -e $(ROOTFS)/usr/bin/cc || { echo "cc was not installed into the rootfs" >&2; exit 1; }
+	@test -f $(ROOTFS)/usr/include/stdio.h || { echo "the musl headers were not installed into the rootfs" >&2; exit 1; }
+	@test -f $(ROOTFS)/usr/lib/libc.a || { echo "the musl static libc was not installed into the rootfs" >&2; exit 1; }
 	@find $(ROOTFS)/opt/gcc -name cc1 -type f | grep -q . || { echo "the gcc compiler proper was not installed into the rootfs" >&2; exit 1; }
 	@test -e $(ROOTFS)/usr/lib/libgcc_s.so || { echo "the libgcc_s linker name is missing from the rootfs" >&2; exit 1; }
 	@test -x $(ROOTFS)/usr/bin/as || { echo "binutils assembler was not installed into the rootfs" >&2; exit 1; }
@@ -1767,7 +1761,6 @@ $(INITRAMFS): $(DINIT_STAMP) $(SHADOW_STAMP) $(SUDO_STAMP) $(LINUX_PAM_STAMP) $(
 	@test -e $(ROOTFS)/usr/lib/libwnck-3.so.0 || { echo "libwnck was not installed into the rootfs" >&2; exit 1; }
 	@test -e $(ROOTFS)/usr/lib/libSM.so.6 || { echo "libSM was not installed into the rootfs" >&2; exit 1; }
 	@test -e $(ROOTFS)/usr/lib/libstartup-notification-1.so.0 || { echo "startup-notification was not installed into the rootfs" >&2; exit 1; }
-	ln -sfn ../usr/bin/tcc $(ROOTFS)/bin/tcc
 	ln -sfn ../usr/bin/lua $(ROOTFS)/bin/lua
 	ln -sfn ../usr/bin/fastfetch $(ROOTFS)/bin/fastfetch
 	# coreutils df reads /proc/self/mountinfo, then falls back to /etc/mtab.
@@ -1784,7 +1777,8 @@ $(INITRAMFS): $(DINIT_STAMP) $(SHADOW_STAMP) $(SUDO_STAMP) $(LINUX_PAM_STAMP) $(
 		$(ROOTFS)/bin/tty-clock $(ROOTFS)/bin/tty-tetris $(ROOTFS)/bin/htop \
 		$(ROOTFS)/bin/neofetch $(ROOTFS)/bin/startx $(ROOTFS)/bin/tunix-session $(ROOTFS)/bin/console-login $(ROOTFS)/bin/fb-shot $(ROOTFS)/bin/ps $(ROOTFS)/bin/free \
 		$(ROOTFS)/bin/uptime $(ROOTFS)/bin/top $(ROOTFS)/bin/loadkeys $(ROOTFS)/bin/sleep $(ROOTFS)/bin/preempt-test $(ROOTFS)/bin/smp-test $(ROOTFS)/bin/input-test $(ROOTFS)/bin/fb-test $(ROOTFS)/bin/glib-compat-test $(ROOTFS)/bin/snd-test $(ROOTFS)/bin/link-test $(ROOTFS)/bin/tcp-test $(ROOTFS)/bin/mount-test $(ROOTFS)/bin/mount $(ROOTFS)/bin/umount \
-		$(ROOTFS)/usr/bin/tcc $(ROOTFS)/usr/bin/lua $(ROOTFS)/usr/bin/fastfetch \
+		$(ROOTFS)/usr/bin/gcc $(ROOTFS)/usr/bin/cpp \
+		$(ROOTFS)/usr/bin/lua $(ROOTFS)/usr/bin/fastfetch \
 		$(ROOTFS)/usr/bin/browse \
 		$(ROOTFS)/usr/bin/as $(ROOTFS)/usr/bin/ld $(ROOTFS)/usr/bin/ar \
 		$(ROOTFS)/usr/bin/nm $(ROOTFS)/usr/bin/ranlib $(ROOTFS)/usr/bin/objcopy \
