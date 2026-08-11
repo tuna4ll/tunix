@@ -53,6 +53,48 @@ ports/out/musl-cross/         x86_64-linux-musl cross toolchain (gcc, g++).
 ports/out/graphics-sysroot/   Sysroot for the cross-built graphics ports.
 ```
 
+## The Compiler on the Image
+
+Tunix carries three toolchain pieces: TinyCC (`tcc`, still what `cc` points at),
+binutils (`as`, `ld`, `ar`, …), and **GCC**.
+
+GCC is the one port that is not built here. `ports/build-gcc.sh` *fetches* it,
+as a binary package, from Void's `x86_64-musl` repository using our own xbps —
+the same route [docs/package-manager.md](package-manager.md) describes, run on
+the build host instead of on the machine. Building it instead would mean a
+Canadian cross of the largest source tree there is, to produce a compiler Void
+already publishes for this exact triple.
+
+Void's gcc is dynamically linked and its libraries share names with the image's
+own, so it is staged under a private prefix rather than merged into `/usr`:
+
+```text
+/opt/gcc/usr/bin/gcc                  the driver, as Void built it
+/opt/gcc/usr/lib/gcc/<triple>/<ver>/  cc1, collect2, crt*.o, libgcc.a
+/opt/gcc/usr/lib/*.so.*               only the shared objects it needs
+/usr/bin/gcc                          wrapper: sets LD_LIBRARY_PATH, execs it
+```
+
+GCC locates cc1 and libgcc relative to its own `argv[0]`, so the prefix moves
+with it, but the *system* header and library directories are not relocated —
+`/usr/include` and `/usr/lib` stay the image's own musl. Void supplies the
+compiler, Tunix supplies the libc, and there is exactly one set of headers.
+
+Things worth knowing about the result:
+
+- **C only.** `cc1plus`, `lto1` and `gnat1` are dropped; they are 130 MiB of
+  initramfs, which is loaded into RAM whole. `liblto_plugin.so` stays, because
+  this driver passes `-plugin` to the linker on every link and refuses to link
+  without it — the image's binutils accepts the option and ignores it.
+- **Void's gcc needs a `lib64` exec prefix.** The package installs into `lib`
+  and leaves the symlink to `base-files`, which is not one of its dependencies,
+  so the port creates it. Without it the driver reports `cannot execute 'cc1'`.
+- **Two linker names were missing from the image** and the port adds them:
+  `/usr/lib/libc.so` (to the shared musl, which lives in `/lib`) and
+  `/usr/lib/libgcc_s.so`. Nothing had ever been linked *on* the machine before,
+  so only the SONAMEs existed.
+- Both static and dynamic links work. `-flto` and C++ do not.
+
 ## Graphics Stack
 
 `libdrm` and `mesa` do not use the `musl-gcc` wrapper the other ports use. Mesa

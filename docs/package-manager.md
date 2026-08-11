@@ -196,6 +196,14 @@ tty-clock-2.0.20211121_1: verifying RSA signature...
 2 downloaded, 2 installed, 0 updated, 2 configured, 0 removed, 0 on hold.
 ```
 
+## The image's GCC comes through here too
+
+The same route is used at build time: `ports/build-gcc.sh` runs this xbps on the
+*build host*, installs Void's `gcc` into a staging root, and stages the parts of
+it the image needs. So the compiler on Tunix is a Void binary, put there when
+the image is made rather than downloaded on the machine. See
+[docs/ports.md](ports.md).
+
 ## Limits
 
 **No hard links.** `struct vfs_node` has one `parent` and one `name`, so one
