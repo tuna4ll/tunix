@@ -18,7 +18,7 @@ Tunix is a small Unix-like operating system experiment for x86_64. It includes a
 - Symmetric multiprocessing: every processor the firmware describes is started
   and the scheduler runs processes on all of them — see
   [Multiprocessor](docs/multiprocessor.md)
-- GNU userland (coreutils, grep, sed, gawk, findutils, diffutils, tar, gzip, make), Bash, TinyCC, binutils, nano, Lua, and selected libraries
+- GNU userland (coreutils, grep, sed, gawk, findutils, diffutils, tar, gzip, make), Bash, GCC, binutils, nano, Lua, and selected libraries
 - CPython 3.14, built shared so `ctypes` and C extensions load; `python-test`
   exercises threads, subprocess, signals, sockets, epoll, mmap and sqlite3
 - Networking with both ends of TCP: `bind`/`listen`/`accept` as well as

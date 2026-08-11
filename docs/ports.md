@@ -55,8 +55,10 @@ ports/out/graphics-sysroot/   Sysroot for the cross-built graphics ports.
 
 ## The Compiler on the Image
 
-Tunix carries three toolchain pieces: TinyCC (`tcc`, still what `cc` points at),
-binutils (`as`, `ld`, `ar`, …), and **GCC**.
+Tunix carries two toolchain pieces: binutils (`as`, `ld`, `ar`, …) and **GCC**,
+which is what `cc` points at. TinyCC used to be here as well and was removed
+once GCC worked; the musl headers and static libc it happened to stage into
+`/usr/include` and `/usr/lib` are staged by the GCC port now.
 
 GCC is the one port that is not built here. `ports/build-gcc.sh` *fetches* it,
 as a binary package, from Void's `x86_64-musl` repository using our own xbps —
@@ -73,6 +75,7 @@ own, so it is staged under a private prefix rather than merged into `/usr`:
 /opt/gcc/usr/lib/gcc/<triple>/<ver>/  cc1, collect2, crt*.o, libgcc.a
 /opt/gcc/usr/lib/*.so.*               only the shared objects it needs
 /usr/bin/gcc                          wrapper: sets LD_LIBRARY_PATH, execs it
+/usr/bin/cc                           symlink to the wrapper
 ```
 
 GCC locates cc1 and libgcc relative to its own `argv[0]`, so the prefix moves
@@ -94,6 +97,9 @@ Things worth knowing about the result:
   `/usr/lib/libgcc_s.so`. Nothing had ever been linked *on* the machine before,
   so only the SONAMEs existed.
 - Both static and dynamic links work. `-flto` and C++ do not.
+- **The port also stages the C library it compiles against**: `/usr/include` and
+  `/usr/lib` come from the static musl sysroot the binutils port builds, which
+  is the same libc every static port here was compiled against.
 
 ## Graphics Stack
 

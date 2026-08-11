@@ -55,37 +55,24 @@ Done when:
 - `nano`, shell history, small compiled binaries, and logs can live outside the
   initramfs.
 
-## 3. GCC Port
+## 3. GCC Port — done
 
-Tunix already ships TinyCC, which is useful for small programs and fast checks.
-A GCC port is a bigger milestone: it proves that the userspace, headers,
-dynamic runtime, filesystem behavior, and process model are strong enough for a
-serious compiler toolchain.
+GCC 14.2.1 compiles and links on the machine, and `cc` is it. TinyCC has been
+removed. It did not arrive the way this section expected: rather than building a
+cross GCC on the host, the port *fetches* Void's `x86_64-musl` gcc with xbps and
+stages it under `/opt/gcc` — Tunix's musl is the same version as Void's, so the
+compiler Void already publishes for this triple is the compiler we want. See
+[Ports](ports.md).
 
-First target:
+What it proved is what mattered: a 40 MiB C compiler runs, spawns cc1 and
+collect2, and produces static *and* dynamic binaries against the image's own
+headers and libc, with no special-case hacks.
 
-- Build a cross GCC on the host that targets Tunix x86_64 userspace.
-- Keep the initial language set to C only.
-- Use the existing musl-based sysroot and Tunix headers deliberately, without
-  leaking host headers or host libraries.
-- Produce dynamically linked binaries using `/lib/ld-musl-x86_64.so.1`.
-- Add a small compile/link/run validation program to the image.
+Still open:
 
-Later target:
-
-- Package `gcc`, `cpp`, `as`, `ld`, startup objects, headers, and libraries into
-  a coherent `/usr` layout.
-- Support building non-trivial C programs inside Tunix once the persistent file
-  system exists.
-- Evaluate C++ only after the C compiler, linker flow, and runtime behavior are
-  stable.
-
-Done when:
-
-- A host-built `x86_64-tunix-gcc` can compile a normal C program that runs in
-  Tunix.
-- A GCC-built binary can use libc, syscalls, dynamic linking, file I/O, and basic
-  process behavior without special-case hacks.
+- C++ (`cc1plus`) and `-flto` are deliberately not shipped.
+- Building non-trivial programs on the machine — the compiler works, the
+  question is now the rest of the userland around it.
 
 ## Not Yet
 
