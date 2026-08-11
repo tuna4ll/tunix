@@ -9,6 +9,8 @@
 
 #define VFS_PATH_MAX 256
 #define VFS_SYMLINK_MAX_DEPTH 16
+#define VFS_MOUNT_MAX_DEPTH 16
+#define VFS_TREE_MAX_DEPTH 64
 
 struct vfs_node *vfs_root;
 static uint64_t next_inode = 1;
@@ -146,12 +148,23 @@ struct vfs_node *vfs_find_entry(struct vfs_node *directory, const char *name) {
     return NULL;
 }
 
-/* Resolving here is what keeps hard links out of the rest of the kernel: every
-   path walk goes through this, so a second name reaches the same node as the
-   first and nothing downstream has to know which one it was reached by. */
+/* Step onto whatever is mounted over a directory. A loop rather than one hop
+   because a mount can be made over a directory that is itself a mount root. */
+static struct vfs_node *cross_mounts(struct vfs_node *node) {
+    unsigned depth = 0;
+    while (node && node->mounted && depth++ < VFS_MOUNT_MAX_DEPTH)
+        node = node->mounted;
+    return node;
+}
+
+/* Resolving here is what keeps hard links and mounts out of the rest of the
+   kernel: every path walk goes through this, so a second name reaches the same
+   node as the first, a mounted directory reaches the mounted tree, and nothing
+   downstream has to know which it was reached by. */
 struct vfs_node *vfs_find_child(struct vfs_node *directory, const char *name) {
     struct vfs_node *node = vfs_find_entry(directory, name);
-    return node && node->link_target ? node->link_target : node;
+    if (node && node->link_target) node = node->link_target;
+    return cross_mounts(node);
 }
 
 static const char *next_component(const char *path, char component[128]) {
@@ -202,9 +215,9 @@ static int append_text(char *output, size_t capacity, size_t *at, const char *te
 
 static struct vfs_node *lookup_internal(const char *path, int follow_final, unsigned depth) {
     if (!path || path[0] != '/' || !vfs_root || depth > VFS_SYMLINK_MAX_DEPTH) return NULL;
-    if (path[1] == '\0') return vfs_root;
+    if (path[1] == '\0') return cross_mounts(vfs_root);
 
-    struct vfs_node *current = vfs_root;
+    struct vfs_node *current = cross_mounts(vfs_root);
     char component[128];
     const char *cursor = path;
     while (*cursor) {
@@ -701,6 +714,181 @@ int vfs_rename(const char *old_path, const char *new_path) {
     node->name[sizeof(node->name) - 1] = '\0';
     if (vfs_attach(new_parent, node) != 0) return -1;
     PERSIST(moved, node, old_parent, old_name);
+    return 0;
+}
+
+/* --- mounts -------------------------------------------------------------- */
+
+/* Errno values, so a mount failure can say which one it was. Kept here rather
+   than taken from the syscall layer, which the VFS does not include. */
+#define VFS_EPERM   1
+#define VFS_ENOENT  2
+#define VFS_ENOMEM 12
+#define VFS_EBUSY  16
+#define VFS_ENODEV 19
+#define VFS_ENOTDIR 20
+#define VFS_EINVAL 22
+
+static struct vfs_mount *mount_table;
+
+const struct vfs_mount *vfs_mounts(void) { return mount_table; }
+
+static void mount_field(char *out, size_t capacity, const char *value) {
+    strncpy(out, value ? value : "", capacity - 1);
+    out[capacity - 1] = '\0';
+}
+
+static struct vfs_mount *mount_at(const char *target) {
+    for (struct vfs_mount *entry = mount_table; entry; entry = entry->next)
+        if (strcmp(entry->target, target) == 0) return entry;
+    return NULL;
+}
+
+/* Appended, so /proc/mounts reads in the order the system came up -- except
+   the root, which goes first however late it is declared, because that is
+   where every reader of the file expects to find it. */
+static void mount_insert(struct vfs_mount *entry) {
+    if (strcmp(entry->target, "/") == 0) {
+        entry->next = mount_table;
+        mount_table = entry;
+        return;
+    }
+    struct vfs_mount **at = &mount_table;
+    while (*at) at = &(*at)->next;
+    *at = entry;
+}
+
+void vfs_mount_builtin(const char *source, const char *target, const char *type,
+                       struct vfs_node *root) {
+    if (!target || mount_at(target)) return;
+    struct vfs_mount *entry = (struct vfs_mount *)kmalloc(sizeof(*entry));
+    if (!entry) return;
+    memset(entry, 0, sizeof(*entry));
+    mount_field(entry->source, sizeof(entry->source), source);
+    mount_field(entry->target, sizeof(entry->target), target);
+    mount_field(entry->type, sizeof(entry->type), type);
+    entry->root = root;
+    mount_insert(entry);
+}
+
+/* Tear down a tree nobody can reach any more. Nodes a process still holds --
+   its working directory, say -- are orphaned by destroy_node rather than
+   freed under it, exactly as an unlink would leave them. */
+static void free_tree(struct vfs_node *node, unsigned depth) {
+    if (!node || depth > VFS_TREE_MAX_DEPTH) return;
+    struct vfs_node *child = node->children;
+    node->children = NULL;
+    while (child) {
+        struct vfs_node *next = child->next;
+        child->next = NULL;
+        child->parent = NULL;
+        free_tree(child, depth + 1U);
+        child = next;
+    }
+    destroy_node(node);
+}
+
+static int mount_is_pseudo(const char *type) {
+    return strcmp(type, "proc") == 0 || strcmp(type, "sysfs") == 0 ||
+           strcmp(type, "devtmpfs") == 0 || strcmp(type, "devfs") == 0;
+}
+
+int vfs_mount(const char *source, const char *target, const char *type,
+              uint32_t flags) {
+    if (!target || !type || target[0] != '/') return -VFS_EINVAL;
+    if (flags & ~VFS_MS_SUPPORTED) return -VFS_EINVAL;
+
+    struct vfs_mount *existing = mount_at(target);
+    if (flags & VFS_MS_REMOUNT) {
+        if (!existing) return -VFS_EINVAL;
+        existing->flags = flags & ~VFS_MS_REMOUNT;
+        return 0;
+    }
+    /* Mounting a second filesystem over the first would give two entries the
+       same target, and then umount could not say which it meant. */
+    if (existing) return -VFS_EBUSY;
+
+    struct vfs_node *at = vfs_lookup(target);
+    if (!at) return -VFS_ENOENT;
+    if ((at->flags & 0xFFU) != VFS_DIRECTORY) return -VFS_ENOTDIR;
+    if (at == vfs_root) return -VFS_EBUSY;
+    if (at->mounted) return -VFS_EBUSY;
+
+    struct vfs_node *root = NULL;
+    int owns_root = 0;
+
+    if (flags & VFS_MS_BIND) {
+        if (!source || source[0] != '/') return -VFS_EINVAL;
+        root = vfs_lookup(source);
+        if (!root) return -VFS_ENOENT;
+        if ((root->flags & 0xFFU) != VFS_DIRECTORY) return -VFS_ENOTDIR;
+        if (root == at) return -VFS_EBUSY;
+    } else if (strcmp(type, "tmpfs") == 0 || strcmp(type, "ramfs") == 0) {
+        /* A fresh, empty tree. Volatile so the ext2 driver never writes any of
+           it to the disk, which is what makes it a tmpfs rather than a
+           directory that happens to be empty. */
+        root = vfs_alloc_node(at->name, VFS_DIRECTORY | VFS_VOLATILE);
+        if (!root) return -VFS_ENOMEM;
+        root->mode = at->mode;
+        root->uid = at->uid;
+        root->gid = at->gid;
+        owns_root = 1;
+    } else if (mount_is_pseudo(type)) {
+        /* These trees are built by their own drivers at boot and cannot be
+           made a second time; mounting one is only meaningful where it
+           already is, which the table above has already answered. */
+        return -VFS_EBUSY;
+    } else {
+        /* ext2 and everything else: no driver here can open a device. */
+        return -VFS_ENODEV;
+    }
+
+    struct vfs_mount *entry = (struct vfs_mount *)kmalloc(sizeof(*entry));
+    if (!entry) {
+        if (owns_root) free_tree(root, 0);
+        return -VFS_ENOMEM;
+    }
+    memset(entry, 0, sizeof(*entry));
+    mount_field(entry->source, sizeof(entry->source), source ? source : type);
+    mount_field(entry->target, sizeof(entry->target), target);
+    mount_field(entry->type, sizeof(entry->type), (flags & VFS_MS_BIND) ? "bind" : type);
+    entry->flags = flags;
+    entry->mountpoint = at;
+    entry->root = root;
+    entry->owns_root = owns_root;
+
+    /* The mounted root stands in for the mountpoint, so it takes the
+       mountpoint's name and its *parent* -- which is what makes `..` leave the
+       mount and vfs_node_path spell the path the caller walked. */
+    if (owns_root) {
+        root->parent = at->parent;
+        strncpy(root->name, at->name, sizeof(root->name) - 1);
+        root->name[sizeof(root->name) - 1] = '\0';
+    }
+    at->mounted = root;
+    at->flags |= VFS_MOUNTPOINT;
+    mount_insert(entry);
+    return 0;
+}
+
+int vfs_umount(const char *target) {
+    if (!target) return -VFS_EINVAL;
+    struct vfs_mount *previous = NULL;
+    struct vfs_mount *entry = mount_table;
+    while (entry && strcmp(entry->target, target) != 0) {
+        previous = entry;
+        entry = entry->next;
+    }
+    if (!entry) return -VFS_EINVAL;
+    /* The trees the system booted with have no mountpoint to restore. */
+    if (!entry->mountpoint) return -VFS_EPERM;
+
+    entry->mountpoint->mounted = NULL;
+    entry->mountpoint->flags &= ~VFS_MOUNTPOINT;
+    if (previous) previous->next = entry->next;
+    else mount_table = entry->next;
+    if (entry->owns_root) free_tree(entry->root, 0);
+    kfree(entry);
     return 0;
 }
 

@@ -24,6 +24,18 @@
 #define VFS_PINNED_DATA 0x8000U
 /* A further name for a file that already exists elsewhere. See vfs_link(). */
 #define VFS_HARDLINK    0x10000U
+/* A filesystem is mounted over this directory; `mounted` is its root. */
+#define VFS_MOUNTPOINT  0x20000U
+
+/* Mount flags, with Linux's numbers because userspace passes Linux's. */
+#define VFS_MS_RDONLY   0x0001U
+#define VFS_MS_NOSUID   0x0002U
+#define VFS_MS_NODEV    0x0004U
+#define VFS_MS_NOEXEC   0x0008U
+#define VFS_MS_REMOUNT  0x0020U
+#define VFS_MS_BIND     0x1000U
+#define VFS_MS_SUPPORTED (VFS_MS_RDONLY | VFS_MS_NOSUID | VFS_MS_NODEV | \
+                          VFS_MS_NOEXEC | VFS_MS_REMOUNT | VFS_MS_BIND)
 
 struct vfs_node;
 struct file;
@@ -83,6 +95,9 @@ struct vfs_node {
     struct vfs_node *link_target;
     /* Names this node answers to. One for everything that is not linked. */
     uint32_t links;
+    /* The root of the filesystem mounted over this directory, if any. Every
+       path walk that reaches this node continues there instead. */
+    struct vfs_node *mounted;
     /* Holders outside the directory tree, such as a process's current working
        directory. The tree itself is not counted: a node with refs == 0 is
        owned solely by its parent's child list. */
@@ -105,6 +120,32 @@ struct dirent {
     uint64_t ino;
     uint32_t type;
 };
+
+/*
+ * One line of /proc/mounts. Entries with no `mountpoint` are the trees the
+ * system boots with rather than anything a process mounted: they are reported
+ * like mounts because that is what they are to userspace, but nothing may
+ * unmount them.
+ */
+struct vfs_mount {
+    char source[64];
+    char target[192];
+    char type[16];
+    uint32_t flags;
+    struct vfs_node *mountpoint;
+    struct vfs_node *root;
+    int owns_root;                 /* the tree is ours to free on umount */
+    struct vfs_mount *next;
+};
+
+/* 0 on success, a negative errno on failure. */
+int vfs_mount(const char *source, const char *target, const char *type,
+              uint32_t flags);
+int vfs_umount(const char *target);
+/* Declare a tree the system came up with, so it is reported like a mount. */
+void vfs_mount_builtin(const char *source, const char *target, const char *type,
+                       struct vfs_node *root);
+const struct vfs_mount *vfs_mounts(void);
 
 /*
  * Persistence hooks: a filesystem driver can register these to observe
