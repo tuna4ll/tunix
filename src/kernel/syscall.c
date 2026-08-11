@@ -695,24 +695,72 @@ void syscall_init(void) {
     wrmsr(0xC0000084, 0x200ULL | 0x400ULL);
 }
 
+/*
+ * How much of a write(2) is staged in one go.
+ *
+ * Every call into file_write() is one filesystem write-back, and on ext2 that
+ * means the superblock, the group descriptors and the bitmaps go to the disk
+ * with it. Staging a 4 KiB chunk at a time therefore turned a 64 KiB write into
+ * sixteen of those, and the metadata dominated: it measured 82% of the cost of
+ * writing a file. One block write to the disk is ~0.3 ms whatever it holds, so
+ * what matters is how many there are, not how big they are.
+ *
+ * It matches ext2's run length (EXT2_RUN_BLOCKS * 4 KiB), which is as much as
+ * the filesystem will hand the disk in a single command anyway. The buffer
+ * comes from the heap because the kernel stack is 16 KiB.
+ */
+#define WRITE_STAGE_MAX (128U * 1024U)
+
+/* Only regular files get the large staging buffer. A pipe or a socket write is
+   allowed to come up short -- that is how O_NONBLOCK reports back pressure --
+   and the loop below stops when it does, so a bigger chunk there would turn one
+   full write into a short one. Nothing about those paths is slow anyway. */
+static int write_stages_large(const struct file *file) {
+    return file && file->kind == FILE_KIND_VFS && file->node &&
+           (file->node->flags & 0xFFU) == VFS_FILE;
+}
+
 static int64_t sys_write(int fd, uint64_t user_buffer, size_t length) {
     struct process *process = process_current();
     if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) return -EBADF;
-    uint8_t buffer[4096];
+    struct file *file = process->files->fds[fd];
+    uint8_t stage[4096];
+    uint8_t *buffer = stage;
+    size_t buffer_size = sizeof(stage);
+    if (length > sizeof(stage) && write_stages_large(file)) {
+        size_t wanted = length < WRITE_STAGE_MAX ? length : WRITE_STAGE_MAX;
+        uint8_t *large = (uint8_t *)kmalloc(wanted);
+        if (large) {
+            buffer = large;
+            buffer_size = wanted;
+        }
+    }
+
     size_t completed = 0;
+    int64_t failure = 0;
     while (completed < length) {
         size_t chunk = length - completed;
-        if (chunk > sizeof(buffer)) chunk = sizeof(buffer);
-        if (copy_from_user(buffer, user_buffer + completed, chunk) != 0) return completed ? (int64_t)completed : -EFAULT;
-        int64_t written = file_write(process->files->fds[fd], chunk, buffer);
+        if (chunk > buffer_size) chunk = buffer_size;
+        if (copy_from_user(buffer, user_buffer + completed, chunk) != 0) {
+            failure = -EFAULT;
+            break;
+        }
+        int64_t written = file_write(file, chunk, buffer);
         if (written == -EPIPE) {
             (void)process_send_signal((int64_t)process->pid, SIGPIPE);
-            return completed ? (int64_t)completed : -EPIPE;
+            failure = -EPIPE;
+            break;
         }
-        if (written < 0) return completed ? (int64_t)completed : written;
+        if (written < 0) {
+            failure = written;
+            break;
+        }
         completed += (size_t)written;
         if ((size_t)written < chunk) break;
     }
+
+    if (buffer != stage) kfree(buffer);
+    if (!completed && failure) return failure;
     return (int64_t)completed;
 }
 
