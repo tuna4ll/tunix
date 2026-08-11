@@ -375,11 +375,15 @@ static void mouse_complete_packet(void) {
 
     if (mouse_packet_size == 4U) {
         uint8_t fourth = mouse_packet[3];
-        wheel = (int)(fourth & 0x0FU);
-        if (wheel & 0x08) wheel -= 16;
         if (mouse_device_id == 4U) {
+            /* The Explorer spends the top of the byte on its two extra
+               buttons, so only the low nibble is the wheel. */
+            wheel = (int)(fourth & 0x0FU);
+            if (wheel & 0x08) wheel -= 16;
             if (fourth & 0x10U) new_buttons |= 0x08U;
             if (fourth & 0x20U) new_buttons |= 0x10U;
+        } else {
+            wheel = (int)(int8_t)fourth;
         }
     }
 
@@ -396,8 +400,11 @@ static void mouse_complete_packet(void) {
                          TUNIX_REL_X, x);
     if (y) input_emit_at(TUNIX_INPUT_DEVICE_MOUSE, timestamp, TUNIX_EV_REL,
                          TUNIX_REL_Y, -y);
+    /* The wheel is negated for the same reason Y is: the mouse counts a push
+       away from the hand as negative, and REL_WHEEL counts it as positive.
+       Without this every scroll goes the wrong way. */
     if (wheel) input_emit_at(TUNIX_INPUT_DEVICE_MOUSE, timestamp, TUNIX_EV_REL,
-                             TUNIX_REL_WHEEL, wheel);
+                             TUNIX_REL_WHEEL, -wheel);
     mouse_emit_button(timestamp, changed, new_buttons, 0x01U, TUNIX_BTN_LEFT);
     mouse_emit_button(timestamp, changed, new_buttons, 0x02U, TUNIX_BTN_RIGHT);
     mouse_emit_button(timestamp, changed, new_buttons, 0x04U, TUNIX_BTN_MIDDLE);
