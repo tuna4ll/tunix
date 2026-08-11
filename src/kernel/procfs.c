@@ -190,12 +190,19 @@ static int64_t proc_mounts_read(struct vfs_node *node, uint64_t offset,
                                 size_t size, void *output) {
     (void)node;
     struct text_buffer text = {{0}, 0};
-    /* Report what the root really is: the ext2 volume once it is mounted,
-       otherwise the initramfs we are still running from. */
-    text_string(&text, ext2fs_mounted() ? "/dev/sda / ext2 rw 0 0\n"
-                                        : "initramfs / ramfs rw 0 0\n");
-    text_string(&text, "devfs /dev devfs rw 0 0\n");
-    text_string(&text, "proc /proc proc rw 0 0\n");
+    for (const struct vfs_mount *mount = vfs_mounts(); mount; mount = mount->next) {
+        text_string(&text, mount->source[0] ? mount->source : "none");
+        text_char(&text, ' ');
+        text_string(&text, mount->target);
+        text_char(&text, ' ');
+        text_string(&text, mount->type);
+        text_char(&text, ' ');
+        text_string(&text, (mount->flags & VFS_MS_RDONLY) ? "ro" : "rw");
+        if (mount->flags & VFS_MS_NOSUID) text_string(&text, ",nosuid");
+        if (mount->flags & VFS_MS_NODEV) text_string(&text, ",nodev");
+        if (mount->flags & VFS_MS_NOEXEC) text_string(&text, ",noexec");
+        text_string(&text, " 0 0\n");
+    }
     return text_read(&text, offset, size, output);
 }
 
@@ -619,6 +626,7 @@ void procfs_init(void) {
     struct vfs_node *root = vfs_mkdir_p("/proc");
     if (!root) return;
     root->mode = 0555;
+    vfs_mount_builtin("proc", "/proc", "proc", root);
     /* The placeholder is only there to size the buffer the refresh writes into;
        no pid is longer than the widest 64-bit decimal. */
     self_link = vfs_attach_symlink(root, "self", "18446744073709551615");

@@ -115,6 +115,9 @@ static void publish_device(const char *name, const char *devname,
 }
 
 void sysfs_init(void) {
+    struct vfs_node *sys = vfs_mkdir_p("/sys");
+    if (!sys) return;
+    vfs_mount_builtin("sysfs", "/sys", "sysfs", sys);
     if (!vfs_mkdir_p("/sys/devices")) return;
     if (!vfs_mkdir_p("/sys/class")) return;
     if (!vfs_mkdir_p("/sys/dev/char")) return;

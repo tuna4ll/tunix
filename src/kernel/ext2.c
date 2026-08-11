@@ -1641,6 +1641,11 @@ static void mark_volatile_dirs(void) {
             node->mode = ext2_volatile_dirs[index].mode;
         }
         node->flags |= VFS_VOLATILE;
+        /* /dev and /proc are declared by the drivers that build them, which
+           have not run yet. */
+        if (strcmp(ext2_volatile_dirs[index].path, "/dev") != 0 &&
+            strcmp(ext2_volatile_dirs[index].path, "/proc") != 0)
+            vfs_mount_builtin("tmpfs", ext2_volatile_dirs[index].path, "tmpfs", node);
     }
 }
 

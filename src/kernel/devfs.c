@@ -225,6 +225,7 @@ static struct vfs_node *attach_device(struct vfs_node *dev, const char *name,
 void devfs_init(void) {
     struct vfs_node *dev = vfs_mkdir_p("/dev");
     if (!dev) return;
+    vfs_mount_builtin("devtmpfs", "/dev", "devtmpfs", dev);
     pty_init();
 
     (void)attach_device(dev, "console", VFS_CHARDEVICE, 0666,

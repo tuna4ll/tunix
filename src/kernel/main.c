@@ -169,6 +169,10 @@ void kmain(uint32_t mmap_count, uint64_t mmap_address, uint64_t manifest_address
         if (data_region_lba && ext2fs_seed_root(data_region_lba) != 0)
             kprintf("TUNIX: root persistence unavailable, running from RAM\n");
     }
+    /* Declared once the outcome is known: the root is the ext2 volume only if
+       mounting or seeding it actually worked. */
+    vfs_mount_builtin(ext2fs_mounted() ? "/dev/sda" : "initramfs", "/",
+                      ext2fs_mounted() ? "ext2" : "ramfs", vfs_root);
 #if TUNIX_BOOT_TIMINGS
     boot_log_stage(root_on_disk ? "ext2 root load" : "initramfs VFS indexing + ext2 seed",
                    &stage_started);
