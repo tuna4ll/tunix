@@ -361,18 +361,48 @@ static int flush_meta(void) {
 
 /* --- bitmaps ------------------------------------------------------------ */
 
-static int64_t bitmap_alloc(struct block_cache *cache, uint32_t bitmap_block,
-                            uint32_t max_bits) {
-    uint8_t *bits = cache_get(cache, bitmap_block);
-    if (!bits) return -1;
-    for (uint32_t bit = 0; bit < max_bits; bit++) {
-        if (!(bits[bit >> 3] & (1U << (bit & 7U)))) {
-            bits[bit >> 3] |= (uint8_t)(1U << (bit & 7U));
-            cache->dirty = 1;
-            return (int64_t)bit;
+/*
+ * Find a free bit at or after `start`, wrapping back to the beginning once so
+ * that nothing below the cursor is lost.
+ *
+ * A group bitmap is 32768 bits of which the used ones come in long runs, so the
+ * scan reads a word at a time and skips the full ones outright: a bit-by-bit
+ * walk touches memory once per bit and does it on every single allocation.
+ * Bits within a byte are numbered from the least significant, which is exactly
+ * how a little-endian word load orders them, so the first zero of ~word is the
+ * first free bit of the word.
+ */
+static int64_t bitmap_scan(const uint8_t *bits, uint32_t start, uint32_t max_bits) {
+    const uint32_t *words = (const uint32_t *)bits;
+    if (start >= max_bits) start = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        uint32_t bit = pass ? 0 : start;
+        uint32_t end = pass ? start : max_bits;
+        while (bit < end) {
+            uint32_t index = bit >> 5;
+            /* the bits before the cursor are not ours to take on this pass */
+            uint32_t word = words[index] | ((1U << (bit & 31U)) - 1U);
+            if (word == 0xFFFFFFFFU) {
+                bit = (index + 1U) << 5;
+                continue;
+            }
+            uint32_t found = (index << 5) + (uint32_t)__builtin_ctz(~word);
+            if (found >= end) break;
+            return (int64_t)found;
         }
     }
     return -1;
+}
+
+static int64_t bitmap_alloc(struct block_cache *cache, uint32_t bitmap_block,
+                            uint32_t max_bits, uint32_t start) {
+    uint8_t *bits = cache_get(cache, bitmap_block);
+    if (!bits) return -1;
+    int64_t bit = bitmap_scan(bits, start, max_bits);
+    if (bit < 0) return -1;
+    bits[bit >> 3] |= (uint8_t)(1U << (bit & 7U));
+    cache->dirty = 1;
+    return bit;
 }
 
 static void bitmap_release(struct block_cache *cache, uint32_t bitmap_block,
@@ -384,23 +414,38 @@ static void bitmap_release(struct block_cache *cache, uint32_t bitmap_block,
 }
 
 /*
- * Allocation walks the groups in order and takes the first with space. The
- * bitmap caches hold one block each, so staying inside a group until it fills
- * keeps them warm; a real ext2 would also try to keep a file near its
- * directory, which matters for seek time on a spinning disk and not at all
- * here.
+ * Allocation resumes where the last one left off rather than restarting at the
+ * beginning of the disk. That is not only about the length of the search: the
+ * lowest free block is whatever hole the last deletion left, so always taking
+ * it scatters a growing file across the whole filesystem, and write_blocks()
+ * can then only ever write one block at a time. Carrying on from the previous
+ * block hands out consecutive blocks while consecutive blocks exist, which is
+ * what lets run_append() fill a 32-block transfer.
+ *
+ * Nothing is stranded by this: the scan wraps within the group and the group
+ * walk wraps too, so a full pass still sees every free block.
  *
  * Block 0 holds the superblock and is marked used at format time, so 0 is
  * never a valid allocation and stays usable as the "no block" sentinel.
  */
+static uint32_t block_cursor_group;
+static uint32_t block_cursor_bit;
+
 static uint32_t alloc_block(void) {
-    for (uint32_t group = 0; group < group_count; group++) {
+    /* a format or a mount can leave the cursor pointing past the last group */
+    if (block_cursor_group >= group_count) block_cursor_group = block_cursor_bit = 0;
+    for (uint32_t index = 0; index < group_count; index++) {
+        uint32_t group = block_cursor_group + index;
+        if (group >= group_count) group -= group_count;
         if (!gds[group].bg_free_blocks_count) continue;
+        uint32_t start = group == block_cursor_group ? block_cursor_bit : 0;
         int64_t bit = bitmap_alloc(&cache_bbitmap, group_bbitmap_block(group),
-                                   group_block_count(group));
+                                   group_block_count(group), start);
         if (bit < 0) continue;
         if (sb.s_free_blocks_count) sb.s_free_blocks_count--;
         gds[group].bg_free_blocks_count--;
+        block_cursor_group = group;
+        block_cursor_bit = (uint32_t)bit + 1U;
         return group_first_block(group) + (uint32_t)bit;
     }
     kprintf("EXT2: out of blocks\n");
@@ -416,14 +461,23 @@ static void free_block(uint32_t block) {
     gds[group].bg_free_blocks_count++;
 }
 
+static uint32_t inode_cursor_group;
+static uint32_t inode_cursor_bit;
+
 static uint32_t alloc_inode(void) {
-    for (uint32_t group = 0; group < group_count; group++) {
+    if (inode_cursor_group >= group_count) inode_cursor_group = inode_cursor_bit = 0;
+    for (uint32_t index = 0; index < group_count; index++) {
+        uint32_t group = inode_cursor_group + index;
+        if (group >= group_count) group -= group_count;
         if (!gds[group].bg_free_inodes_count) continue;
+        uint32_t start = group == inode_cursor_group ? inode_cursor_bit : 0;
         int64_t bit = bitmap_alloc(&cache_ibitmap, group_ibitmap_block(group),
-                                   EXT2_INODES_PER_GROUP);
+                                   EXT2_INODES_PER_GROUP, start);
         if (bit < 0) continue;
         if (sb.s_free_inodes_count) sb.s_free_inodes_count--;
         gds[group].bg_free_inodes_count--;
+        inode_cursor_group = group;
+        inode_cursor_bit = (uint32_t)bit + 1U;
         return group * EXT2_INODES_PER_GROUP + (uint32_t)bit + 1U;
     }
     kprintf("EXT2: out of inodes\n");
