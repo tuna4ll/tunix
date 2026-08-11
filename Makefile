@@ -55,6 +55,8 @@ TCC_ROOT := $(PORT_OUT)/tcc-root
 TCC_STAMP := $(PORT_OUT)/.tcc-ready
 BINUTILS_ROOT := $(PORT_OUT)/binutils-root
 BINUTILS_STAMP := $(PORT_OUT)/.binutils-ready
+GCC_ROOT := $(PORT_OUT)/gcc-root
+GCC_STAMP := $(PORT_OUT)/.gcc-ready
 NCURSES_ROOT := $(PORT_OUT)/ncurses-root
 NCURSES_STAMP := $(PORT_OUT)/.ncurses-ready
 NANO := $(PORT_OUT)/nano
@@ -1244,6 +1246,16 @@ $(BINUTILS_STAMP): ports/build-binutils.sh | $(BUILD)/.tools
 	@test -x $(BINUTILS_ROOT)/usr/bin/ld || { echo "binutils linker was not produced" >&2; exit 1; }
 	@touch $@
 
+# gcc is not built here: it is fetched from Void's musl repository with our own
+# xbps, which is why this depends on the whole of that path -- and on the ports
+# whose files it is checked against before being staged.
+$(GCC_STAMP): $(XBPS_STAMP) $(TCC_STAMP) $(BINUTILS_STAMP) $(MUSL_SHARED_STAMP) \
+		$(MUSL_CROSS_STAMP) ports/build-gcc.sh ports/lib/cross-port.sh
+	@mkdir -p $(PORT_OUT)
+	OUT="$(abspath $(PORT_OUT))" bash ports/build-gcc.sh
+	@test -x $(GCC_ROOT)/usr/bin/gcc || { echo "the gcc wrapper was not produced" >&2; exit 1; }
+	@touch $@
+
 $(MBEDTLS_STAMP): $(BASH) ports/build-mbedtls.sh tools/https-get.c tools/ssl-helper.c ports/src/mbedtls/CMakeLists.txt | $(BUILD)/.tools
 	@mkdir -p $(PORT_OUT)
 	OUT="$(abspath $(PORT_OUT))" bash ports/build-mbedtls.sh
@@ -1480,7 +1492,7 @@ $(SND_TEST): $(BUILD)/user/snd_test.o $(USER_RUNTIME) src/userspace/linker.ld
 	$(LD) $(USER_LDFLAGS) -o $@ $(USER_RUNTIME) $(BUILD)/user/snd_test.o
 	$(STRIP) --strip-all $@
 
-$(INITRAMFS): $(DINIT_STAMP) $(SHADOW_STAMP) $(SUDO_STAMP) $(LINUX_PAM_STAMP) $(LIGHTDM_STAMP) $(LIGHTDM_GREETER_STAMP) $(CPYTHON_STAMP) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAMP) $(CURL_STAMP) $(GIT_STAMP) $(TCC_STAMP) $(BINUTILS_STAMP) $(NANO) $(TTY_CLOCK) $(TTY_TETRIS) $(HTOP) $(FASTFETCH_STAMP) $(LUA_STAMP) $(IMAGE_CODECS_STAMP) $(MUSL_SHARED_STAMP) $(IMAGE_CODECS_SHARED_STAMP) $(MBEDTLS_STAMP) $(LIBFFI_STAMP) $(WAYLAND_STAMP) $(PIXMAN_STAMP) $(LIBXKBCOMMON_STAMP) $(XKEYBOARD_CONFIG_STAMP) $(LIBEVDEV_STAMP) $(ALSA_LIB_STAMP) $(LIBUDEV_ZERO_STAMP) $(LIBINPUT_STAMP) $(CAIRO_STAMP) $(LIBDISPLAY_INFO_STAMP) $(SEATD_STAMP) $(WESTON_STAMP) $(LIBDRM_STAMP) $(MESA_STAMP) $(LLVM_STAMP) $(GLIB_STAMP) $(PANGO_STAMP) $(GDK_PIXBUF_STAMP) $(GTK3_STAMP) $(LIBXFCE4UTIL_STAMP) $(XFCONF_STAMP) $(LIBXFCE4UI_STAMP) $(THUNAR_STAMP) $(XCB_STAMP) $(LIBX11_STAMP) $(XEXT_STAMP) $(FONTSTACK_STAMP) $(XSERVER_STAMP) $(XCB_UTIL_STAMP) $(STARTUP_NOTIFICATION_STAMP) $(LIBSM_STAMP) $(LIBWNCK_STAMP) $(XFWM4_STAMP) $(DBUS_STAMP) $(GARCON_STAMP) $(LIBXFCE4WINDOWING_STAMP) $(XFCE4_PANEL_STAMP) $(XFCE4_SESSION_STAMP) $(XFDESKTOP_STAMP) $(LIBXML2_STAMP) $(XFCE4_SETTINGS_STAMP) $(VTE_STAMP) $(XFCE4_TERMINAL_STAMP) $(WELCOME_STAMP) $(ICU_STAMP) $(SQLITE_STAMP) $(LIBWEBP_STAMP) $(WOFF2_STAMP) $(LIBGCRYPT_STAMP) $(LIBTASN1_STAMP) $(GMP_STAMP) $(NETTLE_STAMP) $(GNUTLS_STAMP) $(GLIB_NETWORKING_STAMP) $(LIBSOUP_STAMP) $(WEBKITGTK_STAMP) $(SDL2_STAMP) $(SDL2_NET_STAMP) $(SDL2_MIXER_STAMP) $(CHOCOLATE_DOOM_STAMP) $(XBPS_STAMP) $(INITRD_FILES)
+$(INITRAMFS): $(DINIT_STAMP) $(SHADOW_STAMP) $(SUDO_STAMP) $(LINUX_PAM_STAMP) $(LIGHTDM_STAMP) $(LIGHTDM_GREETER_STAMP) $(CPYTHON_STAMP) $(SYSTEM_TOOLS) $(BASH) $(GNU_PORT_STAMPS) $(IPROUTE2_STAMP) $(CURL_STAMP) $(GIT_STAMP) $(TCC_STAMP) $(BINUTILS_STAMP) $(NANO) $(TTY_CLOCK) $(TTY_TETRIS) $(HTOP) $(FASTFETCH_STAMP) $(LUA_STAMP) $(IMAGE_CODECS_STAMP) $(MUSL_SHARED_STAMP) $(IMAGE_CODECS_SHARED_STAMP) $(MBEDTLS_STAMP) $(LIBFFI_STAMP) $(WAYLAND_STAMP) $(PIXMAN_STAMP) $(LIBXKBCOMMON_STAMP) $(XKEYBOARD_CONFIG_STAMP) $(LIBEVDEV_STAMP) $(ALSA_LIB_STAMP) $(LIBUDEV_ZERO_STAMP) $(LIBINPUT_STAMP) $(CAIRO_STAMP) $(LIBDISPLAY_INFO_STAMP) $(SEATD_STAMP) $(WESTON_STAMP) $(LIBDRM_STAMP) $(MESA_STAMP) $(LLVM_STAMP) $(GLIB_STAMP) $(PANGO_STAMP) $(GDK_PIXBUF_STAMP) $(GTK3_STAMP) $(LIBXFCE4UTIL_STAMP) $(XFCONF_STAMP) $(LIBXFCE4UI_STAMP) $(THUNAR_STAMP) $(XCB_STAMP) $(LIBX11_STAMP) $(XEXT_STAMP) $(FONTSTACK_STAMP) $(XSERVER_STAMP) $(XCB_UTIL_STAMP) $(STARTUP_NOTIFICATION_STAMP) $(LIBSM_STAMP) $(LIBWNCK_STAMP) $(XFWM4_STAMP) $(DBUS_STAMP) $(GARCON_STAMP) $(LIBXFCE4WINDOWING_STAMP) $(XFCE4_PANEL_STAMP) $(XFCE4_SESSION_STAMP) $(XFDESKTOP_STAMP) $(LIBXML2_STAMP) $(XFCE4_SETTINGS_STAMP) $(VTE_STAMP) $(XFCE4_TERMINAL_STAMP) $(WELCOME_STAMP) $(ICU_STAMP) $(SQLITE_STAMP) $(LIBWEBP_STAMP) $(WOFF2_STAMP) $(LIBGCRYPT_STAMP) $(LIBTASN1_STAMP) $(GMP_STAMP) $(NETTLE_STAMP) $(GNUTLS_STAMP) $(GLIB_NETWORKING_STAMP) $(LIBSOUP_STAMP) $(WEBKITGTK_STAMP) $(SDL2_STAMP) $(SDL2_NET_STAMP) $(SDL2_MIXER_STAMP) $(CHOCOLATE_DOOM_STAMP) $(XBPS_STAMP) $(GCC_STAMP) $(INITRD_FILES)
 	rm -rf $(ROOTFS)
 	mkdir -p $(ROOTFS)/bin $(ROOTFS)/sbin $(ROOTFS)/dev $(ROOTFS)/tmp \
 		$(ROOTFS)/run/dbus $(ROOTFS)/run/user/0 $(ROOTFS)/run/user/1000 \
@@ -1514,6 +1526,7 @@ $(INITRAMFS): $(DINIT_STAMP) $(SHADOW_STAMP) $(SUDO_STAMP) $(LINUX_PAM_STAMP) $(
 	cp $(SYSTEM_TOOLS) $(ROOTFS)/bin/
 	cp -R $(TCC_ROOT)/. $(ROOTFS)/
 	cp -R $(BINUTILS_ROOT)/. $(ROOTFS)/
+	cp -R $(GCC_ROOT)/. $(ROOTFS)/
 	cp -R $(LUA_ROOT)/. $(ROOTFS)/
 	cp -R $(FASTFETCH_ROOT)/. $(ROOTFS)/
 	cp -R $(MUSL_SHARED_ROOT)/. $(ROOTFS)/
@@ -1622,6 +1635,9 @@ $(INITRAMFS): $(DINIT_STAMP) $(SHADOW_STAMP) $(SUDO_STAMP) $(LINUX_PAM_STAMP) $(
 	mkdir -p $(ROOTFS)/usr/share/nano
 	cp ports/src/nano/syntax/*.nanorc $(ROOTFS)/usr/share/nano/
 	@test -x $(ROOTFS)/usr/bin/tcc || { echo "TinyCC was not installed into the rootfs" >&2; exit 1; }
+	@test -x $(ROOTFS)/usr/bin/gcc || { echo "gcc was not installed into the rootfs" >&2; exit 1; }
+	@find $(ROOTFS)/opt/gcc -name cc1 -type f | grep -q . || { echo "the gcc compiler proper was not installed into the rootfs" >&2; exit 1; }
+	@test -e $(ROOTFS)/usr/lib/libgcc_s.so || { echo "the libgcc_s linker name is missing from the rootfs" >&2; exit 1; }
 	@test -x $(ROOTFS)/usr/bin/as || { echo "binutils assembler was not installed into the rootfs" >&2; exit 1; }
 	@test -x $(ROOTFS)/usr/bin/ld || { echo "binutils linker was not installed into the rootfs" >&2; exit 1; }
 	@test -x $(ROOTFS)/usr/bin/ar || { echo "binutils archiver was not installed into the rootfs" >&2; exit 1; }
