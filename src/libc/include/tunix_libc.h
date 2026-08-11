@@ -161,6 +161,9 @@ int t_connect_in(int fd, const struct t_sockaddr_in *address);
 /* Fills in the peer address when one is given. */
 int t_accept_in(int fd, struct t_sockaddr_in *address);
 int t_shutdown(int fd, int how);
+int t_mount(const char *source, const char *target, const char *type,
+            unsigned long flags, const void *data);
+int t_umount2(const char *target, int flags);
 int t_accept4(int fd, int flags);
 int t_getsockname(int fd, struct t_sockaddr_un *address, unsigned int *length);
 int t_getpeername(int fd, struct t_sockaddr_un *address, unsigned int *length);
