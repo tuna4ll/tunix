@@ -2366,7 +2366,7 @@ static void fill_statfs(struct vfs_node *node, struct linux_statfs *out) {
         out->f_bsize = PMM_PAGE_SIZE;
         out->f_frsize = PMM_PAGE_SIZE;
         if (out->f_type == TMPFS_MAGIC) {
-            out->f_blocks = pmm_total_page_count();
+            out->f_blocks = pmm_usable_page_count();
             out->f_bfree = pmm_free_page_count();
             out->f_bavail = out->f_bfree;
         }
@@ -2391,7 +2391,7 @@ static void fill_statfs(struct vfs_node *node, struct linux_statfs *out) {
     out->f_type = TMPFS_MAGIC;
     out->f_bsize = PMM_PAGE_SIZE;
     out->f_frsize = PMM_PAGE_SIZE;
-    out->f_blocks = pmm_total_page_count();
+    out->f_blocks = pmm_usable_page_count();
     out->f_bfree = pmm_free_page_count();
     out->f_bavail = out->f_bfree;
 }

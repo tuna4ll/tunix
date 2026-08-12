@@ -136,7 +136,9 @@ static int64_t proc_meminfo_read(struct vfs_node *node, uint64_t offset,
                                  size_t size, void *output) {
     (void)node;
     struct text_buffer text = {{0}, 0};
-    uint64_t total = pmm_total_page_count() * 4ULL;
+    /* Usable, not total: the pages between the two are the firmware's memory
+       hole, and reporting them made an idle machine claim a gigabyte in use. */
+    uint64_t total = pmm_usable_page_count() * 4ULL;
     uint64_t free = pmm_free_page_count() * 4ULL;
     uint64_t used = total >= free ? total - free : 0;
 

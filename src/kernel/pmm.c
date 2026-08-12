@@ -28,6 +28,17 @@ static uint8_t *bitmap;
  */
 static uint16_t *refcounts;
 static uint64_t total_pages;
+/*
+ * Pages that are actually RAM, which is not the same as total_pages.
+ *
+ * total_pages spans everything up to the highest usable address, and on a
+ * machine whose firmware splits RAM around the PCI hole that includes the hole:
+ * a 4 GiB QEMU guest has RAM at 0-3 GiB and 4-5 GiB, so the top is 5 GiB and a
+ * gigabyte in the middle is not memory at all. Those pages start out marked
+ * allocated and never come free, so anything reporting total minus free counts
+ * a gigabyte of nothing as permanently in use.
+ */
+static uint64_t usable_pages;
 static uint64_t free_pages;
 static uint64_t next_hint;
 
@@ -99,6 +110,10 @@ void pmm_init(uint32_t mmap_count, uint64_t mmap_addr,
             }
         }
     }
+
+    /* Everything the loop above cleared, before any of it is reserved again:
+       that is exactly the set of pages backed by RAM. */
+    usable_pages = free_pages;
 
     uint64_t reserved_end = (refcount_virtual - KERNEL_BASE) + refcount_bytes;
     reserved_end = (reserved_end + PMM_PAGE_SIZE - 1) & ~(PMM_PAGE_SIZE - 1);
@@ -192,6 +207,7 @@ uint32_t pmm_page_refcount(uint64_t physical) {
 }
 
 uint64_t pmm_total_page_count(void) { return total_pages; }
+uint64_t pmm_usable_page_count(void) { return usable_pages; }
 uint64_t pmm_free_page_count(void) { return free_pages; }
 uint64_t pmm_managed_limit(void) { return total_pages * PMM_PAGE_SIZE; }
 

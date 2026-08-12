@@ -36,7 +36,11 @@ void pmm_free_page(void *physical_address);
    not allocated or has saturated its reference count. */
 int pmm_page_ref(uint64_t physical);
 uint32_t pmm_page_refcount(uint64_t physical);
+/* Every page up to the highest usable address, holes in the middle included. */
 uint64_t pmm_total_page_count(void);
+/* Only the pages that are RAM. This is the one to report memory against: the
+   difference between the two is address space the machine does not have. */
+uint64_t pmm_usable_page_count(void);
 uint64_t pmm_free_page_count(void);
 uint64_t pmm_managed_limit(void);
 int pmm_physical_range_managed(uint64_t physical, uint64_t length);
