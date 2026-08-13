@@ -19,9 +19,9 @@
 #define VFS_ORPHANED    0x2000U
 /* Contents still on disk: data is NULL, length is set. See vfs_fault_in(). */
 #define VFS_LAZY_DATA   0x4000U
-/* Some process maps these pages: they must never be freed or refetched under
-   it. Set when mmap shares the contents instead of copying them. */
-#define VFS_PINNED_DATA 0x8000U
+/* 0x8000 was VFS_PINNED_DATA, a flag saying some process maps these pages.
+   Nothing ever cleared it, so the first mmap of a file made its contents
+   permanently unreclaimable; it is a count now -- see mapped_refs. */
 /* A further name for a file that already exists elsewhere. See vfs_link(). */
 #define VFS_HARDLINK    0x10000U
 /* A filesystem is mounted over this directory; `mounted` is its root. */
@@ -102,6 +102,12 @@ struct vfs_node {
        directory. The tree itself is not counted: a node with refs == 0 is
        owned solely by its parent's child list. */
     uint32_t refs;
+    /* Mappings that point straight at these pages rather than at a copy of
+       them. While it is non-zero the contents may not be freed or refetched --
+       a process is reading them through its own page tables. One per mapped
+       range, taken when mmap shares the cache and dropped when the range goes
+       away, so a fork or a split counts twice and both halves have to leave. */
+    uint32_t mapped_refs;
     /* Advisory whole-file locks (flock). The lock belongs to the open file
        description, so the holder is tracked on struct file and only the
        aggregate state lives here. */
@@ -183,6 +189,12 @@ void vfs_release_data(struct vfs_node *node);
    Unreferencing an orphaned node is what finally frees it. */
 void vfs_node_ref(struct vfs_node *node);
 void vfs_node_unref(struct vfs_node *node);
+
+/* Claim the node's cached contents for a mapping that points at them, and give
+   them back when the mapping goes. Balanced by the address-space map: every
+   area that shares the cache holds exactly one. */
+void vfs_map_ref(struct vfs_node *node);
+void vfs_map_unref(struct vfs_node *node);
 
 #define VFS_TIME_ATIME 0x1U
 #define VFS_TIME_MTIME 0x2U

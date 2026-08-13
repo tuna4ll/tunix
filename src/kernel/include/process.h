@@ -48,6 +48,12 @@ struct interrupt_frame;
  * munmap and mprotect do to it.
  */
 #define VM_ANONYMOUS 0x1U
+/* The range maps the file's cached contents rather than a copy of them, so the
+   area holds one vfs_map_ref() on the node for as long as it exists. Splitting
+   an area or inheriting it across fork produces another area and another
+   reference, which is what keeps the arithmetic right without a list of
+   mappings per file. */
+#define VM_FILE_PAGES 0x2U
 
 struct vm_area {
     uint64_t start;

@@ -716,11 +716,15 @@ static struct vm_area *area_alloc(uint64_t start, uint64_t end,
     area->offset = offset;
     area->next = NULL;
     if (file) file_ref(file);
+    if ((kind & VM_FILE_PAGES) && file) vfs_map_ref(file->node);
     return area;
 }
 
 static void area_free(struct vm_area *area) {
     if (!area) return;
+    /* Before the file reference, not after: dropping the last one can free the
+       descriptor, and the node is reached through it. */
+    if ((area->kind & VM_FILE_PAGES) && area->file) vfs_map_unref(area->file->node);
     if (area->file) file_unref(area->file);
     kfree(area);
 }

@@ -49,12 +49,20 @@ int vfs_fault_in(struct vfs_node *node) {
     return 0;
 }
 
+void vfs_map_ref(struct vfs_node *node) {
+    if (node) node->mapped_refs++;
+}
+
+void vfs_map_unref(struct vfs_node *node) {
+    if (node && node->mapped_refs) node->mapped_refs--;
+}
+
 /* mmap copies the whole file into the process; keeping the kernel's copy as
    well doubles the cost of every shared library on the image. */
 void vfs_release_data(struct vfs_node *node) {
     if (!node || (node->flags & 0xFFU) != VFS_FILE) return;
     if (!node->disk_inode || !node->data || !(node->flags & VFS_OWNED_DATA)) return;
-    if (node->flags & VFS_PINNED_DATA) return;
+    if (node->mapped_refs) return;
     if (!persist_ops || !persist_ops->fetch) return;
     kfree(node->data);
     node->data = NULL;
@@ -94,11 +102,13 @@ uint64_t vfs_reclaim_file_data(struct vfs_node *node) {
     return reclaimed;
 }
 
-/* Pinned data is mapped into a process; releasing it would pull the pages out
-   from under that mapping, so it is leaked instead. */
+/* Mapped data is being read through some process's page tables; releasing it
+   would pull the pages out from under that mapping, so it is left alone. The
+   node is going away either way, which is why this is the one place the count
+   can be non-zero and the memory still has to be given up on. */
 static void free_node_data(struct vfs_node *node) {
     if (!node || !node->data || !(node->flags & VFS_OWNED_DATA)) return;
-    if (node->flags & VFS_PINNED_DATA) return;
+    if (node->mapped_refs) return;
     kfree(node->data);
 }
 

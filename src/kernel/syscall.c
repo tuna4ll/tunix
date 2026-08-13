@@ -3239,7 +3239,15 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
         }
 
         if (mapped == shareable) {
-            file->node->flags |= VFS_PINNED_DATA;
+            /* Recorded like any other mapping, which is what holds the node's
+               contents: the area's VM_FILE_PAGES reference is dropped when the
+               range is unmapped or the process goes, and the cache becomes
+               reclaimable again once the last one has left. */
+            if (process_map_area(base, base + length, page_flags, VM_FILE_PAGES,
+                                 file, offset) != 0) {
+                unmap_pages(process, base, base + mapped);
+                return -ENOMEM;
+            }
             if (mapped < length &&
                 copy_file_tail(process, file, base, mapped, length, offset,
                                page_flags, prot) != 0) {
@@ -3438,12 +3446,16 @@ static int64_t sys_shmctl(int id, int command, uint64_t user_buffer) {
 static int64_t mremap_backed(struct process *process, uint64_t address,
                              uint64_t old_length, uint64_t new_length,
                              int flags, struct file *backing,
-                             uint64_t backing_offset) {
+                             uint64_t backing_offset, uint32_t kind) {
     if (new_length < old_length) {
         unmap_pages(process, address + new_length, address + old_length);
+        /* The kind travels with the record. A mapping that shares the file's
+           cached pages holds a claim on them through its area, and rewriting
+           the record without it would let the cache be dropped from under a
+           mapping that is still there. */
         if (backing)
-            (void)process_map_area(address, address + new_length, PAGE_WRITE, 0,
-                                   backing, backing_offset);
+            (void)process_map_area(address, address + new_length, PAGE_WRITE,
+                                   kind, backing, backing_offset);
         return (int64_t)address;
     }
 
@@ -3464,7 +3476,7 @@ static int64_t mremap_backed(struct process *process, uint64_t address,
         if (ok) {
             if (backing)
                 (void)process_map_area(address, address + new_length, PAGE_WRITE,
-                                       0, backing, backing_offset);
+                                       kind, backing, backing_offset);
             return (int64_t)address;
         }
         unmap_pages(process, tail, tail + extra);
@@ -3490,8 +3502,8 @@ static int64_t mremap_backed(struct process *process, uint64_t address,
     /* The old range's pages are the object's, and the new mapping took its own
        references, so release the old ones normally. */
     unmap_pages(process, address, address + old_length);
-    (void)process_map_area(destination, destination + new_length, PAGE_WRITE, 0,
-                           backing, backing_offset);
+    (void)process_map_area(destination, destination + new_length, PAGE_WRITE,
+                           kind, backing, backing_offset);
 
     process->mmap_base = destination + new_length + 4096;
     if (process->memory) process->memory->mmap_base = process->mmap_base;
@@ -3519,11 +3531,12 @@ static int64_t sys_mremap(uint64_t address, uint64_t old_length,
     struct vm_area *area = process_find_area(address);
     struct file *backing = area ? area->file : NULL;
     uint64_t backing_offset = area ? area->offset : 0;
+    uint32_t kind = area ? area->kind : 0;
     /* Held across the whole operation: the area this came from is freed by the
        first unmap, and its reference goes with it. */
     if (backing) file_ref(backing);
     int64_t result = mremap_backed(process, address, old_length, new_length,
-                                   flags, backing, backing_offset);
+                                   flags, backing, backing_offset, kind);
     if (backing) file_unref(backing);
     return result;
 }
