@@ -36,6 +36,33 @@ void vfs_notify_meta_changed(struct vfs_node *node) {
     PERSIST(meta_changed, node);
 }
 
+/*
+ * Bytes of file content sitting in the heap that the disk could hand back.
+ *
+ * Kept as a running total rather than measured, because the budget below is
+ * consulted on every syscall and walking the tree to answer would cost more
+ * than the cache saves. Every transition into and out of the cacheable state
+ * goes through cache_charge()/cache_discharge(), which is the whole of it.
+ */
+static uint64_t cached_bytes;
+
+/* Whether this node's contents are the kind the disk can replace. */
+static int cacheable(const struct vfs_node *node) {
+    return node && (node->flags & 0xFFU) == VFS_FILE && node->disk_inode &&
+           node->data && (node->flags & VFS_OWNED_DATA);
+}
+
+static void cache_charge(const struct vfs_node *node) {
+    if (cacheable(node)) cached_bytes += node->capacity;
+}
+
+static void cache_discharge(const struct vfs_node *node) {
+    if (!cacheable(node)) return;
+    cached_bytes -= cached_bytes >= node->capacity ? node->capacity : cached_bytes;
+}
+
+uint64_t vfs_cached_bytes(void) { return cached_bytes; }
+
 /* Mount restores only the tree's shape; the first read, write, exec or mmap
    of a file comes through here to pull its contents off the disk. */
 int vfs_fault_in(struct vfs_node *node) {
@@ -46,6 +73,7 @@ int vfs_fault_in(struct vfs_node *node) {
     /* the fetch owes us length bytes; everything below dereferences them */
     if (!node->data && node->length) return -1;
     node->flags &= ~VFS_LAZY_DATA;
+    cache_charge(node);
     return 0;
 }
 
@@ -60,10 +88,10 @@ void vfs_map_unref(struct vfs_node *node) {
 /* mmap copies the whole file into the process; keeping the kernel's copy as
    well doubles the cost of every shared library on the image. */
 void vfs_release_data(struct vfs_node *node) {
-    if (!node || (node->flags & 0xFFU) != VFS_FILE) return;
-    if (!node->disk_inode || !node->data || !(node->flags & VFS_OWNED_DATA)) return;
+    if (!cacheable(node)) return;
     if (node->mapped_refs) return;
     if (!persist_ops || !persist_ops->fetch) return;
+    cache_discharge(node);
     kfree(node->data);
     node->data = NULL;
     node->capacity = 0;
@@ -86,20 +114,57 @@ void vfs_release_data(struct vfs_node *node) {
  * the nodes where that is not true: anything with no disk inode behind it, and
  * anything mapped into a process.
  */
-uint64_t vfs_reclaim_file_data(struct vfs_node *node) {
+static uint64_t reclaim_below(struct vfs_node *node, uint32_t newer_than) {
     if (!node || node->link_target) return 0;
 
     uint64_t reclaimed = 0;
-    if ((node->flags & 0xFFU) == VFS_FILE) {
+    /* A file read a moment ago is one something is working through; dropping it
+       only to read it straight back is worse than keeping it. */
+    if ((node->flags & 0xFFU) == VFS_FILE && node->atime < newer_than) {
         uint64_t held = node->capacity;
         vfs_release_data(node);
         if (!node->data) reclaimed += held;
     }
 
     for (struct vfs_node *child = node->children; child; child = child->next)
-        reclaimed += vfs_reclaim_file_data(child);
+        reclaimed += reclaim_below(child, newer_than);
 
     return reclaimed;
+}
+
+uint64_t vfs_reclaim_file_data(struct vfs_node *node) {
+    return reclaim_below(node, 0xFFFFFFFFU);
+}
+
+/*
+ * Hold the cache to its budget.
+ *
+ * Called at every syscall entry, so the common case has to be a comparison and
+ * nothing more. When it does fire it starts by dropping only what has not been
+ * touched recently, and widens the window until the cache fits or there is
+ * nothing older left -- which is as close to least-recently-used as a tree with
+ * one-second timestamps and no list can get.
+ */
+void vfs_trim_cache(uint64_t budget) {
+    /* When a pass cannot get under the budget -- everything left is mapped, or
+       was touched a moment ago -- retrying on the next syscall would walk the
+       whole tree for nothing, over and over. Wait until the cache has grown
+       appreciably again before spending another walk on it. */
+    static uint64_t retry_above;
+
+    if (!budget || cached_bytes <= budget || cached_bytes < retry_above) return;
+
+    uint32_t now = (uint32_t)time_epoch_seconds();
+    static const uint32_t ages[] = { 60U, 10U, 1U, 0U };
+    for (unsigned index = 0; index < sizeof(ages) / sizeof(ages[0]); index++) {
+        uint32_t cutoff = now > ages[index] ? now - ages[index] : 0;
+        (void)reclaim_below(vfs_root, cutoff);
+        if (cached_bytes <= budget) {
+            retry_above = 0;
+            return;
+        }
+    }
+    retry_above = cached_bytes + budget / 8;
 }
 
 /* Mapped data is being read through some process's page tables; releasing it
@@ -109,6 +174,7 @@ uint64_t vfs_reclaim_file_data(struct vfs_node *node) {
 static void free_node_data(struct vfs_node *node) {
     if (!node || !node->data || !(node->flags & VFS_OWNED_DATA)) return;
     if (node->mapped_refs) return;
+    cache_discharge(node);
     kfree(node->data);
 }
 
@@ -370,6 +436,7 @@ int vfs_align_data(struct vfs_node *node) {
     node->data = aligned;
     node->capacity = capacity;
     node->flags |= VFS_OWNED_DATA;
+    cache_charge(node);
     return 0;
 }
 
@@ -389,6 +456,7 @@ static int ensure_capacity(struct vfs_node *node, uint64_t required) {
     node->data = new_data;
     node->capacity = capacity;
     node->flags |= VFS_OWNED_DATA;
+    cache_charge(node);
     return 0;
 }
 

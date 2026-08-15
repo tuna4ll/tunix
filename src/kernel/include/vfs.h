@@ -208,6 +208,10 @@ extern struct vfs_node *vfs_root;
 /* Release the cached contents of every file under `node` that can be read back
    off the disk, returning the bytes handed back to the heap. */
 uint64_t vfs_reclaim_file_data(struct vfs_node *node);
+/* File contents currently held in the heap and replaceable from the disk. */
+uint64_t vfs_cached_bytes(void);
+/* Drop least-recently-used contents until the cache is inside `budget`. */
+void vfs_trim_cache(uint64_t budget);
 
 void vfs_init(void);
 struct vfs_node *vfs_alloc_node(const char *name, uint32_t flags);

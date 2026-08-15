@@ -4373,14 +4373,34 @@ static int64_t sys_inotify_rm_watch(int fd, int descriptor) {
     return inotify_remove_watch(file->inotify, descriptor);
 }
 
+/*
+ * How much of the machine the file cache may hold.
+ *
+ * A sixteenth of RAM, floored and capped so neither a small machine nor a large
+ * one gets a silly answer. The number that used to bound it was the heap's own
+ * ceiling -- three quarters of 2 GiB -- which on any machine with room to spare
+ * meant the cache simply grew until something else could not allocate. Reading
+ * a few hundred megabytes of files is an ordinary morning's work, and every
+ * byte of it stayed resident for the life of the boot.
+ */
+static uint64_t file_cache_budget(void) {
+    static uint64_t budget;
+    if (budget) return budget;
+    budget = pmm_usable_page_count() * PMM_PAGE_SIZE / 16ULL;
+    if (budget < 32ULL * 1024 * 1024) budget = 32ULL * 1024 * 1024;
+    if (budget > 128ULL * 1024 * 1024) budget = 128ULL * 1024 * 1024;
+    return budget;
+}
+
 static void syscall_dispatch_locked(struct syscall_frame *frame) {
     if (!frame) return;
     process_account_runtime();
     process_reap_deferred();
-    /* File contents live in the heap, and the heap never returns pages to the
-       PMM. Entering a syscall is the one moment when no kernel path is holding
-       a pointer into a file's buffer, so it is the only safe place to drop
-       them; see vfs_reclaim_file_data(). */
+    /* File contents live in the heap. Entering a syscall is the one moment when
+       no kernel path is holding a pointer into a file's buffer, so it is the
+       only safe place to drop them. The budget is the ordinary bound; the heap
+       running out is the emergency behind it, and takes everything. */
+    vfs_trim_cache(file_cache_budget());
     if (heap_under_pressure()) vfs_reclaim_file_data(vfs_root);
     struct process *caller = process_current();
     uint64_t syscall_number = frame->rax;
