@@ -209,6 +209,29 @@ uint32_t pmm_page_refcount(uint64_t physical) {
 uint64_t pmm_total_page_count(void) { return total_pages; }
 uint64_t pmm_usable_page_count(void) { return usable_pages; }
 uint64_t pmm_free_page_count(void) { return free_pages; }
+
+/*
+ * Hand a range that was reserved at boot back to the allocator.
+ *
+ * Only pages that are still exactly as reserve_page() left them go: allocated
+ * with no reference. A page with a reference is one pmm_alloc_page() handed
+ * out, and freeing that from here would put a live page on the free list.
+ */
+uint64_t pmm_release_reserved(uint64_t physical, uint64_t length) {
+    if (!length) return 0;
+    uint64_t first = physical / PMM_PAGE_SIZE;
+    uint64_t last = (physical + length + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
+    if (last > total_pages) last = total_pages;
+    uint64_t released = 0;
+    for (uint64_t page = first; page < last; page++) {
+        if (!bit_test(page) || refcounts[page]) continue;
+        bit_clear(page);
+        free_pages++;
+        released++;
+        if (page < next_hint) next_hint = page;
+    }
+    return released;
+}
 uint64_t pmm_managed_limit(void) { return total_pages * PMM_PAGE_SIZE; }
 
 int pmm_physical_range_managed(uint64_t physical, uint64_t length) {

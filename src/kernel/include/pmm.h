@@ -42,6 +42,9 @@ uint64_t pmm_total_page_count(void);
    difference between the two is address space the machine does not have. */
 uint64_t pmm_usable_page_count(void);
 uint64_t pmm_free_page_count(void);
+/* Return a range reserved at boot, once nothing points into it any more.
+   Answers with the number of pages that actually went back. */
+uint64_t pmm_release_reserved(uint64_t physical, uint64_t length);
 uint64_t pmm_managed_limit(void);
 int pmm_physical_range_managed(uint64_t physical, uint64_t length);
 int pmm_page_is_allocated(uint64_t physical);

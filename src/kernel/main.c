@@ -96,6 +96,24 @@ static uint64_t load_initramfs(const struct boot_manifest *manifest) {
     return manifest->initramfs_size;
 }
 
+/*
+ * Give the archive back once the disk can answer for what was in it.
+ *
+ * The initramfs is half a gigabyte on this image and every file in the tree
+ * points into it rather than owning a copy, so it has to stay reserved until
+ * those pointers are gone. Seeding gives each file an inode, which is what
+ * makes cutting them loose safe: the next read fetches from the disk instead.
+ * Only the first boot pays this at all -- once there is a root on the disk the
+ * archive is never loaded.
+ */
+static void release_initramfs(uint64_t initramfs_size) {
+    if (!initramfs_size) return;
+    uint64_t detached = vfs_detach_static_data(vfs_root);
+    uint64_t pages = pmm_release_reserved(INITRAMFS_PHYSICAL, initramfs_size);
+    kprintf("TUNIX: released initramfs, %u MiB from %u files\n",
+            (unsigned)(pages * 4096ULL / (1024 * 1024)), (unsigned)detached);
+}
+
 void kmain(uint32_t mmap_count, uint64_t mmap_address, uint64_t manifest_address,
            uint64_t framebuffer_info_address) {
 #if TUNIX_BOOT_TIMINGS
@@ -166,7 +184,11 @@ void kmain(uint32_t mmap_count, uint64_t mmap_address, uint64_t manifest_address
     } else {
         if (tarfs_unpack(INITRAMFS_PHYSICAL, initramfs_size) < 0)
             panic("initramfs unpack failed");
-        if (data_region_lba && ext2fs_seed_root(data_region_lba) != 0)
+        /* Only a seed that worked lets the archive go: without one the tree is
+           still the only copy of the files and still points into it. */
+        if (data_region_lba && ext2fs_seed_root(data_region_lba) == 0)
+            release_initramfs(initramfs_size);
+        else
             kprintf("TUNIX: root persistence unavailable, running from RAM\n");
     }
     /* Declared once the outcome is known: the root is the ext2 volume only if

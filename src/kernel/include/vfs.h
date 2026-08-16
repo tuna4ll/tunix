@@ -212,6 +212,9 @@ uint64_t vfs_reclaim_file_data(struct vfs_node *node);
 uint64_t vfs_cached_bytes(void);
 /* Drop least-recently-used contents until the cache is inside `budget`. */
 void vfs_trim_cache(uint64_t budget);
+/* Drop every pointer into memory the VFS does not own, for files the disk can
+   now answer for. Returns how many files were cut loose. */
+uint64_t vfs_detach_static_data(struct vfs_node *node);
 
 void vfs_init(void);
 struct vfs_node *vfs_alloc_node(const char *name, uint32_t flags);
