@@ -46,6 +46,16 @@ void framebuffer_present(void);
  */
 int framebuffer_claim_graphics(const void *owner);
 int framebuffer_release_graphics(const void *owner, int fail_if_not_owner);
+/*
+ * Switching to another virtual terminal does not take the claim away -- the
+ * owner is still running and still owns its buffers -- it only stops the owner
+ * reaching the screen and lets the text console draw again. Resuming is the
+ * other half, and the owner is expected to put its last frame back.
+ */
+void framebuffer_suspend_graphics(void);
+void framebuffer_resume_graphics(void);
+/* True while this owner both holds the display and is the one in front. */
+int framebuffer_graphics_foreground(const void *owner);
 const uint8_t *framebuffer_font(void);
 uint32_t framebuffer_font_width(void);
 uint32_t framebuffer_font_height(void);

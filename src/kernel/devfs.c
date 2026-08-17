@@ -15,6 +15,7 @@
 #include "include/tty.h"
 #include "include/usercopy.h"
 #include "include/vfs.h"
+#include "include/vt.h"
 #include "../include/tunix/input_event.h"
 
 #define EFAULT 14
@@ -35,26 +36,6 @@ struct linux_rtc_time {
     int tm_yday;
     int tm_isdst;
 };
-
-static int64_t console_read(struct vfs_node *node, uint64_t offset,
-                            size_t size, void *buffer) {
-    (void)node;
-    (void)offset;
-    if (!tty_input_ready()) return -EAGAIN;
-    return tty_read(size, buffer);
-}
-
-static int64_t console_write(struct vfs_node *node, uint64_t offset,
-                             size_t size, const void *buffer) {
-    (void)node;
-    (void)offset;
-    return tty_write(size, buffer);
-}
-
-static int console_ready(struct vfs_node *node) {
-    (void)node;
-    return tty_input_ready();
-}
 
 static int always_ready(struct vfs_node *node) {
     (void)node;
@@ -208,6 +189,33 @@ static int64_t input_event_ioctl(struct vfs_node *node, unsigned long request,
     return copy_to_user(user_argument, &info, sizeof(info)) == 0 ? 0 : -EFAULT;
 }
 
+/*
+ * The terminal devices.
+ *
+ * /dev/tty1../dev/ttyN are the virtual terminals themselves; /dev/tty0 and
+ * /dev/console both mean whichever one is active, which is where a program that
+ * wants to drive the display asks its VT questions; /dev/tty means the caller's
+ * own controlling terminal. All four go through the same operations, and which
+ * terminal is meant is carried in the node.
+ */
+static struct vfs_node *attach_terminal(struct vfs_node *dev, const char *name,
+                                        unsigned index, uint32_t major,
+                                        uint32_t minor) {
+    struct vfs_node *node = vfs_alloc_node(name, VFS_CHARDEVICE);
+    if (!node) return NULL;
+    node->mode = 0666;
+    node->data = (void *)(uintptr_t)index;
+    node->read = vt_node_read;
+    node->write = vt_node_write;
+    node->read_ready = vt_node_ready;
+    node->ioctl = vt_node_ioctl;
+    node->dev_major = major;
+    node->dev_minor = minor;
+    node->gid = DEV_GROUP_TTY;
+    if (vfs_attach(dev, node) != 0) return NULL;
+    return node;
+}
+
 static struct vfs_node *attach_device(struct vfs_node *dev, const char *name,
                                       uint32_t flags, uint32_t mode,
                                       vfs_read_fn read, vfs_write_fn write,
@@ -228,8 +236,28 @@ void devfs_init(void) {
     vfs_mount_builtin("devtmpfs", "/dev", "devtmpfs", dev);
     pty_init();
 
-    (void)attach_device(dev, "console", VFS_CHARDEVICE, 0666,
-                        console_read, console_write, console_ready);
+    /* /dev/console is the active terminal, as it is on Linux when the kernel
+       console is a VT: a service that writes to it writes to whatever the user
+       is looking at. */
+    (void)attach_terminal(dev, "console", VT_NODE_ACTIVE, DEV_MAJOR_TTYAUX,
+                          DEV_MINOR_TTYAUX_CONSOLE);
+    (void)attach_terminal(dev, "tty0", VT_NODE_ACTIVE, DEV_MAJOR_TTY, 0);
+    (void)attach_terminal(dev, "tty", VT_NODE_CURRENT, DEV_MAJOR_TTYAUX,
+                          DEV_MINOR_TTYAUX_CURRENT);
+    for (unsigned index = 1U; index <= VT_COUNT; index++) {
+        char name[8];
+        name[0] = 't'; name[1] = 't'; name[2] = 'y';
+        if (index < 10U) {
+            name[3] = (char)('0' + index);
+            name[4] = 0;
+        } else {
+            name[3] = (char)('0' + index / 10U);
+            name[4] = (char)('0' + index % 10U);
+            name[5] = 0;
+        }
+        (void)attach_terminal(dev, name, index, DEV_MAJOR_TTY, index);
+    }
+
     (void)attach_device(dev, "null", VFS_CHARDEVICE, 0666,
                         null_read, discard_write, always_ready);
     (void)attach_device(dev, "zero", VFS_CHARDEVICE, 0666,
@@ -362,11 +390,6 @@ void devfs_init(void) {
             (void)vfs_create_symlink("/dev/input/mouse0", "/dev/input/event1", 0);
         }
     }
-    (void)vfs_create_symlink("/dev/tty", "/dev/console", 0);
-    /* Where the VT ioctls are asked: on Linux /dev/tty0 is the active virtual
-       terminal, and here there is only ever the one. */
-    (void)vfs_create_symlink("/dev/tty0", "/dev/console", 0);
-    (void)vfs_create_symlink("/dev/tty1", "/dev/console", 0);
     (void)vfs_create_symlink("/dev/rtc0", "/dev/rtc", 0);
     if (sectors) (void)vfs_create_symlink("/dev/root", "/dev/sda", 0);
 }

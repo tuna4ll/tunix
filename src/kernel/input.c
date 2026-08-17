@@ -8,6 +8,7 @@
 #include "include/xhci.h"
 #include "include/tty.h"
 #include "include/usercopy.h"
+#include "include/vt.h"
 #include "../include/tunix/input_event.h"
 
 #define EAGAIN 11
@@ -54,6 +55,14 @@ struct input_record {
 
 struct input_reader {
     unsigned device_id;
+    /*
+     * The virtual terminal this descriptor belongs to: the one its opener was
+     * on. Events are only delivered while that terminal is the active one,
+     * which is what stops an X server on tty7 from reading along with the
+     * password being typed at a login on tty2. It is the job logind does on a
+     * Linux desktop, and there is nothing here to do it anywhere else.
+     */
+    unsigned vt_index;
     struct input_record events[INPUT_READER_CAPACITY];
     size_t head;
     size_t tail;
@@ -223,7 +232,9 @@ static void input_emit_at(unsigned device_id, uint64_t timestamp,
         .value = value
     };
     for (struct input_reader *reader = input_readers; reader; reader = reader->next) {
-        if (reader->device_id == device_id) reader_push(reader, &event);
+        if (reader->device_id != device_id) continue;
+        if (!vt_input_delivered_to(reader->vt_index)) continue;
+        reader_push(reader, &event);
     }
 }
 
@@ -266,8 +277,25 @@ static uint16_t extended_keycode(uint8_t scan) {
     }
 }
 
-static void keyboard_emit_key(uint16_t keycode, int released) {
-    if (!keycode || keycode >= INPUT_KEY_STATE_SIZE) return;
+/*
+ * One key, on its way to everything that cares.
+ *
+ * Returns 0 when the VT layer took the key for itself, which is how
+ * Ctrl+Alt+F2 reaches the kernel and nothing else: not the evdev readers, so a
+ * compositor holding a grab cannot keep the user from leaving it, and not the
+ * console either, so no shell ever sees the F-key that moved the screen.
+ */
+static int keyboard_emit_key(uint16_t keycode, int released) {
+    if (!keycode || keycode >= INPUT_KEY_STATE_SIZE) return 1;
+    int ctrl_held = key_down[TUNIX_KEY_LEFTCTRL] || key_down[TUNIX_KEY_RIGHTCTRL];
+    int alt_held = key_down[TUNIX_KEY_LEFTALT] || key_down[TUNIX_KEY_RIGHTALT];
+    if (vt_handle_hotkey(keycode, !released, ctrl_held, alt_held)) {
+        /* Still recorded as held or not: the key is real even though nobody
+           downstream is told about it, and the record is what stops a later
+           release from being read as a press. */
+        key_down[keycode] = released ? 0 : 1;
+        return 0;
+    }
     int32_t value;
     if (released) {
         value = 0;
@@ -282,6 +310,7 @@ static void keyboard_emit_key(uint16_t keycode, int released) {
     input_emit_at(TUNIX_INPUT_DEVICE_KEYBOARD, timestamp,
                   TUNIX_EV_KEY, keycode, value);
     input_sync_at(TUNIX_INPUT_DEVICE_KEYBOARD, timestamp);
+    return 1;
 }
 
 /* Defined with the PS/2 packet handling, which wants the same helper. */
@@ -298,7 +327,7 @@ static void mouse_emit_button(uint64_t timestamp, uint8_t changed,
  * places, which is what a user expects of it.
  */
 void input_external_key(uint16_t keycode, int released) {
-    keyboard_emit_key(keycode, released);
+    (void)keyboard_emit_key(keycode, released);
 }
 
 /* The same door for a pointer. Button state is a bitmap in the same order the
@@ -355,8 +384,10 @@ static int keyboard_handle_event_byte(uint8_t byte) {
     } else {
         keycode = scan <= TUNIX_KEY_F12 ? scan : TUNIX_KEY_RESERVED;
     }
-    keyboard_emit_key(keycode, released);
-    return 1;
+    /* When the VT layer takes the key, the console must not be given the
+       scancode either -- otherwise the F-key that switched the screen also
+       arrives at the shell that was left behind. */
+    return keyboard_emit_key(keycode, released);
 }
 
 static void mouse_emit_button(uint64_t timestamp, uint8_t changed,
@@ -476,7 +507,8 @@ void input_init(void) {
    open reader, not just an exclusive grab. */
 static int device_has_reader(unsigned device_id) {
     for (struct input_reader *reader = input_readers; reader; reader = reader->next)
-        if (reader->device_id == device_id) return 1;
+        if (reader->device_id == device_id && vt_input_delivered_to(reader->vt_index))
+            return 1;
     return 0;
 }
 
@@ -496,7 +528,7 @@ static void input_drain_controller(void) {
                hit the shell on the console underneath -- and Ctrl+C would fire a
                console SIGINT that tears the whole session down. */
             if (pass_to_tty && !device_has_reader(TUNIX_INPUT_DEVICE_KEYBOARD))
-                tty_handle_scancode(value);
+                vt_handle_scancode(value);
         }
     }
 }
@@ -602,6 +634,7 @@ struct input_reader *input_reader_open(unsigned device_id) {
     if (!reader) return NULL;
     memset(reader, 0, sizeof(*reader));
     reader->device_id = device_id;
+    reader->vt_index = vt_current_index();
 
     uint64_t flags = interrupt_save();
     reader->next = input_readers;

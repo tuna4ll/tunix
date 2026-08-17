@@ -17,11 +17,9 @@
 #define TIOCGETD    0x5424UL
 #define TIOCSETD    0x5423UL
 
-/* The console/keyboard and virtual-terminal ioctls. Tunix has exactly one
-   console and no way to switch away from it, so every question about which
-   terminal is active has the same answer -- but X servers and display managers
-   ask before they will touch the display, and refusing is what forced the
-   XORG_NO_VT and SEATD_VTBOUND=0 workarounds. */
+/* The console/keyboard and virtual-terminal ioctls. Tunix has real virtual
+   terminals -- see vt.c -- so these are answered for the terminal the caller
+   has open rather than fixed at one. */
 #define KDGKBTYPE     0x4B33UL
 #define KDSETMODE     0x4B3AUL
 #define KDGETMODE     0x4B3BUL
@@ -34,8 +32,8 @@
 #define VT_RELDISP    0x5605UL
 #define VT_ACTIVATE   0x5606UL
 #define VT_WAITACTIVE 0x5607UL
+#define VT_DISALLOCATE 0x5608UL
 
-#define TUNIX_VT_CONSOLE 1
 #define TUNIX_KB_101     0x02
 #define TUNIX_KD_TEXT     0
 #define TUNIX_KD_GRAPHICS 1
@@ -91,19 +89,40 @@ struct tunix_termios {
     uint32_t ospeed;
 };
 
-void tty_init(void);
-int tty_ioctl(unsigned long request, void *argument);
-int tty_foreground_pgid(void);
-void tty_set_foreground_pgid(int pgid);
-/* TIOCSCTTY: the session takes the console, and its leader takes the
-   foreground. Job control is only enforced against this session. */
-void tty_set_controlling_session(uint64_t sid, int pgid);
-void tty_release_controlling_session(uint64_t sid);
-int tty_input_ready(void);
-void tty_poll_inputs(void);
-void tty_handle_scancode(uint8_t scancode);
+/*
+ * One terminal's line discipline: what has been typed at it, what it has been
+ * told about echoing and signals, and the screen it prints on. One per virtual
+ * terminal, created by the VT layer.
+ */
+struct tty;
+struct terminal_screen;
+
+struct tty *tty_create(struct terminal_screen *screen);
+void tty_destroy(struct tty *tty);
+struct terminal_screen *tty_screen(const struct tty *tty);
+
+int64_t tty_read(struct tty *tty, size_t size, void *buffer);
+int64_t tty_write(struct tty *tty, size_t size, const void *buffer);
+int tty_input_ready(struct tty *tty);
+/* Everything typed at the keyboard while this terminal is the active one. */
+void tty_handle_scancode(struct tty *tty, uint8_t scancode);
+/* One byte that arrived on the serial line. */
+void tty_push_serial(struct tty *tty, uint8_t value);
+/* The modifiers the keyboard is holding are global -- there is one keyboard --
+   and this is how a change of ownership says the record is stale. */
 void tty_reset_keyboard_state(void);
-int64_t tty_read(size_t size, void *buffer);
-int64_t tty_write(size_t size, const void *buffer);
+void tty_flush_input(struct tty *tty);
+
+/* The termios and job-control ioctls. The KD and VT ones belong to the virtual
+   terminal rather than the line discipline and live in vt.c. */
+int tty_ioctl(struct tty *tty, unsigned long request, void *argument);
+
+int tty_foreground_pgid(const struct tty *tty);
+void tty_set_foreground_pgid(struct tty *tty, int pgid);
+uint64_t tty_session(const struct tty *tty);
+/* TIOCSCTTY: the session takes this terminal, and its leader takes the
+   foreground. Job control is only enforced against this session. */
+void tty_set_controlling_session(struct tty *tty, uint64_t sid, int pgid);
+void tty_release_controlling_session(struct tty *tty, uint64_t sid);
 
 #endif

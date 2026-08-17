@@ -1,6 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "include/framebuffer.h"
+#include "include/heap.h"
 #include "include/io.h"
 #include "include/input.h"
 #include "include/kstring.h"
@@ -8,53 +8,61 @@
 #include "include/signal.h"
 #include "include/tty.h"
 #include "include/terminal.h"
+#include "include/vt.h"
 
 #define EINTR 4
+#define EAGAIN 11
 #define TTY_INPUT_CAPACITY 1024
+#define TTY_CANONICAL_CAPACITY 1024
 #define ANSI_PARAM_MAX 16
 
 extern void serial_write_char(char c);
 
-static struct tunix_termios console_termios;
-static int console_foreground_pgid;
-/* The session that has claimed the console as its controlling terminal, or 0
-   while nobody has. Job control only applies inside that session: a process
-   from anywhere else -- login before it has claimed the terminal, a service
-   reading the console -- is simply allowed to read. */
-static uint64_t console_session;
-/* VT_AUTO with no signals: nothing ever switches away, so the release and
-   acquire signals a VT_PROCESS caller registers can never be raised. */
-static struct tunix_vt_mode console_vt_mode;
-static int console_kd_mode = TUNIX_KD_TEXT;
-static int console_kb_mode = TUNIX_K_XLATE;
-/* An address, used only as an identity for the framebuffer arbitration. */
-static const char console_graphics_owner;
-static char canonical_buffer[1024];
-static size_t canonical_length;
-static size_t canonical_offset;
-static uint8_t input_buffer[TTY_INPUT_CAPACITY];
-static size_t input_head;
-static size_t input_tail;
-static size_t input_count;
-static volatile int input_interrupted;
+/*
+ * One virtual terminal's line discipline and output parser. Everything here is
+ * per-terminal: what has been typed at it, what it is echoing, where its cursor
+ * is. The keyboard itself is not -- there is one of those, and the state it
+ * holds (which modifiers are down) is the file-scope block further down.
+ */
+struct tty {
+    struct terminal_screen *screen;
+    struct tunix_termios termios;
+    int foreground_pgid;
+    /* The session that has claimed this terminal as its controlling terminal,
+       or 0 while nobody has. Job control only applies inside that session: a
+       process from anywhere else -- login before it has claimed the terminal, a
+       service writing to a console -- is simply allowed to read. */
+    uint64_t session;
+
+    uint8_t input_buffer[TTY_INPUT_CAPACITY];
+    size_t input_head;
+    size_t input_tail;
+    size_t input_count;
+    volatile int input_interrupted;
+
+    char canonical_buffer[TTY_CANONICAL_CAPACITY];
+    size_t canonical_length;
+    size_t canonical_offset;
+
+    int ansi_state;
+    unsigned ansi_params[ANSI_PARAM_MAX];
+    unsigned ansi_param_count;
+    unsigned ansi_current;
+    int ansi_have_current;
+    int ansi_private;
+    int saved_row;
+    int saved_col;
+    uint32_t utf8_codepoint;
+    uint32_t utf8_minimum;
+    unsigned utf8_remaining;
+};
+
 static int shift_down;
 static int ctrl_down;
 static int alt_down;
 static int altgr_down;
 static int caps_lock;
 static int extended_prefix;
-
-static int ansi_state;
-static unsigned ansi_params[ANSI_PARAM_MAX];
-static unsigned ansi_param_count;
-static unsigned ansi_current;
-static int ansi_have_current;
-static int ansi_private;
-static int saved_row;
-static int saved_col;
-static uint32_t utf8_codepoint;
-static uint32_t utf8_minimum;
-static unsigned utf8_remaining;
 
 static const char default_keymap[128] = {
     [0x02]='1',[0x03]='2',[0x04]='3',[0x05]='4',[0x06]='5',[0x07]='6',[0x08]='7',[0x09]='8',[0x0A]='9',[0x0B]='0',
@@ -72,9 +80,12 @@ static const char default_shift_keymap[128] = {
     [0x2F]='V',[0x30]='B',[0x31]='N',[0x32]='M',[0x33]='<',[0x34]='>',[0x35]='?',[0x39]=' '
 };
 
+/* One keyboard, one layout: loadkeys(1) changes it for every terminal at once,
+   which is what a user of a machine with several of them expects. */
 static struct tunix_keymap active_keymap;
+static int keymap_loaded;
 
-static int input_push(uint8_t value);
+static int input_push(struct tty *tty, uint8_t value);
 
 static int keymap_is_letter(unsigned keycode) {
     return (active_keymap.letter_bitmap[keycode >> 3] &
@@ -112,6 +123,7 @@ static void keymap_load_default(void) {
         if (default_keymap[keycode] >= 'a' && default_keymap[keycode] <= 'z')
             keymap_mark_letter(keycode);
     }
+    keymap_loaded = 1;
 }
 
 static int keymap_valid_codepoint(uint32_t value) {
@@ -136,7 +148,7 @@ static int keymap_validate(const struct tunix_keymap *map) {
     return 0;
 }
 
-static int input_push_codepoint(uint32_t value) {
+static int input_push_codepoint(struct tty *tty, uint32_t value) {
     uint8_t encoded[4];
     unsigned count;
     if (value <= 0x7FU) {
@@ -158,8 +170,8 @@ static int input_push_codepoint(uint32_t value) {
         encoded[3] = (uint8_t)(0x80U | (value & 0x3FU));
         count = 4;
     }
-    if (input_count + count > TTY_INPUT_CAPACITY) return -1;
-    for (unsigned i = 0; i < count; i++) (void)input_push(encoded[i]);
+    if (tty->input_count + count > TTY_INPUT_CAPACITY) return -1;
+    for (unsigned i = 0; i < count; i++) (void)input_push(tty, encoded[i]);
     return 0;
 }
 
@@ -184,255 +196,267 @@ static uint32_t keymap_lookup(unsigned keycode, unsigned level, int *direct_ctrl
     }
 }
 
-static unsigned ansi_param(unsigned index, unsigned default_value) {
-    if (index >= ansi_param_count || ansi_params[index] == 0) return default_value;
-    return ansi_params[index];
+static unsigned ansi_param(struct tty *tty, unsigned index, unsigned default_value) {
+    if (index >= tty->ansi_param_count || tty->ansi_params[index] == 0)
+        return default_value;
+    return tty->ansi_params[index];
 }
 
-static void ansi_finish_param(void) {
-    if (ansi_param_count < ANSI_PARAM_MAX) {
-        ansi_params[ansi_param_count++] = ansi_have_current ? ansi_current : 0;
+static void ansi_finish_param(struct tty *tty) {
+    if (tty->ansi_param_count < ANSI_PARAM_MAX) {
+        tty->ansi_params[tty->ansi_param_count++] =
+            tty->ansi_have_current ? tty->ansi_current : 0;
     }
-    ansi_current = 0;
-    ansi_have_current = 0;
+    tty->ansi_current = 0;
+    tty->ansi_have_current = 0;
 }
 
-static void terminal_ansi_final(char command) {
-    if (ansi_have_current || ansi_param_count == 0) ansi_finish_param();
+static void terminal_ansi_final(struct tty *tty, char command) {
+    struct terminal_screen *screen = tty->screen;
+    if (tty->ansi_have_current || tty->ansi_param_count == 0) ansi_finish_param(tty);
     switch (command) {
         case 'm':
-            terminal_set_sgr_sequence(ansi_params, ansi_param_count);
+            terminal_set_sgr_sequence(screen, tty->ansi_params, tty->ansi_param_count);
             break;
-        case 'A': terminal_cursor_move(-(int)ansi_param(0, 1), 0); break;
-        case 'B': terminal_cursor_move((int)ansi_param(0, 1), 0); break;
-        case 'C': terminal_cursor_move(0, (int)ansi_param(0, 1)); break;
-        case 'D': terminal_cursor_move(0, -(int)ansi_param(0, 1)); break;
-        case 'E': { int row, col; terminal_cursor_get(&row, &col); (void)col; terminal_cursor_set(row + (int)ansi_param(0, 1), 0); break; }
-        case 'F': { int row, col; terminal_cursor_get(&row, &col); (void)col; terminal_cursor_set(row - (int)ansi_param(0, 1), 0); break; }
-        case 'G': { int row, col; terminal_cursor_get(&row, &col); (void)col; terminal_cursor_set(row, (int)ansi_param(0, 1) - 1); break; }
+        case 'A': terminal_cursor_move(screen, -(int)ansi_param(tty, 0, 1), 0); break;
+        case 'B': terminal_cursor_move(screen, (int)ansi_param(tty, 0, 1), 0); break;
+        case 'C': terminal_cursor_move(screen, 0, (int)ansi_param(tty, 0, 1)); break;
+        case 'D': terminal_cursor_move(screen, 0, -(int)ansi_param(tty, 0, 1)); break;
+        case 'E': { int row, col; terminal_cursor_get(screen, &row, &col); (void)col; terminal_cursor_set(screen, row + (int)ansi_param(tty, 0, 1), 0); break; }
+        case 'F': { int row, col; terminal_cursor_get(screen, &row, &col); (void)col; terminal_cursor_set(screen, row - (int)ansi_param(tty, 0, 1), 0); break; }
+        case 'G': { int row, col; terminal_cursor_get(screen, &row, &col); (void)col; terminal_cursor_set(screen, row, (int)ansi_param(tty, 0, 1) - 1); break; }
         case 'H':
-        case 'f': terminal_cursor_set((int)ansi_param(0, 1) - 1, (int)ansi_param(1, 1) - 1); break;
-        case 'J': terminal_erase_display(ansi_param(0, 0)); break;
-        case 'K': terminal_erase_line(ansi_param(0, 0)); break;
-        case 'L': terminal_insert_lines(ansi_param(0, 1)); break;
-        case 'M': terminal_delete_lines(ansi_param(0, 1)); break;
-        case '@': terminal_insert_chars(ansi_param(0, 1)); break;
-        case 'P': terminal_delete_chars(ansi_param(0, 1)); break;
-        case 'X': terminal_erase_chars(ansi_param(0, 1)); break;
-        case 'S': terminal_scroll_up(ansi_param(0, 1)); break;
-        case 'T': terminal_scroll_down(ansi_param(0, 1)); break;
-        case 'r': terminal_set_scroll_region((int)ansi_param(0, 1),
-                                             (int)ansi_param(1, 0)); break;
-        case 's': terminal_cursor_get(&saved_row, &saved_col); break;
-        case 'u': terminal_cursor_set(saved_row, saved_col); break;
-        case 'a': terminal_cursor_move(0, (int)ansi_param(0, 1)); break;
-        case 'd': { int row, col; terminal_cursor_get(&row, &col); (void)row; terminal_cursor_set((int)ansi_param(0, 1) - 1, col); break; }
-        case 'e': terminal_cursor_move((int)ansi_param(0, 1), 0); break;
+        case 'f': terminal_cursor_set(screen, (int)ansi_param(tty, 0, 1) - 1,
+                                      (int)ansi_param(tty, 1, 1) - 1); break;
+        case 'J': terminal_erase_display(screen, ansi_param(tty, 0, 0)); break;
+        case 'K': terminal_erase_line(screen, ansi_param(tty, 0, 0)); break;
+        case 'L': terminal_insert_lines(screen, ansi_param(tty, 0, 1)); break;
+        case 'M': terminal_delete_lines(screen, ansi_param(tty, 0, 1)); break;
+        case '@': terminal_insert_chars(screen, ansi_param(tty, 0, 1)); break;
+        case 'P': terminal_delete_chars(screen, ansi_param(tty, 0, 1)); break;
+        case 'X': terminal_erase_chars(screen, ansi_param(tty, 0, 1)); break;
+        case 'S': terminal_scroll_up(screen, ansi_param(tty, 0, 1)); break;
+        case 'T': terminal_scroll_down(screen, ansi_param(tty, 0, 1)); break;
+        case 'r': terminal_set_scroll_region(screen, (int)ansi_param(tty, 0, 1),
+                                             (int)ansi_param(tty, 1, 0)); break;
+        case 's': terminal_cursor_get(screen, &tty->saved_row, &tty->saved_col); break;
+        case 'u': terminal_cursor_set(screen, tty->saved_row, tty->saved_col); break;
+        case 'a': terminal_cursor_move(screen, 0, (int)ansi_param(tty, 0, 1)); break;
+        case 'd': { int row, col; terminal_cursor_get(screen, &row, &col); (void)row; terminal_cursor_set(screen, (int)ansi_param(tty, 0, 1) - 1, col); break; }
+        case 'e': terminal_cursor_move(screen, (int)ansi_param(tty, 0, 1), 0); break;
         case 'h':
         case 'l':
-            if (ansi_private) {
+            if (tty->ansi_private) {
                 int enabled = command == 'h';
-                for (unsigned i = 0; i < ansi_param_count; i++) {
-                    if (ansi_params[i] == 25U) terminal_set_cursor_visible(enabled);
-                    else if (ansi_params[i] == 47U || ansi_params[i] == 1047U ||
-                             ansi_params[i] == 1049U) terminal_set_alternate_screen(enabled);
+                for (unsigned i = 0; i < tty->ansi_param_count; i++) {
+                    if (tty->ansi_params[i] == 25U)
+                        terminal_set_cursor_visible(screen, enabled);
+                    else if (tty->ansi_params[i] == 47U || tty->ansi_params[i] == 1047U ||
+                             tty->ansi_params[i] == 1049U)
+                        terminal_set_alternate_screen(screen, enabled);
                 }
             }
             break;
         default: break;
     }
-    ansi_state = 0;
-    ansi_param_count = 0;
-    ansi_current = 0;
-    ansi_have_current = 0;
-    ansi_private = 0;
+    tty->ansi_state = 0;
+    tty->ansi_param_count = 0;
+    tty->ansi_current = 0;
+    tty->ansi_have_current = 0;
+    tty->ansi_private = 0;
 }
 
-static void ansi_begin_csi(void) {
-    ansi_state = 2;
-    ansi_param_count = 0;
-    ansi_current = 0;
-    ansi_have_current = 0;
-    ansi_private = 0;
+static void ansi_begin_csi(struct tty *tty) {
+    tty->ansi_state = 2;
+    tty->ansi_param_count = 0;
+    tty->ansi_current = 0;
+    tty->ansi_have_current = 0;
+    tty->ansi_private = 0;
 }
 
-static void utf8_reset(void) {
-    utf8_codepoint = 0;
-    utf8_minimum = 0;
-    utf8_remaining = 0;
+static void utf8_reset(struct tty *tty) {
+    tty->utf8_codepoint = 0;
+    tty->utf8_minimum = 0;
+    tty->utf8_remaining = 0;
 }
 
-static void utf8_replacement(void) {
-    utf8_reset();
-    terminal_put_codepoint(UINT32_C(0xFFFD));
+static void utf8_replacement(struct tty *tty) {
+    utf8_reset(tty);
+    terminal_put_codepoint(tty->screen, UINT32_C(0xFFFD));
 }
 
-static void terminal_feed_text_byte(uint8_t byte) {
-    if (utf8_remaining) {
+static void terminal_feed_text_byte(struct tty *tty, uint8_t byte) {
+    if (tty->utf8_remaining) {
         if ((byte & 0xC0U) != 0x80U) {
-            utf8_replacement();
-            terminal_feed_text_byte(byte);
+            utf8_replacement(tty);
+            terminal_feed_text_byte(tty, byte);
             return;
         }
-        utf8_codepoint = (utf8_codepoint << 6) | (uint32_t)(byte & 0x3FU);
-        utf8_remaining--;
-        if (!utf8_remaining) {
-            uint32_t codepoint = utf8_codepoint;
-            uint32_t minimum = utf8_minimum;
-            utf8_reset();
+        tty->utf8_codepoint = (tty->utf8_codepoint << 6) | (uint32_t)(byte & 0x3FU);
+        tty->utf8_remaining--;
+        if (!tty->utf8_remaining) {
+            uint32_t codepoint = tty->utf8_codepoint;
+            uint32_t minimum = tty->utf8_minimum;
+            utf8_reset(tty);
             if (codepoint < minimum || codepoint > UINT32_C(0x10FFFF) ||
                 (codepoint >= UINT32_C(0xD800) && codepoint <= UINT32_C(0xDFFF)))
-                terminal_put_codepoint(UINT32_C(0xFFFD));
+                terminal_put_codepoint(tty->screen, UINT32_C(0xFFFD));
             else
-                terminal_put_codepoint(codepoint);
+                terminal_put_codepoint(tty->screen, codepoint);
         }
         return;
     }
 
     if (byte < 0x80U) {
-        terminal_put_codepoint(byte);
+        terminal_put_codepoint(tty->screen, byte);
     } else if (byte >= 0xC2U && byte <= 0xDFU) {
-        utf8_codepoint = byte & 0x1FU;
-        utf8_minimum = 0x80U;
-        utf8_remaining = 1;
+        tty->utf8_codepoint = byte & 0x1FU;
+        tty->utf8_minimum = 0x80U;
+        tty->utf8_remaining = 1;
     } else if (byte >= 0xE0U && byte <= 0xEFU) {
-        utf8_codepoint = byte & 0x0FU;
-        utf8_minimum = 0x800U;
-        utf8_remaining = 2;
+        tty->utf8_codepoint = byte & 0x0FU;
+        tty->utf8_minimum = 0x800U;
+        tty->utf8_remaining = 2;
     } else if (byte >= 0xF0U && byte <= 0xF4U) {
-        utf8_codepoint = byte & 0x07U;
-        utf8_minimum = UINT32_C(0x10000);
-        utf8_remaining = 3;
+        tty->utf8_codepoint = byte & 0x07U;
+        tty->utf8_minimum = UINT32_C(0x10000);
+        tty->utf8_remaining = 3;
     } else {
-        terminal_put_codepoint(UINT32_C(0xFFFD));
+        terminal_put_codepoint(tty->screen, UINT32_C(0xFFFD));
     }
 }
 
-static void terminal_feed(char c) {
-    if (ansi_state == 0) {
+static void terminal_feed(struct tty *tty, char c) {
+    struct terminal_screen *screen = tty->screen;
+    if (tty->ansi_state == 0) {
         uint8_t byte = (uint8_t)c;
         if (byte == 0x1BU) {
-            if (utf8_remaining) utf8_replacement();
-            ansi_state = 1;
+            if (tty->utf8_remaining) utf8_replacement(tty);
+            tty->ansi_state = 1;
             return;
         }
-        terminal_feed_text_byte(byte);
+        terminal_feed_text_byte(tty, byte);
         return;
     }
-    if (ansi_state == 1) {
+    if (tty->ansi_state == 1) {
         if (c == '[') {
-            ansi_begin_csi();
+            ansi_begin_csi(tty);
             return;
         }
         if (c == ']') {
-            ansi_state = 3;
+            tty->ansi_state = 3;
             return;
         }
         if (c == '7') {
-            terminal_cursor_get(&saved_row, &saved_col);
-            ansi_state = 0;
+            terminal_cursor_get(screen, &tty->saved_row, &tty->saved_col);
+            tty->ansi_state = 0;
             return;
         }
         if (c == '8') {
-            terminal_cursor_set(saved_row, saved_col);
-            ansi_state = 0;
+            terminal_cursor_set(screen, tty->saved_row, tty->saved_col);
+            tty->ansi_state = 0;
             return;
         }
         if (c == 'c') {
-            utf8_reset();
-            terminal_set_alternate_screen(0);
-            terminal_set_cursor_visible(1);
-            terminal_set_sgr(0);
-            terminal_set_scroll_region(0, 0);
-            terminal_clear();
-            ansi_state = 0;
+            utf8_reset(tty);
+            terminal_set_alternate_screen(screen, 0);
+            terminal_set_cursor_visible(screen, 1);
+            terminal_set_sgr(screen, 0);
+            terminal_set_scroll_region(screen, 0, 0);
+            terminal_clear(screen);
+            tty->ansi_state = 0;
             return;
         }
         if (c == 'E') {
-            terminal_put_char('\n');
-            ansi_state = 0;
+            terminal_put_char(screen, '\n');
+            tty->ansi_state = 0;
             return;
         }
         if (c == 'D') {
             int row, col;
-            terminal_cursor_get(&row, &col);
-            (void)row;
-            terminal_put_char('\n');
-            terminal_cursor_set(row + 1, col);
-            ansi_state = 0;
+            terminal_cursor_get(screen, &row, &col);
+            terminal_put_char(screen, '\n');
+            terminal_cursor_set(screen, row + 1, col);
+            tty->ansi_state = 0;
             return;
         }
         if (c == 'M') {
-            terminal_cursor_move(-1, 0);
-            ansi_state = 0;
+            terminal_cursor_move(screen, -1, 0);
+            tty->ansi_state = 0;
             return;
         }
         if (c == '(' || c == ')' || c == '*' || c == '+' || c == '-' ||
             c == '.' || c == '/' || c == '#' || c == '%') {
-            ansi_state = 5;
+            tty->ansi_state = 5;
             return;
         }
-        ansi_state = 0;
+        tty->ansi_state = 0;
         return;
     }
-    if (ansi_state == 3) {
-        if ((unsigned char)c == 0x07U) ansi_state = 0;
-        else if ((unsigned char)c == 0x1BU) ansi_state = 4;
+    if (tty->ansi_state == 3) {
+        if ((unsigned char)c == 0x07U) tty->ansi_state = 0;
+        else if ((unsigned char)c == 0x1BU) tty->ansi_state = 4;
         return;
     }
-    if (ansi_state == 4) {
-        ansi_state = c == '\\' ? 0 : 3;
+    if (tty->ansi_state == 4) {
+        tty->ansi_state = c == '\\' ? 0 : 3;
         return;
     }
-    if (ansi_state == 5) {
-        ansi_state = 0;
+    if (tty->ansi_state == 5) {
+        tty->ansi_state = 0;
         return;
     }
     if (c >= '0' && c <= '9') {
-        ansi_current = ansi_current * 10U + (unsigned)(c - '0');
-        ansi_have_current = 1;
+        tty->ansi_current = tty->ansi_current * 10U + (unsigned)(c - '0');
+        tty->ansi_have_current = 1;
         return;
     }
     if (c == ';' || c == ':') {
-        ansi_finish_param();
+        ansi_finish_param(tty);
         return;
     }
-    if (c == '?' && ansi_param_count == 0 && !ansi_have_current) {
-        ansi_private = 1;
+    if (c == '?' && tty->ansi_param_count == 0 && !tty->ansi_have_current) {
+        tty->ansi_private = 1;
         return;
     }
     if (c == '>') return;
-    terminal_ansi_final(c);
+    terminal_ansi_final(tty, c);
 }
 
-static void emit_char(char c) {
+/*
+ * Everything written to any terminal is mirrored to the serial line. On a
+ * machine with several of them that interleaves, but the serial log is the only
+ * record of a terminal nobody is looking at, and losing it would mean losing
+ * the output of every service that is not on the terminal in front of you.
+ */
+static void emit_char(struct tty *tty, char c) {
     serial_write_char(c);
-    terminal_feed(c);
+    terminal_feed(tty, c);
 }
 
-int64_t tty_write(size_t size, const void *buffer) {
-    if (!buffer) return -1;
+int64_t tty_write(struct tty *tty, size_t size, const void *buffer) {
+    if (!tty || !buffer) return -1;
     const char *bytes = (const char *)buffer;
-    for (size_t i = 0; i < size; i++) emit_char(bytes[i]);
+    for (size_t i = 0; i < size; i++) emit_char(tty, bytes[i]);
     return (int64_t)size;
 }
 
-static int signal_input_character(uint8_t value) {
-    if (!(console_termios.lflag & TTY_ISIG) || console_foreground_pgid <= 0)
+static int signal_input_character(struct tty *tty, uint8_t value) {
+    if (!(tty->termios.lflag & TTY_ISIG) || tty->foreground_pgid <= 0)
         return 0;
 
     int signal_number = 0;
     const char *echo = NULL;
     size_t echo_length = 0;
-    if (value == console_termios.cc[TTY_VINTR]) {
+    if (value == tty->termios.cc[TTY_VINTR]) {
         signal_number = SIGINT;
         echo = "^C\n";
         echo_length = 3;
-    } else if (value == console_termios.cc[TTY_VQUIT]) {
+    } else if (value == tty->termios.cc[TTY_VQUIT]) {
         signal_number = SIGQUIT;
         echo = "^\\\n";
         echo_length = 3;
-    } else if (value == console_termios.cc[TTY_VSUSP]) {
+    } else if (value == tty->termios.cc[TTY_VSUSP]) {
         signal_number = SIGTSTP;
         echo = "^Z\n";
         echo_length = 3;
@@ -440,43 +464,56 @@ static int signal_input_character(uint8_t value) {
         return 0;
     }
 
-    canonical_length = canonical_offset = 0;
-    input_head = input_tail = input_count = 0;
-    input_interrupted = 1;
-    if ((console_termios.lflag & TTY_ECHO) && echo)
-        (void)tty_write(echo_length, echo);
-    (void)process_send_signal(-(int64_t)console_foreground_pgid, signal_number);
+    tty->canonical_length = tty->canonical_offset = 0;
+    tty->input_head = tty->input_tail = tty->input_count = 0;
+    tty->input_interrupted = 1;
+    if ((tty->termios.lflag & TTY_ECHO) && echo)
+        (void)tty_write(tty, echo_length, echo);
+    (void)process_send_signal(-(int64_t)tty->foreground_pgid, signal_number);
     return 1;
 }
 
-static int input_push(uint8_t value) {
-    if (signal_input_character(value)) return 0;
-    if (input_count == TTY_INPUT_CAPACITY) return -1;
-    input_buffer[input_tail] = value;
-    input_tail = (input_tail + 1U) % TTY_INPUT_CAPACITY;
-    input_count++;
+static int input_push(struct tty *tty, uint8_t value) {
+    /* Either way something has happened that a blocked reader cares about: a
+       character to take, or a signal that ends its read. Waking is safe from
+       the keyboard interrupt because everything here runs under the kernel
+       lock with interrupts off, so no reader can be between deciding it has
+       nothing to do and going to sleep. */
+    if (signal_input_character(tty, value)) {
+        vt_input_arrived();
+        return 0;
+    }
+    if (tty->input_count == TTY_INPUT_CAPACITY) return -1;
+    tty->input_buffer[tty->input_tail] = value;
+    tty->input_tail = (tty->input_tail + 1U) % TTY_INPUT_CAPACITY;
+    tty->input_count++;
+    vt_input_arrived();
     return 0;
 }
 
-static void input_push_text(const char *text) {
+static void input_push_text(struct tty *tty, const char *text) {
     while (*text) {
-        if (input_push((uint8_t)*text++) != 0) break;
+        if (input_push(tty, (uint8_t)*text++) != 0) break;
     }
 }
 
-static int input_pop(void) {
-    if (input_count == 0) return -1;
-    int value = input_buffer[input_head];
-    input_head = (input_head + 1U) % TTY_INPUT_CAPACITY;
-    input_count--;
+static int input_pop(struct tty *tty) {
+    if (tty->input_count == 0) return -1;
+    int value = tty->input_buffer[tty->input_head];
+    tty->input_head = (tty->input_head + 1U) % TTY_INPUT_CAPACITY;
+    tty->input_count--;
     return value;
 }
 
-static int serial_try_read(void) {
-    if (inb(0x3FD) & 1U) return inb(0x3F8);
-    return -1;
+void tty_push_serial(struct tty *tty, uint8_t value) {
+    if (tty) (void)input_push(tty, value);
 }
 
+void tty_flush_input(struct tty *tty) {
+    if (!tty) return;
+    tty->canonical_length = tty->canonical_offset = 0;
+    tty->input_head = tty->input_tail = tty->input_count = 0;
+}
 
 void tty_reset_keyboard_state(void) {
     shift_down = 0;
@@ -486,7 +523,8 @@ void tty_reset_keyboard_state(void) {
     extended_prefix = 0;
 }
 
-void tty_handle_scancode(uint8_t code) {
+void tty_handle_scancode(struct tty *tty, uint8_t code) {
+    if (!tty) return;
     if (code == 0xE0U) {
         extended_prefix = 1;
         return;
@@ -509,16 +547,16 @@ void tty_handle_scancode(uint8_t code) {
         }
         if (released) return;
         switch (code) {
-            case 0x48U: input_push_text("\x1b[A"); return;
-            case 0x50U: input_push_text("\x1b[B"); return;
-            case 0x4DU: input_push_text("\x1b[C"); return;
-            case 0x4BU: input_push_text("\x1b[D"); return;
-            case 0x47U: input_push_text("\x1b[H"); return;
-            case 0x4FU: input_push_text("\x1b[F"); return;
-            case 0x52U: input_push_text("\x1b[2~"); return;
-            case 0x53U: input_push_text("\x1b[3~"); return;
-            case 0x49U: input_push_text("\x1b[5~"); return;
-            case 0x51U: input_push_text("\x1b[6~"); return;
+            case 0x48U: input_push_text(tty, "\x1b[A"); return;
+            case 0x50U: input_push_text(tty, "\x1b[B"); return;
+            case 0x4DU: input_push_text(tty, "\x1b[C"); return;
+            case 0x4BU: input_push_text(tty, "\x1b[D"); return;
+            case 0x47U: input_push_text(tty, "\x1b[H"); return;
+            case 0x4FU: input_push_text(tty, "\x1b[F"); return;
+            case 0x52U: input_push_text(tty, "\x1b[2~"); return;
+            case 0x53U: input_push_text(tty, "\x1b[3~"); return;
+            case 0x49U: input_push_text(tty, "\x1b[5~"); return;
+            case 0x51U: input_push_text(tty, "\x1b[6~"); return;
             default: return;
         }
     }
@@ -529,23 +567,23 @@ void tty_handle_scancode(uint8_t code) {
     if (code == 0x38U) { alt_down = 1; return; }
     if (code == 0xB8U) { alt_down = 0; return; }
     if (code == 0x3AU) { caps_lock = !caps_lock; return; }
-    if (code == 0x01U) { (void)input_push(0x1BU); return; }
+    if (code == 0x01U) { (void)input_push(tty, 0x1BU); return; }
     if (code & 0x80U || code >= 128U) return;
-    if (code == 0x0EU) { (void)input_push(127U); return; }
-    if (code == 0x0FU && shift_down) { input_push_text("\x1b[Z"); return; }
+    if (code == 0x0EU) { (void)input_push(tty, 127U); return; }
+    if (code == 0x0FU && shift_down) { input_push_text(tty, "\x1b[Z"); return; }
     switch (code) {
-        case 0x3BU: input_push_text("\x1bOP"); return;
-        case 0x3CU: input_push_text("\x1bOQ"); return;
-        case 0x3DU: input_push_text("\x1bOR"); return;
-        case 0x3EU: input_push_text("\x1bOS"); return;
-        case 0x3FU: input_push_text("\x1b[15~"); return;
-        case 0x40U: input_push_text("\x1b[17~"); return;
-        case 0x41U: input_push_text("\x1b[18~"); return;
-        case 0x42U: input_push_text("\x1b[19~"); return;
-        case 0x43U: input_push_text("\x1b[20~"); return;
-        case 0x44U: input_push_text("\x1b[21~"); return;
-        case 0x57U: input_push_text("\x1b[23~"); return;
-        case 0x58U: input_push_text("\x1b[24~"); return;
+        case 0x3BU: input_push_text(tty, "\x1bOP"); return;
+        case 0x3CU: input_push_text(tty, "\x1bOQ"); return;
+        case 0x3DU: input_push_text(tty, "\x1bOR"); return;
+        case 0x3EU: input_push_text(tty, "\x1bOS"); return;
+        case 0x3FU: input_push_text(tty, "\x1b[15~"); return;
+        case 0x40U: input_push_text(tty, "\x1b[17~"); return;
+        case 0x41U: input_push_text(tty, "\x1b[18~"); return;
+        case 0x42U: input_push_text(tty, "\x1b[19~"); return;
+        case 0x43U: input_push_text(tty, "\x1b[20~"); return;
+        case 0x44U: input_push_text(tty, "\x1b[21~"); return;
+        case 0x57U: input_push_text(tty, "\x1b[23~"); return;
+        case 0x58U: input_push_text(tty, "\x1b[24~"); return;
         default: break;
     }
     unsigned level = (shift_down ? TUNIX_KEYMAP_LEVEL_SHIFT : 0U) |
@@ -562,184 +600,183 @@ void tty_handle_scancode(uint8_t code) {
         else if (value >= '@' && value <= '_') value &= 0x1FU;
         else if (value == '?') value = 0x7FU;
     }
-    if (alt_down && input_push(0x1BU) != 0) return;
-    (void)input_push_codepoint(value);
+    if (alt_down && input_push(tty, 0x1BU) != 0) return;
+    (void)input_push_codepoint(tty, value);
 }
 
-void tty_poll_inputs(void) {
-    for (;;) {
-        int value = serial_try_read();
-        if (value < 0) break;
-        if (input_push((uint8_t)value) != 0) break;
+/*
+ * Take one character from the queue.
+ *
+ * Nothing waits here. A terminal only ever has characters put in it by the
+ * keyboard or the serial line, and both do that from an interrupt; the read
+ * path is only entered once tty_input_ready() has said there is something to
+ * take, and a terminal that is not the active one is never given anything at
+ * all. Spinning would hold the kernel lock against the very interrupt that
+ * would end the spin.
+ */
+static int read_input_char(struct tty *tty) {
+    vt_poll_input();
+    if (tty->input_interrupted) {
+        tty->input_interrupted = 0;
+        return -EINTR;
     }
-    input_poll();
+    int value = input_pop(tty);
+    return value >= 0 ? value : -EAGAIN;
 }
 
-static int read_input_char(void) {
-    for (;;) {
-        tty_poll_inputs();
-        if (input_interrupted) {
-            input_interrupted = 0;
-            return -EINTR;
-        }
-        int value = input_pop();
-        if (value >= 0) return value;
-        __asm__ volatile("pause");
-    }
-}
-
-static int canonical_input_complete(void) {
-    if (canonical_offset < canonical_length) return 1;
-    for (size_t i = 0, at = input_head; i < input_count; i++) {
-        uint8_t value = input_buffer[at];
+static int canonical_input_complete(struct tty *tty) {
+    if (tty->canonical_offset < tty->canonical_length) return 1;
+    for (size_t i = 0, at = tty->input_head; i < tty->input_count; i++) {
+        uint8_t value = tty->input_buffer[at];
         if (value == '\n' || value == '\r' ||
-            value == console_termios.cc[TTY_VEOF]) return 1;
+            value == tty->termios.cc[TTY_VEOF]) return 1;
         at = (at + 1U) % TTY_INPUT_CAPACITY;
     }
-    return 0;
+    /* A queue that has filled without a delimiter has to be handed over as it
+       is; the alternative is a terminal that never answers again. */
+    return tty->input_count >= TTY_CANONICAL_CAPACITY;
 }
 
-int tty_input_ready(void) {
-    tty_poll_inputs();
-    if (!(console_termios.lflag & TTY_ICANON)) return input_count != 0;
-    return canonical_input_complete();
+int tty_input_ready(struct tty *tty) {
+    if (!tty) return 0;
+    vt_poll_input();
+    if (tty->input_interrupted) return 1;
+    if (!(tty->termios.lflag & TTY_ICANON)) return tty->input_count != 0;
+    return canonical_input_complete(tty);
 }
 
-static int refill_canonical(void) {
-    canonical_length = 0;
-    canonical_offset = 0;
-    while (canonical_length < sizeof(canonical_buffer)) {
-        int value = read_input_char();
+static int refill_canonical(struct tty *tty) {
+    tty->canonical_length = 0;
+    tty->canonical_offset = 0;
+    int saw_end_of_file = 0;
+    int starved = 0;
+    while (tty->canonical_length < sizeof(tty->canonical_buffer)) {
+        int value = read_input_char(tty);
+        /* Nothing queued. Distinguished from end of file below: a terminal with
+           an empty queue has not ended, it simply has nothing typed at it yet,
+           and answering 0 there would look like Ctrl-D to every shell. */
+        if (value == -EAGAIN) {
+            starved = 1;
+            break;
+        }
         if (value < 0) return value;
-        if (value == console_termios.cc[TTY_VEOF]) {
-            if (canonical_length == 0) return 0;
+        if (value == tty->termios.cc[TTY_VEOF]) {
+            saw_end_of_file = 1;
             break;
         }
         if (value == '\r') value = '\n';
-        if (value == console_termios.cc[TTY_VERASE] || value == '\b' || value == 127) {
-            if (canonical_length) {
-                canonical_length--;
-                if (console_termios.lflag & TTY_ECHO) tty_write(3, "\b \b");
+        if (value == tty->termios.cc[TTY_VERASE] || value == '\b' || value == 127) {
+            if (tty->canonical_length) {
+                tty->canonical_length--;
+                if (tty->termios.lflag & TTY_ECHO) tty_write(tty, 3, "\b \b");
             }
             continue;
         }
-        canonical_buffer[canonical_length++] = (char)value;
-        if (console_termios.lflag & TTY_ECHO) {
+        tty->canonical_buffer[tty->canonical_length++] = (char)value;
+        if (tty->termios.lflag & TTY_ECHO) {
             char c = (char)value;
-            tty_write(1, &c);
+            tty_write(tty, 1, &c);
         }
         if (value == '\n') break;
     }
-    return (int)canonical_length;
+    if (tty->canonical_length == 0) {
+        if (saw_end_of_file) return 0;
+        if (starved) return -EAGAIN;
+    }
+    return (int)tty->canonical_length;
 }
 
-int64_t tty_read(size_t size, void *buffer) {
-    if (!buffer || size == 0) return 0;
+int64_t tty_read(struct tty *tty, size_t size, void *buffer) {
+    if (!tty || !buffer || size == 0) return 0;
     struct process *reader = process_current();
-    if (reader && console_session > 0 && reader->sid == console_session &&
-        console_foreground_pgid > 0 &&
-        reader->pgid != (uint64_t)console_foreground_pgid) {
+    if (reader && tty->session > 0 && reader->sid == tty->session &&
+        tty->foreground_pgid > 0 &&
+        reader->pgid != (uint64_t)tty->foreground_pgid) {
         (void)process_send_signal(-(int64_t)reader->pgid, SIGTTIN);
         return -EINTR;
     }
     char *out = (char *)buffer;
 
-    if (!(console_termios.lflag & TTY_ICANON)) {
+    if (!(tty->termios.lflag & TTY_ICANON)) {
         size_t received = 0;
-        int value = read_input_char();
+        int value = read_input_char(tty);
         if (value < 0) return value;
         out[received++] = (char)value;
-        if (console_termios.lflag & TTY_ECHO) {
+        if (tty->termios.lflag & TTY_ECHO) {
             char c = (char)value;
-            tty_write(1, &c);
+            tty_write(tty, 1, &c);
         }
-        tty_poll_inputs();
-        while (received < size && input_count) out[received++] = (char)input_pop();
+        while (received < size && tty->input_count) out[received++] = (char)input_pop(tty);
         return (int64_t)received;
     }
 
-    if (canonical_offset >= canonical_length) {
-        int result = refill_canonical();
+    if (tty->canonical_offset >= tty->canonical_length) {
+        int result = refill_canonical(tty);
         if (result <= 0) return result;
     }
-    size_t available = canonical_length - canonical_offset;
+    size_t available = tty->canonical_length - tty->canonical_offset;
     if (size > available) size = available;
-    memcpy(out, canonical_buffer + canonical_offset, size);
-    canonical_offset += size;
+    memcpy(out, tty->canonical_buffer + tty->canonical_offset, size);
+    tty->canonical_offset += size;
     return (int64_t)size;
 }
 
-void tty_init(void) {
-    utf8_reset();
-    memset(&console_termios, 0, sizeof(console_termios));
-    console_termios.iflag = 0x00000500U;
-    console_termios.oflag = 0x00000005U;
-    console_termios.cflag = 0x000000BFU;
-    console_termios.lflag = TTY_ECHO | TTY_ECHOE | TTY_ECHOK |
-                            TTY_ICANON | TTY_ISIG | TTY_IEXTEN;
-    console_termios.cc[TTY_VINTR] = 3;
-    console_termios.cc[TTY_VQUIT] = 28;
-    console_termios.cc[TTY_VERASE] = 127;
-    console_termios.cc[TTY_VKILL] = 21;
-    console_termios.cc[TTY_VEOF] = 4;
-    console_termios.cc[TTY_VTIME] = 0;
-    console_termios.cc[TTY_VMIN] = 1;
-    console_termios.cc[TTY_VSTART] = 17;
-    console_termios.cc[TTY_VSTOP] = 19;
-    console_termios.cc[TTY_VSUSP] = 26;
-    console_termios.ispeed = 38400;
-    console_termios.ospeed = 38400;
-    console_foreground_pgid = 0;
-    memset(&console_vt_mode, 0, sizeof(console_vt_mode));
-    console_kd_mode = TUNIX_KD_TEXT;
-    console_kb_mode = TUNIX_K_XLATE;
-    canonical_length = canonical_offset = 0;
-    input_head = input_tail = input_count = 0;
-    input_interrupted = 0;
-    shift_down = ctrl_down = alt_down = altgr_down = caps_lock = extended_prefix = 0;
-    keymap_load_default();
-    ansi_state = 0;
-    ansi_param_count = ansi_current = 0;
-    ansi_have_current = 0;
-    saved_row = saved_col = 0;
-}
-
-/* KD_GRAPHICS is a program announcing it will paint the screen itself, so the
-   console stands down -- the same handover DRM performs when a client presents
-   its first frame. KD_TEXT gives the display back and the console redraws. */
-static int set_kd_mode(int mode) {
-    if (mode == TUNIX_KD_GRAPHICS) {
-        if (framebuffer_claim_graphics(&console_graphics_owner) != 0) return -1;
-    } else if (mode == TUNIX_KD_TEXT) {
-        framebuffer_release_graphics(&console_graphics_owner, 0);
-    } else {
-        return -1;
+struct tty *tty_create(struct terminal_screen *screen) {
+    struct tty *tty = kmalloc(sizeof(*tty));
+    if (!tty) return NULL;
+    memset(tty, 0, sizeof(*tty));
+    tty->screen = screen;
+    tty->termios.iflag = 0x00000500U;
+    tty->termios.oflag = 0x00000005U;
+    tty->termios.cflag = 0x000000BFU;
+    tty->termios.lflag = TTY_ECHO | TTY_ECHOE | TTY_ECHOK |
+                         TTY_ICANON | TTY_ISIG | TTY_IEXTEN;
+    tty->termios.cc[TTY_VINTR] = 3;
+    tty->termios.cc[TTY_VQUIT] = 28;
+    tty->termios.cc[TTY_VERASE] = 127;
+    tty->termios.cc[TTY_VKILL] = 21;
+    tty->termios.cc[TTY_VEOF] = 4;
+    tty->termios.cc[TTY_VTIME] = 0;
+    tty->termios.cc[TTY_VMIN] = 1;
+    tty->termios.cc[TTY_VSTART] = 17;
+    tty->termios.cc[TTY_VSTOP] = 19;
+    tty->termios.cc[TTY_VSUSP] = 26;
+    tty->termios.ispeed = 38400;
+    tty->termios.ospeed = 38400;
+    if (!keymap_loaded) {
+        keymap_load_default();
+        tty_reset_keyboard_state();
+        caps_lock = 0;
     }
-    console_kd_mode = mode;
-    return 0;
+    return tty;
 }
 
-int tty_ioctl(unsigned long request, void *argument) {
-    if (!argument) return -1;
+void tty_destroy(struct tty *tty) {
+    kfree(tty);
+}
+
+struct terminal_screen *tty_screen(const struct tty *tty) {
+    return tty ? tty->screen : NULL;
+}
+
+int tty_ioctl(struct tty *tty, unsigned long request, void *argument) {
+    if (!tty || !argument) return -1;
     switch (request) {
         case TCGETS:
-            memcpy(argument, &console_termios, sizeof(console_termios));
+            memcpy(argument, &tty->termios, sizeof(tty->termios));
             return 0;
         case TCSETS:
         case TCSETSW:
         case TCSETSF:
-            memcpy(&console_termios, argument, sizeof(console_termios));
-            if (request == TCSETSF) {
-                canonical_length = canonical_offset = 0;
-                input_head = input_tail = input_count = 0;
-            }
+            memcpy(&tty->termios, argument, sizeof(tty->termios));
+            if (request == TCSETSF) tty_flush_input(tty);
             return 0;
         case TIOCGPGRP:
-            *(int *)argument = console_foreground_pgid;
+            *(int *)argument = tty->foreground_pgid;
             return 0;
         case TIOCSPGRP:
-            console_foreground_pgid = *(const int *)argument;
-            input_interrupted = 0;
+            tty->foreground_pgid = *(const int *)argument;
+            tty->input_interrupted = 0;
             return 0;
         case TIOCGETD:
             *(int *)argument = 0;
@@ -757,66 +794,34 @@ int tty_ioctl(unsigned long request, void *argument) {
         case KDGKBTYPE:
             *(uint8_t *)argument = TUNIX_KB_101;
             return 0;
-        case KDGETMODE:
-            *(int *)argument = console_kd_mode;
-            return 0;
-        case KDSETMODE:
-            return set_kd_mode(*(const int *)argument);
-        case KDGKBMODE:
-            *(int *)argument = console_kb_mode;
-            return 0;
-        case KDSKBMODE: {
-            int mode = *(const int *)argument;
-            if (mode < TUNIX_K_RAW || mode > TUNIX_K_OFF) return -1;
-            console_kb_mode = mode;
-            return 0;
-        }
-        case VT_OPENQRY:
-            *(int *)argument = TUNIX_VT_CONSOLE;
-            return 0;
-        case VT_GETSTATE: {
-            struct tunix_vt_stat *state = argument;
-            state->v_active = TUNIX_VT_CONSOLE;
-            state->v_signal = 0;
-            state->v_state = 1U << TUNIX_VT_CONSOLE;
-            return 0;
-        }
-        case VT_GETMODE:
-            memcpy(argument, &console_vt_mode, sizeof(console_vt_mode));
-            return 0;
-        case VT_SETMODE: {
-            const struct tunix_vt_mode *mode = argument;
-            if (mode->mode != TUNIX_VT_AUTO && mode->mode != TUNIX_VT_PROCESS) return -1;
-            memcpy(&console_vt_mode, mode, sizeof(console_vt_mode));
-            return 0;
-        }
-        /* A switch to the console has already happened; a switch to anything
-           else is a terminal that does not exist. */
-        case VT_ACTIVATE:
-        case VT_WAITACTIVE:
-            return *(const int *)argument == TUNIX_VT_CONSOLE ? 0 : -1;
-        case VT_RELDISP:
-            return 0;
         default:
             return -1;
     }
 }
 
-int tty_foreground_pgid(void) { return console_foreground_pgid; }
-void tty_set_foreground_pgid(int pgid) {
-    console_foreground_pgid = pgid;
-    input_interrupted = 0;
+int tty_foreground_pgid(const struct tty *tty) {
+    return tty ? tty->foreground_pgid : 0;
 }
 
-void tty_set_controlling_session(uint64_t sid, int pgid) {
-    console_session = sid;
-    console_foreground_pgid = pgid;
-    input_interrupted = 0;
+void tty_set_foreground_pgid(struct tty *tty, int pgid) {
+    if (!tty) return;
+    tty->foreground_pgid = pgid;
+    tty->input_interrupted = 0;
+}
+
+uint64_t tty_session(const struct tty *tty) { return tty ? tty->session : 0; }
+
+void tty_set_controlling_session(struct tty *tty, uint64_t sid, int pgid) {
+    if (!tty) return;
+    tty->session = sid;
+    tty->foreground_pgid = pgid;
+    tty->input_interrupted = 0;
 }
 
 /* TIOCNOTTY. The foreground group is left alone: it is what Ctrl-C is aimed
-   at, and nothing takes over as the console's session until a login does. */
-void tty_release_controlling_session(uint64_t sid) {
-    if (console_session && console_session != sid) return;
-    console_session = 0;
+   at, and nothing takes over as the terminal's session until a login does. */
+void tty_release_controlling_session(struct tty *tty, uint64_t sid) {
+    if (!tty) return;
+    if (tty->session && tty->session != sid) return;
+    tty->session = 0;
 }

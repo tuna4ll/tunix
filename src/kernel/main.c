@@ -23,6 +23,7 @@
 #include "include/time.h"
 #include "include/timer.h"
 #include "include/tty.h"
+#include "include/vt.h"
 #include "include/vfs.h"
 #include "include/terminal.h"
 #include "include/vmm.h"
@@ -201,10 +202,12 @@ void kmain(uint32_t mmap_count, uint64_t mmap_address, uint64_t manifest_address
 #endif
     if (terminal_init() != 0)
         panic("framebuffer terminal initialization failed");
+    /* The first virtual terminal, and the display handed to it. Everything
+       written to a console from here on lands on a terminal that exists. */
+    vt_init();
 #if TUNIX_BOOT_TIMINGS
     boot_log_stage("terminal initialization", &stage_started);
 #endif
-    tty_init();
     input_init();
     /* Delivery moves here, after the handlers exist and before anything is
        unmasked: the routing below has to go to whichever controller is live. */

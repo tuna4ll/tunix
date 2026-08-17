@@ -854,6 +854,15 @@ static int present_framebuffer(uint32_t fb_id) {
     int status = framebuffer_claim_graphics(&drm_display_owner);
     if (status != 0) return status;
 
+    /*
+     * The client is on a virtual terminal the user has switched away from. It
+     * keeps drawing -- a compositor has no reason to stop, and stopping it is
+     * not this driver's business -- but none of it reaches the screen, and the
+     * call still succeeds: a frame that was refused would be reported as a
+     * device error, and the last one presented goes back up on the switch back.
+     */
+    if (!framebuffer_graphics_foreground(&drm_display_owner)) return 0;
+
     if (virtgpu_available() && present_via_virtgpu(fb, buffer) == 0) return 0;
 
     uint8_t *scanout = framebuffer_scanout();
@@ -1239,4 +1248,23 @@ void drm_file_close(struct file *file) {
     /* Buffers outlive the descriptor deliberately: a mapping may still be in
        use, and the pages are reference counted. Ownership of the display is
        handled by drm_device_close(), which the VFS calls with the node. */
+}
+
+/*
+ * The user has switched to another virtual terminal.
+ *
+ * A virtio-gpu is scanning out the client's buffer directly, so the scanout has
+ * to be handed back before the console draws anything -- the console paints
+ * into the framebuffer the bootloader set up, and on a virtio-vga that is only
+ * on the screen while no resource is bound. Without the GPU there is nothing to
+ * undo: presenting is a copy, and simply not copying is enough.
+ */
+void drm_display_suspend(void) {
+    if (!drm_ready) return;
+    virtgpu_scanout_disable();
+}
+
+void drm_display_resume(void) {
+    if (!drm_ready || !active_fb_id) return;
+    (void)present_framebuffer(active_fb_id);
 }

@@ -16,6 +16,7 @@ extern uint64_t process_current_pid(void);
 #include "include/signalfd.h"
 #include "include/pipe.h"
 #include "include/pty.h"
+#include "include/vt.h"
 #include "include/vfs.h"
 #include "include/unix_socket.h"
 #include "include/net/inet_socket.h"
@@ -173,6 +174,15 @@ struct file *file_create_pty_endpoint(struct pty_pair *pty, int master,
 const void *file_read_wait_channel(struct file *file) {
     if (file && file->kind == FILE_KIND_PIPE_READ && file->pipe)
         return &file->pipe->data_wait;
+    /*
+     * A virtual terminal, which the keyboard wakes. Without this a login
+     * prompt waiting for somebody to type is rewound and retried on every
+     * schedule, and four of them -- one per terminal -- keep four processors
+     * busy doing nothing at all.
+     */
+    if (file && file->kind == FILE_KIND_VFS && file->node &&
+        file->node->read == vt_node_read)
+        return vt_input_wait_channel();
     return NULL;
 }
 

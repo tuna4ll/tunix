@@ -334,7 +334,7 @@ KERNEL_OBJS := \
 	$(BUILD)/memfd.o $(BUILD)/sysvshm.o $(BUILD)/signalfd.o $(BUILD)/drm.o $(BUILD)/sysfs.o \
 	$(BUILD)/vfs.o $(BUILD)/tarfs.o $(BUILD)/ext2.o $(BUILD)/devfs.o $(BUILD)/unix_socket.o $(BUILD)/pty.o \
 	$(BUILD)/usercopy.o $(BUILD)/elf.o $(BUILD)/file.o $(BUILD)/cred.o \
-	$(BUILD)/pipe.o $(BUILD)/tty.o $(BUILD)/process.o $(BUILD)/procfs.o $(BUILD)/time.o $(BUILD)/random.o $(BUILD)/ata.o \
+	$(BUILD)/pipe.o $(BUILD)/tty.o $(BUILD)/vt.o $(BUILD)/process.o $(BUILD)/procfs.o $(BUILD)/time.o $(BUILD)/random.o $(BUILD)/ata.o \
 	$(BUILD)/acpi.o $(BUILD)/apic.o $(BUILD)/power.o $(BUILD)/xhci.o \
 	$(BUILD)/sound.o $(BUILD)/hda.o \
 	$(BUILD)/virtio_pci.o $(BUILD)/virtio_ring.o $(BUILD)/virtio_gpu.o \
@@ -1326,7 +1326,8 @@ $(BUILD)/file.o: src/kernel/include/file.h src/kernel/include/vfs.h src/kernel/i
 $(BUILD)/syscall.o: src/kernel/include/vfs.h src/kernel/include/tty.h src/kernel/include/pty.h src/kernel/include/process.h src/kernel/include/random.h src/kernel/include/time.h src/kernel/include/input.h src/kernel/include/framebuffer.h src/kernel/include/eventfd.h src/kernel/include/timerfd.h src/kernel/include/epoll.h src/kernel/include/inotify.h src/kernel/include/memfd.h src/kernel/include/signalfd.h src/kernel/include/ext2.h
 $(BUILD)/terminal_font.o: $(TERMINAL_FONT_DATA) src/kernel/include/terminal_font.h
 $(BUILD)/terminal.o: src/kernel/include/terminal_font.h src/kernel/include/terminal.h src/kernel/include/framebuffer.h
-$(BUILD)/tty.o: src/kernel/include/input.h src/kernel/include/tty.h src/kernel/include/terminal.h src/include/tunix/keymap.h
+$(BUILD)/tty.o: src/kernel/include/input.h src/kernel/include/tty.h src/kernel/include/terminal.h src/kernel/include/vt.h src/include/tunix/keymap.h
+$(BUILD)/vt.o: src/kernel/include/vt.h src/kernel/include/tty.h src/kernel/include/terminal.h src/kernel/include/framebuffer.h src/kernel/include/drm.h
 $(BUILD)/process.o: src/kernel/include/process.h src/kernel/include/signal.h src/kernel/include/interrupt.h
 # struct vfs_node is embedded across the whole kernel; a layout change must
 # rebuild every object or stale offsets corrupt the tree at runtime.

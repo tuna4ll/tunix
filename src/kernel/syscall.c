@@ -27,6 +27,7 @@
 #include "include/ext2.h"
 #include "include/time.h"
 #include "include/tty.h"
+#include "include/vt.h"
 #include "include/usercopy.h"
 #include "include/vfs.h"
 #include "include/terminal.h"
@@ -2209,96 +2210,13 @@ static int64_t sys_ioctl(int fd, unsigned long request, uint64_t user_argument) 
     if (file->kind != FILE_KIND_VFS || !file->node || (file->node->flags & 0xFFU) != VFS_CHARDEVICE) return -ENOTTY;
     if (file->node->ioctl) return file->node->ioctl(file->node, request, user_argument);
 
-    if (request == TCGETS) {
-        struct tunix_termios value;
-        if (tty_ioctl(request, &value) != 0) return -ENOTTY;
-        return copy_to_user(user_argument, &value, sizeof(value)) == 0 ? 0 : -EFAULT;
-    }
-    if (request == TCSETS || request == TCSETSW || request == TCSETSF) {
-        struct tunix_termios value;
-        if (copy_from_user(&value, user_argument, sizeof(value)) != 0) return -EFAULT;
-        return tty_ioctl(request, &value) == 0 ? 0 : -ENOTTY;
-    }
-    if (request == TIOCGPGRP) {
-        int pgid;
-        if (tty_ioctl(request, &pgid) != 0) return -ENOTTY;
-        return copy_to_user(user_argument, &pgid, sizeof(pgid)) == 0 ? 0 : -EFAULT;
-    }
-    if (request == TIOCSPGRP) {
-        int pgid;
-        if (copy_from_user(&pgid, user_argument, sizeof(pgid)) != 0) return -EFAULT;
-        return tty_ioctl(request, &pgid) == 0 ? 0 : -ENOTTY;
-    }
-    /* login(1) claims the console as its session's controlling terminal before
-       handing it to the user's shell. */
-    if (request == TIOCSCTTY) {
-        struct process *process = process_current();
-        if (!process) return -ENOTTY;
-        tty_set_controlling_session(process->sid, (int)process->pgid);
-        return 0;
-    }
-    /* su(1) gives the terminal up before it becomes somebody else. */
-    if (request == TIOCNOTTY) {
-        struct process *process = process_current();
-        if (!process) return -ENOTTY;
-        tty_release_controlling_session(process->sid);
-        return 0;
-    }
-    if (request == TIOCGETD || request == TIOCSETD) {
-        int discipline = 0;
-        if (request == TIOCSETD && copy_from_user(&discipline, user_argument, sizeof(discipline)) != 0) return -EFAULT;
-        if (tty_ioctl(request, &discipline) != 0) return -ENOTTY;
-        if (request == TIOCGETD && copy_to_user(user_argument, &discipline, sizeof(discipline)) != 0) return -EFAULT;
-        return 0;
-    }
-    if (request == TUNIX_KDGKBMAP) {
-        struct tunix_keymap map;
-        if (tty_ioctl(request, &map) != 0) return -ENOTTY;
-        return copy_to_user(user_argument, &map, sizeof(map)) == 0 ? 0 : -EFAULT;
-    }
-    if (request == TUNIX_KDSKBMAP) {
-        struct tunix_keymap map;
-        if (copy_from_user(&map, user_argument, sizeof(map)) != 0) return -EFAULT;
-        return tty_ioctl(request, &map) == 0 ? 0 : -EINVAL;
-    }
-    /* VT_ACTIVATE, VT_WAITACTIVE, VT_RELDISP and the KD mode setters take the
-       terminal or mode as the argument itself rather than through a pointer. */
-    if (request == VT_ACTIVATE || request == VT_WAITACTIVE ||
-        request == VT_RELDISP || request == KDSETMODE || request == KDSKBMODE) {
-        int value = (int)user_argument;
-        return tty_ioctl(request, &value) == 0 ? 0 : -EINVAL;
-    }
-    if (request == VT_OPENQRY || request == KDGETMODE || request == KDGKBMODE) {
-        int value;
-        if (tty_ioctl(request, &value) != 0) return -ENOTTY;
-        return copy_to_user(user_argument, &value, sizeof(value)) == 0 ? 0 : -EFAULT;
-    }
-    if (request == KDGKBTYPE) {
-        uint8_t type;
-        if (tty_ioctl(request, &type) != 0) return -ENOTTY;
-        return copy_to_user(user_argument, &type, sizeof(type)) == 0 ? 0 : -EFAULT;
-    }
-    if (request == VT_GETSTATE) {
-        struct tunix_vt_stat state;
-        if (tty_ioctl(request, &state) != 0) return -ENOTTY;
-        return copy_to_user(user_argument, &state, sizeof(state)) == 0 ? 0 : -EFAULT;
-    }
-    if (request == VT_GETMODE || request == VT_SETMODE) {
-        struct tunix_vt_mode mode;
-        if (request == VT_SETMODE &&
-            copy_from_user(&mode, user_argument, sizeof(mode)) != 0) return -EFAULT;
-        if (tty_ioctl(request, &mode) != 0) return -EINVAL;
-        if (request == VT_GETMODE &&
-            copy_to_user(user_argument, &mode, sizeof(mode)) != 0) return -EFAULT;
-        return 0;
-    }
-    if (request == TIOCGWINSZ) {
-        uint16_t rows;
-        uint16_t columns;
-        terminal_get_dimensions(&rows, &columns);
-        struct linux_winsize winsize = {rows, columns, 0, 0};
-        return copy_to_user(user_argument, &winsize, sizeof(winsize)) == 0 ? 0 : -EFAULT;
-    }
+    /*
+     * A character device that is not a terminal. Every terminal there is --
+     * /dev/ttyN, /dev/tty0, /dev/tty, /dev/console -- carries vt_node_ioctl and
+     * was answered above; the pseudo-terminals have their own path further up.
+     * Saying so plainly here is what makes isatty() tell the truth about
+     * /dev/null, which the old catch-all did not.
+     */
     return -ENOTTY;
 }
 
@@ -4542,6 +4460,20 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
                 file->kind == FILE_KIND_VFS && file->node &&
                 file->node->write_ready) {
                 block_and_retry(frame, SYS_IOCTL, file, 1);
+            } else if (result == -EAGAIN && (unsigned long)frame->rsi == VT_WAITACTIVE) {
+                /*
+                 * Waiting for a terminal to come to the front. The switch is
+                 * held up by a program that was asked to release the display
+                 * and has not answered yet, so this sleeps until it does --
+                 * which is exactly what a display manager expects of
+                 * VT_WAITACTIVE, and what it would otherwise spin on.
+                 */
+                frame->user_rip -= 2U;
+                frame->rax = SYS_IOCTL;
+                struct process *waiter = process_current();
+                if (waiter) waiter->syscall_rewound = 1;
+                if (process_sleep_on(frame, vt_switch_wait_channel()) != 0)
+                    process_yield_from_syscall(frame);
             } else {
                 frame->rax = (uint64_t)result;
             }

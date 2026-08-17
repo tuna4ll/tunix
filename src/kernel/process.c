@@ -15,6 +15,7 @@
 #include "include/syscall.h"
 #include "include/time.h"
 #include "include/tty.h"
+#include "include/vt.h"
 #include "include/vfs.h"
 #include "include/vmm.h"
 
@@ -435,7 +436,9 @@ struct process *process_create_from_path(const char *path) {
 
     enqueue(process);
     procfs_register_process(process);
-    if (process->pid == 1) tty_set_foreground_pgid((int)process->pgid);
+    /* init starts life in the foreground of the first terminal, which is what
+       makes Ctrl-C typed before anything has logged in go somewhere. */
+    if (process->pid == 1) tty_set_foreground_pgid(vt_tty(1U), (int)process->pgid);
     KDEBUG("process: pid=%u path=%s entry=%p cr3=%p\n",
             (unsigned)process->pid, path, (void *)process->entry, (void *)process->cr3);
     return process;
@@ -1219,6 +1222,14 @@ void process_exit_from_syscall(struct syscall_frame *frame, int status) {
         (void)process_futex_wake(clear_address, 1);
     }
     process_release_files(exiting);
+    /* A process that drove a virtual terminal has to let go of it here: the
+       display could otherwise stay owed to a program that no longer exists,
+       and a switch it was asked to release would never be answered. */
+    if (!exiting->is_thread)
+        vt_process_exited(exiting->pid,
+                          /* Only the leader's exit ends the session; a child
+                             shell leaving is not the login going away. */
+                          exiting->sid == exiting->pid ? exiting->sid : 0);
     if (exiting->is_thread) exiting->state = PROCESS_DEAD;
     else notify_parent_of_exit(exiting);
     KDEBUG("process: pid=%u exited status=%d\n", (unsigned)exiting->pid, status);

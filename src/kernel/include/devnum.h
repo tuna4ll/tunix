@@ -10,6 +10,13 @@
  * sysfs publishes the same pair, so the two cannot drift apart.
  */
 
+/* The virtual terminals, numbered as Linux numbers them: major 4 is tty0 (the
+   active one) and ttyN after it, and major 5 holds the two indirect nodes --
+   /dev/tty, the caller's own controlling terminal, and /dev/console. */
+#define DEV_MAJOR_TTY 4
+#define DEV_MAJOR_TTYAUX 5
+#define DEV_MINOR_TTYAUX_CURRENT 0
+#define DEV_MINOR_TTYAUX_CONSOLE 1
 #define DEV_MAJOR_INPUT 13
 /* event0.. are minor 64 and up on Linux. */
 #define DEV_MINOR_INPUT_EVENT_BASE 64

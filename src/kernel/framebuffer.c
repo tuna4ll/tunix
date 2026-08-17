@@ -5,6 +5,7 @@
 #include "include/terminal.h"
 #include "include/usercopy.h"
 #include "include/vmm.h"
+#include "include/vt.h"
 
 #include "../include/tunix/framebuffer.h"
 
@@ -47,6 +48,10 @@ struct framebuffer_state {
        but the DRM device claims it with a token of its own (see drm.c), so this
        is deliberately untyped: the pointer is only ever compared. */
     const void *graphics_owner;
+    /* The owner is on a virtual terminal that is not the one in front. It keeps
+       its claim -- it is still running and still owns its buffers -- but it
+       does not reach the screen, and the console may draw again. */
+    int graphics_suspended;
     int ready;
 };
 
@@ -92,8 +97,12 @@ int framebuffer_claim_graphics(const void *owner) {
         interrupt_restore(interrupt_flags);
         return -EBUSY;
     }
+    int first_claim = framebuffer.graphics_owner == NULL;
     framebuffer.graphics_owner = owner;
     interrupt_restore(interrupt_flags);
+    /* A new owner belongs to the terminal that is in front of the user now;
+       that is what decides where the display goes back to on a switch. */
+    if (first_claim) vt_display_claimed();
     return 0;
 }
 
@@ -108,12 +117,34 @@ int framebuffer_release_graphics(const void *owner, int fail_if_not_owner) {
         return fail_if_not_owner ? -EPERM : 0;
     }
     framebuffer.graphics_owner = NULL;
+    framebuffer.graphics_suspended = 0;
     interrupt_restore(interrupt_flags);
 
+    vt_display_released();
     /* Whatever was on screen belonged to the owner that just left, so the
        console has to paint itself back. */
     terminal_redraw();
     return 0;
+}
+
+void framebuffer_suspend_graphics(void) {
+    uint64_t interrupt_flags = interrupt_save();
+    if (framebuffer.graphics_owner) framebuffer.graphics_suspended = 1;
+    interrupt_restore(interrupt_flags);
+}
+
+void framebuffer_resume_graphics(void) {
+    uint64_t interrupt_flags = interrupt_save();
+    framebuffer.graphics_suspended = 0;
+    interrupt_restore(interrupt_flags);
+}
+
+int framebuffer_graphics_foreground(const void *owner) {
+    uint64_t interrupt_flags = interrupt_save();
+    int foreground = framebuffer.graphics_owner == owner &&
+                     !framebuffer.graphics_suspended;
+    interrupt_restore(interrupt_flags);
+    return foreground;
 }
 
 /* /dev/fb0 owns by open file description, and only a writable one may draw. */
@@ -189,7 +220,8 @@ int framebuffer_init(const struct boot_framebuffer_info *boot_info) {
 
 int framebuffer_available(void) { return framebuffer.ready; }
 int framebuffer_console_active(void) {
-    return framebuffer.ready && framebuffer.graphics_owner == NULL;
+    return framebuffer.ready &&
+           (framebuffer.graphics_owner == NULL || framebuffer.graphics_suspended);
 }
 uint32_t framebuffer_width(void) { return framebuffer.width; }
 uint32_t framebuffer_height(void) { return framebuffer.height; }

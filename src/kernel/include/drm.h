@@ -49,4 +49,14 @@ void drm_device_open(struct vfs_node *node);
 void drm_device_close(struct vfs_node *node);
 void drm_file_close(struct file *file);
 
+/*
+ * The virtual terminal the client is on has been switched away from, or back
+ * to. Suspending stops presenting and hands a virtio-gpu's scanout back, so the
+ * text console has the screen; resuming puts the last frame that was presented
+ * back up, because the client has gone on drawing into its own buffer all along
+ * and has no reason to think anything changed.
+ */
+void drm_display_suspend(void);
+void drm_display_resume(void);
+
 #endif

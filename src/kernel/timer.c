@@ -3,6 +3,7 @@
 #include "include/io.h"
 #include "include/process.h"
 #include "include/timer.h"
+#include "include/vt.h"
 
 #define PIT_INPUT_HZ 1193182U
 #define PIT_COMMAND 0x43U
@@ -25,6 +26,15 @@ void timer_init(void) {
 
 void timer_irq(struct interrupt_frame *frame) {
     ticks++;
+    /*
+     * The two keyboards that raise no interrupt: the serial line, which nothing
+     * unmasks IRQ 4 for, and USB, whose event ring is read rather than
+     * delivered. Both used to be looked at by whoever was waiting to read a
+     * terminal, and terminal reads now sleep instead of spinning -- so the tick
+     * is what looks. It costs one port read and one memory read when nothing
+     * has happened, which is almost always.
+     */
+    vt_poll_input();
     process_timer_interrupt(frame);
 }
 
