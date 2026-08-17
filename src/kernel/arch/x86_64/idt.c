@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include "../../include/acpi.h"
 #include "../../include/idt.h"
 #include "../../include/smp.h"
 
@@ -67,6 +68,7 @@ extern void isr31(void);
 extern void irq0(void);
 extern void irq1(void);
 extern void irq12(void);
+extern void irq_sci(void);
 extern void irq_lapic_timer(void);
 extern void irq_invalidate_tlb(void);
 
@@ -115,6 +117,7 @@ void idt_init(void) {
     idt_set_gate(32, (uint64_t)irq0, 0x08, 0x8E, 0);
     idt_set_gate(33, (uint64_t)irq1, 0x08, 0x8E, 0);
     idt_set_gate(44, (uint64_t)irq12, 0x08, 0x8E, 0);
+    idt_set_gate(ACPI_SCI_VECTOR, (uint64_t)irq_sci, 0x08, 0x8E, 0);
     idt_set_gate(SMP_TIMER_VECTOR, (uint64_t)irq_lapic_timer, 0x08, 0x8E, 0);
     idt_set_gate(SMP_INVALIDATE_VECTOR, (uint64_t)irq_invalidate_tlb, 0x08, 0x8E, 0);
 

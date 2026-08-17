@@ -18,6 +18,7 @@
 #include <stddef.h>
 
 #include "include/acpi.h"
+#include "include/apic.h"
 #include "include/io.h"
 #include "include/time.h"
 #include "include/vmm.h"
@@ -552,4 +553,71 @@ void acpi_reset(void) {
     struct { uint16_t limit; uint64_t base; } __attribute__((packed)) empty = { 0, 0 };
     __asm__ volatile("lidt %0; int3" : : "m"(empty));
     for (;;) __asm__ volatile("cli; hlt");
+}
+
+/* The enable half of an event block sits directly above its status half, and
+   the block's length covers both. */
+static uint16_t event_enable_port(uint32_t event_block) {
+    if (!event_block || power.event_bytes < 2U) return 0;
+    return (uint16_t)(event_block + power.event_bytes / 2U);
+}
+
+/*
+ * Unmask the fixed-feature power button.
+ *
+ * Untested against a press, and not for want of trying. QEMU's `pc` machine
+ * says in its own FADT that the button is a fixed feature (flags bit 4 clear),
+ * and everything this sets up reads back correct from the guest: ACPI mode on,
+ * PWRBTN_EN set in the enable register, the PM block answering -- its timer
+ * counts, so it is the real device and not an unclaimed port range. QEMU emits
+ * its POWERDOWN event when asked, and PWRBTN_STS never appears. Nothing this
+ * side can do about that, so what is here is what the tables ask for; a machine
+ * that raises the event will be answered.
+ */
+void acpi_power_button_enable(unsigned vector) {
+    if (!acpi_power_info() || !power.pm1a_event) return;
+    if (acpi_enable() != 0) {
+        kprintf("ACPI: firmware would not hand over the fixed hardware\n");
+        return;
+    }
+
+    uint16_t enable = event_enable_port(power.pm1a_event);
+    if (!enable) return;
+    /* Status bits are cleared by writing one to them. Doing it before the
+       enable stops a press that happened while nobody was listening from
+       arriving as an interrupt the moment one is. */
+    outw((uint16_t)power.pm1a_event, PM1_POWER_BUTTON);
+    outw(enable, (uint16_t)(inw(enable) | PM1_POWER_BUTTON));
+    if (power.pm1b_event) {
+        uint16_t second = event_enable_port(power.pm1b_event);
+        if (second) {
+            outw((uint16_t)power.pm1b_event, PM1_POWER_BUTTON);
+            outw(second, (uint16_t)(inw(second) | PM1_POWER_BUTTON));
+        }
+    }
+
+    /* Through the MADT rather than on the ACPI default: the specification says
+       the SCI is level-triggered and active low, and the override says what it
+       is on this machine, which is not always the same thing. */
+    if (apic_route_global(power.sci_interrupt, vector) != 0) {
+        kprintf("ACPI: sci %u is outside the ioapic; no power button\n",
+                (unsigned)power.sci_interrupt);
+        return;
+    }
+    kprintf("ACPI: power button on sci %u\n", (unsigned)power.sci_interrupt);
+}
+
+int acpi_sci_interrupt(void) {
+    if (!power_known || !power.pm1a_event) return 0;
+
+    int pressed = 0;
+    if (inw((uint16_t)power.pm1a_event) & PM1_POWER_BUTTON) {
+        outw((uint16_t)power.pm1a_event, PM1_POWER_BUTTON);
+        pressed = 1;
+    }
+    if (power.pm1b_event && (inw((uint16_t)power.pm1b_event) & PM1_POWER_BUTTON)) {
+        outw((uint16_t)power.pm1b_event, PM1_POWER_BUTTON);
+        pressed = 1;
+    }
+    return pressed;
 }

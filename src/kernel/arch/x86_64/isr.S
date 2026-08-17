@@ -363,6 +363,16 @@ irq12:
     push 44
     jmp isr_common_stub
 
+/* The ACPI system control interrupt, on IDT vector 0x30. Where the firmware
+   actually raises it is a global interrupt number the FADT names, so unlike
+   the legacy lines above it there is no fixed IRQ to call this. */
+.global irq_sci
+irq_sci:
+    cli
+    push 0
+    push 0x30
+    jmp isr_common_stub
+
 /* The local APIC timer, which is what preempts every processor the PIT is not
    wired to. */
 .global irq_lapic_timer

@@ -141,6 +141,26 @@ int apic_route_irq(unsigned global, unsigned vector, int active_low,
     return 0;
 }
 
+int apic_route_global(unsigned global, unsigned vector) {
+    /* Overrides are listed by the legacy line they replace, but the entry also
+       carries the global number that line really arrives on, and that is what
+       matches here: the caller has a global number and no legacy line to look
+       up. On a machine where the two are equal -- which is every line but the
+       timer -- the lookup finds the same entry either way. */
+    int active_low = 1;
+    int level_triggered = 1;
+    const struct acpi_machine *machine = acpi_describe_machine();
+    if (machine) {
+        for (uint32_t i = 0; i < machine->override_count; i++) {
+            if (machine->overrides[i].global != global) continue;
+            active_low = machine->overrides[i].active_low;
+            level_triggered = machine->overrides[i].level_triggered;
+            break;
+        }
+    }
+    return apic_route_irq(global, vector, active_low, level_triggered);
+}
+
 void apic_send_eoi(void) {
     if (active) local_apic[LAPIC_EOI / sizeof(uint32_t)] = 0;
 }

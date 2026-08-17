@@ -102,4 +102,14 @@ void acpi_power_off(void);
    triple fault. Does not return. */
 void acpi_reset(void) __attribute__((noreturn));
 
+/* Where the SCI is delivered. Above the legacy lines the PIC was remapped onto
+   and well below the ones the local APIC uses for itself. */
+#define ACPI_SCI_VECTOR 0x30U
+
+/* Unmask the power button and route its interrupt to `vector`. Quietly does
+   nothing on a machine that describes no event block. */
+void acpi_power_button_enable(unsigned vector);
+/* Acknowledge one SCI. True when the power button is what raised it. */
+int acpi_sci_interrupt(void);
+
 #endif

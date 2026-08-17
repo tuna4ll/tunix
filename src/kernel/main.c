@@ -214,6 +214,10 @@ void kmain(uint32_t mmap_count, uint64_t mmap_address, uint64_t manifest_address
     if (input_mouse_available()) {
         if (apic) apic_route_legacy_irq(12U); else pic_unmask(12U);
     }
+    /* The power button, which is an ACPI event rather than a line the PIC ever
+       carried: it needs the IOAPIC, so a machine that stayed on the 8259 pair
+       simply does not get one. */
+    if (apic) acpi_power_button_enable(ACPI_SCI_VECTOR);
     devfs_init();
     /* After devfs: the entries describe the devices it just attached. */
     sysfs_init();

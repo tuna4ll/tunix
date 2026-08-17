@@ -22,6 +22,13 @@ int apic_route_legacy_irq(unsigned irq);
 int apic_route_irq(unsigned global, unsigned vector, int active_low,
                    int level_triggered);
 
+/* Route an interrupt the firmware names by global number rather than by legacy
+   line, which is how the FADT names the SCI. How it is wired comes from the
+   MADT's overrides, and only from the ACPI default of level-triggered active
+   low when nothing says otherwise -- the default is not a safe guess on its
+   own, since QEMU wires its own SCI active high and says so in the table. */
+int apic_route_global(unsigned global, unsigned vector);
+
 /* The identity of whichever processor asks. */
 uint32_t apic_local_id(void);
 /* Every processor has to enable its own local APIC before it can be sent

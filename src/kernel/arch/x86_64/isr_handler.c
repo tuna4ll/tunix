@@ -1,5 +1,7 @@
 #include <stdint.h>
+#include "../../include/acpi.h"
 #include "../../include/input.h"
+#include "../../include/power.h"
 #include "../../include/interrupt.h"
 #include "../../include/klock.h"
 #include "../../include/percpu.h"
@@ -63,6 +65,15 @@ static void isr_dispatch(struct interrupt_frame *regs) {
         regs->int_no == PIC_SLAVE_VECTOR + 4U) {
         interrupt_acknowledge((unsigned)regs->int_no);
         input_irq();
+        return;
+    }
+    /* The SCI. Acknowledged before it is acted on, like the tick above and for
+       the same reason: acting on it does not come back here. The controller is
+       always the APIC, because the SCI is only ever routed once the IOAPIC has
+       taken over. */
+    if (regs->int_no == ACPI_SCI_VECTOR) {
+        apic_send_eoi();
+        if (acpi_sci_interrupt()) power_button_pressed();
         return;
     }
     if (regs->int_no < 32) {
