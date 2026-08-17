@@ -75,7 +75,8 @@ Both the press and the release are swallowed, because half of a key is worse
 than none of it.
 
 It works for a USB keyboard as well as a PS/2 one -- the two meet at that
-function, one decoded from scancodes and the other from HID usages.
+function, one decoded from scancodes and the other from HID usages -- and so,
+below it, does everything else the console does with a key.
 
 ## The display
 
@@ -102,6 +103,21 @@ image does that outside `fb-test`.
 ## Input
 
 Keystrokes go to the active terminal, and nowhere else.
+
+The console is fed **keycodes**, not scancodes. That is what the keymap has
+always been indexed by -- `loadkeys` reads "keycode N = symbol" out of a keymap
+file, as on Linux -- and feeding it scancodes only worked because the two
+coincide for the main block of a set-1 keyboard. The PS/2 driver decodes its
+scancodes into keycodes anyway, and a USB keyboard produces nothing else, so
+both meet at `keyboard_emit_key()` and both can type at a login prompt. Before
+this, a machine whose only keyboard was USB could switch terminals but not type
+at one: the console was on the scancode path, which only the PS/2 driver fed.
+
+A machine with no i8042 at all is a real machine, not just `i8042=off` in QEMU.
+An absent controller answers every port with 0xFF, which reads as "there is a
+byte waiting" for ever, so the controller is probed once at init and the drain
+loop stops on it. The pointer device node is created when there is a pointer of
+*either* kind, which is why a USB mouse gets `/dev/input/event1`.
 
 For the console that is obvious. For evdev it is not: an X server keeps
 `/dev/input/event0` open the whole time it is running, including while the user
