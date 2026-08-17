@@ -104,8 +104,12 @@ struct terminal_screen *tty_screen(const struct tty *tty);
 int64_t tty_read(struct tty *tty, size_t size, void *buffer);
 int64_t tty_write(struct tty *tty, size_t size, const void *buffer);
 int tty_input_ready(struct tty *tty);
-/* Everything typed at the keyboard while this terminal is the active one. */
-void tty_handle_scancode(struct tty *tty, uint8_t scancode);
+/*
+ * Everything typed at the keyboard while this terminal is the active one, as a
+ * keycode -- which is what the keymap is indexed by, and the only thing a USB
+ * keyboard can produce. The PS/2 driver decodes its scancodes before this.
+ */
+void tty_handle_key(struct tty *tty, uint16_t keycode, int pressed);
 /* One byte that arrived on the serial line. */
 void tty_push_serial(struct tty *tty, uint8_t value);
 /* The modifiers the keyboard is holding are global -- there is one keyboard --

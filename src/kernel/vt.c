@@ -265,8 +265,8 @@ int vt_handle_hotkey(uint16_t keycode, int pressed, int ctrl_held, int alt_held)
     return 1;
 }
 
-void vt_handle_scancode(uint8_t scancode) {
-    tty_handle_scancode(terminals[active_index].tty, scancode);
+void vt_handle_key(uint16_t keycode, int pressed) {
+    tty_handle_key(terminals[active_index].tty, keycode, pressed);
 }
 
 int vt_input_delivered_to(unsigned index) {

@@ -9,6 +9,7 @@
 #include "include/tty.h"
 #include "include/terminal.h"
 #include "include/vt.h"
+#include "../include/tunix/input_event.h"
 
 #define EINTR 4
 #define EAGAIN 11
@@ -62,7 +63,7 @@ static int ctrl_down;
 static int alt_down;
 static int altgr_down;
 static int caps_lock;
-static int extended_prefix;
+
 
 static const char default_keymap[128] = {
     [0x02]='1',[0x03]='2',[0x04]='3',[0x05]='4',[0x06]='5',[0x07]='6',[0x08]='7',[0x09]='8',[0x0A]='9',[0x0B]='0',
@@ -520,78 +521,91 @@ void tty_reset_keyboard_state(void) {
     ctrl_down = 0;
     alt_down = 0;
     altgr_down = 0;
-    extended_prefix = 0;
 }
 
-void tty_handle_scancode(struct tty *tty, uint8_t code) {
+/* The keys that stand for a sequence rather than a character. Terminfo calls
+   these kcuu1, kend, kf1 and so on; they are what makes an arrow key move the
+   cursor in a shell instead of doing nothing. */
+static const char *key_sequence(uint16_t keycode) {
+    switch (keycode) {
+        case TUNIX_KEY_UP: return "\x1b[A";
+        case TUNIX_KEY_DOWN: return "\x1b[B";
+        case TUNIX_KEY_RIGHT: return "\x1b[C";
+        case TUNIX_KEY_LEFT: return "\x1b[D";
+        case TUNIX_KEY_HOME: return "\x1b[H";
+        case TUNIX_KEY_END: return "\x1b[F";
+        case TUNIX_KEY_INSERT: return "\x1b[2~";
+        case TUNIX_KEY_DELETE: return "\x1b[3~";
+        case TUNIX_KEY_PAGEUP: return "\x1b[5~";
+        case TUNIX_KEY_PAGEDOWN: return "\x1b[6~";
+        case TUNIX_KEY_F1: return "\x1bOP";
+        case TUNIX_KEY_F2: return "\x1bOQ";
+        case TUNIX_KEY_F3: return "\x1bOR";
+        case TUNIX_KEY_F4: return "\x1bOS";
+        case TUNIX_KEY_F5: return "\x1b[15~";
+        case TUNIX_KEY_F6: return "\x1b[17~";
+        case TUNIX_KEY_F7: return "\x1b[18~";
+        case TUNIX_KEY_F8: return "\x1b[19~";
+        case TUNIX_KEY_F9: return "\x1b[20~";
+        case TUNIX_KEY_F10: return "\x1b[21~";
+        case TUNIX_KEY_F11: return "\x1b[23~";
+        case TUNIX_KEY_F12: return "\x1b[24~";
+        default: return NULL;
+    }
+}
+
+/*
+ * One key, as a keycode rather than as a scancode.
+ *
+ * Keycodes are what the keymap has always been indexed by -- loadkeys(1) reads
+ * "keycode N = symbol" out of a keymap file, the same as on Linux -- and it
+ * only worked when fed scancodes because the two coincide for the main block
+ * of a set-1 keyboard. Speaking keycodes here is both the correction of that
+ * and the reason a USB keyboard now reaches the console at all: the PS/2
+ * driver decodes scancodes into keycodes already, and the HID driver produces
+ * nothing else, so the two meet here instead of only in evdev.
+ */
+void tty_handle_key(struct tty *tty, uint16_t keycode, int pressed) {
     if (!tty) return;
-    if (code == 0xE0U) {
-        extended_prefix = 1;
-        return;
-    }
-    if (code == 0xE1U) {
-        extended_prefix = 0;
-        return;
-    }
-    if (extended_prefix) {
-        extended_prefix = 0;
-        uint8_t released = code & 0x80U;
-        code &= 0x7FU;
-        if (code == 0x1DU) {
-            ctrl_down = released ? 0 : 1;
+    switch (keycode) {
+        case TUNIX_KEY_LEFTSHIFT:
+        case TUNIX_KEY_RIGHTSHIFT: shift_down = pressed; return;
+        case TUNIX_KEY_LEFTCTRL:
+        case TUNIX_KEY_RIGHTCTRL: ctrl_down = pressed; return;
+        case TUNIX_KEY_LEFTALT: alt_down = pressed; return;
+        case TUNIX_KEY_RIGHTALT: altgr_down = pressed; return;
+        /* Caps lock turns over on the press and is left alone on the release,
+           or holding it down would turn it over twice. */
+        case TUNIX_KEY_CAPSLOCK:
+            if (pressed) caps_lock = !caps_lock;
             return;
-        }
-        if (code == 0x38U) {
-            altgr_down = released ? 0 : 1;
-            return;
-        }
-        if (released) return;
-        switch (code) {
-            case 0x48U: input_push_text(tty, "\x1b[A"); return;
-            case 0x50U: input_push_text(tty, "\x1b[B"); return;
-            case 0x4DU: input_push_text(tty, "\x1b[C"); return;
-            case 0x4BU: input_push_text(tty, "\x1b[D"); return;
-            case 0x47U: input_push_text(tty, "\x1b[H"); return;
-            case 0x4FU: input_push_text(tty, "\x1b[F"); return;
-            case 0x52U: input_push_text(tty, "\x1b[2~"); return;
-            case 0x53U: input_push_text(tty, "\x1b[3~"); return;
-            case 0x49U: input_push_text(tty, "\x1b[5~"); return;
-            case 0x51U: input_push_text(tty, "\x1b[6~"); return;
-            default: return;
-        }
-    }
-    if (code == 0x2AU || code == 0x36U) { shift_down = 1; return; }
-    if (code == 0xAAU || code == 0xB6U) { shift_down = 0; return; }
-    if (code == 0x1DU) { ctrl_down = 1; return; }
-    if (code == 0x9DU) { ctrl_down = 0; return; }
-    if (code == 0x38U) { alt_down = 1; return; }
-    if (code == 0xB8U) { alt_down = 0; return; }
-    if (code == 0x3AU) { caps_lock = !caps_lock; return; }
-    if (code == 0x01U) { (void)input_push(tty, 0x1BU); return; }
-    if (code & 0x80U || code >= 128U) return;
-    if (code == 0x0EU) { (void)input_push(tty, 127U); return; }
-    if (code == 0x0FU && shift_down) { input_push_text(tty, "\x1b[Z"); return; }
-    switch (code) {
-        case 0x3BU: input_push_text(tty, "\x1bOP"); return;
-        case 0x3CU: input_push_text(tty, "\x1bOQ"); return;
-        case 0x3DU: input_push_text(tty, "\x1bOR"); return;
-        case 0x3EU: input_push_text(tty, "\x1bOS"); return;
-        case 0x3FU: input_push_text(tty, "\x1b[15~"); return;
-        case 0x40U: input_push_text(tty, "\x1b[17~"); return;
-        case 0x41U: input_push_text(tty, "\x1b[18~"); return;
-        case 0x42U: input_push_text(tty, "\x1b[19~"); return;
-        case 0x43U: input_push_text(tty, "\x1b[20~"); return;
-        case 0x44U: input_push_text(tty, "\x1b[21~"); return;
-        case 0x57U: input_push_text(tty, "\x1b[23~"); return;
-        case 0x58U: input_push_text(tty, "\x1b[24~"); return;
         default: break;
     }
+    /* A release changes nothing else: the character was delivered when the key
+       went down, and a held key repeats through another press. */
+    if (!pressed) return;
+
+    if (keycode == TUNIX_KEY_ESC) { (void)input_push(tty, 0x1BU); return; }
+    if (keycode == TUNIX_KEY_BACKSPACE) { (void)input_push(tty, 127U); return; }
+    if (keycode == TUNIX_KEY_TAB && shift_down) {
+        input_push_text(tty, "\x1b[Z");
+        return;
+    }
+    if (keycode == TUNIX_KEY_KPENTER) { (void)input_push(tty, '\r'); return; }
+    if (keycode == TUNIX_KEY_KPSLASH) { (void)input_push(tty, '/'); return; }
+    const char *sequence = key_sequence(keycode);
+    if (sequence) {
+        input_push_text(tty, sequence);
+        return;
+    }
+    if (keycode >= TUNIX_KEYMAP_KEYCODES) return;
+
     unsigned level = (shift_down ? TUNIX_KEYMAP_LEVEL_SHIFT : 0U) |
                      (altgr_down ? TUNIX_KEYMAP_LEVEL_ALTGR : 0U) |
                      (ctrl_down ? TUNIX_KEYMAP_LEVEL_CTRL : 0U);
-    if (caps_lock && keymap_is_letter(code)) level ^= TUNIX_KEYMAP_LEVEL_SHIFT;
+    if (caps_lock && keymap_is_letter(keycode)) level ^= TUNIX_KEYMAP_LEVEL_SHIFT;
     int direct_ctrl = 0;
-    uint32_t value = keymap_lookup(code, level, &direct_ctrl);
+    uint32_t value = keymap_lookup(keycode, level, &direct_ctrl);
     if (value == TUNIX_KEYSYM_NONE) return;
     if (ctrl_down && !direct_ctrl) {
         if (value == ' ') value = 0;

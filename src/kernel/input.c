@@ -86,6 +86,15 @@ static uint8_t key_down[INPUT_KEY_STATE_SIZE];
 static unsigned keyboard_extended;
 static unsigned keyboard_pause_bytes;
 
+/* Defined with the rest of the reader bookkeeping, further down; the keyboard
+   path needs it to know whether the console still owns the keystrokes. */
+static int device_has_reader(unsigned device_id);
+
+/* Whether there is an i8042 at all. Read once, at init: an absent controller
+   answers every port with 0xFF, and taking that for real status is an endless
+   loop rather than a missing keyboard. */
+static unsigned ps2_present;
+
 static uint8_t mouse_packet[4];
 static unsigned mouse_packet_index;
 static unsigned mouse_packet_size;
@@ -310,6 +319,21 @@ static int keyboard_emit_key(uint16_t keycode, int released) {
     input_emit_at(TUNIX_INPUT_DEVICE_KEYBOARD, timestamp,
                   TUNIX_EV_KEY, keycode, value);
     input_sync_at(TUNIX_INPUT_DEVICE_KEYBOARD, timestamp);
+
+    /*
+     * And the console, from the same place -- which is what makes a USB
+     * keyboard able to type at a login prompt. The PS/2 path used to hand its
+     * raw scancodes to the console separately, so a machine with no PS/2 port
+     * could switch terminals but not type at one.
+     *
+     * When an input stack (Xorg/libinput, a Wayland compositor) has the
+     * keyboard open on the terminal in front, it owns the keystrokes and the
+     * console must not also cook them: a keystroke typed into a window would
+     * otherwise also hit the shell underneath, and Ctrl+C would fire a console
+     * SIGINT that tears the whole session down.
+     */
+    if (!device_has_reader(TUNIX_INPUT_DEVICE_KEYBOARD))
+        vt_handle_key(keycode, released ? 0 : 1);
     return 1;
 }
 
@@ -457,6 +481,26 @@ static void mouse_handle_byte(uint8_t byte) {
 
 void input_init(void) {
     uint8_t config = 0;
+
+    raw_head = 0;
+    raw_tail = 0;
+    raw_count = 0;
+    raw_listeners = 0;
+    input_readers = NULL;
+    memset(key_down, 0, sizeof(key_down));
+    keyboard_extended = 0;
+    keyboard_pause_bytes = 0;
+    mouse_packet_index = 0;
+    mouse_buttons = 0;
+    mouse_present = 0;
+    tty_reset_keyboard_state();
+
+    /* Is the controller there at all? A machine whose keyboard is on USB may
+       have no i8042, and every port of one that is missing reads back 0xFF.
+       Everything below talks to it, so this question comes first. */
+    ps2_present = inb(PS2_STATUS_PORT) != 0xFFU;
+    if (!ps2_present) return;
+
     (void)ps2_command(0xADU);
     (void)ps2_command(0xA7U);
     ps2_flush();
@@ -486,17 +530,6 @@ void input_init(void) {
         if (ps2_mouse_command(0xF4U) != 0) mouse_present = 0;
     }
 
-    raw_head = 0;
-    raw_tail = 0;
-    raw_count = 0;
-    raw_listeners = 0;
-    input_readers = NULL;
-    memset(key_down, 0, sizeof(key_down));
-    keyboard_extended = 0;
-    keyboard_pause_bytes = 0;
-    mouse_packet_index = 0;
-    mouse_buttons = 0;
-    tty_reset_keyboard_state();
 }
 
 /* Is any descriptor reading this device? A userspace input stack that has the
@@ -513,22 +546,24 @@ static int device_has_reader(unsigned device_id) {
 }
 
 static void input_drain_controller(void) {
+    if (!ps2_present) return;
     for (;;) {
         uint8_t status = inb(PS2_STATUS_PORT);
+        /* All ones is an absent controller, not a full output buffer. A
+           machine with no i8042 -- which is every machine whose keyboard is on
+           USB, and QEMU with i8042=off -- would otherwise read 0xFF for ever
+           and never leave this loop. */
+        if (status == 0xFFU) return;
         if (!(status & PS2_STATUS_OUTPUT_FULL)) return;
         uint8_t value = inb(PS2_DATA_PORT);
         if (status & PS2_STATUS_AUX_DATA) {
             mouse_handle_byte(value);
         } else {
+            /* The raw byte is kept for /dev/input/keyboard, the one reader
+               that still wants scancodes. Everything else -- evdev and the
+               console alike -- is fed the keycode this decodes to. */
             raw_push(value);
-            int pass_to_tty = keyboard_handle_event_byte(value);
-            /* When an input stack (Xorg/libinput, a Wayland compositor) has the
-               keyboard open, it owns the keystrokes; the console must not also
-               cook them, or a keystroke typed into a window under X would also
-               hit the shell on the console underneath -- and Ctrl+C would fire a
-               console SIGINT that tears the whole session down. */
-            if (pass_to_tty && !device_has_reader(TUNIX_INPUT_DEVICE_KEYBOARD))
-                vt_handle_scancode(value);
+            (void)keyboard_handle_event_byte(value);
         }
     }
 }
@@ -547,8 +582,10 @@ void input_irq(void) {
     input_drain_controller();
 }
 
+/* A pointer of either kind. The PS/2 one is what this driver negotiated; the
+   USB one belongs to the HID driver, and both feed the same evdev device. */
 int input_mouse_available(void) {
-    return mouse_present != 0;
+    return mouse_present != 0 || xhci_pointer_present();
 }
 
 int input_get_device_info(unsigned device_id, struct tunix_input_device_info *info) {

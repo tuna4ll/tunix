@@ -61,8 +61,8 @@ void vt_input_arrived(void);
 /* A key, before anything else sees it. 1 when the VT layer consumed it, which
    is when it is one of the switching combinations. */
 int vt_handle_hotkey(uint16_t keycode, int pressed, int ctrl_held, int alt_held);
-/* A scancode the console should cook, for the active terminal. */
-void vt_handle_scancode(uint8_t scancode);
+/* A key the console should cook, for the active terminal. */
+void vt_handle_key(uint16_t keycode, int pressed);
 /*
  * Serial input and device polling, into whichever terminal is active. Cheap
  * enough for the timer interrupt, which is what notices the input that raises
