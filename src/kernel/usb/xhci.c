@@ -1019,6 +1019,24 @@ static struct xhci_device *device_for_slot(uint32_t slot) {
     return NULL;
 }
 
+/* What was found on the bus. Asked once, when the device nodes are created:
+   a machine whose keyboard and pointer are on USB has no PS/2 pair to answer
+   for them, and an evdev node that is never created is a desktop with no
+   mouse. `running` rather than `used`, so a device that enumerated but never
+   started reporting does not count. */
+static int hid_device_present(uint8_t protocol) {
+    if (!controller.present) return 0;
+    for (unsigned index = 0; index < MAX_DEVICES; index++) {
+        if (devices[index].used && devices[index].running &&
+            devices[index].hid_protocol == protocol)
+            return 1;
+    }
+    return 0;
+}
+
+int xhci_keyboard_present(void) { return hid_device_present(HID_PROTOCOL_KEYBOARD); }
+int xhci_pointer_present(void) { return hid_device_present(HID_PROTOCOL_MOUSE); }
+
 /* Called from the input layer's poll: take whatever the endpoints have
    finished, turn it into key and pointer events, and ask for more. */
 void xhci_poll(void) {

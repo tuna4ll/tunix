@@ -28,6 +28,12 @@ struct xhci_controller *xhci_get(void);
    do rather than needing an interrupt path of their own. */
 void xhci_poll(void);
 
+/* Whether a HID device of each kind was enumerated. The input layer asks
+   because the device nodes are created once, at boot, and a machine whose
+   pointer is on USB has no PS/2 mouse to answer for it. */
+int xhci_keyboard_present(void);
+int xhci_pointer_present(void);
+
 /* Register access. Wide reads are split in two on purpose; see the source. */
 uint32_t xhci_read32(uint64_t address);
 void xhci_write32(uint64_t address, uint32_t value);
