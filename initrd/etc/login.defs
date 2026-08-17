@@ -22,7 +22,12 @@ GID_MIN		1000
 GID_MAX		60000
 
 LOGIN_RETRIES	5
-LOGIN_TIMEOUT	60
+# No timeout. A getty is running on each of the first four virtual terminals,
+# and a timeout makes every one of them give up and be restarted once a minute
+# for as long as the machine is up -- which fills the console with service
+# churn and throws away anything half-typed at a prompt nobody has answered yet.
+# On a machine with a real getty this is the getty's business, not login's.
+LOGIN_TIMEOUT	0
 FAIL_DELAY	3
 
 # SHA512 is what /etc/shadow already holds, and what musl's crypt() implements.

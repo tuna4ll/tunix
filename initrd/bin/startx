@@ -6,9 +6,13 @@
 #   LIBSEAT_BACKEND=builtin  weston 14 will only talk to a seat through libseat,
 #                            and there is no seatd daemon on Tunix; the builtin
 #                            backend runs the seat server inside weston itself.
-#   SEATD_VTBOUND=0          turns off VT binding. Tunix has no virtual
-#                            terminals, and without this libseat issues VT
-#                            ioctls that cannot be answered.
+#   SEATD_VTBOUND=0          turns off libseat's VT binding. Tunix does have
+#                            virtual terminals now, but weston is not what
+#                            drives the display on this image -- LightDM and
+#                            Xorg are -- so the binding path is left unused
+#                            rather than half-tested. Weston claims whichever
+#                            terminal it was started from, which is what a
+#                            switch away from and back to it restores.
 # Keyboard and mouse come from /dev/input/event0 and event1 through libinput,
 # so no --continue-without-input is needed.
 #

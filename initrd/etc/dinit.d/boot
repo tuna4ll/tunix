@@ -4,7 +4,13 @@
 type = internal
 waits-for = rcS
 waits-for = keymap
-# The graphical login. LightDM owns the display from here on; the console
-# `login` service is still defined and can be started in its place, but the two
-# cannot both run -- there is one screen and one keyboard.
+# A login prompt on each of the first four virtual terminals, as a distribution
+# has: Ctrl+Alt+F1 through Ctrl+Alt+F4.
+waits-for = tty1
+waits-for = tty2
+waits-for = tty3
+waits-for = tty4
+# The graphical login, which takes a virtual terminal of its own (tty7, from
+# /etc/lightdm/lightdm.conf) and leaves the console logins alone. Ctrl+Alt+F7
+# comes back to it.
 waits-for = lightdm

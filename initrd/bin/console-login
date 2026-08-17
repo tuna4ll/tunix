@@ -1,6 +1,8 @@
 #!/bin/sh
-# What a getty would do on a machine with virtual terminals: put the console on
-# the standard descriptors and hand it to login(1). dinit restarts this when the
-# session ends, so logging out brings the prompt back.
-exec </dev/console >/dev/console 2>&1
-exec /bin/login
+# A login prompt on one virtual terminal.
+#
+# /bin/getty does the work -- session, controlling terminal, standard
+# descriptors -- and this only names the terminal, so that the service files
+# read as what they are. With no argument it takes the first terminal, which is
+# what a machine with nothing else running would want.
+exec /bin/getty "${1:-/dev/tty1}"

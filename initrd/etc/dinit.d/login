@@ -1,6 +1,0 @@
-# The console login prompt. restart = true is what makes it a login *service*:
-# when the session ends, login runs again and the next person gets a prompt.
-type = process
-command = /bin/console-login
-depends-on = rcS
-restart = true
