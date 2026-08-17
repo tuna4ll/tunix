@@ -69,13 +69,28 @@ typedef struct heap_block {
        and immune to the boundaries having moved. */
     uint8_t pages_released;
     struct heap_block* next;
-    uint64_t reserved;   /* padding only: keeps sizeof a multiple of HEAP_ALIGN */
+    /* The list runs both ways so that freeing does not have to find the block
+       before this one by walking from the start. It used to, on every kfree,
+       through a list that reaches nine thousand blocks on a running desktop --
+       and all of it to answer "is my neighbour free too?". */
+    struct heap_block* prev;
 } heap_block_t;
 
 _Static_assert(sizeof(heap_block_t) % HEAP_ALIGN == 0,
                "the heap header must not disturb the alignment of what follows it");
 
 static heap_block_t* head = NULL;
+/* The last block, so growing the heap does not walk to find it. */
+static heap_block_t* tail = NULL;
+/*
+ * A block at or before the first free one.
+ *
+ * Only a lower bound, which is all a search needs: starting here instead of at
+ * head skips the run of allocated blocks that builds up at the bottom of the
+ * heap and never comes back. Kept honest by kfree, which is the only thing that
+ * can put a free block earlier than this.
+ */
+static heap_block_t* first_free = NULL;
 static uint64_t heap_size = 0;
 /* Bytes currently handed out. heap_size only ever grows, so it says nothing
    about how much room is left; this does. */
@@ -101,6 +116,9 @@ void heap_init(void) {
     head->is_free = 1;
     head->pages_released = 0;
     head->next = NULL;
+    head->prev = NULL;
+    tail = head;
+    first_free = head;
 }
 
 /* Maps fresh physical pages right after the current end of the heap so
@@ -145,14 +163,16 @@ static int heap_grow(size_t min_size) {
     new_block->is_free = 1;
     new_block->pages_released = 0;
     new_block->next = NULL;
+    new_block->prev = tail;
 
-    heap_block_t *tail = head;
-    while (tail->next) tail = tail->next;
+    /* Both outcomes leave free space at or after `tail`, and first_free is
+       never past `tail`, so the hint stays a lower bound either way. */
     if (tail->is_free &&
         (uint64_t)tail + sizeof(heap_block_t) + tail->size == base) {
         tail->size += (uint32_t)growth;
     } else {
         tail->next = new_block;
+        tail = new_block;
     }
 
     heap_size += growth;
@@ -253,14 +273,17 @@ static heap_block_t *split_for_page_alignment(heap_block_t *block, uint64_t size
     uint64_t lead = aligned - payload;
     if (block->size < lead + size) return NULL;
 
-    heap_block_t *tail = (heap_block_t *)(aligned - sizeof(heap_block_t));
-    tail->magic = HEAP_MAGIC;
-    tail->size = (uint32_t)(block->size - lead);
-    tail->is_free = 1;
-    tail->next = block->next;
+    heap_block_t *carved = (heap_block_t *)(aligned - sizeof(heap_block_t));
+    carved->magic = HEAP_MAGIC;
+    carved->size = (uint32_t)(block->size - lead);
+    carved->is_free = 1;
+    carved->next = block->next;
+    carved->prev = block;
+    if (carved->next) carved->next->prev = carved;
+    else tail = carved;
     block->size = (uint32_t)(lead - sizeof(heap_block_t));
-    block->next = tail;
-    return tail;
+    block->next = carved;
+    return carved;
 }
 
 void* kmalloc(size_t size) {
@@ -272,7 +295,7 @@ void* kmalloc(size_t size) {
     spinlock_acquire(&heap_lock);
 
     for (;;) {
-        heap_block_t* curr = head;
+        heap_block_t* curr = first_free ? first_free : head;
         while (curr != NULL) {
             if (curr->is_free && curr->size >= size) {
                 /* Pages first: everything below writes headers into this block,
@@ -296,6 +319,9 @@ void* kmalloc(size_t size) {
                        remainder is the part that may still be short of pages. */
                     new_block->pages_released = released;
                     new_block->next = chosen->next;
+                    new_block->prev = chosen;
+                    if (new_block->next) new_block->next->prev = new_block;
+                    else tail = new_block;
 
                     chosen->size = size;
                     chosen->next = new_block;
@@ -305,6 +331,16 @@ void* kmalloc(size_t size) {
                 chosen->pages_released = 0;
                 chosen->is_free = 0;
                 heap_allocated += chosen->size;
+                /*
+                 * Move the hint on only when the block it names has stopped
+                 * being free, and then only by one. Anything further would
+                 * step over the free blocks this search skipped for being too
+                 * small -- and the page-alignment carve leaves the block the
+                 * hint named still free, which is why this asks rather than
+                 * assumes.
+                 */
+                if (first_free && !first_free->is_free && first_free->next)
+                    first_free = first_free->next;
                 spinlock_release(&heap_lock);
                 return (void*)((uint8_t*)chosen + sizeof(heap_block_t));
             }
@@ -336,17 +372,31 @@ void kfree(void* ptr) {
     block->is_free = 1;
     heap_release_pages(block);
 
-    heap_block_t* curr = head;
-    while (curr != NULL) {
-        if (curr->is_free && curr->next != NULL && curr->next->is_free) {
-            curr->size += curr->next->size + sizeof(heap_block_t);
-            /* Either side may be short of pages, so the merged block is too. */
-            curr->pages_released |= curr->next->pages_released;
-            curr->next = curr->next->next;
-        } else {
-            curr = curr->next;
-        }
+    /* Both neighbours, and only them: the list is ordered by address and every
+       other block was already coalesced with its own neighbours when it was
+       freed, so there is nothing further away left to join. */
+    heap_block_t* next = block->next;
+    if (next && next->is_free) {
+        block->size += next->size + sizeof(heap_block_t);
+        /* Either side may be short of pages, so the merged block is too. */
+        block->pages_released |= next->pages_released;
+        block->next = next->next;
+        if (block->next) block->next->prev = block;
+        else tail = block;
     }
+    heap_block_t* previous = block->prev;
+    if (previous && previous->is_free) {
+        previous->size += block->size + sizeof(heap_block_t);
+        previous->pages_released |= block->pages_released;
+        previous->next = block->next;
+        if (previous->next) previous->next->prev = previous;
+        else tail = previous;
+        block = previous;
+    }
+
+    /* The survivor, which is at or before whatever the hint pointed at -- and
+       may be the block the hint pointed at, now absorbed. */
+    if (!first_free || block < first_free) first_free = block;
 
     spinlock_release(&heap_lock);
 }
