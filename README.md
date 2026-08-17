@@ -37,6 +37,9 @@ Tunix is a small Unix-like operating system experiment for x86_64. It includes a
   and a console `login` prompt. shadow-utils (`login`, `su`, `passwd`) and
   `sudo` are ported. The image ships `root` / `root` and `tunix` / `tunix` —
   see [Users and Permissions](docs/users-and-permissions.md)
+- Eight virtual terminals, switched with Ctrl+Alt+F1..F8 or `chvt`: a login
+  prompt on the first four, the graphical session on the seventh, each with its
+  own screen and keyboard — see [Virtual Terminals](docs/virtual-terminals.md)
 - A full Xfce desktop on Xorg (xfwm4, xfce4-panel, xfdesktop, Thunar and
   xfce4-terminal), started by the session of whoever logs in, so it runs as
   that user; a Weston (Wayland) session is also available
@@ -94,6 +97,7 @@ make clean
 - [Mounting](docs/mounting.md)
 - [Networking](docs/networking.md)
 - [Users and Permissions](docs/users-and-permissions.md)
+- [Virtual Terminals](docs/virtual-terminals.md)
 - [Display Manager](docs/display-manager.md)
 - [virtio-gpu](docs/virtio-gpu.md)
 - [Package Manager](docs/package-manager.md)

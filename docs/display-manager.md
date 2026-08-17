@@ -52,36 +52,22 @@ it and they keep working as they did; moving them across is a separate job.
 ## Virtual terminals
 
 A display manager's first question is which terminal to put the X server on.
-Tunix has one console and no way to switch away from it, so the kernel answers
-every form of that question the same way. `src/kernel/tty.c` handles:
+Tunix has eight of them and they are real — see
+[Virtual Terminals](virtual-terminals.md) for what a terminal is and how
+switching works. `src/kernel/vt.c` answers the ioctls, on any terminal node and
+on `/dev/tty0`, which means whichever one is active.
 
-| ioctl | Answer |
-| --- | --- |
-| `VT_OPENQRY` | 1 — the console, the only terminal there is |
-| `VT_GETSTATE` | active 1, no pending signal |
-| `VT_ACTIVATE`, `VT_WAITACTIVE` | success for 1, `EINVAL` for anything else |
-| `VT_GETMODE`, `VT_SETMODE` | `VT_AUTO`; a registered signal can never fire |
-| `VT_RELDISP` | success |
-| `KDGETMODE`, `KDSETMODE` | remembered, and it does something — see below |
-| `KDGKBMODE`, `KDSKBMODE` | remembered |
-| `KDGKBTYPE` | `KB_101` |
+LightDM claims a terminal for the seat before it starts anything — the first
+free one at or above `minimum-vt` — and then `VT_ACTIVATE`s it and reads
+`VT_GETSTATE` back. `lightdm.conf` sets `minimum-vt=7`, upstream's default and
+where every distribution puts the graphical session, which leaves the console
+logins on tty1 to tty4 alone. Ctrl+Alt+F7 comes back to the desktop.
 
-They are asked on `/dev/tty0`, which is a symlink to `/dev/console`.
-
-`KDSETMODE` is the one with a side effect. `KD_GRAPHICS` is a program saying it
-will paint the screen itself, so the text console stands down and hands over the
-scanout — the same arbitration DRM already performs when a client presents its
-first frame. `KD_TEXT` gives it back and the console redraws.
-
-LightDM does use these. It claims a terminal for the seat before it starts
-anything — the first free one at or above `minimum-vt` — and then `VT_ACTIVATE`s
-it and reads `VT_GETSTATE` back. Upstream's default of 7 names a terminal that
-does not exist here, so `lightdm.conf` sets `minimum-vt=1`: the console, the one
-the kernel answers for.
-
-Whether *Xorg* binds a console is a separate question, answered by
-`XORG_NO_VT` in the server wrapper. The façade is also what retires the reason
-`startx` sets `SEATD_VTBOUND=0`.
+Whether *Xorg* binds a terminal is a separate question, answered by
+`XORG_NO_VT` in the server wrapper: it does not. That is why the wrapper runs
+`chvt` first — the display belongs to whichever terminal was in front when the
+first frame was presented, so the switch has to happen before the server
+starts, not after.
 
 ## The two wrappers
 
@@ -91,7 +77,8 @@ things they set is expressible in `lightdm.conf`.
 The server wrapper exports `XORG_NO_VT`, which the Xorg port reads to skip the
 `/dev/tty0` probe and the VT ioctls entirely — input comes from evdev and the
 display from DRM master, neither of which needs a console. It also names
-`/etc/X11/xorg.conf` outright and drops any `vtN` argument.
+`/etc/X11/xorg.conf` outright, and turns LightDM's `vtN` argument into a `chvt`
+of its own instead of passing it on.
 
 The session wrapper sets the XDG environment. LightDM's children are not started
 by a shell, so they inherit neither `/etc/profile` nor anything `tunix-session`
@@ -110,12 +97,12 @@ what the desktop is, whichever way you arrive at it.
 
 ## Going back to the console login
 
-The `login` service is still defined; only what `boot` waits for changed. The
-two cannot both run — there is one screen and one keyboard — so it is a swap:
+There is nothing to swap any more: the console logins on tty1 to tty4 run
+alongside the graphical one, and Ctrl+Alt+F1 is how you reach them. Stopping
+the display manager frees the terminal it holds:
 
 ```
 # dinitctl stop lightdm
-# dinitctl start login
 ```
 
 ## What it took
