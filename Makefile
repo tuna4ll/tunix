@@ -354,8 +354,10 @@ SND_TEST := $(BUILD)/user/snd-test
 LINK_TEST := $(BUILD)/user/link-test
 TCP_TEST := $(BUILD)/user/tcp-test
 MOUNT_TEST := $(BUILD)/user/mount-test
+GETTY := $(BUILD)/user/getty
+CHVT := $(BUILD)/user/chvt
 MOUNT_TOOLS := $(BUILD)/user/mount $(BUILD)/user/umount
-SYSTEM_TOOLS := $(BUILD)/user/ps $(BUILD)/user/free $(BUILD)/user/uptime $(BUILD)/user/top $(LOADKEYS) $(SLEEP) $(PREEMPT_TEST) $(SMP_TEST) $(INPUT_TEST) $(FB_TEST) $(FB_SHOT) $(GLIB_COMPAT_TEST) $(SND_TEST) $(LINK_TEST) $(TCP_TEST) $(MOUNT_TEST) $(MOUNT_TOOLS)
+SYSTEM_TOOLS := $(BUILD)/user/ps $(BUILD)/user/free $(BUILD)/user/uptime $(BUILD)/user/top $(LOADKEYS) $(SLEEP) $(PREEMPT_TEST) $(SMP_TEST) $(INPUT_TEST) $(FB_TEST) $(FB_SHOT) $(GLIB_COMPAT_TEST) $(SND_TEST) $(LINK_TEST) $(TCP_TEST) $(MOUNT_TEST) $(MOUNT_TOOLS) $(GETTY) $(CHVT)
 INITRD_FILES := $(shell find initrd -type f 2>/dev/null)
 
 .PHONY: all run run-gpu headless qemu-ci terminal-font dynamic-runtime-check shared-image-codecs-check gl-check clean
@@ -1458,6 +1460,14 @@ $(MOUNT_TEST): $(BUILD)/user/mount_test.o $(USER_RUNTIME) src/userspace/linker.l
 	$(LD) $(USER_LDFLAGS) -o $@ $(USER_RUNTIME) $(BUILD)/user/mount_test.o
 	$(STRIP) --strip-all $@
 
+$(CHVT): $(BUILD)/user/chvt.o $(USER_RUNTIME) src/userspace/linker.ld
+	$(LD) $(USER_LDFLAGS) -o $@ $(USER_RUNTIME) $(BUILD)/user/chvt.o
+	$(STRIP) --strip-all $@
+
+$(GETTY): $(BUILD)/user/getty.o $(USER_RUNTIME) src/userspace/linker.ld
+	$(LD) $(USER_LDFLAGS) -o $@ $(USER_RUNTIME) $(BUILD)/user/getty.o
+	$(STRIP) --strip-all $@
+
 $(BUILD)/user/mount:$(BUILD)/user/mount.o $(USER_RUNTIME) src/userspace/linker.ld
 	$(LD) $(USER_LDFLAGS) -o $@ $(USER_RUNTIME) $(BUILD)/user/mount.o
 	$(STRIP) --strip-all $@
@@ -1745,6 +1755,8 @@ $(INITRAMFS): $(DINIT_STAMP) $(SHADOW_STAMP) $(SUDO_STAMP) $(LINUX_PAM_STAMP) $(
 	@test -x $(ROOTFS)/usr/bin/xfsettingsd || { echo "xfsettingsd was not installed into the rootfs" >&2; exit 1; }
 	@test -x $(ROOTFS)/bin/tunix-session || { echo "the Tunix session launcher was not installed into the rootfs" >&2; exit 1; }
 	@test -x $(ROOTFS)/bin/console-login || { echo "the console login wrapper was not installed into the rootfs" >&2; exit 1; }
+	@test -x $(ROOTFS)/bin/getty || { echo "getty was not installed into the rootfs" >&2; exit 1; }
+	@test -x $(ROOTFS)/bin/chvt || { echo "chvt was not installed into the rootfs" >&2; exit 1; }
 	@test -x $(ROOTFS)/bin/login || { echo "shadow login was not installed into the rootfs" >&2; exit 1; }
 	@test -x $(ROOTFS)/bin/su || { echo "su was not installed into the rootfs" >&2; exit 1; }
 	@test -x $(ROOTFS)/usr/bin/passwd || { echo "passwd was not installed into the rootfs" >&2; exit 1; }
@@ -1777,7 +1789,7 @@ $(INITRAMFS): $(DINIT_STAMP) $(SHADOW_STAMP) $(SUDO_STAMP) $(LINUX_PAM_STAMP) $(
 		$(ROOTFS)/bin/bash $(ROOTFS)/bin/nano \
 		$(ROOTFS)/bin/tty-clock $(ROOTFS)/bin/tty-tetris $(ROOTFS)/bin/htop \
 		$(ROOTFS)/bin/neofetch $(ROOTFS)/bin/startx $(ROOTFS)/bin/tunix-session $(ROOTFS)/bin/console-login $(ROOTFS)/bin/fb-shot $(ROOTFS)/bin/ps $(ROOTFS)/bin/free \
-		$(ROOTFS)/bin/uptime $(ROOTFS)/bin/top $(ROOTFS)/bin/loadkeys $(ROOTFS)/bin/sleep $(ROOTFS)/bin/preempt-test $(ROOTFS)/bin/smp-test $(ROOTFS)/bin/input-test $(ROOTFS)/bin/fb-test $(ROOTFS)/bin/glib-compat-test $(ROOTFS)/bin/snd-test $(ROOTFS)/bin/link-test $(ROOTFS)/bin/tcp-test $(ROOTFS)/bin/mount-test $(ROOTFS)/bin/mount $(ROOTFS)/bin/umount \
+		$(ROOTFS)/bin/uptime $(ROOTFS)/bin/top $(ROOTFS)/bin/loadkeys $(ROOTFS)/bin/sleep $(ROOTFS)/bin/preempt-test $(ROOTFS)/bin/smp-test $(ROOTFS)/bin/input-test $(ROOTFS)/bin/fb-test $(ROOTFS)/bin/glib-compat-test $(ROOTFS)/bin/snd-test $(ROOTFS)/bin/link-test $(ROOTFS)/bin/tcp-test $(ROOTFS)/bin/mount-test $(ROOTFS)/bin/mount $(ROOTFS)/bin/umount $(ROOTFS)/bin/getty $(ROOTFS)/bin/chvt \
 		$(ROOTFS)/usr/bin/gcc $(ROOTFS)/usr/bin/cpp \
 		$(ROOTFS)/usr/bin/lua $(ROOTFS)/usr/bin/fastfetch \
 		$(ROOTFS)/usr/bin/browse \
