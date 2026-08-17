@@ -335,7 +335,7 @@ KERNEL_OBJS := \
 	$(BUILD)/vfs.o $(BUILD)/tarfs.o $(BUILD)/ext2.o $(BUILD)/devfs.o $(BUILD)/unix_socket.o $(BUILD)/pty.o \
 	$(BUILD)/usercopy.o $(BUILD)/elf.o $(BUILD)/file.o $(BUILD)/cred.o \
 	$(BUILD)/pipe.o $(BUILD)/tty.o $(BUILD)/process.o $(BUILD)/procfs.o $(BUILD)/time.o $(BUILD)/random.o $(BUILD)/ata.o \
-	$(BUILD)/acpi.o $(BUILD)/apic.o $(BUILD)/xhci.o \
+	$(BUILD)/acpi.o $(BUILD)/apic.o $(BUILD)/power.o $(BUILD)/xhci.o \
 	$(BUILD)/sound.o $(BUILD)/hda.o \
 	$(BUILD)/virtio_pci.o $(BUILD)/virtio_ring.o $(BUILD)/virtio_gpu.o \
 	$(BUILD)/pci.o $(BUILD)/rtl8139.o $(BUILD)/net.o $(BUILD)/inet_socket.o $(BUILD)/netlink.o
@@ -1845,10 +1845,18 @@ $(IMAGE): $(BUILD)/stage1.bin $(BUILD)/stage2.bin $(KERNEL) $(INITRAMFS) scripts
 # across all of them. Override QEMU_SMP=1 to run the machine as it was before
 # there was more than one.
 QEMU_SMP ?= 4
+
+# -no-reboot and -no-shutdown used to be passed unconditionally, from before the
+# guest could do either: QEMU intercepted the reset and the power-down and kept
+# the machine sitting there. Now that reboot(2) works, intercepting them would
+# mean `reboot` exits QEMU and `poweroff` appears to hang. They are still the
+# right flags for chasing a fault that resets the machine, which is what
+# QEMU_HALT_ON_RESET=1 asks for.
+QEMU_RESET_FLAGS := $(if $(QEMU_HALT_ON_RESET),-no-reboot -no-shutdown,)
 run: $(IMAGE)
 	rm -f $(BUILD)/serial.log
 	$(QEMU) -machine pc,accel=kvm:tcg -cpu host -smp $(QEMU_SMP) -m 4096M -drive format=raw,file=$(IMAGE) \
-		-serial file:$(BUILD)/serial.log -monitor none -no-reboot -no-shutdown \
+		-serial file:$(BUILD)/serial.log -monitor none $(QEMU_RESET_FLAGS) \
 		-netdev user,id=net0 -device rtl8139,netdev=net0 $(QEMU_AUDIO)
 
 # virtio-vga rather than virtio-gpu-pci: the bootloader sets the mode over VBE
@@ -1869,12 +1877,12 @@ run-gpu: $(IMAGE)
 	rm -f $(BUILD)/serial.log
 	$(QEMU) -machine pc,accel=kvm:tcg -cpu host -smp $(QEMU_SMP) -m 4096M -drive format=raw,file=$(IMAGE) \
 		-vga none -device virtio-vga,$(QEMU_GPU_RESOLUTION) -display $(QEMU_GPU_DISPLAY) \
-		-serial file:$(BUILD)/serial.log -monitor none -no-reboot -no-shutdown \
+		-serial file:$(BUILD)/serial.log -monitor none $(QEMU_RESET_FLAGS) \
 		-netdev user,id=net0 -device rtl8139,netdev=net0 $(QEMU_AUDIO)
 
 headless: $(IMAGE)
 	$(QEMU) -machine pc,accel=kvm:tcg -cpu host -smp $(QEMU_SMP) -m 4096M -drive format=raw,file=$(IMAGE) \
-		-nographic -monitor none -serial stdio -no-reboot -no-shutdown \
+		-nographic -monitor none -serial stdio $(QEMU_RESET_FLAGS) \
 		-netdev user,id=net0 -device rtl8139,netdev=net0 $(QEMU_AUDIO)
 
 qemu-ci: $(IMAGE)

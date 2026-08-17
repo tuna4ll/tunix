@@ -19,6 +19,7 @@
 #include "include/pipe.h"
 #include "include/pty.h"
 #include "include/pmm.h"
+#include "include/power.h"
 #include "include/process.h"
 #include "include/random.h"
 #include "include/signal.h"
@@ -131,6 +132,7 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define SYS_STATFS 137
 #define SYS_FSTATFS 138
 #define SYS_SYNC 162
+#define SYS_REBOOT 169
 #define SYS_SYNCFS 306
 #define SYS_FTRUNCATE 77
 #define SYS_GETCWD 79
@@ -4392,6 +4394,46 @@ static uint64_t file_cache_budget(void) {
     return budget;
 }
 
+/*
+ * reboot(2).
+ *
+ * The magic numbers are not decoration: the call takes the machine away, and
+ * requiring two constants and a command means a wild syscall with plausible
+ * arguments cannot reach it by accident. Linux accepts four values for the
+ * second one, all of them dates, and libcs differ over which they pass.
+ */
+#define LINUX_REBOOT_MAGIC1 0xFEE1DEADU
+#define LINUX_REBOOT_MAGIC2 0x28121969U
+#define LINUX_REBOOT_MAGIC2A 0x05121996U
+#define LINUX_REBOOT_MAGIC2B 0x16041998U
+#define LINUX_REBOOT_MAGIC2C 0x20112000U
+
+#define LINUX_REBOOT_CMD_RESTART 0x01234567U
+#define LINUX_REBOOT_CMD_HALT 0xCDEF0123U
+#define LINUX_REBOOT_CMD_POWER_OFF 0x4321FEDCU
+#define LINUX_REBOOT_CMD_CAD_ON 0x89ABCDEFU
+#define LINUX_REBOOT_CMD_CAD_OFF 0x00000000U
+
+static int64_t sys_reboot(uint32_t magic1, uint32_t magic2, uint32_t command) {
+    const struct credentials *cred = cred_current();
+    if (cred && cred->euid != 0) return -EPERM;
+    if (magic1 != LINUX_REBOOT_MAGIC1) return -EINVAL;
+    if (magic2 != LINUX_REBOOT_MAGIC2 && magic2 != LINUX_REBOOT_MAGIC2A &&
+        magic2 != LINUX_REBOOT_MAGIC2B && magic2 != LINUX_REBOOT_MAGIC2C)
+        return -EINVAL;
+
+    switch (command) {
+        /* These return, and are the reason this is not simply noreturn: an init
+           that turns the power button over to itself carries on running. */
+        case LINUX_REBOOT_CMD_CAD_ON:  power_set_button_handled(1); return 0;
+        case LINUX_REBOOT_CMD_CAD_OFF: power_set_button_handled(0); return 0;
+        case LINUX_REBOOT_CMD_RESTART:   power_restart();
+        case LINUX_REBOOT_CMD_HALT:      power_halt();
+        case LINUX_REBOOT_CMD_POWER_OFF: power_off();
+        default: return -EINVAL;
+    }
+}
+
 static void syscall_dispatch_locked(struct syscall_frame *frame) {
     if (!frame) return;
     process_account_runtime();
@@ -4910,6 +4952,11 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         case SYS_FDATASYNC: frame->rax = (uint64_t)sys_fsync((int)frame->rdi); break;
         case SYS_SYNCFS: frame->rax = (uint64_t)sys_fsync((int)frame->rdi); break;
         case SYS_SYNC: frame->rax = (uint64_t)ext2fs_sync(); break;
+        case SYS_REBOOT:
+            frame->rax = (uint64_t)sys_reboot((uint32_t)frame->rdi,
+                                              (uint32_t)frame->rsi,
+                                              (uint32_t)frame->rdx);
+            break;
         case SYS_FTRUNCATE: frame->rax = (uint64_t)sys_ftruncate((int)frame->rdi, frame->rsi); break;
         case SYS_FLOCK: {
             int operation = (int)frame->rsi;
