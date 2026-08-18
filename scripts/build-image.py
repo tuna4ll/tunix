@@ -48,7 +48,12 @@ DATA_REGION_ALIGN_SECTORS = 2048
 # EXT2_MAX_GROUPS (128) of them, so 16 GiB. This only decides how much the
 # image reserves -- and it has to hold the whole initramfs, because first boot
 # seeds the root filesystem from it and then everything the user writes.
-DATA_REGION_BYTES = 1024 * 1024 * 1024
+#
+# 1 GiB left almost nothing over once the seeded root was in place: installing
+# gcc alone spends a couple of hundred megabytes, and a desktop's worth of
+# packages does not fit at all. The region is written as a hole rather than as
+# zeroes (see below), so the reservation costs image file length and not disk.
+DATA_REGION_BYTES = 8 * 1024 * 1024 * 1024
 
 CONFIG_NAME = b"TUNIX   CFG"
 KERNEL_NAME = b"KERNEL  ELF"
@@ -179,11 +184,18 @@ def main() -> None:
     used_sectors = len(image) // SECTOR_SIZE
     data_lba = -(-used_sectors // DATA_REGION_ALIGN_SECTORS) * DATA_REGION_ALIGN_SECTORS
     image += b"\0" * (data_lba * SECTOR_SIZE - len(image))
-    image += b"\0" * DATA_REGION_BYTES
 
-    pathlib.Path(output).write_bytes(bytes(image))
+    # The data region is left as a hole. Building it in memory would mean
+    # holding the whole reservation as bytes -- and then a second copy to
+    # write it -- which stops being possible long before the region is large
+    # enough to be useful. Extending the file instead costs nothing until the
+    # guest writes, and the guest sees the same all-zero disk either way.
+    total_bytes = len(image) + DATA_REGION_BYTES
+    with open(output, "wb") as handle:
+        handle.write(bytes(image))
+        handle.truncate(total_bytes)
 
-    print(f"image: {output} ({len(image)} bytes)")
+    print(f"image: {output} ({total_bytes} bytes)")
     print(f"stage2: {stage2_sectors} sectors")
     print(f"kernel: {len(kernel)} bytes in the partition crc32={crc32(kernel):08x}")
     print(f"manifest: lba {MANIFEST_LBA}")

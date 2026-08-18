@@ -31,15 +31,20 @@ def main() -> None:
 
     image_path = Path(sys.argv[1])
     initramfs_path = Path(sys.argv[2])
-    image = image_path.read_bytes()
     initramfs_size = initramfs_path.stat().st_size
 
     offset = MANIFEST_LBA * SECTOR_SIZE
     packed_size = struct.calcsize(MANIFEST_FORMAT)
-    if len(image) < offset + packed_size:
+    image_size = image_path.stat().st_size
+    if image_size < offset + packed_size:
         raise SystemExit("disk image is too small to contain the boot manifest")
 
-    fields = struct.unpack_from(MANIFEST_FORMAT, image, offset)
+    # Only the manifest is read. The image is mostly the reserved data region,
+    # which is a hole, and reading it back would materialise every byte of it.
+    with image_path.open("rb") as handle:
+        handle.seek(offset)
+        manifest_bytes = handle.read(packed_size)
+    fields = struct.unpack_from(MANIFEST_FORMAT, manifest_bytes, 0)
     (
         magic,
         version,
@@ -76,7 +81,7 @@ def main() -> None:
         )
 
     end = initramfs_lba * SECTOR_SIZE + initramfs_size
-    if end > len(image):
+    if end > image_size:
         raise SystemExit("initramfs extends beyond the end of the disk image")
 
     print(
