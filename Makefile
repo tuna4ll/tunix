@@ -315,8 +315,10 @@ COMMON_CFLAGS := -std=gnu11 -Wall -Wextra -Werror -ffreestanding -fno-stack-prot
 # happily reach for %xmm0 to copy a 16-byte struct -- corrupts user state on a
 # plain syscall, with no context switch in sight. That is not theoretical: it is
 # what produced NaNs in weston-smoke's simulation.
+# KERNEL_CFLAGS_EXTRA is for switching on a diagnostic that is too expensive to
+# ship, without editing anything: make KERNEL_CFLAGS_EXTRA=-DTUNIX_HEAP_DEBUG=1
 KERNEL_CFLAGS := $(COMMON_CFLAGS) -mcmodel=kernel -mgeneral-regs-only \
-	-Isrc/kernel/include -Isrc/include -I$(BUILD)/generated
+	-Isrc/kernel/include -Isrc/include -I$(BUILD)/generated $(KERNEL_CFLAGS_EXTRA)
 KERNEL_LDFLAGS := -nostdlib -no-pie -Wl,-T,src/kernel/arch/x86_64/linker.ld \
 	-Wl,--gc-sections -Wl,--build-id=none -Wl,-z,max-page-size=0x1000
 USER_CFLAGS := $(COMMON_CFLAGS) -mcmodel=small -Isrc/libc/include -Isrc/include
@@ -1410,6 +1412,11 @@ $(BUILD)/isr_handler.o: src/kernel/arch/x86_64/isr_handler.c src/kernel/include/
 # like the edit did nothing.
 $(KERNEL): $(KERNEL_OBJS) src/kernel/arch/x86_64/linker.ld
 	$(CC) $(KERNEL_LDFLAGS) -o $@ $(KERNEL_OBJS)
+	# Keep the symbols before throwing them away. Stripping removes sections
+	# but moves no code, so an address read out of a running machine -- the
+	# RIP in QEMU's "info registers", say -- resolves against this copy
+	# exactly as it would have against the kernel actually booted.
+	cp $@ $(BUILD)/kernel.debug.elf
 	$(STRIP) --strip-all $@
 
 $(BUILD)/user/crt0.o: src/libc/crt0.S | $(BUILD)/user
