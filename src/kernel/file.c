@@ -38,12 +38,29 @@ struct file *file_open_node(struct vfs_node *node, uint32_t flags) {
     file->kind = FILE_KIND_VFS;
     file->flags = flags;
     file->node = node;
+    /*
+     * An open file keeps its node alive. Without this, unlink() frees the
+     * contents out from under everyone still using them: destroy_node() only
+     * spares a node that something holds a reference to, and until now the
+     * only thing that ever took one was a process's working directory.
+     *
+     * That is POSIX's rule -- a file goes away when its last name and its
+     * last descriptor are both gone -- but here it is also a memory-safety
+     * one, because file data lives in kmalloc'd buffers and a mapping points
+     * straight at them. A package manager replacing a shared library does
+     * exactly the unsupported thing: it unlinks the old libfoo.so while the
+     * running process still has it mapped, the buffer goes back to the heap,
+     * and the next allocation to land there is quietly overwritten by a
+     * process that has no idea its own text moved.
+     */
+    vfs_node_ref(node);
     if (node->flags & VFS_FRAMEBUFFER) {
         file->kind = FILE_KIND_FRAMEBUFFER;
     } else if (node->flags & VFS_INPUTDEVICE) {
         unsigned device_id = (unsigned)(uintptr_t)node->data;
         file->input_reader = input_reader_open(device_id);
         if (!file->input_reader) {
+            vfs_node_unref(node);
             kfree(file);
             return NULL;
         }
@@ -168,6 +185,7 @@ struct file *file_create_pty_endpoint(struct pty_pair *pty, int master,
     file->flags = flags;
     file->node = node;
     file->pty = pty;
+    vfs_node_ref(node);          /* as in file_open_node, and dropped alike */
     return file;
 }
 
@@ -301,6 +319,10 @@ void file_unref(struct file *file) {
         netlink_socket_unref(file->netlink_socket);
     if ((file->kind == FILE_KIND_PTY_MASTER || file->kind == FILE_KIND_PTY_SLAVE) && file->pty)
         pty_close_endpoint(file->pty, file->kind == FILE_KIND_PTY_MASTER);
+    /* The other half of the reference taken when the node was opened. Last:
+       for a node already unlinked this is what finally frees it, and the
+       close callback above still wants it to exist. */
+    vfs_node_unref(file->node);
     kfree(file);
 }
 
