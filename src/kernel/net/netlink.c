@@ -394,9 +394,26 @@ static void dump_routes(struct nl_builder *b, uint32_t seq, uint32_t pid) {
 
 /* ---- request dispatch --------------------------------------------------- */
 
-static void handle_route_request(struct nl_builder *b, const struct nlmsghdr *request) {
+/*
+ * `portid` is the socket's own, not the one in the request.
+ *
+ * A message from the kernel is addressed *to* a socket, so nlmsg_pid carries
+ * the destination's port id -- the same number bind() assigned and
+ * getsockname() reported. Echoing the request's field instead looks harmless,
+ * because a program sending to the kernel leaves it zero, and the reply then
+ * claims to be addressed to port zero.
+ *
+ * libnetlink drops any message whose nlmsg_pid is not its own port id, on the
+ * grounds that it belongs to somebody else, and goes back to waiting for the
+ * one it asked for. So `ip` read every byte of a perfectly well-formed answer,
+ * discarded all of it, and blocked for ever on a reply that had already been
+ * delivered -- and anything else built on libmnl or getifaddrs() did the same,
+ * which is why fastfetch stopped at the line before its network module.
+ */
+static void handle_route_request(struct nl_builder *b, const struct nlmsghdr *request,
+                                 uint32_t portid) {
     uint32_t seq = request->nlmsg_seq;
-    uint32_t pid = request->nlmsg_pid;
+    uint32_t pid = portid;
     switch (request->nlmsg_type) {
         case RTM_GETLINK: dump_links(b, seq, pid); break;
         case RTM_GETADDR: dump_addrs(b, seq, pid); break;
@@ -410,11 +427,12 @@ static void handle_route_request(struct nl_builder *b, const struct nlmsghdr *re
     }
 }
 
-static void handle_diag_request(struct nl_builder *b, const struct nlmsghdr *request) {
+static void handle_diag_request(struct nl_builder *b, const struct nlmsghdr *request,
+                                uint32_t portid) {
     /* ss issues SOCK_DIAG_BY_FAMILY dumps. We have no socket-table enumeration
        wired in yet, so answer every dump with an empty result (NLMSG_DONE):
        ss then prints just its header rather than failing on the socket. */
-    nl_put_done(b, request->nlmsg_seq, request->nlmsg_pid);
+    nl_put_done(b, request->nlmsg_seq, portid);
 }
 
 static int nl_rx_append(struct netlink_socket *socket, const uint8_t *data, size_t length) {
@@ -437,7 +455,7 @@ int64_t netlink_socket_sendto(struct netlink_socket *socket, const void *data, s
     (void)address;
     (void)address_length;
     if (!socket) return -EINVAL;
-    netlink_assign_portid(socket);
+    uint32_t portid = netlink_assign_portid(socket);
 
     /* Nothing ever asks the uevent family a question, and it has no replies to
        give: accept the write and stay silent. */
@@ -456,9 +474,9 @@ int64_t netlink_socket_sendto(struct netlink_socket *socket, const void *data, s
         if (request->nlmsg_len < sizeof(struct nlmsghdr) ||
             offset + request->nlmsg_len > length) break;
         if (socket->protocol == TUNIX_NETLINK_ROUTE)
-            handle_route_request(&builder, request);
+            handle_route_request(&builder, request, portid);
         else
-            handle_diag_request(&builder, request);
+            handle_diag_request(&builder, request, portid);
         offset += NLMSG_ALIGN(request->nlmsg_len);
     }
 
