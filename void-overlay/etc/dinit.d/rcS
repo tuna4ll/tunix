@@ -1,0 +1,6 @@
+# Early filesystem setup for the void_distro experiment, trimmed down from
+# initrd/etc/dinit.d/rcS to what a bare shell actually needs: a writable /tmp
+# and a marker the same convention as the real image uses to prove the console
+# came up.
+type = scripted
+command = /etc/rc.d/rcS

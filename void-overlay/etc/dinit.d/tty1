@@ -1,0 +1,7 @@
+# A shell on virtual terminal 1. See void-login.c for why this is a shell and
+# not a login prompt: the experiment is whether Void's userland runs at all,
+# not whether it authenticates.
+type = process
+command = /usr/bin/getty /dev/tty1
+depends-on = rcS
+restart = true

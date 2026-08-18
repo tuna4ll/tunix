@@ -356,6 +356,10 @@ TCP_TEST := $(BUILD)/user/tcp-test
 MOUNT_TEST := $(BUILD)/user/mount-test
 GETTY := $(BUILD)/user/getty
 CHVT := $(BUILD)/user/chvt
+# The void_distro experiment's login stand-in; see void-login.c. Not part of
+# SYSTEM_TOOLS -- nothing outside that one image should ship a shell with no
+# password on it.
+VOID_LOGIN := $(BUILD)/user/void-login
 MOUNT_TOOLS := $(BUILD)/user/mount $(BUILD)/user/umount
 SYSTEM_TOOLS := $(BUILD)/user/ps $(BUILD)/user/free $(BUILD)/user/uptime $(BUILD)/user/top $(LOADKEYS) $(SLEEP) $(PREEMPT_TEST) $(SMP_TEST) $(INPUT_TEST) $(FB_TEST) $(FB_SHOT) $(GLIB_COMPAT_TEST) $(SND_TEST) $(LINK_TEST) $(TCP_TEST) $(MOUNT_TEST) $(MOUNT_TOOLS) $(GETTY) $(CHVT)
 INITRD_FILES := $(shell find initrd -type f 2>/dev/null)
@@ -1468,6 +1472,10 @@ $(GETTY): $(BUILD)/user/getty.o $(USER_RUNTIME) src/userspace/linker.ld
 	$(LD) $(USER_LDFLAGS) -o $@ $(USER_RUNTIME) $(BUILD)/user/getty.o
 	$(STRIP) --strip-all $@
 
+$(VOID_LOGIN): $(BUILD)/user/void-login.o $(USER_RUNTIME) src/userspace/linker.ld
+	$(LD) $(USER_LDFLAGS) -o $@ $(USER_RUNTIME) $(BUILD)/user/void-login.o
+	$(STRIP) --strip-all $@
+
 $(BUILD)/user/mount:$(BUILD)/user/mount.o $(USER_RUNTIME) src/userspace/linker.ld
 	$(LD) $(USER_LDFLAGS) -o $@ $(USER_RUNTIME) $(BUILD)/user/mount.o
 	$(STRIP) --strip-all $@
@@ -1843,6 +1851,51 @@ $(INITRAMFS): $(DINIT_STAMP) $(SHADOW_STAMP) $(SUDO_STAMP) $(LINUX_PAM_STAMP) $(
 $(IMAGE): $(BUILD)/stage1.bin $(BUILD)/stage2.bin $(KERNEL) $(INITRAMFS) scripts/build-image.py $(BOOT_CONFIG_STAMP)
 	$(PYTHON) scripts/build-image.py $@ $(BUILD)/stage1.bin $(BUILD)/stage2.bin $(KERNEL) $(INITRAMFS)
 	$(PYTHON) scripts/check-boot-image.py $@ $(INITRAMFS)
+
+# --- void_distro: an experiment, not part of the real image -----------------
+#
+# Same kernel, same bootloader, a completely different rootfs: Void Linux's
+# own x86_64-musl base tarball instead of the ~130 ports built by this
+# Makefile. The question it answers is narrow -- does upstream Void's
+# unmodified dynamically linked userland (bash, coreutils, its own musl
+# loader) run on this kernel -- and it answers that by booting it with only
+# dinit, getty/chvt and a login stand-in laid on top; see
+# scripts/build-void-rootfs.sh and void-login.c for what and why.
+VOID_ROOTFS_URL := https://repo-default.voidlinux.org/live/current/void-x86_64-musl-ROOTFS-20250202.tar.xz
+VOID_ROOTFS_TARBALL := $(PORT_OUT)/void-rootfs.tar.xz
+VOID_ROOTFS_DIR := $(BUILD)/rootfs-void
+VOID_INITRAMFS := $(BUILD)/initramfs-void.img
+VOID_IMAGE := $(BUILD)/tunix-void.img
+VOID_OVERLAY_FILES := $(shell find void-overlay -type f 2>/dev/null)
+
+$(VOID_ROOTFS_TARBALL): | $(PORT_OUT)
+	curl -fL -o $@.tmp $(VOID_ROOTFS_URL)
+	mv $@.tmp $@
+
+$(VOID_INITRAMFS): $(VOID_ROOTFS_TARBALL) $(DINIT_STAMP) $(GETTY) $(CHVT) $(VOID_LOGIN) $(ZSTD_STAMP) \
+		scripts/build-void-rootfs.sh $(VOID_OVERLAY_FILES) | $(BUILD)
+	bash scripts/build-void-rootfs.sh $(VOID_ROOTFS_DIR) $(VOID_ROOTFS_TARBALL) \
+		$(DINIT_ROOT) $(GETTY) $(CHVT) $(VOID_LOGIN) $(ZSTD_ROOT) void-overlay
+	tar --format=ustar --blocking-factor=1 --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf $@ -C $(VOID_ROOTFS_DIR) .
+	$(PYTHON) scripts/apply-permissions.py $@ scripts/rootfs-permissions.conf
+
+$(VOID_IMAGE): $(BUILD)/stage1.bin $(BUILD)/stage2.bin $(KERNEL) $(VOID_INITRAMFS) scripts/build-image.py $(BOOT_CONFIG_STAMP)
+	$(PYTHON) scripts/build-image.py $@ $(BUILD)/stage1.bin $(BUILD)/stage2.bin $(KERNEL) $(VOID_INITRAMFS)
+	$(PYTHON) scripts/check-boot-image.py $@ $(VOID_INITRAMFS)
+
+.PHONY: void_distro run-void headless-void
+void_distro: $(VOID_IMAGE)
+
+run-void: $(VOID_IMAGE)
+	rm -f $(BUILD)/serial-void.log
+	$(QEMU) -machine pc,accel=kvm:tcg -cpu host -smp $(QEMU_SMP) -m 4096M -drive format=raw,file=$(VOID_IMAGE) \
+		-serial file:$(BUILD)/serial-void.log -monitor none $(QEMU_RESET_FLAGS) \
+		-netdev user,id=net0 -device rtl8139,netdev=net0
+
+headless-void: $(VOID_IMAGE)
+	$(QEMU) -machine pc,accel=kvm:tcg -cpu host -smp $(QEMU_SMP) -m 4096M -drive format=raw,file=$(VOID_IMAGE) \
+		-nographic -monitor none -serial stdio $(QEMU_RESET_FLAGS) \
+		-netdev user,id=net0 -device rtl8139,netdev=net0
 
 # 4 GiB: Tunix keeps file data in RAM, so `git clone` of a real repo
 # needs headroom for the pack plus git's own working set, and a browser tab is
