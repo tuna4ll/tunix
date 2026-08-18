@@ -462,7 +462,35 @@ struct linux_clone_args {
 #define FUTEX_CMD_MASK 0x7F
 
 #define MAX_EXEC_ITEMS 64
-#define MAX_EXEC_STRING 256
+/* 256 was enough for every argv/envp string this kernel had ever been asked
+ * to copy -- until a real distribution's login shell exported LS_COLORS.
+ * dircolors's default database renders to two or three KiB, so any real
+ * userland's first login-shell profile silently broke every execve() after
+ * it: copy_string_from_user() has no way to say "didn't fit" separately from
+ * "faulted" (see usercopy.c), and copy_exec_vector() turned that into EFAULT
+ * for a perfectly valid string. 4096 covers a 256-color LS_COLORS with room
+ * to spare.
+ *
+ * This bound applies only to storage that lives in the kmalloc'd
+ * exec_arguments; see MAX_SHEBANG_LINE for the one that does not. Linux draws
+ * the same line, for the same reason, and calls the two MAX_ARG_STRLEN and
+ * BINPRM_BUF_SIZE. */
+#define MAX_EXEC_STRING 4096
+/*
+ * The "#!" line, which is read into ordinary local buffers rather than onto
+ * the heap -- so unlike the limit above, this one is spent out of the 32 KiB
+ * kernel stack, and three buffers of it are live at once while a script is
+ * being resolved.
+ *
+ * It was briefly MAX_EXEC_STRING, which put 12 KiB of the exec path's frames
+ * on that stack and overran it. A kernel stack is itself a kmalloc'd block
+ * (see process.c), so the overrun landed in the neighbouring block's header
+ * and did nothing at all until some later kmalloc walked the free list into
+ * the wreckage and faulted -- a crash arbitrarily far from the code that
+ * caused it. 256 is what Linux allows a shebang line, and no interpreter path
+ * worth running is longer.
+ */
+#define MAX_SHEBANG_LINE 256
 
 struct linux_timespec {
     int64_t tv_sec;
@@ -3517,9 +3545,9 @@ static int copy_exec_vector(uint64_t user_vector, char storage[MAX_EXEC_ITEMS][M
     return -E2BIG;
 }
 
-static int parse_shebang(struct vfs_node *file, char interpreter[MAX_EXEC_STRING],
-                          char optional_argument[MAX_EXEC_STRING]) {
-    unsigned char header[MAX_EXEC_STRING];
+static int parse_shebang(struct vfs_node *file, char interpreter[MAX_SHEBANG_LINE],
+                          char optional_argument[MAX_SHEBANG_LINE]) {
+    unsigned char header[MAX_SHEBANG_LINE];
     if (!file || (file->flags & 0xFFU) != VFS_FILE || file->length < 2) return 0;
     size_t amount = file->length < sizeof(header) - 1 ? (size_t)file->length : sizeof(header) - 1;
     int64_t read = vfs_read(file, 0, amount, header);
@@ -3532,7 +3560,7 @@ static int parse_shebang(struct vfs_node *file, char interpreter[MAX_EXEC_STRING
     while (at < (size_t)read && header[at] != ' ' && header[at] != '\t' &&
            header[at] != '\n' && header[at] != '\r') at++;
     size_t length = at - start;
-    if (!length || length >= MAX_EXEC_STRING || header[start] != '/') return -ENOEXEC;
+    if (!length || length >= MAX_SHEBANG_LINE || header[start] != '/') return -ENOEXEC;
     memcpy(interpreter, header + start, length);
     interpreter[length] = '\0';
 
@@ -3541,7 +3569,7 @@ static int parse_shebang(struct vfs_node *file, char interpreter[MAX_EXEC_STRING
     while (at < (size_t)read && header[at] != '\n' && header[at] != '\r') at++;
     while (at > start && (header[at - 1] == ' ' || header[at - 1] == '\t')) at--;
     length = at - start;
-    if (length >= MAX_EXEC_STRING) return -ENOEXEC;
+    if (length >= MAX_SHEBANG_LINE) return -ENOEXEC;
     if (length) memcpy(optional_argument, header + start, length);
     optional_argument[length] = '\0';
     return 1;
@@ -3628,8 +3656,8 @@ static int64_t sys_execve(struct syscall_frame *frame, uint64_t user_path, uint6
         return permitted;
     }
 
-    char interpreter[MAX_EXEC_STRING];
-    char optional_argument[MAX_EXEC_STRING];
+    char interpreter[MAX_SHEBANG_LINE];
+    char optional_argument[MAX_SHEBANG_LINE];
     int script = parse_shebang(file, interpreter, optional_argument);
     if (script < 0) {
         kfree(arguments);
