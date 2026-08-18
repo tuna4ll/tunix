@@ -179,6 +179,8 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define SYS_SETSID 112
 #define SYS_GETPGID 121
 #define SYS_GETSID 124
+#define SYS_CAPGET 125
+#define SYS_CAPSET 126
 #define SYS_SIGALTSTACK 131
 #define SYS_ARCH_PRCTL 158
 #define SYS_PRCTL 157
@@ -3910,6 +3912,70 @@ static int64_t sys_sigaltstack(struct syscall_frame *frame, uint64_t user_stack,
     return 0;
 }
 
+/* Linux capabilities, uapi/linux/capability.h. This kernel's privilege model
+ * (cred.h: "the POSIX model, without capabilities") never tracks capability
+ * bits separately from euid, so there is nothing to store -- capget()
+ * synthesizes its answer from euid, and capset() only has to agree with
+ * whatever capget() would say. The version-negotiation dance (report our
+ * version back and fail once when the caller's header names an older one)
+ * mirrors what real Linux does, because libcap always tries it first. */
+#define LINUX_CAPABILITY_VERSION_3 0x20080522U
+
+struct cap_user_header {
+    uint32_t version;
+    int32_t pid;
+};
+
+struct cap_user_data {
+    uint32_t effective;
+    uint32_t permitted;
+    uint32_t inheritable;
+};
+
+static int64_t sys_capget(uint64_t user_header, uint64_t user_data) {
+    if (!user_header) return -EFAULT;
+    struct cap_user_header header;
+    if (copy_from_user(&header, user_header, sizeof(header)) != 0) return -EFAULT;
+
+    if (header.version != LINUX_CAPABILITY_VERSION_3) {
+        header.version = LINUX_CAPABILITY_VERSION_3;
+        if (copy_to_user(user_header, &header, sizeof(header)) != 0) return -EFAULT;
+        return user_data ? -EINVAL : 0;
+    }
+    if (!user_data) return 0;
+    if (header.pid < 0) return -EINVAL;
+
+    struct process *target = header.pid ? process_find((uint64_t)header.pid) : process_current();
+    if (!target) return -ESRCH;
+
+    uint32_t bits = target->cred.euid == 0 ? 0xFFFFFFFFU : 0U;
+    struct cap_user_data data[2];
+    data[0].effective = data[0].permitted = data[0].inheritable = bits;
+    data[1].effective = data[1].permitted = data[1].inheritable = bits;
+    return copy_to_user(user_data, data, sizeof(data)) == 0 ? 0 : -EFAULT;
+}
+
+static int64_t sys_capset(uint64_t user_header, uint64_t user_data) {
+    if (!user_header) return -EFAULT;
+    struct cap_user_header header;
+    if (copy_from_user(&header, user_header, sizeof(header)) != 0) return -EFAULT;
+
+    if (header.version != LINUX_CAPABILITY_VERSION_3) {
+        header.version = LINUX_CAPABILITY_VERSION_3;
+        (void)copy_to_user(user_header, &header, sizeof(header));
+        return -EINVAL;
+    }
+    struct process *process = process_current();
+    if (header.pid && (!process || (uint64_t)header.pid != process->pid)) return -EPERM;
+    if (!user_data) return 0;
+
+    /* A process cannot hold a capability its euid does not already grant it
+     * in this model, so the only real question is whether the caller is
+     * trying to claim one it lacks -- which is exactly what capget() above
+     * would have reported as an empty set. */
+    return cred_is_root() ? 0 : -EPERM;
+}
+
 static int64_t sys_prctl(int option, uint64_t arg2, uint64_t arg3,
                          uint64_t arg4, uint64_t arg5) {
     struct process *process = process_current();
@@ -5035,6 +5101,8 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             frame->rax = target ? target->sid : (uint64_t)-(int64_t)ESRCH;
             break;
         }
+        case SYS_CAPGET: frame->rax = (uint64_t)sys_capget(frame->rdi, frame->rsi); break;
+        case SYS_CAPSET: frame->rax = (uint64_t)sys_capset(frame->rdi, frame->rsi); break;
         case SYS_SIGALTSTACK: frame->rax = (uint64_t)sys_sigaltstack(frame, frame->rdi, frame->rsi); break;
         case SYS_PRCTL: frame->rax = (uint64_t)sys_prctl((int)frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8); break;
         case SYS_ARCH_PRCTL: frame->rax = (uint64_t)sys_arch_prctl((int)frame->rdi, frame->rsi); break;
