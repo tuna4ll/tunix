@@ -3377,6 +3377,8 @@ static int64_t sys_shmdt(uint64_t address) {
     struct vm_area *area = process_find_area(address);
     if (!area || area->start != address) return -EINVAL;
     unmap_pages(process, area->start, area->end);
+    /* That may have been the last attachment to a segment already removed. */
+    sysvshm_reap();
     return 0;
 }
 

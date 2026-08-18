@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
+#include "include/cred.h"
 #include "include/file.h"
 #include "include/heap.h"
 #include "include/kstring.h"
@@ -26,6 +27,7 @@
 
 struct shm_segment {
     int used;
+    int destroyed;
     int id;
     int32_t key;
     uint32_t mode;
@@ -53,8 +55,14 @@ static struct shm_segment *find_by_id(int id) {
 static struct shm_segment *find_by_key(int32_t key) {
     if (key == IPC_PRIVATE) return NULL;
     for (int i = 0; i < SHM_MAX_SEGMENTS; i++)
-        if (segments[i].used && segments[i].key == key) return &segments[i];
+        if (segments[i].used && !segments[i].destroyed && segments[i].key == key)
+            return &segments[i];
     return NULL;
+}
+
+/* One reference is the table's own, the rest are attached mappings. */
+static uint64_t attach_count(const struct shm_segment *segment) {
+    return segment->file->refs > 1 ? (uint64_t)(segment->file->refs - 1) : 0;
 }
 
 static void release(struct shm_segment *segment) {
@@ -62,7 +70,14 @@ static void release(struct shm_segment *segment) {
     memset(segment, 0, sizeof(*segment));
 }
 
+void sysvshm_reap(void) {
+    for (int i = 0; i < SHM_MAX_SEGMENTS; i++)
+        if (segments[i].used && segments[i].destroyed && attach_count(&segments[i]) == 0)
+            release(&segments[i]);
+}
+
 int sysvshm_get(int32_t key, uint64_t size, int flags, uint32_t pid) {
+    sysvshm_reap();
     struct shm_segment *existing = find_by_key(key);
     if (existing) {
         if ((flags & IPC_CREAT) && (flags & IPC_EXCL)) return -EEXIST;
@@ -100,6 +115,11 @@ int sysvshm_get(int32_t key, uint64_t size, int flags, uint32_t pid) {
     slot->mode = (uint32_t)flags & 0777U;
     slot->size = size;
     slot->cpid = pid;
+    struct credentials *creator = cred_current();
+    if (creator) {
+        slot->uid = slot->cuid = creator->euid;
+        slot->gid = slot->cgid = creator->egid;
+    }
     slot->ctime = now_seconds();
     slot->file = file;
     return slot->id;
@@ -130,15 +150,14 @@ int sysvshm_stat(int id, struct shm_id_ds *out) {
     out->gid = segment->gid;
     out->cuid = segment->cuid;
     out->cgid = segment->cgid;
-    out->mode = segment->mode;
+    out->mode = segment->mode | (segment->destroyed ? SHM_DEST : 0U);
     out->segsz = segment->size;
     out->atime = segment->atime;
     out->dtime = segment->dtime;
     out->ctime = segment->ctime;
     out->cpid = (int32_t)segment->cpid;
     out->lpid = (int32_t)segment->lpid;
-    /* One reference is the table's own, the rest are attached mappings. */
-    out->nattch = segment->file->refs > 0 ? (uint64_t)(segment->file->refs - 1) : 0;
+    out->nattch = attach_count(segment);
     return 0;
 }
 
@@ -155,6 +174,14 @@ int sysvshm_set(int id, uint32_t mode, uint32_t uid, uint32_t gid) {
 int sysvshm_remove(int id) {
     struct shm_segment *segment = find_by_id(id);
     if (!segment) return -EINVAL;
+    /* While anything is attached the id has to keep resolving, because a caller
+       is allowed to remove a segment before handing the id to whoever attaches
+       next -- see the note in sysvshm.h. */
+    if (attach_count(segment) > 0) {
+        segment->destroyed = 1;
+        segment->ctime = now_seconds();
+        return 0;
+    }
     release(segment);
     return 0;
 }

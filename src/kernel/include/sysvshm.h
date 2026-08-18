@@ -14,8 +14,15 @@
  * A segment is a memfd_object wrapped in a struct file, so the address-space
  * map's existing file reference counting is what keeps the pages alive: each
  * vm_area attached to a segment holds a reference, fork copies them, exit drops
- * them. That is also why IPC_RMID can simply free the table slot -- the id stops
- * resolving at once, while anything still attached keeps the memory.
+ * them.
+ *
+ * IPC_RMID does not free the slot while anything is still attached. That is not
+ * a nicety: cairo's shared-memory pool calls shmat(), then IPC_RMID, and only
+ * then asks the X server to attach the same id -- so an id that stopped
+ * resolving at IPC_RMID makes the server's shmat() fail and MIT-SHM comes apart
+ * with a BadAccess on ShmAttach. A removed segment is instead marked destroyed:
+ * its key stops matching, the id keeps resolving, and the slot is released once
+ * the last attachment is gone.
  */
 
 struct file;
@@ -34,6 +41,9 @@ struct file;
 
 #define SHM_RDONLY 010000
 #define SHM_RND    020000
+
+/* Reported in the mode of a segment that IPC_RMID has marked, as Linux does. */
+#define SHM_DEST   01000
 
 /* struct shmid64_ds, the layout shmctl(IPC_STAT) writes to user space. */
 struct shm_id_ds {
@@ -59,6 +69,10 @@ struct shm_id_ds {
 
 /* Returns a segment id, or a negative errno. */
 int sysvshm_get(int32_t key, uint64_t size, int flags, uint32_t pid);
+/* Release any destroyed segment whose last attachment has gone away. Cheap
+   enough to call from every shm syscall, which is what keeps a process that
+   exits while attached from holding its slot forever. */
+void sysvshm_reap(void);
 /* The file backing `id` with a reference taken, plus the segment size.
    The caller owns the reference and must file_unref() it. */
 struct file *sysvshm_acquire(int id, uint64_t *size_out);
