@@ -190,7 +190,18 @@ void isr_handler(struct interrupt_frame *regs) {
         }
         panic("double fault");
     }
-    kernel_lock();
+    /*
+     * An exception this processor took while already inside the lock is a
+     * kernel bug, and taking the lock again would be a worse one: a ticket
+     * lock cannot be satisfied by its own holder, so the machine would stop
+     * here with every other processor queued behind it -- no panic, no
+     * output, nothing a signal could reach. isr_dispatch() panics on every
+     * kernel-mode fault (each of the paths that recovers is gated on a fault
+     * from user mode), so going in still holding the lock is safe: it does
+     * not come back, and the unlock the entry stub would have done on the
+     * way out is not owed to anyone.
+     */
+    if (!kernel_lock_held_here()) kernel_lock();
     isr_dispatch(regs);
     /* Same move as the syscall return makes, and for the same reason: the
        frame may be sitting on the kernel stack of a process this processor
