@@ -207,6 +207,10 @@ struct process *process_find(uint64_t pid);
 uint64_t process_current_pid(void);
 uint64_t process_current_tid(void);
 uint64_t process_current_ppid(void);
+/* Whether the running process's kernel stack is still within its allocation.
+   False once something has run off the bottom of it -- which, since kernel
+   stacks come from kmalloc, means the heap has already been damaged. */
+int process_check_kernel_stack(void);
 void process_start_first(void) __attribute__((noreturn));
 /* Every processor but the first: park until the scheduler has work for it. */
 void process_run_idle(void) __attribute__((noreturn));

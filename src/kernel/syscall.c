@@ -5316,9 +5316,16 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
  */
 _Static_assert(sizeof(struct syscall_frame) == 144, "syscall_entry.S assumes 144");
 
+extern void panic(const char *msg) __attribute__((noreturn));
+
 void syscall_dispatch(struct syscall_frame *frame) {
     kernel_lock();
     syscall_dispatch_locked(frame);
+    /* Asked here rather than anywhere deeper because this is the one point
+       every syscall passes through on its way out, and the deep call chains
+       -- exec resolving a script, the VFS walking a long path -- have all
+       unwound by now. Continuing on a damaged heap only buries the cause. */
+    if (!process_check_kernel_stack()) panic("kernel stack overflow");
     uint64_t stack_top = cpu_current()->kernel_rsp;
     if (stack_top) {
         struct syscall_frame *resumed =

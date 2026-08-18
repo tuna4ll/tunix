@@ -35,6 +35,10 @@
  * what turns that into a message.
  */
 #define KERNEL_STACK_SIZE (32 * 1024)
+/* Written at the lowest address of every kernel stack; see
+   allocate_kernel_stack(). Any value works so long as nothing plausible
+   writes it by accident. */
+#define KERNEL_STACK_CANARY 0x5441434B47554152ULL
 #define ECHILD 10
 #define EINTR 4
 #define EINVAL 22
@@ -283,6 +287,29 @@ static int allocate_kernel_stack(struct process *process) {
     if (!kernel_stack) return -1;
     process->kernel_stack_base = (uint64_t)kernel_stack;
     process->kernel_stack_top = ((uint64_t)kernel_stack + KERNEL_STACK_SIZE) & ~15ULL;
+    /* The word the stack would have to run past to reach the block header of
+       whatever kmalloc put underneath it. Checked on the way out of every
+       syscall (process_check_kernel_stack), because the alternative is what a
+       too-deep exec path already did once: overwrite a neighbouring heap
+       block's header and crash some unrelated allocation later, with nothing
+       left to say where it came from. */
+    *(uint64_t *)process->kernel_stack_base = KERNEL_STACK_CANARY;
+    return 0;
+}
+
+/*
+ * Whether this process's kernel stack is still inside its own allocation.
+ * Cheap enough to ask on a hot path: one load and one compare.
+ */
+int process_check_kernel_stack(void) {
+    struct process *process = process_current();
+    if (!process || !process->kernel_stack_base) return 1;
+    if (*(const uint64_t *)process->kernel_stack_base == KERNEL_STACK_CANARY)
+        return 1;
+    kprintf("kernel stack overflow: pid %u (%s), stack %p..%p\n",
+            (unsigned)process->pid, process->name,
+            (void *)process->kernel_stack_base,
+            (void *)process->kernel_stack_top);
     return 0;
 }
 

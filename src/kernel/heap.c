@@ -100,6 +100,79 @@ static spinlock_t heap_lock;
 extern void kprintf(const char *fmt, ...);
 extern void panic(const char *msg);
 
+/*
+ * Walk the whole list and stop at the first block that is not one, naming the
+ * allocation that ran just before the damage appeared.
+ *
+ * Off by default: it is O(blocks) on every kmalloc and kfree, and the list
+ * reaches thousands of entries on a running system. It exists because the
+ * cheap check below can only report corruption when the allocator next walks
+ * into it, which may be thousands of operations after the write -- and the
+ * whole difficulty of a heap bug is that distance. Build with
+ * -DTUNIX_HEAP_DEBUG=1 to close it.
+ */
+#ifndef TUNIX_HEAP_DEBUG
+#define TUNIX_HEAP_DEBUG 0
+#endif
+
+#if TUNIX_HEAP_DEBUG
+static void heap_validate_all(const char *what, const void *caller,
+                              const void *subject, uint64_t size) {
+    const heap_block_t *curr = head;
+    const heap_block_t *prev = NULL;
+    while (curr) {
+        uint64_t address = (uint64_t)curr;
+        if (address < HEAP_START || address >= HEAP_START + heap_size ||
+            curr->magic != HEAP_MAGIC) {
+            kprintf("HEAP: damaged after %s(%p, %u) called from %p\n",
+                    what, subject, (unsigned)size, caller);
+            kprintf("HEAP: bad block %p, previous %p", (void *)curr, (void *)prev);
+            if (prev)
+                kprintf(" size %u free %u next %p", (unsigned)prev->size,
+                        (unsigned)prev->is_free, (void *)prev->next);
+            kprintf("\n");
+            panic("heap corruption");
+        }
+        prev = curr;
+        curr = curr->next;
+    }
+}
+#define HEAP_VALIDATE(what, subject, size) \
+    heap_validate_all((what), __builtin_return_address(0), (subject), (size))
+#else
+#define HEAP_VALIDATE(what, subject, size) ((void)0)
+#endif
+
+/*
+ * Stop on a block that is not one, and say who pointed at it.
+ *
+ * Every block reached by the search below arrives through some earlier
+ * block's next pointer, so a damaged pointer or a trampled header is only
+ * noticed when it is followed -- by then the address is arbitrary and the
+ * fault it takes names the allocator rather than whatever wrote there. This
+ * is a load and two compares on a path that already walks the list, and it
+ * turns that into the address of the block whose neighbour went wrong, which
+ * is close enough to search a suspect's own allocation for.
+ */
+static void heap_check_block(const heap_block_t *block, const heap_block_t *from) {
+    uint64_t address = (uint64_t)block;
+    if (address >= HEAP_START && address < HEAP_START + heap_size &&
+        block->magic == HEAP_MAGIC)
+        return;
+    kprintf("HEAP: block %p is not a block", (void *)address);
+    if (address >= HEAP_START && address < HEAP_START + heap_size)
+        kprintf(" (magic %x)", (unsigned)block->magic);
+    else
+        kprintf(" (outside the heap, %p..%p)", (void *)HEAP_START,
+                (void *)(HEAP_START + heap_size));
+    if (from)
+        kprintf(", reached from %p size %u free %u next %p prev %p",
+                (void *)from, (unsigned)from->size, (unsigned)from->is_free,
+                (void *)from->next, (void *)from->prev);
+    kprintf("\n");
+    panic("heap corruption");
+}
+
 void heap_init(void) {
     spinlock_init(&heap_lock);
 
@@ -296,17 +369,19 @@ void* kmalloc(size_t size) {
 
     for (;;) {
         heap_block_t* curr = first_free ? first_free : head;
+        heap_block_t* previous = NULL;
         while (curr != NULL) {
+            heap_check_block(curr, previous);
             if (curr->is_free && curr->size >= size) {
                 /* Pages first: everything below writes headers into this block,
                    and a released block has nothing behind those addresses. */
-                if (heap_reacquire_pages(curr, size) != 0) { curr = curr->next; continue; }
+                if (heap_reacquire_pages(curr, size) != 0) { previous = curr; curr = curr->next; continue; }
                 uint8_t released = curr->pages_released;
 
                 heap_block_t* chosen = curr;
                 if (page_aligned) {
                     chosen = split_for_page_alignment(curr, size);
-                    if (!chosen) { curr = curr->next; continue; }
+                    if (!chosen) { previous = curr; curr = curr->next; continue; }
                     curr->pages_released = 0;
                     chosen->pages_released = released;
                 }
@@ -341,9 +416,12 @@ void* kmalloc(size_t size) {
                  */
                 if (first_free && !first_free->is_free && first_free->next)
                     first_free = first_free->next;
+                void *result = (void*)((uint8_t*)chosen + sizeof(heap_block_t));
+                HEAP_VALIDATE("kmalloc", result, size);
                 spinlock_release(&heap_lock);
-                return (void*)((uint8_t*)chosen + sizeof(heap_block_t));
+                return result;
             }
+            previous = curr;
             curr = curr->next;
         }
 
@@ -398,6 +476,7 @@ void kfree(void* ptr) {
        may be the block the hint pointed at, now absorbed. */
     if (!first_free || block < first_free) first_free = block;
 
+    HEAP_VALIDATE("kfree", ptr, 0);
     spinlock_release(&heap_lock);
 }
 
