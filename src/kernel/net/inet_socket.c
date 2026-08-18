@@ -121,6 +121,7 @@ struct tcp_control_block {
 #define SIOCGIFMTU 0x8921U
 #define SIOCGIFHWADDR 0x8927U
 #define SIOCGIFINDEX 0x8933U
+#define SIOCGIFTXQLEN 0x8942U
 
 #define IFF_UP 0x0001
 #define IFF_BROADCAST 0x0002
@@ -1021,6 +1022,11 @@ int inet_socket_ioctl(struct inet_socket *socket, unsigned long request, void *a
             memset(arg + 16, 0, 16); arg[16] = 1; memcpy(arg + 18, cfg->mac, 6); return 0;
         case SIOCGIFINDEX: { int index = 1; memcpy(arg + 16, &index, 4); return 0; }
         case SIOCGIFMTU: { int mtu = 1500; memcpy(arg + 16, &mtu, 4); return 0; }
+        /* iproute2 asks for the transmit queue length before printing a
+           link, and treats the failure as worth a line on stderr. The
+           driver has no such queue to report, so answer with the length
+           Linux gives an ethernet device by default. */
+        case SIOCGIFTXQLEN: { int txqlen = 1000; memcpy(arg + 16, &txqlen, 4); return 0; }
         default: return -ENOTTY;
     }
 }

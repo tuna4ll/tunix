@@ -22,6 +22,7 @@
 #define EAGAIN 11
 #define EINVAL 22
 #define EOPNOTSUPP 95
+#define ENODEV 19
 
 #define NL_MSG_PEEK 0x2
 #define NL_MSG_TRUNC 0x20
@@ -48,6 +49,7 @@
 #define IFLA_BROADCAST 2
 #define IFLA_IFNAME 3
 #define IFLA_MTU 4
+#define IFLA_TXQLEN 13
 
 #define IFA_ADDRESS 1
 #define IFA_LOCAL 2
@@ -291,19 +293,20 @@ static uint8_t netmask_prefix(uint32_t netmask_network_order) {
     return prefix;
 }
 
-static void emit_link(struct nl_builder *b, uint32_t seq, uint32_t pid, int index,
-                      const char *name, uint16_t arptype, uint32_t flags, uint32_t mtu,
-                      const uint8_t *mac, int mac_length) {
+static void emit_link(struct nl_builder *b, uint32_t seq, uint32_t pid, uint16_t msg_flags,
+                      int index, const char *name, uint16_t arptype, uint32_t flags,
+                      uint32_t mtu, const uint8_t *mac, int mac_length) {
     struct ifinfomsg info;
     memset(&info, 0, sizeof(info));
     info.ifi_family = NL_AF_UNSPEC;
     info.ifi_type = arptype;
     info.ifi_index = index;
     info.ifi_flags = flags;
-    struct nlmsghdr *header = nl_msg_begin(b, RTM_NEWLINK, NLM_F_MULTI, seq, pid,
+    struct nlmsghdr *header = nl_msg_begin(b, RTM_NEWLINK, msg_flags, seq, pid,
                                            &info, sizeof(info));
     nl_attr(b, IFLA_IFNAME, name, strlen(name) + 1);
     nl_attr(b, IFLA_MTU, &mtu, sizeof(mtu));
+    nl_attr_u32(b, IFLA_TXQLEN, 1000U);
     if (mac_length) {
         nl_attr(b, IFLA_ADDRESS, mac, (size_t)mac_length);
         uint8_t broadcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
@@ -312,18 +315,98 @@ static void emit_link(struct nl_builder *b, uint32_t seq, uint32_t pid, int inde
     nl_msg_end(b, header);
 }
 
-static void dump_links(struct nl_builder *b, uint32_t seq, uint32_t pid) {
-    uint8_t loopback_mac[6] = {0, 0, 0, 0, 0, 0};
-    emit_link(b, seq, pid, NETLINK_INDEX_LO, "lo", ARPHRD_LOOPBACK,
-              IFF_UP | IFF_LOOPBACK | IFF_RUNNING, 65536U, loopback_mac, 0);
+/* The two interfaces this kernel has, in the order their indices run. */
+struct link_description {
+    int index;
+    const char *name;
+    uint16_t arptype;
+    uint32_t flags;
+    uint32_t mtu;
+    const uint8_t *mac;
+    int mac_length;
+};
+
+static unsigned collect_links(struct link_description *links,
+                              uint8_t loopback_mac[6]) {
+    memset(loopback_mac, 0, 6);
+    links[0].index = NETLINK_INDEX_LO;
+    links[0].name = "lo";
+    links[0].arptype = ARPHRD_LOOPBACK;
+    links[0].flags = IFF_UP | IFF_LOOPBACK | IFF_RUNNING;
+    links[0].mtu = 65536U;
+    links[0].mac = loopback_mac;
+    links[0].mac_length = 0;
 
     const struct net_config *config = net_get_config();
     uint32_t flags = IFF_BROADCAST | IFF_MULTICAST;
     if (config->interface_up) flags |= IFF_UP;
     if (config->link_up) flags |= IFF_RUNNING;
-    emit_link(b, seq, pid, NETLINK_INDEX_ETH0, "eth0", ARPHRD_ETHER, flags, 1500U,
-              config->mac, 6);
-    nl_put_done(b, seq, pid);
+    links[1].index = NETLINK_INDEX_ETH0;
+    links[1].name = "eth0";
+    links[1].arptype = ARPHRD_ETHER;
+    links[1].flags = flags;
+    links[1].mtu = 1500U;
+    links[1].mac = config->mac;
+    links[1].mac_length = 6;
+    return 2;
+}
+
+/* The IFLA_IFNAME an "ip link show dev X" carries, or NULL. Attributes follow
+   the family header; each is padded to four bytes and rta_len covers the
+   header but not that padding, which is what the step below has to add. */
+static const char *request_link_name(const struct nlmsghdr *request) {
+    if (request->nlmsg_len < sizeof(*request) + sizeof(struct ifinfomsg)) return NULL;
+    const uint8_t *base = (const uint8_t *)request;
+    size_t offset = sizeof(*request) + sizeof(struct ifinfomsg);
+    while (offset + sizeof(struct rtattr) <= request->nlmsg_len) {
+        const struct rtattr *attr = (const struct rtattr *)(base + offset);
+        if (attr->rta_len < sizeof(*attr) ||
+            offset + attr->rta_len > request->nlmsg_len) break;
+        if (attr->rta_type == IFLA_IFNAME)
+            return (const char *)(base + offset + sizeof(*attr));
+        offset += NLMSG_ALIGN(attr->rta_len);
+    }
+    return NULL;
+}
+
+/*
+ * A dump answers with every interface and ends in NLMSG_DONE; a plain request
+ * -- what `ip link show eth0` sends, and what getifaddrs() follows a dump
+ * with -- asks about exactly one and is answered by exactly one message, with
+ * neither NLM_F_MULTI nor a terminator. Answering the second kind as though
+ * it were the first hands the caller the whole list, and iproute2 keeps the
+ * first message of it: `ip link show eth0` printed lo.
+ */
+static void dump_links(struct nl_builder *b, uint32_t seq, uint32_t pid,
+                       const struct nlmsghdr *request) {
+    struct link_description links[2];
+    uint8_t loopback_mac[6];
+    unsigned count = collect_links(links, loopback_mac);
+
+    if (request->nlmsg_flags & NLM_F_DUMP) {
+        for (unsigned index = 0; index < count; index++)
+            emit_link(b, seq, pid, NLM_F_MULTI, links[index].index, links[index].name,
+                      links[index].arptype, links[index].flags, links[index].mtu,
+                      links[index].mac, links[index].mac_length);
+        nl_put_done(b, seq, pid);
+        return;
+    }
+
+    const struct ifinfomsg *info = (const struct ifinfomsg *)((const uint8_t *)request +
+                                                             sizeof(*request));
+    int wanted_index = request->nlmsg_len >= sizeof(*request) + sizeof(*info) ?
+        info->ifi_index : 0;
+    const char *wanted_name = request_link_name(request);
+
+    for (unsigned index = 0; index < count; index++) {
+        if (wanted_index && links[index].index != wanted_index) continue;
+        if (wanted_name && strcmp(links[index].name, wanted_name) != 0) continue;
+        emit_link(b, seq, pid, 0, links[index].index, links[index].name,
+                  links[index].arptype, links[index].flags, links[index].mtu,
+                  links[index].mac, links[index].mac_length);
+        return;
+    }
+    nl_put_error(b, seq, pid, request, -ENODEV);
 }
 
 static void emit_addr(struct nl_builder *b, uint32_t seq, uint32_t pid, int index,
@@ -415,7 +498,7 @@ static void handle_route_request(struct nl_builder *b, const struct nlmsghdr *re
     uint32_t seq = request->nlmsg_seq;
     uint32_t pid = portid;
     switch (request->nlmsg_type) {
-        case RTM_GETLINK: dump_links(b, seq, pid); break;
+        case RTM_GETLINK: dump_links(b, seq, pid, request); break;
         case RTM_GETADDR: dump_addrs(b, seq, pid); break;
         case RTM_GETROUTE: dump_routes(b, seq, pid); break;
         default:
