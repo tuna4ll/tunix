@@ -118,9 +118,21 @@ static uint64_t reclaim_below(struct vfs_node *node, uint32_t newer_than) {
     if (!node || node->link_target) return 0;
 
     uint64_t reclaimed = 0;
-    /* A file read a moment ago is one something is working through; dropping it
-       only to read it straight back is worse than keeping it. */
-    if ((node->flags & 0xFFU) == VFS_FILE && node->atime < newer_than) {
+    /*
+     * A file touched a moment ago is one something is working through;
+     * dropping it only to read it straight back is worse than keeping it.
+     *
+     * "Touched" has to mean written as well as read. Only atime was consulted
+     * here, and a write does not set atime -- so the file a process was in the
+     * middle of writing looked like the coldest thing in the tree and was
+     * always the first to go. The next write then faulted the whole file back
+     * off the disk before it could add a byte, and again for the byte after
+     * that: downloading a 78 MB package started at 730 KB/s and was down to
+     * 110 KB/s by the time it was two thirds through, with the processor
+     * inside the ATA driver the whole way.
+     */
+    uint32_t touched = node->atime > node->mtime ? node->atime : node->mtime;
+    if ((node->flags & 0xFFU) == VFS_FILE && touched < newer_than) {
         uint64_t held = node->capacity;
         vfs_release_data(node);
         if (!node->data) reclaimed += held;
@@ -431,6 +443,18 @@ static int64_t memory_read(struct vfs_node *node, uint64_t offset, size_t size, 
     uint64_t available = node->length - offset;
     if ((uint64_t)size > available) size = (size_t)available;
     memcpy(buffer, (const uint8_t *)node->data + offset, size);
+    /*
+     * A read is a use, and nothing else here said so: atime was never stamped
+     * on the read path, so the reclaimer -- which decides what to drop by how
+     * long ago a file was touched -- could not see that a file was being read
+     * at all. It would drop the very file a program was working through, and
+     * the next read pulled the whole thing back off the disk. Extracting a
+     * 78 MB package is a stream of reads over one such file.
+     *
+     * Only the in-memory stamp; nothing is written to the disk for it, which
+     * is what makes this affordable on every read.
+     */
+    if (size) vfs_stamp_times(node, VFS_TIME_ATIME);
     return (int64_t)size;
 }
 
