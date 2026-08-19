@@ -35,6 +35,15 @@ void timer_irq(struct interrupt_frame *frame) {
      * has happened, which is almost always.
      */
     vt_poll_input();
+    /*
+     * Release whatever is waiting on the general channel. Most readiness has
+     * a wakeup of its own, but some has none at all -- a packet arriving for
+     * a socket is noticed by polling the adapter, not by anything that could
+     * signal a sleeper -- and without this a poll() on one of those would
+     * wait for its timeout instead of its data. Waking a sleeper that has
+     * nothing to do costs it one re-test.
+     */
+    process_wake_io();
     process_timer_interrupt(frame);
 }
 

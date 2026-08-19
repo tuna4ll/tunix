@@ -1485,23 +1485,48 @@ int process_sleep_on(struct syscall_frame *frame, const void *channel) {
     waiting->state = PROCESS_BLOCKED;
     waiting->wait_channel = channel;
     if (switch_to_next(frame, waiting) != 0) {
-        /* The caller rewound its syscall before sleeping, so leaving it
-           running costs a retry that re-tests the condition -- correct, and
-           the reason this stays a spin rather than a park: a wakeup that never
-           came would turn into a hang instead of a slow loop. */
-        waiting->state = PROCESS_RUNNING;
-        waiting->wait_channel = NULL;
-        return -EAGAIN;
+        /*
+         * Nothing else to run: park the processor rather than refuse to
+         * sleep. It used to refuse, so that a wakeup which never arrived
+         * became a slow loop instead of a hang -- but "nothing else to run"
+         * is what an idle machine looks like, so the safety net was paid for
+         * continuously. Measured on a machine doing nothing at all, with a
+         * shell at a prompt on two terminals: three of its four processors
+         * spinning here, for ever.
+         *
+         * Parking is safe now because the tick wakes the general io channel
+         * (see process_wake_io), so a sleeper whose own wakeup was missed is
+         * still re-tested a few hundred times a second. The processor halts
+         * until the next interrupt, which is what an idle processor should
+         * cost.
+         *
+         * This does not return: the kernel stack it was using belongs to the
+         * process that has just gone to sleep, and everything worth keeping
+         * was written into saved_frame above.
+         */
+        go_idle();
     }
     return 0;
 }
+
+/* The address is the channel; the object is never read. */
+static const char io_wait_token;
+
+const void *process_io_wait_channel(void) { return &io_wait_token; }
+
+int process_wake_io(void) { return process_wake_all(&io_wait_token); }
 
 int process_wake_all(const void *channel) {
     if (!queue || !channel) return 0;
     int woken = 0;
     struct process *item = queue;
     do {
-        if (item->state == PROCESS_BLOCKED && item->wait_channel == channel) {
+        /* Anything that made one wait channel ready may have made a poll()
+           ready too, and the poller cannot know which queue to have joined.
+           Releasing the io waiters alongside costs nothing -- they re-test --
+           and saves them waiting for the next tick to notice. */
+        if (item->state == PROCESS_BLOCKED &&
+            (item->wait_channel == channel || item->wait_channel == &io_wait_token)) {
             item->wait_channel = NULL;
             item->state = PROCESS_READY;
             woken++;

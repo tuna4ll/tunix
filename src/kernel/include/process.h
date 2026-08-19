@@ -284,6 +284,24 @@ int process_futex_wake(uint64_t address, int maximum);
  */
 int process_sleep_on(struct syscall_frame *frame, const void *channel);
 int process_wake_all(const void *channel);
+/*
+ * The channel a syscall waits on when it has nothing better.
+ *
+ * poll() and select() wait on several descriptors at once, so no single
+ * object's wait queue is the right one to sleep on, and some descriptors --
+ * a TCP socket, say -- have no queue at all because nothing signals them.
+ * Both used to be answered by rewinding the syscall and yielding, which is
+ * a spin: an idle machine with a shell at a prompt on each terminal burned
+ * three of its four processors doing nothing.
+ *
+ * So they sleep here instead, and this is woken generously: by any other
+ * wakeup (process_wake_all), and by the tick, which is what covers a source
+ * that signals nothing at all. Every sleeper re-tests its own condition and
+ * its own deadline on waking, so waking too often is only ever wasted work
+ * -- and waking too rarely, which a per-source queue would risk, is a hang.
+ */
+const void *process_io_wait_channel(void);
+int process_wake_io(void);
 uint32_t process_get_umask(void);
 uint32_t process_set_umask(uint32_t mask);
 void process_set_fs_base(uint64_t value);

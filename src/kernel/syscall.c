@@ -859,7 +859,12 @@ static int retry_io_wait(struct syscall_frame *frame, uint64_t syscall_number,
     frame->user_rip -= 2U;
     frame->rax = syscall_number;
     waiting->syscall_rewound = 1;
-    process_yield_from_syscall(frame);
+    /* Asleep rather than round the run queue again: this is poll(), select()
+       and the timed waits, and what they are waiting for cannot become true
+       while this processor is the one asking. The deadline above is re-tested
+       on every wake, so a timeout is still honoured to within a tick. */
+    if (process_sleep_on(frame, process_io_wait_channel()) != 0)
+        process_yield_from_syscall(frame);
     return 1;
 }
 
@@ -3763,9 +3768,13 @@ static void block_and_retry(struct syscall_frame *frame, uint64_t syscall_number
     frame->rax = syscall_number;
     struct process *process = process_current();
     if (process) process->syscall_rewound = 1;
+    /* The queue belonging to the object when it has one -- a pipe, a terminal
+       -- and the general one when it does not, which is every socket.
+       Yielding instead is what made a blocking read on a socket a spin. */
     const void *channel = writing ? file_write_wait_channel(file)
                                   : file_read_wait_channel(file);
-    if (!channel || process_sleep_on(frame, channel) != 0)
+    if (!channel) channel = process_io_wait_channel();
+    if (process_sleep_on(frame, channel) != 0)
         process_yield_from_syscall(frame);
 }
 
