@@ -1202,10 +1202,21 @@ static int64_t sys_socket(int domain, int type, int protocol) {
     if (type_flags & ~(SOCK_NONBLOCK | SOCK_CLOEXEC)) return -EINVAL;
     struct process *process = process_current();
     if (domain == TUNIX_AF_UNIX) {
-        if ((base_type != TUNIX_SOCK_STREAM && base_type != TUNIX_SOCK_SEQPACKET) ||
-            protocol != 0) return -EOPNOTSUPP;
+        /*
+         * SOCK_DGRAM shares the seqpacket implementation: both keep message
+         * boundaries, and the difference left over -- sending to a path
+         * without connecting first -- is not something anything here does.
+         *
+         * Refusing it outright was worse than an approximation. musl builds
+         * if_indextoname() out of an AF_UNIX SOCK_DGRAM socket and an ioctl
+         * on it, using the socket purely as a handle, so a program asking
+         * which interface a route belongs to got nothing at all -- which is
+         * how fastfetch came to skip every interface it had just enumerated.
+         */
+        if ((base_type != TUNIX_SOCK_STREAM && base_type != TUNIX_SOCK_SEQPACKET &&
+             base_type != TUNIX_SOCK_DGRAM) || protocol != 0) return -EOPNOTSUPP;
         struct unix_socket *socket =
-            unix_socket_create(base_type == TUNIX_SOCK_SEQPACKET);
+            unix_socket_create(base_type != TUNIX_SOCK_STREAM);
         if (!socket) return -ENOMEM;
         /* The identity the peer will read back through SO_PEERCRED. D-Bus
            authenticates with it: a client announces its uid over EXTERNAL and
