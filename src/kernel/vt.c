@@ -259,6 +259,10 @@ const void *vt_graphics_mode_owner(void) {
  */
 int vt_handle_hotkey(uint16_t keycode, int pressed, int ctrl_held, int alt_held) {
     if (!ctrl_held || !alt_held) return 0;
+    if (keycode == TUNIX_KEY_D) {
+        if (pressed) process_dump_all();
+        return 1;
+    }
     unsigned target;
     if (keycode >= TUNIX_KEY_F1 && keycode <= TUNIX_KEY_F10)
         target = (unsigned)(keycode - TUNIX_KEY_F1) + 1U;

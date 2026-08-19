@@ -182,6 +182,80 @@ static void enqueue(struct process *process) {
     process->next = queue;
 }
 
+
+/* --- the process dump ----------------------------------------------------- */
+
+static const char *state_name(int state) {
+    switch (state) {
+        case PROCESS_READY:   return "ready";
+        case PROCESS_RUNNING: return "run";
+        case PROCESS_BLOCKED: return "block";
+        case PROCESS_ZOMBIE:  return "zombie";
+        case PROCESS_STOPPED: return "stop";
+        default:              return "dead";
+    }
+}
+
+/* The mapped object a user address falls in, for a process that is not the
+   one running. Same idea as the fault reporter, which cannot be reused here
+   because it only ever asks about current. */
+static const char *object_at(const struct process *process, uint64_t address,
+                             uint64_t *offset_out) {
+    *offset_out = address;
+    if (!process || !process->memory) return "?";
+    for (struct vm_area *area = process->memory->areas; area; area = area->next) {
+        if (address < area->start) break;
+        if (address >= area->end) continue;
+        *offset_out = address - area->start + area->offset;
+        if (area->file && area->file->node) return area->file->node->name;
+        return "anon";
+    }
+    return "?";
+}
+
+/*
+ * Every process, what it is doing and where it stopped doing it.
+ *
+ * A hung desktop is a dozen processes of which one is stuck and the rest are
+ * waiting on it, and telling those apart from the outside is guesswork. This
+ * prints the state, whatever the process is blocked on -- a syscall being
+ * retried, a futex address, a wait channel, a child -- and the user address it
+ * last executed, named by the library it lands in.
+ */
+void process_dump_wakes(void);
+static void futex_note(char kind, uint64_t address, int woken, int maximum, unsigned value);
+
+void process_dump_all(void) {
+    process_dump_wakes();
+    kprintf("PROCESSES:" "\n");
+    if (!queue) return;
+    struct process *item = queue;
+    do {
+        if (item->state == PROCESS_DEAD) { item = item->next; continue; }
+        uint64_t rip = item == current ? item->saved_frame.user_rip
+                                       : item->saved_frame.user_rip;
+        uint64_t offset = 0;
+        const char *object = object_at(item, rip, &offset);
+        kprintf("  %d/%d %s %s", (int)item->pid, (int)item->tgid,
+                item->name, state_name(item->state));
+        if (item->wait4_active) kprintf(" wait4(%d)", (int)item->wait_pid);
+        if (item->io_wait_active) kprintf(" io-syscall=%d", (int)item->io_wait_syscall);
+        if (item->futex_wait_active) {
+            uint32_t now = 0;
+            int readable = vmm_copy_from_space(item->cr3, &now,
+                                               item->futex_wait_address,
+                                               sizeof(now)) == 0;
+            kprintf(" futex=%p want=%x now=%s%x", (void *)item->futex_wait_address,
+                    (unsigned)item->futex_wait_expected, readable ? "" : "?",
+                    (unsigned)now);
+        }
+        if (item->wait_channel) kprintf(" chan=%p", (const void *)item->wait_channel);
+        if (item->syscall_rewound) kprintf(" rewound");
+        kprintf(" at %s+%p" "\n", object, (void *)offset);
+        item = item->next;
+    } while (item != queue);
+}
+
 struct process *process_find(uint64_t pid) {
     if (!queue || pid == 0) return NULL;
     struct process *item = queue;
@@ -1426,7 +1500,7 @@ int64_t process_futex_wait(struct syscall_frame *frame, uint64_t address,
     uint32_t value = 0;
     if (vmm_copy_from_space(current->cr3, &value, address, sizeof(value)) != 0)
         return -EFAULT;
-    if (value != expected) return -EAGAIN;
+    if (value != expected) { futex_note('A', address, 0, 0, value); return -EAGAIN; }
     if (timeout_ns == 0) return -ETIMEDOUT;
 
     struct process *waiting = current;
@@ -1435,6 +1509,8 @@ int64_t process_futex_wait(struct syscall_frame *frame, uint64_t address,
     waiting->state = PROCESS_BLOCKED;
     waiting->futex_wait_active = 1;
     waiting->futex_wait_address = address;
+    waiting->futex_wait_expected = expected;
+    futex_note('W', address, 0, 0, expected);
     waiting->futex_wait_deadline_ns = timeout_ns < 0 ? UINT64_MAX :
         time_uptime_ns() + (uint64_t)timeout_ns;
     /* Unlike wait4, EAGAIN here is a true answer and not a lie: it is what a
@@ -1509,6 +1585,39 @@ int process_wake_all(const void *channel) {
     return woken;
 }
 
+struct wake_record { uint64_t address; int woken; int pid; int max; char kind; unsigned value; };
+#define WAKE_RING 160
+static struct wake_record wake_ring[WAKE_RING];
+static unsigned wake_ring_next;
+
+static void futex_note(char kind, uint64_t address, int woken, int maximum, unsigned value) {
+    /* A thread that cannot sleep re-enters the wait forever; recording each
+       attempt would push everything else out of the ring. */
+    unsigned last = (wake_ring_next + WAKE_RING - 1U) % WAKE_RING;
+    if (wake_ring[last].address == address && wake_ring[last].kind == kind &&
+        wake_ring[last].pid == (current ? (int)current->pid : 0) &&
+        wake_ring[last].value == value)
+        return;
+    wake_ring[wake_ring_next].kind = kind;
+    wake_ring[wake_ring_next].address = address;
+    wake_ring[wake_ring_next].woken = woken;
+    wake_ring[wake_ring_next].max = maximum;
+    wake_ring[wake_ring_next].value = value;
+    wake_ring[wake_ring_next].pid = current ? (int)current->pid : 0;
+    wake_ring_next = (wake_ring_next + 1U) % WAKE_RING;
+}
+
+void process_dump_wakes(void) {
+    kprintf("FUTEX LOG:\n");
+    for (unsigned i = 0; i < WAKE_RING; i++) {
+        unsigned slot = (wake_ring_next + i) % WAKE_RING;
+        if (!wake_ring[slot].address) continue;
+        kprintf("  %c %p pid=%d n=%d/%d val=%x\n", wake_ring[slot].kind,
+                (void *)wake_ring[slot].address, wake_ring[slot].pid,
+                wake_ring[slot].woken, wake_ring[slot].max, wake_ring[slot].value);
+    }
+}
+
 int process_futex_wake(uint64_t address, int maximum) {
     if (!current || !queue || maximum <= 0) return 0;
     int woken = 0;
@@ -1527,6 +1636,7 @@ int process_futex_wake(uint64_t address, int maximum) {
         }
         item = item->next;
     } while (item != queue);
+    futex_note('K', address, woken, maximum, 0);
     return woken;
 }
 

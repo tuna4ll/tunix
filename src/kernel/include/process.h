@@ -175,6 +175,10 @@ struct process {
 
     int futex_wait_active;
     uint64_t futex_wait_address;
+    /* What the waiter was told the word held. A dump that shows this next to
+       what the word holds now is how a lost wakeup tells itself apart from a
+       thread that simply has nothing to wait for yet. */
+    uint32_t futex_wait_expected;
     /* Non-NULL while blocked in process_sleep_on(). */
     const void *wait_channel;
     uint64_t futex_wait_deadline_ns;
@@ -203,6 +207,9 @@ struct process {
 void process_init(void);
 struct process *process_create_from_path(const char *path);
 struct process *process_current(void);
+/* Print every process, its state, what it is blocked on and where it last was.
+   Bound to Ctrl+Alt+D on the console; see the definition for why. */
+void process_dump_all(void);
 struct process *process_find(uint64_t pid);
 uint64_t process_current_pid(void);
 uint64_t process_current_tid(void);
