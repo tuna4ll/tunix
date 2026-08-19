@@ -241,6 +241,13 @@ void vt_display_released(void) {
     display_suspended = 0;
 }
 
+const void *vt_graphics_mode_owner(void) {
+    if (!index_valid(display_owner_index)) return NULL;
+    struct vt *vt = &terminals[display_owner_index];
+    if (!vt->allocated || vt->kd_mode != TUNIX_KD_GRAPHICS) return NULL;
+    return vt;
+}
+
 /*
  * Ctrl+Alt+F1..F8, ahead of everything else.
  *

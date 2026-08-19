@@ -80,6 +80,9 @@ int vt_input_delivered_to(unsigned index);
    console until it is switched back to. */
 void vt_display_claimed(void);
 void vt_display_released(void);
+/* The terminal that holds the display because a program on it asked for
+   KD_GRAPHICS, or NULL. See framebuffer_claim_graphics() for who asks. */
+const void *vt_graphics_mode_owner(void);
 
 /* A process that has gone: releases the VT_PROCESS ownership and the
    controlling-terminal claim it held, and unblocks a switch waiting on it. */

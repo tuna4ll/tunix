@@ -88,14 +88,29 @@ static int framebuffer_owner_is(const void *owner) {
     return owned;
 }
 
+/*
+ * Putting a terminal in KD_GRAPHICS and presenting through /dev/dri/card0 are
+ * one handover, not two: an X server does exactly that, KDSETMODE on the
+ * terminal it runs on and then SETCRTC on the card. Treating the second as a
+ * competing claim answered it with EBUSY, and the X server reported "failed to
+ * set mode: Resource busy" and never painted. So a claimer is let in alongside
+ * the terminal that already stood the console down. Ownership stays with the
+ * terminal, which is what KD_TEXT and switching away still act on.
+ */
+static int shares_with_graphics_terminal(const void *owner) {
+    const void *terminal = vt_graphics_mode_owner();
+    return terminal && terminal == framebuffer.graphics_owner && terminal != owner;
+}
+
 int framebuffer_claim_graphics(const void *owner) {
     if (!framebuffer.ready) return -ENODEV;
     if (!owner) return -EINVAL;
 
     uint64_t interrupt_flags = interrupt_save();
     if (framebuffer.graphics_owner && framebuffer.graphics_owner != owner) {
+        int shared = shares_with_graphics_terminal(owner);
         interrupt_restore(interrupt_flags);
-        return -EBUSY;
+        return shared ? 0 : -EBUSY;
     }
     int first_claim = framebuffer.graphics_owner == NULL;
     framebuffer.graphics_owner = owner;
@@ -141,8 +156,9 @@ void framebuffer_resume_graphics(void) {
 
 int framebuffer_graphics_foreground(const void *owner) {
     uint64_t interrupt_flags = interrupt_save();
-    int foreground = framebuffer.graphics_owner == owner &&
-                     !framebuffer.graphics_suspended;
+    int mine = framebuffer.graphics_owner == owner ||
+               shares_with_graphics_terminal(owner);
+    int foreground = mine && !framebuffer.graphics_suspended;
     interrupt_restore(interrupt_flags);
     return foreground;
 }
