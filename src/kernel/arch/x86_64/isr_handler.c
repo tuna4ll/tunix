@@ -9,6 +9,7 @@
 #include "../../include/apic.h"
 #include "../../include/file.h"
 #include "../../include/process.h"
+#include "../../include/vmm.h"
 #include "../../include/vfs.h"
 #include "../../include/signal.h"
 #include "../../include/smp.h"
@@ -113,29 +114,103 @@ static void isr_dispatch(struct interrupt_frame *regs) {
             return; /* page is private and writable now; retry the instruction */
         }
 
-        if (process_fault_from_interrupt(regs, fault_signal(regs->int_no))) {
-            /* Named, because on a machine running a desktop several processes
-               fault for their own reasons, and "a process died" is not enough
-               to go looking with. */
-            struct process *faulted = process_current();
-            /* Where the instruction is, said the way a person can act on it:
-               a raw RIP in a shared library means nothing without knowing
-               which library it landed in and how far into it. */
-            struct vm_area *area = process_find_area(fault_rip);
-            const char *object = "?";
-            uint64_t within = fault_rip;
-            if (area) {
-                within = fault_rip - area->start + area->offset;
-                if (area->file && area->file->node) object = area->file->node->name;
-                else object = "anon";
-            }
-            kprintf("%s in %s[%d] at %s+%p (RIP %p) addr %p (error %x), signalling process\n",
-                    exception_messages[regs->int_no],
-                    faulted ? faulted->name : "?",
-                    (int)process_current_pid(), object, (void *)within,
-                    (void *)fault_rip, (void *)fault_address, fault_error);
-            return;
+        /*
+         * Everything the report needs is read *before* the fault is signalled.
+         * A fatal fault tears the process down and switches away, so by the
+         * time a message printed afterwards runs, process_current() is somebody
+         * else -- which is exactly how this reporter came to name the wrong
+         * process and read the wrong stack.
+         */
+        struct process *faulted = process_current();
+        char faulted_name[32];
+        int faulted_pid = (int)process_current_pid();
+        for (unsigned i = 0; i < sizeof(faulted_name) - 1U; i++) {
+            faulted_name[i] = faulted && faulted->name[i] ? faulted->name[i] : 0;
+            if (!faulted_name[i]) break;
         }
+        faulted_name[sizeof(faulted_name) - 1U] = 0;
+        if (!faulted) faulted_name[0] = 0;
+
+        /* Where the instruction is, said the way a person can act on it: a raw
+           RIP in a shared library means nothing without knowing which mapping
+           it landed in and how far into it. */
+        struct vm_area *area = process_find_area(fault_rip);
+        const char *object = "?";
+        uint64_t within = fault_rip;
+        if (area) {
+            within = fault_rip - area->start + area->offset;
+            object = area->file && area->file->node ? area->file->node->name : "anon";
+        }
+
+        /* Registers and a slice of the user stack: on a fault in a shared library
+           they are the only way to tell which call went wrong. */
+        uint64_t saved_rdi = regs->rdi, saved_rsi = regs->rsi, saved_rdx = regs->rdx;
+        uint64_t saved_rax = regs->rax, saved_rbx = regs->rbx, saved_rcx = regs->rcx;
+        uint64_t saved_rbp = regs->rbp, saved_rsp = regs->rsp;
+        uint64_t saved_r8 = regs->r8, saved_r9 = regs->r9;
+        uint64_t stack_words[12];
+        int stack_ok = 1;
+        for (unsigned i = 0; i < 12; i++) {
+            if (!faulted || vmm_copy_from_space(faulted->cr3, &stack_words[i],
+                                                saved_rsp + (uint64_t)i * 8U, 8) != 0) {
+                stack_ok = 0;
+                break;
+            }
+        }
+
+        /* Reported before the fault is signalled, not after: signalling a
+           fatal fault can switch away for good and never come back here,
+           and what did come back came back as a different process. */
+        kprintf("%s in %s[%d] at %s+%p (RIP %p) addr %p (error %x), signalling process\n",
+                exception_messages[regs->int_no],
+                faulted_name[0] ? faulted_name : "?", faulted_pid,
+                object, (void *)within, (void *)fault_rip,
+                (void *)fault_address, fault_error);
+        kprintf("fault: rdi=%p rsi=%p rdx=%p rax=%p rbx=%p rcx=%p\n",
+                (void *)saved_rdi, (void *)saved_rsi, (void *)saved_rdx,
+                (void *)saved_rax, (void *)saved_rbx, (void *)saved_rcx);
+        kprintf("fault: rbp=%p rsp=%p r8=%p r9=%p\n",
+                (void *)saved_rbp, (void *)saved_rsp,
+                (void *)saved_r8, (void *)saved_r9);
+        if (stack_ok)
+            for (unsigned i = 0; i < 12; i++) {
+                uint64_t value = stack_words[i];
+                struct vm_area *hit = NULL;
+                if (faulted && faulted->memory)
+                    for (struct vm_area *a = faulted->memory->areas; a; a = a->next) {
+                        if (value < a->start) break;
+                        if (value < a->end) { hit = a; break; }
+                    }
+                if (hit && hit->file && hit->file->node)
+                    kprintf("fault: stack[%d] %p = %s+%p\n", (int)i,
+                            (void *)value, hit->file->node->name,
+                            (void *)(value - hit->start + hit->offset));
+                else
+                    kprintf("fault: stack[%d] %p\n", (int)i, (void *)value);
+            }
+        /* The bytes around the pointer the faulting call was given: when a
+           heap header has been overwritten, what overwrote it is usually
+           legible right there. */
+        if (faulted) {
+            uint64_t window = (saved_rdi & ~15ULL) - 64ULL;
+            for (unsigned row = 0; row < 8; row++) {
+                unsigned char bytes[16];
+                if (vmm_copy_from_space(faulted->cr3, bytes,
+                                        window + (uint64_t)row * 16U, 16) != 0) break;
+                char text[17];
+                for (unsigned i = 0; i < 16; i++)
+                    text[i] = (bytes[i] >= 32 && bytes[i] < 127) ? (char)bytes[i] : '.';
+                text[16] = 0;
+                kprintf("fault: %p %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x |%s|\n",
+                        (void *)(window + (uint64_t)row * 16U),
+                        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
+                        bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11],
+                        bytes[12], bytes[13], bytes[14], bytes[15], text);
+            }
+        }
+
+        if (process_fault_from_interrupt(regs, fault_signal(regs->int_no))) return;
+
         /* The captured values, not the ones still in the frame: a handler that
            switched process left the next process's registers there, and
            reporting those sends the reader looking in the wrong place. */
