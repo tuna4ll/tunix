@@ -19,6 +19,7 @@
 #include "../include/net/netlink.h"
 #include "../include/net/net.h"
 
+
 #define EAGAIN 11
 #define EINVAL 22
 #define EOPNOTSUPP 95
@@ -135,14 +136,32 @@ struct rtmsg {
 
 /* ---- netlink socket object ---------------------------------------------- */
 
+/*
+ * One reply, as one datagram.
+ *
+ * A netlink socket is message oriented: a read returns a whole datagram and
+ * throws away whatever did not fit, and a dump arrives as a run of them ended
+ * by NLMSG_DONE. Delivering a dump as a single flat buffer instead looks
+ * equivalent -- the same bytes in the same order -- and is not, because a
+ * reader is allowed to stop parsing partway through a datagram and come back
+ * for the next one. fastfetch does exactly that: it takes the first default
+ * route with a zero metric, breaks out of the message loop, and reads again
+ * for the terminator. Flattened, the terminator was inside the datagram it
+ * had already consumed, so that read waited for ever.
+ */
+struct netlink_datagram {
+    struct netlink_datagram *next;
+    size_t length;
+    uint8_t data[];
+};
+
 struct netlink_socket {
     int refs;
     int protocol;
     uint32_t portid;
     int bound;
-    uint8_t *rx;
-    size_t rx_len;
-    size_t rx_pos;
+    struct netlink_datagram *rx_head;
+    struct netlink_datagram *rx_tail;
 };
 
 static uint32_t netlink_next_portid = 0;
@@ -165,7 +184,11 @@ void netlink_socket_ref(struct netlink_socket *socket) {
 void netlink_socket_unref(struct netlink_socket *socket) {
     if (!socket || socket->refs <= 0) return;
     if (--socket->refs != 0) return;
-    if (socket->rx) kfree(socket->rx);
+    while (socket->rx_head) {
+        struct netlink_datagram *dead = socket->rx_head;
+        socket->rx_head = dead->next;
+        kfree(dead);
+    }
     kfree(socket);
 }
 
@@ -377,8 +400,8 @@ static const char *request_link_name(const struct nlmsghdr *request) {
  * it were the first hands the caller the whole list, and iproute2 keeps the
  * first message of it: `ip link show eth0` printed lo.
  */
-static void dump_links(struct nl_builder *b, uint32_t seq, uint32_t pid,
-                       const struct nlmsghdr *request) {
+static int dump_links(struct nl_builder *b, uint32_t seq, uint32_t pid,
+                      const struct nlmsghdr *request) {
     struct link_description links[2];
     uint8_t loopback_mac[6];
     unsigned count = collect_links(links, loopback_mac);
@@ -388,8 +411,7 @@ static void dump_links(struct nl_builder *b, uint32_t seq, uint32_t pid,
             emit_link(b, seq, pid, NLM_F_MULTI, links[index].index, links[index].name,
                       links[index].arptype, links[index].flags, links[index].mtu,
                       links[index].mac, links[index].mac_length);
-        nl_put_done(b, seq, pid);
-        return;
+        return 1;
     }
 
     const struct ifinfomsg *info = (const struct ifinfomsg *)((const uint8_t *)request +
@@ -404,9 +426,10 @@ static void dump_links(struct nl_builder *b, uint32_t seq, uint32_t pid,
         emit_link(b, seq, pid, 0, links[index].index, links[index].name,
                   links[index].arptype, links[index].flags, links[index].mtu,
                   links[index].mac, links[index].mac_length);
-        return;
+        return 0;
     }
     nl_put_error(b, seq, pid, request, -ENODEV);
+    return 0;
 }
 
 static void emit_addr(struct nl_builder *b, uint32_t seq, uint32_t pid, int index,
@@ -426,7 +449,7 @@ static void emit_addr(struct nl_builder *b, uint32_t seq, uint32_t pid, int inde
     nl_msg_end(b, header);
 }
 
-static void dump_addrs(struct nl_builder *b, uint32_t seq, uint32_t pid) {
+static int dump_addrs(struct nl_builder *b, uint32_t seq, uint32_t pid) {
     uint32_t loopback = net_htonl(0x7F000001U); /* 127.0.0.1 */
     emit_addr(b, seq, pid, NETLINK_INDEX_LO, "lo", 8, 254 /* RT_SCOPE_HOST */, loopback);
 
@@ -435,7 +458,7 @@ static void dump_addrs(struct nl_builder *b, uint32_t seq, uint32_t pid) {
         emit_addr(b, seq, pid, NETLINK_INDEX_ETH0, "eth0",
                   netmask_prefix(config->netmask), RT_SCOPE_UNIVERSE, config->address);
     }
-    nl_put_done(b, seq, pid);
+    return 1;
 }
 
 static void emit_route(struct nl_builder *b, uint32_t seq, uint32_t pid, uint8_t dst_len,
@@ -459,7 +482,7 @@ static void emit_route(struct nl_builder *b, uint32_t seq, uint32_t pid, uint8_t
     nl_msg_end(b, header);
 }
 
-static void dump_routes(struct nl_builder *b, uint32_t seq, uint32_t pid) {
+static int dump_routes(struct nl_builder *b, uint32_t seq, uint32_t pid) {
     const struct net_config *config = net_get_config();
     if (config->address && config->netmask) {
         /* on-link subnet route: <network>/<prefix> dev eth0 proto kernel scope link */
@@ -472,7 +495,7 @@ static void dump_routes(struct nl_builder *b, uint32_t seq, uint32_t pid) {
         emit_route(b, seq, pid, 0, NULL, &config->gateway, NULL,
                    NETLINK_INDEX_ETH0, RT_SCOPE_UNIVERSE, RTPROT_BOOT);
     }
-    nl_put_done(b, seq, pid);
+    return 1;
 }
 
 /* ---- request dispatch --------------------------------------------------- */
@@ -493,42 +516,49 @@ static void dump_routes(struct nl_builder *b, uint32_t seq, uint32_t pid) {
  * delivered -- and anything else built on libmnl or getifaddrs() did the same,
  * which is why fastfetch stopped at the line before its network module.
  */
-static void handle_route_request(struct nl_builder *b, const struct nlmsghdr *request,
-                                 uint32_t portid) {
+/* Returns whether the answer is a dump, and so still owes an NLMSG_DONE. */
+static int handle_route_request(struct nl_builder *b, const struct nlmsghdr *request,
+                                uint32_t portid) {
     uint32_t seq = request->nlmsg_seq;
     uint32_t pid = portid;
     switch (request->nlmsg_type) {
-        case RTM_GETLINK: dump_links(b, seq, pid, request); break;
-        case RTM_GETADDR: dump_addrs(b, seq, pid); break;
-        case RTM_GETROUTE: dump_routes(b, seq, pid); break;
+        case RTM_GETLINK: return dump_links(b, seq, pid, request);
+        case RTM_GETADDR: return dump_addrs(b, seq, pid);
+        case RTM_GETROUTE: return dump_routes(b, seq, pid);
         default:
             if (request->nlmsg_flags & NLM_F_ACK)
                 nl_put_error(b, seq, pid, request, 0);
             else
                 nl_put_error(b, seq, pid, request, -EOPNOTSUPP);
-            break;
+            return 0;
     }
 }
 
-static void handle_diag_request(struct nl_builder *b, const struct nlmsghdr *request,
-                                uint32_t portid) {
+static int handle_diag_request(struct nl_builder *b, const struct nlmsghdr *request,
+                               uint32_t portid) {
     /* ss issues SOCK_DIAG_BY_FAMILY dumps. We have no socket-table enumeration
-       wired in yet, so answer every dump with an empty result (NLMSG_DONE):
-       ss then prints just its header rather than failing on the socket. */
-    nl_put_done(b, request->nlmsg_seq, portid);
+       wired in yet, so answer every dump with an empty result -- the
+       terminator alone, queued by the caller: ss then prints just its header
+       rather than failing on the socket. */
+    (void)b;
+    (void)request;
+    (void)portid;
+    return 1;
 }
 
-static int nl_rx_append(struct netlink_socket *socket, const uint8_t *data, size_t length) {
-    size_t live = socket->rx_len - socket->rx_pos;
-    size_t total = live + length;
-    uint8_t *buffer = (uint8_t *)kmalloc(total ? total : 1);
-    if (!buffer) return -1;
-    if (live) memcpy(buffer, socket->rx + socket->rx_pos, live);
-    if (length) memcpy(buffer + live, data, length);
-    if (socket->rx) kfree(socket->rx);
-    socket->rx = buffer;
-    socket->rx_len = total;
-    socket->rx_pos = 0;
+/* Queue one datagram. Empty ones are not queued: a zero-length read means
+   end of stream to most callers, which is not what an empty reply is. */
+static int nl_rx_queue(struct netlink_socket *socket, const uint8_t *data, size_t length) {
+    if (!length) return 0;
+    struct netlink_datagram *datagram =
+        (struct netlink_datagram *)kmalloc(sizeof(*datagram) + length);
+    if (!datagram) return -1;
+    datagram->next = NULL;
+    datagram->length = length;
+    memcpy(datagram->data, data, length);
+    if (socket->rx_tail) socket->rx_tail->next = datagram;
+    else socket->rx_head = datagram;
+    socket->rx_tail = datagram;
     return 0;
 }
 
@@ -556,14 +586,26 @@ int64_t netlink_socket_sendto(struct netlink_socket *socket, const void *data, s
         const struct nlmsghdr *request = (const struct nlmsghdr *)(bytes + offset);
         if (request->nlmsg_len < sizeof(struct nlmsghdr) ||
             offset + request->nlmsg_len > length) break;
-        if (socket->protocol == TUNIX_NETLINK_ROUTE)
-            handle_route_request(&builder, request, portid);
-        else
-            handle_diag_request(&builder, request, portid);
+        int dump = socket->protocol == TUNIX_NETLINK_ROUTE
+            ? handle_route_request(&builder, request, portid)
+            : handle_diag_request(&builder, request, portid);
+
+        /* The body first, then the terminator as a datagram of its own --
+           which is the whole point (see struct netlink_datagram): a reader
+           that stops partway through the body comes back for another read,
+           and on Linux that read is what hands it NLMSG_DONE. */
+        nl_rx_queue(socket, builder.buf, builder.len);
+        builder.len = 0;
+        builder.overflow = 0;
+        if (dump) {
+            nl_put_done(&builder, request->nlmsg_seq, portid);
+            nl_rx_queue(socket, builder.buf, builder.len);
+            builder.len = 0;
+            builder.overflow = 0;
+        }
         offset += NLMSG_ALIGN(request->nlmsg_len);
     }
 
-    if (builder.len) nl_rx_append(socket, builder.buf, builder.len);
     kfree(builder.buf);
     return (int64_t)length;
 }
@@ -571,22 +613,23 @@ int64_t netlink_socket_sendto(struct netlink_socket *socket, const void *data, s
 int64_t netlink_socket_recvfrom(struct netlink_socket *socket, void *data, size_t length,
                                 int flags, void *address, size_t *address_length) {
     if (!socket) return -EINVAL;
-    size_t available = socket->rx_len - socket->rx_pos;
-    if (available == 0) return -EAGAIN;
+    struct netlink_datagram *datagram = socket->rx_head;
+    if (!datagram) return -EAGAIN;
+    size_t available = datagram->length;
 
-    /* The whole synthesized reply is treated as one netlink datagram, matching
-       how iproute2's libnetlink drives us: it first probes the size with
-       MSG_PEEK|MSG_TRUNC (a zero-length buffer that must still report the full
-       length without consuming), allocates exactly that, then reads for real.
-       So a MSG_TRUNC read reports the real length even when it does not fit,
-       and only a non-peek read advances the queue. */
-    const uint8_t *base = socket->rx + socket->rx_pos;
+    /* One datagram per read, and a read that does not fit still consumes it:
+       that is what makes this a message socket rather than a stream. The
+       MSG_PEEK|MSG_TRUNC pair is how iproute2's libnetlink sizes the next
+       datagram -- a zero-length buffer that must report the full length
+       without consuming -- so a truncating read reports what was there and
+       only a non-peek read takes it off the queue. */
     size_t copy = available < length ? available : length;
-    if (copy) memcpy(data, base, copy);
+    if (copy) memcpy(data, datagram->data, copy);
 
     if (!(flags & NL_MSG_PEEK)) {
-        size_t consumed = (flags & NL_MSG_TRUNC) ? available : copy;
-        socket->rx_pos += consumed;
+        socket->rx_head = datagram->next;
+        if (!socket->rx_head) socket->rx_tail = NULL;
+        kfree(datagram);
     }
 
     if (address && address_length) {
@@ -609,7 +652,7 @@ int64_t netlink_socket_write(struct netlink_socket *socket, size_t length, const
 }
 
 int netlink_socket_read_ready(struct netlink_socket *socket) {
-    return socket && socket->rx_len > socket->rx_pos;
+    return socket && socket->rx_head != NULL;
 }
 
 int netlink_socket_write_ready(struct netlink_socket *socket) {
