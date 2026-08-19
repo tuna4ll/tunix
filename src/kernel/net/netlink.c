@@ -82,8 +82,8 @@
 #define RTPROT_KERNEL 2
 #define RTN_UNICAST 1
 
-#define NETLINK_INDEX_LO 1
-#define NETLINK_INDEX_ETH0 2
+#define NETLINK_INDEX_LO NET_IFINDEX_LO
+#define NETLINK_INDEX_ETH0 NET_IFINDEX_ETH0
 
 struct nlmsghdr {
     uint32_t nlmsg_len;

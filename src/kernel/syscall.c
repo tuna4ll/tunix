@@ -2229,6 +2229,22 @@ static int64_t sys_ioctl(int fd, unsigned long request, uint64_t user_argument) 
     }
     if (file->kind == FILE_KIND_FRAMEBUFFER)
         return framebuffer_file_ioctl(file, request, user_argument);
+    /*
+     * The SIOCGIF* device ioctls are a property of the machine's interfaces,
+     * not of the socket they arrive on, and Linux answers them on any socket
+     * at all. That is not a nicety: musl implements if_indextoname() by
+     * opening an AF_UNIX socket and asking it for SIOCGIFNAME, so a program
+     * that resolves the interface behind a route -- fastfetch's Local IP
+     * does exactly that -- never gets an answer if only inet sockets reply.
+     */
+    if (file->kind == FILE_KIND_SOCKET && (request & 0xFF00U) == 0x8900U) {
+        uint8_t argument[40];
+        if (!user_argument || copy_from_user(argument, user_argument, sizeof(argument)) != 0)
+            return -EFAULT;
+        int status = net_interface_ioctl(request, argument);
+        if (status < 0) return status;
+        return copy_to_user(user_argument, argument, sizeof(argument)) == 0 ? 0 : -EFAULT;
+    }
     if (file->kind == FILE_KIND_INET_SOCKET) {
         size_t argument_size = (request == 0x890BU || request == 0x890CU) ? 128U : 40U;
         uint8_t argument[128];

@@ -43,6 +43,22 @@ void net_set_dns(uint32_t dns);
 void net_set_interface_up(int up);
 uint16_t net_checksum(const void *data, size_t length);
 /* Whether an address is one this machine answers on without a wire. */
+/*
+ * The interface indices, shared by every interface that reports them --
+ * rtnetlink's ifi_index, SIOCGIFINDEX and SIOCGIFNAME. They have to agree:
+ * a program asks netlink which interface carries the default route and then
+ * asks a socket for that index's name, and if the two number the interfaces
+ * differently the second question has no answer. Loopback is 1 as it is
+ * everywhere.
+ */
+#define NET_IFINDEX_LO 1
+#define NET_IFINDEX_ETH0 2
+
+/* index -> name, and the SIOCGIF* family generally. Not a property of any one
+   socket -- Linux answers these on whichever socket is handed to it, and musl
+   asks over an AF_UNIX one in if_indextoname() -- so it does not take one. */
+int net_interface_ioctl(unsigned long request, void *argument);
+
 int net_is_loopback(uint32_t address);
 /* The source address a packet to `destination` goes out with. */
 uint32_t net_source_for(uint32_t destination);

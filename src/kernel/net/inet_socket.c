@@ -20,6 +20,7 @@
 #define EAFNOSUPPORT 97
 #define EADDRINUSE 98
 #define EADDRNOTAVAIL 99
+#define ENODEV 19
 #define ENETDOWN 100
 #define ENOTCONN 107
 #define EPIPE 32
@@ -121,6 +122,7 @@ struct tcp_control_block {
 #define SIOCGIFMTU 0x8921U
 #define SIOCGIFHWADDR 0x8927U
 #define SIOCGIFINDEX 0x8933U
+#define SIOCGIFNAME 0x8910U
 #define SIOCGIFTXQLEN 0x8942U
 
 #define IFF_UP 0x0001
@@ -989,7 +991,12 @@ static void set_sockaddr(uint8_t *where, uint32_t address) {
 }
 
 int inet_socket_ioctl(struct inet_socket *socket, unsigned long request, void *argument) {
-    if (!socket || !argument) return -EINVAL;
+    if (!socket) return -EINVAL;
+    return net_interface_ioctl(request, argument);
+}
+
+int net_interface_ioctl(unsigned long request, void *argument) {
+    if (!argument) return -EINVAL;
     uint8_t *arg = (uint8_t *)argument;
     const struct net_config *cfg = net_get_config();
     if (request == SIOCADDRT || request == SIOCDELRT) {
@@ -998,6 +1005,19 @@ int inet_socket_ioctl(struct inet_socket *socket, unsigned long request, void *a
             memcpy(&gateway, arg + 20, 4);
             if (gateway) net_set_gateway(gateway);
         }
+        return 0;
+    }
+    /* Asked before the name is validated, because this is the one request
+       that has no name in it yet -- it carries the index and wants the name
+       back. */
+    if (request == SIOCGIFNAME) {
+        int index;
+        memcpy(&index, arg + 16, sizeof(index));
+        const char *name = index == NET_IFINDEX_LO ? "lo" :
+                           index == NET_IFINDEX_ETH0 ? "eth0" : NULL;
+        if (!name) return -ENODEV;
+        memset(arg, 0, 16);
+        memcpy(arg, name, strlen(name) + 1);
         return 0;
     }
     if (!ifname_valid(arg)) return -EADDRNOTAVAIL;
@@ -1020,7 +1040,7 @@ int inet_socket_ioctl(struct inet_socket *socket, unsigned long request, void *a
         case SIOCGIFBRDADDR: set_sockaddr(arg + 16, cfg->address | ~cfg->netmask); return 0;
         case SIOCGIFHWADDR:
             memset(arg + 16, 0, 16); arg[16] = 1; memcpy(arg + 18, cfg->mac, 6); return 0;
-        case SIOCGIFINDEX: { int index = 1; memcpy(arg + 16, &index, 4); return 0; }
+        case SIOCGIFINDEX: { int index = NET_IFINDEX_ETH0; memcpy(arg + 16, &index, 4); return 0; }
         case SIOCGIFMTU: { int mtu = 1500; memcpy(arg + 16, &mtu, 4); return 0; }
         /* iproute2 asks for the transmit queue length before printing a
            link, and treats the failure as worth a line on stderr. The
