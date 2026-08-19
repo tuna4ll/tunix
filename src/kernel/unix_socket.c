@@ -18,7 +18,6 @@
 
 #define EMSGSIZE 90
 
-#define UNIX_MAX_LISTENERS 8
 #define UNIX_PENDING_MAX 8
 #define UNIX_RIGHTS_MAX 8
 #define UNIX_ANCILLARY_MAX 8
@@ -80,9 +79,16 @@ struct unix_socket {
     int pending_head;
     int pending_tail;
     int pending_count;
+    struct unix_socket *next_listener;
 };
 
-static struct unix_socket *listeners[UNIX_MAX_LISTENERS];
+/* Every bound socket, in a list rather than a table. It used to be eight slots,
+   and a desktop session went past that without trying: the X server, both
+   message buses, the session manager's ICE socket, ssh-agent, gpg-agent and
+   xfconfd are already seven. The ninth listen() returned EAGAIN, which the
+   programs affected reported as "Resource temporarily unavailable" and then
+   gave up on. A socket is heap allocated anyway, so it can carry its own link. */
+static struct unix_socket *listener_list;
 
 static struct pipe_buffer *incoming(struct unix_socket *socket) {
     if (!socket || !socket->channel) return NULL;
@@ -169,8 +175,14 @@ static void clear_pipe(struct pipe_buffer *pipe) {
 }
 
 static void listener_unregister(struct unix_socket *socket) {
-    for (int index = 0; index < UNIX_MAX_LISTENERS; index++) {
-        if (listeners[index] == socket) listeners[index] = NULL;
+    struct unix_socket **link = &listener_list;
+    while (*link) {
+        if (*link == socket) {
+            *link = socket->next_listener;
+            socket->next_listener = NULL;
+            return;
+        }
+        link = &(*link)->next_listener;
     }
 }
 
@@ -338,9 +350,8 @@ int unix_socket_bind(struct unix_socket *socket, const struct tunix_sockaddr_un 
     char path[108];
     int status = copy_path(path, address, length);
     if (status < 0) return status;
-    for (int index = 0; index < UNIX_MAX_LISTENERS; index++) {
-        if (listeners[index] && strcmp(listeners[index]->path, path) == 0)
-            return -EADDRINUSE;
+    for (struct unix_socket *bound = listener_list; bound; bound = bound->next_listener) {
+        if (strcmp(bound->path, path) == 0) return -EADDRINUSE;
     }
     strncpy(socket->path, path, sizeof(socket->path) - 1);
     return 0;
@@ -348,27 +359,22 @@ int unix_socket_bind(struct unix_socket *socket, const struct tunix_sockaddr_un 
 
 int unix_socket_listen(struct unix_socket *socket, int backlog) {
     if (!socket || !socket->path[0] || socket->connected) return -EINVAL;
-    for (int index = 0; index < UNIX_MAX_LISTENERS; index++) {
-        if (listeners[index] == socket) {
+    for (struct unix_socket *bound = listener_list; bound; bound = bound->next_listener) {
+        if (bound == socket) {
             socket->listening = 1;
             return 0;
         }
     }
-    for (int index = 0; index < UNIX_MAX_LISTENERS; index++) {
-        if (!listeners[index]) {
-            listeners[index] = socket;
-            socket->listening = 1;
-            socket->backlog = backlog > 0 && backlog < UNIX_PENDING_MAX ? backlog : UNIX_PENDING_MAX;
-            return 0;
-        }
-    }
-    return -EAGAIN;
+    socket->next_listener = listener_list;
+    listener_list = socket;
+    socket->listening = 1;
+    socket->backlog = backlog > 0 && backlog < UNIX_PENDING_MAX ? backlog : UNIX_PENDING_MAX;
+    return 0;
 }
 
 static struct unix_socket *find_listener(const char *path) {
-    for (int index = 0; index < UNIX_MAX_LISTENERS; index++) {
-        if (listeners[index] && listeners[index]->listening &&
-            strcmp(listeners[index]->path, path) == 0) return listeners[index];
+    for (struct unix_socket *bound = listener_list; bound; bound = bound->next_listener) {
+        if (bound->listening && strcmp(bound->path, path) == 0) return bound;
     }
     return NULL;
 }
