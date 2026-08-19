@@ -14,6 +14,7 @@ extern void panic(const char *msg) __attribute__((noreturn));
 extern void kprintf(const char *fmt, ...);
 /* Commits a reserved page the kernel is about to touch (see process.c). */
 extern int process_commit_area(uint64_t fault_address);
+extern int process_grow_user_stack(uint64_t fault_address);
 
 #if TUNIX_DEBUG_LOGS
 #define KDEBUG(...) kprintf(__VA_ARGS__)
@@ -480,8 +481,17 @@ int vmm_user_range_valid(uint64_t cr3_physical, uint64_t address,
         uint64_t flags;
         if (vmm_translate(cr3_physical, page, NULL, &flags) != 0) {
             /* Reserved but not yet touched: userspace would have faulted the
-               page in here, so do it for the kernel before giving up. */
-            if (cr3_physical != read_cr3() || !process_commit_area(page) ||
+               page in here, so do it for the kernel before giving up.
+               Both kinds of lazy page have to be handled, because the kernel
+               writes into both: an anonymous mapping's first touch, and the
+               main stack's next page down. The stack one is not hypothetical --
+               a signal frame is built *below* the stack pointer and written by
+               hand rather than through a fault, so a process signalled while
+               its stack pointer sat near a page boundary had the frame land on
+               a page it had never reached. That failed the copy, and the
+               delivery path answers a failed copy with a silent SIGSEGV. */
+            if (cr3_physical != read_cr3() ||
+                (!process_commit_area(page) && !process_grow_user_stack(page)) ||
                 vmm_translate(cr3_physical, page, NULL, &flags) != 0) return 0;
         }
         /* A copy-on-write page is logically writable even though the hardware
