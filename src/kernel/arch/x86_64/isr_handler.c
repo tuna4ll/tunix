@@ -7,7 +7,9 @@
 #include "../../include/percpu.h"
 #include "../../include/pic.h"
 #include "../../include/apic.h"
+#include "../../include/file.h"
 #include "../../include/process.h"
+#include "../../include/vfs.h"
 #include "../../include/signal.h"
 #include "../../include/smp.h"
 #include "../../include/timer.h"
@@ -112,9 +114,26 @@ static void isr_dispatch(struct interrupt_frame *regs) {
         }
 
         if (process_fault_from_interrupt(regs, fault_signal(regs->int_no))) {
-            kprintf("%s in user mode at RIP %p addr %p (error %x), signalling process\n",
-                    exception_messages[regs->int_no], (void *)fault_rip,
-                    (void *)fault_address, fault_error);
+            /* Named, because on a machine running a desktop several processes
+               fault for their own reasons, and "a process died" is not enough
+               to go looking with. */
+            struct process *faulted = process_current();
+            /* Where the instruction is, said the way a person can act on it:
+               a raw RIP in a shared library means nothing without knowing
+               which library it landed in and how far into it. */
+            struct vm_area *area = process_find_area(fault_rip);
+            const char *object = "?";
+            uint64_t within = fault_rip;
+            if (area) {
+                within = fault_rip - area->start + area->offset;
+                if (area->file && area->file->node) object = area->file->node->name;
+                else object = "anon";
+            }
+            kprintf("%s in %s[%d] at %s+%p (RIP %p) addr %p (error %x), signalling process\n",
+                    exception_messages[regs->int_no],
+                    faulted ? faulted->name : "?",
+                    (int)process_current_pid(), object, (void *)within,
+                    (void *)fault_rip, (void *)fault_address, fault_error);
             return;
         }
         /* The captured values, not the ones still in the frame: a handler that
