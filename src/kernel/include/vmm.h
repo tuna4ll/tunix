@@ -46,7 +46,10 @@
  *   0x400000  local APIC, IOAPIC  (8 KiB)    src/kernel/apic.c
  *   0x500000  HD Audio registers  (16 KiB)   src/kernel/audio/hda.c
  *   0x600000  virtio BARs         (384 KiB)  src/kernel/virtio/virtio_pci.c
+ *   0x700000  handed out by vmm_map_device(), which is what new drivers use
+ *             instead of picking an offset and hoping.
  */
+#define DEVICE_MMIO_ARENA_OFFSET 0x00700000ULL
 #define USER_ADDRESS_LIMIT 0x0000800000000000ULL
 
 /*
@@ -115,6 +118,15 @@ int vmm_write_combining_available(void);
 void *vmm_phys_to_virt(uint64_t physical);
 uint64_t vmm_virt_to_phys_direct(const void *virtual_address);
 uint64_t vmm_kernel_cr3(void);
+/*
+ * Map a device's registers and return the address they can be reached at, or 0.
+ * The window above DEVICE_MMIO_ARENA_OFFSET is handed out here rather than
+ * carved up by hand, because a driver that picks a colliding offset does not
+ * fail loudly -- the second mapping is refused and the device simply looks
+ * absent. `physical` need not be page aligned; the offset within the page is
+ * preserved in the returned address.
+ */
+uint64_t vmm_map_device(uint64_t physical, uint64_t bytes);
 uint64_t vmm_current_cr3(void);
 uint64_t vmm_create_address_space(void);
 uint64_t vmm_clone_address_space(uint64_t source_cr3);

@@ -300,6 +300,26 @@ void vmm_init(void) {
 }
 
 uint64_t vmm_kernel_cr3(void) { return kernel_cr3_physical; }
+
+uint64_t vmm_map_device(uint64_t physical, uint64_t bytes) {
+    static uint64_t arena_used = 0;
+    if (!physical || !bytes) return 0;
+
+    uint64_t page_offset = physical & 0xFFFULL;
+    uint64_t first = physical - page_offset;
+    uint64_t span = (bytes + page_offset + 0xFFFULL) & ~0xFFFULL;
+    if (DEVICE_MMIO_ARENA_OFFSET + arena_used + span > DEVICE_MMIO_VIRTUAL_BYTES)
+        return 0;
+
+    uint64_t base = DEVICE_MMIO_VIRTUAL_BASE + DEVICE_MMIO_ARENA_OFFSET + arena_used;
+    for (uint64_t offset = 0; offset < span; offset += 4096ULL) {
+        if (vmm_map_page_in(kernel_cr3_physical, base + offset, first + offset,
+                            PAGE_WRITE | PAGE_DEVICE | PAGE_UNCACHED | PAGE_NX) != 0)
+            return 0;
+    }
+    arena_used += span;
+    return base + page_offset;
+}
 uint64_t vmm_current_cr3(void) { return read_cr3(); }
 
 uint64_t vmm_create_address_space(void) {
