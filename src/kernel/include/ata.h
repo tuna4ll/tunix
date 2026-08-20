@@ -11,5 +11,7 @@ int ata_pio_read_bytes(uint64_t offset, size_t size, void *destination);
 int ata_pio_write28(uint32_t lba, uint32_t sectors, const void *source);
 int ata_flush_cache(void);
 uint32_t ata_disk_sectors(void);
+/* Offer this controller's disk to the block layer, if there is one. */
+void ata_register_block_device(void);
 
 #endif

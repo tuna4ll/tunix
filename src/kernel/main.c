@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include "include/ata.h"
 #include "include/build_config.h"
+#include "include/block.h"
 #include "include/boot_manifest.h"
 #include "include/boot_framebuffer.h"
 #include "include/devfs.h"
@@ -132,6 +133,16 @@ void kmain(uint32_t mmap_count, uint64_t mmap_address, uint64_t manifest_address
     if (!manifest || manifest->magic != TUNIX_MANIFEST_MAGIC) {
         manifest = (const struct boot_manifest *)0x00020000ULL;
     }
+    /*
+     * The boot disk joins the block layer before anything else runs, because
+     * the two reads below -- probing for a seeded root, then pulling in the
+     * initramfs -- happen before the allocator and the page tables exist. IDE
+     * is port I/O and needs neither, which is exactly why it is the one the
+     * bootloader speaks and the one that can answer here. The memory-mapped
+     * controllers are probed much later, in block_probe_controllers().
+     */
+    ata_register_block_device();
+
     data_region_lba = compute_data_region_lba(manifest);
     int root_on_disk = data_region_lba && ext2fs_probe(data_region_lba) == 0;
     uint64_t initramfs_size = root_on_disk ? 0 : load_initramfs(manifest);
@@ -177,6 +188,14 @@ void kmain(uint32_t mmap_count, uint64_t mmap_address, uint64_t manifest_address
 #if TUNIX_DEBUG_LOGS
     kprintf("TUNIX: GDT/TSS IDT PMM VMM heap ready\n");
 #endif
+
+    /* Storage controllers come up here and not earlier: two of the three are
+       memory mapped, so they need the page tables and the allocator that the
+       lines above just finished building. The manifest and the initramfs were
+       read before all of that through port-I/O IDE, which is the one controller
+       that needs neither. */
+    block_probe_controllers();
+    block_select_root(tunix_boot_manifest_lba());
 
     vfs_init();
     if (root_on_disk) {

@@ -1,6 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "include/ata.h"
+#include "include/block.h"
 #include "include/build_config.h"
 #include "include/ext2.h"
 #include "include/heap.h"
@@ -248,15 +248,13 @@ static void restore_times(struct vfs_node *node, const struct ext2_inode *inode)
 static int read_blocks(uint32_t block, uint32_t count, void *out) {
     uint32_t lba = ext2_region_lba + block * EXT2_SECTORS_PER_BLOCK;
     uint32_t sectors = count * EXT2_SECTORS_PER_BLOCK;
-    if (ata_dma_read28(lba, sectors, out) == 0) return 0;
-    return ata_pio_read28(lba, sectors, out);
+    return block_read(lba, sectors, out);
 }
 
 static int write_blocks(uint32_t block, uint32_t count, const void *data) {
     uint32_t lba = ext2_region_lba + block * EXT2_SECTORS_PER_BLOCK;
     uint32_t sectors = count * EXT2_SECTORS_PER_BLOCK;
-    if (ata_dma_write28(lba, sectors, data) == 0) return 0;
-    return ata_pio_write28(lba, sectors, data);
+    return block_write(lba, sectors, data);
 }
 
 static int read_block(uint32_t block, void *out) {
@@ -1327,7 +1325,7 @@ static int ext2_format(uint32_t total_blocks) {
         return -1;
 
     if (flush_meta() != 0) return -1;
-    return ata_flush_cache();
+    return block_flush();
 }
 
 /* --- mount / load ------------------------------------------------------- */
@@ -1619,17 +1617,17 @@ int ext2fs_fsync_node(struct vfs_node *node) {
         file_write_range(node->disk_inode, node, 0, node->length) < 0)
         return -1;
     if (flush_meta() != 0) return -1;
-    return ata_flush_cache();
+    return block_flush();
 }
 
 int ext2fs_sync(void) {
     if (!ext2_mounted_flag) return 0;
     if (flush_meta() != 0) return -1;
-    return ata_flush_cache();
+    return block_flush();
 }
 
 static uint32_t region_usable_blocks(uint32_t region_lba) {
-    uint32_t disk_sectors = ata_disk_sectors();
+    uint32_t disk_sectors = (uint32_t)block_sectors();
     if (!disk_sectors || region_lba >= disk_sectors) return 0;
     uint32_t blocks = (disk_sectors - region_lba) / EXT2_SECTORS_PER_BLOCK;
     if (blocks > EXT2_MAX_GROUPS * EXT2_BLOCKS_PER_GROUP)
@@ -1799,7 +1797,7 @@ int ext2fs_seed_root(uint32_t region_lba) {
     }
 
     sb.s_state = 1;
-    if (flush_meta() != 0 || ata_flush_cache() != 0) {
+    if (flush_meta() != 0 || block_flush() != 0) {
         kprintf("EXT2: seed commit failed, persistence disabled\n");
         ext2_root->disk_inode = 0;
         return -1;

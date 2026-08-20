@@ -1,6 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "include/ata.h"
+#include "include/block.h"
 #include "include/devfs.h"
 #include "include/devnum.h"
 #include "include/klog.h"
@@ -150,10 +150,27 @@ static int64_t rtc_ioctl(struct vfs_node *node, unsigned long request,
     return copy_to_user(user_argument, &value, sizeof(value)) == 0 ? 0 : -EFAULT;
 }
 
+/*
+ * /dev/sda, /dev/sdb, ... one per registered disk, in the order the block layer
+ * registered them. The letter is the index: carrying it in the name rather than
+ * in a side table means the node and the device cannot drift apart.
+ */
+static const struct block_device *disk_of(const struct vfs_node *node) {
+    size_t length = strlen(node->name);
+    if (!length) return NULL;
+    return block_device_at((int)(node->name[length - 1] - 'a'));
+}
+
 static int64_t disk_read(struct vfs_node *node, uint64_t offset,
                          size_t size, void *buffer) {
-    (void)node;
-    return ata_pio_read_bytes(offset, size, buffer);
+    return block_device_read_bytes(disk_of(node), offset, size, buffer) == 0
+        ? (int64_t)size : -1;
+}
+
+static int64_t disk_write(struct vfs_node *node, uint64_t offset,
+                          size_t size, const void *buffer) {
+    return block_device_write_bytes(disk_of(node), offset, size, buffer) == 0
+        ? (int64_t)size : -1;
 }
 
 static int64_t keyboard_read(struct vfs_node *node, uint64_t offset,
@@ -275,14 +292,17 @@ void devfs_init(void) {
                                          rtc_read, NULL, always_ready);
     if (rtc) rtc->ioctl = rtc_ioctl;
 
-    uint32_t sectors = ata_disk_sectors();
-    if (sectors) {
-        struct vfs_node *disk = attach_device(dev, "sda",
-            VFS_BLOCKDEVICE | VFS_READONLY, 0440, disk_read, NULL, NULL);
-        if (disk) {
-            disk->length = (uint64_t)sectors * 512ULL;
-            disk->gid = DEV_GROUP_DISK;
-        }
+    for (int index = 0; index < block_device_count(); index++) {
+        const struct block_device *device = block_device_at(index);
+        if (!device || index > 'z' - 'a') break;
+        char name[4] = {'s', 'd', (char)('a' + index), 0};
+        struct vfs_node *disk = attach_device(dev, name, VFS_BLOCKDEVICE, 0660,
+                                              disk_read,
+                                              device->write ? disk_write : NULL,
+                                              NULL);
+        if (!disk) continue;
+        disk->length = device->sectors * BLOCK_SECTOR_SIZE;
+        disk->gid = DEV_GROUP_DISK;
     }
 
     if (framebuffer_available()) {
@@ -391,5 +411,5 @@ void devfs_init(void) {
         }
     }
     (void)vfs_create_symlink("/dev/rtc0", "/dev/rtc", 0);
-    if (sectors) (void)vfs_create_symlink("/dev/root", "/dev/sda", 0);
+    if (block_device_count()) (void)vfs_create_symlink("/dev/root", "/dev/sda", 0);
 }

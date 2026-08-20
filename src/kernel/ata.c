@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "include/ata.h"
+#include "include/block.h"
 #include "include/io.h"
 #include "include/kstring.h"
 #include "include/pci.h"
@@ -372,4 +373,44 @@ int ata_pio_read_bytes(uint64_t offset, size_t size, void *destination) {
         completed += chunk;
     }
     return (int)completed;
+}
+
+/* --- the block layer's view ---------------------------------------------- */
+
+/*
+ * DMA first and programmed I/O as the answer when it is refused: the fallback
+ * used to live in the filesystem, which is not a place that should know how a
+ * disk is wired.
+ */
+static int ata_block_read(void *context, uint64_t lba, uint32_t count, void *destination) {
+    (void)context;
+    if (lba > 0x0FFFFFFFULL) return -1;
+    if (ata_dma_read28((uint32_t)lba, count, destination) == 0) return 0;
+    return ata_pio_read28((uint32_t)lba, count, destination);
+}
+
+static int ata_block_write(void *context, uint64_t lba, uint32_t count, const void *source) {
+    (void)context;
+    if (lba > 0x0FFFFFFFULL) return -1;
+    if (ata_dma_write28((uint32_t)lba, count, source) == 0) return 0;
+    return ata_pio_write28((uint32_t)lba, count, source);
+}
+
+static int ata_block_flush(void *context) {
+    (void)context;
+    return ata_flush_cache();
+}
+
+void ata_register_block_device(void) {
+    uint32_t sectors = ata_disk_sectors();
+    if (!sectors) return;
+    struct block_device device;
+    memset(&device, 0, sizeof(device));
+    device.name[0] = 'i'; device.name[1] = 'd'; device.name[2] = 'e';
+    device.name[3] = '0';
+    device.sectors = sectors;
+    device.read = ata_block_read;
+    device.write = ata_block_write;
+    device.flush = ata_block_flush;
+    block_register(&device);
 }

@@ -210,6 +210,10 @@ static uint32_t manifest_lba_from_command_line(void) {
 
 static uint64_t physical_of(const void *address);
 
+/* Where the manifest was found, so the block layer can ask every other disk
+   whether it carries one too and pick the root by evidence. */
+uint32_t tunix_boot_manifest_lba(void) { return manifest_lba_from_command_line(); }
+
 static uint64_t read_manifest(void) {
     uint32_t lba = manifest_lba_from_command_line();
     if (lba == 0) return 0;
