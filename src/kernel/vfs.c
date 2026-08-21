@@ -17,8 +17,21 @@ struct vfs_node *vfs_root;
 static uint64_t next_inode = 1;
 static const struct vfs_persist_ops *persist_ops;
 
+/*
+ * Two dispatches, not one. persist_ops belongs to the filesystem that owns the
+ * root and is a single global; a second filesystem mounted somewhere else
+ * cannot take it away. So a node's own directory gets asked as well: a driver
+ * that sets `adopt` on the directories it built is told about children created
+ * inside them, which is how a file created on a FAT mount reaches the medium
+ * rather than living in RAM until the mount goes away.
+ */
 #define PERSIST(op, ...) \
     do { if (persist_ops && persist_ops->op) persist_ops->op(__VA_ARGS__); } while (0)
+
+static void adopt_into_parent(struct vfs_node *node) {
+    if (node && node->parent && node->parent->adopt)
+        (void)node->parent->adopt(node->parent, node);
+}
 
 void vfs_set_persist_ops(const struct vfs_persist_ops *ops) {
     persist_ops = ops;
@@ -402,6 +415,7 @@ struct vfs_node *vfs_mkdir_p(const char *path) {
             next = vfs_alloc_node(component, VFS_DIRECTORY);
             if (!next || vfs_attach(current, next) != 0) return NULL;
             PERSIST(created, next);
+            adopt_into_parent(next);
         } else if ((next->flags & 0xFFU) == VFS_SYMLINK) {
             char next_path[VFS_PATH_MAX];
             if (vfs_node_path(next, next_path, sizeof(next_path)) != 0) return NULL;
@@ -565,6 +579,7 @@ struct vfs_node *vfs_create_file(const char *path, const void *data,
     }
     inotify_notify(parent, TUNIX_IN_CREATE, name, 0);
     PERSIST(created, node);
+    adopt_into_parent(node);
     return node;
 }
 
@@ -588,6 +603,7 @@ struct vfs_node *vfs_create_file_node(const char *path, uint32_t mode) {
     cred_stamp_new_node(node);
     inotify_notify(parent, TUNIX_IN_CREATE, name, 0);
     PERSIST(created, node);
+    adopt_into_parent(node);
     return node;
 }
 
@@ -609,6 +625,7 @@ struct vfs_node *vfs_create_directory(const char *path, uint32_t mode) {
     cred_stamp_new_node(node);
     inotify_notify(parent, TUNIX_IN_CREATE, name, 0);
     PERSIST(created, node);
+    adopt_into_parent(node);
     return node;
 }
 
@@ -637,6 +654,7 @@ struct vfs_node *vfs_create_symlink(const char *path, const char *target,
     cred_stamp_new_node(node);
     inotify_notify(parent, TUNIX_IN_CREATE, name, 0);
     PERSIST(created, node);
+    adopt_into_parent(node);
     return node;
 }
 

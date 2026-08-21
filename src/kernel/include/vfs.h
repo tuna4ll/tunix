@@ -82,6 +82,11 @@ struct vfs_node {
        so a size change reaches the medium. Without it the VFS would resize a
        buffer the file does not use and the disk would keep the old chain. */
     int (*truncate)(struct vfs_node *node, uint64_t length);
+    /* Set on a directory by the filesystem that built it: a child has just
+       been created inside, and needs whatever makes it real on the medium.
+       See the note above PERSIST() in vfs.c for why this is separate from the
+       persistence hooks. */
+    int (*adopt)(struct vfs_node *directory, struct vfs_node *child);
     vfs_ioctl_fn ioctl;
     vfs_mmap_fn mmap;
     vfs_ready_fn read_ready;

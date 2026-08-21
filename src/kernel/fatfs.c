@@ -4,6 +4,7 @@
 #include "include/fatfs.h"
 #include "include/heap.h"
 #include "include/kstring.h"
+#include "include/time.h"
 #include "include/vfs.h"
 
 /*
@@ -447,6 +448,7 @@ static void long_name_piece(const uint8_t *entry, char *out) {
 static struct vfs_node *build_directory(struct fat_volume *volume,
                                         uint32_t cluster, const char *name,
                                         struct vfs_node *parent, int depth);
+static int fat_adopt_child(struct vfs_node *directory, struct vfs_node *child);
 
 static int attach_entry(struct fat_volume *volume, struct vfs_node *directory,
                         const uint8_t *entry, const char *name,
@@ -494,6 +496,7 @@ static struct vfs_node *build_directory(struct fat_volume *volume, uint32_t clus
     struct vfs_node *directory = vfs_alloc_node(name, VFS_DIRECTORY);
     if (!directory) return NULL;
     directory->mode = 0755U;
+    directory->adopt = fat_adopt_child;
     struct fat_file *self = (struct fat_file *)kmalloc(sizeof(*self));
     if (self) {
         self->volume = volume;
@@ -550,6 +553,154 @@ static struct vfs_node *build_directory(struct fat_volume *volume, uint32_t clus
         offset += volume->bytes_per_sector;
     }
     return directory;
+}
+
+
+/* --- creating a file ----------------------------------------------------- */
+
+/*
+ * Turn a name into the 8.3 form a directory entry stores. Anything FAT cannot
+ * hold -- lower case, spaces, a second dot, more than eleven characters -- is
+ * folded or dropped, and the result is only ever the *short* name: the long one
+ * the caller asked for is what the VFS node keeps, and what a reader of this
+ * volume on another system sees is the short one. That is a real limitation and
+ * it is here rather than hidden, because writing long-name entries means
+ * checksums over the short name and a run of entries that has to stay in step
+ * with it.
+ */
+static void make_short_name(const char *name, uint8_t *out) {
+    memset(out, ' ', 11);
+    const char *dot = NULL;
+    for (const char *at = name; *at; at++) if (*at == '.') dot = at;
+
+    size_t index = 0;
+    for (const char *at = name; *at && index < 8U; at++) {
+        if (at == dot) break;
+        char value = *at;
+        if (value == ' ' || value == '.') continue;
+        if (value >= 'a' && value <= 'z') value = (char)(value - 32);
+        out[index++] = (uint8_t)value;
+    }
+    if (!index) out[0] = (uint8_t)'_';
+
+    if (dot) {
+        size_t extension = 0;
+        for (const char *at = dot + 1; *at && extension < 3U; at++) {
+            char value = *at;
+            if (value >= 'a' && value <= 'z') value = (char)(value - 32);
+            out[8 + extension++] = (uint8_t)value;
+        }
+    }
+}
+
+/*
+ * The creation date and time in the two packed fields a directory entry uses:
+ * a date of day, month and year-since-1980, and a time whose seconds field
+ * counts twos. Zero is not a neutral value here -- it is month 0 of day 0,
+ * which every tool that reads the volume reports as an invalid date -- so the
+ * clock is asked, and a machine whose clock predates 1980 gets 1980 rather than
+ * a field that underflows.
+ */
+static void entry_timestamp(uint16_t *date_out, uint16_t *time_out) {
+    struct tunix_rtc_time now;
+    if (time_get_rtc(&now) != 0 || now.year < 1980) {
+        *date_out = (uint16_t)((1U << 5) | 1U);   /* 1980-01-01 */
+        *time_out = 0;
+        return;
+    }
+    *date_out = (uint16_t)((((uint32_t)now.year - 1980U) << 9) |
+                           ((uint32_t)now.month << 5) | (uint32_t)now.day);
+    *time_out = (uint16_t)(((uint32_t)now.hour << 11) |
+                           ((uint32_t)now.minute << 5) | ((uint32_t)now.second / 2U));
+}
+
+/* The first entry in a directory that is free or has never been used. */
+static int find_free_entry(struct fat_volume *volume, uint32_t cluster,
+                           uint64_t *offset_out) {
+    uint8_t sector[BLOCK_SECTOR_SIZE];
+    uint64_t offset = 0;
+    uint64_t limit = cluster ? (uint64_t)volume->cluster_count * volume->cluster_bytes
+                             : (uint64_t)volume->root_sectors * volume->bytes_per_sector;
+
+    while (offset < limit) {
+        if (directory_read(volume, cluster, offset, 1, sector) != 0) break;
+        for (uint32_t at = 0; at + 32U <= volume->bytes_per_sector; at += 32U) {
+            if (sector[at] == FAT_ENTRY_END || sector[at] == FAT_ENTRY_FREE) {
+                *offset_out = offset + at;
+                return 0;
+            }
+        }
+        offset += volume->bytes_per_sector;
+    }
+    return -1;
+}
+
+/*
+ * A node the VFS has just created inside a FAT directory. It arrives with no
+ * contents and no place on the medium; this gives it both, and swaps its
+ * handlers over so every later read and write goes to the disk instead of to
+ * the memory buffer it would otherwise have used.
+ */
+static int fat_adopt_child(struct vfs_node *directory, struct vfs_node *child) {
+    struct fat_file *parent = (struct fat_file *)directory->fs_private;
+    if (!parent || !child) return -1;
+    if (child->fs_private) return 0;             /* already ours */
+    if ((child->flags & 0xFFU) != VFS_FILE) return -1;
+    struct fat_volume *volume = parent->volume;
+    if (!volume->device->write) return -1;
+
+    uint64_t offset = 0;
+    if (find_free_entry(volume, parent->first_cluster, &offset) != 0) return -1;
+
+    uint64_t sector_offset = offset - (offset % volume->bytes_per_sector);
+    uint32_t within = (uint32_t)(offset % volume->bytes_per_sector);
+    uint8_t sector[BLOCK_SECTOR_SIZE];
+    if (directory_read(volume, parent->first_cluster, sector_offset, 1, sector) != 0)
+        return -1;
+
+    uint8_t *entry = sector + within;
+    int was_last = entry[0] == FAT_ENTRY_END;
+    memset(entry, 0, 32);
+    make_short_name(child->name, entry);
+    entry[11] = 0;                                /* a plain file */
+    uint16_t date = 0, stamp = 0;
+    entry_timestamp(&date, &stamp);
+    entry[14] = (uint8_t)stamp;                   /* created */
+    entry[15] = (uint8_t)(stamp >> 8);
+    entry[16] = (uint8_t)date;
+    entry[17] = (uint8_t)(date >> 8);
+    entry[18] = (uint8_t)date;                    /* last accessed */
+    entry[19] = (uint8_t)(date >> 8);
+    entry[22] = (uint8_t)stamp;                   /* last modified */
+    entry[23] = (uint8_t)(stamp >> 8);
+    entry[24] = (uint8_t)date;
+    entry[25] = (uint8_t)(date >> 8);
+    if (directory_write(volume, parent->first_cluster, sector_offset, 1, sector) != 0)
+        return -1;
+
+    /* An entry taken from the end of the directory has to be followed by a new
+       end marker, or every reader stops at the entry that used to be last. */
+    if (was_last && within + 64U <= volume->bytes_per_sector) {
+        sector[within + 32U] = FAT_ENTRY_END;
+        if (directory_write(volume, parent->first_cluster, sector_offset, 1, sector) != 0)
+            return -1;
+    }
+
+    struct fat_file *file = (struct fat_file *)kmalloc(sizeof(*file));
+    if (!file) return -1;
+    file->volume = volume;
+    file->first_cluster = 0;
+    file->entry_cluster = parent->first_cluster;
+    file->entry_offset = (uint32_t)offset;
+
+    /* The VFS gave it a memory buffer and the handlers that use one; both go,
+       because from here the medium is where the contents live. */
+    child->fs_private = file;
+    child->length = 0;
+    child->read = fat_node_read;
+    child->write = fat_node_write;
+    child->truncate = fat_node_truncate;
+    return 0;
 }
 
 /* --- mount --------------------------------------------------------------- */
