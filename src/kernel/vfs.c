@@ -5,6 +5,7 @@
 #include "include/inotify.h"
 #include "include/kstring.h"
 #include "include/time.h"
+#include "include/fatfs.h"
 #include "include/vfs.h"
 
 #define VFS_PATH_MAX 256
@@ -965,6 +966,14 @@ int vfs_mount(const char *source, const char *target, const char *type,
         root->uid = at->uid;
         root->gid = at->gid;
         owns_root = 1;
+    } else if (strcmp(type, "vfat") == 0 || strcmp(type, "fat") == 0 ||
+               strcmp(type, "msdos") == 0) {
+        /* The one filesystem here that reads a device. Its tree is built now,
+           in full, because FAT directories are small and a lookup that had to
+           re-read the medium would pay for it on every path walk. */
+        int status = fatfs_mount(source, at->name, &root);
+        if (status != 0) return status;
+        owns_root = 1;
     } else if (mount_is_pseudo(type)) {
         /* These trees are built by their own drivers at boot and cannot be
            made a second time; mounting one is only meaningful where it
@@ -1019,6 +1028,9 @@ int vfs_umount(const char *target) {
     entry->mountpoint->flags &= ~VFS_MOUNTPOINT;
     if (previous) previous->next = entry->next;
     else mount_table = entry->next;
+    /* A FAT tree carries per-node state the VFS knows nothing about, so its
+       driver gets to let go before the nodes themselves are freed. */
+    fatfs_unmount(entry->root);
     if (entry->owns_root) free_tree(entry->root, 0);
     kfree(entry);
     return 0;
@@ -1026,6 +1038,13 @@ int vfs_umount(const char *target) {
 
 int vfs_truncate(struct vfs_node *node, uint64_t length) {
     if (!node || (node->flags & 0xFFU) != VFS_FILE || (node->flags & VFS_READONLY)) return -1;
+    if (node->truncate) {
+        if (node->truncate(node, length) != 0) return -1;
+        node->length = length;
+        vfs_stamp_times(node, VFS_TIME_MTIME | VFS_TIME_CTIME);
+        inotify_notify(node, TUNIX_IN_MODIFY, NULL, 0);
+        return 0;
+    }
     /* Truncating to nothing discards the contents, so drop the promise
        instead of paying to fulfil it. */
     if (!length) node->flags &= ~VFS_LAZY_DATA;

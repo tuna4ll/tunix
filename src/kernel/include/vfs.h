@@ -71,8 +71,17 @@ struct vfs_node {
     uint32_t dev_major;
     uint32_t dev_minor;
     void *data;
+    /* Whatever the filesystem that owns this node needs to find it again on
+       the medium. The VFS never looks inside it and never frees it: the driver
+       that set it owns it, which is what lets a second filesystem exist
+       alongside the one that owns `data`. */
+    void *fs_private;
     vfs_read_fn read;
     vfs_write_fn write;
+    /* Set by a filesystem that stores contents itself rather than in `data`,
+       so a size change reaches the medium. Without it the VFS would resize a
+       buffer the file does not use and the disk would keep the old chain. */
+    int (*truncate)(struct vfs_node *node, uint64_t length);
     vfs_ioctl_fn ioctl;
     vfs_mmap_fn mmap;
     vfs_ready_fn read_ready;

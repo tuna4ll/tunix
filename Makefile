@@ -337,7 +337,7 @@ KERNEL_OBJS := \
 	$(BUILD)/vfs.o $(BUILD)/tarfs.o $(BUILD)/ext2.o $(BUILD)/devfs.o $(BUILD)/unix_socket.o $(BUILD)/pty.o \
 	$(BUILD)/usercopy.o $(BUILD)/elf.o $(BUILD)/file.o $(BUILD)/cred.o \
 	$(BUILD)/pipe.o $(BUILD)/tty.o $(BUILD)/vt.o $(BUILD)/process.o $(BUILD)/procfs.o $(BUILD)/time.o $(BUILD)/random.o $(BUILD)/ata.o \
-	$(BUILD)/acpi.o $(BUILD)/apic.o $(BUILD)/power.o $(BUILD)/xhci.o 	$(BUILD)/block.o $(BUILD)/ahci.o $(BUILD)/nvme.o \
+	$(BUILD)/acpi.o $(BUILD)/apic.o $(BUILD)/power.o $(BUILD)/xhci.o 	$(BUILD)/block.o $(BUILD)/ahci.o $(BUILD)/nvme.o $(BUILD)/fatfs.o \
 	$(BUILD)/sound.o $(BUILD)/hda.o \
 	$(BUILD)/virtio_pci.o $(BUILD)/virtio_ring.o $(BUILD)/virtio_gpu.o \
 	$(BUILD)/pci.o $(BUILD)/rtl8139.o $(BUILD)/net.o $(BUILD)/inet_socket.o $(BUILD)/netlink.o
