@@ -226,6 +226,15 @@ extern void kprintf(const char *fmt, ...);
 #define ENDPOINT_NUMBER_MASK 0x0FU
 #define ENDPOINT_TYPE_MASK 0x03U
 #define ENDPOINT_TYPE_INTERRUPT 3U
+#define ENDPOINT_TYPE_BULK 2U
+
+/* Mass storage, bulk-only transport, SCSI command set: the combination every
+   USB stick reports and the only one this driver answers. */
+#define USB_CLASS_MASS_STORAGE 8U
+#define MSC_SUBCLASS_SCSI 6U
+#define MSC_PROTOCOL_BULK_ONLY 0x50U
+#define EP_TYPE_BULK_OUT 2U
+#define EP_TYPE_BULK_IN 6U
 
 #define TRB_TYPE_CONFIGURE_ENDPOINT 12U
 #define EP_TYPE_INTERRUPT_IN 7U
@@ -318,6 +327,18 @@ struct xhci_device {
     uint8_t endpoint_address;
     uint16_t endpoint_packet;
     uint8_t endpoint_interval;
+
+    /* Mass storage, if that is what this turned out to be: the two bulk
+       endpoints it moves everything through, each with its own ring. */
+    int is_storage;
+    uint8_t bulk_in_address;
+    uint8_t bulk_out_address;
+    uint16_t bulk_in_packet;
+    uint16_t bulk_out_packet;
+    uint32_t bulk_in_dci;
+    uint32_t bulk_out_dci;
+    struct producer_ring bulk_in_ring;
+    struct producer_ring bulk_out_ring;
 
     /* The interrupt endpoint, once it is configured and running. */
     uint32_t endpoint_dci;
@@ -998,6 +1019,122 @@ static int configure_endpoint(struct xhci_device *device) {
                        device->slot << COMMAND_SLOT_SHIFT, NULL);
 }
 
+/*
+ * Look for a bulk-only mass-storage interface and both of its endpoints. The
+ * walk is the same shape as the HID one; what differs is that two endpoints
+ * are wanted rather than one, and a device is only usable when both arrive.
+ */
+static int find_storage_interface(struct xhci_device *device, uint8_t *buffer) {
+    if (control_transfer(device, USB_DIRECTION_IN, USB_REQUEST_GET_DESCRIPTOR,
+                         USB_DESCRIPTOR_CONFIGURATION << USB_DESCRIPTOR_TYPE_SHIFT, 0,
+                         buffer, CONFIGURATION_DESCRIPTOR_BYTES) != 0) return -1;
+    uint16_t total = (uint16_t)(buffer[CONFIGURATION_TOTAL_LENGTH_OFFSET] |
+                                (buffer[CONFIGURATION_TOTAL_LENGTH_OFFSET + 1] << 8));
+    if (!total || total > RING_BYTES) return -1;
+    if (control_transfer(device, USB_DIRECTION_IN, USB_REQUEST_GET_DESCRIPTOR,
+                         USB_DESCRIPTOR_CONFIGURATION << USB_DESCRIPTOR_TYPE_SHIFT, 0,
+                         buffer, total) != 0) return -1;
+
+    device->configuration_value = buffer[CONFIGURATION_VALUE_OFFSET];
+    device->bulk_in_address = 0;
+    device->bulk_out_address = 0;
+
+    int in_storage = 0;
+    for (uint16_t offset = 0; offset + 2U <= total; ) {
+        uint8_t length = buffer[offset + DESCRIPTOR_LENGTH_OFFSET];
+        uint8_t type = buffer[offset + DESCRIPTOR_TYPE_OFFSET];
+        if (!length || offset + length > total) break;
+
+        if (type == USB_DESCRIPTOR_INTERFACE) {
+            in_storage = buffer[offset + INTERFACE_CLASS_OFFSET] == USB_CLASS_MASS_STORAGE &&
+                         buffer[offset + INTERFACE_SUBCLASS_OFFSET] == MSC_SUBCLASS_SCSI &&
+                         buffer[offset + INTERFACE_PROTOCOL_OFFSET] == MSC_PROTOCOL_BULK_ONLY;
+            if (in_storage) device->interface_number = buffer[offset + INTERFACE_NUMBER_OFFSET];
+        } else if (type == USB_DESCRIPTOR_ENDPOINT && in_storage) {
+            uint8_t address = buffer[offset + ENDPOINT_ADDRESS_OFFSET];
+            uint8_t attributes = buffer[offset + ENDPOINT_ATTRIBUTES_OFFSET];
+            uint16_t packet = (uint16_t)(buffer[offset + ENDPOINT_MAX_PACKET_OFFSET] |
+                                         (buffer[offset + ENDPOINT_MAX_PACKET_OFFSET + 1] << 8));
+            if ((attributes & ENDPOINT_TYPE_MASK) == ENDPOINT_TYPE_BULK) {
+                if (address & ENDPOINT_DIRECTION_IN) {
+                    device->bulk_in_address = address;
+                    device->bulk_in_packet = packet;
+                } else {
+                    device->bulk_out_address = address;
+                    device->bulk_out_packet = packet;
+                }
+            }
+        }
+        offset = (uint16_t)(offset + length);
+    }
+    return (device->bulk_in_address && device->bulk_out_address) ? 0 : -1;
+}
+
+/* Give a ring its page and its trailing link back to the start. */
+static int prepare_ring(struct producer_ring *ring) {
+    ring->entries = dma_page(&ring->physical);
+    if (!ring->entries) return -1;
+    ring->index = 0;
+    ring->cycle = 1;
+    struct trb *link = &ring->entries[RING_TRB_COUNT - 1];
+    link->parameter_low = (uint32_t)ring->physical;
+    link->parameter_high = (uint32_t)(ring->physical >> 32);
+    link->control = (TRB_TYPE_LINK << TRB_TYPE_SHIFT) | TRB_TOGGLE_CYCLE;
+    return 0;
+}
+
+/*
+ * Both bulk endpoints in one CONFIGURE_ENDPOINT. They have to be added
+ * together: the slot's context-entries field states the highest endpoint that
+ * is valid, so configuring them one at a time would have the second command
+ * describe a slot the first had already sized differently.
+ */
+static int configure_bulk_endpoints(struct xhci_device *device) {
+    device->bulk_in_dci = (uint32_t)(device->bulk_in_address & ENDPOINT_NUMBER_MASK) * 2U + 1U;
+    device->bulk_out_dci = (uint32_t)(device->bulk_out_address & ENDPOINT_NUMBER_MASK) * 2U;
+    if (prepare_ring(&device->bulk_in_ring) != 0) return -1;
+    if (prepare_ring(&device->bulk_out_ring) != 0) return -1;
+
+    uint32_t highest = device->bulk_in_dci > device->bulk_out_dci
+        ? device->bulk_in_dci : device->bulk_out_dci;
+
+    memset(device->input_context, 0, RING_BYTES);
+    uint32_t *control = context_at(device->input_context, INPUT_CONTROL_INDEX);
+    control[1] = INPUT_ADD_SLOT | (1U << device->bulk_in_dci) | (1U << device->bulk_out_dci);
+
+    uint32_t *slot = context_at(device->input_context, SLOT_CONTEXT_INDEX);
+    slot[0] = (device->speed << SLOT_SPEED_SHIFT) | (highest << SLOT_CONTEXT_ENTRIES_SHIFT);
+    slot[1] = device->port << SLOT_ROOT_PORT_SHIFT;
+
+    uint32_t *in_endpoint = context_at(device->input_context, device->bulk_in_dci + 1U);
+    in_endpoint[1] = (EP_TYPE_BULK_IN << EP_TYPE_SHIFT) |
+                     (EP_ERROR_COUNT << EP_ERROR_COUNT_SHIFT) |
+                     ((uint32_t)device->bulk_in_packet << EP_MAX_PACKET_SHIFT);
+    in_endpoint[2] = (uint32_t)(device->bulk_in_ring.physical | EP_DEQUEUE_CYCLE);
+    in_endpoint[3] = (uint32_t)(device->bulk_in_ring.physical >> 32);
+    in_endpoint[4] = (uint32_t)device->bulk_in_packet << EP_AVERAGE_TRB_SHIFT;
+
+    uint32_t *out_endpoint = context_at(device->input_context, device->bulk_out_dci + 1U);
+    out_endpoint[1] = (EP_TYPE_BULK_OUT << EP_TYPE_SHIFT) |
+                      (EP_ERROR_COUNT << EP_ERROR_COUNT_SHIFT) |
+                      ((uint32_t)device->bulk_out_packet << EP_MAX_PACKET_SHIFT);
+    out_endpoint[2] = (uint32_t)(device->bulk_out_ring.physical | EP_DEQUEUE_CYCLE);
+    out_endpoint[3] = (uint32_t)(device->bulk_out_ring.physical >> 32);
+    out_endpoint[4] = (uint32_t)device->bulk_out_packet << EP_AVERAGE_TRB_SHIFT;
+
+    return run_command(TRB_TYPE_CONFIGURE_ENDPOINT, device->input_physical,
+                       device->slot << COMMAND_SLOT_SHIFT, NULL);
+}
+
+static int start_storage(struct xhci_device *device) {
+    if (control_transfer(device, 0, USB_REQUEST_SET_CONFIGURATION,
+                         device->configuration_value, 0, NULL, 0) != 0) return -1;
+    if (configure_bulk_endpoints(device) != 0) return -1;
+    device->is_storage = 1;
+    device->running = 1;
+    return 0;
+}
+
 /* Everything between "a HID interface was found" and "reports are arriving". */
 static int start_hid(struct xhci_device *device) {
     if (control_transfer(device, 0, USB_REQUEST_SET_CONFIGURATION,
@@ -1102,7 +1239,18 @@ static void enumerate_ports(void) {
         }
 
         if (find_hid_interface(device, descriptor) != 0) {
-            kprintf("XHCI: port %u slot %u is not a boot-protocol HID device\n",
+            /* Not a keyboard or a mouse; the other thing this driver knows how
+               to be is a disk. */
+            if (find_storage_interface(device, descriptor) == 0) {
+                if (start_storage(device) != 0)
+                    kprintf("XHCI: port %u storage did not start\n", (unsigned)port);
+                else
+                    kprintf("XHCI: port %u slot %u is a mass storage device\n",
+                            (unsigned)port, (unsigned)slot);
+                found++;
+                continue;
+            }
+            kprintf("XHCI: port %u slot %u is not a device this driver knows\n",
                     (unsigned)port, (unsigned)slot);
             continue;
         }
@@ -1204,4 +1352,39 @@ int xhci_init(void) {
             (unsigned)controller.context_bytes);
     enumerate_ports();
     return 0;
+}
+
+/* --- what the mass-storage driver above needs ---------------------------- */
+
+static struct xhci_device *storage_device(int index) {
+    int seen = 0;
+    for (unsigned at = 0; at < MAX_DEVICES; at++) {
+        if (!devices[at].used || !devices[at].is_storage) continue;
+        if (seen == index) return &devices[at];
+        seen++;
+    }
+    return NULL;
+}
+
+int xhci_storage_count(void) {
+    int count = 0;
+    for (unsigned at = 0; at < MAX_DEVICES; at++)
+        if (devices[at].used && devices[at].is_storage) count++;
+    return count;
+}
+
+/*
+ * One bulk transfer, submitted and waited for. Everything the transport above
+ * does -- command, data, status -- is one of these, and each is a single TRB
+ * because the buffers handed down are already physically contiguous.
+ */
+int xhci_bulk_transfer(int index, int in, uint64_t physical, uint32_t length) {
+    struct xhci_device *device = storage_device(index);
+    if (!device) return -1;
+    struct producer_ring *ring = in ? &device->bulk_in_ring : &device->bulk_out_ring;
+    uint32_t dci = in ? device->bulk_in_dci : device->bulk_out_dci;
+
+    enqueue(ring, physical, length, TRB_TYPE_NORMAL, TRB_INTERRUPT_ON_COMPLETION);
+    ring_doorbell(device->slot, dci);
+    return wait_for_transfer();
 }

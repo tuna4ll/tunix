@@ -34,6 +34,12 @@ void xhci_poll(void);
 int xhci_keyboard_present(void);
 int xhci_pointer_present(void);
 
+/* Mass storage found on the bus, for the block driver layered above. A bulk
+   transfer is synchronous and takes a DMA address, because that is the only
+   thing the controller can be told about. */
+int xhci_storage_count(void);
+int xhci_bulk_transfer(int index, int in, uint64_t physical, uint32_t length);
+
 /* Register access. Wide reads are split in two on purpose; see the source. */
 uint32_t xhci_read32(uint64_t address);
 void xhci_write32(uint64_t address, uint32_t value);

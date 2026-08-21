@@ -5,6 +5,7 @@
 #include "include/boot_manifest.h"
 #include "include/kstring.h"
 #include "include/nvme.h"
+#include "include/usb_storage.h"
 
 /* See include/block.h for what this is and why the early boot read is not
    one of its clients. */
@@ -172,8 +173,10 @@ int block_device_read_bytes(const struct block_device *device, uint64_t offset,
 
 void block_probe_controllers(void) {
     /* IDE is already here: main.c registered it before the allocator existed,
-       because the initramfs read needed it. These two could not have been
-       probed then -- both are memory mapped. */
+       because the initramfs read needed it. These could not have been probed
+       then -- AHCI and NVMe are memory mapped, and the USB one needs the
+       controller the line before it in main.c brought up. */
     ahci_init();
     nvme_init();
+    usb_storage_init();
 }

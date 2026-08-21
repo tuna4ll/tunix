@@ -338,6 +338,7 @@ KERNEL_OBJS := \
 	$(BUILD)/usercopy.o $(BUILD)/elf.o $(BUILD)/file.o $(BUILD)/cred.o \
 	$(BUILD)/pipe.o $(BUILD)/tty.o $(BUILD)/vt.o $(BUILD)/process.o $(BUILD)/procfs.o $(BUILD)/time.o $(BUILD)/random.o $(BUILD)/ata.o \
 	$(BUILD)/acpi.o $(BUILD)/apic.o $(BUILD)/power.o $(BUILD)/xhci.o 	$(BUILD)/block.o $(BUILD)/ahci.o $(BUILD)/nvme.o $(BUILD)/fatfs.o \
+	$(BUILD)/usb_storage.o \
 	$(BUILD)/sound.o $(BUILD)/hda.o \
 	$(BUILD)/virtio_pci.o $(BUILD)/virtio_ring.o $(BUILD)/virtio_gpu.o \
 	$(BUILD)/pci.o $(BUILD)/rtl8139.o $(BUILD)/net.o $(BUILD)/inet_socket.o $(BUILD)/netlink.o
@@ -1360,6 +1361,9 @@ $(BUILD)/rtl8139.o: src/kernel/net/rtl8139.c | $(BUILD)
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
 $(BUILD)/xhci.o: src/kernel/usb/xhci.c | $(BUILD)
+	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
+
+$(BUILD)/usb_storage.o: src/kernel/usb/usb_storage.c | $(BUILD)
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
 $(BUILD)/ahci.o: src/kernel/storage/ahci.c | $(BUILD)
