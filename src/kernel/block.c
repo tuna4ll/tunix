@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "include/ahci.h"
+#include "include/ata.h"
 #include "include/block.h"
 #include "include/boot_manifest.h"
 #include "include/kstring.h"
@@ -171,12 +172,31 @@ int block_device_read_bytes(const struct block_device *device, uint64_t offset,
     return 0;
 }
 
-void block_probe_controllers(void) {
-    /* IDE is already here: main.c registered it before the allocator existed,
-       because the initramfs read needed it. These could not have been probed
-       then -- AHCI and NVMe are memory mapped, and the USB one needs the
-       controller the line before it in main.c brought up. */
+void block_probe_early(void) {
+    /* The first disk read happens before kmain, in the code that fetches the
+       boot manifest, and kmain asks again on the way past. Whichever is first
+       does the work. */
+    static int probed;
+    if (probed) return;
+    probed = 1;
+
+    /* Everything that can answer before the allocator and the kernel's own page
+       tables exist, because the manifest and the initramfs are read before
+       both. IDE needs nothing; the other two reach their registers through the
+       identity map the loader left behind and keep their DMA in static
+       buffers. A machine whose only disk is SATA or NVMe would otherwise get
+       no further than "invalid boot manifest". */
+    ata_register_block_device();
     ahci_init();
     nvme_init();
+}
+
+void block_probe_controllers(void) {
+    /* The disks are already registered; what changes here is how their
+       registers are reached, now that the low identity map is about to become
+       user memory. USB could not be probed earlier at all -- it needs the
+       controller main.c brings up a few lines above. */
+    ahci_remap();
+    nvme_remap();
     usb_storage_init();
 }

@@ -4,7 +4,6 @@
 #include "../include/block.h"
 #include "../include/kstring.h"
 #include "../include/pci.h"
-#include "../include/pmm.h"
 #include "../include/vmm.h"
 
 /*
@@ -22,6 +21,10 @@
  * the list is built one page at a time by translating each page separately.
  * Assuming contiguity is the bug this design exists to avoid: it works for
  * every small read and corrupts memory on the first large one.
+ *
+ * The translation has to answer before the page tables exist as well, because
+ * this driver is probed early enough to read the boot manifest; see
+ * buffer_physical().
  */
 
 extern void kprintf(const char *fmt, ...);
@@ -73,10 +76,15 @@ extern void kprintf(const char *fmt, ...);
 #define ATA_FLUSH_CACHE_EXT 0xEAU
 #define ATA_IDENTIFY 0xECU
 
-/* 32 entries of 4 KiB is 128 KiB in one command, which is more than any caller
-   asks for and still leaves the whole port fitting in a single page. */
+/* 32 entries, and a transfer capped one page below what they could describe.
+   The caller's buffer is rarely page aligned -- the heap hands out whatever
+   fits -- and a range that starts part-way into a page needs one entry more
+   than its length suggests. Sizing the cap to the aligned case made every
+   large write from the heap fail the table and return an error the seeding
+   path did not report, which is how a freshly seeded root came out with files
+   that were there but empty. */
 #define AHCI_PRDT_ENTRIES 32U
-#define AHCI_MAX_SECTORS (AHCI_PRDT_ENTRIES * 4096U / BLOCK_SECTOR_SIZE)
+#define AHCI_MAX_SECTORS ((AHCI_PRDT_ENTRIES - 1U) * 4096U / BLOCK_SECTOR_SIZE)
 #define AHCI_MAX_PORTS 8U
 #define AHCI_WAIT_SPINS 40000000U
 
@@ -129,9 +137,51 @@ struct ahci_port {
     char name[16];
 };
 
-static uint64_t hba_base;
+static uint64_t hba_base;         /* how the window is reached now */
+static uint64_t hba_physical;     /* where PCI said it is */
 static struct ahci_port ports[AHCI_MAX_PORTS];
 static unsigned port_count;
+
+/*
+ * The command list, the received-FIS area and the command table for each port,
+ * as a static buffer rather than a page from the allocator: this driver is
+ * probed before the allocator exists. The alignment is the command list's --
+ * a kilobyte -- and a page satisfies it and every other structure's.
+ */
+static uint8_t port_dma[AHCI_MAX_PORTS][4096] __attribute__((aligned(4096)));
+
+/* The kernel image is mapped one gigabyte above KERNEL_BASE, so a static
+   buffer's physical address is its address less that base. The same
+   arithmetic the ATA driver does, and for the same reason: it has to work
+   before the direct map exists. */
+#define KERNEL_IMAGE_BASE 0xFFFFFFFF80000000ULL
+
+static uint64_t static_physical(const void *address) {
+    return (uint64_t)(uintptr_t)address - KERNEL_IMAGE_BASE;
+}
+
+
+/*
+ * The physical address of a buffer the block layer handed down.
+ *
+ * Before vmm_init there is no page table to walk and no direct map to subtract,
+ * so the two cases the early boot path actually uses are answered by
+ * arithmetic: a static inside the kernel image, and a raw physical address
+ * reached through the identity map the loader left behind -- which is how the
+ * initramfs is staged. Everything else is a heap or direct-map address and only
+ * exists once the page tables do.
+ */
+static uint64_t buffer_physical(uint64_t address) {
+    if (address >= KERNEL_IMAGE_BASE &&
+        address - KERNEL_IMAGE_BASE < 0x40000000ULL) {
+        return address - KERNEL_IMAGE_BASE;
+    }
+    if (address < 0x100000000ULL) return address;
+    uint64_t cr3 = vmm_kernel_cr3();
+    uint64_t physical = 0;
+    if (!cr3 || vmm_translate(cr3, address, &physical, NULL) != 0) return 0;
+    return physical;
+}
 
 static uint32_t read32(uint64_t address) {
     return *(volatile uint32_t *)address;
@@ -178,8 +228,8 @@ static int build_prdt(struct ahci_command_table *table, const void *buffer,
     unsigned used = 0;
     while (bytes) {
         if (used == AHCI_PRDT_ENTRIES) return -1;
-        uint64_t physical = 0;
-        if (vmm_translate(vmm_kernel_cr3(), address, &physical, NULL) != 0) return -1;
+        uint64_t physical = buffer_physical(address);
+        if (!physical) return -1;
         uint32_t chunk = 4096U - (uint32_t)(address & 0xFFFULL);
         if (chunk > bytes) chunk = bytes;
         table->prdt[used].address_low = (uint32_t)physical;
@@ -296,10 +346,9 @@ static int ahci_flush(void *context) {
 /* --- bring-up ------------------------------------------------------------ */
 
 static uint64_t identify_sectors(struct ahci_port *port) {
-    uint8_t *buffer = (uint8_t *)vmm_phys_to_virt(port->page_physical);
     /* The tail of the port's own page is free and physically contiguous, which
        is exactly what a 512-byte IDENTIFY answer needs. */
-    uint8_t *identify = buffer + 0x800U;
+    uint8_t *identify = port->page + 0x800U;
     memset(identify, 0, 512);
     if (issue(port, ATA_IDENTIFY, 0, 0, identify, 512, 0) != 0) return 0;
 
@@ -330,14 +379,12 @@ static void bring_up_port(unsigned index) {
 
     if (stop_port(port) != 0) return;
 
-    uint64_t physical = (uint64_t)pmm_alloc_page();
-    if (!physical) return;
-    port->page_physical = physical;
-    port->page = (uint8_t *)vmm_phys_to_virt(physical);
+    port->page = port_dma[port_count];
+    port->page_physical = static_physical(port->page);
     memset(port->page, 0, 4096);
 
-    uint64_t list_physical = physical + PORT_PAGE_CL;
-    uint64_t fis_physical = physical + PORT_PAGE_FIS;
+    uint64_t list_physical = port->page_physical + PORT_PAGE_CL;
+    uint64_t fis_physical = port->page_physical + PORT_PAGE_FIS;
     write32(registers + PORT_CLB, (uint32_t)list_physical);
     write32(registers + PORT_CLBU, (uint32_t)(list_physical >> 32));
     write32(registers + PORT_FB, (uint32_t)fis_physical);
@@ -350,7 +397,6 @@ static void bring_up_port(unsigned index) {
     port->sectors = identify_sectors(port);
     if (!port->sectors) {
         stop_port(port);
-        pmm_free_page((void *)physical);
         return;
     }
 
@@ -377,11 +423,10 @@ void ahci_init(void) {
     if (!abar) return;
 
     pci_enable_bus_mastering(&pci);
-    hba_base = vmm_map_device(abar, 0x2000U);
-    if (!hba_base) {
-        kprintf("AHCI: register window unavailable\n");
-        return;
-    }
+    /* The identity map the loader left is still in place, so the window is
+       reachable where PCI says it is. ahci_remap() moves it later. */
+    hba_physical = abar;
+    hba_base = abar;
 
     write32(hba_base + HBA_GHC, read32(hba_base + HBA_GHC) | HBA_GHC_AE);
 
@@ -391,4 +436,18 @@ void ahci_init(void) {
         bring_up_port(index);
     }
     if (!port_count) kprintf("AHCI: controller present, no disks\n");
+}
+
+void ahci_remap(void) {
+    if (!hba_physical || !port_count) return;
+    uint64_t mapped = vmm_map_device(hba_physical, 0x2000U);
+    if (!mapped) {
+        kprintf("AHCI: register window unavailable, disks lost\n");
+        return;
+    }
+    /* Every port's register address was derived from the old base, so they all
+       move by the same amount rather than being recomputed from the index. */
+    for (unsigned index = 0; index < port_count; index++)
+        ports[index].registers = ports[index].registers - hba_base + mapped;
+    hba_base = mapped;
 }

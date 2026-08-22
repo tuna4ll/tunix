@@ -61,7 +61,6 @@ static void boot_log_stage(const char *name, uint64_t *started) {
 }
 #endif
 
-static int initramfs_used_dma;
 static uint32_t data_region_lba;
 
 static uint32_t compute_data_region_lba(const struct boot_manifest *manifest) {
@@ -82,18 +81,35 @@ static uint64_t load_initramfs(const struct boot_manifest *manifest) {
     if (!manifest->initramfs_size || manifest->initramfs_size > TUNIX_INITRAMFS_MAX_BYTES) {
         panic("invalid initramfs size");
     }
-    if (manifest->initramfs_lba > 0x0FFFFFFFULL || manifest->initramfs_sectors > TUNIX_INITRAMFS_MAX_SECTORS) {
-        panic("initramfs outside ATA28 limits");
+    if (manifest->initramfs_sectors > TUNIX_INITRAMFS_MAX_SECTORS) {
+        panic("initramfs larger than the reservation");
     }
-    initramfs_used_dma =
-        ata_dma_read28((uint32_t)manifest->initramfs_lba,
-                       manifest->initramfs_sectors,
-                       (void *)INITRAMFS_PHYSICAL) == 0;
-    if (!initramfs_used_dma &&
-        ata_pio_read28((uint32_t)manifest->initramfs_lba,
-                       manifest->initramfs_sectors,
-                       (void *)INITRAMFS_PHYSICAL) != 0) {
-        panic("ATA initramfs load failed");
+    /* Through the block layer, so the controller the machine actually has is
+       the one that answers. The destination is a raw physical address reached
+       through the identity map the loader left; the drivers translate it. */
+    if (block_read(manifest->initramfs_lba, manifest->initramfs_sectors,
+                   (void *)INITRAMFS_PHYSICAL) != 0) {
+        panic("initramfs load failed");
+    }
+    /*
+     * The manifest carries the archive's checksum, so a read that returned
+     * success but delivered the wrong bytes is caught here rather than three
+     * layers up as "invalid ELF64" on some file that happened to be unlucky.
+     * A driver is at its least trustworthy the first time it is used.
+     */
+    uint32_t checksum = 0xFFFFFFFFU;
+    const uint8_t *bytes = (const uint8_t *)INITRAMFS_PHYSICAL;
+    for (uint64_t index = 0; index < manifest->initramfs_size; index++) {
+        checksum ^= bytes[index];
+        for (int bit = 0; bit < 8; bit++) {
+            checksum = (checksum >> 1) ^ (0xEDB88320U & (uint32_t)(-(int32_t)(checksum & 1U)));
+        }
+    }
+    checksum = ~checksum;
+    if (checksum != manifest->initramfs_crc32) {
+        kprintf("TUNIX: initramfs checksum %x, expected %x\n",
+                (unsigned)checksum, (unsigned)manifest->initramfs_crc32);
+        panic("initramfs read back wrong");
     }
     return manifest->initramfs_size;
 }
@@ -134,14 +150,12 @@ void kmain(uint32_t mmap_count, uint64_t mmap_address, uint64_t manifest_address
         manifest = (const struct boot_manifest *)0x00020000ULL;
     }
     /*
-     * The boot disk joins the block layer before anything else runs, because
-     * the two reads below -- probing for a seeded root, then pulling in the
-     * initramfs -- happen before the allocator and the page tables exist. IDE
-     * is port I/O and needs neither, which is exactly why it is the one the
-     * bootloader speaks and the one that can answer here. The memory-mapped
-     * controllers are probed much later, in block_probe_controllers().
+     * The disks join the block layer before anything else runs, because the two
+     * reads below -- probing for a seeded root, then pulling in the initramfs --
+     * happen before the allocator and the page tables exist. See
+     * block_probe_early() for how a memory-mapped controller manages that.
      */
-    ata_register_block_device();
+    block_probe_early();
 
     data_region_lba = compute_data_region_lba(manifest);
     int root_on_disk = data_region_lba && ext2fs_probe(data_region_lba) == 0;
@@ -160,9 +174,9 @@ void kmain(uint32_t mmap_count, uint64_t mmap_address, uint64_t manifest_address
     idt_init();
     time_init();
 #if TUNIX_BOOT_TIMINGS
-    boot_log_cycles(initramfs_used_dma ? "initramfs ATA DMA load" :
-                                      "initramfs ATA PIO fallback load",
-                    initramfs_cycles);
+    /* Which controller answered is the block layer's business now, and it
+       says so itself when it registers the disk. */
+    boot_log_cycles("initramfs load", initramfs_cycles);
     uint64_t stage_started = boot_read_tsc();
 #endif
     random_init();

@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include "../../include/boot_framebuffer.h"
+#include "../../include/block.h"
 #include "../../include/boot_manifest.h"
 
 /*
@@ -214,10 +215,17 @@ static uint64_t physical_of(const void *address);
    whether it carries one too and pick the root by evidence. */
 uint32_t tunix_boot_manifest_lba(void) { return manifest_lba_from_command_line(); }
 
+/*
+ * The first disk read the kernel makes, and the one that decides whether it can
+ * boot at all. It goes through the block layer rather than straight to the IDE
+ * ports: a machine whose only disk is SATA or NVMe answers here and nowhere
+ * else, and "invalid boot manifest" was all it used to be able to say.
+ */
 static uint64_t read_manifest(void) {
     uint32_t lba = manifest_lba_from_command_line();
     if (lba == 0) return 0;
-    if (ata_pio_read28(lba, 1, manifest_storage) != 0) return 0;
+    block_probe_early();
+    if (block_read(lba, 1, manifest_storage) != 0) return 0;
 
     const struct boot_manifest *manifest =
         (const struct boot_manifest *)manifest_storage;

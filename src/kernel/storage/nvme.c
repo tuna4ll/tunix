@@ -4,7 +4,6 @@
 #include "../include/kstring.h"
 #include "../include/nvme.h"
 #include "../include/pci.h"
-#include "../include/pmm.h"
 #include "../include/vmm.h"
 
 /*
@@ -96,8 +95,24 @@ struct nvme_queue {
     uint64_t completion_doorbell;
 };
 
-static uint64_t registers;
+static uint64_t registers;        /* how the window is reached now */
+static uint64_t registers_physical;
 static uint32_t doorbell_stride;
+
+/*
+ * Four queue pages, a pointer-list page and a scratch page, static rather than
+ * allocated: this driver is probed before the allocator exists. Each queue has
+ * to start on a page boundary because the registers holding their addresses
+ * reserve the low twelve bits.
+ */
+#define NVME_DMA_PAGES 6U
+static uint8_t nvme_dma[NVME_DMA_PAGES][4096] __attribute__((aligned(4096)));
+
+#define KERNEL_IMAGE_BASE 0xFFFFFFFF80000000ULL
+
+static uint64_t static_physical(const void *address) {
+    return (uint64_t)(uintptr_t)address - KERNEL_IMAGE_BASE;
+}
 static struct nvme_queue admin_queue;
 static struct nvme_queue io_queue;
 static uint64_t prp_list_physical;
@@ -107,6 +122,29 @@ static uint16_t next_command_id = 1;
 static uint64_t namespace_blocks;
 static uint32_t namespace_block_bytes;
 static uint32_t sectors_per_block;
+
+
+/*
+ * The physical address of a buffer the block layer handed down.
+ *
+ * Before vmm_init there is no page table to walk and no direct map to subtract,
+ * so the two cases the early boot path actually uses are answered by
+ * arithmetic: a static inside the kernel image, and a raw physical address
+ * reached through the identity map the loader left behind -- which is how the
+ * initramfs is staged. Everything else is a heap or direct-map address and only
+ * exists once the page tables do.
+ */
+static uint64_t buffer_physical(uint64_t address) {
+    if (address >= KERNEL_IMAGE_BASE &&
+        address - KERNEL_IMAGE_BASE < 0x40000000ULL) {
+        return address - KERNEL_IMAGE_BASE;
+    }
+    if (address < 0x100000000ULL) return address;
+    uint64_t cr3 = vmm_kernel_cr3();
+    uint64_t physical = 0;
+    if (!cr3 || vmm_translate(cr3, address, &physical, NULL) != 0) return 0;
+    return physical;
+}
 
 static uint32_t read32(uint64_t address) { return *(volatile uint32_t *)address; }
 static void write32(uint64_t address, uint32_t value) {
@@ -122,29 +160,26 @@ static void write64(uint64_t address, uint64_t value) {
 
 static void pause_cpu(void) { __asm__ volatile("pause"); }
 
+/* The offset of a doorbell inside the window, not its address. */
 static uint64_t doorbell_of(uint32_t queue, int completion) {
     uint32_t index = queue * 2U + (completion ? 1U : 0U);
-    return registers + 0x1000U + (uint64_t)index * (4ULL << doorbell_stride);
+    return 0x1000U + (uint64_t)index * (4ULL << doorbell_stride);
 }
 
-static int allocate_queue(struct nvme_queue *queue, uint32_t id) {
+static int allocate_queue(struct nvme_queue *queue, uint32_t id,
+                          unsigned submission_page, unsigned completion_page) {
     memset(queue, 0, sizeof(*queue));
-    uint64_t submission = (uint64_t)pmm_alloc_page();
-    if (!submission) return -1;
-    uint64_t completion = (uint64_t)pmm_alloc_page();
-    if (!completion) {
-        pmm_free_page((void *)submission);
-        return -1;
-    }
-    queue->submission_physical = submission;
-    queue->completion_physical = completion;
-    queue->submission = (struct nvme_command *)vmm_phys_to_virt(submission);
-    queue->completion = (struct nvme_completion *)vmm_phys_to_virt(completion);
+    queue->submission = (struct nvme_command *)nvme_dma[submission_page];
+    queue->completion = (struct nvme_completion *)nvme_dma[completion_page];
+    queue->submission_physical = static_physical(queue->submission);
+    queue->completion_physical = static_physical(queue->completion);
     memset(queue->submission, 0, 4096);
     memset(queue->completion, 0, 4096);
     /* The queue starts empty, so the first entry the controller writes will
        carry phase 1. */
     queue->phase = 1;
+    /* Offsets rather than addresses: the window moves once, in nvme_remap(),
+       and a doorbell recorded as an absolute address would not move with it. */
     queue->submission_doorbell = doorbell_of(id, 0);
     queue->completion_doorbell = doorbell_of(id, 1);
     return 0;
@@ -161,7 +196,7 @@ static int submit(struct nvme_queue *queue, struct nvme_command *command) {
 
     queue->submission[queue->submission_tail] = *command;
     queue->submission_tail = (queue->submission_tail + 1U) % QUEUE_ENTRIES;
-    write32(queue->submission_doorbell, queue->submission_tail);
+    write32(registers + queue->submission_doorbell, queue->submission_tail);
 
     for (uint32_t spin = 0; spin < NVME_WAIT_SPINS; spin++) {
         volatile struct nvme_completion *entry = &queue->completion[queue->completion_head];
@@ -169,7 +204,7 @@ static int submit(struct nvme_queue *queue, struct nvme_command *command) {
         if ((status & 1U) == queue->phase && entry->command_id == id) {
             queue->completion_head = (queue->completion_head + 1U) % QUEUE_ENTRIES;
             if (!queue->completion_head) queue->phase ^= 1U;
-            write32(queue->completion_doorbell, queue->completion_head);
+            write32(registers + queue->completion_doorbell, queue->completion_head);
             return (int)(status >> 1);
         }
         pause_cpu();
@@ -184,8 +219,8 @@ static int submit(struct nvme_queue *queue, struct nvme_command *command) {
  */
 static int build_prp(struct nvme_command *command, const void *buffer, uint32_t bytes) {
     uint64_t address = (uint64_t)(uintptr_t)buffer;
-    uint64_t physical = 0;
-    if (vmm_translate(vmm_kernel_cr3(), address, &physical, NULL) != 0) return -1;
+    uint64_t physical = buffer_physical(address);
+    if (!physical) return -1;
     command->prp1 = physical;
     command->prp2 = 0;
 
@@ -198,14 +233,15 @@ static int build_prp(struct nvme_command *command, const void *buffer, uint32_t 
     if (pages > NVME_MAX_PAGES) return -1;
 
     if (pages == 1U) {
-        if (vmm_translate(vmm_kernel_cr3(), next, &physical, NULL) != 0) return -1;
+        physical = buffer_physical(next);
+        if (!physical) return -1;
         command->prp2 = physical;
         return 0;
     }
 
     for (uint32_t index = 0; index < pages; index++) {
-        if (vmm_translate(vmm_kernel_cr3(), next + (uint64_t)index * 4096ULL,
-                          &physical, NULL) != 0) return -1;
+        physical = buffer_physical(next + (uint64_t)index * 4096ULL);
+        if (!physical) return -1;
         prp_list[index] = physical;
     }
     command->prp2 = prp_list_physical;
@@ -249,8 +285,8 @@ static int nvme_read(void *context, uint64_t lba, uint32_t count, void *destinat
         if (!within && chunk % sectors_per_block == 0) {
             if (transfer(lba, chunk, out, 0) != 0) return -1;
         } else {
-            uint8_t *staging = (uint8_t *)vmm_phys_to_virt(prp_list_physical);
-            /* The PRP list page is idle for a single-block transfer. */
+            /* The pointer-list page is idle for a single-block transfer. */
+            uint8_t *staging = (uint8_t *)prp_list;
             if (namespace_block_bytes > 4096U) return -1;
             if (transfer(aligned, sectors_per_block, staging, 0) != 0) return -1;
             uint32_t available = sectors_per_block - within;
@@ -278,7 +314,7 @@ static int nvme_write(void *context, uint64_t lba, uint32_t count, const void *s
         if (!within && chunk % sectors_per_block == 0) {
             if (transfer(lba, chunk, (void *)(uintptr_t)in, 1) != 0) return -1;
         } else {
-            uint8_t *staging = (uint8_t *)vmm_phys_to_virt(prp_list_physical);
+            uint8_t *staging = (uint8_t *)prp_list;
             if (namespace_block_bytes > 4096U) return -1;
             if (transfer(aligned, sectors_per_block, staging, 0) != 0) return -1;
             uint32_t available = sectors_per_block - within;
@@ -316,9 +352,8 @@ static int wait_ready(int wanted) {
 }
 
 static int identify_namespace(void) {
-    uint64_t page = (uint64_t)pmm_alloc_page();
-    if (!page) return -1;
-    uint8_t *data = (uint8_t *)vmm_phys_to_virt(page);
+    uint8_t *data = nvme_dma[5];
+    uint64_t page = static_physical(data);
     memset(data, 0, 4096);
 
     struct nvme_command command;
@@ -327,11 +362,7 @@ static int identify_namespace(void) {
     command.nsid = 1;
     command.prp1 = page;
     command.dword10 = 0;             /* CNS 0: this namespace */
-    int status = submit(&admin_queue, &command);
-    if (status != 0) {
-        pmm_free_page((void *)page);
-        return -1;
-    }
+    if (submit(&admin_queue, &command) != 0) return -1;
 
     uint64_t size = 0;
     memcpy(&size, data, sizeof(size));
@@ -339,7 +370,6 @@ static int identify_namespace(void) {
     uint32_t format = 0;
     memcpy(&format, data + 128 + (size_t)formatted * 4U, sizeof(format));
     uint8_t shift = (uint8_t)((format >> 16) & 0xFFU);   /* LBADS */
-    pmm_free_page((void *)page);
 
     if (shift < 9U || shift > 12U || !size) return -1;
     namespace_blocks = size;
@@ -376,11 +406,10 @@ void nvme_init(void) {
     if (!base) return;
 
     pci_enable_bus_mastering(&pci);
-    registers = vmm_map_device(base, 0x2000U);
-    if (!registers) {
-        kprintf("NVME: register window unavailable\n");
-        return;
-    }
+    /* Reachable where PCI says it is: the loader's identity map is still in
+       place this early. nvme_remap() moves it once ours replaces it. */
+    registers_physical = base;
+    registers = base;
 
     uint32_t capability_high = read32(registers + REG_CAP + 4U);
     doorbell_stride = capability_high & 0x0FU;
@@ -388,12 +417,11 @@ void nvme_init(void) {
     write32(registers + REG_CC, read32(registers + REG_CC) & ~CC_ENABLE);
     if (wait_ready(0) != 0) return;
 
-    if (allocate_queue(&admin_queue, 0) != 0) return;
-    if (allocate_queue(&io_queue, 1) != 0) return;
+    if (allocate_queue(&admin_queue, 0, 0, 1) != 0) return;
+    if (allocate_queue(&io_queue, 1, 2, 3) != 0) return;
 
-    prp_list_physical = (uint64_t)pmm_alloc_page();
-    if (!prp_list_physical) return;
-    prp_list = (uint64_t *)vmm_phys_to_virt(prp_list_physical);
+    prp_list = (uint64_t *)nvme_dma[4];
+    prp_list_physical = static_physical(prp_list);
     memset(prp_list, 0, 4096);
 
     write32(registers + REG_AQA, ((QUEUE_ENTRIES - 1U) << 16) | (QUEUE_ENTRIES - 1U));
@@ -431,4 +459,15 @@ void nvme_init(void) {
     if (namespace_block_bytes != BLOCK_SECTOR_SIZE)
         kprintf("NVME: %u byte blocks, staged through as 512 byte sectors\n",
                 (unsigned)namespace_block_bytes);
+}
+
+void nvme_remap(void) {
+    if (!registers_physical || !namespace_blocks) return;
+    uint64_t mapped = vmm_map_device(registers_physical, 0x2000U);
+    if (!mapped) {
+        kprintf("NVME: register window unavailable, namespace lost\n");
+        return;
+    }
+    /* Doorbells are held as offsets, so nothing else has to move. */
+    registers = mapped;
 }

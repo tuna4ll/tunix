@@ -66,8 +66,12 @@ int block_device_write_bytes(const struct block_device *device, uint64_t offset,
 int block_flush(void);
 uint64_t block_sectors(void);
 
-/* Probe every storage controller and register what it finds. Called once the
-   allocator and the page tables are up, because two of the three need MMIO. */
+/* Every controller that can answer before the allocator and the page tables
+   exist. Called from kmain before the manifest is read. */
+void block_probe_early(void);
+/* Called once the kernel's own page tables are up: moves register windows out
+   of the identity map, and brings up the controllers that could not be probed
+   earlier. */
 void block_probe_controllers(void);
 
 /* The sector the bootloader read the manifest from; defined in tunix_boot.c. */
