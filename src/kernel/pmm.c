@@ -1,6 +1,10 @@
 #include "include/build_config.h"
 #include <stddef.h>
 #include <stdint.h>
+#include "include/oplock.h"
+
+static void *pmm_alloc_page_locked(void);
+static void pmm_free_page_locked(void *physical_address);
 #include "include/pmm.h"
 
 #define KERNEL_BASE 0xFFFFFFFF80000000ULL
@@ -142,7 +146,20 @@ void pmm_init(uint32_t mmap_count, uint64_t mmap_addr,
 }
 
 
+/*
+ * Guarded because a shared-mode path reaches here: a copy to a user buffer can
+ * fault a page in, and two processors doing that at once would otherwise share
+ * a bitmap and a cursor with nothing between them. An exclusive holder pays
+ * nothing -- oplock_enter() knows it is alone.
+ */
 void *pmm_alloc_page(void) {
+    oplock_enter();
+    void *taken = pmm_alloc_page_locked();
+    oplock_leave();
+    return taken;
+}
+
+static void *pmm_alloc_page_locked(void) {
     if (!free_pages) return NULL;
 
     for (uint64_t pass = 0; pass < 2; pass++) {
@@ -171,6 +188,12 @@ void *pmm_alloc_page(void) {
  * survive until the last address space holding them is torn down.
  */
 void pmm_free_page(void *physical_address) {
+    oplock_enter();
+    pmm_free_page_locked(physical_address);
+    oplock_leave();
+}
+
+static void pmm_free_page_locked(void *physical_address) {
     if (!physical_address) return;
     uint64_t address = (uint64_t)physical_address;
     if ((address & (PMM_PAGE_SIZE - 1)) || address >= total_pages * PMM_PAGE_SIZE) {

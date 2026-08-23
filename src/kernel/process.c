@@ -7,6 +7,9 @@
 #include "include/heap.h"
 #include "include/interrupt.h"
 #include "include/klock.h"
+#include "include/oplock.h"
+
+static int process_wake_all_locked(const void *channel);
 #include "include/kstring.h"
 #include "include/percpu.h"
 #include "include/pmm.h"
@@ -1565,7 +1568,16 @@ const void *process_io_wait_channel(void) { return &io_wait_token; }
 
 int process_wake_io(void) { return process_wake_all(&io_wait_token); }
 
+/* Guarded: a shared-mode pipe read wakes whoever was waiting for space, and
+   that walks the queue every other processor may also be walking. */
 int process_wake_all(const void *channel) {
+    oplock_enter();
+    int woken = process_wake_all_locked(channel);
+    oplock_leave();
+    return woken;
+}
+
+static int process_wake_all_locked(const void *channel) {
     if (!queue || !channel) return 0;
     int woken = 0;
     struct process *item = queue;

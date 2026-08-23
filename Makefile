@@ -328,7 +328,7 @@ USER_LDFLAGS := -nostdlib -static -T src/userspace/linker.ld --build-id=none \
 KERNEL_OBJS := \
 	$(BUILD)/tunix_boot.o \
 	$(BUILD)/entry.o $(BUILD)/main.o $(BUILD)/serial.o \
-	$(BUILD)/kprintf.o $(BUILD)/kstring.o $(BUILD)/gdt.o $(BUILD)/percpu.o $(BUILD)/klock.o $(BUILD)/idle.o $(BUILD)/smp.o $(BUILD)/trampoline.o \
+	$(BUILD)/kprintf.o $(BUILD)/kstring.o $(BUILD)/gdt.o $(BUILD)/percpu.o $(BUILD)/klock.o $(BUILD)/oplock.o $(BUILD)/idle.o $(BUILD)/smp.o $(BUILD)/trampoline.o \
 	$(BUILD)/idt.o $(BUILD)/isr.o $(BUILD)/isr_handler.o $(BUILD)/pic.o $(BUILD)/timer.o \
 	$(BUILD)/pmm.o $(BUILD)/vmm.o $(BUILD)/framebuffer.o $(BUILD)/terminal_font.o $(BUILD)/terminal.o $(BUILD)/input.o \
 	$(BUILD)/heap.o $(BUILD)/syscall.o $(BUILD)/syscall_entry.o \

@@ -2,6 +2,10 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "include/kstring.h"
+#include "include/oplock.h"
+
+static int vmm_map_page_in_locked(uint64_t cr3_physical, uint64_t virtual_address,
+                                  uint64_t physical_address, uint64_t flags);
 #include "include/pmm.h"
 #include "include/smp.h"
 #include "include/vmm.h"
@@ -350,7 +354,23 @@ void vmm_activate(uint64_t cr3_physical) {
     write_cr3(physical);
 }
 
+/*
+ * Guarded because two threads of one process can now be inside the kernel at
+ * once, and a mapping walks and extends tables they share. The intermediate
+ * tables are the hazard rather than the leaf: two processors finding the same
+ * directory missing would both create one, and one of the two would be lost
+ * along with everything mapped through it.
+ */
 int vmm_map_page_in(uint64_t cr3_physical, uint64_t virtual_address,
+                    uint64_t physical_address, uint64_t flags) {
+    oplock_enter();
+    int status = vmm_map_page_in_locked(cr3_physical, virtual_address,
+                                        physical_address, flags);
+    oplock_leave();
+    return status;
+}
+
+static int vmm_map_page_in_locked(uint64_t cr3_physical, uint64_t virtual_address,
                     uint64_t physical_address, uint64_t flags) {
     uint64_t cr3 = cr3_physical & ADDRESS_MASK;
     if (!address_space_registered(cr3)) return -1;
