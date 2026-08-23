@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "spinlock.h"
 
 struct vfs_node;
 struct pipe_buffer;
@@ -39,6 +40,9 @@ struct signalfd_context;
 #define FILE_KIND_DMABUF      17
 
 struct file {
+    /* Taken by shared-mode reads and writes, because the offset below is
+       mutated and two descriptors onto the same open file share it. */
+    spinlock_t lock;
     int refs;
     int kind;
     uint32_t flags;

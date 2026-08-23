@@ -5354,7 +5354,76 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
  */
 _Static_assert(sizeof(struct syscall_frame) == 144, "syscall_entry.S assumes 144");
 
+/*
+ * Which files a read or a write may move bytes through without excluding the
+ * rest of the kernel.
+ *
+ * The test is not "is this fast" but "is everything it touches either private
+ * to this process or behind a lock of its own". A pipe qualifies because it
+ * has a lock now and its whole state is inside it. A character device whose
+ * handler keeps no state -- /dev/zero, /dev/null and their kind -- qualifies
+ * because there is nothing to protect. Everything else, including regular
+ * files (whose writes reach the disk and the persistence hooks), sockets, ptys
+ * and terminals, does not, and takes the kernel lock exclusively as before.
+ */
+static int file_may_share(const struct file *file) {
+    if (!file) return 0;
+    if (file->kind == FILE_KIND_PIPE_READ || file->kind == FILE_KIND_PIPE_WRITE)
+        return 1;
+    if (file->kind != FILE_KIND_VFS || !file->node) return 0;
+    /* A stateless device: no data of its own, so its handler cannot race. */
+    if ((file->node->flags & 0xFFU) != VFS_CHARDEVICE) return 0;
+    return file->node->data == NULL && file->node->length == 0;
+}
+
+/*
+ * A read or a write, attempted without excluding anyone. Returns zero when it
+ * could not be finished this way -- an unsuitable file, or one that would have
+ * blocked, since blocking means the scheduler and the scheduler is exclusive.
+ * The caller then starts again with the kernel lock held, which is what every
+ * other syscall does from the outset.
+ */
+static int syscall_try_shared(struct syscall_frame *frame) {
+    uint64_t number = frame->rax;
+    int fd = (int)frame->rdi;
+    struct process *process = process_current();
+    if (!process || !process->files || fd < 0 || fd >= PROCESS_MAX_FDS) return 0;
+    struct file *file = process->files->fds[fd];
+    if (!file_may_share(file)) return 0;
+
+    int64_t result = number == SYS_READ
+        ? sys_read(fd, frame->rsi, (size_t)frame->rdx)
+        : sys_write(fd, frame->rsi, (size_t)frame->rdx);
+
+    /* Would have blocked: leave it to the exclusive path, which can sleep. */
+    if (result == -EAGAIN && !(file->flags & O_NONBLOCK)) return 0;
+
+    frame->rax = (uint64_t)result;
+    return 1;
+}
+
+/* Cheap enough to ask before any lock is held, because it reads nothing but
+   the number the process passed in a register. */
+static int syscall_number_may_share(uint64_t number) {
+    return number == SYS_READ || number == SYS_WRITE;
+}
+
 void syscall_dispatch(struct syscall_frame *frame) {
+    if (syscall_number_may_share(frame->rax)) {
+        kernel_lock_shared();
+        if (syscall_try_shared(frame)) {
+            /* The entry stub releases whichever mode is held. */
+            uint64_t top = cpu_current()->kernel_rsp;
+            if (top) {
+                struct syscall_frame *resumed =
+                    (struct syscall_frame *)(top - sizeof(*frame));
+                if (resumed != frame) *resumed = *frame;
+            }
+            return;
+        }
+        kernel_unlock_shared();
+    }
+
     kernel_lock();
     syscall_dispatch_locked(frame);
     uint64_t stack_top = cpu_current()->kernel_rsp;

@@ -1,6 +1,10 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "include/file.h"
+#include "include/klock.h"
+
+static int64_t file_read_locked(struct file *file, size_t size, void *buffer);
+static int64_t file_write_locked(struct file *file, size_t size, const void *buffer);
 #include "include/heap.h"
 /* Only the owning process id is needed here, not the whole process interface. */
 extern uint64_t process_current_pid(void);
@@ -326,7 +330,25 @@ void file_unref(struct file *file) {
     kfree(file);
 }
 
+/* The offset below is shared by every descriptor onto this open file, so a
+   shared-mode read has to have it to itself. Exclusive holders are alone. */
+static void file_enter(struct file *file) {
+    if (kernel_lock_shared_here()) spinlock_acquire(&file->lock);
+}
+
+static void file_leave(struct file *file) {
+    if (kernel_lock_shared_here()) spinlock_release(&file->lock);
+}
+
 int64_t file_read(struct file *file, size_t size, void *buffer) {
+    if (!file || !buffer) return -EBADF;
+    file_enter(file);
+    int64_t moved = file_read_locked(file, size, buffer);
+    file_leave(file);
+    return moved;
+}
+
+static int64_t file_read_locked(struct file *file, size_t size, void *buffer) {
     if (!file || !buffer) return -EBADF;
     if (file->kind == FILE_KIND_PIPE_READ) return pipe_read(file->pipe, size, buffer);
     if (file->kind == FILE_KIND_SOCKET) return unix_socket_read(file->socket, size, buffer);
@@ -360,6 +382,14 @@ int64_t file_read(struct file *file, size_t size, void *buffer) {
 }
 
 int64_t file_write(struct file *file, size_t size, const void *buffer) {
+    if (!file || !buffer) return -EBADF;
+    file_enter(file);
+    int64_t moved = file_write_locked(file, size, buffer);
+    file_leave(file);
+    return moved;
+}
+
+static int64_t file_write_locked(struct file *file, size_t size, const void *buffer) {
     if (!file || !buffer) return -EBADF;
     if (file->kind == FILE_KIND_SOCKET) return unix_socket_write(file->socket, size, buffer);
     if (file->kind == FILE_KIND_INET_SOCKET) return inet_socket_write(file->inet_socket, size, buffer);

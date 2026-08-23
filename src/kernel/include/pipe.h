@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "spinlock.h"
 
 #define PIPE_CAPACITY 4096
 
@@ -19,6 +20,11 @@ struct pipe_buffer {
        Readers wait for data, writers wait for space. */
     char data_wait;
     char space_wait;
+    /* Taken by shared-mode readers and writers, which are the only things that
+       can be inside this pipe at the same time. Two processes on different
+       pipes take different locks and never meet: that is where the parallelism
+       comes from. */
+    spinlock_t lock;
 };
 
 int pipe_create(struct file **read_end, struct file **write_end);
