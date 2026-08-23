@@ -3,7 +3,7 @@
 .global syscall_entry
 .global process_enter_user
 .extern syscall_dispatch
-.extern kernel_unlock
+.extern kernel_unlock_current
 
 /* struct cpu, as percpu.h lays it out. */
 .set CPU_KERNEL_RSP, 0
@@ -58,7 +58,7 @@ syscall_entry:
        be standing on. */
     mov rsp, qword ptr gs:[CPU_KERNEL_RSP]
     sub rsp, 144
-    call kernel_unlock
+    call kernel_unlock_current
 
     /* Build an iretq frame below the saved process context. */
     mov r11, rsp
