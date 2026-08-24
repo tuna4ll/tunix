@@ -16,7 +16,7 @@
 #include "include/usercopy.h"
 #include "include/vfs.h"
 #include "include/vt.h"
-#include "../include/tunix/input_event.h"
+#include "include/tunix/input_event.h"
 
 #define EFAULT 14
 #define EINVAL 22

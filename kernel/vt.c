@@ -12,7 +12,7 @@
 #include "include/usercopy.h"
 #include "include/vfs.h"
 #include "include/vt.h"
-#include "../include/tunix/input_event.h"
+#include "include/tunix/input_event.h"
 
 #define EPERM 1
 #define ENXIO 6

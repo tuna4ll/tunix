@@ -20,7 +20,7 @@
 #include "../include/time.h"
 #include "../include/kstring.h"
 #include "../include/input.h"
-#include "../../include/tunix/input_event.h"
+#include "../include/tunix/input_event.h"
 #include "../include/xhci.h"
 
 extern void kprintf(const char *fmt, ...);

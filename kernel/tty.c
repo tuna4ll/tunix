@@ -9,7 +9,7 @@
 #include "include/tty.h"
 #include "include/terminal.h"
 #include "include/vt.h"
-#include "../include/tunix/input_event.h"
+#include "include/tunix/input_event.h"
 
 #define EINTR 4
 #define EAGAIN 11

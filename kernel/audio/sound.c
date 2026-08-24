@@ -31,7 +31,7 @@
 #include "../include/usercopy.h"
 #include "../include/vfs.h"
 #include "../include/vmm.h"
-#include "../../include/tunix/asound.h"
+#include "../include/tunix/asound.h"
 
 extern void kprintf(const char *fmt, ...);
 

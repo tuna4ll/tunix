@@ -7,7 +7,7 @@
 #include "include/vmm.h"
 #include "include/vt.h"
 
-#include "../include/tunix/framebuffer.h"
+#include "include/tunix/framebuffer.h"
 
 extern void kprintf(const char *fmt, ...);
 

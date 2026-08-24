@@ -9,7 +9,7 @@
 #include "include/tty.h"
 #include "include/usercopy.h"
 #include "include/vt.h"
-#include "../include/tunix/input_event.h"
+#include "include/tunix/input_event.h"
 
 #define EAGAIN 11
 #define EINVAL 22
