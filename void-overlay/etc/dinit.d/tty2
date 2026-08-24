@@ -1,7 +1,0 @@
-# A second terminal, so Ctrl+Alt+F1/F2 has something to prove: two independent
-# Void shells, each with its own session, on the VT layer built for the main
-# image.
-type = process
-command = /usr/bin/getty /dev/tty2
-depends-on = rcS
-restart = true

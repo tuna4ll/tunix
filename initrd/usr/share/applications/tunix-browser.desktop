@@ -1,9 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Web Browser
-Comment=Browse the web with WebKitGTK
-Exec=browse %u
-Icon=web-browser
-Terminal=false
-Categories=Network;WebBrowser;
-MimeType=text/html;x-scheme-handler/http;x-scheme-handler/https;x-scheme-handler/file;

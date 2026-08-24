@@ -1,8 +1,0 @@
-#!/bin/sh
-# A login prompt on one virtual terminal.
-#
-# /bin/getty does the work -- session, controlling terminal, standard
-# descriptors -- and this only names the terminal, so that the service files
-# read as what they are. With no argument it takes the first terminal, which is
-# what a machine with nothing else running would want.
-exec /bin/getty "${1:-/dev/tty1}"

@@ -1,8 +1,0 @@
-# The display manager's login. LightDM runs as root, so pam_unix reads
-# /etc/shadow directly and never needs the unix_chkpwd helper.
-auth        requisite   pam_nologin.so
-auth        include     system-auth
-account     include     system-auth
-password    include     system-auth
-session     required    pam_env.so
-session     include     system-auth

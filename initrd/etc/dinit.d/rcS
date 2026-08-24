@@ -1,4 +1,0 @@
-# Early filesystem setup (what the old hand-rolled init did in C): the
-# writable directories, their permissions, and the CI boot marker.
-type = scripted
-command = /etc/rc.d/rcS

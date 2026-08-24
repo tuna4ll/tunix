@@ -1,7 +1,0 @@
-# Root of the service graph for the void_distro experiment. Same shape as the
-# real image's "boot" (see initrd/etc/dinit.d/boot): dinit (PID 1) starts this
-# and everything else hangs off it.
-type = internal
-waits-for = rcS
-waits-for = tty1
-waits-for = tty2

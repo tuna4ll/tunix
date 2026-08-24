@@ -1,9 +1,0 @@
-# The login prompt on virtual terminal 1, reached with Ctrl+Alt+F1.
-#
-# restart = true is what makes it a login *service*: when the session ends,
-# getty runs again and the next person gets a prompt. dinit's built-in restart
-# rate limiting stops a crash loop.
-type = process
-command = /bin/console-login /dev/tty1
-depends-on = rcS
-restart = true

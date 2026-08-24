@@ -1,7 +1,0 @@
-#!/bin/sh
-# Load the console keymap named by /etc/vconsole.conf (KEYMAP=name, shell
-# syntax, so sourcing it is the parser). No file or no KEYMAP means US default.
-[ -r /etc/vconsole.conf ] || exit 0
-. /etc/vconsole.conf
-[ -n "${KEYMAP:-}" ] || exit 0
-exec /bin/loadkeys -q "$KEYMAP"

@@ -1,7 +1,0 @@
-# The greeter's own session. It is not a login: the greeter user is already
-# decided and there is nothing to authenticate, so auth is a straight pass.
-auth        required    pam_permit.so
-account     required    pam_unix.so
-password    required    pam_deny.so
-session     required    pam_env.so
-session     required    pam_unix.so

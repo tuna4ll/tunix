@@ -1,8 +1,0 @@
-# Autologin. The account was named in lightdm.conf rather than typed at the
-# greeter, so there is no password to check -- but everything else about the
-# session is the same as an ordinary login.
-auth        required    pam_permit.so
-account     include     system-auth
-password    include     system-auth
-session     required    pam_env.so
-session     include     system-auth

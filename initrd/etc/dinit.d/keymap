@@ -1,4 +1,0 @@
-# Console keymap from /etc/vconsole.conf. Only affects the kernel terminal;
-# weston reads its layout from XKB via weston.ini instead.
-type = scripted
-command = /etc/rc.d/rc.keymap
