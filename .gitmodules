@@ -1,3 +1,0 @@
-[submodule "tunix-boot"]
-	path = tunix-boot
-	url = https://github.com/tunixos/tunix-boot.git
