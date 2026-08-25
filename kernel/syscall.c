@@ -126,6 +126,8 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define SYS_WAITID 247
 #define SYS_FCHOWNAT 260
 #define SYS_UNAME 63
+#define SYS_SETHOSTNAME 170
+#define SYS_SETDOMAINNAME 171
 #define SYS_FCNTL 72
 #define SYS_FLOCK 73
 #define SYS_FSYNC 74
@@ -3794,15 +3796,39 @@ static int64_t sys_readv_writev(int fd, uint64_t user_iov, int count, int write_
     return total;
 }
 
+/*
+ * The machine's name, which uname(2) used to answer with a constant. The first
+ * thing runit does on the way up is read /etc/hostname and call sethostname(2),
+ * so a kernel that cannot be told its own name reports the wrong one to
+ * everything that asks for the rest of the boot.
+ */
+#define HOSTNAME_MAX 64
+static char machine_hostname[HOSTNAME_MAX + 1] = "tunix";
+static char machine_domainname[HOSTNAME_MAX + 1] = "(none)";
+
+static int64_t set_machine_name(char *destination, uint64_t user_name,
+                                uint64_t length) {
+    const struct credentials *cred = cred_current();
+    if (cred && cred->euid != 0) return -EPERM;
+    if (length > HOSTNAME_MAX) return -EINVAL;
+
+    char value[HOSTNAME_MAX + 1];
+    if (length && copy_from_user(value, user_name, (size_t)length) != 0)
+        return -EFAULT;
+    value[length] = '\0';
+    memcpy(destination, value, (size_t)length + 1U);
+    return 0;
+}
+
 static int64_t sys_uname(uint64_t user_buffer) {
     struct linux_utsname value;
     memset(&value, 0, sizeof(value));
     strncpy(value.sysname, "Tunix", sizeof(value.sysname) - 1);
-    strncpy(value.nodename, "tunix", sizeof(value.nodename) - 1);
+    strncpy(value.nodename, machine_hostname, sizeof(value.nodename) - 1);
     strncpy(value.release, "0.1.0", sizeof(value.release) - 1);
     strncpy(value.version, "Tunix Kernel", sizeof(value.version) - 1);
     strncpy(value.machine, "x86_64", sizeof(value.machine) - 1);
-    strncpy(value.domainname, "localdomain", sizeof(value.domainname) - 1);
+    strncpy(value.domainname, machine_domainname, sizeof(value.domainname) - 1);
     return copy_to_user(user_buffer, &value, sizeof(value)) == 0 ? 0 : -EFAULT;
 }
 
@@ -4977,6 +5003,12 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         case SYS_TKILL: frame->rax = (uint64_t)process_send_signal_checked((int64_t)frame->rdi, (int)frame->rsi); break;
         case SYS_TGKILL: frame->rax = (uint64_t)process_send_signal_checked((int64_t)frame->rsi, (int)frame->rdx); break;
         case SYS_UNAME: frame->rax = (uint64_t)sys_uname(frame->rdi); break;
+        case SYS_SETHOSTNAME:
+            frame->rax = (uint64_t)set_machine_name(machine_hostname, frame->rdi, frame->rsi);
+            break;
+        case SYS_SETDOMAINNAME:
+            frame->rax = (uint64_t)set_machine_name(machine_domainname, frame->rdi, frame->rsi);
+            break;
         case SYS_FCNTL: {
             struct process *process = process_current();
             int fd = (int)frame->rdi;

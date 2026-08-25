@@ -107,7 +107,7 @@ VOID_ROOTFS_DATE ?= 20250202
 VOID_INSTALL ?= base-files bash coreutils util-linux findutils diffutils \
 	grep sed gawk tar gzip xz procps-ng psmisc iproute2 iputils file less \
 	which ncurses shadow sudo runit runit-void tzdata ca-certificates \
-	nano htop curl fastfetch
+	e2fsprogs kbd nano htop curl fastfetch
 VOID_REMOVE ?=
 
 BASE_FILES := $(shell find base-files -type f 2>/dev/null)

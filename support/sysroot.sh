@@ -39,8 +39,10 @@ check_permissions() {
 	mkdir -p "$1"
 	rm -f "$probe"
 	: > "$probe"
-	chmod 4750 "$probe"
+	# chown before chmod: changing the owner clears the setuid bit, so the
+	# other order fails this check on a filesystem that is perfectly fine.
 	chown 1:1 "$probe"
+	chmod 4750 "$probe"
 	local mode owner
 	mode=$(stat -c %a "$probe")
 	owner=$(stat -c %u:%g "$probe")
@@ -95,6 +97,15 @@ printf 'repository=%s/current\n' "$MIRROR" > "$SYSROOT/etc/xbps.d/00-repository-
 export XBPS_ARCH=x86_64
 XBPS="$XBPS_DIR/usr/bin"
 
+# xbps first and on its own. The base tarball is cut a few times a year and the
+# repository moves on without it; xbps refuses to install anything at all into a
+# root whose own xbps package is older than the repository format, and says so
+# with an error that does not mention the tarball.
+echo ":: updating xbps"
+"$XBPS/xbps-install" -S -y -u -r "$SYSROOT" xbps
+echo ":: updating the base"
+"$XBPS/xbps-install" -S -y -u -r "$SYSROOT"
+
 echo ":: installing packages"
 "$XBPS/xbps-install" -S -y -r "$SYSROOT" $INSTALL
 if [ -n "$REMOVE" ]; then
@@ -126,7 +137,11 @@ chmod 0700 "$SYSROOT/home/tunix"
 chmod 0755 "$SYSROOT/etc/rc.local"
 chmod 0440 "$SYSROOT/etc/sudoers.d/tunix"
 
+# Cleared first, so the list in base-files/services is the whole answer rather
+# than an addition to whatever the runit-void package happened to enable --
+# which is six gettys and udevd.
 echo ":: enabling services"
+rm -rf "$SYSROOT/etc/runit/runsvdir/default"
 mkdir -p "$SYSROOT/etc/runit/runsvdir/default"
 while read -r service; do
 	case "$service" in ''|'#'*) continue ;; esac
