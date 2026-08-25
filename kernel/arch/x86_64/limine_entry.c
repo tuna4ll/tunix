@@ -28,6 +28,16 @@
 __attribute__((used, section(".limine_requests")))
 static volatile LIMINE_BASE_REVISION(3);
 
+/* Four levels, on a machine that could do five. Every address constant in
+   vmm.h is a four-level one, and the kernel walks the tables itself. */
+__attribute__((used, section(".limine_requests")))
+static volatile struct limine_paging_mode_request paging_mode_request = {
+    .id = LIMINE_PAGING_MODE_REQUEST, .revision = 0, .response = NULL,
+    .mode = LIMINE_PAGING_MODE_X86_64_4LVL,
+    .max_mode = LIMINE_PAGING_MODE_X86_64_4LVL,
+    .min_mode = LIMINE_PAGING_MODE_X86_64_4LVL,
+};
+
 __attribute__((used, section(".limine_requests")))
 static volatile struct limine_memmap_request memmap_request = {
     .id = LIMINE_MEMMAP_REQUEST, .revision = 0, .response = NULL,
@@ -149,6 +159,9 @@ const char *boot_command_line_value(const char *key) {
 void limine_start(void) {
     if (!LIMINE_BASE_REVISION_SUPPORTED) panic("limine: base revision 3 unsupported");
     if (!hhdm_request.response) panic("limine: no higher-half direct map");
+    if (paging_mode_request.response &&
+        paging_mode_request.response->mode != LIMINE_PAGING_MODE_X86_64_4LVL)
+        panic("limine: five-level paging is not supported");
     if (!address_request.response) panic("limine: no executable address");
 
     info.hhdm_offset = hhdm_request.response->offset;
