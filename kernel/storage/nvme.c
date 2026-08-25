@@ -101,17 +101,16 @@ static uint32_t doorbell_stride;
 
 /*
  * Four queue pages, a pointer-list page and a scratch page, static rather than
- * allocated: this driver is probed before the allocator exists. Each queue has
- * to start on a page boundary because the registers holding their addresses
+ * allocated: they live for as long as the machine does. Each queue has to
+ * start on a page boundary because the registers holding their addresses
  * reserve the low twelve bits.
  */
 #define NVME_DMA_PAGES 6U
 static uint8_t nvme_dma[NVME_DMA_PAGES][4096] __attribute__((aligned(4096)));
 
-#define KERNEL_IMAGE_BASE 0xFFFFFFFF80000000ULL
-
+/* The physical address of one of the static pages above. */
 static uint64_t static_physical(const void *address) {
-    return (uint64_t)(uintptr_t)address - KERNEL_IMAGE_BASE;
+    return vmm_dma_physical(address, 4096);
 }
 static struct nvme_queue admin_queue;
 static struct nvme_queue io_queue;
@@ -124,22 +123,10 @@ static uint32_t namespace_block_bytes;
 static uint32_t sectors_per_block;
 
 
-/*
- * The physical address of a buffer the block layer handed down.
- *
- * Before vmm_init there is no page table to walk and no direct map to subtract,
- * so the two cases the early boot path actually uses are answered by
- * arithmetic: a static inside the kernel image, and a raw physical address
- * reached through the identity map the loader left behind -- which is how the
- * initramfs is staged. Everything else is a heap or direct-map address and only
- * exists once the page tables do.
- */
+/* And of one page of a buffer the block layer handed down, which may be
+   anywhere -- including a heap allocation whose pages are not consecutive, so
+   this is asked once per page rather than once per request. */
 static uint64_t buffer_physical(uint64_t address) {
-    if (address >= KERNEL_IMAGE_BASE &&
-        address - KERNEL_IMAGE_BASE < 0x40000000ULL) {
-        return address - KERNEL_IMAGE_BASE;
-    }
-    if (address < 0x100000000ULL) return address;
     uint64_t cr3 = vmm_kernel_cr3();
     uint64_t physical = 0;
     if (!cr3 || vmm_translate(cr3, address, &physical, NULL) != 0) return 0;

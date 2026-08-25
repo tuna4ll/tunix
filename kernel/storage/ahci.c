@@ -144,39 +144,21 @@ static unsigned port_count;
 
 /*
  * The command list, the received-FIS area and the command table for each port,
- * as a static buffer rather than a page from the allocator: this driver is
- * probed before the allocator exists. The alignment is the command list's --
- * a kilobyte -- and a page satisfies it and every other structure's.
+ * as a static buffer rather than a page from the allocator: it has to stay put
+ * for the life of the machine and is sized once. The alignment is the command
+ * list's -- a kilobyte -- and a page satisfies it and every other structure's.
  */
 static uint8_t port_dma[AHCI_MAX_PORTS][4096] __attribute__((aligned(4096)));
 
-/* The kernel image is mapped one gigabyte above KERNEL_BASE, so a static
-   buffer's physical address is its address less that base. The same
-   arithmetic the ATA driver does, and for the same reason: it has to work
-   before the direct map exists. */
-#define KERNEL_IMAGE_BASE 0xFFFFFFFF80000000ULL
-
+/* The physical address of one of the static pages above. */
 static uint64_t static_physical(const void *address) {
-    return (uint64_t)(uintptr_t)address - KERNEL_IMAGE_BASE;
+    return vmm_dma_physical(address, 4096);
 }
 
-
-/*
- * The physical address of a buffer the block layer handed down.
- *
- * Before vmm_init there is no page table to walk and no direct map to subtract,
- * so the two cases the early boot path actually uses are answered by
- * arithmetic: a static inside the kernel image, and a raw physical address
- * reached through the identity map the loader left behind -- which is how the
- * initramfs is staged. Everything else is a heap or direct-map address and only
- * exists once the page tables do.
- */
+/* And of one page of a buffer the block layer handed down, which may be
+   anywhere -- including a heap allocation whose pages are not consecutive, so
+   this is asked once per page rather than once per request. */
 static uint64_t buffer_physical(uint64_t address) {
-    if (address >= KERNEL_IMAGE_BASE &&
-        address - KERNEL_IMAGE_BASE < 0x40000000ULL) {
-        return address - KERNEL_IMAGE_BASE;
-    }
-    if (address < 0x100000000ULL) return address;
     uint64_t cr3 = vmm_kernel_cr3();
     uint64_t physical = 0;
     if (!cr3 || vmm_translate(cr3, address, &physical, NULL) != 0) return 0;

@@ -5,6 +5,7 @@
 #include "include/io.h"
 #include "include/kstring.h"
 #include "include/pci.h"
+#include "include/vmm.h"
 
 #define ATA_DATA       0x1F0
 #define ATA_SECCOUNT0  0x1F2
@@ -29,7 +30,6 @@
 #define ATA_SECTOR_SIZE  512U
 #define ATA_DMA_MAX_SECTORS 256U
 #define ATA_DMA_MAX_PRDS 4U
-#define KERNEL_VIRTUAL_BASE 0xFFFFFFFF80000000ULL
 
 #define BM_COMMAND_START 0x01
 #define BM_COMMAND_READ  0x08
@@ -51,22 +51,14 @@ static int dma_probe_state;
 static uint16_t dma_io_base;
 static struct ata_prd dma_prdt[ATA_DMA_MAX_PRDS] __attribute__((aligned(16)));
 
-static inline uint64_t ata_pointer_physical(const void *pointer) {
-    uint64_t value = (uint64_t)(uintptr_t)pointer;
-    if (value >= KERNEL_VIRTUAL_BASE) value -= KERNEL_VIRTUAL_BASE;
-    return value;
-}
-
 /*
- * DMA needs physically contiguous memory. Raw physical addresses and the
- * kernel image mapping (KERNEL_VIRTUAL_BASE + first GiB) qualify; kernel
- * heap mappings above that are pieced together from arbitrary pages, so
- * their virtual-minus-base "physical" address would be garbage.
+ * Bus-master DMA needs one physically contiguous run, which the VMM answers
+ * for and nothing else can: the direct map and the kernel image qualify, a
+ * heap allocation does not, and where the image sits in physical memory is
+ * the bootloader's choice rather than a constant this file can subtract.
  */
-static int ata_dma_pointer_valid(const void *pointer) {
-    uint64_t value = (uint64_t)(uintptr_t)pointer;
-    if (value < KERNEL_VIRTUAL_BASE) return 1;
-    return value - KERNEL_VIRTUAL_BASE < 0x40000000ULL;
+static inline uint64_t ata_pointer_physical(const void *pointer, uint64_t length) {
+    return vmm_dma_physical(pointer, length);
 }
 
 static inline void ata_read_words(uint16_t *destination, size_t word_count) {
@@ -158,8 +150,8 @@ static int ata_dma_transfer_chunk(uint32_t lba, uint32_t sectors,
     uint32_t bytes = sectors * ATA_SECTOR_SIZE;
     if (ata_build_prdt(buffer_physical, bytes) != 0) return -1;
 
-    uint64_t prdt_physical = ata_pointer_physical(dma_prdt);
-    if (prdt_physical > 0xFFFFFFFFULL) return -1;
+    uint64_t prdt_physical = ata_pointer_physical(dma_prdt, sizeof dma_prdt);
+    if (!prdt_physical || prdt_physical > 0xFFFFFFFFULL) return -1;
 
     uint8_t direction = to_device ? 0U : BM_COMMAND_READ;
     uint8_t ata_command = to_device ? ATA_CMD_WRITE_DMA : ATA_CMD_READ_DMA;
@@ -239,15 +231,15 @@ static int ata_dma_transfer28(uint32_t lba, uint32_t sectors,
                               const void *buffer, int to_device) {
     if (!buffer || sectors == 0 || lba > 0x0FFFFFFFU ||
         sectors > 0x10000000U - lba) return -1;
-    if (!ata_dma_pointer_valid(buffer)) return -1;
     if (ata_dma_probe() != 0) return -1;
 
     uint32_t disk_sectors = ata_disk_sectors();
     if (disk_sectors && (lba >= disk_sectors || sectors > disk_sectors - lba)) return -1;
 
-    uint64_t physical = ata_pointer_physical(buffer);
     uint64_t total_bytes = (uint64_t)sectors * ATA_SECTOR_SIZE;
-    if (physical > 0xFFFFFFFFULL || total_bytes > 0x100000000ULL - physical) return -1;
+    uint64_t physical = ata_pointer_physical(buffer, total_bytes);
+    if (!physical || physical > 0xFFFFFFFFULL ||
+        total_bytes > 0x100000000ULL - physical) return -1;
 
     uint32_t remaining = sectors;
     uint32_t current_lba = lba;

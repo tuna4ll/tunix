@@ -115,6 +115,17 @@ int vmm_write_combining_available(void);
 
 void *vmm_phys_to_virt(uint64_t physical);
 uint64_t vmm_virt_to_phys_direct(const void *virtual_address);
+/*
+ * The physical address of a buffer a device may be pointed at, or 0.
+ *
+ * DMA needs the whole run to be physically contiguous, which is true of the
+ * direct map and of the kernel image and of nothing else the kernel hands
+ * around -- a heap allocation is pieced together from whatever pages the
+ * allocator had. The drivers used to answer this by subtracting a constant,
+ * which stopped being right the moment a loader was free to place the image
+ * where it liked.
+ */
+uint64_t vmm_dma_physical(const void *pointer, uint64_t length);
 uint64_t vmm_kernel_cr3(void);
 /*
  * Map a device's registers and return the address they can be reached at, or 0.

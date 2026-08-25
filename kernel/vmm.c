@@ -94,6 +94,23 @@ uint64_t vmm_virt_to_phys_direct(const void *virtual_address) {
     return physical;
 }
 
+uint64_t vmm_dma_physical(const void *pointer, uint64_t length) {
+    const struct boot_info *boot = boot_info();
+    uint64_t value = (uint64_t)(uintptr_t)pointer;
+
+    if (value >= DIRECT_MAP_BASE && value < DIRECT_MAP_BASE + DIRECT_MAP_SIZE) {
+        uint64_t physical = value - DIRECT_MAP_BASE;
+        return pmm_physical_range_managed(physical, length) ? physical : 0;
+    }
+    if (value >= boot->kernel_virtual_base &&
+        value - boot->kernel_virtual_base < boot->kernel_size) {
+        uint64_t offset = value - boot->kernel_virtual_base;
+        if (length > boot->kernel_size - offset) return 0;
+        return boot->kernel_physical_base + offset;
+    }
+    return 0;
+}
+
 static int registry_contains(const uint64_t *registry, size_t count, uint64_t value) {
     for (size_t index = 0; index < count; index++) {
         if (registry[index] == value) return 1;
