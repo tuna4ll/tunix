@@ -37,10 +37,10 @@ extern void kprintf(const char *fmt, ...);
 #define EXT2_BLOCK_SIZE 4096U
 #define EXT2_SECTORS_PER_BLOCK (EXT2_BLOCK_SIZE / 512U)
 #define EXT2_MAGIC 0xEF53U
-/* One block bitmap is one block, so a group holds at most 8 * block_size
-   blocks: 32768 blocks = 128 MiB per group. */
-#define EXT2_BLOCKS_PER_GROUP (8U * EXT2_BLOCK_SIZE)
-#define EXT2_INODES_PER_GROUP 8192U
+/* One bitmap is one block, so neither the blocks nor the inodes of a group can
+   number more than 8 * block_size. The real figures come from the superblock;
+   this is the ceiling they are checked against. */
+#define EXT2_GROUP_MAX_BITS (8U * EXT2_BLOCK_SIZE)
 #define EXT2_INODE_SIZE 128U
 #define EXT2_INODES_PER_BLOCK (EXT2_BLOCK_SIZE / EXT2_INODE_SIZE)
 #define EXT2_ROOT_INO 2U
@@ -53,8 +53,6 @@ extern void kprintf(const char *fmt, ...);
    declared yet here; ext2_group_desc_size_check below asserts it. */
 #define EXT2_GD_PER_BLOCK (EXT2_BLOCK_SIZE / 32U)
 
-#define EXT2_GD_BLOCK 1U
-#define EXT2_INODE_TABLE_BLOCKS (EXT2_INODES_PER_GROUP * EXT2_INODE_SIZE / EXT2_BLOCK_SIZE)
 
 #define EXT2_POINTERS_PER_BLOCK (EXT2_BLOCK_SIZE / 4U)
 #define EXT2_DIRECT_BLOCKS 12U
@@ -161,6 +159,10 @@ static struct vfs_node *ext2_root;
 static struct ext2_superblock sb;
 static struct ext2_group_desc gds[EXT2_MAX_GROUPS];
 static uint32_t group_count;
+/* The geometry the mounted superblock describes; see adopt_geometry(). */
+static uint32_t first_data_block;
+static uint32_t blocks_per_group;
+static uint32_t inodes_per_group;
 /* Length of the group descriptor table in blocks. One block covers 128 groups,
    so this is 1 for every size the ATA driver can address, but the layout is
    computed rather than assumed. */
@@ -175,35 +177,22 @@ static uint8_t bulk_buf[EXT2_RUN_BLOCKS * EXT2_BLOCK_SIZE];
 /* --- group layout ------------------------------------------------------- */
 
 /*
- * Every group is laid out the same way, starting at its first block:
+ * Where a group's metadata is, according to the group itself.
  *
- *   +0                    superblock (the primary in group 0, a backup after)
- *   +1 .. +gd_blocks      group descriptor table (ditto)
- *   +1 + gd_blocks        block bitmap
- *   +2 + gd_blocks        inode bitmap
- *   +3 + gd_blocks        inode table (EXT2_INODE_TABLE_BLOCKS blocks)
- *   ...                   data
- *
- * Backups live in every group rather than only the sparse_super ones, which is
- * what a rev-1 filesystem without RO_COMPAT_SPARSE_SUPER means, and is what
- * e2fsck will expect to find. They are written once at format time; like Linux,
- * we only keep the primary copy up to date afterwards.
- *
- * With a single group and gd_blocks == 1 this reduces exactly to the fixed
- * layout the driver used before: bitmaps at blocks 2 and 3, inode table at 4.
+ * The driver used to compute all of this: it made the filesystem, so it knew
+ * that every group began with a superblock backup, then the descriptor table,
+ * then the two bitmaps and the inode table. mke2fs writes the image now, and
+ * it does none of that reliably -- most groups have no backup (sparse_super),
+ * and reserved growth blocks push the rest along -- so the descriptors are
+ * read and believed instead of checked against a layout of our own.
  */
 
 static uint32_t gd_blocks_for(uint32_t groups) {
     return (groups + EXT2_GD_PER_BLOCK - 1U) / EXT2_GD_PER_BLOCK;
 }
 
-static uint32_t group_meta_blocks_for(uint32_t gdb) {
-    return 3U + gdb + EXT2_INODE_TABLE_BLOCKS;
-}
-
-
 static uint32_t group_first_block(uint32_t group) {
-    return group * EXT2_BLOCKS_PER_GROUP;
+    return first_data_block + group * blocks_per_group;
 }
 
 /* The last group is short whenever the filesystem does not end on a group
@@ -212,19 +201,19 @@ static uint32_t group_block_count(uint32_t group) {
     uint32_t first = group_first_block(group);
     if (first >= sb.s_blocks_count) return 0;
     uint32_t remaining = sb.s_blocks_count - first;
-    return remaining < EXT2_BLOCKS_PER_GROUP ? remaining : EXT2_BLOCKS_PER_GROUP;
+    return remaining < blocks_per_group ? remaining : blocks_per_group;
 }
 
 static uint32_t group_bbitmap_block(uint32_t group) {
-    return group_first_block(group) + 1U + gd_blocks;
+    return gds[group].bg_block_bitmap;
 }
 
 static uint32_t group_ibitmap_block(uint32_t group) {
-    return group_bbitmap_block(group) + 1U;
+    return gds[group].bg_inode_bitmap;
 }
 
 static uint32_t group_itable_block(uint32_t group) {
-    return group_bbitmap_block(group) + 2U;
+    return gds[group].bg_inode_table;
 }
 
 static uint32_t epoch32(void) {
@@ -347,7 +336,7 @@ static int flush_meta(void) {
     memset(meta_buf, 0, sizeof(meta_buf));
     memcpy(meta_buf + 1024, &sb, sizeof(sb));
     if (write_block(0, meta_buf) != 0) return -1;
-    return write_gd_table(EXT2_GD_BLOCK);
+    return write_gd_table(first_data_block + 1U);
 }
 
 /* --- bitmaps ------------------------------------------------------------ */
@@ -445,9 +434,10 @@ static uint32_t alloc_block(void) {
 
 static void free_block(uint32_t block) {
     if (!block || block >= sb.s_blocks_count) return;
-    uint32_t group = block / EXT2_BLOCKS_PER_GROUP;
+    uint32_t within = block - first_data_block;
+    uint32_t group = within / blocks_per_group;
     bitmap_release(&cache_bbitmap, group_bbitmap_block(group),
-                   block % EXT2_BLOCKS_PER_GROUP);
+                   within % blocks_per_group);
     sb.s_free_blocks_count++;
     gds[group].bg_free_blocks_count++;
 }
@@ -463,13 +453,13 @@ static uint32_t alloc_inode(void) {
         if (!gds[group].bg_free_inodes_count) continue;
         uint32_t start = group == inode_cursor_group ? inode_cursor_bit : 0;
         int64_t bit = bitmap_alloc(&cache_ibitmap, group_ibitmap_block(group),
-                                   EXT2_INODES_PER_GROUP, start);
+                                   inodes_per_group, start);
         if (bit < 0) continue;
         if (sb.s_free_inodes_count) sb.s_free_inodes_count--;
         gds[group].bg_free_inodes_count--;
         inode_cursor_group = group;
         inode_cursor_bit = (uint32_t)bit + 1U;
-        return group * EXT2_INODES_PER_GROUP + (uint32_t)bit + 1U;
+        return group * inodes_per_group + (uint32_t)bit + 1U;
     }
     kprintf("EXT2: out of inodes\n");
     return 0;
@@ -478,9 +468,9 @@ static uint32_t alloc_inode(void) {
 static void free_inode(uint32_t ino, int is_directory) {
     if (!ino || ino > sb.s_inodes_count) return;
     uint32_t index = ino - 1U;
-    uint32_t group = index / EXT2_INODES_PER_GROUP;
+    uint32_t group = index / inodes_per_group;
     bitmap_release(&cache_ibitmap, group_ibitmap_block(group),
-                   index % EXT2_INODES_PER_GROUP);
+                   index % inodes_per_group);
     sb.s_free_inodes_count++;
     gds[group].bg_free_inodes_count++;
     if (is_directory && gds[group].bg_used_dirs_count)
@@ -491,7 +481,7 @@ static void free_inode(uint32_t ino, int is_directory) {
    to be bumped in the group that actually owns the inode. */
 static void inode_group_dirs_inc(uint32_t ino) {
     if (!ino || ino > sb.s_inodes_count) return;
-    gds[(ino - 1U) / EXT2_INODES_PER_GROUP].bg_used_dirs_count++;
+    gds[(ino - 1U) / inodes_per_group].bg_used_dirs_count++;
 }
 
 /* --- inode table -------------------------------------------------------- */
@@ -500,8 +490,8 @@ static void inode_group_dirs_inc(uint32_t ino) {
    resolved to its group before it can be located within that group's table. */
 static uint32_t inode_table_block(uint32_t ino, uint32_t *offset) {
     uint32_t index = ino - 1U;
-    uint32_t group = index / EXT2_INODES_PER_GROUP;
-    uint32_t within = index % EXT2_INODES_PER_GROUP;
+    uint32_t group = index / inodes_per_group;
+    uint32_t within = index % inodes_per_group;
     *offset = (within % EXT2_INODES_PER_BLOCK) * EXT2_INODE_SIZE;
     return group_itable_block(group) + within / EXT2_INODES_PER_BLOCK;
 }
@@ -1504,35 +1494,48 @@ static uint32_t region_usable_blocks(uint32_t region_lba) {
     uint32_t disk_sectors = (uint32_t)block_sectors();
     if (!disk_sectors || region_lba >= disk_sectors) return 0;
     uint32_t blocks = (disk_sectors - region_lba) / EXT2_SECTORS_PER_BLOCK;
-    if (blocks > EXT2_MAX_GROUPS * EXT2_BLOCKS_PER_GROUP)
-        blocks = EXT2_MAX_GROUPS * EXT2_BLOCKS_PER_GROUP;
+    if (blocks > EXT2_MAX_GROUPS * EXT2_GROUP_MAX_BITS)
+        blocks = EXT2_MAX_GROUPS * EXT2_GROUP_MAX_BITS;
     return blocks;
 }
 
+/*
+ * What this driver can mount.
+ *
+ * What is refused here is only what the code genuinely cannot cope with: a
+ * block size other than 4 KiB, because every buffer in this file is sized to
+ * it; an inode bigger than the classic 128 bytes; a group whose bitmap would
+ * not fit in one block; and any incompatible feature but filetype -- extents
+ * and 64-bit block numbers most of all. Everything else the superblock says
+ * is taken as given rather than compared against a layout of our own.
+ */
 static int superblock_usable(uint32_t usable_blocks) {
     if (sb.s_magic != EXT2_MAGIC || sb.s_rev_level != 1 ||
         sb.s_log_block_size != 2 || sb.s_inode_size != EXT2_INODE_SIZE ||
         sb.s_first_data_block != 0 || sb.s_state != 1 ||
-        sb.s_blocks_per_group != EXT2_BLOCKS_PER_GROUP ||
-        sb.s_inodes_per_group != EXT2_INODES_PER_GROUP ||
+        !sb.s_blocks_per_group || !sb.s_inodes_per_group ||
+        sb.s_blocks_per_group > EXT2_GROUP_MAX_BITS ||
+        sb.s_inodes_per_group > EXT2_GROUP_MAX_BITS ||
+        sb.s_inodes_per_group % EXT2_INODES_PER_BLOCK ||
         sb.s_blocks_count > usable_blocks ||
         (sb.s_feature_incompat & ~EXT2_FEATURE_INCOMPAT_FILETYPE))
         return 0;
 
-    uint32_t groups = (sb.s_blocks_count + EXT2_BLOCKS_PER_GROUP - 1U) /
-                      EXT2_BLOCKS_PER_GROUP;
+    uint32_t groups = (sb.s_blocks_count - sb.s_first_data_block +
+                       sb.s_blocks_per_group - 1U) / sb.s_blocks_per_group;
     if (!groups || groups > EXT2_MAX_GROUPS) return 0;
-    if (sb.s_inodes_count != groups * EXT2_INODES_PER_GROUP) return 0;
-    if (sb.s_blocks_count < group_meta_blocks_for(gd_blocks_for(groups)) + 1U)
-        return 0;
+    if (sb.s_inodes_count != groups * sb.s_inodes_per_group) return 0;
     return 1;
 }
 
 /* Adopt the geometry the superblock describes. Only call this once
    superblock_usable() has accepted it. */
 static void adopt_geometry(void) {
-    group_count = (sb.s_blocks_count + EXT2_BLOCKS_PER_GROUP - 1U) /
-                  EXT2_BLOCKS_PER_GROUP;
+    first_data_block = sb.s_first_data_block;
+    blocks_per_group = sb.s_blocks_per_group;
+    inodes_per_group = sb.s_inodes_per_group;
+    group_count = (sb.s_blocks_count - first_data_block + blocks_per_group - 1U) /
+                  blocks_per_group;
     gd_blocks = gd_blocks_for(group_count);
 }
 
@@ -1594,18 +1597,21 @@ int ext2fs_mount_root(uint32_t region_lba) {
     adopt_geometry();
 
     for (uint32_t index = 0; index < gd_blocks; index++) {
-        if (read_block(EXT2_GD_BLOCK + index, meta_buf) != 0) return -1;
+        if (read_block(first_data_block + 1U + index, meta_buf) != 0) return -1;
         uint32_t start = index * EXT2_GD_PER_BLOCK;
         uint32_t count = group_count - start;
         if (count > EXT2_GD_PER_BLOCK) count = EXT2_GD_PER_BLOCK;
         memcpy(&gds[start], meta_buf, count * sizeof(struct ext2_group_desc));
     }
-    /* The layout is fully determined by the geometry, so a descriptor that
-       disagrees means the image was written by something else. */
+    /* The descriptors are the layout now, so what is left to check is that
+       each one points inside the filesystem: a bitmap block past the end
+       would be read straight off whatever follows the partition. */
     for (uint32_t group = 0; group < group_count; group++) {
-        if (gds[group].bg_block_bitmap != group_bbitmap_block(group) ||
-            gds[group].bg_inode_bitmap != group_ibitmap_block(group) ||
-            gds[group].bg_inode_table != group_itable_block(group)) return -1;
+        uint32_t table_end = gds[group].bg_inode_table +
+                             inodes_per_group / EXT2_INODES_PER_BLOCK;
+        if (gds[group].bg_block_bitmap >= sb.s_blocks_count ||
+            gds[group].bg_inode_bitmap >= sb.s_blocks_count ||
+            table_end > sb.s_blocks_count) return -1;
     }
 
     ext2_root = vfs_root;
