@@ -1,0 +1,5 @@
+NAME="Tunix"
+ID=tunix
+ID_LIKE=void
+PRETTY_NAME="Tunix"
+HOME_URL="https://github.com/tunixos/tunix"

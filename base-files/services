@@ -1,0 +1,11 @@
+# Enabled by symlinking /etc/sv/<name> into /etc/runit/runsvdir/default.
+# The list is here rather than as symlinks in the tree because a symlink does
+# not survive a checkout on every filesystem this repo gets cloned onto.
+#
+# Not enabled, and why: udevd needs uevents over netlink, which the kernel does
+# not send; dhcpcd needs a packet socket, which it has no concept of. The
+# network is configured statically in rc.local instead.
+agetty-tty1
+agetty-tty2
+agetty-tty3
+agetty-tty4

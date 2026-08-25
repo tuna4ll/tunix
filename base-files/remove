@@ -1,0 +1,8 @@
+# Paths deleted from the sysroot after the packages are installed. Nothing here
+# is needed to run the system, and all of it is large.
+usr/share/man
+usr/share/info
+usr/share/doc
+usr/share/gtk-doc
+usr/share/licenses
+usr/share/locale
