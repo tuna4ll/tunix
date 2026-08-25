@@ -1,0 +1,122 @@
+#!/bin/bash
+#
+# Assemble the root filesystem.
+#
+# Tunix builds no userland of its own. Everything above the kernel is a Void
+# Linux package, installed into a directory here by Void's own package manager,
+# so what the machine runs is a stock glibc distribution rather than a hundred
+# hand-written build scripts.
+#
+# Three things go in: Void's base ROOTFS tarball, the packages named by
+# $VOID_INSTALL, and base-files/ from this repo laid over the result.
+set -euo pipefail
+
+SYSROOT=${1:?usage: sysroot.sh SYSROOT CACHE}
+CACHE=${2:?usage: sysroot.sh SYSROOT CACHE}
+
+MIRROR=${VOID_MIRROR:-https://repo-default.voidlinux.org}
+ROOTFS_DATE=${VOID_ROOTFS_DATE:-20250202}
+XBPS_STATIC_VERSION=${XBPS_STATIC_VERSION:-0.60.4_1}
+INSTALL=${VOID_INSTALL:-base-files bash coreutils util-linux runit runit-void}
+REMOVE=${VOID_REMOVE:-}
+
+ROOTFS_TARBALL="$CACHE/void-x86_64-ROOTFS-$ROOTFS_DATE.tar.xz"
+XBPS_TARBALL="$CACHE/xbps-static-$XBPS_STATIC_VERSION.tar.xz"
+XBPS_DIR="$CACHE/xbps"
+
+if [ "$(id -u)" != 0 ]; then
+	echo "sysroot.sh: needs root -- the tarball carries ownership and device nodes" >&2
+	exit 1
+fi
+
+fetch() {
+	[ -f "$2" ] && return 0
+	mkdir -p "$(dirname "$2")"
+	echo ":: fetching $1"
+	curl -fL --retry 3 -o "$2.part" "$1"
+	mv "$2.part" "$2"
+}
+
+# --- the tools --------------------------------------------------------------
+#
+# xbps is taken as Void's own statically linked build rather than as a host
+# package: it exists for every distribution this way, and it is the same
+# version of the tool that made the repository it is about to read.
+fetch "$MIRROR/static/xbps-static-static-$XBPS_STATIC_VERSION.x86_64-musl.tar.xz" \
+	"$XBPS_TARBALL"
+if [ ! -x "$XBPS_DIR/usr/bin/xbps-install" ]; then
+	rm -rf "$XBPS_DIR"
+	mkdir -p "$XBPS_DIR"
+	tar -xJf "$XBPS_TARBALL" -C "$XBPS_DIR"
+fi
+
+fetch "$MIRROR/live/current/void-x86_64-ROOTFS-$ROOTFS_DATE.tar.xz" "$ROOTFS_TARBALL"
+
+# --- the base ---------------------------------------------------------------
+
+echo ":: unpacking the base rootfs"
+rm -rf "$SYSROOT"
+mkdir -p "$SYSROOT"
+tar -xJpf "$ROOTFS_TARBALL" -C "$SYSROOT"
+
+# The tarball's xbps.d points at whatever mirror it was built against; ours
+# has to be the one the packages are actually coming from.
+mkdir -p "$SYSROOT/etc/xbps.d"
+printf 'repository=%s/current\n' "$MIRROR" > "$SYSROOT/etc/xbps.d/00-repository-main.conf"
+
+# --- the packages -----------------------------------------------------------
+
+export XBPS_ARCH=x86_64
+XBPS="$XBPS_DIR/usr/bin"
+
+echo ":: installing packages"
+"$XBPS/xbps-install" -S -y -r "$SYSROOT" $INSTALL
+if [ -n "$REMOVE" ]; then
+	"$XBPS/xbps-remove" -R -y -r "$SYSROOT" $REMOVE
+fi
+"$XBPS/xbps-remove" -O -y -r "$SYSROOT"
+
+# --- what makes it Tunix ----------------------------------------------------
+
+echo ":: applying base-files"
+cp -a base-files/overlay/. "$SYSROOT/"
+
+# Appended rather than copied: Void's own packages own these files and add
+# their system users to them, so replacing them would delete those.
+for file in passwd group shadow; do
+	[ -f "base-files/append/$file" ] || continue
+	cat "base-files/append/$file" >> "$SYSROOT/etc/$file"
+done
+
+# One password for both accounts, and it is in the repository in plain sight:
+# this is a machine you boot in an emulator to look at, not one anybody logs
+# into over a network.
+PASSWORD_HASH=$(sed -n 's/^tunix:\([^:]*\):.*/\1/p' base-files/append/shadow)
+sed -i "s|^root:[^:]*:|root:$PASSWORD_HASH:|" "$SYSROOT/etc/shadow"
+sed -i 's|^wheel:x:10:.*|wheel:x:10:tunix|' "$SYSROOT/etc/group"
+
+chown -R 1000:1000 "$SYSROOT/home/tunix"
+chmod 0700 "$SYSROOT/home/tunix"
+chmod 0755 "$SYSROOT/etc/rc.local"
+chmod 0440 "$SYSROOT/etc/sudoers.d/tunix"
+
+echo ":: enabling services"
+mkdir -p "$SYSROOT/etc/runit/runsvdir/default"
+while read -r service; do
+	case "$service" in ''|'#'*) continue ;; esac
+	if [ ! -d "$SYSROOT/etc/sv/$service" ]; then
+		echo "sysroot.sh: no such service: $service" >&2
+		exit 1
+	fi
+	ln -sfn "/etc/sv/$service" "$SYSROOT/etc/runit/runsvdir/default/$service"
+done < base-files/services
+
+if [ -f base-files/remove ]; then
+	echo ":: trimming"
+	while read -r path; do
+		case "$path" in ''|'#'*) continue ;; esac
+		rm -rf "${SYSROOT:?}/$path"
+	done < base-files/remove
+fi
+
+echo ":: sysroot ready at $SYSROOT ($(du -sh "$SYSROOT" | cut -f1))"

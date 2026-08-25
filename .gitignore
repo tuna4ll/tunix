@@ -1,8 +1,6 @@
 build/
-ports/out/
-# Its own repository: github.com/tunixos/tunix-ports
-tunix-ports/
 *.o
+*.d
 *.elf
 *.bin
 *.img
@@ -10,11 +8,8 @@ tunix-ports/
 *.log
 *.orig
 *.rej
-*.zip
-*.rar
 .DS_Store
 .vscode/
 .idea/
-
 __pycache__/
 *.pyc

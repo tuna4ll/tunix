@@ -51,7 +51,7 @@ KERNEL_OBJECTS := $(KERNEL_SOURCES:%=$(BUILD)/%.o)
 KERNEL_DEPS    := $(KERNEL_OBJECTS:.o=.d)
 
 .PHONY: all kernel clean distclean
-all: kernel
+all: image
 kernel: $(KERNEL)
 
 $(KERNEL): $(KERNEL_OBJECTS) kernel/arch/x86_64/linker.ld
@@ -83,8 +83,105 @@ $(LIMINE_HEADER):
 $(LIMINE_EXE): $(LIMINE_HEADER)
 	$(MAKE) -C $(LIMINE_DIR)
 
+# What this build makes, without what it downloaded: the kernel takes a minute
+# to rebuild and the sysroot is most of a gigabyte over the network.
 clean:
-	rm -rf $(BUILD)/kernel $(BUILD)/generated $(KERNEL)
+	rm -rf $(BUILD)/kernel $(BUILD)/generated $(KERNEL) $(IMAGE)
 
 distclean:
 	rm -rf $(BUILD)
+
+# --- the sysroot ------------------------------------------------------------
+#
+# Void Linux, installed by Void's own package manager. Nothing above the kernel
+# is built here.
+
+CACHE         := $(BUILD)/cache
+SYSROOT       ?= $(BUILD)/sysroot
+SYSROOT_STAMP := $(BUILD)/.sysroot
+
+VOID_MIRROR      ?= https://repo-default.voidlinux.org
+VOID_ROOTFS_DATE ?= 20250202
+# The glibc set, not the musl one: the ROOTFS tarball without -musl in its name
+# is the glibc build, and every package installed on top of it follows.
+VOID_INSTALL ?= base-files bash coreutils util-linux findutils diffutils \
+	grep sed gawk tar gzip xz procps-ng psmisc iproute2 iputils file less \
+	which ncurses shadow sudo runit runit-void tzdata ca-certificates \
+	nano htop curl fastfetch
+VOID_REMOVE ?=
+
+BASE_FILES := $(shell find base-files -type f 2>/dev/null)
+
+.PHONY: sysroot
+sysroot: $(SYSROOT_STAMP)
+
+$(SYSROOT_STAMP): support/sysroot.sh $(BASE_FILES) | $(BUILD)
+	VOID_MIRROR='$(VOID_MIRROR)' VOID_ROOTFS_DATE='$(VOID_ROOTFS_DATE)' \
+	VOID_INSTALL='$(VOID_INSTALL)' VOID_REMOVE='$(VOID_REMOVE)' \
+		support/sysroot.sh $(SYSROOT) $(CACHE)
+	@touch $@
+
+$(BUILD):
+	@mkdir -p $@
+
+# --- the image --------------------------------------------------------------
+
+IMAGE := $(BUILD)/tunix.img
+
+.PHONY: image
+image: $(IMAGE)
+
+$(IMAGE): $(KERNEL) $(LIMINE_EXE) support/limine.conf support/image.sh $(SYSROOT_STAMP)
+	support/image.sh $@ $(KERNEL) $(LIMINE_DIR) support/limine.conf $(SYSROOT)
+
+# --- running it -------------------------------------------------------------
+
+# 4 GiB and four processors: the kernel starts every processor the firmware
+# describes, and a desktop under a software rasteriser wants the memory.
+QEMU_MEMORY ?= 4G
+QEMU_SMP    ?= 4
+QEMU_AUDIO  ?= -audiodev none,id=snd0 -device intel-hda -device hda-output,audiodev=snd0
+QEMU_NET    ?= -netdev user,id=net0 -device rtl8139,netdev=net0
+QEMU_COMMON  = -machine q35,accel=kvm:tcg -cpu host -smp $(QEMU_SMP) \
+	-m $(QEMU_MEMORY) -drive format=raw,file=$(IMAGE),if=none,id=disk0 \
+	-device ide-hd,drive=disk0,bus=ide.0 \
+	$(QEMU_NET) $(QEMU_AUDIO)
+
+# The firmware for the UEFI targets. Taken from the osdev0 nightlies, which is
+# where the Limine templates point, rather than from a distribution package
+# that half the machines building this will not have.
+OVMF_URL ?= https://github.com/osdev0/edk2-ovmf-nightly/releases/latest/download/ovmf-code-x86_64.fd
+OVMF_VARS_URL ?= https://github.com/osdev0/edk2-ovmf-nightly/releases/latest/download/ovmf-vars-x86_64.fd
+OVMF      := $(CACHE)/ovmf-code-x86_64.fd
+OVMF_VARS := $(BUILD)/ovmf-vars-x86_64.fd
+
+$(OVMF):
+	@mkdir -p $(dir $@)
+	curl -fL --retry 3 -o $@ $(OVMF_URL)
+
+$(OVMF_VARS):
+	@mkdir -p $(dir $@)
+	curl -fL --retry 3 -o $@ $(OVMF_VARS_URL)
+
+.PHONY: run run-uefi run-gpu headless
+run: $(IMAGE)
+	rm -f $(BUILD)/serial.log
+	$(QEMU) $(QEMU_COMMON) -serial file:$(BUILD)/serial.log -monitor none
+
+run-uefi: $(IMAGE) $(OVMF) $(OVMF_VARS)
+	rm -f $(BUILD)/serial.log
+	$(QEMU) $(QEMU_COMMON) -serial file:$(BUILD)/serial.log -monitor none \
+		-drive if=pflash,unit=0,format=raw,readonly=on,file=$(OVMF) \
+		-drive if=pflash,unit=1,format=raw,file=$(OVMF_VARS)
+
+# virtio-vga rather than virtio-gpu-pci: Limine sets the mode over the VGA
+# adapter and the kernel's text console draws into that framebuffer, both of
+# which only exist on the VGA-compatible variant.
+QEMU_GPU ?= -vga none -device virtio-vga,xres=1280,yres=720 \
+	-display gtk,zoom-to-fit=on
+run-gpu: $(IMAGE)
+	rm -f $(BUILD)/serial.log
+	$(QEMU) $(QEMU_COMMON) $(QEMU_GPU) -serial file:$(BUILD)/serial.log -monitor none
+
+headless: $(IMAGE)
+	$(QEMU) $(QEMU_COMMON) -nographic -monitor none -serial stdio
