@@ -16,10 +16,10 @@
  * formatted with 4 KiB blocks: the driver does the translation, because the
  * alternative is every caller knowing the geometry of every controller.
  *
- * The early boot path is deliberately *not* a client. kmain reads the manifest
- * and the initramfs before the page tables and the allocator exist, which a
- * memory-mapped controller cannot serve, so that one read stays on port-I/O
- * IDE. See main.c.
+ * There is no longer an early path around it. The kernel used to read a boot
+ * manifest and an initramfs off the disk before the allocator existed, which
+ * only port-I/O IDE could serve; Limine loads the kernel and the root lives on
+ * a real partition, so the first disk read now happens with everything up.
  */
 
 #define BLOCK_SECTOR_SIZE 512U
@@ -42,14 +42,9 @@ int block_register(const struct block_device *device);
 int block_device_count(void);
 const struct block_device *block_device_at(int index);
 
-/*
- * Choose the device the root filesystem lives on. Every registered disk is
- * asked whether it carries our boot manifest, and the first that says yes wins;
- * that is a fact about the medium rather than a guess from a preference order,
- * which matters as soon as a machine has a scratch NVMe drive alongside the
- * disk it actually booted from. Falls back to device 0.
- */
-void block_select_root(uint32_t manifest_lba);
+/* Choose the device the root filesystem lives on, by index. Falls back to
+   device 0 when the index names no disk. */
+void block_select_root(int index);
 const struct block_device *block_root(void);
 
 /* The root device, for the filesystem and /dev/sda. */
@@ -66,15 +61,9 @@ int block_device_write_bytes(const struct block_device *device, uint64_t offset,
 int block_flush(void);
 uint64_t block_sectors(void);
 
-/* Every controller that can answer before the allocator and the page tables
-   exist. Called from kmain before the manifest is read. */
-void block_probe_early(void);
-/* Called once the kernel's own page tables are up: moves register windows out
-   of the identity map, and brings up the controllers that could not be probed
-   earlier. */
-void block_probe_controllers(void);
-
-/* The sector the bootloader read the manifest from; defined in tunix_boot.c. */
-uint32_t tunix_boot_manifest_lba(void);
+/* Bring up every controller and register the disks behind it. Called once the
+   allocator and the kernel's own page tables exist, which all three of the
+   memory-mapped controllers need. */
+void block_probe(void);
 
 #endif

@@ -5,15 +5,13 @@
 #include <stdint.h>
 
 /*
- * Where the kernel image is linked, and the only thing that has to live here:
- * -mcmodel=kernel puts every symbol in the top 2 GiB, so the code and its
- * static data have no choice. The first gigabyte of physical memory is mapped
- * here as well, which is how the image is reachable at all -- and it is why a
- * static buffer's address can still be turned into a physical one (see
- * vmm_virt_to_phys_direct, which the DMA drivers hand exactly that).
+ * Where the kernel image is linked: -mcmodel=kernel puts every symbol in the
+ * top 2 GiB, so the code and its static data have no choice, and Limine
+ * requires the same. Only the image is mapped here -- how far a static
+ * buffer's address is from its physical one is the loader's to say, which is
+ * why vmm_virt_to_phys_direct() asks boot_info() rather than subtracting this.
  */
 #define KERNEL_BASE 0xFFFFFFFF80000000ULL
-#define KERNEL_WINDOW_SIZE 0x40000000ULL
 /*
  * The direct map: all of physical memory, in its own PML4 entry.
  *

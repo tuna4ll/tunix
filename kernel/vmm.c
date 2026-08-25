@@ -6,6 +6,7 @@
 
 static int vmm_map_page_in_locked(uint64_t cr3_physical, uint64_t virtual_address,
                                   uint64_t physical_address, uint64_t flags);
+#include "include/boot.h"
 #include "include/pmm.h"
 #include "include/smp.h"
 #include "include/vmm.h"
@@ -70,17 +71,19 @@ void *vmm_phys_to_virt(uint64_t physical) {
  * Most callers hand back something vmm_phys_to_virt() gave them, which is in
  * the direct map. But the DMA drivers hand it a *static* buffer -- rtl8139's
  * receive ring and transmit slots are plain arrays in the kernel image -- and
- * those live at KERNEL_BASE. Both windows map physical memory at a fixed
- * offset, so both can be answered; refusing the second one would hand the
- * network card a garbage address to write into.
+ * those live in the image's own mapping. That one is no longer "physical plus
+ * KERNEL_BASE": Limine loads the image wherever it likes and reports where,
+ * so the offset between the two comes from the loader rather than a constant.
  */
 uint64_t vmm_virt_to_phys_direct(const void *virtual_address) {
+    const struct boot_info *boot = boot_info();
     uint64_t value = (uint64_t)virtual_address;
     uint64_t physical;
     if (value >= DIRECT_MAP_BASE && value < DIRECT_MAP_BASE + DIRECT_MAP_SIZE) {
         physical = value - DIRECT_MAP_BASE;
-    } else if (value >= KERNEL_BASE && value < KERNEL_BASE + KERNEL_WINDOW_SIZE) {
-        physical = value - KERNEL_BASE;
+    } else if (value >= boot->kernel_virtual_base &&
+               value < boot->kernel_virtual_base + boot->kernel_size) {
+        physical = value - boot->kernel_virtual_base + boot->kernel_physical_base;
     } else {
         panic("VMM: address is not in direct map");
     }
@@ -210,38 +213,16 @@ void vmm_init(void) {
      * Everything up to the point the direct map exists has to be reached
      * through the loader's window instead, because page_table_pointer() now
      * answers with an address that is not mapped yet. `early` is that window:
-     * the loader mapped the first gigabyte of RAM at KERNEL_BASE, which is
-     * also where the kernel image it just loaded lives.
+     * Limine's higher-half direct map, which covers every page the tables
+     * below are allocated from.
+     *
+     * The kernel image's own mapping is left exactly as the loader made it.
+     * The framebuffer and device windows sit in the gigabyte above it, which
+     * Limine leaves empty, so there is nothing here to take back first.
      */
-#define early(physical) ((uint64_t *)(KERNEL_BASE + ((physical) & ADDRESS_MASK)))
+    const uint64_t hhdm = boot_info()->hhdm_offset;
+#define early(physical) ((uint64_t *)(hhdm + ((physical) & ADDRESS_MASK)))
     uint64_t *pml4 = early(kernel_cr3_physical);
-
-    uint16_t high_pml4 = (uint16_t)((KERNEL_BASE >> 39) & 0x1FF);
-    uint16_t high_pdp = (uint16_t)((KERNEL_BASE >> 30) & 0x1FF);
-    uint64_t pdpt_physical = pml4[high_pml4] & ADDRESS_MASK;
-    if (!pdpt_physical) panic("VMM: boot PDPT unavailable");
-    uint64_t *pdpt = early(pdpt_physical);
-    uint64_t pd_physical = pdpt[high_pdp] & ADDRESS_MASK;
-    if (!pd_physical) panic("VMM: boot PD unavailable");
-    uint64_t *pd = early(pd_physical);
-
-    /* The window the kernel image is reached through. One gigabyte of 2 MiB
-       pages, unchanged: the image is inside it, and so is every static buffer
-       a DMA driver hands to vmm_virt_to_phys_direct(). */
-    for (uint64_t i = 0; i < 512; i++) {
-        pd[i] = (i * 0x200000ULL) | PAGE_PRESENT | PAGE_WRITE | PAGE_HUGE;
-    }
-
-    /*
-     * And nothing above it. The loader maps as much RAM here as fits above
-     * KERNEL_BASE -- on a 4 GiB machine that is 2047 MiB, which swallows the
-     * framebuffer and device windows that live in the second gigabyte. They
-     * are 4 KiB mappings and cannot be placed inside a huge page, so the
-     * entry covering them has to go. It used to be replaced by a directory
-     * that stopped exactly at the framebuffer; now that the direct map has
-     * moved out, the whole gigabyte is simply given back.
-     */
-    for (uint16_t i = (uint16_t)(high_pdp + 1); i < 512; i++) pdpt[i] = 0;
 
     /*
      * The direct map, in a PML4 entry of its own.

@@ -3,7 +3,6 @@
 #include "include/ahci.h"
 #include "include/ata.h"
 #include "include/block.h"
-#include "include/boot_manifest.h"
 #include "include/kstring.h"
 #include "include/nvme.h"
 #include "include/usb_storage.h"
@@ -39,31 +38,13 @@ const struct block_device *block_root(void) {
     return root_index < device_count ? &devices[root_index] : NULL;
 }
 
-/*
- * The manifest the bootloader wrote is the only thing that identifies our disk
- * among several, so the root is found by reading for it rather than by ranking
- * controller types -- which matters the moment a machine has a scratch drive
- * next to the one it booted from.
- */
-static int carries_manifest(const struct block_device *device, uint32_t lba) {
-    if (device->sectors <= lba) return 0;
-    uint8_t sector[BLOCK_SECTOR_SIZE];
-    if (device->read(device->context, lba, 1, sector) != 0) return 0;
-    uint32_t magic;
-    memcpy(&magic, sector, sizeof(magic));
-    return magic == TUNIX_MANIFEST_MAGIC;
-}
-
-void block_select_root(uint32_t manifest_lba) {
-    for (int index = 0; index < device_count; index++) {
-        if (!carries_manifest(&devices[index], manifest_lba)) continue;
-        root_index = index;
-        kprintf("BLOCK: root on %s\n", devices[index].name);
-        return;
-    }
-    root_index = 0;
-    if (device_count)
-        kprintf("BLOCK: no manifest found, root on %s\n", devices[0].name);
+/* The root is device 0 unless something says otherwise. What used to decide
+   it -- reading every disk for the boot manifest -- went away with the
+   manifest; root= on the command line names the disk now, and a partition is
+   a device of its own here, so the answer is an index. */
+void block_select_root(int index) {
+    root_index = index >= 0 && index < device_count ? index : 0;
+    if (device_count) kprintf("BLOCK: root on %s\n", devices[root_index].name);
 }
 
 int block_read(uint64_t lba, uint32_t count, void *destination) {
@@ -172,31 +153,11 @@ int block_device_read_bytes(const struct block_device *device, uint64_t offset,
     return 0;
 }
 
-void block_probe_early(void) {
-    /* The first disk read happens before kmain, in the code that fetches the
-       boot manifest, and kmain asks again on the way past. Whichever is first
-       does the work. */
-    static int probed;
-    if (probed) return;
-    probed = 1;
-
-    /* Everything that can answer before the allocator and the kernel's own page
-       tables exist, because the manifest and the initramfs are read before
-       both. IDE needs nothing; the other two reach their registers through the
-       identity map the loader left behind and keep their DMA in static
-       buffers. A machine whose only disk is SATA or NVMe would otherwise get
-       no further than "invalid boot manifest". */
+void block_probe(void) {
     ata_register_block_device();
     ahci_init();
     nvme_init();
-}
-
-void block_probe_controllers(void) {
-    /* The disks are already registered; what changes here is how their
-       registers are reached, now that the low identity map is about to become
-       user memory. USB could not be probed earlier at all -- it needs the
-       controller main.c brings up a few lines above. */
-    ahci_remap();
-    nvme_remap();
+    /* Last: the disks behind it hang off the xHCI controller main.c starts a
+       few lines earlier. */
     usb_storage_init();
 }

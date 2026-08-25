@@ -1,7 +1,7 @@
 .intel_syntax noprefix
 .section .text
 .global kernel_entry
-.extern tunix_boot_start
+.extern limine_start
 .extern __bss_start
 .extern kernel_end
 
@@ -25,7 +25,7 @@ kernel_entry:
 
     lea rsp, [rip + stack_top]
     xor rbp, rbp
-    call tunix_boot_start
+    call limine_start
 1:
     hlt
     jmp 1b

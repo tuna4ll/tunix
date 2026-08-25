@@ -1,44 +1,65 @@
+OUTPUT_FORMAT(elf64-x86-64)
 ENTRY(kernel_entry)
+
+/* One loadable segment per permission, which is what Limine maps the image
+   from. The request block gets its own so that it is guaranteed to be inside a
+   PT_LOAD and reachable by the loader's scan. */
+PHDRS
+{
+    requests PT_LOAD;
+    text     PT_LOAD;
+    rodata   PT_LOAD;
+    data     PT_LOAD;
+}
+
 SECTIONS
 {
+    /* -mcmodel=kernel puts every symbol in the top 2 GiB, which is also where
+       Limine requires the image to be linked. */
     . = 0xFFFFFFFF80100000;
+    kernel_image_start = .;
 
-    .text ALIGN(4K) : AT(ADDR(.text) - 0xFFFFFFFF80000000)
-    {
-        *(.text*)
-    }
+    .limine_requests : {
+        KEEP(*(.limine_requests_start))
+        KEEP(*(.limine_requests))
+        KEEP(*(.limine_requests_end))
+    } :requests
 
-    .rodata ALIGN(4K) : AT(ADDR(.rodata) - 0xFFFFFFFF80000000)
-    {
-        *(.rodata*)
-    }
+    . = ALIGN(CONSTANT(MAXPAGESIZE));
 
-    .data ALIGN(4K) : AT(ADDR(.data) - 0xFFFFFFFF80000000)
-    {
-        *(.data*)
-    }
+    .text : {
+        *(.text .text.*)
+    } :text
 
-    .bss ALIGN(4K) : AT(ADDR(.bss) - 0xFFFFFFFF80000000)
-    {
+    . = ALIGN(CONSTANT(MAXPAGESIZE));
+
+    .rodata : {
+        *(.rodata .rodata.*)
+    } :rodata
+
+    . = ALIGN(CONSTANT(MAXPAGESIZE));
+
+    .data : {
+        *(.data .data.*)
+    } :data
+
+    .bss : {
         __bss_start = .;
         *(COMMON)
-        *(.bss*)
+        *(.bss .bss.*)
         kernel_end = .;
+
+        /* pmm_init puts its page bitmap and reference counts at kernel_end, so
+           the kernel has to own that space rather than assume somebody mapped
+           past its image. Being inside .bss is what makes the loader allocate
+           it and report it as taken.
+           The bound follows PMM_DIRECT_MAP_LIMIT, 8 GiB: at most 2097152 pages,
+           costing one bit each for the bitmap and two bytes each for the
+           counts. That is 4.25 MiB; eight megabytes leaves room for the
+           alignment and for the limit to grow again. Raising the limit without
+           raising this overruns the reserve silently, which is why the two are
+           commented against each other. */
         . += 0x800000;
         kernel_reserve_end = .;
-    }
-
-    /* pmm_init puts its page bitmap and reference counts at kernel_end, so the
-       kernel has to own that space rather than assume somebody mapped past its
-       image. It used to work only because the old bootloader mapped a generous
-       slab; a loader that maps exactly the program headers — as any of them is
-       entitled to — faulted on the first write.
-       The bound follows PMM_DIRECT_MAP_LIMIT, now 8 GiB: at most 2097152
-       pages, costing one bit each for the bitmap and two bytes each for the
-       counts. That is 4.25 MiB; eight megabytes leaves room for the alignment
-       and for the limit to grow again. Raising the limit without raising this
-       overruns the reserve silently, which is why the two are commented
-       against each other. */
-    ASSERT((kernel_reserve_end - 0xFFFFFFFF80000000) < 0x02000000,
-           "kernel image overlaps the 32 MiB initramfs staging area")
+    } :data
 }

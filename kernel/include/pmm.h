@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+#include "boot.h"
+
 #define PMM_PAGE_SIZE 4096ULL
 /*
  * How much physical memory the machine may use.
@@ -20,15 +22,7 @@
  */
 #define PMM_DIRECT_MAP_LIMIT (8ULL * 1024ULL * 1024ULL * 1024ULL)
 
-struct e820_entry {
-    uint64_t base;
-    uint64_t length;
-    uint32_t type;
-    uint32_t acpi;
-} __attribute__((packed));
-
-void pmm_init(uint32_t mmap_count, uint64_t mmap_addr,
-              uint64_t reserve_start, uint64_t reserve_size);
+void pmm_init(const struct boot_memory_region *regions, uint32_t count);
 void *pmm_alloc_page(void);
 /* Drops one reference; the page returns to the allocator at the last one. */
 void pmm_free_page(void *physical_address);

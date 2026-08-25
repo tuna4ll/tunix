@@ -7,9 +7,8 @@ static void *pmm_alloc_page_locked(void);
 static void pmm_free_page_locked(void *physical_address);
 #include "include/pmm.h"
 
-#define KERNEL_BASE 0xFFFFFFFF80000000ULL
-
 extern uint8_t kernel_end;
+extern uint8_t kernel_reserve_end;
 extern void kprintf(const char *fmt, ...);
 
 #if TUNIX_DEBUG_LOGS
@@ -65,9 +64,17 @@ static void reserve_page(uint64_t page) {
     }
 }
 
-void pmm_init(uint32_t mmap_count, uint64_t mmap_addr,
-              uint64_t reserve_start, uint64_t reserve_size) {
-    struct e820_entry *entries = (struct e820_entry *)mmap_addr;
+/*
+ * The first megabyte is never handed out.
+ *
+ * Limine may report parts of it as usable -- base revision 3 explicitly allows
+ * even page zero -- but the null page has to stay unmapped, and smp_init()
+ * copies its real-mode trampoline to a fixed physical address down here. The
+ * old bootloader made all of low memory reserved and hid both requirements.
+ */
+#define PMM_LOW_MEMORY_RESERVE 0x100000ULL
+
+void pmm_init(const struct boot_memory_region *regions, uint32_t count) {
     uint64_t highest = 0;
     /* Summed, not taken from the top of the range: firmware splits RAM around
        the PCI hole, so on a 4 GiB machine the highest usable address is 5 GiB
@@ -75,13 +82,13 @@ void pmm_init(uint32_t mmap_count, uint64_t mmap_addr,
     uint64_t installed = 0;
     uint64_t usable = 0;
 
-    for (uint32_t i = 0; i < mmap_count; i++) {
-        if (entries[i].type != 1) continue;
-        uint64_t end = entries[i].base + entries[i].length;
-        if (end < entries[i].base) continue;
-        installed += entries[i].length;
+    for (uint32_t i = 0; i < count; i++) {
+        if (!regions[i].usable) continue;
+        uint64_t end = regions[i].base + regions[i].length;
+        if (end < regions[i].base) continue;
+        installed += regions[i].length;
         if (end > PMM_DIRECT_MAP_LIMIT) end = PMM_DIRECT_MAP_LIMIT;
-        if (end > entries[i].base) usable += end - entries[i].base;
+        if (end > regions[i].base) usable += end - regions[i].base;
         if (end > highest) highest = end;
     }
     if (highest < 2 * 1024 * 1024ULL) panic("PMM: insufficient usable memory");
@@ -91,20 +98,24 @@ void pmm_init(uint32_t mmap_count, uint64_t mmap_addr,
     uint64_t bitmap_virtual = ((uint64_t)&kernel_end + 15ULL) & ~15ULL;
     bitmap = (uint8_t *)bitmap_virtual;
 
-    /* The reference counts sit immediately after the allocation bitmap; both
-       are reserved below so no allocation can ever hand them out. */
+    /* The reference counts sit immediately after the allocation bitmap. Both
+       live in the slab the linker script reserves past .bss, which is sized
+       for PMM_DIRECT_MAP_LIMIT -- a machine with more memory than that would
+       write past the end of the image, silently, so it is checked here. */
     uint64_t refcount_virtual = (bitmap_virtual + bitmap_bytes + 15ULL) & ~15ULL;
     uint64_t refcount_bytes = total_pages * sizeof(uint16_t);
+    if (refcount_virtual + refcount_bytes > (uint64_t)&kernel_reserve_end)
+        panic("PMM: page tracking overruns the reserve after the kernel image");
     refcounts = (uint16_t *)refcount_virtual;
 
     for (uint64_t i = 0; i < bitmap_bytes; i++) bitmap[i] = 0xFF;
     for (uint64_t i = 0; i < total_pages; i++) refcounts[i] = 0;
     free_pages = 0;
 
-    for (uint32_t i = 0; i < mmap_count; i++) {
-        if (entries[i].type != 1) continue;
-        uint64_t start = (entries[i].base + PMM_PAGE_SIZE - 1) & ~(PMM_PAGE_SIZE - 1);
-        uint64_t end = (entries[i].base + entries[i].length) & ~(PMM_PAGE_SIZE - 1);
+    for (uint32_t i = 0; i < count; i++) {
+        if (!regions[i].usable) continue;
+        uint64_t start = (regions[i].base + PMM_PAGE_SIZE - 1) & ~(PMM_PAGE_SIZE - 1);
+        uint64_t end = (regions[i].base + regions[i].length) & ~(PMM_PAGE_SIZE - 1);
         if (end > highest) end = highest;
         for (uint64_t address = start; address < end; address += PMM_PAGE_SIZE) {
             uint64_t page = address / PMM_PAGE_SIZE;
@@ -119,21 +130,14 @@ void pmm_init(uint32_t mmap_count, uint64_t mmap_addr,
        that is exactly the set of pages backed by RAM. */
     usable_pages = free_pages;
 
-    uint64_t reserved_end = (refcount_virtual - KERNEL_BASE) + refcount_bytes;
-    reserved_end = (reserved_end + PMM_PAGE_SIZE - 1) & ~(PMM_PAGE_SIZE - 1);
-    if (reserved_end < 0x100000ULL) reserved_end = 0x100000ULL;
+    /* The image, the bitmap and the reference counts need no reservation of
+       their own any more: all three are inside the kernel's .bss, which the
+       loader allocated and reports as memory the kernel already owns, so the
+       loop above never saw them as usable in the first place. */
+    for (uint64_t page = 0; page < PMM_LOW_MEMORY_RESERVE / PMM_PAGE_SIZE; page++)
+        reserve_page(page);
 
-    for (uint64_t page = 0; page < reserved_end / PMM_PAGE_SIZE; page++) reserve_page(page);
-
-    if (reserve_size) {
-        uint64_t reserve_end = reserve_start + reserve_size;
-        if (reserve_end < reserve_start) panic("PMM: reserve range overflow");
-        uint64_t first_page = reserve_start / PMM_PAGE_SIZE;
-        uint64_t last_page = (reserve_end + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
-        for (uint64_t page = first_page; page < last_page; page++) reserve_page(page);
-    }
-
-    next_hint = reserved_end / PMM_PAGE_SIZE;
+    next_hint = PMM_LOW_MEMORY_RESERVE / PMM_PAGE_SIZE;
 
     /* Not behind the debug flag: how much of the machine's memory is actually
        usable is the first thing anyone wants to know, and it was silently

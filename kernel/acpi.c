@@ -25,7 +25,7 @@
 #include "include/kstring.h"
 
 extern void kprintf(const char *fmt, ...);
-extern uint64_t tunix_boot_rsdp(void);
+#include "include/boot.h"
 
 #define RSDP_SIGNATURE "RSD PTR "
 #define RSDP_SIGNATURE_BYTES 8U
@@ -404,7 +404,7 @@ static void parse_fadt(const struct acpi_header *fadt) {
 /* --- reading the tables ------------------------------------------------- */
 
 static void parse_tables(void) {
-    uint64_t rsdp_physical = tunix_boot_rsdp();
+    uint64_t rsdp_physical = boot_info()->rsdp;
     if (!rsdp_physical) return;
     const uint8_t *rsdp = map_physical(rsdp_physical, RSDP_FULL_BYTES);
     if (!rsdp || !signature_is(rsdp, RSDP_SIGNATURE, RSDP_SIGNATURE_BYTES)) return;

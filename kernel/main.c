@@ -1,11 +1,9 @@
 #include <stdint.h>
 #include "include/ata.h"
+#include "include/boot.h"
 #include "include/build_config.h"
 #include "include/block.h"
-#include "include/boot_manifest.h"
-#include "include/boot_framebuffer.h"
 #include "include/devfs.h"
-#include "include/sysfs.h"
 #include "include/sysfs.h"
 #include "include/gdt.h"
 #include "include/framebuffer.h"
@@ -20,7 +18,6 @@
 #include "include/random.h"
 #include "include/syscall.h"
 #include "include/ext2.h"
-#include "include/tarfs.h"
 #include "include/time.h"
 #include "include/timer.h"
 #include "include/tty.h"
@@ -33,8 +30,6 @@
 #include "include/smp.h"
 #include "include/virtgpu.h"
 #include "include/xhci.h"
-
-#define INITRAMFS_PHYSICAL 0x02000000ULL
 
 extern void serial_init(void);
 extern void kprintf(const char *fmt, ...);
@@ -61,131 +56,31 @@ static void boot_log_stage(const char *name, uint64_t *started) {
 }
 #endif
 
-static uint32_t data_region_lba;
-
-static uint32_t compute_data_region_lba(const struct boot_manifest *manifest) {
-    if (!manifest || manifest->magic != TUNIX_MANIFEST_MAGIC ||
-        manifest->version != TUNIX_MANIFEST_VERSION) return 0;
-    uint64_t end = manifest->initramfs_lba + manifest->initramfs_sectors;
-    uint64_t aligned = (end + TUNIX_DATA_REGION_ALIGN_SECTORS - 1ULL) &
-                       ~(TUNIX_DATA_REGION_ALIGN_SECTORS - 1ULL);
-    return aligned > 0x0FFFFFFFULL ? 0 : (uint32_t)aligned;
-}
-
-static uint64_t load_initramfs(const struct boot_manifest *manifest) {
-    if (!manifest || manifest->magic != TUNIX_MANIFEST_MAGIC ||
-        manifest->version != TUNIX_MANIFEST_VERSION ||
-        manifest->size < sizeof(*manifest)) {
-        panic("invalid boot manifest");
-    }
-    if (!manifest->initramfs_size || manifest->initramfs_size > TUNIX_INITRAMFS_MAX_BYTES) {
-        panic("invalid initramfs size");
-    }
-    if (manifest->initramfs_sectors > TUNIX_INITRAMFS_MAX_SECTORS) {
-        panic("initramfs larger than the reservation");
-    }
-    /* Through the block layer, so the controller the machine actually has is
-       the one that answers. The destination is a raw physical address reached
-       through the identity map the loader left; the drivers translate it. */
-    if (block_read(manifest->initramfs_lba, manifest->initramfs_sectors,
-                   (void *)INITRAMFS_PHYSICAL) != 0) {
-        panic("initramfs load failed");
-    }
-    /*
-     * The manifest carries the archive's checksum, so a read that returned
-     * success but delivered the wrong bytes is caught here rather than three
-     * layers up as "invalid ELF64" on some file that happened to be unlucky.
-     * A driver is at its least trustworthy the first time it is used.
-     */
-    uint32_t checksum = 0xFFFFFFFFU;
-    const uint8_t *bytes = (const uint8_t *)INITRAMFS_PHYSICAL;
-    for (uint64_t index = 0; index < manifest->initramfs_size; index++) {
-        checksum ^= bytes[index];
-        for (int bit = 0; bit < 8; bit++) {
-            checksum = (checksum >> 1) ^ (0xEDB88320U & (uint32_t)(-(int32_t)(checksum & 1U)));
-        }
-    }
-    checksum = ~checksum;
-    if (checksum != manifest->initramfs_crc32) {
-        kprintf("TUNIX: initramfs checksum %x, expected %x\n",
-                (unsigned)checksum, (unsigned)manifest->initramfs_crc32);
-        panic("initramfs read back wrong");
-    }
-    return manifest->initramfs_size;
-}
-
-/*
- * Give the archive back once the disk can answer for what was in it.
- *
- * The initramfs is half a gigabyte on this image and every file in the tree
- * points into it rather than owning a copy, so it has to stay reserved until
- * those pointers are gone. Seeding gives each file an inode, which is what
- * makes cutting them loose safe: the next read fetches from the disk instead.
- * Only the first boot pays this at all -- once there is a root on the disk the
- * archive is never loaded.
- */
-static void release_initramfs(uint64_t initramfs_size) {
-    if (!initramfs_size) return;
-    uint64_t detached = vfs_detach_static_data(vfs_root);
-    uint64_t pages = pmm_release_reserved(INITRAMFS_PHYSICAL, initramfs_size);
-    kprintf("TUNIX: released initramfs, %u MiB from %u files\n",
-            (unsigned)(pages * 4096ULL / (1024 * 1024)), (unsigned)detached);
-}
-
-void kmain(uint32_t mmap_count, uint64_t mmap_address, uint64_t manifest_address,
-           uint64_t framebuffer_info_address) {
+void kmain(const struct boot_info *boot) {
 #if TUNIX_BOOT_TIMINGS
     uint64_t boot_started = boot_read_tsc();
-    uint64_t initramfs_started = boot_started;
 #endif
     __asm__ volatile("cli");
     pic_init();
     serial_init();
 #if TUNIX_DEBUG_LOGS
-    kprintf("TUNIX: boot mmap=%u manifest=%p\n", mmap_count, (void *)manifest_address);
-#endif
-
-    const struct boot_manifest *manifest = (const struct boot_manifest *)manifest_address;
-    if (!manifest || manifest->magic != TUNIX_MANIFEST_MAGIC) {
-        manifest = (const struct boot_manifest *)0x00020000ULL;
-    }
-    /*
-     * The disks join the block layer before anything else runs, because the two
-     * reads below -- probing for a seeded root, then pulling in the initramfs --
-     * happen before the allocator and the page tables exist. See
-     * block_probe_early() for how a memory-mapped controller manages that.
-     */
-    block_probe_early();
-
-    data_region_lba = compute_data_region_lba(manifest);
-    int root_on_disk = data_region_lba && ext2fs_probe(data_region_lba) == 0;
-    uint64_t initramfs_size = root_on_disk ? 0 : load_initramfs(manifest);
-#if TUNIX_BOOT_TIMINGS
-    uint64_t initramfs_cycles = boot_read_tsc() - initramfs_started;
-#endif
-#if TUNIX_DEBUG_LOGS
-    if (root_on_disk)
-        kprintf("TUNIX: ext2 root found on disk, skipping initramfs\n");
-    else
-        kprintf("TUNIX: initramfs loaded from ATA, %u bytes\n", (unsigned)initramfs_size);
+    kprintf("TUNIX: boot regions=%u cmdline=\"%s\"\n", boot->memory_count,
+            boot->command_line);
 #endif
 
     gdt_init();
     idt_init();
     time_init();
 #if TUNIX_BOOT_TIMINGS
-    /* Which controller answered is the block layer's business now, and it
-       says so itself when it registers the disk. */
-    boot_log_cycles("initramfs load", initramfs_cycles);
     uint64_t stage_started = boot_read_tsc();
 #endif
     random_init();
-    pmm_init(mmap_count, mmap_address, INITRAMFS_PHYSICAL, initramfs_size);
+    pmm_init(boot->memory, boot->memory_count);
     vmm_init();
-    if (!framebuffer_info_address) panic("missing framebuffer boot information");
-    const struct boot_framebuffer_info *framebuffer_info =
-        (const struct boot_framebuffer_info *)vmm_phys_to_virt(framebuffer_info_address);
-    if (framebuffer_init(framebuffer_info) != 0) panic("framebuffer initialization failed");
+    /* Fatal: the kernel draws its console into the framebuffer and has no
+       other way to say anything to whoever is looking at the machine. */
+    if (!boot->framebuffer) panic("no framebuffer from the bootloader");
+    if (framebuffer_init(boot->framebuffer) != 0) panic("framebuffer initialization failed");
     heap_init();
     acpi_describe_machine();
     net_init();
@@ -203,35 +98,18 @@ void kmain(uint32_t mmap_count, uint64_t mmap_address, uint64_t manifest_address
     kprintf("TUNIX: GDT/TSS IDT PMM VMM heap ready\n");
 #endif
 
-    /* Storage controllers come up here and not earlier: two of the three are
+    /* Every storage controller at once, and only here: two of the three are
        memory mapped, so they need the page tables and the allocator that the
-       lines above just finished building. The manifest and the initramfs were
-       read before all of that through port-I/O IDE, which is the one controller
-       that needs neither. */
-    block_probe_controllers();
-    block_select_root(tunix_boot_manifest_lba());
+       lines above just finished building, and the USB disks hang off the
+       controller started a few lines earlier. */
+    block_probe();
+    block_select_root(0);
 
     vfs_init();
-    if (root_on_disk) {
-        if (ext2fs_mount_root(data_region_lba) != 0)
-            panic("persistent root filesystem load failed");
-    } else {
-        if (tarfs_unpack(INITRAMFS_PHYSICAL, initramfs_size) < 0)
-            panic("initramfs unpack failed");
-        /* Only a seed that worked lets the archive go: without one the tree is
-           still the only copy of the files and still points into it. */
-        if (data_region_lba && ext2fs_seed_root(data_region_lba) == 0)
-            release_initramfs(initramfs_size);
-        else
-            kprintf("TUNIX: root persistence unavailable, running from RAM\n");
-    }
-    /* Declared once the outcome is known: the root is the ext2 volume only if
-       mounting or seeding it actually worked. */
-    vfs_mount_builtin(ext2fs_mounted() ? "/dev/sda" : "initramfs", "/",
-                      ext2fs_mounted() ? "ext2" : "ramfs", vfs_root);
+    if (ext2fs_mount_root(0) != 0) panic("root filesystem mount failed");
+    vfs_mount_builtin("/dev/sda", "/", "ext2", vfs_root);
 #if TUNIX_BOOT_TIMINGS
-    boot_log_stage(root_on_disk ? "ext2 root load" : "initramfs VFS indexing + ext2 seed",
-                   &stage_started);
+    boot_log_stage("root filesystem mount", &stage_started);
 #endif
     if (terminal_init() != 0)
         panic("framebuffer terminal initialization failed");
