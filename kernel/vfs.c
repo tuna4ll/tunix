@@ -162,35 +162,6 @@ uint64_t vfs_reclaim_file_data(struct vfs_node *node) {
     return reclaim_below(node, 0xFFFFFFFFU);
 }
 
-/*
- * Cut every file loose from contents the VFS does not own.
- *
- * The initramfs tree is built by pointing each node straight at the archive in
- * physical memory instead of copying it, so the whole image has to stay
- * reserved for as long as any node refers to it. Once it has been seeded to
- * disk each of those files has an inode of its own and can be fetched back, so
- * the pointers can go -- and with them the reservation.
- *
- * A node someone has mapped keeps its pointer: the pages are in that process's
- * page tables and the archive underneath them may not move.
- */
-uint64_t vfs_detach_static_data(struct vfs_node *node) {
-    if (!node) return 0;
-
-    uint64_t detached = 0;
-    if ((node->flags & 0xFFU) == VFS_FILE && node->data && node->length &&
-        node->disk_inode && !(node->flags & VFS_OWNED_DATA) && !node->mapped_refs) {
-        node->data = NULL;
-        node->capacity = 0;
-        node->flags |= VFS_LAZY_DATA;
-        detached++;
-    }
-
-    for (struct vfs_node *child = node->children; child; child = child->next)
-        detached += vfs_detach_static_data(child);
-
-    return detached;
-}
 
 /*
  * Hold the cache to its budget.

@@ -171,7 +171,6 @@ static uint8_t data_buf[EXT2_BLOCK_SIZE];
 static uint8_t walk_buf[EXT2_BLOCK_SIZE];
 static uint8_t walk_buf2[EXT2_BLOCK_SIZE];
 static uint8_t bulk_buf[EXT2_RUN_BLOCKS * EXT2_BLOCK_SIZE];
-static const uint8_t zero_buf[EXT2_BLOCK_SIZE];
 
 /* --- group layout ------------------------------------------------------- */
 
@@ -202,9 +201,6 @@ static uint32_t group_meta_blocks_for(uint32_t gdb) {
     return 3U + gdb + EXT2_INODE_TABLE_BLOCKS;
 }
 
-static uint32_t group_meta_blocks(void) {
-    return group_meta_blocks_for(gd_blocks);
-}
 
 static uint32_t group_first_block(uint32_t group) {
     return group * EXT2_BLOCKS_PER_GROUP;
@@ -265,9 +261,6 @@ static int write_block(uint32_t block, const void *data) {
     return write_blocks(block, 1, data);
 }
 
-static int zero_block(uint32_t block) {
-    return write_block(block, zero_buf);
-}
 
 /* --- single-block write-back caches -------------------------------------- */
 
@@ -1205,128 +1198,6 @@ static const struct vfs_persist_ops ext2_persist_ops = {
     .fetch = ext2_fetch_data,
 };
 
-/* --- format ------------------------------------------------------------- */
-
-/* Stamp a backup superblock and descriptor table at the head of a group. Linux
-   only maintains the primary copy during normal operation, so these are written
-   once, here, and are allowed to drift in their free counters afterwards. */
-static int write_group_backup(uint32_t group) {
-    uint32_t first = group_first_block(group);
-    memset(meta_buf, 0, sizeof(meta_buf));
-    sb.s_block_group_nr = (uint16_t)group;
-    memcpy(meta_buf + 1024, &sb, sizeof(sb));
-    sb.s_block_group_nr = 0;
-    if (write_block(first, meta_buf) != 0) return -1;
-    return write_gd_table(first + 1U);
-}
-
-static int ext2_format(uint32_t total_blocks) {
-    uint32_t now = epoch32();
-
-    group_count = (total_blocks + EXT2_BLOCKS_PER_GROUP - 1U) / EXT2_BLOCKS_PER_GROUP;
-    /* region_usable_blocks() already caps the size, so this only fires if a
-       caller invents its own block count -- but the array it would run off the
-       end of is the descriptor table, so refuse rather than corrupt memory. */
-    if (!group_count || group_count > EXT2_MAX_GROUPS) return -1;
-    gd_blocks = gd_blocks_for(group_count);
-    uint32_t meta_blocks = group_meta_blocks();
-    /* The root directory's first data block sits right after group 0's
-       metadata, which is where the old fixed EXT2_FIRST_DATA_BLOCK pointed. */
-    uint32_t root_block = meta_blocks;
-
-    cache_reset_all();
-    memset(&sb, 0, sizeof(sb));
-    sb.s_inodes_count = group_count * EXT2_INODES_PER_GROUP;
-    sb.s_blocks_count = total_blocks;
-    sb.s_free_inodes_count = sb.s_inodes_count - (EXT2_FIRST_INO - 1U);
-    sb.s_first_data_block = 0;
-    sb.s_log_block_size = 2;
-    sb.s_log_frag_size = 2;
-    sb.s_blocks_per_group = EXT2_BLOCKS_PER_GROUP;
-    sb.s_frags_per_group = EXT2_BLOCKS_PER_GROUP;
-    sb.s_inodes_per_group = EXT2_INODES_PER_GROUP;
-    sb.s_mtime = now;
-    sb.s_wtime = now;
-    sb.s_max_mnt_count = 0xFFFFU;
-    sb.s_magic = EXT2_MAGIC;
-    sb.s_state = 0; /* marked clean only after seeding completes */
-    sb.s_errors = 1;
-    sb.s_lastcheck = now;
-    sb.s_rev_level = 1;
-    sb.s_first_ino = EXT2_FIRST_INO;
-    sb.s_inode_size = EXT2_INODE_SIZE;
-    sb.s_feature_incompat = EXT2_FEATURE_INCOMPAT_FILETYPE;
-    random_get_bytes(sb.s_uuid, sizeof(sb.s_uuid));
-    memcpy(sb.s_volume_name, "tunix-root", 11);
-
-    memset(gds, 0, sizeof(gds));
-    sb.s_free_blocks_count = 0;
-
-    for (uint32_t group = 0; group < group_count; group++) {
-        uint32_t blocks_here = group_block_count(group);
-        /* Group 0 also spends a block on the root directory. */
-        uint32_t used_here = meta_blocks + (group == 0 ? 1U : 0U);
-        uint32_t free_here = blocks_here > used_here ? blocks_here - used_here : 0U;
-        uint32_t free_inodes_here = EXT2_INODES_PER_GROUP -
-                                    (group == 0 ? EXT2_FIRST_INO - 1U : 0U);
-
-        gds[group].bg_block_bitmap = group_bbitmap_block(group);
-        gds[group].bg_inode_bitmap = group_ibitmap_block(group);
-        gds[group].bg_inode_table = group_itable_block(group);
-        gds[group].bg_free_blocks_count = (uint16_t)free_here;
-        gds[group].bg_free_inodes_count = (uint16_t)free_inodes_here;
-        gds[group].bg_used_dirs_count = group == 0 ? 1U : 0U;
-        sb.s_free_blocks_count += free_here;
-
-        /* block bitmap: this group's metadata used, plus the root directory in
-           group 0, plus padding for a short final group */
-        uint8_t *bits = cache_put_new(&cache_bbitmap, group_bbitmap_block(group));
-        if (!bits) return -1;
-        for (uint32_t bit = 0; bit < used_here; bit++)
-            bits[bit >> 3] |= (uint8_t)(1U << (bit & 7U));
-        for (uint32_t bit = blocks_here; bit < EXT2_BLOCKS_PER_GROUP; bit++)
-            bits[bit >> 3] |= (uint8_t)(1U << (bit & 7U));
-
-        /* inode bitmap: reserved inodes 1..10 in group 0, tail beyond the
-           group's inode count padded in every group */
-        bits = cache_put_new(&cache_ibitmap, group_ibitmap_block(group));
-        if (!bits) return -1;
-        if (group == 0) {
-            for (uint32_t bit = 0; bit < EXT2_FIRST_INO - 1U; bit++)
-                bits[bit >> 3] |= (uint8_t)(1U << (bit & 7U));
-        }
-        for (uint32_t bit = EXT2_INODES_PER_GROUP; bit < 8U * EXT2_BLOCK_SIZE; bit++)
-            bits[bit >> 3] |= (uint8_t)(1U << (bit & 7U));
-
-        for (uint32_t block = 0; block < EXT2_INODE_TABLE_BLOCKS; block++) {
-            if (zero_block(group_itable_block(group) + block) != 0) return -1;
-        }
-    }
-
-    /* Descriptors are complete now, so the backups can be stamped. Group 0's
-       primary copy is written by flush_meta below. */
-    if (cache_flush_all() != 0) return -1;
-    for (uint32_t group = 1; group < group_count; group++) {
-        if (write_group_backup(group) != 0) return -1;
-    }
-
-    struct ext2_inode root;
-    memset(&root, 0, sizeof(root));
-    root.i_mode = EXT2_S_IFDIR | 0755U;
-    root.i_size = EXT2_BLOCK_SIZE;
-    root.i_atime = now;
-    root.i_ctime = now;
-    root.i_mtime = now;
-    root.i_links_count = 2;
-    root.i_blocks = EXT2_SECTORS_PER_BLOCK;
-    root.i_block[0] = root_block;
-    if (inode_write(EXT2_ROOT_INO, &root) != 0) return -1;
-    if (dir_write_initial_block(root_block, EXT2_ROOT_INO, EXT2_ROOT_INO) != 0)
-        return -1;
-
-    if (flush_meta() != 0) return -1;
-    return block_flush();
-}
 
 /* --- mount / load ------------------------------------------------------- */
 
@@ -1626,20 +1497,15 @@ int ext2fs_sync(void) {
     return block_flush();
 }
 
+/* How many blocks the device can hold past the start of the filesystem. The
+   superblock says how many it actually uses; this is only the ceiling that
+   claim is checked against. */
 static uint32_t region_usable_blocks(uint32_t region_lba) {
     uint32_t disk_sectors = (uint32_t)block_sectors();
     if (!disk_sectors || region_lba >= disk_sectors) return 0;
     uint32_t blocks = (disk_sectors - region_lba) / EXT2_SECTORS_PER_BLOCK;
     if (blocks > EXT2_MAX_GROUPS * EXT2_BLOCKS_PER_GROUP)
         blocks = EXT2_MAX_GROUPS * EXT2_BLOCKS_PER_GROUP;
-
-    uint32_t groups = (blocks + EXT2_BLOCKS_PER_GROUP - 1U) / EXT2_BLOCKS_PER_GROUP;
-    uint32_t meta = group_meta_blocks_for(gd_blocks_for(groups));
-    /* A trailing group too small to hold even its own metadata would have a
-       negative amount of space; drop it and end on a group boundary instead. */
-    uint32_t tail = blocks % EXT2_BLOCKS_PER_GROUP;
-    if (tail && tail < meta + 8U) blocks -= tail;
-    if (blocks < meta + 64U) return 0;
     return blocks;
 }
 
@@ -1767,46 +1633,3 @@ int ext2fs_mount_root(uint32_t region_lba) {
     return 0;
 }
 
-int ext2fs_seed_root(uint32_t region_lba) {
-    if (ext2_mounted_flag || !vfs_root) return -1;
-    uint32_t usable_blocks = region_usable_blocks(region_lba);
-    if (!usable_blocks) {
-        kprintf("EXT2: no usable disk region, persistence disabled\n");
-        return -1;
-    }
-    ext2_region_lba = region_lba;
-
-    kprintf("EXT2: seeding root filesystem to disk...\n");
-    if (ext2_format(usable_blocks) != 0) {
-        kprintf("EXT2: format failed, persistence disabled\n");
-        return -1;
-    }
-
-    mark_volatile_dirs();
-    ext2_root = vfs_root;
-    ext2_root->disk_inode = EXT2_ROOT_INO;
-    seed_errors = 0;
-    for (struct vfs_node *child = vfs_root->children; child; child = child->next)
-        persist_subtree(child, 0);
-    persist_links(vfs_root, 0);
-    if (seed_errors) {
-        kprintf("EXT2: seeding failed for %d entries, persistence disabled\n",
-                seed_errors);
-        ext2_root->disk_inode = 0;
-        return -1;
-    }
-
-    sb.s_state = 1;
-    if (flush_meta() != 0 || block_flush() != 0) {
-        kprintf("EXT2: seed commit failed, persistence disabled\n");
-        ext2_root->disk_inode = 0;
-        return -1;
-    }
-    ext2_mounted_flag = 1;
-    vfs_set_persist_ops(&ext2_persist_ops);
-    kprintf("EXT2: seeded persistent root (%u MiB, %u/%u blocks used)\n",
-            (unsigned)((uint64_t)sb.s_blocks_count * EXT2_BLOCK_SIZE >> 20),
-            (unsigned)(sb.s_blocks_count - sb.s_free_blocks_count),
-            (unsigned)sb.s_blocks_count);
-    return 0;
-}
