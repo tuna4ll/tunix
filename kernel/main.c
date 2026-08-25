@@ -3,6 +3,7 @@
 #include "include/boot.h"
 #include "include/build_config.h"
 #include "include/block.h"
+#include "include/kstring.h"
 #include "include/devfs.h"
 #include "include/sysfs.h"
 #include "include/gdt.h"
@@ -56,6 +57,28 @@ static void boot_log_stage(const char *name, uint64_t *started) {
 }
 #endif
 
+/*
+ * root= names the device the filesystem is on: root=/dev/sda2, or sda2. Without
+ * it the kernel takes whatever the block layer registered first, which is right
+ * on a machine with one unpartitioned disk and a guess anywhere else.
+ */
+static int root_device_index(void) {
+    const char *value = boot_command_line_value("root");
+    if (!value) return 0;
+
+    char name[5 + BLOCK_NAME_BYTES];
+    size_t length = 0;
+    while (value[length] && value[length] != ' ' && length < sizeof name - 1) {
+        name[length] = value[length];
+        length++;
+    }
+    name[length] = '\0';
+
+    int index = block_device_index_by_name(name);
+    if (index < 0) kprintf("TUNIX: root=%s names no device\n", name);
+    return index < 0 ? 0 : index;
+}
+
 void kmain(const struct boot_info *boot) {
 #if TUNIX_BOOT_TIMINGS
     uint64_t boot_started = boot_read_tsc();
@@ -103,11 +126,16 @@ void kmain(const struct boot_info *boot) {
        lines above just finished building, and the USB disks hang off the
        controller started a few lines earlier. */
     block_probe();
-    block_select_root(0);
+    block_select_root(root_device_index());
 
     vfs_init();
+    /* Offset zero: a partition is its own device here, so the filesystem
+       starts where the device does. */
     if (ext2fs_mount_root(0) != 0) panic("root filesystem mount failed");
-    vfs_mount_builtin("/dev/sda", "/", "ext2", vfs_root);
+    const struct block_device *root = block_root();
+    char source[5 + BLOCK_NAME_BYTES] = "/dev/";
+    if (root) memcpy(source + 5, root->dev_name, sizeof root->dev_name);
+    vfs_mount_builtin(root ? source : "none", "/", "ext2", vfs_root);
 #if TUNIX_BOOT_TIMINGS
     boot_log_stage("root filesystem mount", &stage_started);
 #endif

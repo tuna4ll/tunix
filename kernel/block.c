@@ -5,6 +5,7 @@
 #include "include/block.h"
 #include "include/kstring.h"
 #include "include/nvme.h"
+#include "include/partition.h"
 #include "include/usb_storage.h"
 
 /* See include/block.h for what this is and why the early boot read is not
@@ -14,17 +15,109 @@ extern void kprintf(const char *fmt, ...);
 
 static struct block_device devices[BLOCK_MAX_DEVICES];
 static int device_count;
+static int disk_count;
 static int root_index;
+
+/*
+ * A partition is a device in its own right, and the only thing it owns is
+ * where on its parent it starts. The parent index rather than a pointer: the
+ * table is an array, and an entry added later must not be able to move one
+ * that a partition is pointing at.
+ */
+struct partition_context {
+    int parent;
+    uint64_t start;
+};
+
+static struct partition_context partitions[BLOCK_MAX_DEVICES];
+
+static int partition_read(void *context, uint64_t lba, uint32_t count,
+                          void *destination) {
+    const struct partition_context *part = context;
+    const struct block_device *disk = block_device_at(part->parent);
+    if (!disk) return -1;
+    return disk->read(disk->context, part->start + lba, count, destination);
+}
+
+static int partition_write(void *context, uint64_t lba, uint32_t count,
+                           const void *source) {
+    const struct partition_context *part = context;
+    const struct block_device *disk = block_device_at(part->parent);
+    if (!disk || !disk->write) return -1;
+    return disk->write(disk->context, part->start + lba, count, source);
+}
+
+static int partition_flush(void *context) {
+    const struct partition_context *part = context;
+    const struct block_device *disk = block_device_at(part->parent);
+    if (!disk) return -1;
+    return disk->flush ? disk->flush(disk->context) : 0;
+}
+
+static void announce(int index) {
+    kprintf("BLOCK: %s (%s), %u sectors%s\n", devices[index].dev_name,
+            devices[index].name, (unsigned)devices[index].sectors,
+            devices[index].write ? "" : ", read only");
+}
 
 int block_register(const struct block_device *device) {
     if (!device || !device->read || !device->sectors) return -1;
     if (device_count == BLOCK_MAX_DEVICES) return -1;
-    devices[device_count] = *device;
-    devices[device_count].name[sizeof(devices[0].name) - 1] = '\0';
-    kprintf("BLOCK: %s, %u sectors%s\n", devices[device_count].name,
-            (unsigned)devices[device_count].sectors,
-            devices[device_count].write ? "" : ", read only");
+    if (disk_count > 'z' - 'a') return -1;
+
+    struct block_device *entry = &devices[device_count];
+    *entry = *device;
+    entry->name[sizeof entry->name - 1] = '\0';
+    entry->parent = -1;
+    entry->dev_name[0] = 's';
+    entry->dev_name[1] = 'd';
+    entry->dev_name[2] = (char)('a' + disk_count);
+    entry->dev_name[3] = '\0';
+    disk_count++;
+    announce(device_count);
     return device_count++;
+}
+
+int block_register_partition(int parent, int number, uint64_t start,
+                             uint64_t sectors) {
+    const struct block_device *disk = block_device_at(parent);
+    if (!disk || disk->parent != -1 || number < 1 || number > 9) return -1;
+    if (!sectors || start >= disk->sectors || sectors > disk->sectors - start)
+        return -1;
+    if (device_count == BLOCK_MAX_DEVICES) return -1;
+
+    struct partition_context *context = &partitions[device_count];
+    context->parent = parent;
+    context->start = start;
+
+    struct block_device *entry = &devices[device_count];
+    memset(entry, 0, sizeof *entry);
+    memcpy(entry->name, disk->name, sizeof entry->name);
+    memcpy(entry->dev_name, disk->dev_name, sizeof entry->dev_name);
+    size_t length = strlen(entry->dev_name);
+    entry->dev_name[length] = (char)('0' + number);
+    entry->dev_name[length + 1] = '\0';
+    entry->parent = parent;
+    entry->sectors = sectors;
+    entry->read = partition_read;
+    entry->write = disk->write ? partition_write : NULL;
+    entry->flush = partition_flush;
+    entry->context = context;
+    announce(device_count);
+    return device_count++;
+}
+
+int block_device_index_by_name(const char *name) {
+    if (!name) return -1;
+    if (name[0] == '/') {
+        static const char prefix[] = "/dev/";
+        for (size_t index = 0; index < sizeof prefix - 1; index++)
+            if (name[index] != prefix[index]) return -1;
+        name += sizeof prefix - 1;
+    }
+    for (int index = 0; index < device_count; index++)
+        if (strcmp(devices[index].dev_name, name) == 0) return index;
+    return -1;
 }
 
 int block_device_count(void) { return device_count; }
@@ -44,7 +137,7 @@ const struct block_device *block_root(void) {
    a device of its own here, so the answer is an index. */
 void block_select_root(int index) {
     root_index = index >= 0 && index < device_count ? index : 0;
-    if (device_count) kprintf("BLOCK: root on %s\n", devices[root_index].name);
+    if (device_count) kprintf("BLOCK: root on %s\n", devices[root_index].dev_name);
 }
 
 int block_read(uint64_t lba, uint32_t count, void *destination) {
@@ -157,7 +250,8 @@ void block_probe(void) {
     ata_register_block_device();
     ahci_init();
     nvme_init();
-    /* Last: the disks behind it hang off the xHCI controller main.c starts a
-       few lines earlier. */
+    /* Before the partition scan and after the rest: the disks behind it hang
+       off the xHCI controller main.c starts a few lines earlier. */
     usb_storage_init();
+    partition_scan();
 }

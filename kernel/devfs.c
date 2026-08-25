@@ -151,14 +151,12 @@ static int64_t rtc_ioctl(struct vfs_node *node, unsigned long request,
 }
 
 /*
- * /dev/sda, /dev/sdb, ... one per registered disk, in the order the block layer
- * registered them. The letter is the index: carrying it in the name rather than
- * in a side table means the node and the device cannot drift apart.
+ * /dev/sda, /dev/sda1, /dev/sdb, ... one node per device the block layer holds,
+ * disks and partitions alike. The name is the block layer's, looked up rather
+ * than derived, so the node and the device cannot drift apart.
  */
 static const struct block_device *disk_of(const struct vfs_node *node) {
-    size_t length = strlen(node->name);
-    if (!length) return NULL;
-    return block_device_at((int)(node->name[length - 1] - 'a'));
+    return block_device_at(block_device_index_by_name(node->name));
 }
 
 static int64_t disk_read(struct vfs_node *node, uint64_t offset,
@@ -294,9 +292,8 @@ void devfs_init(void) {
 
     for (int index = 0; index < block_device_count(); index++) {
         const struct block_device *device = block_device_at(index);
-        if (!device || index > 'z' - 'a') break;
-        char name[4] = {'s', 'd', (char)('a' + index), 0};
-        struct vfs_node *disk = attach_device(dev, name, VFS_BLOCKDEVICE, 0660,
+        if (!device) break;
+        struct vfs_node *disk = attach_device(dev, device->dev_name, VFS_BLOCKDEVICE, 0660,
                                               disk_read,
                                               device->write ? disk_write : NULL,
                                               NULL);
@@ -411,5 +408,10 @@ void devfs_init(void) {
         }
     }
     (void)vfs_create_symlink("/dev/rtc0", "/dev/rtc", 0);
-    if (block_device_count()) (void)vfs_create_symlink("/dev/root", "/dev/sda", 0);
+    const struct block_device *root = block_root();
+    if (root) {
+        char target[5 + BLOCK_NAME_BYTES] = "/dev/";
+        memcpy(target + 5, root->dev_name, sizeof root->dev_name);
+        (void)vfs_create_symlink("/dev/root", target, 0);
+    }
 }
