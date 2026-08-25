@@ -29,6 +29,30 @@ if [ "$(id -u)" != 0 ]; then
 	exit 1
 fi
 
+# A directory that cannot record ownership or the setuid bit cannot hold a root
+# filesystem: sudo and su would ship unprivileged, and every file in the image
+# would belong to root. Windows drives mounted into WSL are the usual way to
+# end up here, and the failure is silent -- chmod succeeds and changes nothing
+# -- so it is worth one probe up front.
+check_permissions() {
+	local probe="$1/.permission-probe"
+	mkdir -p "$1"
+	rm -f "$probe"
+	: > "$probe"
+	chmod 4750 "$probe"
+	chown 1:1 "$probe"
+	local mode owner
+	mode=$(stat -c %a "$probe")
+	owner=$(stat -c %u:%g "$probe")
+	rm -f "$probe"
+	if [ "$mode" != 4750 ] || [ "$owner" != 1:1 ]; then
+		echo "sysroot.sh: $1 does not keep permissions (got $mode $owner)." >&2
+		echo "  Build the sysroot on a Linux filesystem instead:" >&2
+		echo "    make image SYSROOT=/var/tmp/tunix-sysroot" >&2
+		exit 1
+	fi
+}
+
 fetch() {
 	[ -f "$2" ] && return 0
 	mkdir -p "$(dirname "$2")"
@@ -42,6 +66,8 @@ fetch() {
 # xbps is taken as Void's own statically linked build rather than as a host
 # package: it exists for every distribution this way, and it is the same
 # version of the tool that made the repository it is about to read.
+check_permissions "$(dirname "$SYSROOT")"
+
 fetch "$MIRROR/static/xbps-static-static-$XBPS_STATIC_VERSION.x86_64-musl.tar.xz" \
 	"$XBPS_TARBALL"
 if [ ! -x "$XBPS_DIR/usr/bin/xbps-install" ]; then
