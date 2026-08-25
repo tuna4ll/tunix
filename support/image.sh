@@ -1,0 +1,80 @@
+#!/bin/bash
+#
+# Build the disk image: a GPT disk with an EFI system partition Limine boots
+# from and an ext2 root the kernel mounts.
+#
+# One image boots both firmwares. UEFI runs EFI/BOOT/BOOTX64.EFI off the ESP;
+# BIOS runs the stage written into the protective MBR by `limine bios-install`,
+# which then finds limine-bios.sys on the same partition.
+set -euo pipefail
+
+IMAGE=${1:?usage: image.sh IMAGE KERNEL LIMINE_DIR LIMINE_CONF SYSROOT}
+KERNEL=${2:?}
+LIMINE_DIR=${3:?}
+LIMINE_CONF=${4:?}
+SYSROOT=${5:?}
+
+ESP_MIB=${ESP_MIB:-64}
+# Headroom over what the tree actually needs, so that the machine has somewhere
+# to put a package it installs later.
+ROOT_SLACK_MIB=${ROOT_SLACK_MIB:-512}
+
+WORK=$(dirname "$IMAGE")/image
+rm -rf "$WORK"
+mkdir -p "$WORK"
+
+# --- the EFI system partition ----------------------------------------------
+
+echo ":: building the ESP"
+truncate -s "${ESP_MIB}M" "$WORK/esp.img"
+mformat -i "$WORK/esp.img" -F -v TUNIX ::
+mmd -i "$WORK/esp.img" ::/EFI ::/EFI/BOOT ::/boot ::/boot/limine
+mcopy -i "$WORK/esp.img" "$LIMINE_DIR/BOOTX64.EFI" ::/EFI/BOOT/BOOTX64.EFI
+mcopy -i "$WORK/esp.img" "$LIMINE_DIR/limine-bios.sys" ::/boot/limine/limine-bios.sys
+mcopy -i "$WORK/esp.img" "$LIMINE_CONF" ::/boot/limine/limine.conf
+mcopy -i "$WORK/esp.img" "$KERNEL" ::/boot/kernel.elf
+
+# --- the root filesystem ----------------------------------------------------
+#
+# The feature set is not the default one. The kernel's ext2 driver reads
+# classic ext2 and nothing else: 4 KiB blocks, 128-byte inodes, no extents, no
+# 64-bit block numbers, no checksummed metadata, and no hashed directories --
+# it would have to maintain the hash tree to write into one. mke2fs is happy to
+# leave all of that out; see superblock_usable() in kernel/ext2.c.
+ROOT_MIB=$(( $(du -sm "$SYSROOT" | cut -f1) + ROOT_SLACK_MIB ))
+echo ":: building a ${ROOT_MIB} MiB root filesystem"
+truncate -s "${ROOT_MIB}M" "$WORK/root.img"
+mkfs.ext2 -q -b 4096 -I 128 -m 1 -L tunix-root \
+	-O ^resize_inode,^dir_index,^ext_attr,^metadata_csum,^64bit,^huge_file,^dir_nlink,^extra_isize \
+	-d "$SYSROOT" "$WORK/root.img"
+# mke2fs leaves the filesystem marked "not cleanly unmounted" after -d on some
+# versions; the kernel refuses anything but a clean superblock, and e2fsck is
+# the thing that says so authoritatively.
+e2fsck -fp "$WORK/root.img" >/dev/null || [ $? -lt 4 ]
+
+# --- the disk ---------------------------------------------------------------
+
+ESP_SECTORS=$(( ESP_MIB * 1024 * 1024 / 512 ))
+ROOT_SECTORS=$(( ROOT_MIB * 1024 * 1024 / 512 ))
+ESP_START=2048
+ROOT_START=$(( ESP_START + ESP_SECTORS ))
+# 2048 sectors of slack at the end for the backup GPT.
+TOTAL_SECTORS=$(( ROOT_START + ROOT_SECTORS + 2048 ))
+
+echo ":: writing $IMAGE"
+rm -f "$IMAGE"
+truncate -s $(( TOTAL_SECTORS * 512 )) "$IMAGE"
+sfdisk --quiet --label gpt "$IMAGE" <<EOF
+start=$ESP_START, size=$ESP_SECTORS, type=uefi, name="EFI System"
+start=$ROOT_START, size=$ROOT_SECTORS, type=linux, name="tunix-root"
+EOF
+
+dd if="$WORK/esp.img" of="$IMAGE" bs=512 seek=$ESP_START conv=notrunc status=none
+dd if="$WORK/root.img" of="$IMAGE" bs=512 seek=$ROOT_START conv=notrunc status=none
+
+# BIOS: the first stage goes in the gap between the protective MBR and the
+# first partition, which is why the ESP starts at sector 2048 rather than 34.
+"$LIMINE_DIR/limine" bios-install "$IMAGE"
+
+rm -rf "$WORK"
+echo ":: $IMAGE ready ($(du -h "$IMAGE" | cut -f1))"
