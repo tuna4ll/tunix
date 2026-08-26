@@ -6,7 +6,9 @@
 #include "include/kstring.h"
 #include "include/pmm.h"
 #include "include/process.h"
+#include "include/boot.h"
 #include "include/procfs.h"
+#include "include/uts.h"
 #include "include/smp.h"
 #include "include/time.h"
 #include "include/vfs.h"
@@ -177,6 +179,52 @@ static int64_t proc_uptime_read(struct vfs_node *node, uint64_t offset,
     if (fraction < 10) text_char(&text, '0');
     text_unsigned(&text, fraction);
     text_string(&text, " 0.00\n");
+    return text_read(&text, offset, size, output);
+}
+
+static int64_t proc_cmdline_line_read(struct vfs_node *node, uint64_t offset,
+                                      size_t size, void *output) {
+    (void)node;
+    struct text_buffer text = {{0}, 0};
+    text_string(&text, boot_info()->command_line);
+    text_char(&text, '\n');
+    return text_read(&text, offset, size, output);
+}
+
+/*
+ * /proc/sys/kernel/hostname, and it has to be writable: Void's init sets the
+ * machine's name by writing this file rather than by calling sethostname(2).
+ */
+static int64_t proc_hostname_read(struct vfs_node *node, uint64_t offset,
+                                  size_t size, void *output) {
+    (void)node;
+    struct text_buffer text = {{0}, 0};
+    text_string(&text, uts_hostname());
+    text_char(&text, '\n');
+    return text_read(&text, offset, size, output);
+}
+
+static int64_t proc_hostname_write(struct vfs_node *node, uint64_t offset,
+                                   size_t size, const void *input) {
+    (void)node;
+    (void)offset;
+    uts_set_hostname((const char *)input, size);
+    return (int64_t)size;
+}
+
+static int64_t proc_ostype_read(struct vfs_node *node, uint64_t offset,
+                                size_t size, void *output) {
+    (void)node;
+    struct text_buffer text = {{0}, 0};
+    text_string(&text, "Tunix\n");
+    return text_read(&text, offset, size, output);
+}
+
+static int64_t proc_osrelease_read(struct vfs_node *node, uint64_t offset,
+                                   size_t size, void *output) {
+    (void)node;
+    struct text_buffer text = {{0}, 0};
+    text_string(&text, "0.1.0\n");
     return text_read(&text, offset, size, output);
 }
 
@@ -641,6 +689,19 @@ void procfs_init(void) {
     virtual_file(root, "mounts", proc_mounts_read, 0);
     virtual_file(root, "stat", proc_stat_read, 0);
     virtual_file(root, "loadavg", proc_loadavg_read, 0);
+    virtual_file(root, "cmdline", proc_cmdline_line_read, 0);
+
+    struct vfs_node *kernel = vfs_mkdir_p("/proc/sys/kernel");
+    if (kernel) {
+        kernel->mode = 0555;
+        struct vfs_node *host = virtual_file(kernel, "hostname", proc_hostname_read, 0);
+        if (host) {
+            host->mode = 0644;
+            host->write = proc_hostname_write;
+        }
+        virtual_file(kernel, "ostype", proc_ostype_read, 0);
+        virtual_file(kernel, "osrelease", proc_osrelease_read, 0);
+    }
 
     struct vfs_node *net = vfs_mkdir_p("/proc/net");
     if (net) {
