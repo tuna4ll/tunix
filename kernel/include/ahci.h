@@ -18,6 +18,5 @@ void ahci_init(void);
 /* Move the register window into the device area once the kernel's own page
    tables are up. The identity map the probe used belongs to the low half of
    the address space, which becomes user memory the moment a process runs. */
-void ahci_remap(void);
 
 #endif

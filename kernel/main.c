@@ -170,7 +170,23 @@ void kmain(const struct boot_info *boot) {
     process_init();
     procfs_init();
     syscall_init();
-    if (!process_create_from_path("/sbin/init")) panic("cannot create /sbin/init");
+    /* init= names the first program, so a machine that will not finish booting
+       can be pointed at a shell or a single command instead of its init. */
+    char init_path[128] = "/sbin/init";
+    const char *requested = boot_command_line_value("init");
+    if (requested) {
+        size_t length = 0;
+        while (requested[length] && requested[length] != ' ' &&
+               length < sizeof init_path - 1) {
+            init_path[length] = requested[length];
+            length++;
+        }
+        init_path[length] = '\0';
+    }
+    if (!process_create_from_path(init_path)) {
+        kprintf("TUNIX: cannot start %s\n", init_path);
+        panic("no init");
+    }
     timer_init();
     if (apic_is_active()) apic_route_legacy_irq(0U); else pic_unmask(0U);
     /* Last, and after the timer: the processors this starts come up idle and

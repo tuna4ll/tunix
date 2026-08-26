@@ -227,6 +227,11 @@ static size_t master_feed_input(struct pty_pair *pty, const uint8_t *bytes,
 void pty_init(void) {
     struct vfs_node *dev = vfs_mkdir_p("/dev");
     struct vfs_node *pts = vfs_mkdir_p("/dev/pts");
+    /* Declared as a mount even though the tree below it is made here rather
+       than by a filesystem: init scripts check `mountpoint -q /dev/pts` and
+       mount devpts over it when the answer is no, which this kernel cannot do
+       and which would hide the terminals if it could. */
+    if (pts) vfs_mount_builtin("devpts", "/dev/pts", "devpts", pts);
     ptmx_node = vfs_alloc_node("ptmx", VFS_CHARDEVICE);
     if (ptmx_node) {
         ptmx_node->mode = 0666;

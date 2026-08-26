@@ -13,6 +13,5 @@ void nvme_init(void);
 
 /* Move the register window into the device area once the kernel's own page
    tables are up. */
-void nvme_remap(void);
 
 #endif

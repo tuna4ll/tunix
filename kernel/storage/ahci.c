@@ -405,10 +405,17 @@ void ahci_init(void) {
     if (!abar) return;
 
     pci_enable_bus_mastering(&pci);
-    /* The identity map the loader left is still in place, so the window is
-       reachable where PCI says it is. ahci_remap() moves it later. */
+    /* Mapped before the first register read, not after. There used to be a
+       window here reachable at its physical address, because the old
+       bootloader identity mapped the low 4 GiB and the disks had to be found
+       before the kernel's own page tables existed. Neither is true now: Limine
+       maps nothing at zero, and the block layer is probed after vmm_init. */
     hba_physical = abar;
-    hba_base = abar;
+    hba_base = vmm_map_device(abar, 0x2000U);
+    if (!hba_base) {
+        kprintf("AHCI: register window unavailable\n");
+        return;
+    }
 
     write32(hba_base + HBA_GHC, read32(hba_base + HBA_GHC) | HBA_GHC_AE);
 
@@ -420,16 +427,3 @@ void ahci_init(void) {
     if (!port_count) kprintf("AHCI: controller present, no disks\n");
 }
 
-void ahci_remap(void) {
-    if (!hba_physical || !port_count) return;
-    uint64_t mapped = vmm_map_device(hba_physical, 0x2000U);
-    if (!mapped) {
-        kprintf("AHCI: register window unavailable, disks lost\n");
-        return;
-    }
-    /* Every port's register address was derived from the old base, so they all
-       move by the same amount rather than being recomputed from the index. */
-    for (unsigned index = 0; index < port_count; index++)
-        ports[index].registers = ports[index].registers - hba_base + mapped;
-    hba_base = mapped;
-}

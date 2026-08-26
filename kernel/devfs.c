@@ -408,6 +408,17 @@ void devfs_init(void) {
         }
     }
     (void)vfs_create_symlink("/dev/rtc0", "/dev/rtc", 0);
+
+    /* Where shm_open(3) puts its files. A tmpfs of its own so that nothing
+       under it is ever written to the disk, and a mount so that the init
+       scripts see one already there. */
+    struct vfs_node *shm = vfs_mkdir_p("/dev/shm");
+    if (shm) {
+        shm->mode = 01777;
+        shm->flags |= VFS_VOLATILE;
+        vfs_mount_builtin("shm", "/dev/shm", "tmpfs", shm);
+    }
+
     const struct block_device *root = block_root();
     if (root) {
         char target[5 + BLOCK_NAME_BYTES] = "/dev/";

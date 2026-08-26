@@ -165,8 +165,8 @@ static int allocate_queue(struct nvme_queue *queue, uint32_t id,
     /* The queue starts empty, so the first entry the controller writes will
        carry phase 1. */
     queue->phase = 1;
-    /* Offsets rather than addresses: the window moves once, in nvme_remap(),
-       and a doorbell recorded as an absolute address would not move with it. */
+    /* Offsets rather than addresses, so that a doorbell does not have to be
+       recomputed if the register window is ever mapped somewhere else. */
     queue->submission_doorbell = doorbell_of(id, 0);
     queue->completion_doorbell = doorbell_of(id, 1);
     return 0;
@@ -393,10 +393,14 @@ void nvme_init(void) {
     if (!base) return;
 
     pci_enable_bus_mastering(&pci);
-    /* Reachable where PCI says it is: the loader's identity map is still in
-       place this early. nvme_remap() moves it once ours replaces it. */
+    /* Mapped before the first register read; see the same place in ahci.c for
+       why it used not to be. */
     registers_physical = base;
-    registers = base;
+    registers = vmm_map_device(base, 0x2000U);
+    if (!registers) {
+        kprintf("NVME: register window unavailable\n");
+        return;
+    }
 
     uint32_t capability_high = read32(registers + REG_CAP + 4U);
     doorbell_stride = capability_high & 0x0FU;
@@ -448,13 +452,3 @@ void nvme_init(void) {
                 (unsigned)namespace_block_bytes);
 }
 
-void nvme_remap(void) {
-    if (!registers_physical || !namespace_blocks) return;
-    uint64_t mapped = vmm_map_device(registers_physical, 0x2000U);
-    if (!mapped) {
-        kprintf("NVME: register window unavailable, namespace lost\n");
-        return;
-    }
-    /* Doorbells are held as offsets, so nothing else has to move. */
-    registers = mapped;
-}
