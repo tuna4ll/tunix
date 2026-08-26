@@ -1,114 +1,93 @@
 # Build and Run
 
-This document covers the normal local workflow for building and booting Tunix.
+```sh
+make          # kernel + sysroot + image
+make run      # boot it under BIOS
+```
+
+The first build downloads a Void Linux rootfs and about 300 MiB of packages, so
+it needs a network. After that everything but the kernel is cached.
+
+## What gets built
+
+Only the kernel. Everything above it is a Void Linux package:
+
+| Step | Target | What happens |
+| --- | --- | --- |
+| Kernel | `make kernel` | `kernel/` compiled to `build/kernel.elf` |
+| Sysroot | `make sysroot` | `support/sysroot.sh` unpacks Void's ROOTFS tarball, installs `VOID_INSTALL` into it with xbps, and lays `base-files/` over the result |
+| Image | `make image` | `support/image.sh` makes a GPT disk with an ESP and an ext2 root, and installs Limine into both |
+
+Limine itself is cloned into `build/limine` on the first build: the header the
+kernel builds its requests from and the bootloader that reads them have to be
+the same version, so both come from one checkout.
 
 ## Requirements
 
-Tunix is built with the top-level `Makefile`. The build expects a Unix-like
-toolchain environment with:
+- `gcc`, `binutils`, `make`, `python3`
+- `curl`, `git`, `tar`
+- `mtools`, `e2fsprogs`, `util-linux` (`sfdisk`), `coreutils`
+- `qemu-system-x86_64` to run it
+- root, for `make sysroot` — the tarball carries ownership and the image has to
+  keep it
 
-```text
-gcc
-ld
-nasm
-strip
-ar
-python3
-make
-tar
-qemu-system-x86_64
-```
+## The sysroot needs a real filesystem
 
-Some ports also use common build tools such as `cmake`, `autoreconf`,
-`pkg-config`, and `readelf`.
-
-Initialize third-party sources before the first full build:
+`sysroot.sh` refuses to build on a filesystem that cannot record ownership or
+the setuid bit, because the result would be an image where `sudo` is not setuid
+and every file belongs to root. A Windows drive mounted into WSL is the usual
+way to hit this, and the failure is otherwise silent -- `chmod` succeeds and
+changes nothing. Point the sysroot somewhere else:
 
 ```sh
-git submodule update --init --recursive
+make image SYSROOT=/var/tmp/tunix-sysroot CACHE=/var/tmp/tunix-cache
 ```
 
-## Build
+## Changing what is installed
 
-Build the disk image:
+`VOID_INSTALL` in the GNUmakefile is the package list, `VOID_REMOVE` is what to
+take back out again, and `VOID_ROOTFS_DATE` is which base tarball to start from.
 
 ```sh
-make all
+make image VOID_INSTALL="base-files bash coreutils util-linux runit runit-void git"
 ```
 
-The main outputs are:
+`base-files/` is what makes it Tunix rather than Void: `overlay/` is copied over
+the tree, `append/` is appended to `/etc/passwd`, `/etc/group` and
+`/etc/shadow`, `services` is the list of runit services to enable, and `remove`
+is a list of paths to delete.
 
-```text
-build/tunix.img       Bootable disk image.
-build/kernel.elf      Kernel ELF.
-build/initramfs.img   Initramfs archive.
-build/rootfs/         Temporary root filesystem staging tree.
-ports/out/            Built third-party tools and libraries.
-```
+## Running
 
-`make all` may take a while on the first run because it builds the bundled
-ports. Later builds reuse `ports/out/` unless it is cleaned.
+| Target | What it does |
+| --- | --- |
+| `make run` | BIOS, no window, serial to `build/serial.log` |
+| `make run-uefi` | the same image under OVMF |
+| `make run-gpu` | a window, with virtio-gpu scanout |
+| `make headless` | serial on stdin/stdout |
 
-## Run
+Useful overrides: `QEMU_SMP`, `QEMU_MEMORY`, `QEMU_NET`, `QEMU_AUDIO`.
 
-Run with the normal QEMU display:
+## Debugging a boot
 
 ```sh
-make run
+make kernel KERNEL_CFLAGS_EXTRA=-DTUNIX_DEBUG_LOGS=1
 ```
 
-Run without a graphical QEMU window:
+turns on the kernel's own commentary -- every `fork`, `exec`, `exit` and every
+syscall that answered `ENOSYS`. `TUNIX_BOOT_TIMINGS=1` times the boot stages
+instead. Both go to the serial log.
+
+To run something other than init, put `init=` on the Limine command line in
+`support/limine.conf` and rebuild:
+
+```
+cmdline: root=/dev/sda2 init=/usr/bin/uname
+```
+
+## Cleaning
 
 ```sh
-make headless
-```
-
-Run with a virtio-gpu instead of the emulated VGA adapter, which is what the
-kernel's virtio-gpu driver needs to find — see [virtio-gpu](virtio-gpu.md):
-
-```sh
-make run-gpu
-```
-
-All three boot `build/tunix.img` with 128 MiB of RAM and an RTL8139 network
-device. The graphical run writes serial output to:
-
-```text
-build/serial.log
-```
-
-## Clean
-
-Remove generated kernel, image, rootfs, and port output:
-
-```sh
-make clean
-```
-
-This deletes:
-
-```text
-build/
-ports/out/
-```
-
-Use this when a port has stale configure output or a generated file no longer
-matches the current source.
-
-## Common Problems
-
-Missing source under `ports/src/` usually means submodules were not initialized:
-
-```sh
-git submodule update --init --recursive
-```
-
-Missing host tools should be fixed in the host environment, not by editing the
-generated output tree.
-
-If a port keeps using old generated files, clean and rebuild:
-
-```sh
-make clean
-make all
+make clean      # the kernel and the image
+make distclean  # everything, including the downloads
 ```
