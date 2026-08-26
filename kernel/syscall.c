@@ -1280,13 +1280,17 @@ static int64_t sys_socketpair(int domain, int type, int protocol,
     int base_type = type & 0xF;
     int type_flags = type & ~0xF;
     if (type_flags & ~(SOCK_NONBLOCK | SOCK_CLOEXEC)) return -EINVAL;
+    /* A datagram pair as well as a stream one. Both ends are connected and
+       neither can lose a message, so it is the same object as a seqpacket pair
+       -- which is what a udev daemon asks for and used to be refused. */
     if (domain != TUNIX_AF_UNIX || protocol != 0 ||
-        (base_type != TUNIX_SOCK_STREAM && base_type != TUNIX_SOCK_SEQPACKET))
+        (base_type != TUNIX_SOCK_STREAM && base_type != TUNIX_SOCK_SEQPACKET &&
+         base_type != TUNIX_SOCK_DGRAM))
         return -EOPNOTSUPP;
     struct unix_socket *first = NULL;
     struct unix_socket *second = NULL;
     int status = unix_socket_pair(&first, &second,
-                                  base_type == TUNIX_SOCK_SEQPACKET);
+                                  base_type != TUNIX_SOCK_STREAM);
     if (status < 0) return status;
     struct process *process = process_current();
     int32_t pid = process ? (int32_t)process->pid : 0;
