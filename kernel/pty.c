@@ -113,8 +113,6 @@ static void initialize_termios(struct tunix_termios *termios) {
     termios->cc[TTY_VSTART] = 17;
     termios->cc[TTY_VSTOP] = 19;
     termios->cc[TTY_VSUSP] = 26;
-    termios->ispeed = 38400;
-    termios->ospeed = 38400;
 }
 
 static void reset_pair(struct pty_pair *pty) {

@@ -71,6 +71,11 @@ $(TERMINAL_FONT_DATA): $(TERMINAL_FONT_SOURCE) support/terminal-font.py
 	@mkdir -p $(dir $@)
 	$(PYTHON) support/terminal-font.py $< $@
 
+# A change to the flags has to rebuild everything, and nothing in the generated
+# dependencies says so: KERNEL_CFLAGS_EXTRA=-DTUNIX_DEBUG_LOGS=1 would otherwise
+# leave a tree of objects half built with it and half without.
+$(KERNEL_OBJECTS): GNUmakefile
+
 -include $(KERNEL_DEPS)
 
 # --- limine -----------------------------------------------------------------

@@ -755,8 +755,6 @@ struct tty *tty_create(struct terminal_screen *screen) {
     tty->termios.cc[TTY_VSTART] = 17;
     tty->termios.cc[TTY_VSTOP] = 19;
     tty->termios.cc[TTY_VSUSP] = 26;
-    tty->termios.ispeed = 38400;
-    tty->termios.ospeed = 38400;
     if (!keymap_loaded) {
         keymap_load_default();
         tty_reset_keyboard_state();

@@ -137,6 +137,7 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define SYS_WAITID 247
 #define SYS_FCHOWNAT 260
 #define SYS_UNAME 63
+#define SYS_TIME 201
 #define SYS_SYSINFO 99
 #define SYS_TIMES 100
 #define SYS_SETHOSTNAME 170
@@ -5279,6 +5280,15 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
            returning is already the barrier this asks for. */
         case SYS_MEMBARRIER: frame->rax = 0; break;
         case SYS_SYSINFO: frame->rax = (uint64_t)sys_sysinfo(frame->rdi); break;
+        /* time(2). glibc calls it rather than clock_gettime when it only wants
+           whole seconds, which procps does once per row it prints. */
+        case SYS_TIME: {
+            int64_t seconds = (int64_t)time_epoch_seconds();
+            if (frame->rdi && copy_to_user(frame->rdi, &seconds, sizeof(seconds)) != 0)
+                frame->rax = (uint64_t)-(int64_t)EFAULT;
+            else frame->rax = (uint64_t)seconds;
+            break;
+        }
         case SYS_TIMES: frame->rax = (uint64_t)sys_times(frame->rdi); break;
         case SYS_GETUID: frame->rax = cred_current() ? cred_current()->uid : 0; break;
         case SYS_GETGID: frame->rax = cred_current() ? cred_current()->gid : 0; break;

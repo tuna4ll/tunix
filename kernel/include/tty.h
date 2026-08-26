@@ -76,7 +76,18 @@ struct tunix_vt_mode {
 #define TTY_VSTART  8
 #define TTY_VSTOP   9
 #define TTY_VSUSP   10
-#define TTY_NCCS    32
+/*
+ * Linux's NCCS, and Linux's struct termios: this is what TCGETS and TCSETS
+ * copy in and out, so its size is an ABI and not a choice.
+ *
+ * It used to carry 32 control characters and a pair of speeds, which is musl's
+ * struct rather than the kernel's -- musl passes its own termios straight to
+ * the ioctl, so the two agreed and nothing showed. glibc does not: tcgetattr
+ * gives the kernel a 36-byte buffer on the stack and converts, so writing 60
+ * bytes into it overran the stack of every program that called isatty(). The
+ * speeds moved into cflag's CBAUD bits, which is where Linux keeps them.
+ */
+#define TTY_NCCS    19
 
 struct tunix_termios {
     uint32_t iflag;
@@ -85,9 +96,9 @@ struct tunix_termios {
     uint32_t lflag;
     uint8_t line;
     uint8_t cc[TTY_NCCS];
-    uint32_t ispeed;
-    uint32_t ospeed;
 };
+
+_Static_assert(sizeof(struct tunix_termios) == 36U, "termios ABI size mismatch");
 
 /*
  * One terminal's line discipline: what has been typed at it, what it has been
