@@ -7,18 +7,18 @@ reflects the code as it exists today.
 
 ## Finding the processors
 
-`acpi_describe_machine` (`src/kernel/acpi.c`) walks the MADT. A type 0 entry is
+`acpi_describe_machine` (`kernel/acpi.c`) walks the MADT. A type 0 entry is
 a processor: it carries an ACPI id, a local APIC id, and flags saying whether
 the socket is filled. The APIC id is what a startup message is addressed to and
 it is **not** the index — firmware numbers processors however it likes, and a
 machine with hyperthreading disabled in its BIOS leaves gaps.
 
-`SMP_MAX_CPUS` (8, `src/kernel/include/percpu.h`) is the ceiling. A table that
+`SMP_MAX_CPUS` (8, `kernel/include/percpu.h`) is the ceiling. A table that
 lists more says so on the console rather than silently rounding down.
 
 ## Bringing one up
 
-`smp_init` (`src/kernel/smp.c`) runs at the end of `kmain`, after the APIC, the
+`smp_init` (`kernel/smp.c`) runs at the end of `kmain`, after the APIC, the
 timer and the syscall MSRs, and before the first process starts. For each
 processor other than the one running:
 
@@ -34,7 +34,7 @@ failure is easier to attribute that way.
 
 ### The trampoline
 
-`src/kernel/arch/x86_64/trampoline.S` is copied to physical `0x8000` and runs
+`kernel/arch/x86_64/trampoline.S` is copied to physical `0x8000` and runs
 from there, so nothing in it may use a link-time address; every reference is
 written as an offset into the blob plus the address it was copied to.
 
@@ -62,7 +62,7 @@ mistake in here is a triple fault and a silent reboot, not a message.
 
 ## What each processor owns
 
-`struct cpu` (`src/kernel/include/percpu.h`) is reached through `GS`. That is
+`struct cpu` (`kernel/include/percpu.h`) is reached through `GS`. That is
 the only way a piece of kernel code can find out which processor is running it:
 every other name in the kernel is shared.
 
@@ -131,7 +131,7 @@ itself, immediately, exactly as before.
 Nothing in this kernel was written to be entered twice at once: the process
 queue is a bare linked list, the VFS tree has no locks, the page tables are
 edited in place. So kernel entry is serialised behind a single ticket lock
-(`src/kernel/klock.c`), taken in `syscall_dispatch` and `isr_handler` and
+(`kernel/klock.c`), taken in `syscall_dispatch` and `isr_handler` and
 dropped by the assembly that called them.
 
 This does not cost the parallelism that was wanted: user code is where the time
@@ -187,7 +187,7 @@ The kernel reaches user memory by walking the page tables in software
 enough: a processor still holding a translation to a page that has just been
 freed would keep writing into memory handed to somebody else.
 
-`smp_flush_address_space` (`src/kernel/smp.c`) is called wherever a mapping is
+`smp_flush_address_space` (`kernel/smp.c`) is called wherever a mapping is
 removed or narrowed: `vmm_unmap_page_in`, `vmm_protect_page_in`, the copy path
 of `vmm_handle_cow_fault` (before the frame goes back to the allocator), and
 `vmm_clone_address_space`, which clears write permission on the *parent*'s
@@ -332,7 +332,7 @@ The System V ABI requires DF to be clear on entry to a C function, and the
 compiler acts on that: a struct assignment or a `memset` becomes `rep movs` or
 `rep stos`, which walks *backwards* when DF is set and writes over whatever
 lies before the destination instead of after it. User code sets DF legitimately
-— musl's `memmove` does, for an overlapping copy — and an interrupt landing in
+— glibc's `memmove` does, for an overlapping copy — and an interrupt landing in
 that window handed the flag straight to the kernel.
 
 The syscall path never had the problem: `FMASK` clears DF on the way in, which
@@ -357,10 +357,12 @@ processors and a desktop are what got somebody looking.
 
 ## Proving it
 
-`bin/smp-test` (`src/userspace/smp_test.c`) times one child doing a fixed
-amount of arithmetic, then four children doing that much each at once. The
-ratio between "what four would have cost one after another" and what they
-actually cost is a number a fast context switch cannot fake.
+A program that times one child doing a fixed amount of arithmetic, then four
+children doing that much each at once. The ratio between "what four would have
+cost one after another" and what they actually cost is a number a fast context
+switch cannot fake. It was `bin/smp-test`, built against the kernel's own libc;
+that libc is gone and so is the program, but the measurement it produced is
+what the numbers below are.
 
 On `-smp 4` (four consecutive runs gave 338, 297, 362 and 327 percent):
 

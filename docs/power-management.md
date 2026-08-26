@@ -1,7 +1,7 @@
 # Power Management
 
 Tunix can turn itself off and restart itself. `poweroff`, `reboot` and `halt`
-work from a shell, and dinit runs them at the end of a shutdown the same way it
+work from a shell, and runit runs them at the end of a shutdown the same way it
 would on any other system.
 
 ## What the firmware has to be asked
@@ -10,7 +10,7 @@ There is no port that means "power down". The ports are named by the FADT, and
 the *value* to write to them lives in the DSDT as an AML object, so getting a
 machine to switch itself off needs both tables.
 
-`acpi_describe_machine` (`src/kernel/acpi.c`) walks the RSDP to the RSDT or
+`acpi_describe_machine` (`kernel/acpi.c`) walks the RSDP to the RSDT or
 XSDT and reads two tables from it:
 
 - the **MADT**, which describes the processors and the interrupt controllers.
@@ -78,7 +78,7 @@ The flush is `ext2fs_sync` and an ATA cache flush. File writes reach ext2 as
 they happen, so this is metadata and the drive's own cache rather than a
 writeback cache of file contents, and it finishes in milliseconds.
 
-`src/kernel/power.c` holds that sequence rather than the syscall, because the
+`kernel/power.c` holds that sequence rather than the syscall, because the
 power button's interrupt wants the same thing.
 
 ## The power button
@@ -92,7 +92,7 @@ in the table, so the default is not a safe guess.
 
 On a press the kernel flushes and powers off. That is a policy decision made in
 the absence of anywhere better to send it: there is no power-management daemon
-here, and dinit's signals mean halt and reboot rather than power off. When
+here, and runit's signals mean halt and reboot rather than power off. When
 something exists to hand the event to, `power_button_pressed` is the one place
 that has to change.
 

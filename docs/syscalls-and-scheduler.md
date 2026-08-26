@@ -16,14 +16,14 @@ Tunix reuses the Linux x86_64 syscall numbers and calling convention:
   `rflags`).
 - Invoked with the `syscall` instruction from user space.
 
-Reusing the Linux numbering means musl-built x86_64 binaries can issue
+Reusing the Linux numbering means unmodified x86_64 binaries can issue
 syscalls Tunix already understands without a translation layer. Numbers and
-handlers are defined in `src/kernel/syscall.c:46` (the `SYS_*` `#define`
+handlers are defined in `kernel/syscall.c:46` (the `SYS_*` `#define`
 block).
 
 ## Entry path
 
-`syscall_init` (`src/kernel/syscall.c:527`) programs the syscall MSRs once at
+`syscall_init` (`kernel/syscall.c:527`) programs the syscall MSRs once at
 boot:
 
 - `EFER.SCE` (MSR `0xC0000080`) is set to enable the `SYSCALL`/`SYSRET`
@@ -33,7 +33,7 @@ boot:
 - `LSTAR` (MSR `0xC0000082`) points at `syscall_entry`, the raw entry point.
 - `FMASK` (MSR `0xC0000084`) clears `IF` and `DF` on entry.
 
-`syscall_entry` (`src/kernel/arch/x86_64/syscall_entry.S:20`) is hand-written
+`syscall_entry` (`kernel/arch/x86_64/syscall_entry.S:20`) is hand-written
 assembly, not a C function, because it runs before there is a valid kernel
 stack:
 
@@ -44,7 +44,7 @@ stack:
    the question has to be answered before there is a stack to answer it with.
 2. It spills all argument/callee-relevant registers plus `rcx`/`r11`
    (the `SYSCALL`-clobbered return `rip`/`rflags`) and the saved user `rsp`
-   into a `struct syscall_frame` (`src/kernel/include/syscall.h:6`) on that
+   into a `struct syscall_frame` (`kernel/include/syscall.h:6`) on that
    stack.
 3. It calls `syscall_dispatch(frame)`.
 4. On return, it rebuilds an `iretq` frame from the (possibly modified)
@@ -55,14 +55,14 @@ Using `iretq` for every return — even the ordinary `SYSCALL` fast path — is
 deliberate: it lets the scheduler resume a process with one common frame
 format regardless of whether it was last suspended by a syscall or by the
 timer interrupt (see below). `process_enter_user`
-(`src/kernel/arch/x86_64/syscall_entry.S:87`) uses the same `iretq` technique
+(`kernel/arch/x86_64/syscall_entry.S:87`) uses the same `iretq` technique
 for the very first entry into user space.
 
 Two separate "kernel stack" pointers exist and both are updated together
 whenever the scheduler switches processes (`activate_process`,
-`src/kernel/process.c:397`):
+`kernel/process.c:397`):
 
-- `tss.rsp0`, set via `set_kernel_stack` (`src/kernel/arch/x86_64/gdt.c`) —
+- `tss.rsp0`, set via `set_kernel_stack` (`kernel/arch/x86_64/gdt.c`) —
   used by the CPU for privilege-level changes on interrupts/exceptions
   (e.g. the timer IRQ).
 - `kernel_rsp` in the per-CPU block, set via `syscall_set_kernel_stack` —
@@ -75,7 +75,7 @@ whichever process *this* processor is running.
 ## Dispatch table
 
 `syscall_dispatch` takes the kernel lock, and `syscall_dispatch_locked`
-(`src/kernel/syscall.c`) is a single `switch` on `frame->rax`. On every call it
+(`kernel/syscall.c`) is a single `switch` on `frame->rax`. On every call it
 first accounts CPU time for the caller (`process_account_runtime`) and frees
 any processes left in `PROCESS_DEAD` state by a previous switch
 (`process_reap_deferred`), then dispatches. Implemented syscalls fall into
@@ -109,7 +109,7 @@ implemented since Tunix is currently single-user: `getuid`/`getgid`/`geteuid`/
 `getegid` always return `0`, `getgroups` reports no supplementary groups.
 `statx` and `rseq` are recognized but return `-ENOSYS`. Anything not listed in
 the `switch` falls through to the `default` case, logs the syscall number,
-and returns `-ENOSYS` (`src/kernel/syscall.c:3221`).
+and returns `-ENOSYS` (`kernel/syscall.c:3221`).
 
 After the `switch`, `process_prepare_user_return` runs (unless the handler
 explicitly opted out via `skip_signal_delivery`) to check for pending signals
@@ -118,12 +118,12 @@ space.
 
 ## Process states and the process table
 
-Every process is a `struct process` (`src/kernel/include/process.h:34`) kept
-in one circular, singly linked list (`queue`, `src/kernel/process.c:45`), with
+Every process is a `struct process` (`kernel/include/process.h:34`) kept
+in one circular, singly linked list (`queue`, `kernel/process.c:45`), with
 `current` pointing at whichever entry is presently running. New processes are
-appended at the tail by `enqueue` (`src/kernel/process.c:122`).
+appended at the tail by `enqueue` (`kernel/process.c:122`).
 
-States (`src/kernel/include/process.h:11`):
+States (`kernel/include/process.h:11`):
 
 - `PROCESS_READY` — runnable, not currently on the CPU.
 - `PROCESS_RUNNING` — the one process the CPU is executing.
@@ -132,7 +132,7 @@ States (`src/kernel/include/process.h:11`):
   `SIGTTOU`).
 - `PROCESS_ZOMBIE` — exited, status not yet collected by the parent.
 - `PROCESS_DEAD` — fully finished; only `process_reap_deferred`
-  (`src/kernel/process.c:220`) still holds a reference, and it frees the
+  (`kernel/process.c:220`) still holds a reference, and it frees the
   struct, kernel stack, and (once unreferenced) address space on the next
   syscall dispatch.
 
@@ -149,15 +149,15 @@ The scheduler is round robin over the circular `queue`, shared by every
 processor — see [Multiprocessor](multiprocessor.md) for how they are started
 and what keeps them out of each other's way:
 
-- `next_runnable(after)` (`src/kernel/process.c:385`) walks forward from
+- `next_runnable(after)` (`kernel/process.c:385`) walks forward from
   `after` (or from the head if `after` is `NULL`) and returns the first
   process in `PROCESS_READY` state, wrapping around the list once. A `RUNNING`
   process is not a candidate: it is loaded on some processor already.
 - The quantum is `PROCESS_DEFAULT_QUANTUM_TICKS` = 5 timer ticks
-  (`src/kernel/process.c:33`). The timer runs at `TIMER_FREQUENCY_HZ` = 250 Hz
-  (`src/kernel/include/timer.h:8`), a PIT rate generator programmed by
-  `timer_init` (`src/kernel/timer.c:14`), so a quantum is ~20 ms.
-- `activate_process` (`src/kernel/process.c:397`) is the only place that makes
+  (`kernel/process.c:33`). The timer runs at `TIMER_FREQUENCY_HZ` = 250 Hz
+  (`kernel/include/timer.h:8`), a PIT rate generator programmed by
+  `timer_init` (`kernel/timer.c:14`), so a quantum is ~20 ms.
+- `activate_process` (`kernel/process.c:397`) is the only place that makes
   a process "the" running one: it sets `current`, resets the quantum if it
   had run out, stamps `last_scheduled_ns`, sets state to `RUNNING`, points
   both kernel-stack registers (this processor's TSS `rsp0` and the
@@ -173,13 +173,13 @@ outside of a few defined points, a "switch" is just: copy the outgoing
 process's register snapshot into its `saved_frame`, copy the incoming
 process's `saved_frame` into the frame that is about to be returned to user
 space via `iretq`, and call `activate_process`. This happens in
-`switch_to_next` (`src/kernel/process.c:456`) for syscall-driven switches, and
+`switch_to_next` (`kernel/process.c:456`) for syscall-driven switches, and
 inline in `process_timer_interrupt` for preemption.
 
 ### Preemption
 
-`timer_irq` (`src/kernel/timer.c:26`) fires on every PIT tick and calls
-`process_timer_interrupt` (`src/kernel/process.c:472`), which only acts if the
+`timer_irq` (`kernel/timer.c:26`) fires on every PIT tick and calls
+`process_timer_interrupt` (`kernel/process.c:472`), which only acts if the
 interrupt landed in user mode (`cs & 3`) on the currently running process. It
 decrements `time_slice_ticks`; when it reaches zero it looks for another
 runnable process via `next_runnable`. If one exists, the current process's
@@ -199,18 +199,18 @@ APIC timer rather than the PIT, which is wired to one of them.
 ### Voluntary and blocking transitions
 
 - **`sched_yield`** calls `process_yield_from_syscall`
-  (`src/kernel/process.c:503`) directly: mark self `READY`, find another
+  (`kernel/process.c:503`) directly: mark self `READY`, find another
   runnable process, switch. If none exists, stay `RUNNING`.
 - **Blocking I/O** (`read`, `poll`/`ppoll`, `select`/`pselect6`, `connect`,
   `recvfrom`/`recvmsg`, `nanosleep`, `clock_nanosleep`) has no wait-queue
-  mechanism. Instead `retry_io_wait` (`src/kernel/syscall.c:605`) rewinds
+  mechanism. Instead `retry_io_wait` (`kernel/syscall.c:605`) rewinds
   `user_rip` by 2 bytes — the length of the `syscall` instruction — and calls
   `process_yield_from_syscall`. The process is rescheduled later, re-executes
   the same `syscall` instruction from scratch, and the handler checks again
   whether the resource is ready or the deadline has passed. `syscall_dispatch`
   clears this retry state (`clear_io_wait`) if a *different* syscall number
   shows up first (e.g. the process was interrupted by a signal handler).
-- **`futex(FUTEX_WAIT)`** (`process_futex_wait`, `src/kernel/process.c:861`)
+- **`futex(FUTEX_WAIT)`** (`process_futex_wait`, `kernel/process.c:861`)
   sets `PROCESS_BLOCKED` plus a wait address/deadline and calls
   `switch_to_next` directly (no retry-by-rip-rewind, since there is nothing
   useful to re-check without waking up first). `futex(FUTEX_WAKE)`
@@ -218,11 +218,11 @@ APIC timer rather than the PIT, which is wired to one of them.
   address within the same address space and flips them back to `READY`;
   expired futex deadlines are swept lazily by `wake_expired_futex_waiters`,
   called from `next_runnable`.
-- **`wait4`** (`process_waitpid_from_syscall`, `src/kernel/process.c:1000`)
+- **`wait4`** (`process_waitpid_from_syscall`, `kernel/process.c:1000`)
   returns immediately if a matching zombie/stopped/continued child already
   exists. Otherwise it records `wait_pid`/`wait_status_user`/`wait_options` on
   the parent, sets `PROCESS_BLOCKED`, and switches away. A child's
-  `notify_parent_of_exit` (`src/kernel/process.c:557`) writes the wait status
+  `notify_parent_of_exit` (`kernel/process.c:557`) writes the wait status
   and return value directly into the blocked parent's `saved_frame.rax` and
   flips it back to `READY` — the parent never re-executes the syscall, since
   it wasn't retried, it was completed on its behalf while suspended.
@@ -240,7 +240,7 @@ APIC timer rather than the PIT, which is wired to one of them.
   only freed later by `process_reap_deferred`, called at the top of every
   `syscall_dispatch`.
 - **Signals** are checked on every return to user space, not just at syscall
-  boundaries: `process_prepare_user_return` (`src/kernel/process.c:1145`) runs
+  boundaries: `process_prepare_user_return` (`kernel/process.c:1145`) runs
   both at the end of `syscall_dispatch` and at the end of
   `process_timer_interrupt`. A pending, unblocked signal can itself drive a
   state transition — `PROCESS_STOPPED` for job-control signals, or process

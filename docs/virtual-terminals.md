@@ -14,14 +14,14 @@ the display manager and the compositor had to be told to stop asking --
 
 Three things, kept apart deliberately:
 
-- **the screen** (`src/kernel/terminal.c`), a grid of cells with a cursor and a
+- **the screen** (`kernel/terminal.c`), a grid of cells with a cursor and a
   scroll region. A screen draws to the display only while it is the active one,
   so a terminal nobody is looking at goes on scrolling into its own cells and
   shows the result the moment it is switched to.
-- **the line discipline** (`src/kernel/tty.c`), which is the termios flags, the
+- **the line discipline** (`kernel/tty.c`), which is the termios flags, the
   input queue, the canonical line buffer, the foreground process group and the
   ANSI parser for what is written to it.
-- **the terminal itself** (`src/kernel/vt.c`), which owns those two and the
+- **the terminal itself** (`kernel/vt.c`), which owns those two and the
   state that only means anything when there is more than one of them: the KD
   mode, the VT mode, and which terminal the display belongs to.
 
@@ -144,20 +144,13 @@ read when there is nothing there.
 
 ## On the image
 
-`/bin/getty` (`src/userspace/getty.c`) is what makes a terminal a *login*
-terminal: it starts a session, opens the terminal, claims it with `TIOCSCTTY`,
-puts it on the standard descriptors and executes `login`. Four dinit services,
-`tty1` to `tty4`, run one each and restart it when the session ends.
+`agetty` from util-linux is what makes a terminal a *login* terminal: it starts
+a session, opens the terminal, claims it with `TIOCSCTTY`, puts it on the
+standard descriptors and executes `login`. Four runit services, `agetty-tty1`
+to `agetty-tty4`, run one each and restart it when the session ends; which four
+is `base-files/services`.
 
-LightDM takes a terminal of its own through `minimum-vt=7` in
-`/etc/lightdm/lightdm.conf`. It passes that number to the X server, and
-`/etc/lightdm/Xserver` switches to it before starting Xorg -- otherwise the
-display would be claimed on whatever terminal happened to be in front when the
-first frame was presented, and Ctrl+Alt+F7 would find an empty console while
-the desktop sat on tty1.
-
-`chvt` prints the active terminal when called with no argument and switches to
-one when given a number.
+`chvt`, from the kbd package, switches to a numbered terminal.
 
 ## What is not here
 

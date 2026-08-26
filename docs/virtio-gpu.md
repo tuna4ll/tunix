@@ -10,7 +10,7 @@ make run-gpu
 
 ## Why it exists
 
-`/dev/dri/card0` has no GPU behind it (see `src/kernel/drm.c`). The display is
+`/dev/dri/card0` has no GPU behind it (see `kernel/drm.c`). The display is
 the region the bootloader set up over VBE, there is no CRTC to reprogram, and so
 presenting a framebuffer means blitting it: a full screen of `memcpy` on the
 CPU, per frame, in the kernel, with the giant lock held. At 1280x720 that is
@@ -25,16 +25,16 @@ screenful of copying goes away.
 
 | File | What it is |
 | --- | --- |
-| `src/kernel/virtio/virtio_pci.c` | The virtio 1.0 PCI transport |
-| `src/kernel/virtio/virtio_ring.c` | A split virtqueue |
-| `src/kernel/virtio/virtio_gpu.c` | The device: resources, scanout, flush |
-| `src/kernel/include/virtio.h`, `virtgpu.h` | The interfaces between them |
+| `kernel/virtio/virtio_pci.c` | The virtio 1.0 PCI transport |
+| `kernel/virtio/virtio_ring.c` | A split virtqueue |
+| `kernel/virtio/virtio_gpu.c` | The device: resources, scanout, flush |
+| `kernel/include/virtio.h`, `virtgpu.h` | The interfaces between them |
 
 A modern virtio device publishes no registers at a fixed offset. It chains
 vendor-specific PCI capabilities, each naming a BAR, an offset and a length, and
 the driver walks that chain to find the common configuration, the notification
 area and the device configuration. `virtio_pci.c` maps whichever BARs those name
-into the shared device window described in `src/kernel/include/vmm.h`.
+into the shared device window described in `kernel/include/vmm.h`.
 
 The transport is **polled**. After a kick it spins on the used ring with a two
 second deadline, the same bargain the RTL8139 driver makes, and for the same
@@ -115,9 +115,7 @@ On `make run-gpu`, against QEMU 11.0.2 with `virtio-vga`:
 
 - the device probes at `1af4:1050`, negotiates `VERSION_1` only, and
   `GET_DISPLAY_INFO` round-trips — `TUNIX: virtio-gpu ready` on the serial log
-- the LightDM greeter and, after logging in, the full Xfce session — wallpaper,
-  panel, window manager, the welcome window — render through the scanout. Both
-  were confirmed with the blit fallback compiled out, so nothing was reaching
-  the screen by the old path
+- the console renders through the scanout, confirmed with the blit fallback
+  compiled out so that nothing could be reaching the screen by the old path
 - the fallback itself still works: a machine with a plain VGA adapter finds no
   virtio-gpu and `drm.c` blits exactly as before

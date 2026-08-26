@@ -66,7 +66,7 @@ sudo mount -o loop /tmp/root.ext2 /mnt
 
 ## How writes reach the disk
 
-The driver registers `vfs_persist_ops` hooks (`src/kernel/include/vfs.h`)
+The driver registers `vfs_persist_ops` hooks (`kernel/include/vfs.h`)
 and the VFS invokes them on every mutation:
 
 | VFS operation | ext2 action |
@@ -107,12 +107,12 @@ processes; no locking is needed.
 
 ## Kernel pieces
 
-- `src/kernel/ata.c` — `ata_pio_write28()` and `ata_flush_cache()`.
-- `src/kernel/ext2.c` — superblock/group descriptor handling, bitmaps,
+- `kernel/ata.c` — `ata_pio_write28()` and `ata_flush_cache()`.
+- `kernel/ext2.c` — superblock/group descriptor handling, bitmaps,
   inode table, block mapping, directory entries, in-kernel mkfs, the boot
   loader/seeder, and the write-through event handlers.
-- `src/kernel/vfs.c` — `vfs_persist_ops` hook points on every tree mutation.
-- `src/kernel/main.c` — probes the disk before touching the initramfs and
+- `kernel/vfs.c` — `vfs_persist_ops` hook points on every tree mutation.
+- `kernel/main.c` — probes the disk before touching the initramfs and
   picks the boot source.
 
 ## Limits

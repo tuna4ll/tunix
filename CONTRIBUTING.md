@@ -44,10 +44,10 @@ make all
 - Follow the style of the surrounding file.
 - Keep kernel code freestanding-friendly.
 - Avoid pulling host headers, libraries, or assumptions into target builds.
-- Do not commit generated output from `build/` or `ports/out/`.
-- Do not patch vendored source under `ports/src/` unless there is a clear
-  reason. Prefer wrapper code, compatibility headers, or port build-script
-  changes.
+- Do not commit generated output from `build/`.
+- The userland is Void Linux and is not built here. A change to what the image
+  ships is a change to `VOID_INSTALL` in the GNUmakefile or to `base-files/`,
+  not a package built from source.
 
 ## Testing
 
@@ -69,11 +69,10 @@ or:
 make headless
 ```
 
-For dynamic runtime or shared-library changes, run the relevant checks:
+and boot the same image under the other firmware, since one image serves both:
 
 ```sh
-make dynamic-runtime-check
-make shared-image-codecs-check
+make run-uefi
 ```
 
 If you cannot run a relevant check, mention that in the commit or pull request.
@@ -86,7 +85,8 @@ Useful starting points:
 
 - [README.md](README.md)
 - [docs/build-and-run.md](docs/build-and-run.md)
-- [docs/ports.md](docs/ports.md)
+- [docs/boot.md](docs/boot.md)
+- [docs/userland.md](docs/userland.md)
 
 ## Commit Messages
 
@@ -100,7 +100,7 @@ Examples:
 
 ```text
 fix(kernel): fix file descriptor cleanup
-feat(ports): add build checks for nano
+feat(build): fetch ovmf for the uefi target
 docs: clarify boot instructions
 ```
 
