@@ -130,12 +130,26 @@ done
 # into over a network.
 PASSWORD_HASH=$(sed -n 's/^tunix:\([^:]*\):.*/\1/p' base-files/append/shadow)
 sed -i "s|^root:[^:]*:|root:$PASSWORD_HASH:|" "$SYSROOT/etc/shadow"
-sed -i 's|^wheel:x:10:.*|wheel:x:10:tunix|' "$SYSROOT/etc/group"
+# Void puts wheel at gid 4, not the 10 it is on most distributions, so the
+# gid is taken from the file rather than written into it.
+sed -i 's|^wheel:x:\([0-9]*\):.*|wheel:x:\1:tunix|' "$SYSROOT/etc/group"
 
 chown -R 1000:1000 "$SYSROOT/home/tunix"
 chmod 0700 "$SYSROOT/home/tunix"
 chmod 0755 "$SYSROOT/etc/rc.local"
 chmod 0440 "$SYSROOT/etc/sudoers.d/tunix"
+
+# /dev, /proc, /sys, /run and /tmp belong to the kernel, which fills them in at
+# boot. Whatever a package left in them here would sit underneath and shadow
+# the real thing -- an install script that redirected to /dev/null left a
+# twenty-byte regular file there, and every `>/dev/null` in the system then
+# failed with EACCES.
+echo ":: clearing the pseudo-filesystem mount points"
+for directory in dev proc sys run tmp; do
+	rm -rf "${SYSROOT:?}/$directory"
+	mkdir -p "$SYSROOT/$directory"
+done
+chmod 1777 "$SYSROOT/tmp"
 
 # Cleared first, so the list in base-files/services is the whole answer rather
 # than an addition to whatever the runit-void package happened to enable --
