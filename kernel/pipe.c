@@ -23,6 +23,18 @@ int pipe_create(struct file **read_end, struct file **write_end) {
     return 0;
 }
 
+struct pipe_buffer *pipe_buffer_create_named(void) {
+    struct pipe_buffer *pipe = (struct pipe_buffer *)kmalloc(sizeof(*pipe));
+    if (!pipe) return NULL;
+    memset(pipe, 0, sizeof(*pipe));
+    pipe->named = 1;
+    return pipe;
+}
+
+void pipe_buffer_destroy(struct pipe_buffer *pipe) {
+    if (pipe) kfree(pipe);
+}
+
 /*
  * Held only in shared mode, because that is the only mode in which a second
  * processor can be inside this pipe. An exclusive holder is alone and pays
@@ -93,5 +105,5 @@ void pipe_release(struct pipe_buffer *pipe, int write_end) {
         if (pipe->readers > 0) pipe->readers--;
         if (pipe->readers == 0) process_wake_all(&pipe->space_wait);
     }
-    if (pipe->readers == 0 && pipe->writers == 0) kfree(pipe);
+    if (!pipe->named && pipe->readers == 0 && pipe->writers == 0) kfree(pipe);
 }

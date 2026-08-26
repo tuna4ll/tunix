@@ -6,6 +6,7 @@
 #include "include/kstring.h"
 #include "include/time.h"
 #include "include/fatfs.h"
+#include "include/pipe.h"
 #include "include/vfs.h"
 
 #define VFS_PATH_MAX 256
@@ -629,6 +630,36 @@ struct vfs_node *vfs_create_symlink(const char *path, const char *target,
     return node;
 }
 
+/*
+ * mkfifo(3), which is what a process supervisor is built out of: runsv talks to
+ * itself through supervise/control and refuses to start without it.
+ *
+ * The node is volatile, so it never reaches the disk. Linux would keep it
+ * there, but a FIFO carries no data across a reboot and the programs that make
+ * them make them again; persisting one would mean teaching the ext2 driver a
+ * file type whose contents do not exist.
+ */
+struct vfs_node *vfs_create_fifo(const char *path, uint32_t mode) {
+    char parent_path[256];
+    char name[128];
+    if (split_parent(path, parent_path, name) != 0) return NULL;
+    struct vfs_node *parent = vfs_lookup(parent_path);
+    if (!parent || (parent->flags & 0xFFU) != VFS_DIRECTORY) return NULL;
+    if (vfs_find_child(parent, name)) return NULL;
+
+    struct vfs_node *node = vfs_alloc_node(name, VFS_PIPE | VFS_VOLATILE);
+    if (!node) return NULL;
+    node->mode = mode & 07777U;
+    if (vfs_attach(parent, node) != 0) {
+        kfree(node);
+        return NULL;
+    }
+    cred_stamp_new_node(node);
+    node->mode = mode & 07777U;
+    inotify_notify(parent, TUNIX_IN_CREATE, name, 0);
+    return node;
+}
+
 struct vfs_node *vfs_attach_symlink(struct vfs_node *parent, const char *name,
                                     const char *target) {
     if (!parent || !name || !target || !target[0]) return NULL;
@@ -725,6 +756,10 @@ static void destroy_node(struct vfs_node *node) {
         return;
     }
     free_node_data(node);
+    if (node->fifo) {
+        pipe_buffer_destroy(node->fifo);
+        node->fifo = NULL;
+    }
     kfree(node);
 }
 

@@ -27,6 +27,7 @@
 #include "include/ext2.h"
 #include "include/time.h"
 #include "include/tty.h"
+#include "include/uts.h"
 #include "include/vt.h"
 #include "include/usercopy.h"
 #include "include/vfs.h"
@@ -215,6 +216,8 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define SYS_INOTIFY_ADD_WATCH 254
 #define SYS_INOTIFY_RM_WATCH 255
 #define SYS_OPENAT 257
+#define SYS_MKNOD 133
+#define SYS_MKNODAT 259
 #define SYS_MKDIRAT 258
 #define SYS_NEWFSTATAT 262
 #define SYS_UNLINKAT 263
@@ -2311,7 +2314,8 @@ static void fill_stat(struct vfs_node *node, struct linux_stat *stat) {
     uint32_t type = kind == VFS_DIRECTORY ? 0040000U :
                     (kind == VFS_CHARDEVICE ? 0020000U :
                     (kind == VFS_BLOCKDEVICE ? 0060000U :
-                    (kind == VFS_SYMLINK ? 0120000U : 0100000U)));
+                    (kind == VFS_SYMLINK ? 0120000U :
+                    (kind == VFS_PIPE ? 0010000U : 0100000U))));
     /* 07777, not 0777: the setuid, setgid and sticky bits are part of the mode
        and a caller that cannot see them cannot tell su from any other program. */
     stat->st_mode = type | (node->mode & 07777U);
@@ -2745,6 +2749,33 @@ static int64_t sys_umount2(uint64_t user_target, int flags) {
     char target[256];
     if (copy_string_from_user(target, sizeof(target), user_target) < 0) return -EFAULT;
     return vfs_umount(target);
+}
+
+/*
+ * mknod(2), for the one file type it can make: a FIFO.
+ *
+ * Device nodes are refused rather than faked. /dev is built by the kernel from
+ * the devices it actually found, so a node made here would name a driver that
+ * is not behind it; MAKEDEV scripts get EPERM, which is what they get on a
+ * system with devtmpfs too. Making a regular file is allowed because mknod(2)
+ * says it is and it costs nothing.
+ */
+static int64_t sys_mknodat(int dirfd, uint64_t user_path, uint32_t mode,
+                           uint64_t device) {
+    (void)device;
+    char path[256];
+    int status = copy_path_at(dirfd, user_path, path);
+    if (status != 0) return status;
+
+    uint32_t type = mode & 0170000U;
+    if (type != 0010000U && type != 0100000U && type != 0) return -EPERM;
+    if (vfs_lookup_nofollow(path)) return -EEXIST;
+    int permitted = cred_may_write_parent(path);
+    if (permitted != 0) return permitted;
+
+    if (type == 0010000U)
+        return vfs_create_fifo(path, mode & 07777U) ? 0 : -EIO;
+    return vfs_create_file_node(path, mode & 07777U) ? 0 : -EIO;
 }
 
 static int64_t sys_symlink_at(uint64_t user_target, int new_dirfd,
@@ -3816,21 +3847,17 @@ static int64_t sys_readv_writev(int fd, uint64_t user_iov, int count, int write_
  * so a kernel that cannot be told its own name reports the wrong one to
  * everything that asks for the rest of the boot.
  */
-#define HOSTNAME_MAX 64
-static char machine_hostname[HOSTNAME_MAX + 1] = "tunix";
-static char machine_domainname[HOSTNAME_MAX + 1] = "(none)";
-
-static int64_t set_machine_name(char *destination, uint64_t user_name,
-                                uint64_t length) {
+static int64_t set_machine_name(int domain, uint64_t user_name, uint64_t length) {
     const struct credentials *cred = cred_current();
     if (cred && cred->euid != 0) return -EPERM;
-    if (length > HOSTNAME_MAX) return -EINVAL;
+    if (length > UTS_NAME_MAX) return -EINVAL;
 
-    char value[HOSTNAME_MAX + 1];
+    char value[UTS_NAME_MAX + 1];
     if (length && copy_from_user(value, user_name, (size_t)length) != 0)
         return -EFAULT;
     value[length] = '\0';
-    memcpy(destination, value, (size_t)length + 1U);
+    if (domain) uts_set_domainname(value, (size_t)length);
+    else uts_set_hostname(value, (size_t)length);
     return 0;
 }
 
@@ -3921,11 +3948,11 @@ static int64_t sys_uname(uint64_t user_buffer) {
     struct linux_utsname value;
     memset(&value, 0, sizeof(value));
     strncpy(value.sysname, "Tunix", sizeof(value.sysname) - 1);
-    strncpy(value.nodename, machine_hostname, sizeof(value.nodename) - 1);
+    strncpy(value.nodename, uts_hostname(), sizeof(value.nodename) - 1);
     strncpy(value.release, "0.1.0", sizeof(value.release) - 1);
     strncpy(value.version, "Tunix Kernel", sizeof(value.version) - 1);
     strncpy(value.machine, "x86_64", sizeof(value.machine) - 1);
-    strncpy(value.domainname, machine_domainname, sizeof(value.domainname) - 1);
+    strncpy(value.domainname, uts_domainname(), sizeof(value.domainname) - 1);
     return copy_to_user(user_buffer, &value, sizeof(value)) == 0 ? 0 : -EFAULT;
 }
 
@@ -5119,10 +5146,10 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         case SYS_TGKILL: frame->rax = (uint64_t)process_send_signal_checked((int64_t)frame->rsi, (int)frame->rdx); break;
         case SYS_UNAME: frame->rax = (uint64_t)sys_uname(frame->rdi); break;
         case SYS_SETHOSTNAME:
-            frame->rax = (uint64_t)set_machine_name(machine_hostname, frame->rdi, frame->rsi);
+            frame->rax = (uint64_t)set_machine_name(0, frame->rdi, frame->rsi);
             break;
         case SYS_SETDOMAINNAME:
-            frame->rax = (uint64_t)set_machine_name(machine_domainname, frame->rdi, frame->rsi);
+            frame->rax = (uint64_t)set_machine_name(1, frame->rdi, frame->rsi);
             break;
         case SYS_FCNTL: {
             struct process *process = process_current();
@@ -5443,6 +5470,14 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             frame->rax = (uint64_t)sys_inotify_init((int)frame->rdi);
             break;
         case SYS_OPENAT: frame->rax = (uint64_t)open_at((int)frame->rdi, frame->rsi, frame->rdx, frame->r10); break;
+        case SYS_MKNOD:
+            frame->rax = (uint64_t)sys_mknodat(AT_FDCWD, frame->rdi,
+                                               (uint32_t)frame->rsi, frame->rdx);
+            break;
+        case SYS_MKNODAT:
+            frame->rax = (uint64_t)sys_mknodat((int)frame->rdi, frame->rsi,
+                                               (uint32_t)frame->rdx, frame->r10);
+            break;
         case SYS_MKDIRAT: frame->rax = (uint64_t)sys_mkdir_at((int)frame->rdi, frame->rsi, frame->rdx); break;
         case SYS_NEWFSTATAT:
             if (frame->r10 & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH | AT_NO_AUTOMOUNT))

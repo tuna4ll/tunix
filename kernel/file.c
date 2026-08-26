@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "include/file.h"
+#include "include/pipe.h"
 #include "include/klock.h"
 
 static int64_t file_read_locked(struct file *file, size_t size, void *buffer);
@@ -58,6 +59,29 @@ struct file *file_open_node(struct vfs_node *node, uint32_t flags) {
      * process that has no idea its own text moved.
      */
     vfs_node_ref(node);
+    /*
+     * A FIFO is not read and written through the node at all: both ends are
+     * ordinary pipe descriptors onto one buffer the node owns. Opening never
+     * blocks waiting for the other side, which POSIX would have it do -- the
+     * programs that use FIFOs here open both ends themselves, and a rendezvous
+     * nothing completes is a hang with no way out.
+     */
+    if ((node->flags & 0xFFU) == VFS_PIPE) {
+        int write_end = (flags & 3U) != 0;
+        if (!node->fifo) {
+            node->fifo = pipe_buffer_create_named();
+            if (!node->fifo) {
+                vfs_node_unref(node);
+                kfree(file);
+                return NULL;
+            }
+        }
+        file->kind = write_end ? FILE_KIND_PIPE_WRITE : FILE_KIND_PIPE_READ;
+        file->pipe = node->fifo;
+        if (write_end) node->fifo->writers++;
+        else node->fifo->readers++;
+        return file;
+    }
     if (node->flags & VFS_FRAMEBUFFER) {
         file->kind = FILE_KIND_FRAMEBUFFER;
     } else if (node->flags & VFS_INPUTDEVICE) {

@@ -61,6 +61,7 @@
 
 struct vfs_node;
 struct file;
+struct pipe_buffer;
 
 typedef int64_t (*vfs_read_fn)(struct vfs_node *, uint64_t, size_t, void *);
 typedef int64_t (*vfs_write_fn)(struct vfs_node *, uint64_t, size_t, const void *);
@@ -93,6 +94,9 @@ struct vfs_node {
     uint32_t dev_major;
     uint32_t dev_minor;
     void *data;
+    /* The buffer behind a FIFO. Created on the first open and freed with the
+       node, so that a FIFO nobody has open is still a FIFO. */
+    struct pipe_buffer *fifo;
     /* Whatever the filesystem that owns this node needs to find it again on
        the medium. The VFS never looks inside it and never frees it: the driver
        that set it owns it, which is what lets a second filesystem exist
@@ -270,6 +274,7 @@ struct vfs_node *vfs_create_file(const char *path, const void *data,
                                  uint64_t length, uint32_t flags, int copy_data);
 struct vfs_node *vfs_create_file_node(const char *path, uint32_t mode);
 struct vfs_node *vfs_create_directory(const char *path, uint32_t mode);
+struct vfs_node *vfs_create_fifo(const char *path, uint32_t mode);
 struct vfs_node *vfs_create_symlink(const char *path, const char *target,
                                     uint32_t flags);
 /* Attach directly to a parent node, for trees that are built rather than
