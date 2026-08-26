@@ -69,8 +69,12 @@ start=$ESP_START, size=$ESP_SECTORS, type=uefi, name="EFI System"
 start=$ROOT_START, size=$ROOT_SECTORS, type=linux, name="tunix-root"
 EOF
 
-dd if="$WORK/esp.img" of="$IMAGE" bs=512 seek=$ESP_START conv=notrunc status=none
-dd if="$WORK/root.img" of="$IMAGE" bs=512 seek=$ROOT_START conv=notrunc status=none
+# seek_bytes so the block size can be chosen for throughput rather than to make
+# the offset land on a whole number of blocks. At 512 bytes this took minutes.
+dd if="$WORK/esp.img" of="$IMAGE" bs=4M oflag=seek_bytes \
+	seek=$(( ESP_START * 512 )) conv=notrunc status=none
+dd if="$WORK/root.img" of="$IMAGE" bs=4M oflag=seek_bytes \
+	seek=$(( ROOT_START * 512 )) conv=notrunc status=none
 
 # BIOS: the first stage goes in the gap between the protective MBR and the
 # first partition, which is why the ESP starts at sector 2048 rather than 34.
