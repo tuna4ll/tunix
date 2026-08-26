@@ -36,6 +36,28 @@
 #define VFS_MS_BIND     0x1000U
 #define VFS_MS_SUPPORTED (VFS_MS_RDONLY | VFS_MS_NOSUID | VFS_MS_NODEV | \
                           VFS_MS_NOEXEC | VFS_MS_REMOUNT | VFS_MS_BIND)
+/*
+ * Flags that say how a filesystem behaves rather than what is being mounted:
+ * when atimes are updated, whether writes are synchronous, whether a failure
+ * is reported. None of them mean anything here, and refusing them is worse
+ * than ignoring them -- libmount puts MS_SILENT on every call it makes, so
+ * `mount -o remount,ro /` failed with EINVAL and took the boot with it.
+ */
+#define VFS_MS_SYNCHRONOUS 0x00000010U
+#define VFS_MS_MANDLOCK    0x00000040U
+#define VFS_MS_DIRSYNC     0x00000080U
+#define VFS_MS_NOSYMFOLLOW 0x00000100U
+#define VFS_MS_NOATIME     0x00000400U
+#define VFS_MS_NODIRATIME  0x00000800U
+#define VFS_MS_SILENT      0x00008000U
+#define VFS_MS_POSIXACL    0x00010000U
+#define VFS_MS_RELATIME    0x00200000U
+#define VFS_MS_STRICTATIME 0x01000000U
+#define VFS_MS_LAZYTIME    0x02000000U
+#define VFS_MS_IGNORED (VFS_MS_SYNCHRONOUS | VFS_MS_MANDLOCK | VFS_MS_DIRSYNC | \
+                        VFS_MS_NOSYMFOLLOW | VFS_MS_NOATIME | VFS_MS_NODIRATIME | \
+                        VFS_MS_SILENT | VFS_MS_POSIXACL | VFS_MS_RELATIME | \
+                        VFS_MS_STRICTATIME | VFS_MS_LAZYTIME)
 
 struct vfs_node;
 struct file;

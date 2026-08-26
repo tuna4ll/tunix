@@ -918,7 +918,8 @@ static int mount_is_pseudo(const char *type) {
 int vfs_mount(const char *source, const char *target, const char *type,
               uint32_t flags) {
     if (!target || !type || target[0] != '/') return -VFS_EINVAL;
-    if (flags & ~VFS_MS_SUPPORTED) return -VFS_EINVAL;
+    if (flags & ~(VFS_MS_SUPPORTED | VFS_MS_IGNORED)) return -VFS_EINVAL;
+    flags &= ~VFS_MS_IGNORED;
 
     struct vfs_mount *existing = mount_at(target);
     if (flags & VFS_MS_REMOUNT) {
