@@ -212,6 +212,45 @@ static int64_t proc_hostname_write(struct vfs_node *node, uint64_t offset,
     return (int64_t)size;
 }
 
+/*
+ * The integer knobs under /proc/sys.
+ *
+ * None of them do anything: there is no dmesg to restrict and no pointers to
+ * hide. They exist because `sysctl --system` runs on the way up and prints an
+ * error for each one it cannot find, and because /etc/runit/core-services
+ * tests kernel.dmesg_restrict with `[ $(sysctl -n ...) -eq 1 ]`, which is a
+ * syntax error rather than a false when the value is the empty string.
+ */
+static int64_t proc_knob_read(struct vfs_node *node, uint64_t offset,
+                              size_t size, void *output) {
+    struct text_buffer text = {{0}, 0};
+    text_unsigned(&text, (uint64_t)(uintptr_t)node->data);
+    text_char(&text, '\n');
+    return text_read(&text, offset, size, output);
+}
+
+static int64_t proc_knob_write(struct vfs_node *node, uint64_t offset,
+                               size_t size, const void *input) {
+    (void)offset;
+    const char *at = (const char *)input;
+    uint64_t value = 0;
+    for (size_t index = 0; index < size && at[index] >= '0' && at[index] <= '9';
+         index++)
+        value = value * 10U + (uint64_t)(at[index] - '0');
+    node->data = (void *)(uintptr_t)value;
+    return (int64_t)size;
+}
+
+static struct vfs_node *virtual_file(struct vfs_node *parent, const char *name,
+                                     vfs_read_fn reader, uint64_t pid);
+
+static void knob(struct vfs_node *parent, const char *name, uint64_t value) {
+    struct vfs_node *node = virtual_file(parent, name, proc_knob_read, value);
+    if (!node) return;
+    node->mode = 0644;
+    node->write = proc_knob_write;
+}
+
 static int64_t proc_ostype_read(struct vfs_node *node, uint64_t offset,
                                 size_t size, void *output) {
     (void)node;
@@ -701,6 +740,37 @@ void procfs_init(void) {
         }
         virtual_file(kernel, "ostype", proc_ostype_read, 0);
         virtual_file(kernel, "osrelease", proc_osrelease_read, 0);
+        knob(kernel, "dmesg_restrict", 0);
+        knob(kernel, "kptr_restrict", 0);
+        knob(kernel, "core_uses_pid", 0);
+        knob(kernel, "kexec_load_disabled", 0);
+        knob(kernel, "perf_event_paranoid", 3);
+        knob(kernel, "unprivileged_bpf_disabled", 1);
+        knob(kernel, "pid_max", 32768);
+        knob(kernel, "panic", 0);
+    }
+
+    struct vfs_node *yama = vfs_mkdir_p("/proc/sys/kernel/yama");
+    if (yama) {
+        yama->mode = 0555;
+        knob(yama, "ptrace_scope", 1);
+    }
+
+    /* seedrng reads the pool size to decide how much entropy to save, and
+       says so on the console when it cannot. */
+    struct vfs_node *random = vfs_mkdir_p("/proc/sys/kernel/random");
+    if (random) {
+        random->mode = 0555;
+        knob(random, "poolsize", 256);
+        knob(random, "entropy_avail", 256);
+    }
+
+    struct vfs_node *fs = vfs_mkdir_p("/proc/sys/fs");
+    if (fs) {
+        fs->mode = 0555;
+        knob(fs, "protected_hardlinks", 1);
+        knob(fs, "protected_symlinks", 1);
+        knob(fs, "file-max", 65536);
     }
 
     struct vfs_node *net = vfs_mkdir_p("/proc/net");
