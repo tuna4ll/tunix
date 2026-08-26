@@ -155,18 +155,25 @@ QEMU_COMMON  = -machine q35,accel=kvm:tcg -cpu host -smp $(QEMU_SMP) \
 # The firmware for the UEFI targets. Taken from the osdev0 nightlies, which is
 # where the Limine templates point, rather than from a distribution package
 # that half the machines building this will not have.
-OVMF_URL ?= https://github.com/osdev0/edk2-ovmf-nightly/releases/latest/download/ovmf-code-x86_64.fd
-OVMF_VARS_URL ?= https://github.com/osdev0/edk2-ovmf-nightly/releases/latest/download/ovmf-vars-x86_64.fd
-OVMF      := $(CACHE)/ovmf-code-x86_64.fd
-OVMF_VARS := $(BUILD)/ovmf-vars-x86_64.fd
+OVMF_URL     ?= https://github.com/osdev0/edk2-ovmf-nightly/releases/latest/download/edk2-ovmf.tar.xz
+OVMF_TARBALL := $(CACHE)/edk2-ovmf.tar.xz
+OVMF         := $(CACHE)/edk2-ovmf/ovmf-code-x86_64.fd
+# The variable store is writable and the firmware writes to it, so it is a
+# build artefact rather than a cached download: a corrupted one is fixed by
+# `make clean`, which would not touch the cache.
+OVMF_VARS    := $(BUILD)/ovmf-vars-x86_64.fd
 
-$(OVMF):
+$(OVMF_TARBALL):
 	@mkdir -p $(dir $@)
 	curl -fL --retry 3 -o $@ $(OVMF_URL)
 
-$(OVMF_VARS):
+$(OVMF): $(OVMF_TARBALL)
+	tar -xJf $< -C $(CACHE)
+	@touch $@
+
+$(OVMF_VARS): $(OVMF)
 	@mkdir -p $(dir $@)
-	curl -fL --retry 3 -o $@ $(OVMF_VARS_URL)
+	cp $(CACHE)/edk2-ovmf/ovmf-vars-x86_64.fd $@
 
 .PHONY: run run-uefi run-gpu headless
 run: $(IMAGE)
