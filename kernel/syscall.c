@@ -88,6 +88,17 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define SYS_PIPE 22
 #define SYS_SELECT 23
 #define SYS_SCHED_YIELD 24
+#define SYS_SCHED_SETSCHEDULER 144
+#define SYS_SCHED_GETSCHEDULER 145
+#define SYS_SCHED_GETPARAM 143
+#define SYS_SCHED_SETPARAM 142
+#define SYS_SCHED_GET_PRIORITY_MAX 146
+#define SYS_SCHED_GET_PRIORITY_MIN 147
+#define SYS_SCHED_RR_GET_INTERVAL 148
+#define SYS_GETCPU 309
+#define SYS_MEMBARRIER 324
+#define SYS_PREADV 295
+#define SYS_PWRITEV 296
 #define SYS_SCHED_SETAFFINITY 203
 #define SYS_SCHED_GETAFFINITY 204
 #define SYS_EPOLL_CREATE 213
@@ -126,6 +137,8 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define SYS_WAITID 247
 #define SYS_FCHOWNAT 260
 #define SYS_UNAME 63
+#define SYS_SYSINFO 99
+#define SYS_TIMES 100
 #define SYS_SETHOSTNAME 170
 #define SYS_SETDOMAINNAME 171
 #define SYS_FCNTL 72
@@ -3820,6 +3833,89 @@ static int64_t set_machine_name(char *destination, uint64_t user_name,
     return 0;
 }
 
+/*
+ * sysinfo(2) and times(2), which everything that reports on the machine wants:
+ * free(1), uptime(1), top(1) and fastfetch all go through one or the other, and
+ * a missing one is not a degraded answer but a tool that prints an error.
+ */
+
+#define CLOCK_TICKS_PER_SECOND 100ULL
+#define NANOSECONDS_PER_TICK (1000000000ULL / CLOCK_TICKS_PER_SECOND)
+
+struct linux_sysinfo {
+    int64_t uptime;
+    uint64_t loads[3];
+    uint64_t totalram;
+    uint64_t freeram;
+    uint64_t sharedram;
+    uint64_t bufferram;
+    uint64_t totalswap;
+    uint64_t freeswap;
+    uint16_t procs;
+    uint16_t pad;
+    uint64_t totalhigh;
+    uint64_t freehigh;
+    uint32_t mem_unit;
+    char reserved[4];
+};
+
+_Static_assert(sizeof(struct linux_sysinfo) == 112U, "sysinfo ABI size mismatch");
+
+struct linux_tms {
+    int64_t tms_utime;
+    int64_t tms_stime;
+    int64_t tms_cutime;
+    int64_t tms_cstime;
+};
+
+static int64_t sys_sysinfo(uint64_t user_buffer) {
+    struct linux_sysinfo value;
+    memset(&value, 0, sizeof(value));
+    value.uptime = (int64_t)(time_uptime_ns() / 1000000000ULL);
+    /* There is no load average to report: the scheduler keeps no history, and
+       inventing one would be worse than the zero every reader already
+       tolerates. */
+    value.totalram = pmm_usable_page_count() * PMM_PAGE_SIZE;
+    value.freeram = pmm_free_page_count() * PMM_PAGE_SIZE;
+    value.procs = (uint16_t)process_count();
+    value.mem_unit = 1;
+    return copy_to_user(user_buffer, &value, sizeof(value)) == 0 ? 0 : -EFAULT;
+}
+
+/*
+ * All of a process's time is charged as user time. Splitting it would mean
+ * timing the syscall path itself, and the scheduler only accounts for how long
+ * a process was on a processor at all -- see process_account_runtime().
+ */
+static int64_t sys_times(uint64_t user_buffer) {
+    if (user_buffer) {
+        struct linux_tms value;
+        memset(&value, 0, sizeof(value));
+        struct process *process = process_current();
+        if (process)
+            value.tms_utime = (int64_t)(process_runtime_ns(process) / NANOSECONDS_PER_TICK);
+        if (copy_to_user(user_buffer, &value, sizeof(value)) != 0) return -EFAULT;
+    }
+    return (int64_t)(time_uptime_ns() / NANOSECONDS_PER_TICK);
+}
+
+/* getrusage(2). Only the time is real; the page-fault and context-switch
+   counters are not kept anywhere. */
+static int64_t sys_getrusage(uint64_t user_buffer) {
+    struct { int64_t seconds; int64_t microseconds; } utime = {0, 0};
+    uint8_t value[144];
+    memset(value, 0, sizeof(value));
+
+    struct process *process = process_current();
+    if (process) {
+        uint64_t nanoseconds = process_runtime_ns(process);
+        utime.seconds = (int64_t)(nanoseconds / 1000000000ULL);
+        utime.microseconds = (int64_t)((nanoseconds % 1000000000ULL) / 1000ULL);
+    }
+    memcpy(value, &utime, sizeof(utime));
+    return copy_to_user(user_buffer, value, sizeof(value)) == 0 ? 0 : -EFAULT;
+}
+
 static int64_t sys_uname(uint64_t user_buffer) {
     struct linux_utsname value;
     memset(&value, 0, sizeof(value));
@@ -4661,6 +4757,24 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             }
             break;
         }
+        /* preadv/pwritev, as pread/pwrite are done a few lines above: move the
+           offset, run the vectored call, put it back. */
+        case SYS_PREADV:
+        case SYS_PWRITEV: {
+            struct process *process = process_current();
+            int fd = (int)frame->rdi;
+            int writing = syscall_number == SYS_PWRITEV;
+            if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd] ||
+                process->files->fds[fd]->kind != FILE_KIND_VFS)
+                frame->rax = (uint64_t)-(int64_t)EBADF;
+            else {
+                uint64_t saved = process->files->fds[fd]->offset;
+                process->files->fds[fd]->offset = frame->r10;
+                frame->rax = (uint64_t)sys_readv_writev(fd, frame->rsi, (int)frame->rdx, writing);
+                process->files->fds[fd]->offset = saved;
+            }
+            break;
+        }
         case SYS_READV:
         case SYS_WRITEV: {
             int writing = syscall_number == SYS_WRITEV;
@@ -5122,11 +5236,50 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
            treats a failure here as a reason to abort the whole session. */
         case SYS_GETPRIORITY: frame->rax = 20; break;
         case SYS_SETPRIORITY: frame->rax = 0; break;
-        case SYS_GETRUSAGE: {
-            uint8_t zero[144]; memset(zero, 0, sizeof(zero));
-            frame->rax = copy_to_user(frame->rsi, zero, sizeof(zero)) == 0 ? 0 : (uint64_t)-(int64_t)EFAULT;
+        case SYS_GETRUSAGE: frame->rax = (uint64_t)sys_getrusage(frame->rsi); break;
+        /*
+         * Scheduling policy. There is one: round robin over every runnable
+         * process at a single priority. SCHED_OTHER is what that is called, and
+         * it is the only thing that can be set; asking for SCHED_FIFO would be
+         * answered with a lie, so it is refused instead. Answering at all
+         * matters because a daemon that cannot read its own policy -- and
+         * procps reads it for every process -- treats the error as fatal.
+         */
+        case SYS_SCHED_GETSCHEDULER: frame->rax = 0; break;
+        case SYS_SCHED_SETSCHEDULER: frame->rax = frame->rsi == 0 ? 0 : (uint64_t)-(int64_t)EINVAL; break;
+        case SYS_SCHED_GETPARAM:
+        case SYS_SCHED_SETPARAM: {
+            uint32_t priority = 0;
+            frame->rax = syscall_number == SYS_SCHED_SETPARAM
+                ? 0
+                : (copy_to_user(frame->rsi, &priority, sizeof(priority)) == 0
+                       ? 0 : (uint64_t)-(int64_t)EFAULT);
             break;
         }
+        /* Both zero, which is what Linux answers for SCHED_OTHER. */
+        case SYS_SCHED_GET_PRIORITY_MAX:
+        case SYS_SCHED_GET_PRIORITY_MIN: frame->rax = 0; break;
+        case SYS_SCHED_RR_GET_INTERVAL: {
+            struct { int64_t seconds; int64_t nanoseconds; } slice = {0, 0};
+            frame->rax = copy_to_user(frame->rsi, &slice, sizeof(slice)) == 0
+                ? 0 : (uint64_t)-(int64_t)EFAULT;
+            break;
+        }
+        case SYS_GETCPU: {
+            uint32_t cpu = cpu_current() ? cpu_current()->index : 0;
+            uint32_t node = 0;
+            if (frame->rdi && copy_to_user(frame->rdi, &cpu, sizeof(cpu)) != 0)
+                frame->rax = (uint64_t)-(int64_t)EFAULT;
+            else if (frame->rsi && copy_to_user(frame->rsi, &node, sizeof(node)) != 0)
+                frame->rax = (uint64_t)-(int64_t)EFAULT;
+            else frame->rax = 0;
+            break;
+        }
+        /* Every processor takes the kernel lock to run a syscall, so a syscall
+           returning is already the barrier this asks for. */
+        case SYS_MEMBARRIER: frame->rax = 0; break;
+        case SYS_SYSINFO: frame->rax = (uint64_t)sys_sysinfo(frame->rdi); break;
+        case SYS_TIMES: frame->rax = (uint64_t)sys_times(frame->rdi); break;
         case SYS_GETUID: frame->rax = cred_current() ? cred_current()->uid : 0; break;
         case SYS_GETGID: frame->rax = cred_current() ? cred_current()->gid : 0; break;
         case SYS_GETEUID: frame->rax = cred_current() ? cred_current()->euid : 0; break;
