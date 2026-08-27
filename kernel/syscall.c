@@ -1500,7 +1500,14 @@ static int64_t sys_sendto(int fd, uint64_t user_data, size_t length, int flags,
         if (length > 4096U) return -EMSGSIZE;
         uint8_t request[4096];
         if (length && copy_from_user(request, user_data, length) != 0) return -EFAULT;
-        return netlink_socket_sendto(netlink, request, length, flags, NULL, 0);
+        /* The destination decides who a uevent message reaches, so it has to
+           come along here as it does through sendmsg. */
+        struct tunix_sockaddr_nl destination;
+        int addressed = user_address && address_length >= sizeof(destination) &&
+            copy_from_user(&destination, user_address, sizeof(destination)) == 0;
+        return netlink_socket_sendto(netlink, request, length, flags,
+                                     addressed ? &destination : NULL,
+                                     addressed ? sizeof(destination) : 0U);
     }
     struct inet_socket *socket = inet_socket_from_fd(fd);
     if (!socket) return -EBADF;

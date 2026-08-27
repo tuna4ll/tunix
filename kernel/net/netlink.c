@@ -639,6 +639,31 @@ static void netlink_uevent_multicast(uint32_t groups, const void *data, size_t l
     }
 }
 
+/*
+ * Deliver to one socket, named by the port it bound.
+ *
+ * This is how udevd hands an event to the worker that will run the rules for
+ * it: the worker binds a socket, the parent keeps its address across the fork
+ * and sends the device to that address alone. Dropping these left every worker
+ * asleep in epoll_wait, the parent reporting that each one was "taking a long
+ * time", and `udevadm settle` waiting out its two minutes at every boot.
+ */
+static void netlink_uevent_unicast(uint32_t portid, const void *data, size_t length,
+                                   uint32_t source_portid,
+                                   const struct netlink_credentials *credentials,
+                                   const struct netlink_socket *sender) {
+    if (!portid || !length) return;
+    for (struct netlink_socket *socket = netlink_registry; socket;
+         socket = socket->registry_next) {
+        if (socket == sender) continue;
+        if (socket->protocol != TUNIX_NETLINK_KOBJECT_UEVENT) continue;
+        if (socket->portid != portid) continue;
+        (void)nl_rx_queue_from(socket, (const uint8_t *)data, length, source_portid,
+                               0, credentials);
+        return;
+    }
+}
+
 void netlink_uevent_broadcast(const void *message, size_t length) {
     /* From the kernel: port zero, uid zero, on the group udevd listens to. */
     struct netlink_credentials kernel = {0, 0, 0};
@@ -655,22 +680,26 @@ int64_t netlink_socket_sendto(struct netlink_socket *socket, const void *data, s
     uint32_t portid = netlink_assign_portid(socket);
 
     /*
-     * The uevent family has no requests to answer. What it does carry is
-     * udevd's re-announcement, addressed to a group rather than to a port:
-     * pass that on to whoever subscribed, and accept anything else in silence.
+     * The uevent family has no requests to answer, but it carries two kinds of
+     * message of its own: udevd's re-announcement, addressed to a group, and
+     * the events it hands to its workers, addressed to one port. Anything
+     * addressed to neither is accepted in silence.
      */
     if (socket->protocol == TUNIX_NETLINK_KOBJECT_UEVENT) {
         const struct tunix_sockaddr_nl *destination =
             (const struct tunix_sockaddr_nl *)address;
-        if (destination && address_length >= sizeof(*destination) &&
-            destination->groups) {
+        if (destination && address_length >= sizeof(*destination)) {
             struct netlink_credentials sender;
             const struct credentials *self = cred_current();
             sender.pid = (uint32_t)process_current_pid();
             sender.uid = self ? self->euid : 0U;
             sender.gid = self ? self->egid : 0U;
-            netlink_uevent_multicast(destination->groups, data, length, portid,
-                                     &sender, socket);
+            if (destination->groups)
+                netlink_uevent_multicast(destination->groups, data, length, portid,
+                                         &sender, socket);
+            else
+                netlink_uevent_unicast(destination->pid, data, length, portid,
+                                       &sender, socket);
         }
         return (int64_t)length;
     }
