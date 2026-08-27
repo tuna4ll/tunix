@@ -3,7 +3,9 @@
 #include "include/heap.h"
 #include "include/file.h"
 #include "include/kstring.h"
+#include "include/cred.h"
 #include "include/pipe.h"
+#include "include/process.h"
 #include "include/unix_socket.h"
 
 #define EADDRINUSE 98
@@ -27,6 +29,12 @@
    per send, so a recv can hand back exactly one message. */
 struct unix_record_queue {
     uint32_t lengths[UNIX_RECORDS_MAX];
+    /* Who sent each one. SO_PEERCRED answers for the connection and is fixed
+       when it is made; SCM_CREDENTIALS answers for the message, and the two
+       stop agreeing the moment the peer forks -- which is the whole of how
+       udevd tells its workers apart, since the message they send it is empty
+       and the sender's pid is all it carries. */
+    struct unix_credentials senders[UNIX_RECORDS_MAX];
     int head;
     int tail;
     int count;
@@ -73,6 +81,8 @@ struct unix_socket {
     int backlog;
     int passcred;
     struct unix_credentials credentials;
+    /* Filled by each read from the record it took. */
+    struct unix_credentials last_sender;
     char path[108];
     struct unix_channel *channel;
     struct unix_socket *pending[UNIX_PENDING_MAX];
@@ -444,6 +454,7 @@ int64_t unix_socket_read(struct unix_socket *socket, size_t size, void *buffer) 
         if (!records) return -ENOTCONN;
         if (records->count == 0) return peer_write_open(socket) ? -EAGAIN : 0;
         size_t record = records->lengths[records->head];
+        socket->last_sender = records->senders[records->head];
         records->head = (records->head + 1) % UNIX_RECORDS_MAX;
         records->count--;
         size_t deliver = size < record ? size : record;
@@ -484,6 +495,11 @@ int64_t unix_socket_write(struct unix_socket *socket, size_t size, const void *b
         }
         pipe->count += size;
         records->lengths[records->tail] = (uint32_t)size;
+        struct unix_credentials *sender = &records->senders[records->tail];
+        const struct credentials *self = cred_current();
+        sender->pid = (int32_t)process_current_pid();
+        sender->uid = self ? self->euid : 0U;
+        sender->gid = self ? self->egid : 0U;
         records->tail = (records->tail + 1) % UNIX_RECORDS_MAX;
         records->count++;
         return (int64_t)size;
@@ -540,6 +556,17 @@ int64_t unix_socket_recv_with_rights(struct unix_socket *socket, size_t size,
     queue->head = (queue->head + 1) % UNIX_ANCILLARY_MAX;
     queue->count--;
     return result;
+}
+
+void unix_socket_last_sender(struct unix_socket *socket,
+                             struct unix_credentials *out) {
+    if (!out) return;
+    /* Before the first message on a record socket -- and always on a byte
+       stream, which carries no per-message sender -- the connection's answer
+       is the best there is. */
+    if (socket && socket->last_sender.pid) { *out = socket->last_sender; return; }
+    if (!socket || unix_socket_get_peer_credentials(socket, out) != 0)
+        memset(out, 0, sizeof(*out));
 }
 
 int unix_socket_read_ready(struct unix_socket *socket) {

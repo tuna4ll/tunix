@@ -49,6 +49,11 @@ int64_t unix_socket_send_with_rights(struct unix_socket *socket, size_t size,
 int64_t unix_socket_recv_with_rights(struct unix_socket *socket, size_t size,
                                      void *buffer, struct file **files,
                                      size_t maximum_files, size_t *file_count);
+/* The credentials of the process that sent the message the last read handed
+   over, which is what SCM_CREDENTIALS reports. */
+void unix_socket_last_sender(struct unix_socket *socket,
+                             struct unix_credentials *out);
+
 int unix_socket_read_ready(struct unix_socket *socket);
 int unix_socket_write_ready(struct unix_socket *socket);
 int unix_socket_peer_closed(struct unix_socket *socket);

@@ -800,6 +800,20 @@ static int64_t sys_write(int fd, uint64_t user_buffer, size_t length) {
 
     size_t completed = 0;
     int64_t failure = 0;
+    /*
+     * An empty write is not always nothing to do. On a message socket it sends
+     * an empty datagram, which the reader is meant to see: udevd's workers
+     * report that they have finished with exactly that -- a zero-byte message
+     * whose whole content is the sender's credentials -- so skipping the call
+     * left every device event marked as still running, and every boot waiting
+     * out `udevadm settle`. Everything else treats a zero-length write as the
+     * no-op it is.
+     */
+    if (!length) {
+        int64_t written = file_write(file, 0, buffer);
+        if (written < 0) return written;
+        return 0;
+    }
     while (completed < length) {
         size_t chunk = length - completed;
         if (chunk > buffer_size) chunk = buffer_size;
@@ -1770,8 +1784,8 @@ static int write_unix_control(struct linux_msghdr *message,
                               struct file **files, size_t file_count,
                               int receive_flags) {
     struct unix_credentials peer = {0, 0, 0};
-    int include_credentials = unix_socket_get_passcred(socket) &&
-        unix_socket_get_peer_credentials(socket, &peer) == 0;
+    int include_credentials = unix_socket_get_passcred(socket);
+    if (include_credentials) unix_socket_last_sender(socket, &peer);
     size_t rights_length = file_count ?
         sizeof(struct linux_cmsghdr) + file_count * sizeof(int32_t) : 0;
     size_t rights_space = file_count ? cmsg_align(rights_length) : 0;
