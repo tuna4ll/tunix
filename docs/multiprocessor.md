@@ -283,9 +283,10 @@ wakeup that never came into a hang instead of a slow loop.
 
 ## When the machine just resets
 
-Not everything four processors find is a concurrency bug. The Xfce session run
-as an unprivileged user reset the machine outright — no panic, no message, QEMU
-simply pausing on the guest's reset.
+Not everything four processors find is a concurrency bug. An Xfce session run
+as an unprivileged user — from the ports build that no longer exists — reset the
+machine outright: no panic, no message, QEMU simply pausing on the guest's
+reset.
 
 That shape is a triple fault: the processor could not deliver a fault, could not
 deliver the double fault that followed, and gave up. Nothing is printed because
@@ -349,8 +350,8 @@ was the cause:
 - **Kernel stacks are 32 KiB rather than 16.** The deepest ordinary path through
   `syscall_dispatch` measures 9688 bytes, so 16 was survivable — but `sys_read`
   (4120) calling a `/proc` reader (4112) is 8 KiB before the VFS frames between
-  them, and xfce4-panel reads `/proc` continuously. That is closer than a stack
-  whose overflow resets the machine should ever be.
+  them, and a panel applet reading `/proc` continuously is what found it. That
+  is closer than a stack whose overflow resets the machine should ever be.
 
 None of this was caused by more processors. It was reachable all along; four
 processors and a desktop are what got somebody looking.
@@ -395,10 +396,11 @@ every thread pool that sizes itself ask that first and only fall back to
 however many it is running. `sched_setaffinity` accepts and does nothing —
 every processor here is equal and nothing is pinned.
 
-The other proof is the desktop: the full Xfce session — Xorg, xfwm4,
-xfce4-panel, xfdesktop, Thunar, all of it heavily threaded — comes up and stays
-up on four processors, which is what turned each of the bugs above from a
-theory into a log.
+The other proof was a desktop: a full Xfce session — Xorg, xfwm4, xfce4-panel,
+xfdesktop, Thunar, all of it heavily threaded — coming up and staying up on four
+processors is what turned each of the bugs above from a theory into a log. That
+session was built by the ports tree and went with it; the bugs it found did not,
+and the userland that runs now is Void's threaded one.
 
 `make run` and `make headless` pass `-smp 4`. `QEMU_SMP=1` runs the machine as
 it was before there was more than one.
