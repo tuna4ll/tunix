@@ -97,17 +97,27 @@ printf 'repository=%s/current\n' "$MIRROR" > "$SYSROOT/etc/xbps.d/00-repository-
 export XBPS_ARCH=x86_64
 XBPS="$XBPS_DIR/usr/bin"
 
+# The downloaded packages live in the cache beside the tarballs rather than in
+# the sysroot's own /var/cache/xbps, which this script deletes at the top of
+# every run. Adding one package would otherwise fetch the other three hundred
+# megabytes over again.
+PACKAGES="$CACHE/packages"
+mkdir -p "$PACKAGES"
+xbps_install() {
+	"$XBPS/xbps-install" -c "$PACKAGES" -r "$SYSROOT" "$@"
+}
+
 # xbps first and on its own. The base tarball is cut a few times a year and the
 # repository moves on without it; xbps refuses to install anything at all into a
 # root whose own xbps package is older than the repository format, and says so
 # with an error that does not mention the tarball.
 echo ":: updating xbps"
-"$XBPS/xbps-install" -S -y -u -r "$SYSROOT" xbps
+xbps_install -S -y -u xbps
 echo ":: updating the base"
-"$XBPS/xbps-install" -S -y -u -r "$SYSROOT"
+xbps_install -S -y -u
 
 echo ":: installing packages"
-"$XBPS/xbps-install" -S -y -r "$SYSROOT" $INSTALL
+xbps_install -S -y $INSTALL
 if [ -n "$REMOVE" ]; then
 	"$XBPS/xbps-remove" -R -y -r "$SYSROOT" $REMOVE
 fi
