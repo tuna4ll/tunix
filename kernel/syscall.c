@@ -479,7 +479,17 @@ struct linux_clone_args {
 
 #define FUTEX_WAIT 0
 #define FUTEX_WAKE 1
+/* The same two waits and wakes, but the waiter names a set of bits and a wake
+   only reaches the waiters it names. glibc issues every timed wait as one of
+   these -- and, since 2.31, every untimed one too -- so a kernel without them
+   makes any pthread condition variable abort with "the futex facility returned
+   an unexpected error code". The other difference is the timeout: a bitset
+   wait is given a deadline rather than a duration. */
+#define FUTEX_WAIT_BITSET 9
+#define FUTEX_WAKE_BITSET 10
 #define FUTEX_PRIVATE_FLAG 128
+/* Measure the deadline against the wall clock rather than against uptime. */
+#define FUTEX_CLOCK_REALTIME 256
 #define FUTEX_CMD_MASK 0x7F
 
 #define MAX_EXEC_ITEMS 64
@@ -5423,9 +5433,16 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         case SYS_FUTEX: {
             int operation = (int)frame->rsi;
             int command = operation & FUTEX_CMD_MASK;
-            if (command == FUTEX_WAKE) {
-                frame->rax = (uint64_t)process_futex_wake(frame->rdi, (int)frame->rdx);
-            } else if (command == FUTEX_WAIT) {
+            int bitset_form = command == FUTEX_WAIT_BITSET || command == FUTEX_WAKE_BITSET;
+            /* val3 carries the bitset; the plain commands mean all of it. */
+            uint32_t bitset = bitset_form ? (uint32_t)frame->r9 : FUTEX_BITSET_MATCH_ANY;
+            if (!bitset) {
+                frame->rax = (uint64_t)-(int64_t)EINVAL;
+                break;
+            }
+            if (command == FUTEX_WAKE || command == FUTEX_WAKE_BITSET) {
+                frame->rax = (uint64_t)process_futex_wake(frame->rdi, (int)frame->rdx, bitset);
+            } else if (command == FUTEX_WAIT || command == FUTEX_WAIT_BITSET) {
                 int64_t timeout_ns = -1;
                 if (frame->r10) {
                     struct linux_timespec timeout;
@@ -5439,10 +5456,19 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
                     }
                     timeout_ns = timeout.tv_sec > (INT64_MAX - timeout.tv_nsec) / 1000000000LL ?
                         INT64_MAX : timeout.tv_sec * 1000000000LL + timeout.tv_nsec;
+                    /* A bitset wait names the moment to give up rather than
+                       how long to wait, against whichever clock the operation
+                       chose. Turn it into the duration the wait wants. */
+                    if (command == FUTEX_WAIT_BITSET) {
+                        uint64_t now = (operation & FUTEX_CLOCK_REALTIME)
+                            ? time_realtime_ns() : time_uptime_ns();
+                        timeout_ns = (uint64_t)timeout_ns > now
+                            ? (int64_t)((uint64_t)timeout_ns - now) : 0;
+                    }
                 }
                 struct process *futex_caller = process_current();
                 int64_t result = process_futex_wait(frame, frame->rdi, (uint32_t)frame->rdx,
-                                                    timeout_ns);
+                                                    timeout_ns, bitset);
                 if (process_current() == futex_caller) frame->rax = (uint64_t)result;
             } else {
                 frame->rax = (uint64_t)-(int64_t)ENOSYS;

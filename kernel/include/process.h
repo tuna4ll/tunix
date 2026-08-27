@@ -179,6 +179,9 @@ struct process {
        what the word holds now is how a lost wakeup tells itself apart from a
        thread that simply has nothing to wait for yet. */
     uint32_t futex_wait_expected;
+    /* Which bits of a FUTEX_WAKE_BITSET this waiter answers to. FUTEX_WAIT
+       asks for all of them, which is what makes the two commands one queue. */
+    uint32_t futex_wait_bitset;
     /* Non-NULL while blocked in process_sleep_on(). */
     const void *wait_channel;
     uint64_t futex_wait_deadline_ns;
@@ -272,9 +275,13 @@ int process_setpgid(int64_t pid, int64_t pgid);
 int64_t process_setsid(void);
 void process_prepare_user_return(struct syscall_frame *frame);
 int process_sigreturn(struct syscall_frame *frame);
+/* A wake that reaches every waiter, whichever bits it asked for. */
+#define FUTEX_BITSET_MATCH_ANY 0xFFFFFFFFU
+
 int64_t process_futex_wait(struct syscall_frame *frame, uint64_t address,
-                           uint32_t expected, int64_t timeout_ns);
-int process_futex_wake(uint64_t address, int maximum);
+                           uint32_t expected, int64_t timeout_ns,
+                           uint32_t bitset);
+int process_futex_wake(uint64_t address, int maximum, uint32_t bitset);
 
 /*
  * Sleep on an opaque channel -- any stable kernel address identifying what is

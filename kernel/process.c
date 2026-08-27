@@ -1220,7 +1220,7 @@ static void robust_wake_address(struct process *process, uint64_t address) {
     if ((value & FUTEX_TID_MASK) != (uint32_t)process->pid) return;
     value = (value & ~FUTEX_TID_MASK) | FUTEX_OWNER_DIED;
     if (vmm_copy_to_space(process->cr3, address, &value, sizeof(value)) != 0) return;
-    (void)process_futex_wake(address, 1);
+    (void)process_futex_wake(address, 1, FUTEX_BITSET_MATCH_ANY);
 }
 
 static int robust_futex_address(uint64_t entry, int64_t offset, uint64_t *address) {
@@ -1302,7 +1302,7 @@ void process_exit_from_syscall(struct syscall_frame *frame, int status) {
         uint32_t zero = 0;
         (void)vmm_copy_to_space(exiting->cr3, clear_address, &zero, sizeof(zero));
         exiting->clear_child_tid_user = 0;
-        (void)process_futex_wake(clear_address, 1);
+        (void)process_futex_wake(clear_address, 1, FUTEX_BITSET_MATCH_ANY);
     }
     process_release_files(exiting);
     /* A process that drove a virtual terminal has to let go of it here: the
@@ -1503,7 +1503,8 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
 }
 
 int64_t process_futex_wait(struct syscall_frame *frame, uint64_t address,
-                           uint32_t expected, int64_t timeout_ns) {
+                           uint32_t expected, int64_t timeout_ns,
+                           uint32_t bitset) {
     if (!current || !frame || (address & 3U) || address >= USER_ADDRESS_LIMIT)
         return -EINVAL;
     uint32_t value = 0;
@@ -1519,6 +1520,7 @@ int64_t process_futex_wait(struct syscall_frame *frame, uint64_t address,
     waiting->futex_wait_active = 1;
     waiting->futex_wait_address = address;
     waiting->futex_wait_expected = expected;
+    waiting->futex_wait_bitset = bitset;
     futex_note('W', address, 0, 0, expected);
     waiting->futex_wait_deadline_ns = timeout_ns < 0 ? UINT64_MAX :
         time_uptime_ns() + (uint64_t)timeout_ns;
@@ -1636,14 +1638,15 @@ void process_dump_wakes(void) {
     }
 }
 
-int process_futex_wake(uint64_t address, int maximum) {
-    if (!current || !queue || maximum <= 0) return 0;
+int process_futex_wake(uint64_t address, int maximum, uint32_t bitset) {
+    if (!current || !queue || maximum <= 0 || !bitset) return 0;
     int woken = 0;
     struct process *item = queue;
     do {
         if (item->state == PROCESS_BLOCKED && item->futex_wait_active &&
             item->memory == current->memory &&
-            item->futex_wait_address == address) {
+            item->futex_wait_address == address &&
+            (item->futex_wait_bitset & bitset)) {
             item->futex_wait_active = 0;
             item->futex_wait_address = 0;
             item->futex_wait_deadline_ns = 0;
@@ -1726,7 +1729,7 @@ static void terminate_sibling_threads(int status) {
                 uint32_t zero = 0;
                 (void)vmm_copy_to_space(item->cr3, clear_address, &zero, sizeof(zero));
                 item->clear_child_tid_user = 0;
-                (void)process_futex_wake(clear_address, 1);
+                (void)process_futex_wake(clear_address, 1, FUTEX_BITSET_MATCH_ANY);
             }
             item->state = PROCESS_DEAD;
             process_release_files(item);
