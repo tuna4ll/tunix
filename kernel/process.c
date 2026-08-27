@@ -894,15 +894,21 @@ void process_protect_area(uint64_t start, uint64_t end, uint64_t page_flags) {
             continue;
         }
         /* Trim whatever lies outside the range into an area of its own, then
-           the remainder is exactly the range and takes the new flags. Each
-           split advances the walk, so this always terminates. */
+           look at what is left rather than stepping over it: a cut at the end
+           leaves the head exactly equal to the range, and stepping over it was
+           how an mprotect that shrank an area from the tail came to change no
+           permissions at all. glibc's malloc does exactly that -- it reserves
+           an arena PROT_NONE and makes the first pages of it readable and
+           writable -- so the first write into a new arena died on a page the
+           kernel had committed read-only.
+
+           Each pass either splits (and the head then falls outside the range,
+           or matches it exactly) or advances, so this still terminates. */
         if (area->start < start || area->end > end) {
             uint64_t cut = area->start < start ? start : end;
             if (!area_split_at(area, cut)) {
                 link = &area->next;
-                continue;
             }
-            link = &area->next;
             continue;
         }
         area->page_flags = page_flags;
