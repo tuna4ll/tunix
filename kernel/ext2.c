@@ -26,8 +26,8 @@ extern void kprintf(const char *fmt, ...);
  * and is not read again. Mounting restores only the tree's shape; file
  * contents arrive one file at a time through ext2_fetch_data(). The VFS tree
  * is the cache, and every mutation is mirrored to disk write-through via the
- * persistence hooks. VFS_VOLATILE directories (/tmp, /run, /dev, /proc,
- * /var/tmp) stay RAM-only. s_state is the seed commit marker: 0 while
+ * persistence hooks. VFS_VOLATILE directories (/tmp, /run, /dev, /proc, /sys,
+ * /var/tmp) and everything under them stay RAM-only. s_state is the seed commit marker: 0 while
  * formatting, 1 only once a full seed landed.
  *
  * Metadata blocks go through single-block write-back caches flushed at the
@@ -871,11 +871,27 @@ static int ext2_tracks(const struct vfs_node *node) {
     return ext2_mounted_flag && !ext2_loading && node && node->disk_inode;
 }
 
+/*
+ * Whether a node belongs to one of the RAM-only trees. The flag sits on the
+ * directory at the top -- /tmp, /sys and the rest -- and everything below it
+ * inherits: asking only about the node itself let a file created in /tmp be
+ * written to the disk, and the root filled up with logs a reboot should have
+ * taken away.
+ */
+static int under_volatile(const struct vfs_node *node) {
+    for (const struct vfs_node *walk = node; walk; walk = walk->parent) {
+        if (walk->flags & VFS_VOLATILE) return 1;
+        /* vfs_root is its own parent, so stop rather than spin. */
+        if (walk->parent == walk) break;
+    }
+    return 0;
+}
+
 /* Returns 0 on success, 1 for intentionally skipped nodes, -1 on error. */
 static int create_one(struct vfs_node *node) {
     if (!node->parent || !node->parent->disk_inode || node->disk_inode) return -1;
     uint32_t kind = node->flags & 0xFFU;
-    if (node->flags & VFS_VOLATILE) return 1;
+    if (under_volatile(node)) return 1;
     /* A name for a file elsewhere in the tree; the walk comes back for it once
        every inode exists, since the file it names may not yet. */
     if (node->link_target) return 1;
@@ -1548,7 +1564,7 @@ static const struct {
     uint32_t mode;
 } ext2_volatile_dirs[] = {
     {"/tmp", 01777}, {"/var/tmp", 01777}, {"/run", 0755},
-    {"/dev", 0755}, {"/proc", 0555},
+    {"/dev", 0755}, {"/proc", 0555}, {"/sys", 0555},
 };
 
 static void mark_volatile_dirs(void) {
@@ -1562,10 +1578,11 @@ static void mark_volatile_dirs(void) {
             node->mode = ext2_volatile_dirs[index].mode;
         }
         node->flags |= VFS_VOLATILE;
-        /* /dev and /proc are declared by the drivers that build them, which
-           have not run yet. */
+        /* /dev, /proc and /sys are declared by the drivers that build them,
+           which have not run yet. */
         if (strcmp(ext2_volatile_dirs[index].path, "/dev") != 0 &&
-            strcmp(ext2_volatile_dirs[index].path, "/proc") != 0)
+            strcmp(ext2_volatile_dirs[index].path, "/proc") != 0 &&
+            strcmp(ext2_volatile_dirs[index].path, "/sys") != 0)
             vfs_mount_builtin("tmpfs", ext2_volatile_dirs[index].path, "tmpfs", node);
     }
 }
