@@ -202,9 +202,33 @@ static int ata_dma_transfer_chunk(uint32_t lba, uint32_t sectors,
     return 0;
 }
 
+/*
+ * Whether there is a controller at the legacy ports at all.
+ *
+ * A machine with no ISA IDE -- q35, which is what this is usually run on --
+ * leaves those ports unclaimed, and reads of an unclaimed port return 0xFF.
+ * That looks exactly like a drive that is permanently busy, so the identify
+ * below waited out its ten million reads before giving up: each one traps to
+ * the emulator, and the boot spent seventy-five seconds asking a controller
+ * that was not there.
+ *
+ * The check is the usual one: write two scratch registers and read them back.
+ * Nothing answers on a floating bus, and a real controller keeps what it was
+ * given whether or not a drive is attached.
+ */
+static int ata_controller_present(void) {
+    if (inb(ATA_STATUS) == 0xFFU) return 0;
+    outb(ATA_LBA0, 0x55U);
+    outb(ATA_LBA1, 0xAAU);
+    if (inb(ATA_LBA0) != 0x55U || inb(ATA_LBA1) != 0xAAU) return 0;
+    return 1;
+}
+
 uint32_t ata_disk_sectors(void) {
     if (identify_attempted) return cached_sectors;
     identify_attempted = 1;
+
+    if (!ata_controller_present()) return 0;
 
     outb(ATA_HDDEVSEL, 0xA0U);
     io_wait();
@@ -215,7 +239,10 @@ uint32_t ata_disk_sectors(void) {
     outb(ATA_COMMAND, ATA_CMD_IDENTIFY);
 
     uint8_t status = inb(ATA_STATUS);
-    if (status == 0) return 0;
+    /* Zero is no drive on this channel; all ones is the floating bus again,
+       which the presence check above cannot rule out on its own once the
+       command has been written. */
+    if (status == 0 || status == 0xFFU) return 0;
     if (ata_wait_not_busy() < 0) return 0;
     if (inb(ATA_LBA1) != 0 || inb(ATA_LBA2) != 0) return 0;
     if (ata_wait_drq() != 0) return 0;
