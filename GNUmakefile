@@ -112,7 +112,15 @@ VOID_ROOTFS_DATE ?= 20250202
 VOID_INSTALL ?= base-files bash coreutils util-linux findutils diffutils \
 	grep sed gawk tar gzip xz procps-ng psmisc iproute2 iputils file less \
 	which ncurses shadow sudo runit runit-void tzdata ca-certificates \
-	e2fsprogs kbd nano htop curl fastfetch
+	e2fsprogs kbd nano htop curl fastfetch \
+	$(VOID_INSTALL_GRAPHICAL)
+
+# The graphical session. weston pulls most of its own world in; what is listed
+# beside it is what a compositor needs and nothing depends on: the software
+# renderer, the keymaps libxkbcommon compiles, a font for weston-terminal, and
+# the seat daemon weston asks for a device through.
+VOID_INSTALL_GRAPHICAL ?= weston mesa-dri xkeyboard-config dejavu-fonts-ttf \
+	seatd
 VOID_REMOVE ?=
 
 BASE_FILES := $(shell find base-files -type f 2>/dev/null)
@@ -120,7 +128,7 @@ BASE_FILES := $(shell find base-files -type f 2>/dev/null)
 .PHONY: sysroot
 sysroot: $(SYSROOT_STAMP)
 
-$(SYSROOT_STAMP): support/sysroot.sh $(BASE_FILES) | $(BUILD)
+$(SYSROOT_STAMP): support/sysroot.sh $(BASE_FILES) GNUmakefile | $(BUILD)
 	VOID_MIRROR='$(VOID_MIRROR)' VOID_ROOTFS_DATE='$(VOID_ROOTFS_DATE)' \
 	VOID_INSTALL='$(VOID_INSTALL)' VOID_REMOVE='$(VOID_REMOVE)' \
 		support/sysroot.sh $(SYSROOT) $(CACHE)
