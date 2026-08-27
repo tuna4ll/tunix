@@ -10,6 +10,10 @@
 #define VFS_BLOCKDEVICE 0x04U
 #define VFS_PIPE        0x05U
 #define VFS_SYMLINK     0x06U
+/* The name a bound AF_UNIX socket has in the filesystem. It holds nothing --
+   the connection is made through the socket registry, not through the node --
+   but it exists, and programs look for it. */
+#define VFS_SOCKET      0x07U
 #define VFS_READONLY    0x100U
 #define VFS_OWNED_DATA  0x200U
 #define VFS_INPUTDEVICE 0x400U
@@ -275,6 +279,7 @@ struct vfs_node *vfs_create_file(const char *path, const void *data,
 struct vfs_node *vfs_create_file_node(const char *path, uint32_t mode);
 struct vfs_node *vfs_create_directory(const char *path, uint32_t mode);
 struct vfs_node *vfs_create_fifo(const char *path, uint32_t mode);
+struct vfs_node *vfs_create_socket_node(const char *path, uint32_t mode);
 struct vfs_node *vfs_create_symlink(const char *path, const char *target,
                                     uint32_t flags);
 /* Attach directly to a parent node, for trees that are built rather than

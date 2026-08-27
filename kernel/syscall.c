@@ -1362,7 +1362,20 @@ static int64_t sys_bind(int fd, uint64_t user_address, uint64_t length) {
     if (unix_value) {
         struct tunix_sockaddr_un address;
         int status = copy_sockaddr_un(user_address, length, &address);
-        return status < 0 ? status : unix_socket_bind(unix_value, &address, (size_t)length);
+        if (status < 0) return status;
+        /* A name in the filesystem for every socket bound to a path, as Linux
+           gives one. The abstract namespace -- a leading NUL -- has no such
+           name and gets none. The node is refused if the path is taken, which
+           is why a daemon unlinks its socket before binding it. */
+        int named = address.path[0] != 0;
+        if (named && vfs_lookup_nofollow(address.path)) return -EADDRINUSE;
+        status = unix_socket_bind(unix_value, &address, (size_t)length);
+        if (status == 0 && named) {
+            struct process *self = process_current();
+            uint32_t mode = 0777U & ~(self ? self->umask : 0U);
+            (void)vfs_create_socket_node(address.path, mode);
+        }
+        return status;
     }
     struct netlink_socket *netlink_value = netlink_socket_from_fd(fd);
     if (netlink_value) {
@@ -2400,7 +2413,8 @@ static void fill_stat(struct vfs_node *node, struct linux_stat *stat) {
                     (kind == VFS_CHARDEVICE ? 0020000U :
                     (kind == VFS_BLOCKDEVICE ? 0060000U :
                     (kind == VFS_SYMLINK ? 0120000U :
-                    (kind == VFS_PIPE ? 0010000U : 0100000U))));
+                    (kind == VFS_PIPE ? 0010000U :
+                    (kind == VFS_SOCKET ? 0140000U : 0100000U)))));
     /* 07777, not 0777: the setuid, setgid and sticky bits are part of the mode
        and a caller that cannot see them cannot tell su from any other program. */
     stat->st_mode = type | (node->mode & 07777U);

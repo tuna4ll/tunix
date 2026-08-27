@@ -660,6 +660,39 @@ struct vfs_node *vfs_create_fifo(const char *path, uint32_t mode) {
     return node;
 }
 
+/*
+ * The name bind(2) gives a unix socket.
+ *
+ * Nothing is ever read from or written to it: a connect(2) finds the listener
+ * by path in the socket layer, and this node exists only so that the path is
+ * there to be seen. Programs rely on that constantly -- waiting for a daemon
+ * by testing for its socket is the usual idiom, and a socket nothing can see
+ * makes every such test say the daemon is not running.
+ *
+ * Volatile, like a FIFO: a socket carries nothing across a reboot, and the
+ * process that would answer on it is gone by then anyway.
+ */
+struct vfs_node *vfs_create_socket_node(const char *path, uint32_t mode) {
+    char parent_path[256];
+    char name[128];
+    if (split_parent(path, parent_path, name) != 0) return NULL;
+    struct vfs_node *parent = vfs_lookup(parent_path);
+    if (!parent || (parent->flags & 0xFFU) != VFS_DIRECTORY) return NULL;
+    if (vfs_find_child(parent, name)) return NULL;
+
+    struct vfs_node *node = vfs_alloc_node(name, VFS_SOCKET | VFS_VOLATILE);
+    if (!node) return NULL;
+    node->mode = mode & 07777U;
+    if (vfs_attach(parent, node) != 0) {
+        kfree(node);
+        return NULL;
+    }
+    cred_stamp_new_node(node);
+    node->mode = mode & 07777U;
+    inotify_notify(parent, TUNIX_IN_CREATE, name, 0);
+    return node;
+}
+
 struct vfs_node *vfs_attach_symlink(struct vfs_node *parent, const char *name,
                                     const char *target) {
     if (!parent || !name || !target || !target[0]) return NULL;
