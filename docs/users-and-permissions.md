@@ -23,34 +23,28 @@ keyboard. The groups are not decoration: the device nodes carry them.
 | `/dev/input/event*` | `input` (45) |
 | `/dev/snd/*` | `audio` (29) |
 | `/dev/pts/*` | `tty` (5) |
-| `/dev/sda` | `disk` (6) |
+| `/dev/sda`, `/dev/sda1`, ... | `disk` (6) |
 
 ## Logging in
 
-dinit starts LightDM, which asks for the password at a graphical greeter and
-checks it through PAM -- see [Display Manager](display-manager.md). The
-`login` service is still defined for a console login and does the same thing
-without a screen: shadow's `login(1)` checks `/etc/shadow` directly, sets the
-account's groups, gid and uid, and execs the login shell.
+runit runs an `agetty` on each of the first four virtual terminals; `login(1)`
+from shadow-utils checks `/etc/shadow`, sets the account's groups, gid and uid,
+and executes the login shell. Everything after that runs as whoever logged in.
 
-Either way the desktop runs as whoever logged in rather than as root. Everything
-it once needed root for -- the runtime directory, the machine id, the compiled
-GSettings schemas -- happens earlier in `/etc/rc.d/rcS`, which is still root.
-
-`login`, `su` and `sudo` do not go through PAM: they were built without it and
-each still reads `/etc/shadow` its own way. Only LightDM authenticates through
-`/etc/pam.d`.
+Both accounts share one password hash, and it is in
+`base-files/append/shadow` in plain sight: this is a machine you boot in an
+emulator to look at, not one anybody logs into over a network.
 
 ## Becoming somebody else
 
-`su`, `sudo` and `passwd` are the real programs, ported from shadow-utils and
-sudo. They work because the kernel honours the set-user-ID bit: the binaries are
-installed 4755, so an exec of them runs with euid 0 while the real uid stays the
-caller's, and dropping back is what the saved uid is for.
+`su`, `sudo` and `passwd` are Void's own binaries, unmodified. They work because
+the kernel honours the set-user-ID bit: they are installed 4755, so an exec of
+them runs with euid 0 while the real uid stays the caller's, and dropping back
+is what the saved uid is for.
 
 ```
 $ id
-uid=1000(tunix) gid=1000(tunix) groups=1000(tunix),4(adm),10(wheel),29(audio),44(video),45(input),100(users)
+uid=1000(tunix) gid=1000(tunix) groups=1000(tunix),4(wheel)
 $ sudo id -u
 [sudo] password for tunix:
 0
@@ -60,7 +54,7 @@ Password:
 root
 ```
 
-`/etc/sudoers` gives `%wheel` full access. `visudo` edits it safely.
+`base-files/overlay/etc/sudoers.d/tunix` is what gives the account access.
 
 ## What the kernel enforces
 
@@ -98,12 +92,9 @@ terminal it cannot name.
 
 ## How the image gets its permissions
 
-The rootfs is staged on a Windows drive, which reports every file as 0777
-root:root, so the modes cannot come from the staging tree. `make` runs
-`scripts/apply-permissions.py` over the finished archive instead: programs (ELF
-or `#!`) become 0755, data 0644, directories 0755, and
-`scripts/rootfs-permissions.conf` lists the exceptions -- `/etc/shadow` at 0600,
-the setuid binaries at 4755, `/tmp` sticky, `/home/tunix` owned by uid 1000.
-
-That file is the place to add a permission, not the Makefile: a `chmod` in the
-build is a no-op on that filesystem.
+From the sysroot, unchanged: `mkfs.ext2 -d` copies each file's mode and owner
+into the filesystem it builds. There used to be a table of them applied to the
+finished archive, because the tree was staged on a Windows drive that reports
+everything as 0777 root:root -- `support/sysroot.sh` now refuses to build there
+instead, and says where to put the sysroot rather than working around it. A
+filesystem that cannot hold a setuid bit cannot hold a root filesystem.
