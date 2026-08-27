@@ -10,14 +10,27 @@
 #define TUNIX_AF_NETLINK 16
 #define TUNIX_NETLINK_ROUTE 0
 #define TUNIX_NETLINK_SOCK_DIAG 4
-/* Hotplug notifications. Tunix has no hotplug -- every device exists from boot
-   -- so a socket on this family is permanently silent. It exists because
-   libudev's monitor is created before any device is enumerated, and udev
-   consumers (weston's input layer among them) treat a failure to create the
-   monitor as a failure to find any device at all. */
+/* Device notifications, which is how udevd hears that a device exists at all:
+   writing an action to a /sys uevent file broadcasts it on this family, udevd
+   applies its rules and re-broadcasts the result, and its listeners -- weston's
+   display and input layers among them -- act on that. */
 #define TUNIX_NETLINK_KOBJECT_UEVENT 15
 
+/* The two multicast groups on that family, numbered as Linux numbers them: the
+   kernel announces on 1, udevd re-announces on 2. A bind asks for them as a
+   mask, so group N is bit N-1. */
+#define TUNIX_UEVENT_GROUP_KERNEL 1
+#define TUNIX_UEVENT_GROUP_UDEV 2
+
 struct netlink_socket;
+
+/* Who sent the datagram a read just returned. udev refuses any message whose
+   sender is not root, so this has to travel with the data. */
+struct netlink_credentials {
+    uint32_t pid;
+    uint32_t uid;
+    uint32_t gid;
+};
 
 /* struct sockaddr_nl as seen from userspace. */
 struct tunix_sockaddr_nl {
@@ -43,5 +56,17 @@ int64_t netlink_socket_write(struct netlink_socket *socket, size_t length, const
 
 int netlink_socket_read_ready(struct netlink_socket *socket);
 int netlink_socket_write_ready(struct netlink_socket *socket);
+
+/* SO_PASSCRED, which udev's monitor sets before it will believe anything. */
+void netlink_socket_set_passcred(struct netlink_socket *socket, int on);
+int netlink_socket_get_passcred(struct netlink_socket *socket);
+/* The credentials that came with the datagram the last read handed over. */
+void netlink_socket_last_credentials(struct netlink_socket *socket,
+                                     struct netlink_credentials *out);
+
+/* Announce a device event to everything listening on the kernel group. The
+   message is Linux's: a "<action>@<devpath>" line, then NUL-terminated
+   KEY=VALUE properties. */
+void netlink_uevent_broadcast(const void *message, size_t length);
 
 #endif

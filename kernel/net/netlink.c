@@ -16,8 +16,10 @@
 #include <stdint.h>
 #include "../include/heap.h"
 #include "../include/kstring.h"
+#include "../include/cred.h"
 #include "../include/net/netlink.h"
 #include "../include/net/net.h"
+#include "../include/process.h"
 
 
 #define EAGAIN 11
@@ -151,6 +153,13 @@ struct rtmsg {
  */
 struct netlink_datagram {
     struct netlink_datagram *next;
+    /* The address a read reports as the source, and the credentials a
+       recvmsg reports beside it. Both are per-datagram rather than per-socket
+       because one multicast socket carries messages from the kernel and from
+       udevd at once, and udev tells them apart by exactly these. */
+    uint32_t source_portid;
+    uint32_t source_groups;
+    struct netlink_credentials source_credentials;
     size_t length;
     uint8_t data[];
 };
@@ -160,11 +169,19 @@ struct netlink_socket {
     int protocol;
     uint32_t portid;
     int bound;
+    /* Multicast groups as a mask, the way bind() asks for them: group N is
+       bit N-1. */
+    uint32_t groups;
+    int passcred;
+    struct netlink_credentials last_credentials;
     struct netlink_datagram *rx_head;
     struct netlink_datagram *rx_tail;
+    /* Every open netlink socket, so a broadcast can find its listeners. */
+    struct netlink_socket *registry_next;
 };
 
 static uint32_t netlink_next_portid = 0;
+static struct netlink_socket *netlink_registry = NULL;
 
 struct netlink_socket *netlink_socket_create(int protocol) {
     if (protocol != TUNIX_NETLINK_ROUTE && protocol != TUNIX_NETLINK_SOCK_DIAG &&
@@ -174,6 +191,8 @@ struct netlink_socket *netlink_socket_create(int protocol) {
     memset(socket, 0, sizeof(*socket));
     socket->refs = 1;
     socket->protocol = protocol;
+    socket->registry_next = netlink_registry;
+    netlink_registry = socket;
     return socket;
 }
 
@@ -184,6 +203,9 @@ void netlink_socket_ref(struct netlink_socket *socket) {
 void netlink_socket_unref(struct netlink_socket *socket) {
     if (!socket || socket->refs <= 0) return;
     if (--socket->refs != 0) return;
+    for (struct netlink_socket **at = &netlink_registry; *at; at = &(*at)->registry_next) {
+        if (*at == socket) { *at = socket->registry_next; break; }
+    }
     while (socket->rx_head) {
         struct netlink_datagram *dead = socket->rx_head;
         socket->rx_head = dead->next;
@@ -202,8 +224,26 @@ int netlink_socket_bind(struct netlink_socket *socket, const void *address, size
     const struct tunix_sockaddr_nl *nl = (const struct tunix_sockaddr_nl *)address;
     if (nl && length >= sizeof(*nl) && nl->pid) socket->portid = nl->pid;
     else netlink_assign_portid(socket);
+    /* Asking for no group is the normal case and is not a subscription: a
+       request/response socket binds with a zero mask. */
+    if (nl && length >= sizeof(*nl)) socket->groups = nl->groups;
     socket->bound = 1;
     return 0;
+}
+
+void netlink_socket_set_passcred(struct netlink_socket *socket, int on) {
+    if (socket) socket->passcred = on ? 1 : 0;
+}
+
+int netlink_socket_get_passcred(struct netlink_socket *socket) {
+    return socket ? socket->passcred : 0;
+}
+
+void netlink_socket_last_credentials(struct netlink_socket *socket,
+                                     struct netlink_credentials *out) {
+    if (!out) return;
+    if (!socket) { memset(out, 0, sizeof(*out)); return; }
+    *out = socket->last_credentials;
 }
 
 int netlink_socket_getsockname(struct netlink_socket *socket, void *address, size_t *length) {
@@ -546,20 +586,64 @@ static int handle_diag_request(struct nl_builder *b, const struct nlmsghdr *requ
     return 1;
 }
 
-/* Queue one datagram. Empty ones are not queued: a zero-length read means
-   end of stream to most callers, which is not what an empty reply is. */
-static int nl_rx_queue(struct netlink_socket *socket, const uint8_t *data, size_t length) {
+/* Queue one datagram from a given sender. Empty ones are not queued: a
+   zero-length read means end of stream to most callers, which is not what an
+   empty reply is. */
+static int nl_rx_queue_from(struct netlink_socket *socket, const uint8_t *data,
+                            size_t length, uint32_t source_portid,
+                            uint32_t source_groups,
+                            const struct netlink_credentials *credentials) {
     if (!length) return 0;
     struct netlink_datagram *datagram =
         (struct netlink_datagram *)kmalloc(sizeof(*datagram) + length);
     if (!datagram) return -1;
     datagram->next = NULL;
+    datagram->source_portid = source_portid;
+    datagram->source_groups = source_groups;
+    if (credentials) datagram->source_credentials = *credentials;
+    else memset(&datagram->source_credentials, 0, sizeof(datagram->source_credentials));
     datagram->length = length;
     memcpy(datagram->data, data, length);
     if (socket->rx_tail) socket->rx_tail->next = datagram;
     else socket->rx_head = datagram;
     socket->rx_tail = datagram;
     return 0;
+}
+
+/* A reply the kernel made to this socket's own request: no group, and the
+   kernel's port, which is zero. */
+static int nl_rx_queue(struct netlink_socket *socket, const uint8_t *data, size_t length) {
+    return nl_rx_queue_from(socket, data, length, 0, 0, NULL);
+}
+
+/*
+ * Deliver to everything listening on a group of the uevent family.
+ *
+ * `groups` is the mask a sender addressed, which on Linux may name several at
+ * once; a listener gets one copy if any bit it subscribed to is in it. The
+ * sender never gets its own message back -- udevd both listens on group 1 and
+ * sends on group 2, and would otherwise process its own output.
+ */
+static void netlink_uevent_multicast(uint32_t groups, const void *data, size_t length,
+                                     uint32_t source_portid,
+                                     const struct netlink_credentials *credentials,
+                                     const struct netlink_socket *sender) {
+    if (!groups || !length) return;
+    for (struct netlink_socket *socket = netlink_registry; socket;
+         socket = socket->registry_next) {
+        if (socket == sender) continue;
+        if (socket->protocol != TUNIX_NETLINK_KOBJECT_UEVENT) continue;
+        if (!(socket->groups & groups)) continue;
+        (void)nl_rx_queue_from(socket, (const uint8_t *)data, length, source_portid,
+                               groups, credentials);
+    }
+}
+
+void netlink_uevent_broadcast(const void *message, size_t length) {
+    /* From the kernel: port zero, uid zero, on the group udevd listens to. */
+    struct netlink_credentials kernel = {0, 0, 0};
+    netlink_uevent_multicast(1U << (TUNIX_UEVENT_GROUP_KERNEL - 1), message, length,
+                             0, &kernel, NULL);
 }
 
 int64_t netlink_socket_sendto(struct netlink_socket *socket, const void *data, size_t length,
@@ -570,9 +654,26 @@ int64_t netlink_socket_sendto(struct netlink_socket *socket, const void *data, s
     if (!socket) return -EINVAL;
     uint32_t portid = netlink_assign_portid(socket);
 
-    /* Nothing ever asks the uevent family a question, and it has no replies to
-       give: accept the write and stay silent. */
-    if (socket->protocol == TUNIX_NETLINK_KOBJECT_UEVENT) return (int64_t)length;
+    /*
+     * The uevent family has no requests to answer. What it does carry is
+     * udevd's re-announcement, addressed to a group rather than to a port:
+     * pass that on to whoever subscribed, and accept anything else in silence.
+     */
+    if (socket->protocol == TUNIX_NETLINK_KOBJECT_UEVENT) {
+        const struct tunix_sockaddr_nl *destination =
+            (const struct tunix_sockaddr_nl *)address;
+        if (destination && address_length >= sizeof(*destination) &&
+            destination->groups) {
+            struct netlink_credentials sender;
+            const struct credentials *self = cred_current();
+            sender.pid = (uint32_t)process_current_pid();
+            sender.uid = self ? self->euid : 0U;
+            sender.gid = self ? self->egid : 0U;
+            netlink_uevent_multicast(destination->groups, data, length, portid,
+                                     &sender, socket);
+        }
+        return (int64_t)length;
+    }
 
     size_t cap = 8192;
     struct nl_builder builder = {0};
@@ -626,6 +727,10 @@ int64_t netlink_socket_recvfrom(struct netlink_socket *socket, void *data, size_
     size_t copy = available < length ? available : length;
     if (copy) memcpy(data, datagram->data, copy);
 
+    uint32_t source_portid = datagram->source_portid;
+    uint32_t source_groups = datagram->source_groups;
+    socket->last_credentials = datagram->source_credentials;
+
     if (!(flags & NL_MSG_PEEK)) {
         socket->rx_head = datagram->next;
         if (!socket->rx_head) socket->rx_tail = NULL;
@@ -636,6 +741,11 @@ int64_t netlink_socket_recvfrom(struct netlink_socket *socket, void *data, size_
         struct tunix_sockaddr_nl nl;
         memset(&nl, 0, sizeof(nl));
         nl.family = TUNIX_AF_NETLINK;
+        /* udev decides whether to trust a message by these two: a kernel
+           announcement is group 1 from port 0, and anything claiming to be
+           one from a real port is discarded. */
+        nl.pid = source_portid;
+        nl.groups = source_groups;
         size_t addr_copy = *address_length < sizeof(nl) ? *address_length : sizeof(nl);
         memcpy(address, &nl, addr_copy);
         *address_length = sizeof(nl);

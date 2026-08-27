@@ -1676,8 +1676,17 @@ static int64_t sys_sendmsg(int fd, uint64_t user_message, int flags) {
     }
 
     struct netlink_socket *netlink = netlink_socket_from_fd(fd);
-    if (netlink)
-        return netlink_socket_sendto(netlink, data, length, flags, NULL, 0);
+    if (netlink) {
+        /* The destination matters here: udevd addresses its re-announcement to
+           a multicast group rather than to a port, and the group is in the
+           sockaddr rather than in the message. */
+        struct tunix_sockaddr_nl destination;
+        int addressed = message.name && message.name_length >= sizeof(destination) &&
+            copy_from_user(&destination, message.name, sizeof(destination)) == 0;
+        return netlink_socket_sendto(netlink, data, length, flags,
+                                     addressed ? &destination : NULL,
+                                     addressed ? sizeof(destination) : 0U);
+    }
 
     struct inet_socket *socket = inet_socket_from_fd(fd);
     if (!socket) return -EBADF;
@@ -1705,6 +1714,37 @@ static int scatter_message_data(const struct linux_msghdr *message,
         offset += amount;
         remaining -= amount;
     }
+    return 0;
+}
+
+/*
+ * SCM_CREDENTIALS for a netlink datagram.
+ *
+ * udev's monitor will not look at a message that arrives without one, and
+ * throws away any whose sender is not root -- so a uevent the kernel sent has
+ * to say so, with the kernel's own pid of zero and uid of zero.
+ */
+static int write_netlink_control(struct linux_msghdr *message,
+                                 struct netlink_socket *socket) {
+    if (!netlink_socket_get_passcred(socket)) {
+        message->control_length = 0;
+        return 0;
+    }
+    size_t credentials_length =
+        sizeof(struct linux_cmsghdr) + sizeof(struct linux_ucred);
+    if (!message->control || message->control_length < cmsg_align(credentials_length)) {
+        message->flags |= MSG_CTRUNC;
+        message->control_length = 0;
+        return 0;
+    }
+    struct netlink_credentials sender;
+    netlink_socket_last_credentials(socket, &sender);
+    struct linux_cmsghdr header = {credentials_length, SOL_SOCKET, SCM_CREDENTIALS};
+    struct linux_ucred credentials = {sender.pid, sender.uid, sender.gid};
+    if (copy_to_user(message->control, &header, sizeof(header)) != 0 ||
+        copy_to_user(message->control + sizeof(header), &credentials,
+                     sizeof(credentials)) != 0) return -EFAULT;
+    message->control_length = credentials_length;
     return 0;
 }
 
@@ -1856,7 +1896,8 @@ static int64_t sys_recvmsg(int fd, uint64_t user_message, int flags) {
             if (copy && copy_to_user(message.name, &nl_address, copy) != 0) return -EFAULT;
             message.name_length = (uint32_t)nl_length;
         }
-        message.control_length = 0;
+        int status = write_netlink_control(&message, netlink);
+        if (status < 0) return status;
         message.flags = 0;
         if (copy_to_user(user_message, &message, sizeof(message)) != 0) return -EFAULT;
         return result;
@@ -1936,10 +1977,19 @@ static int64_t sys_setsockopt(int fd, int level, int option,
         unix_socket_set_passcred(unix_value, enabled != 0);
         return 0;
     }
-    if (netlink_socket_from_fd(fd)) {
+    struct netlink_socket *netlink_option = netlink_socket_from_fd(fd);
+    if (netlink_option) {
+        /* SO_PASSCRED is the one that means something: udev's monitor sets it
+           and then discards every message that arrives without a sender. */
+        if (level == SOL_SOCKET && option == SO_PASSCRED && length >= sizeof(int32_t)) {
+            int32_t enabled;
+            if (copy_from_user(&enabled, user_value, sizeof(enabled)) != 0) return -EFAULT;
+            netlink_socket_set_passcred(netlink_option, enabled != 0);
+            return 0;
+        }
         /* iproute2 sets SO_SNDBUF/SO_RCVBUF and a few SOL_NETLINK options while
            opening the socket; accept them so rtnl_open() does not bail out. */
-        (void)level; (void)option; (void)user_value; (void)length;
+        (void)user_value; (void)length;
         return 0;
     }
     struct inet_socket *socket = inet_socket_from_fd(fd);
