@@ -111,7 +111,9 @@ echo ":: installing packages"
 if [ -n "$REMOVE" ]; then
 	"$XBPS/xbps-remove" -R -y -r "$SYSROOT" $REMOVE
 fi
-"$XBPS/xbps-remove" -O -y -r "$SYSROOT"
+# Orphans, if there are any. xbps-remove -O exits 255 when it finds nothing to
+# do and says nothing about it, so an empty run is not a failure here.
+"$XBPS/xbps-remove" -O -y -r "$SYSROOT" || true
 
 # --- what makes it Tunix ----------------------------------------------------
 
