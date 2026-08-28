@@ -101,8 +101,12 @@ XBPS="$XBPS_DIR/usr/bin"
 # the sysroot's own /var/cache/xbps, which this script deletes at the top of
 # every run. Adding one package would otherwise fetch the other three hundred
 # megabytes over again.
-PACKAGES="$CACHE/packages"
-mkdir -p "$PACKAGES"
+# Absolute, always. xbps resolves a relative cache directory against the root it
+# is installing into, so the default `build/cache` put three hundred megabytes
+# of downloaded packages *inside* the sysroot -- and from there into the image,
+# which is where a 185 MiB /build/cache came from.
+mkdir -p "$CACHE/packages"
+PACKAGES=$(cd "$CACHE/packages" && pwd)
 xbps_install() {
 	"$XBPS/xbps-install" -c "$PACKAGES" -r "$SYSROOT" "$@"
 }
