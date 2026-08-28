@@ -32,16 +32,23 @@ bytes all along, and musl's layout hid it. Under glibc every program that called
 
 | Path | What it is |
 | --- | --- |
-| `overlay/` | Copied over the tree: `/etc/hostname`, `/etc/os-release`, `/etc/fstab`, `/etc/rc.local`, the `tunix` user's shell configuration |
+| `overlay/` | Copied over the tree: `/etc/hostname`, `/etc/os-release`, `/etc/fstab`, `/etc/rc.local`, weston's configuration and its service, the `tunix` user's shell configuration |
 | `append/` | Appended to `/etc/passwd`, `/etc/group` and `/etc/shadow`, because Void's own packages own those files and add their system users to them |
 | `services` | The runit services to enable. The directory is cleared first, so this list is the whole answer rather than an addition to what `runit-void` happened to enable |
 | `remove` | Paths to delete: manuals, locales, documentation |
 
+## What is enabled
+
+- **udevd**, Void's `eudev`, started by the core services like anywhere else.
+  It hears about devices over `NETLINK_KOBJECT_UEVENT` and writes what it
+  decides to `/run/udev/data`, which is where libudev looks -- see
+  [The desktop](desktop.md) for what that chain took.
+- **seatd and weston**, which is the graphical session.
+- **agetty** on the second, third and fourth virtual terminals. Not the first:
+  weston takes whichever terminal is active when it starts.
+
 ## What is not enabled, and why
 
-- **udevd.** It needs uevents over netlink, and the kernel does not send them.
-  `/dev` is built by the kernel from the devices it actually found, which is
-  what udev would otherwise be for.
 - **dhcpcd.** It needs a packet socket, which this network stack has no concept
   of. `/etc/rc.local` configures the interface statically instead, with the
   addresses QEMU's user-mode network hands out.
@@ -61,7 +68,11 @@ None of them stop the boot.
 
 ## Logging in
 
-`root` / `root` and `tunix` / `tunix`, on any of the first four virtual
-terminals. `tunix` is in `wheel`, so `sudo` works. The password hash is in
-`base-files/append/shadow` in plain sight: this is a machine you boot in an
-emulator to look at.
+The machine comes up in weston. Ctrl+Alt+F2 moves to a text console, where both
+accounts have the same password: `tunix` / `tunix` and `root` / `tunix`. The
+hash is in `base-files/append/shadow` in plain sight, and is written over
+root's as the sysroot is assembled -- this is a machine you boot in an emulator
+to look at.
+
+`tunix` is in `wheel`, so `sudo` works, and in `_seatd`, which is how the
+session reaches the display.

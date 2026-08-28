@@ -3,7 +3,7 @@
 Tunix is a Unix-like operating system for x86_64: a kernel written from scratch,
 booted by Limine, running an unmodified Void Linux userland on top of it.
 
-![Tunix running fastfetch](screenshots/screenshot.png)
+![Weston on Tunix](screenshots/weston.png)
 
 The point of the split is that nothing above the kernel is written here. The
 image is Void's own glibc packages, installed by Void's own package manager, on
@@ -21,7 +21,9 @@ a much better test than a userland built to suit it.
 - **A Void Linux glibc userland**: bash, coreutils, util-linux, iproute2,
   shadow, sudo, curl, nano, htop -- installed with xbps and not built here --
   see [The userland](docs/userland.md)
-- **runit as PID 1**, unmodified, with agetty on four virtual terminals
+- **A Wayland desktop**: Void's own Weston, started by runit as an ordinary
+  user and given the display by seatd -- see [The desktop](docs/desktop.md)
+- **runit as PID 1**, unmodified, with udevd and agetty on the text consoles
 - **Storage**: a block layer over IDE, AHCI, NVMe and USB mass storage, GPT and
   MBR partitions, and a read-write ext2 root that `mkfs.ext2` made -- see
   [The root filesystem](docs/filesystem.md)
@@ -29,8 +31,9 @@ a much better test than a userland built to suit it.
   a kernel lock that has a shared mode -- see [Multiprocessor](docs/multiprocessor.md)
 - **Networking**: RTL8139, IPv4, ARP, ICMP, UDP, both ends of TCP, netlink and
   a real loopback -- see [Networking](docs/networking.md)
-- **A framebuffer console** with eight virtual terminals on Ctrl+Alt+F1..F8 --
-  see [Virtual Terminals](docs/virtual-terminals.md)
+- **A framebuffer console** with eight virtual terminals on Ctrl+Alt+F1..F8,
+  and the VT handshake a compositor needs to be moved off one -- see
+  [Virtual Terminals](docs/virtual-terminals.md)
 - **A virtio-gpu driver**, so the display is scanned out where it lies instead
   of being copied every frame -- see [virtio-gpu](docs/virtio-gpu.md)
 - **Intel HD Audio** behind ALSA's `/dev/snd` interface
@@ -45,17 +48,19 @@ make          # kernel, sysroot and image
 make run      # boot it
 ```
 
-The first build downloads a Void rootfs and about 300 MiB of packages. The
+The first build downloads a Void rootfs and about 600 MiB of packages. The
 sysroot has to be built as root, on a filesystem that can hold ownership and the
 setuid bit; see [Build and Run](docs/build-and-run.md) if yours cannot.
 
-Log in as `tunix` / `tunix`, or `root` / `root`.
+It boots into Weston. Ctrl+Alt+F2 leaves it for a text console, where you can
+log in as `tunix` / `tunix` or `root` / `tunix`; Ctrl+Alt+F1 goes back.
 
 ## Documentation
 
 - [Build and Run](docs/build-and-run.md)
 - [Boot](docs/boot.md)
 - [The userland](docs/userland.md)
+- [The desktop](docs/desktop.md)
 - [The root filesystem](docs/filesystem.md)
 - [Syscalls and Scheduler](docs/syscalls-and-scheduler.md)
 - [Multiprocessor](docs/multiprocessor.md)
