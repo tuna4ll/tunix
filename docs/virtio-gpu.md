@@ -60,11 +60,25 @@ those two are only the same number when the buffer has no padding.
 
 ## Giving the display back
 
-The text console draws into the VGA framebuffer, which QEMU shows only while no
-virtio scanout is set. So every path in `drm.c` that hands the display back —
-`DROP_MASTER`, `SETCRTC` with no framebuffer, and the last descriptor on the
-card closing — disables the scanout first, and the console reappears where it
-left off. This is why `run-gpu` uses `virtio-vga` and not `virtio-gpu-pci`: the
+The text console draws into the VGA framebuffer, and the first answer to
+handing the display back was to set the scanout to nothing, on the grounds that
+the device would then show what was underneath.
+
+**It does not.** A `virtio-vga` shows the VGA framebuffer only until the guest
+sets a scanout for the first time; from then on the display is the virtio one,
+and a scanout set to nothing reads *Display output is not active*. Switching
+away from a compositor left a blank screen where the console should have been.
+
+So the console is scanned out like anything else. `drm_console_present()`
+creates one resource over the framebuffer the bootloader set up — the pages
+never move, so it is created once — and points the scanout at it. Because a
+host resource is a copy of the guest pages rather than a window onto them, it
+has to be transferred again as the console changes: the timer does that thirty
+times a second, and only while a text console is what the user is looking at.
+A screenful of transfer at that rate is what the display cost before virtio-gpu
+existed, and it is paid only while nothing else wants the screen.
+
+`run-gpu` uses `virtio-vga` rather than `virtio-gpu-pci` because the
 VGA-compatible variant is the one that has a framebuffer for the bootloader to
 set a mode in and for the console to draw into.
 

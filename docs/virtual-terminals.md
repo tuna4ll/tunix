@@ -1,9 +1,11 @@
 # Virtual Terminals
 
+![A text console](../screenshots/screenshot.png)
+
 Tunix has eight virtual terminals. Ctrl+Alt+F1 through Ctrl+Alt+F8 move between
 them, `chvt` does the same from a program, and each one keeps its own screen,
 its own keyboard queue and its own idea of who is in the foreground. The first
-four run a login prompt; the graphical login takes the seventh.
+is the desktop; the second, third and fourth run a login prompt.
 
 Before this there was one console. Every question about which terminal was
 active had the same answer, `VT_ACTIVATE` refused anything but terminal 1, and
@@ -142,13 +144,40 @@ USB is an event ring that is read rather than delivered. The timer interrupt
 polls both, 250 times a second, at the cost of one port read and one memory
 read when there is nothing there.
 
+## The handshake, with a compositor in it
+
+Weston is on the image now, and it is the first program here that registers as
+a `VT_PROCESS` owner -- through seatd, which is what actually calls
+`VT_SETMODE` and answers `VT_RELDISP`. Pressing Ctrl+Alt+F2 on a running
+desktop goes:
+
+1. The keyboard interrupt reaches `vt_handle_hotkey()`, which takes the key
+   before evdev sees it -- a compositor with the keyboard grabbed must not be
+   able to keep the user from leaving it.
+2. `vt_switch()` finds terminal 1 in `VT_PROCESS` mode and sends seatd the
+   release signal it asked for, then waits.
+3. seatd tells weston to disable the session; weston drops DRM master and says
+   so; seatd answers `VT_RELDISP`.
+4. The switch finishes, and the console is put back on the screen.
+
+Two bugs sat between the design and it working. The kernel refused to send a
+signal at all when the processor taking the interrupt had no current process --
+which is what an idle processor is, and what a machine showing a still desktop
+usually has. And the console did not come back afterwards, because handing the
+scanout back does not return a virtio-gpu to the framebuffer underneath; see
+[virtio-gpu](virtio-gpu.md).
+
 ## On the image
 
 `agetty` from util-linux is what makes a terminal a *login* terminal: it starts
 a session, opens the terminal, claims it with `TIOCSCTTY`, puts it on the
-standard descriptors and executes `login`. Four runit services, `agetty-tty1`
-to `agetty-tty4`, run one each and restart it when the session ends; which four
+standard descriptors and executes `login`. Three runit services, `agetty-tty2`
+to `agetty-tty4`, run one each and restart it when the session ends; which ones
 is `base-files/services`.
+
+Terminal 1 has none. Weston takes whichever terminal is active when it starts,
+which is the first, and a login prompt sharing it would draw into the same
+cells -- see [The desktop](desktop.md).
 
 `chvt`, from the kbd package, switches to a numbered terminal.
 
@@ -159,10 +188,8 @@ is `base-files/services`.
   on the screen.
 - **`KDSETMODE(KD_GRAPHICS)` from a terminal that is not active** is refused
   rather than deferred. Nothing on the image asks.
-- **The X server does not do the VT handshake.** It runs with `XORG_NO_VT`, so
-  it never registers as a `VT_PROCESS` owner and never has to be asked to
-  release the display -- the kernel simply stops it reaching the screen. The
-  handshake is implemented and answered for a program that does use it; nothing
-  on the image does yet.
+- **Nothing waits for a terminal that refuses to leave.** `VT_RELDISP` with 0
+  cancels the pending switch and the request is dropped rather than retried;
+  Linux would keep the terminal and report it. Nothing on the image refuses.
 - **Echo is per line, not per key.** The line discipline echoes when the line is
   read, not as it is typed, which predates this work and is unchanged by it.
