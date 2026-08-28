@@ -22,7 +22,7 @@ one points inside the filesystem.
 
 ## What the driver can mount
 
-`superblock_usable()` in `kernel/ext2.c` refuses anything it genuinely cannot
+`superblock_usable()` in `kernel/fs/ext2.c` refuses anything it genuinely cannot
 read:
 
 - a block size other than 4 KiB -- every buffer in the file is sized to it
@@ -66,7 +66,7 @@ with `EACCES`.
 
 ## Partitions
 
-`kernel/partition.c` reads GPT and MBR partition tables and registers what they
+`kernel/fs/partition.c` reads GPT and MBR partition tables and registers what they
 describe as block devices of their own -- `sda1`, `sda2` -- so the filesystem
 starts where its device does and `root=/dev/sda2` names it. Both schemes are
 read because both are used: the image carries a protective MBR in front of the

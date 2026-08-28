@@ -10,7 +10,7 @@ There is no port that means "power down". The ports are named by the FADT, and
 the *value* to write to them lives in the DSDT as an AML object, so getting a
 machine to switch itself off needs both tables.
 
-`acpi_describe_machine` (`kernel/acpi.c`) walks the RSDP to the RSDT or
+`acpi_describe_machine` (`kernel/drivers/acpi.c`) walks the RSDP to the RSDT or
 XSDT and reads two tables from it:
 
 - the **MADT**, which describes the processors and the interrupt controllers.

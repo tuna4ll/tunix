@@ -49,7 +49,7 @@ Weston finds its display and its input devices through libudev, and libudev
 finds them by walking `/sys` and reading what udevd wrote about each one. Both
 halves are the kernel's:
 
-1. `kernel/sysfs.c` publishes each device the kernel has -- the DRM card, two
+1. `kernel/fs/sysfs.c` publishes each device the kernel has -- the DRM card, two
    evdev nodes, the sound card -- as a directory under `/sys/devices` with a
    `uevent` file, a `subsystem` link, an entry in `/sys/class/<subsystem>` and
    one in `/sys/dev/char`.

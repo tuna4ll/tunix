@@ -7,7 +7,7 @@ reflects the code as it exists today.
 
 ## Finding the processors
 
-`acpi_describe_machine` (`kernel/acpi.c`) walks the MADT. A type 0 entry is
+`acpi_describe_machine` (`kernel/drivers/acpi.c`) walks the MADT. A type 0 entry is
 a processor: it carries an ACPI id, a local APIC id, and flags saying whether
 the socket is filled. The APIC id is what a startup message is addressed to and
 it is **not** the index — firmware numbers processors however it likes, and a

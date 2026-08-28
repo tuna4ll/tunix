@@ -16,14 +16,14 @@ the display manager and the compositor had to be told to stop asking --
 
 Three things, kept apart deliberately:
 
-- **the screen** (`kernel/terminal.c`), a grid of cells with a cursor and a
+- **the screen** (`kernel/tty/terminal.c`), a grid of cells with a cursor and a
   scroll region. A screen draws to the display only while it is the active one,
   so a terminal nobody is looking at goes on scrolling into its own cells and
   shows the result the moment it is switched to.
-- **the line discipline** (`kernel/tty.c`), which is the termios flags, the
+- **the line discipline** (`kernel/tty/tty.c`), which is the termios flags, the
   input queue, the canonical line buffer, the foreground process group and the
   ANSI parser for what is written to it.
-- **the terminal itself** (`kernel/vt.c`), which owns those two and the
+- **the terminal itself** (`kernel/tty/vt.c`), which owns those two and the
   state that only means anything when there is more than one of them: the KD
   mode, the VT mode, and which terminal the display belongs to.
 

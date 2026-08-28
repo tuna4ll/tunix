@@ -76,9 +76,21 @@ log in as `tunix` / `tunix` or `root` / `tunix`; Ctrl+Alt+F1 goes back.
 ## Layout
 
 ```
-kernel/       the kernel: arch/x86_64, drivers, VFS, network, syscalls
+kernel/
+  arch/x86_64/  everything that only makes sense on one processor
+  drivers/      the hardware: acpi, apic, pci, serial, ata, input, drm,
+                and audio/ net/ storage/ usb/ virtio/ under it
+  fs/           the VFS and the filesystems on it: ext2, fat, proc, sys, dev
+  net/          the stack: IPv4, TCP, UDP, netlink
+  ipc/          what a descriptor can be: pipes, unix sockets, epoll, memfd
+  tty/          terminals: the line discipline, the screen, the virtual ones
+  lib/          the small pieces the freestanding build has to bring itself
+  *.c           the core the rest is built on: syscalls, processes, memory
 base-files/   what makes the Void sysroot into Tunix
 support/      the sysroot and image builders, limine.conf, the font tool
 docs/
 GNUmakefile   the whole build
 ```
+
+The build finds sources by walking `kernel/`, so a new file needs no entry
+anywhere; only its includes have to know how far down it sits.

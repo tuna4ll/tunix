@@ -74,7 +74,7 @@ root=/dev/sda2 init=/sbin/init
 
 - `root=` names the block device the filesystem is on, by the name the block
   layer gives it. Partitions are devices of their own here (see
-  `kernel/partition.c`), so `sda2` is a device and the filesystem starts at its
+  `kernel/fs/partition.c`), so `sda2` is a device and the filesystem starts at its
   first sector. Without `root=` the kernel takes whatever registered first.
 - `init=` names the first program. It defaults to `/sbin/init`; pointing it at
   something else is how a machine that will not finish booting gets debugged.

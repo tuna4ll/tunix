@@ -40,7 +40,7 @@ mcopy -i "$WORK/esp.img" "$KERNEL" ::/boot/kernel.elf
 # classic ext2 and nothing else: 4 KiB blocks, 128-byte inodes, no extents, no
 # 64-bit block numbers, no checksummed metadata, and no hashed directories --
 # it would have to maintain the hash tree to write into one. mke2fs is happy to
-# leave all of that out; see superblock_usable() in kernel/ext2.c.
+# leave all of that out; see superblock_usable() in kernel/fs/ext2.c.
 ROOT_MIB=$(( $(du -sm "$SYSROOT" | cut -f1) + ROOT_SLACK_MIB ))
 echo ":: building a ${ROOT_MIB} MiB root filesystem"
 truncate -s "${ROOT_MIB}M" "$WORK/root.img"

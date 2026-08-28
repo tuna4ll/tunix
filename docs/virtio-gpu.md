@@ -10,7 +10,7 @@ make run-gpu
 
 ## Why it exists
 
-`/dev/dri/card0` has no GPU behind it (see `kernel/drm.c`). The display is
+`/dev/dri/card0` has no GPU behind it (see `kernel/drivers/drm.c`). The display is
 the region the bootloader set up over VBE, there is no CRTC to reprogram, and so
 presenting a framebuffer means blitting it: a full screen of `memcpy` on the
 CPU, per frame, in the kernel, with the giant lock held. At 1280x720 that is
@@ -25,9 +25,9 @@ screenful of copying goes away.
 
 | File | What it is |
 | --- | --- |
-| `kernel/virtio/virtio_pci.c` | The virtio 1.0 PCI transport |
-| `kernel/virtio/virtio_ring.c` | A split virtqueue |
-| `kernel/virtio/virtio_gpu.c` | The device: resources, scanout, flush |
+| `kernel/drivers/virtio/virtio_pci.c` | The virtio 1.0 PCI transport |
+| `kernel/drivers/virtio/virtio_ring.c` | A split virtqueue |
+| `kernel/drivers/virtio/virtio_gpu.c` | The device: resources, scanout, flush |
 | `kernel/include/virtio.h`, `virtgpu.h` | The interfaces between them |
 
 A modern virtio device publishes no registers at a fixed offset. It chains
