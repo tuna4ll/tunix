@@ -51,6 +51,28 @@ over with the reference the stack was holding.
 `/proc/net/tcp` lists listeners as state `0A` and half-open connections as
 `03`.
 
+## What glibc's resolver wants
+
+Nothing here resolves a name itself: `/etc/resolv.conf` names QEMU's resolver
+and glibc does the rest over UDP. That turned out to be a stricter test than
+sending a packet, because the resolver treats two things as fatal that look
+optional from the kernel side, and neither of them fails loudly.
+
+- **`setsockopt(SOL_IP, IP_RECVERR)`**, which it sets on every nameserver
+  socket it opens so that an ICMP port-unreachable turns into a quick error
+  rather than a timeout. A socket that refuses the option is closed and the
+  lookup reported as failed — before a single query is sent. Refusing it made
+  every name on the machine unresolvable; xbps called that "Transient resolver
+  failure" and curl called it "Could not resolve host".
+- **`sendmmsg`**, which it uses to put the A and the AAAA query for one name
+  into a single call. There is no fallback: `ENOSYS` there fails the lookup the
+  same silent way. `getent hosts` asks for one family and so never took that
+  path, which made the failure look like it depended on the program.
+
+Nothing is put on a socket's error queue, so `IP_RECVERR` is accepted and
+answers honestly: there is never anything to read. `sendmmsg` is a loop around
+`sendmsg`, which is what it is on Linux too.
+
 ## Checking it
 
 `tcp-test` on the image runs a server and a forked client against each other
@@ -69,3 +91,7 @@ CPython's own socket module.
   no out-of-order reassembly — a segment arriving early is re-acknowledged and
   dropped rather than held.
 - 32 sockets in total, across every family.
+- No `MSG_ERRQUEUE`, so an ICMP error is never reported to the socket that
+  caused it, and no `recvmmsg` to go with `sendmmsg`.
+- `ping` works but warns: it asks for `ICMP_FILTER` to choose which ICMP types
+  reach it, is refused, and filters in userspace instead.
