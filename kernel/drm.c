@@ -1261,7 +1261,28 @@ void drm_file_close(struct file *file) {
  */
 void drm_display_suspend(void) {
     if (!drm_ready) return;
-    virtgpu_scanout_disable();
+    drm_console_present();
+}
+
+/*
+ * Put the text console on the screen.
+ *
+ * Without a virtio-gpu this is nothing at all: the console draws into the
+ * scanout the bootloader set up and the host sees it there. With one, the
+ * console has to be scanned out like any other buffer -- and it has to be done
+ * again as the console changes, because a host resource is a copy of the guest
+ * pages rather than a window onto them. The timer calls this while the console
+ * is in front; a screenful of transfer at that rate is the same cost the
+ * display had before virtio-gpu, and only while nothing else wants the screen.
+ */
+void drm_console_present(void) {
+    if (!virtgpu_available()) return;
+    uint32_t pitch = framebuffer_pitch();
+    if (!pitch) return;
+    (void)virtgpu_console_present(framebuffer_physical_address() +
+                                      framebuffer_memory_offset(),
+                                  pitch / 4U, framebuffer_width(),
+                                  framebuffer_height());
 }
 
 void drm_display_resume(void) {

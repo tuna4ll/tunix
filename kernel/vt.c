@@ -231,6 +231,15 @@ void vt_process_exited(uint64_t pid, uint64_t sid) {
     }
 }
 
+/*
+ * Whether what the user is looking at is a text console rather than a graphics
+ * client's buffer. Either nobody has claimed the display, or whoever has is
+ * suspended behind another terminal.
+ */
+int vt_console_in_front(void) {
+    return !display_owner_index || display_suspended;
+}
+
 void vt_display_claimed(void) {
     display_owner_index = active_index;
     display_suspended = 0;

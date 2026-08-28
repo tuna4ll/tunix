@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include "include/drm.h"
 #include "include/interrupt.h"
 #include "include/io.h"
 #include "include/process.h"
@@ -35,6 +36,10 @@ void timer_irq(struct interrupt_frame *frame) {
      * has happened, which is almost always.
      */
     vt_poll_input();
+    /* Roughly thirty times a second, and only while the console owns the
+       screen: see drm_console_present(). */
+    if ((ticks % (TIMER_FREQUENCY_HZ / 30U)) == 0U && vt_console_in_front())
+        drm_console_present();
     /*
      * Release whatever is waiting on the general channel. Most readiness has
      * a wakeup of its own, but some has none at all -- a packet arriving for

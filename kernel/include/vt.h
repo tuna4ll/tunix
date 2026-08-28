@@ -69,6 +69,8 @@ void vt_handle_key(uint16_t keycode, int pressed);
  * no interrupt of its own -- the serial line and the USB event ring.
  */
 void vt_poll_input(void);
+/* True while a text console is what the screen is showing. */
+int vt_console_in_front(void);
 void vt_poll_serial(void);
 /* Whether an input reader bound to terminal `index` should be given events:
    the keyboard belongs to the active terminal, and to nothing else. */

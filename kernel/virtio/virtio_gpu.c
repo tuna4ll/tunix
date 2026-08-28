@@ -9,6 +9,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "../include/heap.h"
 #include "../include/kstring.h"
 #include "../include/virtgpu.h"
 #include "../include/virtio.h"
@@ -282,6 +283,28 @@ int virtgpu_present(uint32_t resource, uint32_t width, uint32_t height) {
     set_rect(&request.flush.r, width, height);
     request.flush.resource_id = resource;
     return submit(sizeof(request.flush), NULL, 0, sizeof(struct virtio_gpu_ctrl_hdr));
+}
+
+/* Created once, over the framebuffer the bootloader set up, and kept: the
+   pages never move and the resource costs nothing while it is not scanned out. */
+static uint32_t console_resource;
+
+int virtgpu_console_present(uint64_t physical, uint32_t stride_pixels,
+                            uint32_t width, uint32_t height) {
+    if (!ready || !stride_pixels || !width || !height) return -1;
+    if (!console_resource) {
+        uint64_t bytes = (uint64_t)stride_pixels * 4U * height;
+        uint64_t page_count = (bytes + 4095U) / 4096U;
+        uint64_t *pages = (uint64_t *)kmalloc(page_count * sizeof(uint64_t));
+        if (!pages) return -1;
+        for (uint64_t index = 0; index < page_count; index++)
+            pages[index] = physical + index * 4096U;
+        console_resource = virtgpu_resource_create(stride_pixels, height,
+                                                   pages, page_count);
+        kfree(pages);
+        if (!console_resource) return -1;
+    }
+    return virtgpu_present(console_resource, width, height);
 }
 
 void virtgpu_scanout_disable(void) {

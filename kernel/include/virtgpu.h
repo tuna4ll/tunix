@@ -26,8 +26,22 @@ uint32_t virtgpu_resource_create(uint32_t width, uint32_t height,
                                  const uint64_t *pages, uint64_t page_count);
 void virtgpu_resource_destroy(uint32_t resource);
 int virtgpu_present(uint32_t resource, uint32_t width, uint32_t height);
-/* Hand the scanout back, which is what returns a virtio-vga to its VGA
-   framebuffer and lets the text console reappear. */
 void virtgpu_scanout_disable(void);
+
+/*
+ * Scan out the text console's framebuffer.
+ *
+ * Handing the display back cannot mean setting the scanout to nothing: a
+ * virtio-vga that has ever been given a scanout keeps showing the virtio
+ * display, and an empty one reads "Display output is not active" rather than
+ * falling back to the VGA framebuffer underneath -- which is where the console
+ * draws. So the console gets a resource over those same pages, and giving the
+ * display back means scanning that out instead.
+ *
+ * `physical` is where the framebuffer starts, `stride_pixels` its pitch in
+ * pixels, and `width`/`height` the part of it that is the screen.
+ */
+int virtgpu_console_present(uint64_t physical, uint32_t stride_pixels,
+                            uint32_t width, uint32_t height);
 
 #endif

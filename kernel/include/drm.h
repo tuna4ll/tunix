@@ -57,6 +57,8 @@ void drm_file_close(struct file *file);
  * and has no reason to think anything changed.
  */
 void drm_display_suspend(void);
+/* Scan the text console out, for as long as it is the thing in front. */
+void drm_console_present(void);
 void drm_display_resume(void);
 
 #endif
