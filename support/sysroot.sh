@@ -149,6 +149,11 @@ sed -i 's|^wheel:x:\([0-9]*\):.*|wheel:x:\1:tunix|' "$SYSROOT/etc/group"
 chown -R 1000:1000 "$SYSROOT/home/tunix"
 chmod 0700 "$SYSROOT/home/tunix"
 chmod 0755 "$SYSROOT/etc/rc.local"
+# sudo refuses to read a sudoers directory anyone could write to, and says so
+# by reporting that the user is not in the sudoers file at all. The mode has
+# to be set here because a checkout on a Windows filesystem reports every
+# directory as 0777 and cp -a faithfully copies that.
+chmod 0750 "$SYSROOT/etc/sudoers.d"
 chmod 0440 "$SYSROOT/etc/sudoers.d/tunix"
 
 # /dev, /proc, /sys, /run and /tmp belong to the kernel, which fills them in at
