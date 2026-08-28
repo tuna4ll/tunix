@@ -109,6 +109,7 @@ struct tcp_control_block {
 #define IPPROTO_IP 0
 #define IP_HDRINCL 3
 #define IP_TTL 2
+#define IP_RECVERR 11
 
 #define SIOCADDRT 0x890BU
 #define SIOCDELRT 0x890CU
@@ -152,6 +153,8 @@ struct inet_socket {
     int write_shutdown;
     int broadcast;
     int header_included;
+    /* IP_RECVERR: the caller wants ICMP errors on this socket's error queue. */
+    int report_errors;
     uint8_t ttl;
     int orphan;                          /* fd closed but TCB still closing */
     /* Listening sockets have no control block of their own: they hold a list
@@ -955,6 +958,22 @@ int inet_socket_setsockopt(struct inet_socket *socket, int level, int option,
             if (ttl < 1 || ttl > 255) return -EINVAL;
             socket->ttl = (uint8_t)ttl; return 0;
         }
+        /*
+         * Ask for ICMP errors on the socket's error queue. Nothing is ever put
+         * on that queue here -- there is no MSG_ERRQUEUE delivery -- so a
+         * caller that reads it is told there is nothing there, which is true.
+         *
+         * The option still has to be accepted. glibc's resolver sets it on
+         * every nameserver socket it opens and treats a refusal as fatal: it
+         * closes the socket and reports the lookup as failed. Refusing it made
+         * every name on the machine unresolvable without a single packet
+         * reaching the wire, which is what "Transient resolver failure" from
+         * xbps and "Could not resolve host" from curl were.
+         */
+        if (option == IP_RECVERR && value && length >= sizeof(int)) {
+            socket->report_errors = *(const int *)value != 0;
+            return 0;
+        }
     }
     return -EOPNOTSUPP;
 }
@@ -973,6 +992,7 @@ int inet_socket_getsockopt(struct inet_socket *socket, int level, int option,
     }
     else if (level == SOL_SOCKET && option == SO_BROADCAST) result = socket->broadcast;
     else if (level == IPPROTO_IP && option == IP_TTL) result = socket->ttl;
+    else if (level == IPPROTO_IP && option == IP_RECVERR) result = socket->report_errors;
     else return -EOPNOTSUPP;
     memcpy(value, &result, sizeof(result));
     *length = sizeof(result);
