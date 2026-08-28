@@ -2028,7 +2028,19 @@ static void record_sender(struct process *target, int signal_number) {
 }
 
 static int send_signal(int64_t pid, int signal_number, int checked) {
-    if (signal_number < 0 || signal_number > TUNIX_NSIG || !current) return -EINVAL;
+    if (signal_number < 0 || signal_number > TUNIX_NSIG) return -EINVAL;
+    /*
+     * A kill(2) is judged against the caller, and a pid of zero means the
+     * caller's own group, so both of those need one. A signal the kernel sends
+     * on its own behalf needs neither -- and frequently has no caller at all.
+     *
+     * Ctrl+Alt+F2 is the case that matters. It arrives as an interrupt, the
+     * processor that takes it is usually idle, and an idle processor has no
+     * current process: the release signal to whoever owns the terminal was
+     * refused with EINVAL and the screen stayed where it was. Which looked
+     * exactly like a compositor refusing to let go.
+     */
+    if ((checked || pid == 0) && !current) return -EINVAL;
     if (pid > 0) {
         struct process *target = process_find((uint64_t)pid);
         if (!target) return -ESRCH;
