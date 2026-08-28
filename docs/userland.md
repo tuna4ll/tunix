@@ -76,3 +76,16 @@ to look at.
 
 `tunix` is in `wheel`, so `sudo` works, and in `_seatd`, which is how the
 session reaches the display.
+
+## fastfetch
+
+`fastfetch` is configured for the `tunix` account in
+`~/.config/fastfetch/config.jsonc`, and draws the logo in
+`/usr/share/fastfetch/logo.txt` beside the usual summary. Both files come from
+`base-files/overlay`.
+
+Nothing in the list is hardcoded: what a module cannot answer it leaves out, so
+the same config prints a shorter block on a text console than it does in
+weston-terminal, where the display, the compositor, the terminal and its font
+all have an answer. There is no `Host` line at all -- it reads SMBIOS, and the
+kernel exposes none.

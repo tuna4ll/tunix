@@ -1,0 +1,41 @@
+// fastfetch, for the tunix account. The logo is a file rather than one of the
+// built-in distribution logos: fastfetch has never heard of this one.
+{
+    "logo": {
+        "source": "/usr/share/fastfetch/logo.txt",
+        "type": "file",
+        "padding": {
+            "top": 1,
+            "left": 2
+        }
+    },
+    // Modules a text console cannot answer -- the display, the compositor, the
+    // fonts -- are left in rather than trimmed: fastfetch drops the line when
+    // there is no answer, and in weston-terminal there is one.
+    "modules": [
+        "title",
+        "separator",
+        "os",
+        "host",
+        "kernel",
+        "uptime",
+        "packages",
+        "shell",
+        "display",
+        "de",
+        "wm",
+        "theme",
+        "font",
+        "cursor",
+        "terminal",
+        "terminalfont",
+        "cpu",
+        "gpu",
+        "memory",
+        "disk",
+        "localip",
+        "locale",
+        "break",
+        "colors"
+    ]
+}
