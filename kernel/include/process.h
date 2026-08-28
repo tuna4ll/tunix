@@ -134,6 +134,9 @@ struct process {
     int pdeath_signal;
     int dumpable;
     int no_new_privs;
+    /* PR_SET_KEEPCAPS. Recorded and never consulted: there are no
+       capabilities to keep across a setuid. */
+    int keep_capabilities;
     int child_subreaper;
     int thp_disable;
     uint64_t timerslack_ns;

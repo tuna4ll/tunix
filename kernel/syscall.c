@@ -4373,10 +4373,23 @@ static int64_t sys_prctl(int option, uint64_t arg2, uint64_t arg3,
         case PR_GET_TIMERSLACK:
             return (int64_t)process->timerslack_ns;
         case PR_GET_KEEPCAPS:
+            return process->keep_capabilities;
+        case PR_SET_KEEPCAPS:
+            if (arg2 > 1) return -EINVAL;
+            /*
+             * Keep the permitted capability set across a change of uid. There
+             * are no capabilities here, so there is nothing to keep -- but the
+             * flag is a promise about a later setuid rather than an action,
+             * and refusing it is not the same as having nothing to do. It is
+             * the first thing iputils' ping asks for, and being told EINVAL
+             * made it exit with "ping: prctl: Invalid argument" before it
+             * opened a socket.
+             */
+            process->keep_capabilities = (int)arg2;
+            return 0;
         case PR_GET_SECUREBITS:
         case PR_GET_SECCOMP:
             return 0;
-        case PR_SET_KEEPCAPS:
         case PR_SET_SECUREBITS:
             return arg2 == 0 ? 0 : -EINVAL;
         case PR_CAPBSET_READ:
