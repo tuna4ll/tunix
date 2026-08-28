@@ -117,6 +117,7 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define SYS_RECVFROM 45
 #define SYS_SENDMSG 46
 #define SYS_RECVMSG 47
+#define SYS_SENDMMSG 307
 #define SYS_SHUTDOWN 48
 #define SYS_BIND 49
 #define SYS_LISTEN 50
@@ -661,6 +662,15 @@ struct linux_msghdr {
 };
 
 _Static_assert(sizeof(struct linux_msghdr) == 56, "Linux x86_64 msghdr ABI mismatch");
+
+/* sendmmsg's array element: a message, and room for how much of it went. */
+struct linux_mmsghdr {
+    struct linux_msghdr msg_hdr;
+    uint32_t msg_len;
+    uint32_t __pad;
+};
+
+_Static_assert(sizeof(struct linux_mmsghdr) == 64, "Linux x86_64 mmsghdr ABI mismatch");
 
 struct linux_cmsghdr {
     uint64_t length;
@@ -1880,6 +1890,39 @@ static int write_unix_control(struct linux_msghdr *message,
     }
     message->control_length = offset;
     return 0;
+}
+
+/*
+ * Several messages in one call.
+ *
+ * The whole of it is a loop around sendmsg, which is what Linux does too: the
+ * saving is the syscalls, not the sending. It is here because glibc's resolver
+ * puts the A and the AAAA query for one name into a single sendmmsg, and does
+ * not fall back when the call is refused -- so every name lookup made by a
+ * program that asks for both families at once failed, without a packet
+ * reaching the wire. xbps was one; `getent hosts`, which asks for one family,
+ * was not, which is what made it look like the network was intermittent.
+ *
+ * The return is the number of messages accepted. An error is only reported
+ * when the first one fails: a partial send is a success with a smaller count,
+ * and the caller finds out by reading msg_len.
+ */
+static int64_t sys_sendmmsg(int fd, uint64_t user_vector, unsigned count, int flags) {
+    if (!user_vector) return -EFAULT;
+    /* UIO_MAXIOV, the same ceiling Linux puts on it. */
+    if (count > 1024U) count = 1024U;
+
+    unsigned sent = 0;
+    for (; sent < count; sent++) {
+        uint64_t element = user_vector + (uint64_t)sent * sizeof(struct linux_mmsghdr);
+        int64_t result = sys_sendmsg(fd, element, flags);
+        if (result < 0) return sent ? (int64_t)sent : result;
+        uint32_t length = (uint32_t)result;
+        if (copy_to_user(element + offsetof(struct linux_mmsghdr, msg_len),
+                         &length, sizeof(length)) != 0)
+            return sent ? (int64_t)sent : -EFAULT;
+    }
+    return (int64_t)sent;
 }
 
 static int64_t sys_recvmsg(int fd, uint64_t user_message, int flags) {
@@ -5157,6 +5200,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             break;
         }
         case SYS_SENDMSG: frame->rax = (uint64_t)sys_sendmsg((int)frame->rdi, frame->rsi, (int)frame->rdx); break;
+        case SYS_SENDMMSG: frame->rax = (uint64_t)sys_sendmmsg((int)frame->rdi, frame->rsi, (unsigned)frame->rdx, (int)frame->r10); break;
         case SYS_RECVMSG: {
             int fd = (int)frame->rdi;
             int flags = (int)frame->rdx;
