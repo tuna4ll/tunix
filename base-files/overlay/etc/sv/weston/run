@@ -1,0 +1,30 @@
+#!/bin/sh
+# Weston, as the ordinary user rather than as root.
+#
+# It gets the display and the input devices from seatd instead of opening them
+# itself, which is why the account only has to be in the _seatd group.
+exec 2>&1
+
+# Wait for the socket, not for the service: seatd is reported up as soon as it
+# is running, and weston exits immediately if it connects a moment too early.
+sv start seatd >/dev/null || exit 1
+attempt=0
+while [ ! -S /run/seatd.sock ]; do
+	attempt=$((attempt + 1))
+	[ "$attempt" -gt 60 ] && exit 1
+	sleep 0.5
+done
+
+# A home directory, because a session without one is not a session: fontconfig
+# has nowhere to put its cache, says so, and every client weston starts dies on
+# it -- which weston answers by starting them again.
+export HOME=/home/tunix
+export USER=tunix
+export LOGNAME=tunix
+export XDG_RUNTIME_DIR=/run/user/1000
+export XDG_CONFIG_DIRS=/etc/xdg
+export XDG_SESSION_TYPE=wayland
+install -d -m 0700 -o tunix -g tunix "$XDG_RUNTIME_DIR"
+
+cd "$HOME" || exit 1
+exec chpst -u tunix:tunix:_seatd weston

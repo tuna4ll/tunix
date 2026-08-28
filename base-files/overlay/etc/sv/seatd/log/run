@@ -1,0 +1,5 @@
+#!/bin/sh
+# Void's own log script hands seatd's output to vlogger, which needs a syslog
+# daemon; nothing here runs one, so it would go nowhere. A file instead.
+mkdir -p /var/log/seatd
+exec svlogd -tt /var/log/seatd

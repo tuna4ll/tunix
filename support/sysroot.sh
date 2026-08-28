@@ -145,10 +145,21 @@ sed -i "s|^root:[^:]*:|root:$PASSWORD_HASH:|" "$SYSROOT/etc/shadow"
 # Void puts wheel at gid 4, not the 10 it is on most distributions, so the
 # gid is taken from the file rather than written into it.
 sed -i 's|^wheel:x:\([0-9]*\):.*|wheel:x:\1:tunix|' "$SYSROOT/etc/group"
+# _seatd owns the socket seatd listens on, and weston asks that socket for the
+# display and the input devices rather than opening them itself. The group is
+# created by the seatd package, so only the membership is written here.
+sed -i 's|^_seatd:x:\([0-9]*\):.*|_seatd:x:\1:tunix|' "$SYSROOT/etc/group"
 
 chown -R 1000:1000 "$SYSROOT/home/tunix"
 chmod 0700 "$SYSROOT/home/tunix"
 chmod 0755 "$SYSROOT/etc/rc.local"
+# The services this repo adds. A checkout on a filesystem with no execute bit
+# leaves these unrunnable, and runit reports that as a service that keeps
+# failing to start rather than as a permission problem.
+for service in base-files/overlay/etc/sv/*/run base-files/overlay/etc/sv/*/log/run; do
+	[ -f "$service" ] || continue
+	chmod 0755 "$SYSROOT${service#base-files/overlay}"
+done
 # sudo refuses to read a sudoers directory anyone could write to, and says so
 # by reporting that the user is not in the sudoers file at all. The mode has
 # to be set here because a checkout on a Windows filesystem reports every

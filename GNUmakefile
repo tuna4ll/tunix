@@ -120,7 +120,7 @@ VOID_INSTALL ?= base-files bash coreutils util-linux findutils diffutils \
 # renderer, the keymaps libxkbcommon compiles, a font for weston-terminal, and
 # the seat daemon weston asks for a device through.
 VOID_INSTALL_GRAPHICAL ?= weston mesa-dri xkeyboard-config dejavu-fonts-ttf \
-	seatd
+	seatd xcursor-vanilla-dmz
 VOID_REMOVE ?=
 
 BASE_FILES := $(shell find base-files -type f 2>/dev/null)

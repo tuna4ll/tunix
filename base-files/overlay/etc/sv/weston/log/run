@@ -1,0 +1,6 @@
+#!/bin/sh
+# Weston's output goes to a file rather than to the console. It is a graphical
+# session: the console it would otherwise print on is a virtual terminal
+# somebody may be logged in to, and a compositor logs steadily.
+mkdir -p /var/log/weston
+exec svlogd -tt /var/log/weston
