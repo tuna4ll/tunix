@@ -146,6 +146,10 @@ done
 # into over a network.
 PASSWORD_HASH=$(sed -n 's/^tunix:\([^:]*\):.*/\1/p' base-files/append/shadow)
 sed -i "s|^root:[^:]*:|root:$PASSWORD_HASH:|" "$SYSROOT/etc/shadow"
+# And bash for root as well. Void gives it /bin/sh, which is dash: no history,
+# no completion, and a different set of surprises from the shell the other
+# account and every script on the image are written for.
+sed -i 's|^\(root:.*\):/bin/sh$|\1:/bin/bash|' "$SYSROOT/etc/passwd"
 # Void puts wheel at gid 4, not the 10 it is on most distributions, so the
 # gid is taken from the file rather than written into it.
 sed -i 's|^wheel:x:\([0-9]*\):.*|wheel:x:\1:tunix|' "$SYSROOT/etc/group"
