@@ -40,8 +40,25 @@ way to hit this, and the failure is otherwise silent -- `chmod` succeeds and
 changes nothing. Point the sysroot somewhere else:
 
 ```sh
-make image SYSROOT=/var/tmp/tunix-sysroot CACHE=/var/tmp/tunix-cache
+make image SYSROOT=/var/tmp/tunix/sysroot CACHE=/var/tmp/tunix/cache
 ```
+
+Rather than typing that every time, put it in `local.mk`, which the GNUmakefile
+includes if it exists and git ignores:
+
+```make
+SYSROOT = /var/tmp/tunix/sysroot
+CACHE   = /var/tmp/tunix/cache
+```
+
+Then `make run` is `make run` again. The override is only needed when the
+sysroot is actually rebuilt -- which any change to `GNUmakefile`,
+`support/sysroot.sh` or `base-files/` causes -- but a stale setting is worse
+than a redundant one, so the file is the better answer.
+
+The packages themselves are cached in `$(CACHE)/packages` and survive a
+rebuild, so adding one package does not fetch the other six hundred megabytes
+again.
 
 ## Changing what is installed
 

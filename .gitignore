@@ -1,4 +1,6 @@
 build/
+# Per-machine settings; see docs/build-and-run.md.
+local.mk
 # Its own repository: github.com/tunixos/tunix-ports
 tunix-ports/
 *.o

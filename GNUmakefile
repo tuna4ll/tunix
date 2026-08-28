@@ -6,6 +6,11 @@
 
 override MAKEFLAGS += -rR
 
+# Settings for this machine, not for the repository: SYSROOT above all, which
+# has to name a filesystem that can hold ownership and the setuid bit. Ignored
+# by git, and absent by default -- the leading dash is what makes that fine.
+-include local.mk
+
 # -R above clears make's built-in variables, and it does so after this file is
 # read: a plain `CC ?= cc` would see the built-in, decline to assign, and then
 # be wiped. Anything the environment or the command line set still wins.
@@ -101,7 +106,7 @@ distclean:
 # Void Linux, installed by Void's own package manager. Nothing above the kernel
 # is built here.
 
-CACHE         := $(BUILD)/cache
+CACHE         ?= $(BUILD)/cache
 SYSROOT       ?= $(BUILD)/sysroot
 SYSROOT_STAMP := $(BUILD)/.sysroot
 
