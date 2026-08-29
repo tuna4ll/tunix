@@ -5,6 +5,33 @@ they are started, what each of them owns privately, how the scheduler hands
 work out, and what keeps them from corrupting each other's view of memory. It
 reflects the code as it exists today.
 
+## Every spin with interrupts off has to service the flush
+
+A processor asking the others to drop cached translations sets a flag on each
+of them, sends an interrupt, and waits. It does that holding the kernel lock,
+because the page tables being edited are the ones they are running on.
+
+So a processor spinning anywhere with interrupts disabled cannot be reached by
+that interrupt, and has to call `smp_service_flush()` inside its own wait loop.
+`wait_for_turn()` always did. The console locks, when they were added, did not
+-- and what that produced on a real machine was the whole thing stopping in
+the first thirty tickets of the boot:
+
+```
+KLOCK: cpu 1 stuck waiting for ticket 28: next 31 serving 27 shared 0
+KLOCK: cpu 0 holds 1
+```
+
+cpu 0 holding the kernel lock, waiting for a flush from a processor that was
+spinning for a lock with its interrupts off.
+
+The wait is bounded now as well. A processor that is marked online and never
+answers -- one that came up, said so and then went wrong -- used to take the
+machine with it, holding the one lock everything else needs and printing
+nothing. It gets two seconds, then a line saying so, and the flush is given up
+on: a processor with stale translations is a worse machine than a correct one
+and a much better one than a dead one.
+
 ## The lock says when it is not coming
 
 Two ways the kernel lock can be lost for good, and both are silent from

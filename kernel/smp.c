@@ -53,6 +53,9 @@ extern uint8_t smp_trampoline_data[];
 #define STARTUP_TIMEOUT_MS 200ULL
 #define INIT_SETTLE_MS 10ULL
 #define STARTUP_SETTLE_US 200ULL
+/* Long enough that a busy processor always answers, short enough that a
+   processor that never will does not take the machine with it. */
+#define FLUSH_TIMEOUT_NS (2ULL * 1000ULL * 1000ULL * 1000ULL)
 
 static unsigned online_cpus = 1;
 
@@ -97,8 +100,28 @@ void smp_flush_address_space(uint64_t cr3) {
     for (unsigned index = 0; index < SMP_MAX_CPUS; index++) {
         struct cpu *cpu = percpu_slot(index);
         if (index == self || !cpu->online) continue;
-        while (__atomic_load_n(&cpu->flush_pending, __ATOMIC_ACQUIRE))
+        /*
+         * Bounded, because this runs with the kernel lock held. A processor
+         * that is marked online and does not answer -- one that came up, said
+         * so and then went wrong -- would otherwise stop the whole machine
+         * here, holding the one lock everything else needs, having printed
+         * nothing. Giving up leaves that processor with stale translations,
+         * which is a worse machine than a correct one and a much better one
+         * than a dead one.
+         */
+        uint64_t deadline = time_uptime_ns() + FLUSH_TIMEOUT_NS;
+        while (__atomic_load_n(&cpu->flush_pending, __ATOMIC_ACQUIRE)) {
+            if (time_uptime_ns() >= deadline) {
+                static volatile uint8_t reported[SMP_MAX_CPUS];
+                if (!reported[index]) {
+                    reported[index] = 1;
+                    kprintf("SMP: cpu %u did not answer a flush\n", index);
+                }
+                __atomic_store_n(&cpu->flush_pending, 0, __ATOMIC_RELEASE);
+                break;
+            }
             __asm__ volatile("pause");
+        }
     }
 }
 

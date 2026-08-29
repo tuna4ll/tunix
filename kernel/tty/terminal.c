@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "../include/framebuffer.h"
+#include "../include/smp.h"
 #include "../include/heap.h"
 #include "../include/kstring.h"
 #include "../include/vfs.h"
@@ -464,8 +465,15 @@ static volatile int paint_lock;
 static uint64_t paint_acquire(void) {
     uint64_t flags;
     __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags) :: "memory");
-    while (__atomic_test_and_set(&paint_lock, __ATOMIC_ACQUIRE))
+    /* Servicing the flush inside the spin is not an optimisation. A processor
+       waiting here has interrupts off, so the one asking it to drop cached
+       translations cannot reach it as an interrupt -- and that processor is
+       very likely holding the kernel lock while it waits, which is a machine
+       that stops with one processor holding everything. */
+    while (__atomic_test_and_set(&paint_lock, __ATOMIC_ACQUIRE)) {
+        smp_service_flush();
         __asm__ volatile("pause");
+    }
     return flags;
 }
 

@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stdarg.h>
 #include "../include/klog.h"
+#include "../include/smp.h"
 #include "../include/kstring.h"
 
 #define KLOG_CAPACITY 16384U
@@ -126,8 +127,12 @@ static volatile int log_lock;
 static uint64_t log_acquire(void) {
     uint64_t flags;
     __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags) :: "memory");
-    while (__atomic_test_and_set(&log_lock, __ATOMIC_ACQUIRE))
+    /* As in terminal.c: interrupts are off here, so the flush another
+       processor is waiting on has to be serviced by hand. */
+    while (__atomic_test_and_set(&log_lock, __ATOMIC_ACQUIRE)) {
+        smp_service_flush();
         __asm__ volatile("pause");
+    }
     return flags;
 }
 
