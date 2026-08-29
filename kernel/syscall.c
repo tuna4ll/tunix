@@ -5810,7 +5810,20 @@ static int syscall_number_may_share(uint64_t number) {
     return number == SYS_READ || number == SYS_WRITE;
 }
 
+#define VERBOSE_SYSCALL_LIMIT 24U
+
 void syscall_dispatch(struct syscall_frame *frame) {
+    /* The first syscall is the answer to one question and it is the question
+       that matters here: whether userland ran at all. */
+    if (boot_verbose()) {
+        static unsigned traced;
+        if (traced < VERBOSE_SYSCALL_LIMIT) {
+            traced++;
+            kprintf("syscall: %u from pid %d\n", (unsigned)frame->rax,
+                    (int)process_current_pid());
+        }
+    }
+
     if (syscall_number_may_share(frame->rax)) {
         kernel_lock_shared();
         if (syscall_try_shared(frame)) {

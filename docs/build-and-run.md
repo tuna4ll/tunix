@@ -157,10 +157,25 @@ booting apart:
 | --- | --- | --- |
 | `Tunix` | | |
 | `Tunix (one processor)` | `nosmp` | the other processors, and everything they race with |
-| `Tunix (shell)` | `init=/bin/sh` | userland working from the boot scripts getting through |
+| `Tunix (shell)` | `init=/bin/sh verbose` | userland working from the boot scripts getting through |
 
 A prompt from the third means the kernel, the disk, the loader and libc are all
 fine and what is wrong is above them.
+
+`verbose` prints the first two dozen faults and the first two dozen syscalls
+and then goes quiet:
+
+```
+syscall: 257 from pid 1
+fault: pid 1 rip 0x7f0000013134 addr 0x6000001eb0fc error 6
+```
+
+That window is the one thing the kernel otherwise has no way to show. A
+process that never reaches its first syscall and never takes an unhandled
+fault -- which the fault reporter would print on its own -- is, from outside,
+a machine that printed its last line and stopped. Whether *any* syscall
+appears is the whole question, and the answer separates "userland never ran"
+from "userland ran and is stuck in the kernel".
 
 ## Booting on one processor
 

@@ -177,6 +177,21 @@ int boot_command_line_flag(const char *key) {
     return 0;
 }
 
+/*
+ * Whether `verbose` was asked for.
+ *
+ * It turns on a bounded trace of the first steps userland takes -- the first
+ * faults and the first syscalls -- and nothing else. That is the one window
+ * the kernel has no other way to show: a process that never reaches its first
+ * syscall and never takes an unhandled fault is, from outside, a machine that
+ * printed its last line and stopped.
+ */
+int boot_verbose(void) {
+    static int cached = -1;
+    if (cached < 0) cached = boot_command_line_flag("verbose");
+    return cached;
+}
+
 void limine_start(void) {
     if (!LIMINE_BASE_REVISION_SUPPORTED) panic("limine: base revision 3 unsupported");
     if (!hhdm_request.response) panic("limine: no higher-half direct map");

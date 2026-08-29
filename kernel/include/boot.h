@@ -57,4 +57,8 @@ const char *boot_command_line_value(const char *key);
    carries no value: boot_command_line_value() wants `key=` and finds none. */
 int boot_command_line_flag(const char *key);
 
+/* Whether `verbose` is on the command line: a bounded trace of userland's
+   first faults and first syscalls. See limine_entry.c. */
+int boot_verbose(void);
+
 #endif

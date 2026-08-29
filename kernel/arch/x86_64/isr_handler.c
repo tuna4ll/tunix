@@ -7,6 +7,7 @@
 #include "../../include/percpu.h"
 #include "../../include/pic.h"
 #include "../../include/apic.h"
+#include "../../include/boot.h"
 #include "../../include/file.h"
 #include "../../include/process.h"
 #include "../../include/vmm.h"
@@ -17,6 +18,8 @@
 
 extern void kprintf(const char *fmt, ...);
 extern void panic(const char *msg);
+
+#define VERBOSE_FAULT_LIMIT 24U
 
 const char *exception_messages[] = {
     "Division By Zero", "Debug", "Non Maskable Interrupt", "Breakpoint",
@@ -89,6 +92,19 @@ static void isr_dispatch(struct interrupt_frame *regs) {
         uint64_t fault_address = 0;
         if (regs->int_no == 14) /* page fault: CR2 holds the bad address */
             __asm__ volatile("mov %%cr2, %0" : "=r"(fault_address));
+
+        /* Bounded, and only when asked for: the first faults a process takes
+           are the loader mapping its libraries, and if one of them never
+           returns this is the last thing printed before the machine stops. */
+        if (boot_verbose() && (regs->cs & 3U) == 3U) {
+            static unsigned traced;
+            if (traced < VERBOSE_FAULT_LIMIT) {
+                traced++;
+                kprintf("fault: pid %d rip %p addr %p error %x\n",
+                        (int)process_current_pid(), (void *)fault_rip,
+                        (void *)fault_address, (unsigned)fault_error);
+            }
+        }
 
         /* A not-present write inside the stack window is the stack growing,
            not a crash. Bit 0 of the error code clear means the page is absent;
