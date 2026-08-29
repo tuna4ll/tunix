@@ -148,10 +148,23 @@ cmdline: root=LABEL=tunix-root init=/usr/bin/uname
 is the only form that finds the right disk on a machine that has others;
 `root=/dev/sda2` still works and names a position in the probe order.
 
+## The boot menu
+
+Three entries, and the second two exist to take a machine that will not finish
+booting apart:
+
+| Entry | Command line | What it separates |
+| --- | --- | --- |
+| `Tunix` | | |
+| `Tunix (one processor)` | `nosmp` | the other processors, and everything they race with |
+| `Tunix (shell)` | `init=/bin/sh` | userland working from the boot scripts getting through |
+
+A prompt from the third means the kernel, the disk, the loader and libc are all
+fine and what is wrong is above them.
+
 ## Booting on one processor
 
-The Limine menu has a second entry, `Tunix (one processor)`, which is the same
-image with `nosmp` on the command line. It is for a machine that will not
+`Tunix (one processor)` is the same image with `nosmp` on the command line. It is for a machine that will not
 finish booting: everything the other processors bring with them -- the TLB
 shootdown, the contention on the kernel lock, one of them running init while
 the first idles -- stops being a suspect.
@@ -164,7 +177,22 @@ TUNIX: starting /sbin/init
 TUNIX: cpu 0 has nothing to run
 ```
 
-That last line is not a failure. On a machine with several processors another
+Init leaving is fatal and says so, because from the outside it is not
+distinguishable from a hang -- every processor goes idle and the screen keeps
+whatever was on it:
+
+```
+TUNIX: init exited, status 0
+PANIC: init exited
+```
+
+and a fatal signal names where it died:
+
+```
+TUNIX: init killed by signal 11 at rip 0x... rsp 0x...
+```
+
+The `cpu 0 has nothing to run` line is not a failure. On a machine with several processors another
 one takes init before the first gets there, and the first idles; the line
 exists because it is the difference between an init running somewhere else and
 an init that never ran. On one processor it reads `cpu 0 entering user mode`

@@ -1287,6 +1287,11 @@ static void notify_children_of_parent_death(struct process *parent) {
 static void terminate_sibling_threads(int status);
 
 static void process_exit_from_signal(struct syscall_frame *frame, int signal_number) {
+    /* Before the teardown, while the frame still describes where it died. */
+    if (current && current->pid == 1)
+        kprintf("TUNIX: init killed by signal %d at rip %p rsp %p\n",
+                signal_number, (void *)(frame ? frame->user_rip : 0),
+                (void *)(frame ? frame->user_rsp : 0));
     if (current) current->termination_signal = signal_number;
     /* The signal was aimed at the process; the thread it landed on is an
        accident of scheduling, and taking only that one down leaves the rest
@@ -1299,6 +1304,16 @@ static void process_exit_from_signal(struct syscall_frame *frame, int signal_num
 void process_exit_from_syscall(struct syscall_frame *frame, int status) {
     if (!current || !frame) panic("process: exit without current process");
     struct process *exiting = current;
+    /*
+     * Init leaving is the end of the machine, and it has to say so. There is
+     * nothing left to boot into, no parent to report to, and every processor
+     * goes idle -- which from the outside is a black screen and a cursor, and
+     * indistinguishable from a kernel that hung.
+     */
+    if (!exiting->is_thread && exiting->pid == 1) {
+        kprintf("TUNIX: init exited, status %d\n", status);
+        panic("init exited");
+    }
     exiting->exit_status = status;
     exiting->state = PROCESS_ZOMBIE;
     process_handle_robust_list(exiting);
