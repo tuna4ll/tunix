@@ -84,6 +84,38 @@ int pci_find_class(uint8_t class_code, uint8_t subclass, struct pci_device *out)
     return -1;
 }
 
+/*
+ * The same class and subclass cover four different USB host controllers, and
+ * a machine of a certain age has more than one of them: the programming
+ * interface is the only thing that tells UHCI, OHCI, EHCI and xHCI apart.
+ */
+int pci_find_class_prog_if(uint8_t class_code, uint8_t subclass, uint8_t prog_if,
+                           struct pci_device *out) {
+    if (!out) return -1;
+    for (unsigned bus = 0; bus < 256; bus++) {
+        for (unsigned slot = 0; slot < 32; slot++) {
+            uint32_t id0 = pci_config_read32((uint8_t)bus, (uint8_t)slot, 0, 0);
+            if ((uint16_t)id0 == 0xFFFFU) continue;
+            uint32_t header = pci_config_read32((uint8_t)bus, (uint8_t)slot, 0, 0x0C);
+            unsigned functions = (header & 0x00800000U) ? 8U : 1U;
+            for (unsigned function = 0; function < functions; function++) {
+                uint32_t id = pci_config_read32((uint8_t)bus, (uint8_t)slot,
+                                                (uint8_t)function, 0);
+                if ((uint16_t)id == 0xFFFFU) continue;
+                uint32_t class_value = pci_config_read32((uint8_t)bus, (uint8_t)slot,
+                                                         (uint8_t)function, 0x08);
+                if ((uint8_t)(class_value >> 24) == class_code &&
+                    (uint8_t)(class_value >> 16) == subclass &&
+                    (uint8_t)(class_value >> 8) == prog_if) {
+                    fill_device(out, (uint8_t)bus, (uint8_t)slot, (uint8_t)function);
+                    return 0;
+                }
+            }
+        }
+    }
+    return -1;
+}
+
 void pci_enable_bus_mastering(const struct pci_device *device) {
     if (!device) return;
     uint32_t value = pci_config_read32(device->bus, device->slot, device->function, 0x04);

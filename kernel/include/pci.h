@@ -20,6 +20,10 @@ uint32_t pci_config_read32(uint8_t bus, uint8_t slot, uint8_t function, uint8_t 
 void pci_config_write32(uint8_t bus, uint8_t slot, uint8_t function, uint8_t offset, uint32_t value);
 int pci_find_device(uint16_t vendor_id, uint16_t device_id, struct pci_device *out);
 int pci_find_class(uint8_t class_code, uint8_t subclass, struct pci_device *out);
+/* The same, but matching the programming interface too: it is what separates
+   the four kinds of USB host controller, which share a class and a subclass. */
+int pci_find_class_prog_if(uint8_t class_code, uint8_t subclass, uint8_t prog_if,
+                           struct pci_device *out);
 void pci_enable_bus_mastering(const struct pci_device *device);
 
 #endif

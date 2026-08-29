@@ -21,6 +21,7 @@
 #include "../../include/kstring.h"
 #include "../../include/input.h"
 #include "../../include/tunix/input_event.h"
+#include "../../include/usb.h"
 #include "../../include/xhci.h"
 
 extern void kprintf(const char *fmt, ...);
@@ -1291,6 +1292,21 @@ static int start_controller(void) {
     return 0;
 }
 
+static int xhci_host_storage_count(void) { return xhci_storage_count(); }
+
+static int xhci_host_bulk_transfer(int index, int in, uint64_t physical,
+                                   uint32_t length) {
+    return xhci_bulk_transfer(index, in, physical, length);
+}
+
+/* The seam described in usb.h. The two wrappers exist because the functions
+   they call are the driver's public ones and are defined further down. */
+static const struct usb_host xhci_host = {
+    .name = "xhci",
+    .storage_count = xhci_host_storage_count,
+    .bulk_transfer = xhci_host_bulk_transfer,
+};
+
 int xhci_init(void) {
     struct pci_device device;
     if (pci_find_class(PCI_CLASS_SERIAL_BUS, PCI_SUBCLASS_USB, &device) != 0) return -1;
@@ -1351,6 +1367,7 @@ int xhci_init(void) {
             (unsigned)controller.max_slots, (unsigned)controller.max_ports,
             (unsigned)controller.context_bytes);
     enumerate_ports();
+    if (xhci_storage_count()) usb_register_host(&xhci_host);
     return 0;
 }
 

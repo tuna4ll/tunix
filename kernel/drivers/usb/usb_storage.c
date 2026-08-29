@@ -5,7 +5,7 @@
 #include "../../include/pmm.h"
 #include "../../include/usb_storage.h"
 #include "../../include/vmm.h"
-#include "../../include/xhci.h"
+#include "../../include/usb.h"
 
 /*
  * USB mass storage: bulk-only transport carrying SCSI.
@@ -96,17 +96,17 @@ static int run_command(struct usb_disk *disk, const uint8_t *command,
     memcpy(cbw->command, command, command_length);
     uint32_t tag = cbw->tag;
 
-    if (xhci_bulk_transfer(disk->controller_index, 0, wrapper_physical,
+    if (usb_bulk_transfer(disk->controller_index, 0, wrapper_physical,
                            sizeof(*cbw)) != 0) return -1;
 
     if (length &&
-        xhci_bulk_transfer(disk->controller_index, in, staging_physical, length) != 0)
+        usb_bulk_transfer(disk->controller_index, in, staging_physical, length) != 0)
         return -1;
 
     struct command_status_wrapper *csw =
         (struct command_status_wrapper *)(wrapper_page + 64);
     memset(csw, 0, sizeof(*csw));
-    if (xhci_bulk_transfer(disk->controller_index, 1, wrapper_physical + 64,
+    if (usb_bulk_transfer(disk->controller_index, 1, wrapper_physical + 64,
                            sizeof(*csw)) != 0) return -1;
 
     if (csw->signature != CSW_SIGNATURE || csw->tag != tag) return -1;
@@ -223,7 +223,7 @@ static int read_capacity(struct usb_disk *disk) {
 }
 
 void usb_storage_init(void) {
-    int present = xhci_storage_count();
+    int present = usb_storage_count();
     if (!present) return;
 
     wrapper_page = (uint8_t *)vmm_phys_to_virt((wrapper_physical = (uint64_t)pmm_alloc_page()));
