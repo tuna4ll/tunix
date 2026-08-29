@@ -112,8 +112,38 @@ void kprintf(const char *fmt, ...) {
 
 extern void terminal_print(const char *);
 
+/*
+ * The tail of the log, on the terminal.
+ *
+ * A panic is the one moment the serial port is not enough. On real hardware
+ * there is usually nothing attached to it, and the reason the kernel stopped
+ * is never the panic line itself -- it is the twenty lines above it, which
+ * until now only existed somewhere nobody was looking.
+ */
+void klog_print_tail(unsigned lines) {
+    if (!klog_count) return;
+    size_t start = klog_count;
+    unsigned seen = 0;
+    while (start > 0) {
+        size_t index = (klog_head + start - 1U) % KLOG_CAPACITY;
+        if (klog_buffer[index] == '\n' && ++seen > lines) break;
+        start--;
+    }
+    /* One character at a time, because the log is a ring and the terminal
+       takes strings: a pair is the shortest thing that is both. */
+    char pair[2] = {0, 0};
+    for (size_t at = start; at < klog_count; at++) {
+        pair[0] = klog_buffer[(klog_head + at) % KLOG_CAPACITY];
+        terminal_print(pair);
+    }
+}
+
+#define PANIC_LOG_LINES 24U
+
 void panic(const char *msg) {
     kprintf("PANIC: %s\n", msg);
+    terminal_print("\n\n--- kernel log ---\n");
+    klog_print_tail(PANIC_LOG_LINES);
     terminal_print("\n\n*** KERNEL PANIC ***\n");
     terminal_print(msg);
     while (1) __asm__ volatile("cli; hlt");

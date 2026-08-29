@@ -119,7 +119,9 @@ Useful overrides: `QEMU_SMP`, `QEMU_MEMORY`, `QEMU_NET`, `QEMU_AUDIO`.
 A panic reaches the screen from `terminal_init()` onwards, which `kmain` calls
 right after the heap and well before the root filesystem -- so a machine that
 cannot find its root says so on the display, and lists the block devices the
-probe did register, instead of going black.
+probe did register, instead of going black. It prints the last two dozen lines
+of the kernel log above the panic as well, which on a machine with nothing
+attached to its serial port is the only way to read them.
 
 ```sh
 make kernel KERNEL_CFLAGS_EXTRA=-DTUNIX_DEBUG_LOGS=1
