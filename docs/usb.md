@@ -62,6 +62,33 @@ from absent.
 - **No HID.** See above -- the devices EHCI would have to talk to at full speed
   are the ones it deliberately gives away.
 
+## Ports have to be turned on before they can be asked
+
+A controller with port power control comes out of a reset with its ports
+unpowered, and an unpowered port reports no connection. Asking whether
+something is plugged in before turning the port on is therefore a question with
+one possible answer, and it is the wrong one. The first version of this driver
+did exactly that: it powered the port inside `reset_port()`, *after* the check
+that returned early when nothing was connected.
+
+It passed every test, because the emulated controller powers its own ports and
+never says no. On real hardware every port on both controllers came back empty.
+
+So `start_controller()` powers all of them -- clearing Port Owner at the same
+time, since the firmware hands ports to the companion controller for its legacy
+emulation and a reset does not always take them back -- and `ehci_init()` waits
+the 100 ms debounce once, for every controller at once, before anything looks.
+
+When a controller finds nothing, it prints what its ports actually read:
+
+```
+EHCI: port 1 idle, status 1000
+```
+
+A port with nothing in it, a port owned by the companion and a port that
+refused to enable are three different problems that look identical from
+outside. PORTSC tells them apart.
+
 ## The shape of the driver
 
 The asynchronous schedule and nothing else. A queue head sits in a ring that

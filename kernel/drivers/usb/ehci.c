@@ -143,6 +143,8 @@ extern void kprintf(const char *fmt, ...);
 /* The specification's recovery time after a port reset, before the device is
    required to answer on its default address. */
 #define RESET_RECOVERY_NS (20ULL * 1000ULL * 1000ULL)
+/* The debounce a connection needs before PORTSC means anything. */
+#define PORT_POWER_SETTLE_NS (100ULL * 1000ULL * 1000ULL)
 #define SET_ADDRESS_RECOVERY_NS (10ULL * 1000ULL * 1000ULL)
 
 #define EHCI_REGISTER_BYTES 0x1000U
@@ -404,7 +406,31 @@ static int start_controller(struct ehci *host) {
     /* Route every port to this controller rather than to the companion. Until
        this is written the ports belong to UHCI/OHCI and read as empty. */
     mmio_write32(operational(host, EHCI_CONFIGFLAG), 1U);
-    delay_ns(RESET_RECOVERY_NS);
+
+    /*
+     * Power every port, and only then wait.
+     *
+     * A controller with port power control comes out of a reset with its ports
+     * unpowered, and an unpowered port reports no connection -- so asking
+     * whether something is plugged in before turning the port on is asking a
+     * question with one possible answer. It cost a boot on real hardware to
+     * find that out, because the emulated controller powers its ports itself
+     * and never says no.
+     *
+     * The debounce a connection needs afterwards is long -- the specification
+     * asks for 100 ms -- so it is not waited for here: every controller is
+     * powered first and ehci_init() waits once for all of them.
+     */
+    for (unsigned port = 0; port < host->ports && port < MAX_PORTS; port++) {
+        uint32_t status = mmio_read32(port_register(host, port));
+        /* Port Owner goes with it. The firmware hands ports to the companion
+           controller for its own legacy emulation and a reset does not always
+           take them back; a port left owned elsewhere reads as empty here. If
+           what is on it turns out to be full speed, reset_port() gives it
+           away again deliberately. */
+        mmio_write32(port_register(host, port),
+                     (status & ~(PORTSC_CHANGE_BITS | PORTSC_OWNER)) | PORTSC_POWER);
+    }
     return 0;
 }
 
@@ -431,12 +457,6 @@ static int reset_port(struct ehci *host, unsigned port) {
         PORTSC_LINE_STATUS_LOW_SPEED) {
         release_port(host, port);
         return -1;
-    }
-
-    if (!(status & PORTSC_POWER)) {
-        mmio_write32(port_register(host, port),
-                     (status & ~PORTSC_CHANGE_BITS) | PORTSC_POWER);
-        delay_ns(PORT_RESET_HOLD_NS);
     }
 
     status = mmio_read32(port_register(host, port));
@@ -690,6 +710,16 @@ static void enumerate_ports(struct ehci *host) {
         if (reset_port(host, port) != 0) continue;
         if (enumerate_device(host, port, next_address) == 0) next_address++;
     }
+    if (host->device_count) return;
+
+    /* Nothing came up, and this is where the interesting information is: a
+       port with nothing in it, a port handed to the companion and a port that
+       refused to enable all look the same from outside and are three different
+       problems. PORTSC tells them apart, so on a machine with nothing on its
+       serial port, print it. */
+    for (unsigned port = 0; port < host->ports && port < MAX_PORTS; port++)
+        kprintf("EHCI: port %u idle, status %x\n", port + 1U,
+                (unsigned)mmio_read32(port_register(host, port)));
 }
 
 /* --- what the mass-storage transport above needs -------------------------- */
@@ -791,7 +821,6 @@ static int start_one(const struct pci_device *device, struct ehci *host) {
     kprintf("EHCI: %x.%x at %x, %u ports, async schedule running\n",
             (unsigned)(host->version >> 8), (unsigned)(host->version & 0xFF),
             (unsigned)physical, (unsigned)host->ports);
-    enumerate_ports(host);
     return 0;
 }
 
@@ -842,6 +871,13 @@ int ehci_init(void) {
     }
 
     if (!controller_count) return -1;
+
+    /* One debounce for every controller rather than one each: they were all
+       powered above and the interval is the same interval. */
+    delay_ns(PORT_POWER_SETTLE_NS);
+    for (unsigned which = 0; which < controller_count; which++)
+        enumerate_ports(&controllers[which]);
+
     if (ehci_storage_count()) usb_register_host(&ehci_host);
     return 0;
 }
