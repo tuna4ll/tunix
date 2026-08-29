@@ -44,6 +44,7 @@ void klog_console(int enabled) {
 
 extern void terminal_print(const char *);
 extern int terminal_ready(void);
+extern void terminal_paint_lock_reset(void);
 
 static void emit_char(char c) {
     klog_store_char(c);
@@ -107,7 +108,36 @@ static void print_int(int64_t num, int base, int is_upper) {
     }
 }
 
+/*
+ * A message at a time.
+ *
+ * The terminal serialises characters on its own, which keeps the screen from
+ * being corrupted but not from being unreadable: two processors printing at
+ * once produce one line with both messages spliced into it, a character each.
+ * This is the lock that makes a kprintf() atomic, and it is why the trace a
+ * fault handler prints is legible at all.
+ *
+ * Interrupts go off with it for the usual reason: kprintf() is reachable from
+ * an interrupt handler and a processor that took one here would wait for
+ * itself.
+ */
+static volatile int log_lock;
+
+static uint64_t log_acquire(void) {
+    uint64_t flags;
+    __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags) :: "memory");
+    while (__atomic_test_and_set(&log_lock, __ATOMIC_ACQUIRE))
+        __asm__ volatile("pause");
+    return flags;
+}
+
+static void log_release(uint64_t flags) {
+    __atomic_clear(&log_lock, __ATOMIC_RELEASE);
+    if (flags & 0x200ULL) __asm__ volatile("sti");
+}
+
 void kprintf(const char *fmt, ...) {
+    uint64_t flags = log_acquire();
     va_list args;
     va_start(args, fmt);
     while (*fmt) {
@@ -140,6 +170,7 @@ void kprintf(const char *fmt, ...) {
         if (*fmt) fmt++;
     }
     va_end(args);
+    log_release(flags);
 }
 
 /*
@@ -171,6 +202,10 @@ void klog_print_tail(unsigned lines) {
 #define PANIC_LOG_LINES 24U
 
 void panic(const char *msg) {
+    /* Both locks by force. The processor that held either of them may be the
+       one that just went wrong, and a panic that waits for it says nothing. */
+    __atomic_clear(&log_lock, __ATOMIC_RELEASE);
+    terminal_paint_lock_reset();
     kprintf("PANIC: %s\n", msg);
     terminal_print("\n\n--- kernel log ---\n");
     klog_print_tail(PANIC_LOG_LINES);

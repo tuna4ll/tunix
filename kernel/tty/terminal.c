@@ -446,12 +446,50 @@ void terminal_put_codepoint(struct terminal_screen *screen, uint32_t codepoint) 
     if (screen->cursor_visible) render_cell(screen, screen->row, screen->col, 1);
 }
 
+/*
+ * One processor paints at a time.
+ *
+ * Two write into the same screen from two directions: a terminal a program is
+ * writing to, under the kernel lock, and the kernel log, which is not. Neither
+ * cell model nor cursor survives that being interleaved -- what it looks like
+ * from the front is two messages spliced into each other a character at a time
+ * and coloured rubbish where a scroll got half done.
+ *
+ * Interrupts go off with it because kprintf() is reachable from an interrupt
+ * handler, and a processor that took one while holding this would wait for
+ * itself.
+ */
+static volatile int paint_lock;
+
+static uint64_t paint_acquire(void) {
+    uint64_t flags;
+    __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags) :: "memory");
+    while (__atomic_test_and_set(&paint_lock, __ATOMIC_ACQUIRE))
+        __asm__ volatile("pause");
+    return flags;
+}
+
+static void paint_release(uint64_t flags) {
+    __atomic_clear(&paint_lock, __ATOMIC_RELEASE);
+    if (flags & 0x200ULL) __asm__ volatile("sti");
+}
+
 void terminal_put_char(struct terminal_screen *screen, char c) {
+    uint64_t flags = paint_acquire();
     terminal_put_codepoint(screen, (uint8_t)c);
+    paint_release(flags);
 }
 
 void terminal_print(const char *text) {
-    while (text && *text) terminal_put_char(active_screen, *text++);
+    uint64_t flags = paint_acquire();
+    while (text && *text) terminal_put_codepoint(active_screen, (uint8_t)*text++);
+    paint_release(flags);
+}
+
+/* Panic runs after something has already gone wrong, and the processor that
+   held this may be the one that went wrong. */
+void terminal_paint_lock_reset(void) {
+    __atomic_clear(&paint_lock, __ATOMIC_RELEASE);
 }
 
 void terminal_set_sgr_sequence(struct terminal_screen *screen,

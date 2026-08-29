@@ -29,6 +29,9 @@ void terminal_get_dimensions(uint16_t *rows, uint16_t *cols);
 
 /* Writes to the active screen; the panic path, which has no terminal to hand. */
 void terminal_print(const char *text);
+/* Drop the painting lock. Only panic() has any business calling this: see
+   terminal.c. */
+void terminal_paint_lock_reset(void);
 
 void terminal_clear(struct terminal_screen *screen);
 void terminal_put_char(struct terminal_screen *screen, char c);

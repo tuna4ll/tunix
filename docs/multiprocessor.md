@@ -5,6 +5,32 @@ they are started, what each of them owns privately, how the scheduler hands
 work out, and what keeps them from corrupting each other's view of memory. It
 reflects the code as it exists today.
 
+## The console is a shared device too
+
+Two things write into the same screen from two directions: a terminal a program
+is writing to, under the kernel lock, and the kernel log, which is not under it
+at all -- kprintf() is reachable from an interrupt handler and from the fault
+path, and taking the kernel lock there would be a deadlock rather than a fix.
+
+So the terminal has a lock of its own, and kprintf() has a second one that
+makes a whole message atomic. Without the first, the cell model and the cursor
+get interleaved and the screen fills with coloured rubbish where a scroll got
+half done. Without the second the screen is correct and unreadable: two
+processors printing at once produce one line with both messages spliced into
+it, a character each --
+
+```
+T UNI1: st2Iri pid 1
+```
+
+which is what a real machine printed while the trace in `verbose` was going
+out unlocked from every processor at once. Both locks turn interrupts off
+while held, because a processor that took one here would otherwise wait for
+itself.
+
+panic() takes both back by force before it prints: the processor holding one
+may be the one that just went wrong.
+
 ## Finding the processors
 
 `acpi_describe_machine` (`kernel/drivers/acpi.c`) walks the MADT. A type 0 entry is
