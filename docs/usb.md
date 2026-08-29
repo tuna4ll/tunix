@@ -157,6 +157,21 @@ Failures say so, up to a few times:
 EHCI: bulk in endpoint 2 failed, token 40008d80
 ```
 
+## Waking a schedule that stopped
+
+EHCI notices an asynchronous schedule with nothing to do in it and stops
+walking it, and there is no doorbell to ring. Work put into a queue head that
+is already on the ring can therefore simply never start. What comes back is a
+descriptor still marked active with none of its bytes moved:
+
+```
+EHCI: bulk out endpoint 2 failed, token 1f8c80
+```
+
+0x80 is active and 0x1f is the whole 31-byte command still waiting. A transfer
+that has not started after 20 ms turns the schedule off and on again, which is
+what restarts the traversal.
+
 ## The shape of the driver
 
 The asynchronous schedule and nothing else. Two queue heads sit in a ring --

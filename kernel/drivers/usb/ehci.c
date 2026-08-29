@@ -535,6 +535,32 @@ static void build_qtd(struct ehci_qtd *qtd, uint32_t pid, uint64_t physical,
 }
 
 /*
+ * Make the controller look at the schedule again.
+ *
+ * EHCI notices an asynchronous schedule with nothing to do in it and stops
+ * walking it. There is no doorbell to ring, so work put into a queue head that
+ * is already on the ring can simply never start: what comes back is a
+ * descriptor still marked active with none of its bytes moved --
+ *
+ *   EHCI: bulk out endpoint 2 failed, token 1f8c80
+ *
+ * where 0x80 is active and 0x1f is the whole 31-byte command still waiting.
+ * Turning the schedule off and on again is what starts the traversal.
+ */
+#define ASYNC_KICK_AFTER_NS (20ULL * 1000ULL * 1000ULL)
+#define ASYNC_KICK_TIMEOUT_NS (100ULL * 1000ULL * 1000ULL)
+
+static void async_kick(struct ehci *host) {
+    uint32_t command = mmio_read32(operational(host, EHCI_USBCMD));
+    mmio_write32(operational(host, EHCI_USBCMD), command & ~USBCMD_ASYNC_ENABLE);
+    (void)wait_for(operational(host, EHCI_USBSTS), USBSTS_ASYNC_RUNNING, 0,
+                   ASYNC_KICK_TIMEOUT_NS);
+    mmio_write32(operational(host, EHCI_USBCMD), command | USBCMD_ASYNC_ENABLE);
+    (void)wait_for(operational(host, EHCI_USBSTS), USBSTS_ASYNC_RUNNING,
+                   USBSTS_ASYNC_RUNNING, ASYNC_KICK_TIMEOUT_NS);
+}
+
+/*
  * Point the working queue head at a chain of descriptors, link it into the
  * ring, and wait for the last one to go inactive.
  *
@@ -571,6 +597,8 @@ static int run_qtds(struct ehci *host, struct ehci_device *device,
     work_qh->overlay_next = physical_of(first);
 
     uint64_t deadline = time_uptime_ns() + timeout_ns;
+    uint64_t kick_at = time_uptime_ns() + ASYNC_KICK_AFTER_NS;
+    int kicked = 0;
     int status = -1;
     for (;;) {
         uint32_t token = *(volatile uint32_t *)&last->token;
@@ -579,7 +607,12 @@ static int run_qtds(struct ehci *host, struct ehci_device *device,
             break;
         }
         if (*(volatile uint32_t *)&work_qh->overlay_token & QTD_STATUS_HALTED) break;
-        if (time_uptime_ns() >= deadline) break;
+        uint64_t now = time_uptime_ns();
+        if (now >= deadline) break;
+        if (!kicked && now >= kick_at) {
+            kicked = 1;
+            async_kick(host);
+        }
         __asm__ volatile("pause");
     }
 
