@@ -1,7 +1,5 @@
 # Virtual Terminals
 
-![A text console](../screenshots/screenshot.png)
-
 Tunix has eight virtual terminals. Ctrl+Alt+F1 through Ctrl+Alt+F8 move between
 them, `chvt` does the same from a program, and each one keeps its own screen,
 its own keyboard queue and its own idea of who is in the foreground. The first
