@@ -19,6 +19,7 @@
 #include <stdint.h>
 
 #include "include/acpi.h"
+#include "include/boot.h"
 #include "include/apic.h"
 #include "include/gdt.h"
 #include "include/idt.h"
@@ -182,6 +183,15 @@ void smp_init(void) {
     percpu_mark_online(0);
     percpu_slot(0)->apic_id = apic_local_id();
 
+    /* nosmp on the command line keeps the machine on one processor. It is
+       for a machine that will not finish booting: everything the other
+       processors bring with them -- the shootdown, the contention, one of
+       them running init while the first idles -- stops being a suspect. */
+    if (boot_command_line_flag("nosmp")) {
+        kprintf("SMP: one processor, nosmp\n");
+        return;
+    }
+
     const struct acpi_machine *machine = acpi_describe_machine();
     if (!machine || machine->cpu_count < 2 || !apic_is_active()) {
         kprintf("SMP: one processor\n");
@@ -230,7 +240,12 @@ void smp_init(void) {
        page of low memory is a cheap price for not doing that to a machine. */
     if (!missing) unmap_trampoline_page();
     online_cpus = percpu_online_count();
+    kernel_unlock();
+    /* After the unlock, not before. The bring-up holds the kernel lock from
+       end to end and the processors it started are already contending for
+       it, so a line printed inside says only that the loop finished -- and a
+       machine that stops at this line rather than the next one is a machine
+       where one of them took the lock and did not give it back. */
     kprintf("SMP: %u of %u processors running\n", online_cpus,
             (unsigned)machine->cpu_count);
-    kernel_unlock();
 }

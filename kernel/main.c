@@ -228,6 +228,9 @@ void kmain(const struct boot_info *boot) {
        start taking work off the queue immediately, so everything they might
        touch has to already exist. */
     smp_init();
+    /* The last thing the kernel says on its own behalf. Everything after it
+       on the console comes from init. */
+    kprintf("TUNIX: starting %s\n", init_path);
 #if TUNIX_BOOT_TIMINGS
     boot_log_stage("devices/process/init ELF", &stage_started);
     boot_log_cycles("kernel boot total", boot_read_tsc() - boot_started);

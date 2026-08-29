@@ -746,14 +746,20 @@ static void go_idle(void) {
 void process_start_first(void) {
     kernel_lock();
     struct process *first = next_runnable(NULL);
-    /* Not a failure: on a machine with several processors another one may have
-       taken the first process already, and this one simply has nothing yet. */
-    if (!first) go_idle();
+    /* Not a failure: on a machine with several processors another one may
+       have taken the first process already, and this one simply has nothing
+       yet. Worth a line even so -- it is the difference between a machine
+       whose init is running somewhere else and one whose init never ran. */
+    if (!first) {
+        kprintf("TUNIX: cpu %u has nothing to run\n", cpu_current()->index);
+        go_idle();
+    }
     activate_process(first);
     uint64_t entry = first->entry;
     uint64_t stack = first->user_stack_top;
     uint64_t cr3 = first->cr3;
     kernel_unlock();
+    kprintf("TUNIX: cpu %u entering user mode\n", cpu_current()->index);
     process_enter_user(entry, stack, cr3);
     panic("process_enter_user returned");
 }

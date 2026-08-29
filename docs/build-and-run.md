@@ -148,6 +148,30 @@ cmdline: root=LABEL=tunix-root init=/usr/bin/uname
 is the only form that finds the right disk on a machine that has others;
 `root=/dev/sda2` still works and names a position in the probe order.
 
+## Booting on one processor
+
+The Limine menu has a second entry, `Tunix (one processor)`, which is the same
+image with `nosmp` on the command line. It is for a machine that will not
+finish booting: everything the other processors bring with them -- the TLB
+shootdown, the contention on the kernel lock, one of them running init while
+the first idles -- stops being a suspect.
+
+The kernel says which way it went, and then what it did with init:
+
+```
+SMP: 8 of 8 processors running
+TUNIX: starting /sbin/init
+TUNIX: cpu 0 has nothing to run
+```
+
+That last line is not a failure. On a machine with several processors another
+one takes init before the first gets there, and the first idles; the line
+exists because it is the difference between an init running somewhere else and
+an init that never ran. On one processor it reads `cpu 0 entering user mode`
+instead. The `SMP:` line is printed after the bring-up releases the kernel
+lock, so a machine that stops on it rather than after it is one where a
+processor took that lock and did not give it back.
+
 ## Cleaning
 
 ```sh

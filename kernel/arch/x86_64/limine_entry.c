@@ -156,6 +156,27 @@ const char *boot_command_line_value(const char *key) {
     return NULL;
 }
 
+/*
+ * Whether a word appears on the command line on its own.
+ *
+ * The lookup above wants `key=`, which is the right shape for root= and init=
+ * and the wrong one for a switch: `nosmp` has nothing to say beyond being
+ * there, and asking for its value finds nothing.
+ */
+int boot_command_line_flag(const char *key) {
+    const char *at = info.command_line;
+    if (!at) return 0;
+
+    for (; *at != '\0'; at++) {
+        if (at != info.command_line && at[-1] != ' ') continue;
+        size_t index = 0;
+        while (key[index] != '\0' && at[index] == key[index]) index++;
+        if (key[index] != '\0') continue;
+        if (at[index] == '\0' || at[index] == ' ') return 1;
+    }
+    return 0;
+}
+
 void limine_start(void) {
     if (!LIMINE_BASE_REVISION_SUPPORTED) panic("limine: base revision 3 unsupported");
     if (!hhdm_request.response) panic("limine: no higher-half direct map");

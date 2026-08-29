@@ -53,4 +53,8 @@ const struct boot_info *boot_info(void);
    so callers parse forward themselves. */
 const char *boot_command_line_value(const char *key);
 
+/* Whether a word appears on the command line on its own, for a switch that
+   carries no value: boot_command_line_value() wants `key=` and finds none. */
+int boot_command_line_flag(const char *key);
+
 #endif
