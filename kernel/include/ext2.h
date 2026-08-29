@@ -17,6 +17,9 @@ struct ext2_fs_stats {
 /* 0 on success, -1 when no ext2 root is mounted. */
 int ext2fs_stats(struct ext2_fs_stats *out);
 
+/* The block device index whose ext2 label matches, or -1. See ext2.c. */
+int ext2fs_find_label(const char *label);
+
 int ext2fs_probe(uint32_t region_lba);
 int ext2fs_mount_root(uint32_t region_lba);
 int ext2fs_mounted(void);

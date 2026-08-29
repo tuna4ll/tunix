@@ -133,8 +133,12 @@ To run something other than init, put `init=` on the Limine command line in
 `support/limine.conf` and rebuild:
 
 ```
-cmdline: root=/dev/sda2 init=/usr/bin/uname
+cmdline: root=LABEL=tunix-root init=/usr/bin/uname
 ```
+
+`root=` takes a label or a device name. The image ships with the label, which
+is the only form that finds the right disk on a machine that has others;
+`root=/dev/sda2` still works and names a position in the probe order.
 
 ## Cleaning
 

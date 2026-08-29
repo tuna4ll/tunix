@@ -58,15 +58,21 @@ static void boot_log_stage(const char *name, uint64_t *started) {
 #endif
 
 /*
- * root= names the device the filesystem is on: root=/dev/sda2, or sda2. Without
- * it the kernel takes whatever the block layer registered first, which is right
- * on a machine with one unpartitioned disk and a guess anywhere else.
+ * root= names the device the filesystem is on, in one of two forms.
+ *
+ * root=LABEL=tunix-root asks for the disk whose ext2 label says so, and is
+ * what the image ships with: it is the only form that survives being plugged
+ * into a machine that already has disks of its own. root=/dev/sda2, or sda2,
+ * names a position in the probe order instead, which is still the right answer
+ * when a machine has one disk and the label is not known.
+ *
+ * Without either the kernel takes whatever the block layer registered first.
  */
 static int root_device_index(void) {
     const char *value = boot_command_line_value("root");
     if (!value) return 0;
 
-    char name[5 + BLOCK_NAME_BYTES];
+    char name[40];
     size_t length = 0;
     while (value[length] && value[length] != ' ' && length < sizeof name - 1) {
         name[length] = value[length];
@@ -74,7 +80,9 @@ static int root_device_index(void) {
     }
     name[length] = '\0';
 
-    int index = block_device_index_by_name(name);
+    int index;
+    if (strncmp(name, "LABEL=", 6) == 0) index = ext2fs_find_label(name + 6);
+    else index = block_device_index_by_name(name);
     if (index < 0) kprintf("TUNIX: root=%s names no device\n", name);
     return index < 0 ? 0 : index;
 }

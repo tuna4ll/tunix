@@ -1601,6 +1601,39 @@ int ext2fs_probe(uint32_t region_lba) {
     return superblock_usable(usable_blocks) ? 0 : -1;
 }
 
+/*
+ * The index of the disk whose ext2 superblock carries this label, or -1.
+ *
+ * root=/dev/sda2 names a position in the probe order, and that order is a
+ * property of the machine rather than of the image: put the same disk in a
+ * machine that already has one and the name moves -- which is how a kernel
+ * built here ends up trying to mount a stranger's second partition. The label
+ * is written into the filesystem by mkfs.ext2 -L and travels with it.
+ *
+ * The superblock is read directly rather than through ext2fs_probe(), because
+ * probing sets the driver's own state and this runs over every disk on the
+ * machine, most of which are not ours.
+ */
+int ext2fs_find_label(const char *label) {
+    if (!label || !*label) return -1;
+    int count = block_device_count();
+    for (int index = 0; index < count; index++) {
+        const struct block_device *device = block_device_at(index);
+        if (!device || !device->read) continue;
+        struct ext2_superblock probe;
+        if (block_device_read_bytes(device, 1024, sizeof probe, &probe) != 0)
+            continue;
+        if (probe.s_magic != EXT2_MAGIC) continue;
+        /* s_volume_name is not terminated when the label fills it. */
+        size_t length = 0;
+        while (length < sizeof probe.s_volume_name && probe.s_volume_name[length])
+            length++;
+        if (strlen(label) != length) continue;
+        if (strncmp(probe.s_volume_name, label, length) == 0) return index;
+    }
+    return -1;
+}
+
 int ext2fs_mount_root(uint32_t region_lba) {
     if (ext2_mounted_flag || !vfs_root) return -1;
     uint32_t usable_blocks = region_usable_blocks(region_lba);
