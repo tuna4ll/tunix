@@ -209,17 +209,26 @@ void smp_init(void) {
     memcpy(vmm_phys_to_virt(TRAMPOLINE_PHYSICAL), smp_trampoline_start, (size_t)bytes);
 
     unsigned index = 1;
+    unsigned missing = 0;
     for (uint32_t i = 0; i < machine->cpu_count && index < SMP_MAX_CPUS; i++) {
         if (!machine->cpus[i].usable) continue;
         if (machine->cpus[i].apic_id == percpu_slot(0)->apic_id) continue;
         if (start_processor(index, machine->cpus[i].apic_id) != 0) {
             kprintf("SMP: apic %u did not come up\n", (unsigned)machine->cpus[i].apic_id);
-            continue;
+            missing++;
         }
+        /* The slot is spent either way. A processor that missed the deadline
+           has not necessarily failed -- it may still be on its way -- and
+           handing its index and its stack to the next one is how two
+           processors end up running on one stack. */
         index++;
     }
 
-    unmap_trampoline_page();
+    /* The trampoline page stays mapped when something did not check in, for
+       the same reason: a processor still inside it faults on the instruction
+       after paging comes on if the page it is executing from has gone. One
+       page of low memory is a cheap price for not doing that to a machine. */
+    if (!missing) unmap_trampoline_page();
     online_cpus = percpu_online_count();
     kprintf("SMP: %u of %u processors running\n", online_cpus,
             (unsigned)machine->cpu_count);
