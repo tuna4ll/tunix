@@ -4,8 +4,15 @@
 # from and an ext2 root the kernel mounts.
 #
 # One image boots both firmwares. UEFI runs EFI/BOOT/BOOTX64.EFI off the ESP;
-# BIOS runs the stage written into the protective MBR by `limine bios-install`,
-# which then finds limine-bios.sys on the same partition.
+# BIOS runs the stage written into the partition table's boot record by
+# `limine bios-install`, which then finds limine-bios.sys on the ESP.
+#
+# TABLE picks the partition scheme. GPT is the default and is what a UEFI
+# machine expects. MBR exists for old BIOS machines booting from a USB stick:
+# their firmware decides between hard-disk and floppy emulation by looking for
+# an active partition in the boot record, a GPT disk's protective MBR has none,
+# and in floppy emulation the loader is handed a device with no partition table
+# to search -- which it reports as `Stage 3 file not found`.
 set -euo pipefail
 
 IMAGE=${1:?usage: image.sh IMAGE KERNEL LIMINE_DIR LIMINE_CONF SYSROOT}
@@ -13,6 +20,12 @@ KERNEL=${2:?}
 LIMINE_DIR=${3:?}
 LIMINE_CONF=${4:?}
 SYSROOT=${5:?}
+
+TABLE=${TABLE:-gpt}
+case $TABLE in
+gpt | mbr) ;;
+*) echo "image.sh: TABLE must be gpt or mbr, not $TABLE" >&2; exit 1 ;;
+esac
 
 ESP_MIB=${ESP_MIB:-64}
 # Headroom over what the tree actually needs, so that the machine has somewhere
@@ -64,10 +77,18 @@ TOTAL_SECTORS=$(( ROOT_START + ROOT_SECTORS + 2048 ))
 echo ":: writing $IMAGE"
 rm -f "$IMAGE"
 truncate -s $(( TOTAL_SECTORS * 512 )) "$IMAGE"
-sfdisk --quiet --label gpt "$IMAGE" <<EOF
+if [ "$TABLE" = gpt ]; then
+	sfdisk --quiet --label gpt "$IMAGE" <<EOF
 start=$ESP_START, size=$ESP_SECTORS, type=uefi, name="EFI System"
 start=$ROOT_START, size=$ROOT_SECTORS, type=linux, name="tunix-root"
 EOF
+else
+	# `bootable` is the whole point: it is the flag an old BIOS looks for.
+	sfdisk --quiet --label dos "$IMAGE" <<EOF
+start=$ESP_START, size=$ESP_SECTORS, type=ef, bootable
+start=$ROOT_START, size=$ROOT_SECTORS, type=83
+EOF
+fi
 
 # seek_bytes so the block size can be chosen for throughput rather than to make
 # the offset land on a whole number of blocks. At 512 bytes this took minutes.
@@ -76,9 +97,11 @@ dd if="$WORK/esp.img" of="$IMAGE" bs=4M oflag=seek_bytes \
 dd if="$WORK/root.img" of="$IMAGE" bs=4M oflag=seek_bytes \
 	seek=$(( ROOT_START * 512 )) conv=notrunc status=none
 
-# BIOS: the first stage goes in the gap between the protective MBR and the
-# first partition, which is why the ESP starts at sector 2048 rather than 34.
+# BIOS: the first stage goes in the gap between the boot record and the first
+# partition, which is why the ESP starts at sector 2048 rather than 34. On a
+# GPT disk Limine has to split the second stage around the partition entry
+# array; on an MBR one the gap is free and it stays in one piece.
 "$LIMINE_DIR/limine" bios-install "$IMAGE"
 
 rm -rf "$WORK"
-echo ":: $IMAGE ready ($(du -h "$IMAGE" | cut -f1))"
+echo ":: $IMAGE ready, $TABLE ($(du -h "$IMAGE" | cut -f1))"

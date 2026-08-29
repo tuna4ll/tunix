@@ -149,8 +149,13 @@ IMAGE := $(BUILD)/tunix.img
 .PHONY: image
 image: $(IMAGE)
 
+# gpt or mbr. See the header of support/image.sh: an old BIOS booting from a
+# USB stick wants mbr. Switching it does not change a file make looks at, so
+# rebuild with `rm -f $(IMAGE)` after changing it.
+IMAGE_TABLE ?= gpt
+
 $(IMAGE): $(KERNEL) $(LIMINE_EXE) support/limine.conf support/image.sh $(SYSROOT_STAMP)
-	support/image.sh $@ $(KERNEL) $(LIMINE_DIR) support/limine.conf $(SYSROOT)
+	TABLE='$(IMAGE_TABLE)' support/image.sh $@ $(KERNEL) $(LIMINE_DIR) support/limine.conf $(SYSROOT)
 
 # --- running it -------------------------------------------------------------
 

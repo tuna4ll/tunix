@@ -74,6 +74,35 @@ the tree, `append/` is appended to `/etc/passwd`, `/etc/group` and
 `/etc/shadow`, `services` is the list of runit services to enable, and `remove`
 is a list of paths to delete.
 
+## The partition table
+
+The image is GPT by default, which is what a UEFI machine expects and what
+QEMU has always been given here. `IMAGE_TABLE=mbr` builds the same image with
+an MBR instead, and marks the EFI system partition active:
+
+```sh
+rm -f build/tunix.img
+make image IMAGE_TABLE=mbr
+```
+
+It is for one case, and it is a real one. An old BIOS booting from a USB stick
+decides between hard-disk and floppy emulation by looking for an active
+partition in the boot record; a GPT disk's protective MBR has none, so the
+stick is presented as a floppy, and in that mode Limine's second stage is
+handed a device with no partition table to search. What it says then is
+
+```
+!! Stage 3 file not found
+PANIC: Failed to load stage 3.
+```
+
+which reads like a missing file and is really a missing partition table. The
+MBR image boots under both firmwares -- OVMF takes an MBR ESP -- so nothing is
+given up by using it, and the second stage stops being split around the
+partition entry array as a bonus.
+
+Switching the value does not change a file `make` looks at, hence the `rm`.
+
 ## Running
 
 | Target | What it does |
