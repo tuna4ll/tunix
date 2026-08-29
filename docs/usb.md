@@ -131,6 +131,32 @@ high-speed hub up in front of it here. Everything else in this file is
 verified against QEMU; the hub code is verified against the specification and
 against one machine.
 
+## A halted endpoint has to be cleared
+
+A device halts an endpoint to refuse something, and it stays halted. Every
+transfer after it fails, and because each one waits out its timeout first, the
+machine is not frozen but crawling -- which from the front is the same thing,
+and is what a real machine did after userland had started: the trace stopped on
+an `openat`, which is the dynamic loader opening a library, which is a read.
+
+So a failed transfer now looks at the descriptor the controller handed back,
+and clears the halt when there is one. The device resets its data toggle as it
+does that, so the software toggle is reset with it -- leaving the two
+disagreeing is a second, permanent version of the same failure, and the first
+version of this driver did exactly that: it reset its own toggle and never told
+the device.
+
+The toggle also advances by the packets actually moved rather than the packets
+asked for. A device is allowed to end a transfer early and says how much it
+left behind; counting the request instead of the answer desynchronises the
+endpoint the first time one does.
+
+Failures say so, up to a few times:
+
+```
+EHCI: bulk in endpoint 2 failed, token 40008d80
+```
+
 ## The shape of the driver
 
 The asynchronous schedule and nothing else. Two queue heads sit in a ring --

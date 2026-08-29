@@ -128,6 +128,8 @@ extern void kprintf(const char *fmt, ...);
 #define USB_REQUEST_GET_DESCRIPTOR 0x06U
 #define USB_REQUEST_SET_ADDRESS 0x05U
 #define USB_REQUEST_SET_CONFIGURATION 0x09U
+#define USB_REQUEST_CLEAR_FEATURE 0x01U
+#define USB_FEATURE_ENDPOINT_HALT 0x00U
 #define USB_DESCRIPTOR_DEVICE 0x01U
 #define USB_DESCRIPTOR_CONFIGURATION 0x02U
 
@@ -160,6 +162,8 @@ extern void kprintf(const char *fmt, ...);
    than the two an old Intel one splits its ports across. */
 #define MAX_CONTROLLERS 4U
 #define CONFIGURATION_BYTES 512U
+/* Enough to name the failure, not enough to bury the log. */
+#define BULK_FAILURES_REPORTED 8U
 
 struct ehci_qtd {
     uint32_t next;
@@ -984,6 +988,23 @@ static int ehci_storage_count(void) {
     return count;
 }
 
+/*
+ * Clear a halted endpoint.
+ *
+ * A device halts an endpoint to refuse something, and it stays halted: every
+ * transfer after it fails, and since each one waits out the timeout first, a
+ * machine in this state is not frozen but crawling -- which from the front is
+ * the same thing. The device also resets its data toggle when the halt is
+ * cleared, which is why the software toggle is reset with it: leaving the two
+ * disagreeing is a second, permanent version of the same failure.
+ */
+static int clear_endpoint_halt(struct ehci *host, struct ehci_device *device,
+                               uint8_t endpoint, int in) {
+    uint16_t address = (uint16_t)(endpoint | (in ? 0x80U : 0x00U));
+    return control_transfer(host, device, 0x02U, USB_REQUEST_CLEAR_FEATURE,
+                            USB_FEATURE_ENDPOINT_HALT, address, 0, NULL);
+}
+
 static int ehci_bulk_transfer(int index, int in, uint64_t physical,
                               uint32_t length) {
     struct ehci *host = NULL;
@@ -999,17 +1020,32 @@ static int ehci_bulk_transfer(int index, int in, uint64_t physical,
     uint8_t *toggle = in ? &device->bulk_in_toggle : &device->bulk_out_toggle;
 
     build_qtd(&qtds[0], in ? QTD_PID_IN : QTD_PID_OUT, physical, length, *toggle);
-    if (run_qtds(host, device, endpoint, packet, 0, &qtds[0], &qtds[0],
-                 TRANSFER_TIMEOUT_NS) != 0) {
-        /* A halted endpoint leaves its toggle where the failure put it, and
-           the transport above answers a failure by starting the command over.
-           Clearing it here is what keeps the retry from being rejected. */
+    int failed = run_qtds(host, device, endpoint, packet, 0, &qtds[0], &qtds[0],
+                          TRANSFER_TIMEOUT_NS) != 0;
+    uint32_t token = *(volatile uint32_t *)&qtds[0].token;
+
+    if (failed) {
+        /* Worth saying out loud, and worth saying only a few times: a disk
+           that has started failing fails on every block after it, and the
+           first few lines are the ones that name what went wrong. */
+        static unsigned reported;
+        if (reported < BULK_FAILURES_REPORTED) {
+            reported++;
+            kprintf("EHCI: bulk %s endpoint %u failed, token %x\n",
+                    in ? "in" : "out", (unsigned)endpoint, (unsigned)token);
+        }
+        if (token & QTD_STATUS_HALTED)
+            (void)clear_endpoint_halt(host, device, endpoint, in);
         *toggle = 0;
         return -1;
     }
 
-    /* One toggle per packet, and a bulk transfer is a whole number of them. */
-    uint32_t packets = packet ? (length + packet - 1U) / packet : 0;
+    /* One toggle per packet actually moved, which is not the same as one per
+       packet asked for: a device is allowed to end a transfer early, and the
+       bytes it did not send are counted in the descriptor it hands back. */
+    uint32_t remaining = (token >> QTD_LENGTH_SHIFT) & 0x7FFFU;
+    uint32_t moved = length > remaining ? length - remaining : 0;
+    uint32_t packets = packet ? (moved + packet - 1U) / packet : 0;
     *toggle = (uint8_t)((*toggle + packets) & 1U);
     return 0;
 }
