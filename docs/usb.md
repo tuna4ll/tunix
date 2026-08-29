@@ -58,7 +58,10 @@ from absent.
   specification asks for. There is no companion driver, so such a device is not
   reached. It does not cost anything worth having: a USB stick is high speed,
   and a keyboard is behind the firmware's legacy emulation long before this.
-- **No hubs and no split transactions.** A device behind a hub is not found.
+- **Hubs, but only one level of them, and only for high-speed devices.** See
+  below -- a rate-matching hub is not optional on the machines this exists for.
+  A slower device behind a hub would need split transactions, which this driver
+  does not do, and is skipped with a line saying so.
 - **No HID.** See above -- the devices EHCI would have to talk to at full speed
   are the ones it deliberately gives away.
 
@@ -88,6 +91,45 @@ EHCI: port 1 idle, status 1000
 A port with nothing in it, a port owned by the companion and a port that
 refused to enable are three different problems that look identical from
 outside. PORTSC tells them apart.
+
+## The hub on the root port
+
+Intel chipsets of the BIOS era put a **rate-matching hub** on the root port of
+each EHCI controller and hang every physical socket off it. On such a machine
+the root ports each hold exactly one device, that device is the hub, and no
+amount of correct root-port handling finds a disk. What it looks like from the
+outside is this, from a real machine:
+
+```
+USB: ehci at 0:1a.0
+USB: ehci at 0:1d.0
+EHCI: 1.0 at d9105c00, 3 ports, async schedule running
+EHCI: 1.0 at d9105800, 3 ports, async schedule running
+EHCI: port 1 idle, status 1007
+EHCI: port 2 idle, status 1000
+EHCI: port 3 idle, status 1000
+```
+
+`1007` is connected, enabled and powered: the port reset worked and there is a
+device on it. Both controllers, port 1, the same answer -- that shape is the
+hub.
+
+So the driver follows it. Only the management of the hub is needed, not split
+transactions: a high-speed device behind a high-speed hub is addressed
+directly and the hub is transparent to its transfers. Ports are powered, reset
+and read through class requests on the control pipe rather than through a
+register, and the sequence is otherwise the root-port one. The hub is
+configured first -- a device in the address state is not required to answer
+anything but the standard requests, and every port operation is a class one.
+
+One level. A hub behind a hub is not something a chipset does to itself, and
+following it would need a queue this driver does not have.
+
+**This path is not tested in the emulator.** QEMU models only a full-speed hub,
+which cannot attach to an EHCI bus at all, so there is no way to stand a
+high-speed hub up in front of it here. Everything else in this file is
+verified against QEMU; the hub code is verified against the specification and
+against one machine.
 
 ## The shape of the driver
 

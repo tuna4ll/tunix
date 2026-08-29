@@ -149,7 +149,7 @@ extern void kprintf(const char *fmt, ...);
 
 #define EHCI_REGISTER_BYTES 0x1000U
 #define MAX_PORTS 15U
-#define MAX_DEVICES 4U
+#define MAX_DEVICES 8U
 /* Four ring heads fit in the front of the DMA page, and no chipset has more
    than the two an old Intel one splits its ports across. */
 #define MAX_CONTROLLERS 4U
@@ -643,13 +643,47 @@ static int find_storage_interface(struct ehci_device *device,
     return (device->bulk_in_endpoint && device->bulk_out_endpoint) ? 0 : -1;
 }
 
-static int enumerate_device(struct ehci *host, unsigned port, uint8_t address) {
-    if (host->device_count >= MAX_DEVICES) return -1;
-    struct ehci_device *device = &host->devices[host->device_count];
+/*
+ * How a port is named in the log: "1" for a root port, "1.2" for the second
+ * port of the hub on root port 1. The packed form is what gets carried around
+ * -- root port in the high nibble, the port below it in the low one -- and
+ * this is the only place that knows it.
+ */
+static const char *port_name(unsigned where) {
+    static char name[8];
+    unsigned root = (where >> 4) & 0xFU;
+    unsigned below = where & 0xFU;
+    unsigned at = 0;
+    if (root >= 10U) name[at++] = (char)('0' + root / 10U);
+    name[at++] = (char)('0' + root % 10U);
+    if (below) {
+        name[at++] = '.';
+        if (below >= 10U) name[at++] = (char)('0' + below / 10U);
+        name[at++] = (char)('0' + below % 10U);
+    }
+    name[at] = 0;
+    return name;
+}
+
+/*
+ * Put a device on an address and report what kind it is.
+ *
+ * The first eight bytes of the device descriptor carry both things worth
+ * knowing this early: the real maximum packet size for the default pipe, and
+ * the device class -- which is how a hub is recognised before anything asks it
+ * for a configuration it does not have.
+ *
+ * `where` is the port it was found on: the root port in the high nibble and
+ * the port below it on a hub in the low one, logged as "1.2" for the second
+ * port of the hub on root port 1 and "1.0" for root port 1 itself.
+ *
+ * Returns the class, or -1.
+ */
+static int address_device(struct ehci *host, struct ehci_device *device,
+                          uint8_t address, unsigned where) {
     memset(device, 0, sizeof(*device));
     /* Address zero and the smallest packet size the specification allows,
-       until the device has said otherwise: the first eight bytes of its
-       descriptor are the ones that name the real size. */
+       until the device has said otherwise. */
     device->address = 0;
     device->max_packet = 64;
 
@@ -657,49 +691,208 @@ static int enumerate_device(struct ehci *host, unsigned port, uint8_t address) {
     if (control_transfer(host, device, 0x80U, USB_REQUEST_GET_DESCRIPTOR,
                          (uint16_t)(USB_DESCRIPTOR_DEVICE << 8), 0, 8,
                          header) != 0) {
-        kprintf("EHCI: port %u did not answer GET_DESCRIPTOR\n", port + 1U);
+        kprintf("EHCI: port %s did not answer GET_DESCRIPTOR\n", port_name(where));
         return -1;
     }
     if (header[7]) device->max_packet = header[7];
 
-    if (control_transfer(host, device, 0x00U, USB_REQUEST_SET_ADDRESS, address, 0, 0,
-                         NULL) != 0) {
-        kprintf("EHCI: port %u refused SET_ADDRESS\n", port + 1U);
+    if (control_transfer(host, device, 0x00U, USB_REQUEST_SET_ADDRESS, address,
+                         0, 0, NULL) != 0) {
+        kprintf("EHCI: port %s refused SET_ADDRESS\n", port_name(where));
         return -1;
     }
     device->address = address;
     delay_ns(SET_ADDRESS_RECOVERY_NS);
+    return header[4];
+}
 
-    uint8_t header9[9];
+/*
+ * The configuration descriptor, and the bulk endpoints of a mass-storage
+ * interface inside it.
+ *
+ * Every way this can fail says so. A device that is simply not a disk is the
+ * common case and, from outside, looks exactly like a disk that would not
+ * talk -- which is a whole boot spent guessing when the machine has no serial
+ * port to explain itself over.
+ */
+static int enumerate_storage(struct ehci *host, struct ehci_device *device,
+                             unsigned where) {
+    uint8_t header[9];
     if (control_transfer(host, device, 0x80U, USB_REQUEST_GET_DESCRIPTOR,
                          (uint16_t)(USB_DESCRIPTOR_CONFIGURATION << 8), 0, 9,
-                         header9) != 0)
+                         header) != 0) {
+        kprintf("EHCI: port %s has no configuration descriptor\n", port_name(where));
         return -1;
-    uint16_t total = (uint16_t)(header9[2] | ((uint16_t)header9[3] << 8));
+    }
+    uint16_t total = (uint16_t)(header[2] | ((uint16_t)header[3] << 8));
     if (total > CONFIGURATION_BYTES) total = CONFIGURATION_BYTES;
 
     static uint8_t configuration[CONFIGURATION_BYTES];
     if (control_transfer(host, device, 0x80U, USB_REQUEST_GET_DESCRIPTOR,
                          (uint16_t)(USB_DESCRIPTOR_CONFIGURATION << 8), 0, total,
-                         configuration) != 0)
+                         configuration) != 0) {
+        kprintf("EHCI: port %s would not give up its configuration\n", port_name(where));
         return -1;
+    }
 
-    if (find_storage_interface(device, configuration, total) != 0) return -1;
-    device->configuration = header9[5];
+    if (find_storage_interface(device, configuration, total) != 0) {
+        kprintf("EHCI: port %s is not bulk-only mass storage\n", port_name(where));
+        return -1;
+    }
+    device->configuration = header[5];
 
     if (control_transfer(host, device, 0x00U, USB_REQUEST_SET_CONFIGURATION,
                          device->configuration, 0, 0, NULL) != 0) {
-        kprintf("EHCI: port %u refused SET_CONFIGURATION\n", port + 1U);
+        kprintf("EHCI: port %s refused SET_CONFIGURATION\n", port_name(where));
         return -1;
     }
 
     device->used = 1;
     device->is_storage = 1;
-    host->device_count++;
-    kprintf("EHCI: port %u: mass storage at address %u, bulk in %u out %u\n",
-            port + 1U, (unsigned)address, (unsigned)device->bulk_in_endpoint,
+    kprintf("EHCI: port %s: mass storage at address %u, bulk in %u out %u\n",
+            port_name(where), (unsigned)device->address,
+            (unsigned)device->bulk_in_endpoint,
             (unsigned)device->bulk_out_endpoint);
     return 0;
+}
+
+/* --- hubs ------------------------------------------------------------------
+ *
+ * Not an optional extra on the machines this driver exists for. Intel chipsets
+ * of the era put a rate-matching hub on the root port of each EHCI controller
+ * and hang every physical socket off it, so the root ports hold one device
+ * each and it is never the disk. A machine whose root ports all read connected
+ * and enabled and yield nothing is this.
+ *
+ * Only the management of the hub is needed, not split transactions: a
+ * high-speed device behind a high-speed hub is addressed directly and the hub
+ * is transparent to its transfers. A slower device behind one would need
+ * transactions this driver does not do, and is skipped with a line saying so.
+ */
+
+#define USB_CLASS_HUB 0x09U
+#define HUB_REQUEST_GET_STATUS 0x00U
+#define HUB_REQUEST_CLEAR_FEATURE 0x01U
+#define HUB_REQUEST_SET_FEATURE 0x03U
+#define HUB_DESCRIPTOR_TYPE 0x29U
+#define HUB_FEATURE_PORT_RESET 4U
+#define HUB_FEATURE_PORT_POWER 8U
+#define HUB_FEATURE_C_PORT_RESET 20U
+#define HUB_PORT_CONNECTED (1U << 0)
+#define HUB_PORT_ENABLED (1U << 1)
+#define HUB_PORT_RESETTING (1U << 4)
+#define HUB_PORT_HIGH_SPEED (1U << 10)
+#define HUB_MAX_PORTS 15U
+#define HUB_RESET_POLL_NS (20ULL * 1000ULL * 1000ULL)
+#define HUB_RESET_ATTEMPTS 25U
+
+static int hub_port_status(struct ehci *host, struct ehci_device *hub,
+                           unsigned port, uint32_t *out) {
+    uint8_t status[4];
+    if (control_transfer(host, hub, 0xA3U, HUB_REQUEST_GET_STATUS, 0,
+                         (uint16_t)port, 4, status) != 0) return -1;
+    *out = (uint32_t)status[0] | ((uint32_t)status[1] << 8);
+    return 0;
+}
+
+static int hub_port_feature(struct ehci *host, struct ehci_device *hub,
+                            unsigned port, uint16_t feature, int set) {
+    return control_transfer(host, hub, 0x23U,
+                            set ? HUB_REQUEST_SET_FEATURE
+                                : HUB_REQUEST_CLEAR_FEATURE,
+                            feature, (uint16_t)port, 0, NULL);
+}
+
+/*
+ * Reset one hub port and report whether a high-speed device came up on it.
+ *
+ * The sequence is the one the root ports go through, spoken over the control
+ * pipe instead of written to a register: ask the hub to reset the port, watch
+ * its status until the reset clears, and read the speed out of the answer.
+ */
+static int hub_reset_port(struct ehci *host, struct ehci_device *hub,
+                          unsigned port, unsigned where) {
+    if (hub_port_feature(host, hub, port, HUB_FEATURE_PORT_RESET, 1) != 0)
+        return -1;
+
+    uint32_t status = 0;
+    for (unsigned attempt = 0; attempt < HUB_RESET_ATTEMPTS; attempt++) {
+        delay_ns(HUB_RESET_POLL_NS);
+        if (hub_port_status(host, hub, port, &status) != 0) return -1;
+        if (!(status & HUB_PORT_RESETTING)) break;
+    }
+    if (status & HUB_PORT_RESETTING) return -1;
+    hub_port_feature(host, hub, port, HUB_FEATURE_C_PORT_RESET, 0);
+
+    if (!(status & HUB_PORT_ENABLED)) return -1;
+    if (!(status & HUB_PORT_HIGH_SPEED)) {
+        /* Reachable only through split transactions, which this driver does
+           not do. Saying so is better than leaving a live port silent. */
+        kprintf("EHCI: port %s is not high speed, skipped\n", port_name(where));
+        return -1;
+    }
+    delay_ns(RESET_RECOVERY_NS);
+    return 0;
+}
+
+static void enumerate_hub(struct ehci *host, struct ehci_device *hub,
+                          unsigned root_port, uint8_t *next_address) {
+    /*
+     * Configured first, and this is not a formality: a device in the address
+     * state is not required to answer anything but the standard requests, and
+     * everything below is a class request to one of its ports.
+     */
+    uint8_t configuration[9];
+    if (control_transfer(host, hub, 0x80U, USB_REQUEST_GET_DESCRIPTOR,
+                         (uint16_t)(USB_DESCRIPTOR_CONFIGURATION << 8), 0, 9,
+                         configuration) != 0 ||
+        control_transfer(host, hub, 0x00U, USB_REQUEST_SET_CONFIGURATION,
+                         configuration[5], 0, 0, NULL) != 0) {
+        kprintf("EHCI: the hub on port %u would not configure\n", root_port);
+        return;
+    }
+
+    uint8_t descriptor[8];
+    if (control_transfer(host, hub, 0xA0U, USB_REQUEST_GET_DESCRIPTOR,
+                         (uint16_t)(HUB_DESCRIPTOR_TYPE << 8), 0, 8,
+                         descriptor) != 0) {
+        kprintf("EHCI: the hub on port %u has no descriptor\n", root_port);
+        return;
+    }
+    unsigned ports = descriptor[2];
+    if (ports > HUB_MAX_PORTS) ports = HUB_MAX_PORTS;
+    /* bPwrOn2PwrGood is in units of two milliseconds, and is the hub saying
+       how long its ports take to come up after being told to. */
+    uint64_t power_good_ns = (uint64_t)descriptor[5] * 2ULL * 1000ULL * 1000ULL;
+    kprintf("EHCI: port %u is a hub with %u ports\n", root_port, ports);
+
+    for (unsigned port = 1; port <= ports; port++)
+        hub_port_feature(host, hub, port, HUB_FEATURE_PORT_POWER, 1);
+    delay_ns(power_good_ns + PORT_POWER_SETTLE_NS);
+
+    for (unsigned port = 1; port <= ports; port++) {
+        if (host->device_count >= MAX_DEVICES) return;
+        unsigned where = (root_port << 4) | port;
+        uint32_t status = 0;
+        if (hub_port_status(host, hub, port, &status) != 0) continue;
+        if (!(status & HUB_PORT_CONNECTED)) continue;
+        if (hub_reset_port(host, hub, port, where) != 0) continue;
+
+        /* On the stack, not in the table: only a disk earns a slot, and the
+           hub is still using its own entry to answer these requests. */
+        struct ehci_device candidate;
+        int class_code = address_device(host, &candidate, *next_address, where);
+        if (class_code < 0) continue;
+        (*next_address)++;
+        /* One level. A hub behind a hub is not something a chipset does to
+           itself, and following it would need a queue this does not have. */
+        if (class_code == (int)USB_CLASS_HUB) {
+            kprintf("EHCI: port %s is a second hub, not followed\n", port_name(where));
+            continue;
+        }
+        if (enumerate_storage(host, &candidate, where) == 0)
+            host->devices[host->device_count++] = candidate;
+    }
 }
 
 static void enumerate_ports(struct ehci *host) {
@@ -707,8 +900,21 @@ static void enumerate_ports(struct ehci *host) {
        own bus, with its own address space for the devices on it. */
     uint8_t next_address = 1;
     for (unsigned port = 0; port < host->ports && port < MAX_PORTS; port++) {
+        if (host->device_count >= MAX_DEVICES) break;
         if (reset_port(host, port) != 0) continue;
-        if (enumerate_device(host, port, next_address) == 0) next_address++;
+
+        unsigned where = (port + 1U) << 4;
+        struct ehci_device candidate;
+        int class_code = address_device(host, &candidate, next_address, where);
+        if (class_code < 0) continue;
+        next_address++;
+
+        if (class_code == (int)USB_CLASS_HUB) {
+            enumerate_hub(host, &candidate, port + 1U, &next_address);
+            continue;
+        }
+        if (enumerate_storage(host, &candidate, where) == 0)
+            host->devices[host->device_count++] = candidate;
     }
     if (host->device_count) return;
 
