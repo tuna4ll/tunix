@@ -105,6 +105,20 @@ void kmain(const struct boot_info *boot) {
     if (!boot->framebuffer) panic("no framebuffer from the bootloader");
     if (framebuffer_init(boot->framebuffer) != 0) panic("framebuffer initialization failed");
     heap_init();
+    /* The console comes up here rather than after the root filesystem, and the
+       reason is what a failure looks like from the outside. panic() writes to
+       the terminal; with the terminal built later, every panic between this
+       line and the mount -- no disk, no root, an unreadable superblock --
+       reached the serial port and left the screen black. On a machine with no
+       serial cable that is indistinguishable from a hang. */
+    if (terminal_init() != 0)
+        panic("framebuffer terminal initialization failed");
+    /* The first virtual terminal, and the display handed to it. Everything
+       written to a console from here on lands on a terminal that exists. */
+    vt_init();
+#if TUNIX_BOOT_TIMINGS
+    boot_log_stage("terminal initialization", &stage_started);
+#endif
     acpi_describe_machine();
     net_init();
     /* A machine with no PS/2 port has its keyboard here; one that has both
@@ -131,21 +145,28 @@ void kmain(const struct boot_info *boot) {
     vfs_init();
     /* Offset zero: a partition is its own device here, so the filesystem
        starts where the device does. */
-    if (ext2fs_mount_root(0) != 0) panic("root filesystem mount failed");
+    if (ext2fs_mount_root(0) != 0) {
+        /* The inventory, not just the failure. On real hardware the answer is
+           nearly always that nothing here can read the disk the root is on --
+           a USB stick behind a controller with no driver, say -- and the way
+           to tell that apart from a corrupt filesystem is which devices the
+           probe did register. */
+        terminal_print("\nblock devices:");
+        int found = block_device_count();
+        for (int index = 0; index < found; index++) {
+            const struct block_device *device = block_device_at(index);
+            terminal_print(" ");
+            terminal_print(device->dev_name);
+        }
+        if (!found) terminal_print(" none");
+        panic("root filesystem mount failed");
+    }
     const struct block_device *root = block_root();
     char source[5 + BLOCK_NAME_BYTES] = "/dev/";
     if (root) memcpy(source + 5, root->dev_name, sizeof root->dev_name);
     vfs_mount_builtin(root ? source : "none", "/", "ext2", vfs_root);
 #if TUNIX_BOOT_TIMINGS
     boot_log_stage("root filesystem mount", &stage_started);
-#endif
-    if (terminal_init() != 0)
-        panic("framebuffer terminal initialization failed");
-    /* The first virtual terminal, and the display handed to it. Everything
-       written to a console from here on lands on a terminal that exists. */
-    vt_init();
-#if TUNIX_BOOT_TIMINGS
-    boot_log_stage("terminal initialization", &stage_started);
 #endif
     input_init();
     /* Delivery moves here, after the handlers exist and before anything is
