@@ -133,12 +133,26 @@ against one machine.
 
 ## The shape of the driver
 
-The asynchronous schedule and nothing else. A queue head sits in a ring that
-points at itself; a second queue head carrying the transfer descriptors is
-linked in behind it for the duration of one transfer and unlinked again after.
-There is no doorbell in EHCI -- the controller walks the ring on its own, which
-is why every transfer ends in a poll on the descriptor's own status byte rather
-than on an event ring the way xHCI's does.
+The asynchronous schedule and nothing else. Two queue heads sit in a ring --
+an empty head marked as the head of the reclamation list, and a working one --
+and **neither is ever taken out of it again**. A transfer is started by
+pointing the working queue head at a chain of descriptors and finished by
+pointing it back at nothing. There is no doorbell in EHCI, so the controller
+walks the ring on its own and every transfer ends in a poll on the descriptor's
+own status byte rather than on an event ring the way xHCI's does.
+
+The ring being permanent is the important half, and it was not how this started.
+Linking the working queue head in for the duration of a transfer and unlinking
+it after looks obviously correct and is not: the specification will not let
+software touch a queue head it has unlinked until the controller has
+acknowledged the interrupt-on-async-advance doorbell, because the controller
+caches queue heads and is very likely still following the one just removed.
+Doing it per transfer is that mistake per transfer. An emulated controller
+forgives it completely. On a real one the boot reached the point of loading
+init off the stick and stopped there.
+
+An idle queue head with no descriptors is skipped, so leaving both linked
+forever costs nothing and removes the question.
 
 Everything the controller reads lives in one page below 4 GiB. Both halves of
 that are deliberate: a queue head is 84 bytes rather than the 64 it looks like,

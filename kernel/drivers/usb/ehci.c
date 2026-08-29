@@ -214,9 +214,10 @@ typedef char ehci_qtd_size_check[(3 * sizeof(struct ehci_qtd) <= 0x100) ? 1 : -1
  * two EHCI controllers, and the stick is on whichever half the port belongs
  * to, so finding one and stopping is the same as not looking.
  *
- * Only the ring head is per controller. The working queue head, the transfer
- * descriptors and the buffers are shared, because a transfer here is
- * synchronous: exactly one of them is linked into exactly one ring at a time.
+ * The ring head and the working queue head are per controller because they
+ * live in that controller's schedule permanently. The descriptors and the
+ * buffers are shared, because a transfer here is synchronous: only one of them
+ * is ever in flight.
  */
 struct ehci {
     int present;
@@ -225,6 +226,7 @@ struct ehci {
     uint64_t operational;
     unsigned ports;
     struct ehci_qh *async_head;
+    struct ehci_qh *work_qh;
     struct ehci_device devices[MAX_DEVICES];
     unsigned device_count;
 };
@@ -235,7 +237,6 @@ static unsigned controller_count;
 /* One page holds every structure the controllers read. */
 static uint8_t *dma_page;
 static uint64_t dma_physical;
-static struct ehci_qh *work_qh;
 static struct ehci_qtd *qtds;
 static uint8_t *setup_buffer;
 static uint8_t *descriptor_buffer;
@@ -378,13 +379,30 @@ static int reset_controller(struct ehci *host) {
  */
 static void build_async_ring(struct ehci *host) {
     struct ehci_qh *async_head = host->async_head;
+    struct ehci_qh *work = host->work_qh;
+
     memset(async_head, 0, sizeof(*async_head));
-    async_head->horizontal = physical_of(async_head) | LINK_TYPE_QH;
+    memset(work, 0, sizeof(*work));
+
+    /* Two queue heads in a ring, and neither is ever taken out of it again.
+       The specification is strict about removal: a queue head that has been
+       unlinked may not be touched until the controller has acknowledged the
+       interrupt-on-async-advance doorbell, because it caches queue heads and
+       is very likely still following the one just removed. Linking and
+       unlinking around every transfer -- which is what this did first, and
+       what an emulated controller forgives -- is exactly that mistake, once
+       per transfer. Keeping both in the ring for good means never making it:
+       an idle queue head with no descriptors is skipped. */
+    async_head->horizontal = physical_of(work) | LINK_TYPE_QH;
     async_head->characteristics = QH_HEAD_OF_LIST | QH_SPEED_HIGH |
                                   (64U << QH_MAX_PACKET_SHIFT);
     async_head->capabilities = (1U << QH_MULT_SHIFT);
     async_head->overlay_next = LINK_TERMINATE;
     async_head->overlay_alternate = LINK_TERMINATE;
+
+    work->horizontal = physical_of(async_head) | LINK_TYPE_QH;
+    work->overlay_next = LINK_TERMINATE;
+    work->overlay_alternate = LINK_TERMINATE;
 }
 
 static int start_controller(struct ehci *host) {
@@ -525,8 +543,17 @@ static int run_qtds(struct ehci *host, struct ehci_device *device,
                     uint8_t endpoint, uint16_t max_packet, int is_control,
                     struct ehci_qtd *first, struct ehci_qtd *last,
                     uint64_t timeout_ns) {
-    struct ehci_qh *async_head = host->async_head;
-    memset(work_qh, 0, sizeof(*work_qh));
+    struct ehci_qh *work_qh = host->work_qh;
+
+    /* Inert first. The queue head is in the schedule the whole time, so the
+       order of these writes is the interlock: with no descriptor to follow the
+       controller walks past it, and everything else can be rewritten safely.
+       The pointer to the first descriptor goes last, and is what starts the
+       transfer. */
+    work_qh->overlay_next = LINK_TERMINATE;
+    work_qh->overlay_token = 0;
+    work_qh->current_qtd = 0;
+    work_qh->overlay_alternate = LINK_TERMINATE;
     work_qh->characteristics = device->address |
                                ((uint32_t)endpoint << QH_ENDPOINT_SHIFT) |
                                QH_SPEED_HIGH | QH_DATA_TOGGLE_CONTROL |
@@ -537,13 +564,7 @@ static int run_qtds(struct ehci *host, struct ehci_device *device,
        the controller run a protocol the device is not speaking. */
     (void)is_control;
     work_qh->capabilities = (1U << QH_MULT_SHIFT);
-    work_qh->current_qtd = 0;
     work_qh->overlay_next = physical_of(first);
-    work_qh->overlay_alternate = LINK_TERMINATE;
-    work_qh->overlay_token = 0;
-    work_qh->horizontal = physical_of(async_head) | LINK_TYPE_QH;
-
-    async_head->horizontal = physical_of(work_qh) | LINK_TYPE_QH;
 
     uint64_t deadline = time_uptime_ns() + timeout_ns;
     int status = -1;
@@ -558,7 +579,8 @@ static int run_qtds(struct ehci *host, struct ehci_device *device,
         __asm__ volatile("pause");
     }
 
-    async_head->horizontal = physical_of(async_head) | LINK_TYPE_QH;
+    /* Idle again, and still linked. */
+    work_qh->overlay_next = LINK_TERMINATE;
     return status;
 }
 
@@ -1068,13 +1090,15 @@ int ehci_init(void) {
        and a queue head is 84 bytes rather than the 64 it looks like -- the
        overlay is most of it. A whole 256 bytes apart leaves no room to get
        that wrong, and the first version of this driver did. */
-    for (unsigned which = 0; which < MAX_CONTROLLERS; which++)
+    for (unsigned which = 0; which < MAX_CONTROLLERS; which++) {
         controllers[which].async_head =
             (struct ehci_qh *)(dma_page + which * 0x100);
-    work_qh = (struct ehci_qh *)(dma_page + 0x400);
-    qtds = (struct ehci_qtd *)(dma_page + 0x500);
-    setup_buffer = dma_page + 0x600;
-    descriptor_buffer = dma_page + 0x700;
+        controllers[which].work_qh =
+            (struct ehci_qh *)(dma_page + 0x400 + which * 0x100);
+    }
+    qtds = (struct ehci_qtd *)(dma_page + 0x800);
+    setup_buffer = dma_page + 0x900;
+    descriptor_buffer = dma_page + 0xA00;
 
     for (unsigned nth = 0; controller_count < MAX_CONTROLLERS; nth++) {
         if (pci_find_nth_class(PCI_CLASS_SERIAL_BUS, PCI_SUBCLASS_USB, nth,
