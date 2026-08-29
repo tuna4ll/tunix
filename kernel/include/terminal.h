@@ -29,6 +29,12 @@ void terminal_get_dimensions(uint16_t *rows, uint16_t *cols);
 
 /* Writes to the active screen; the panic path, which has no terminal to hand. */
 void terminal_print(const char *text);
+
+/* Hold the screen for a run of characters. Anything writing more than one at a
+   time takes these rather than paying for the lock per glyph; nesting on one
+   processor is allowed. See terminal.c. */
+void terminal_paint_begin(void);
+void terminal_paint_end(void);
 /* Drop the painting lock. Only panic() has any business calling this: see
    terminal.c. */
 void terminal_paint_lock_reset(void);

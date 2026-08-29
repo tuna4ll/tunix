@@ -438,7 +438,11 @@ static void emit_char(struct tty *tty, char c) {
 int64_t tty_write(struct tty *tty, size_t size, const void *buffer) {
     if (!tty || !buffer) return -1;
     const char *bytes = (const char *)buffer;
+    /* The screen for the whole write. A program printing a line is one hold
+       rather than eighty, and the kernel log cannot land in the middle of it. */
+    terminal_paint_begin();
     for (size_t i = 0; i < size; i++) emit_char(tty, bytes[i]);
+    terminal_paint_end();
     return (int64_t)size;
 }
 

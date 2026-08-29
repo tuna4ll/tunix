@@ -474,21 +474,44 @@ static void paint_release(uint64_t flags) {
     if (flags & 0x200ULL) __asm__ volatile("sti");
 }
 
-void terminal_put_char(struct terminal_screen *screen, char c) {
+/*
+ * Held across a run of characters, not around each one.
+ *
+ * Taking it per character was correct and far too expensive: interrupts off,
+ * a contended cache line and a released lock for every glyph, which on the
+ * boot messages alone is tens of thousands of times. What it produced was a
+ * processor holding the kernel lock for seconds at a stretch while it painted
+ * -- the lock watchdog saw it before anything else did.
+ */
+static uint64_t paint_flags;
+static unsigned paint_depth;
+
+void terminal_paint_begin(void) {
     uint64_t flags = paint_acquire();
+    /* Only the outermost caller owns the saved flags: the inner ones took
+       nothing, because the lock is already this processor's. */
+    if (paint_depth++ == 0) paint_flags = flags;
+}
+
+void terminal_paint_end(void) {
+    if (paint_depth == 0) return;
+    if (--paint_depth == 0) paint_release(paint_flags);
+}
+
+void terminal_put_char(struct terminal_screen *screen, char c) {
     terminal_put_codepoint(screen, (uint8_t)c);
-    paint_release(flags);
 }
 
 void terminal_print(const char *text) {
-    uint64_t flags = paint_acquire();
+    terminal_paint_begin();
     while (text && *text) terminal_put_codepoint(active_screen, (uint8_t)*text++);
-    paint_release(flags);
+    terminal_paint_end();
 }
 
 /* Panic runs after something has already gone wrong, and the processor that
    held this may be the one that went wrong. */
 void terminal_paint_lock_reset(void) {
+    paint_depth = 0;
     __atomic_clear(&paint_lock, __ATOMIC_RELEASE);
 }
 
