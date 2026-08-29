@@ -23,9 +23,41 @@ static void klog_store_char(char c) {
     klog_buffer[index] = c;
 }
 
+/*
+ * Whether the log also goes to the screen.
+ *
+ * On for the whole boot, and the reason is machines with no serial port: a
+ * kernel that stops between the console coming up and init running leaves
+ * nothing behind but a cursor, and which line it stopped after is the entire
+ * diagnosis. It costs a few thousand glyphs.
+ *
+ * Painting is the terminal's decision, not this one -- it draws only while the
+ * console owns the framebuffer, so once the compositor has taken the display
+ * these characters go to the log and nowhere else.
+ */
+static int klog_console_enabled = 1;
+static int klog_console_busy;
+
+void klog_console(int enabled) {
+    klog_console_enabled = enabled;
+}
+
+extern void terminal_print(const char *);
+extern int terminal_ready(void);
+
 static void emit_char(char c) {
     klog_store_char(c);
     serial_write_char(c);
+
+    if (!klog_console_enabled || klog_console_busy || !terminal_ready()) return;
+    /* The terminal takes strings and this takes characters; the pair is the
+       shortest thing that is both. The flag is belt and braces: nothing under
+       terminal_print() logs, and if that ever changes this is why it will not
+       be a stack overflow. */
+    klog_console_busy = 1;
+    char pair[2] = {c, 0};
+    terminal_print(pair);
+    klog_console_busy = 0;
 }
 
 size_t klog_size(void) {
@@ -109,8 +141,6 @@ void kprintf(const char *fmt, ...) {
     }
     va_end(args);
 }
-
-extern void terminal_print(const char *);
 
 /*
  * The tail of the log, on the terminal.

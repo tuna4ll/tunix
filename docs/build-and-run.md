@@ -123,6 +123,12 @@ probe did register, instead of going black. It prints the last two dozen lines
 of the kernel log above the panic as well, which on a machine with nothing
 attached to its serial port is the only way to read them.
 
+The log goes to the console as it is written, too, so a machine that stops
+somewhere between the console coming up and init running says which line it got
+to instead of leaving a cursor on a black screen. The terminal draws only while
+the console owns the framebuffer, so once weston has the display these go to
+the serial port and the ring buffer and nowhere else.
+
 ```sh
 make kernel KERNEL_CFLAGS_EXTRA=-DTUNIX_DEBUG_LOGS=1
 ```

@@ -10,5 +10,8 @@ size_t klog_size(void);
 /* The last `lines` lines of the log, written to the terminal. panic() uses it:
    see kprintf.c. */
 void klog_print_tail(unsigned lines);
+/* Whether the log is echoed to the console as it is written. On by default;
+   see kprintf.c for why. */
+void klog_console(int enabled);
 
 #endif
