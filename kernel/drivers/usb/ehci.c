@@ -139,6 +139,12 @@ extern void kprintf(const char *fmt, ...);
 #define PORT_RESET_HOLD_NS (50ULL * 1000ULL * 1000ULL)
 #define PORT_ENABLE_TIMEOUT_NS (200ULL * 1000ULL * 1000ULL)
 #define TRANSFER_TIMEOUT_NS (2000ULL * 1000ULL * 1000ULL)
+/* Enumeration is allowed far less patience than a disk transfer. A device that
+   is not going to answer a control request has already not answered it, and
+   there can be a great many of these: every port of every hub of every
+   controller. At two seconds each, a machine full of empty sockets takes
+   minutes to decide there is nothing on them. */
+#define CONTROL_TIMEOUT_NS (300ULL * 1000ULL * 1000ULL)
 #define HANDOFF_TIMEOUT_NS (1000ULL * 1000ULL * 1000ULL)
 /* The specification's recovery time after a port reset, before the device is
    required to answer on its default address. */
@@ -517,7 +523,8 @@ static void build_qtd(struct ehci_qtd *qtd, uint32_t pid, uint64_t physical,
  */
 static int run_qtds(struct ehci *host, struct ehci_device *device,
                     uint8_t endpoint, uint16_t max_packet, int is_control,
-                    struct ehci_qtd *first, struct ehci_qtd *last) {
+                    struct ehci_qtd *first, struct ehci_qtd *last,
+                    uint64_t timeout_ns) {
     struct ehci_qh *async_head = host->async_head;
     memset(work_qh, 0, sizeof(*work_qh));
     work_qh->characteristics = device->address |
@@ -538,7 +545,7 @@ static int run_qtds(struct ehci *host, struct ehci_device *device,
 
     async_head->horizontal = physical_of(work_qh) | LINK_TYPE_QH;
 
-    uint64_t deadline = time_uptime_ns() + TRANSFER_TIMEOUT_NS;
+    uint64_t deadline = time_uptime_ns() + timeout_ns;
     int status = -1;
     for (;;) {
         uint32_t token = *(volatile uint32_t *)&last->token;
@@ -595,7 +602,7 @@ static int control_transfer(struct ehci *host, struct ehci_device *device,
 
     if (length && !in && data) memcpy(descriptor_buffer, data, length);
     int result = run_qtds(host, device, 0, device->max_packet, 1, setup_qtd,
-                          status_qtd);
+                          status_qtd, CONTROL_TIMEOUT_NS);
     if (result == 0 && length && in && data) memcpy(data, descriptor_buffer, length);
     return result;
 }
@@ -783,7 +790,7 @@ static int enumerate_storage(struct ehci *host, struct ehci_device *device,
 #define HUB_PORT_RESETTING (1U << 4)
 #define HUB_PORT_HIGH_SPEED (1U << 10)
 #define HUB_MAX_PORTS 15U
-#define HUB_RESET_POLL_NS (20ULL * 1000ULL * 1000ULL)
+#define HUB_RESET_POLL_NS (10ULL * 1000ULL * 1000ULL)
 #define HUB_RESET_ATTEMPTS 25U
 
 static int hub_port_status(struct ehci *host, struct ehci_device *hub,
@@ -970,7 +977,8 @@ static int ehci_bulk_transfer(int index, int in, uint64_t physical,
     uint8_t *toggle = in ? &device->bulk_in_toggle : &device->bulk_out_toggle;
 
     build_qtd(&qtds[0], in ? QTD_PID_IN : QTD_PID_OUT, physical, length, *toggle);
-    if (run_qtds(host, device, endpoint, packet, 0, &qtds[0], &qtds[0]) != 0) {
+    if (run_qtds(host, device, endpoint, packet, 0, &qtds[0], &qtds[0],
+                 TRANSFER_TIMEOUT_NS) != 0) {
         /* A halted endpoint leaves its toggle where the failure put it, and
            the transport above answers a failure by starting the command over.
            Clearing it here is what keeps the retry from being rejected. */
