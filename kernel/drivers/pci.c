@@ -85,13 +85,20 @@ int pci_find_class(uint8_t class_code, uint8_t subclass, struct pci_device *out)
 }
 
 /*
- * The same class and subclass cover four different USB host controllers, and
- * a machine of a certain age has more than one of them: the programming
- * interface is the only thing that tells UHCI, OHCI, EHCI and xHCI apart.
+ * The nth device of a class, counted in bus order.
+ *
+ * pci_find_class() answering with the first one is enough for a controller a
+ * machine has one of. USB is not that: the same class and subclass cover UHCI,
+ * OHCI, EHCI and xHCI, only the programming interface separates them, and a
+ * machine of a certain age has several -- old Intel chipsets split their ports
+ * across two EHCI controllers, and a machine with xHCI usually has an EHCI
+ * beside it. Stopping at the first one found means missing whichever one the
+ * disk is actually on.
  */
-int pci_find_class_prog_if(uint8_t class_code, uint8_t subclass, uint8_t prog_if,
-                           struct pci_device *out) {
+int pci_find_nth_class(uint8_t class_code, uint8_t subclass, unsigned nth,
+                       struct pci_device *out) {
     if (!out) return -1;
+    unsigned seen = 0;
     for (unsigned bus = 0; bus < 256; bus++) {
         for (unsigned slot = 0; slot < 32; slot++) {
             uint32_t id0 = pci_config_read32((uint8_t)bus, (uint8_t)slot, 0, 0);
@@ -104,12 +111,11 @@ int pci_find_class_prog_if(uint8_t class_code, uint8_t subclass, uint8_t prog_if
                 if ((uint16_t)id == 0xFFFFU) continue;
                 uint32_t class_value = pci_config_read32((uint8_t)bus, (uint8_t)slot,
                                                          (uint8_t)function, 0x08);
-                if ((uint8_t)(class_value >> 24) == class_code &&
-                    (uint8_t)(class_value >> 16) == subclass &&
-                    (uint8_t)(class_value >> 8) == prog_if) {
-                    fill_device(out, (uint8_t)bus, (uint8_t)slot, (uint8_t)function);
-                    return 0;
-                }
+                if ((uint8_t)(class_value >> 24) != class_code ||
+                    (uint8_t)(class_value >> 16) != subclass) continue;
+                if (seen++ != nth) continue;
+                fill_device(out, (uint8_t)bus, (uint8_t)slot, (uint8_t)function);
+                return 0;
             }
         }
     }

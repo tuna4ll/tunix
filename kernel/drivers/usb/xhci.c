@@ -1308,11 +1308,15 @@ static const struct usb_host xhci_host = {
 };
 
 int xhci_init(void) {
+    /* Every USB controller on the machine, not the first one: a machine with
+       xHCI usually has EHCI beside it, and which of them PCI enumerates first
+       is not something to depend on. */
     struct pci_device device;
-    if (pci_find_class(PCI_CLASS_SERIAL_BUS, PCI_SUBCLASS_USB, &device) != 0) return -1;
-    if (device.prog_if != PCI_PROG_IF_XHCI) {
-        kprintf("XHCI: the USB controller is not xHCI (prog-if %x)\n", device.prog_if);
-        return -1;
+    unsigned nth = 0;
+    for (;; nth++) {
+        if (pci_find_nth_class(PCI_CLASS_SERIAL_BUS, PCI_SUBCLASS_USB, nth,
+                               &device) != 0) return -1;
+        if (device.prog_if == PCI_PROG_IF_XHCI) break;
     }
 
     /* BAR0 is memory-mapped and, on every real xHCI, 64-bit -- which means it

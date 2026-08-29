@@ -148,6 +148,9 @@ extern void kprintf(const char *fmt, ...);
 #define EHCI_REGISTER_BYTES 0x1000U
 #define MAX_PORTS 15U
 #define MAX_DEVICES 4U
+/* Four ring heads fit in the front of the DMA page, and no chipset has more
+   than the two an old Intel one splits its ports across. */
+#define MAX_CONTROLLERS 4U
 #define CONFIGURATION_BYTES 512U
 
 struct ehci_qtd {
@@ -196,17 +199,34 @@ struct ehci_device {
 /* The carve-up in ehci_init() depends on these, and getting it wrong is a
    silent overlap the controller answers by ignoring the schedule. */
 typedef char ehci_qh_size_check[(sizeof(struct ehci_qh) <= 0x100) ? 1 : -1];
-typedef char ehci_qtd_size_check[(3 * sizeof(struct ehci_qtd) <= 0x200) ? 1 : -1];
+typedef char ehci_qtd_size_check[(3 * sizeof(struct ehci_qtd) <= 0x100) ? 1 : -1];
 
-static struct ehci_controller controller;
-static struct ehci_device devices[MAX_DEVICES];
-static unsigned device_count;
+/*
+ * One of these per controller. An old Intel chipset splits its ports across
+ * two EHCI controllers, and the stick is on whichever half the port belongs
+ * to, so finding one and stopping is the same as not looking.
+ *
+ * Only the ring head is per controller. The working queue head, the transfer
+ * descriptors and the buffers are shared, because a transfer here is
+ * synchronous: exactly one of them is linked into exactly one ring at a time.
+ */
+struct ehci {
+    int present;
+    uint16_t version;
+    uint64_t base;
+    uint64_t operational;
+    unsigned ports;
+    struct ehci_qh *async_head;
+    struct ehci_device devices[MAX_DEVICES];
+    unsigned device_count;
+};
 
-/* One page holds everything the controller reads: the ring head, the working
-   queue head, the descriptors, and the buffers a control transfer needs. */
+static struct ehci controllers[MAX_CONTROLLERS];
+static unsigned controller_count;
+
+/* One page holds every structure the controllers read. */
 static uint8_t *dma_page;
 static uint64_t dma_physical;
-static struct ehci_qh *async_head;
 static struct ehci_qh *work_qh;
 static struct ehci_qtd *qtds;
 static uint8_t *setup_buffer;
@@ -220,16 +240,12 @@ static inline void mmio_write32(uint64_t address, uint32_t value) {
     *(volatile uint32_t *)address = value;
 }
 
-static uint64_t operational(uint32_t offset) {
-    return controller.operational + offset;
+static uint64_t operational(const struct ehci *host, uint32_t offset) {
+    return host->operational + offset;
 }
 
-static uint64_t port_register(unsigned port) {
-    return controller.operational + EHCI_PORTSC + port * 4U;
-}
-
-struct ehci_controller *ehci_get(void) {
-    return controller.present ? &controller : NULL;
+static uint64_t port_register(const struct ehci *host, unsigned port) {
+    return host->operational + EHCI_PORTSC + port * 4U;
 }
 
 /* Spin until the masked bits reach `wanted`, or the deadline passes. */
@@ -328,18 +344,18 @@ static void release_from_firmware(const struct pci_device *device,
                        (legacy & ~LEGACY_BIOS_OWNED) | LEGACY_OS_OWNED);
 }
 
-static int reset_controller(void) {
+static int reset_controller(struct ehci *host) {
     /* Stop first: resetting a running controller is undefined. */
-    uint32_t command = mmio_read32(operational(EHCI_USBCMD));
-    mmio_write32(operational(EHCI_USBCMD), command & ~USBCMD_RUN);
-    if (wait_for(operational(EHCI_USBSTS), USBSTS_HALTED, USBSTS_HALTED,
+    uint32_t command = mmio_read32(operational(host, EHCI_USBCMD));
+    mmio_write32(operational(host, EHCI_USBCMD), command & ~USBCMD_RUN);
+    if (wait_for(operational(host, EHCI_USBSTS), USBSTS_HALTED, USBSTS_HALTED,
                  RESET_TIMEOUT_NS) != 0) {
         kprintf("EHCI: controller would not halt\n");
         return -1;
     }
 
-    mmio_write32(operational(EHCI_USBCMD), USBCMD_RESET);
-    if (wait_for(operational(EHCI_USBCMD), USBCMD_RESET, 0, RESET_TIMEOUT_NS) != 0) {
+    mmio_write32(operational(host, EHCI_USBCMD), USBCMD_RESET);
+    if (wait_for(operational(host, EHCI_USBCMD), USBCMD_RESET, 0, RESET_TIMEOUT_NS) != 0) {
         kprintf("EHCI: controller would not reset\n");
         return -1;
     }
@@ -352,7 +368,8 @@ static int reset_controller(void) {
  * linking a second queue head in behind it; the controller walks the ring for
  * as long as the schedule is enabled, with no doorbell to ring.
  */
-static void build_async_ring(void) {
+static void build_async_ring(struct ehci *host) {
+    struct ehci_qh *async_head = host->async_head;
     memset(async_head, 0, sizeof(*async_head));
     async_head->horizontal = physical_of(async_head) | LINK_TYPE_QH;
     async_head->characteristics = QH_HEAD_OF_LIST | QH_SPEED_HIGH |
@@ -362,39 +379,40 @@ static void build_async_ring(void) {
     async_head->overlay_alternate = LINK_TERMINATE;
 }
 
-static int start_controller(void) {
-    mmio_write32(operational(EHCI_USBINTR), 0);
-    mmio_write32(operational(EHCI_CTRLDSSEGMENT), 0);
-    mmio_write32(operational(EHCI_PERIODICLISTBASE), 0);
-    mmio_write32(operational(EHCI_ASYNCLISTADDR), physical_of(async_head));
+static int start_controller(struct ehci *host) {
+    mmio_write32(operational(host, EHCI_USBINTR), 0);
+    mmio_write32(operational(host, EHCI_CTRLDSSEGMENT), 0);
+    mmio_write32(operational(host, EHCI_PERIODICLISTBASE), 0);
+    mmio_write32(operational(host, EHCI_ASYNCLISTADDR),
+                 physical_of(host->async_head));
 
     uint32_t command = (8U << USBCMD_INTERRUPT_THRESHOLD_SHIFT) |
                        USBCMD_ASYNC_ENABLE | USBCMD_RUN;
-    mmio_write32(operational(EHCI_USBCMD), command);
-    if (wait_for(operational(EHCI_USBSTS), USBSTS_HALTED, 0, RESET_TIMEOUT_NS) != 0) {
+    mmio_write32(operational(host, EHCI_USBCMD), command);
+    if (wait_for(operational(host, EHCI_USBSTS), USBSTS_HALTED, 0, RESET_TIMEOUT_NS) != 0) {
         kprintf("EHCI: controller would not start\n");
         return -1;
     }
     /* Enabling the schedule and the schedule running are two different
        things, and a transfer queued in between is one the controller never
        walks. */
-    if (wait_for(operational(EHCI_USBSTS), USBSTS_ASYNC_RUNNING,
+    if (wait_for(operational(host, EHCI_USBSTS), USBSTS_ASYNC_RUNNING,
                  USBSTS_ASYNC_RUNNING, RESET_TIMEOUT_NS) != 0) {
         kprintf("EHCI: the asynchronous schedule would not start\n");
         return -1;
     }
     /* Route every port to this controller rather than to the companion. Until
        this is written the ports belong to UHCI/OHCI and read as empty. */
-    mmio_write32(operational(EHCI_CONFIGFLAG), 1U);
+    mmio_write32(operational(host, EHCI_CONFIGFLAG), 1U);
     delay_ns(RESET_RECOVERY_NS);
     return 0;
 }
 
 /* Hand the port to the companion controller. It is a one-way door: the port
    stops answering here, which is the intent. */
-static void release_port(unsigned port) {
-    uint32_t status = mmio_read32(port_register(port));
-    mmio_write32(port_register(port),
+static void release_port(struct ehci *host, unsigned port) {
+    uint32_t status = mmio_read32(port_register(host, port));
+    mmio_write32(port_register(host, port),
                  (status & ~PORTSC_CHANGE_BITS) | PORTSC_OWNER);
 }
 
@@ -405,38 +423,38 @@ static void release_port(unsigned port) {
  * the reset the port enabling itself is what says the device is high speed: a
  * full-speed one leaves the port disabled. Both cases belong to the companion.
  */
-static int reset_port(unsigned port) {
-    uint32_t status = mmio_read32(port_register(port));
+static int reset_port(struct ehci *host, unsigned port) {
+    uint32_t status = mmio_read32(port_register(host, port));
     if (!(status & PORTSC_CONNECTED)) return -1;
 
     if (((status >> PORTSC_LINE_STATUS_SHIFT) & PORTSC_LINE_STATUS_MASK) ==
         PORTSC_LINE_STATUS_LOW_SPEED) {
-        release_port(port);
+        release_port(host, port);
         return -1;
     }
 
     if (!(status & PORTSC_POWER)) {
-        mmio_write32(port_register(port),
+        mmio_write32(port_register(host, port),
                      (status & ~PORTSC_CHANGE_BITS) | PORTSC_POWER);
         delay_ns(PORT_RESET_HOLD_NS);
     }
 
-    status = mmio_read32(port_register(port));
-    mmio_write32(port_register(port),
+    status = mmio_read32(port_register(host, port));
+    mmio_write32(port_register(host, port),
                  (status & ~(PORTSC_CHANGE_BITS | PORTSC_ENABLED)) | PORTSC_RESET);
     delay_ns(PORT_RESET_HOLD_NS);
 
-    status = mmio_read32(port_register(port));
-    mmio_write32(port_register(port), status & ~(PORTSC_CHANGE_BITS | PORTSC_RESET));
+    status = mmio_read32(port_register(host, port));
+    mmio_write32(port_register(host, port), status & ~(PORTSC_CHANGE_BITS | PORTSC_RESET));
     /* The controller clears the reset bit itself once the signalling is over,
        and only then decides whether to enable the port. */
-    if (wait_for(port_register(port), PORTSC_RESET, 0, PORT_ENABLE_TIMEOUT_NS) != 0)
+    if (wait_for(port_register(host, port), PORTSC_RESET, 0, PORT_ENABLE_TIMEOUT_NS) != 0)
         return -1;
     delay_ns(RESET_RECOVERY_NS);
 
-    status = mmio_read32(port_register(port));
+    status = mmio_read32(port_register(host, port));
     if (!(status & PORTSC_ENABLED)) {
-        release_port(port);
+        release_port(host, port);
         return -1;
     }
     return 0;
@@ -477,9 +495,10 @@ static void build_qtd(struct ehci_qtd *qtd, uint32_t pid, uint64_t physical,
  * unlinked again at the end for the same reason -- leaving it in the ring
  * would have the controller walking descriptors that are about to change.
  */
-static int run_qtds(struct ehci_device *device, uint8_t endpoint,
-                    uint16_t max_packet, int is_control, struct ehci_qtd *first,
-                    struct ehci_qtd *last) {
+static int run_qtds(struct ehci *host, struct ehci_device *device,
+                    uint8_t endpoint, uint16_t max_packet, int is_control,
+                    struct ehci_qtd *first, struct ehci_qtd *last) {
+    struct ehci_qh *async_head = host->async_head;
     memset(work_qh, 0, sizeof(*work_qh));
     work_qh->characteristics = device->address |
                                ((uint32_t)endpoint << QH_ENDPOINT_SHIFT) |
@@ -522,9 +541,10 @@ static int run_qtds(struct ehci_device *device, uint8_t endpoint,
  * the specification rather than tracked, which is why nothing here consults
  * the endpoint toggles the bulk path keeps.
  */
-static int control_transfer(struct ehci_device *device, uint8_t request_type,
-                            uint8_t request, uint16_t value, uint16_t index,
-                            uint16_t length, void *data) {
+static int control_transfer(struct ehci *host, struct ehci_device *device,
+                            uint8_t request_type, uint8_t request,
+                            uint16_t value, uint16_t index, uint16_t length,
+                            void *data) {
     uint8_t *setup = setup_buffer;
     setup[0] = request_type;
     setup[1] = request;
@@ -554,7 +574,8 @@ static int control_transfer(struct ehci_device *device, uint8_t request_type,
     build_qtd(status_qtd, in ? QTD_PID_OUT : QTD_PID_IN, 0, 0, 1);
 
     if (length && !in && data) memcpy(descriptor_buffer, data, length);
-    int result = run_qtds(device, 0, device->max_packet, 1, setup_qtd, status_qtd);
+    int result = run_qtds(host, device, 0, device->max_packet, 1, setup_qtd,
+                          status_qtd);
     if (result == 0 && length && in && data) memcpy(data, descriptor_buffer, length);
     return result;
 }
@@ -602,9 +623,9 @@ static int find_storage_interface(struct ehci_device *device,
     return (device->bulk_in_endpoint && device->bulk_out_endpoint) ? 0 : -1;
 }
 
-static int enumerate_device(unsigned port, uint8_t address) {
-    if (device_count >= MAX_DEVICES) return -1;
-    struct ehci_device *device = &devices[device_count];
+static int enumerate_device(struct ehci *host, unsigned port, uint8_t address) {
+    if (host->device_count >= MAX_DEVICES) return -1;
+    struct ehci_device *device = &host->devices[host->device_count];
     memset(device, 0, sizeof(*device));
     /* Address zero and the smallest packet size the specification allows,
        until the device has said otherwise: the first eight bytes of its
@@ -613,7 +634,7 @@ static int enumerate_device(unsigned port, uint8_t address) {
     device->max_packet = 64;
 
     uint8_t header[8];
-    if (control_transfer(device, 0x80U, USB_REQUEST_GET_DESCRIPTOR,
+    if (control_transfer(host, device, 0x80U, USB_REQUEST_GET_DESCRIPTOR,
                          (uint16_t)(USB_DESCRIPTOR_DEVICE << 8), 0, 8,
                          header) != 0) {
         kprintf("EHCI: port %u did not answer GET_DESCRIPTOR\n", port + 1U);
@@ -621,7 +642,7 @@ static int enumerate_device(unsigned port, uint8_t address) {
     }
     if (header[7]) device->max_packet = header[7];
 
-    if (control_transfer(device, 0x00U, USB_REQUEST_SET_ADDRESS, address, 0, 0,
+    if (control_transfer(host, device, 0x00U, USB_REQUEST_SET_ADDRESS, address, 0, 0,
                          NULL) != 0) {
         kprintf("EHCI: port %u refused SET_ADDRESS\n", port + 1U);
         return -1;
@@ -630,7 +651,7 @@ static int enumerate_device(unsigned port, uint8_t address) {
     delay_ns(SET_ADDRESS_RECOVERY_NS);
 
     uint8_t header9[9];
-    if (control_transfer(device, 0x80U, USB_REQUEST_GET_DESCRIPTOR,
+    if (control_transfer(host, device, 0x80U, USB_REQUEST_GET_DESCRIPTOR,
                          (uint16_t)(USB_DESCRIPTOR_CONFIGURATION << 8), 0, 9,
                          header9) != 0)
         return -1;
@@ -638,7 +659,7 @@ static int enumerate_device(unsigned port, uint8_t address) {
     if (total > CONFIGURATION_BYTES) total = CONFIGURATION_BYTES;
 
     static uint8_t configuration[CONFIGURATION_BYTES];
-    if (control_transfer(device, 0x80U, USB_REQUEST_GET_DESCRIPTOR,
+    if (control_transfer(host, device, 0x80U, USB_REQUEST_GET_DESCRIPTOR,
                          (uint16_t)(USB_DESCRIPTOR_CONFIGURATION << 8), 0, total,
                          configuration) != 0)
         return -1;
@@ -646,7 +667,7 @@ static int enumerate_device(unsigned port, uint8_t address) {
     if (find_storage_interface(device, configuration, total) != 0) return -1;
     device->configuration = header9[5];
 
-    if (control_transfer(device, 0x00U, USB_REQUEST_SET_CONFIGURATION,
+    if (control_transfer(host, device, 0x00U, USB_REQUEST_SET_CONFIGURATION,
                          device->configuration, 0, 0, NULL) != 0) {
         kprintf("EHCI: port %u refused SET_CONFIGURATION\n", port + 1U);
         return -1;
@@ -654,43 +675,54 @@ static int enumerate_device(unsigned port, uint8_t address) {
 
     device->used = 1;
     device->is_storage = 1;
-    device_count++;
+    host->device_count++;
     kprintf("EHCI: port %u: mass storage at address %u, bulk in %u out %u\n",
             port + 1U, (unsigned)address, (unsigned)device->bulk_in_endpoint,
             (unsigned)device->bulk_out_endpoint);
     return 0;
 }
 
-static void enumerate_ports(void) {
+static void enumerate_ports(struct ehci *host) {
+    /* Addresses are numbered per controller because each controller is its
+       own bus, with its own address space for the devices on it. */
     uint8_t next_address = 1;
-    for (unsigned port = 0; port < controller.ports && port < MAX_PORTS; port++) {
-        if (reset_port(port) != 0) continue;
-        if (enumerate_device(port, next_address) == 0) next_address++;
+    for (unsigned port = 0; port < host->ports && port < MAX_PORTS; port++) {
+        if (reset_port(host, port) != 0) continue;
+        if (enumerate_device(host, port, next_address) == 0) next_address++;
     }
 }
 
 /* --- what the mass-storage transport above needs -------------------------- */
 
-static struct ehci_device *storage_device(int index) {
+static struct ehci_device *storage_device(int index, struct ehci **host_out) {
     int seen = 0;
-    for (unsigned at = 0; at < MAX_DEVICES; at++) {
-        if (!devices[at].used || !devices[at].is_storage) continue;
-        if (seen == index) return &devices[at];
-        seen++;
+    for (unsigned which = 0; which < controller_count; which++) {
+        struct ehci *host = &controllers[which];
+        for (unsigned at = 0; at < MAX_DEVICES; at++) {
+            if (!host->devices[at].used || !host->devices[at].is_storage) continue;
+            if (seen == index) {
+                *host_out = host;
+                return &host->devices[at];
+            }
+            seen++;
+        }
     }
     return NULL;
 }
 
 static int ehci_storage_count(void) {
     int count = 0;
-    for (unsigned at = 0; at < MAX_DEVICES; at++)
-        if (devices[at].used && devices[at].is_storage) count++;
+    for (unsigned which = 0; which < controller_count; which++)
+        for (unsigned at = 0; at < MAX_DEVICES; at++)
+            if (controllers[which].devices[at].used &&
+                controllers[which].devices[at].is_storage) count++;
     return count;
 }
 
 static int ehci_bulk_transfer(int index, int in, uint64_t physical,
                               uint32_t length) {
-    struct ehci_device *device = storage_device(index);
+    struct ehci *host = NULL;
+    struct ehci_device *device = storage_device(index, &host);
     if (!device) return -1;
     if (physical + length > DMA_LIMIT) {
         kprintf("EHCI: a buffer above 4 GiB cannot be described\n");
@@ -702,7 +734,7 @@ static int ehci_bulk_transfer(int index, int in, uint64_t physical,
     uint8_t *toggle = in ? &device->bulk_in_toggle : &device->bulk_out_toggle;
 
     build_qtd(&qtds[0], in ? QTD_PID_IN : QTD_PID_OUT, physical, length, *toggle);
-    if (run_qtds(device, endpoint, packet, 0, &qtds[0], &qtds[0]) != 0) {
+    if (run_qtds(host, device, endpoint, packet, 0, &qtds[0], &qtds[0]) != 0) {
         /* A halted endpoint leaves its toggle where the failure put it, and
            the transport above answers a failure by starting the command over.
            Clearing it here is what keeps the retry from being rejected. */
@@ -722,62 +754,94 @@ static const struct usb_host ehci_host = {
     .bulk_transfer = ehci_bulk_transfer,
 };
 
-int ehci_init(void) {
-    struct pci_device device;
-    if (pci_find_class_prog_if(PCI_CLASS_SERIAL_BUS, PCI_SUBCLASS_USB,
-                               PCI_PROG_IF_EHCI, &device) != 0) return -1;
-
-    if (device.bar[0] & PCI_BAR_IO) return -1;
-    uint64_t physical = device.bar[0] & PCI_BAR_ADDRESS_MASK;
-    if ((device.bar[0] & PCI_BAR_TYPE_MASK) == PCI_BAR_TYPE_64BIT)
-        physical |= (uint64_t)device.bar[1] << 32;
+/* Bring one controller up. Failing here is not fatal to the others. */
+static int start_one(const struct pci_device *device, struct ehci *host) {
+    if (device->bar[0] & PCI_BAR_IO) return -1;
+    uint64_t physical = device->bar[0] & PCI_BAR_ADDRESS_MASK;
+    if ((device->bar[0] & PCI_BAR_TYPE_MASK) == PCI_BAR_TYPE_64BIT)
+        physical |= (uint64_t)device->bar[1] << 32;
     if (!physical) return -1;
 
-    controller.base = vmm_map_device(physical, EHCI_REGISTER_BYTES);
-    if (!controller.base) {
+    host->base = vmm_map_device(physical, EHCI_REGISTER_BYTES);
+    if (!host->base) {
         kprintf("EHCI: could not map registers at %x\n", (unsigned)physical);
         return -1;
     }
-    pci_enable_bus_mastering(&device);
+    pci_enable_bus_mastering(device);
 
-    uint32_t length_and_version = mmio_read32(controller.base + EHCI_CAPLENGTH);
-    uint32_t structural = mmio_read32(controller.base + EHCI_HCSPARAMS);
-    uint32_t capabilities = mmio_read32(controller.base + EHCI_HCCPARAMS);
+    uint32_t length_and_version = mmio_read32(host->base + EHCI_CAPLENGTH);
+    uint32_t structural = mmio_read32(host->base + EHCI_HCSPARAMS);
+    uint32_t capabilities = mmio_read32(host->base + EHCI_HCCPARAMS);
 
-    controller.version = (uint16_t)(length_and_version >> 16);
-    controller.operational = controller.base + (uint8_t)length_and_version;
-    controller.ports = structural & HCSPARAMS_PORTS_MASK;
-    if (!controller.ports) {
-        kprintf("EHCI: controller reports no ports\n");
+    host->version = (uint16_t)(length_and_version >> 16);
+    host->operational = host->base + (uint8_t)length_and_version;
+    host->ports = structural & HCSPARAMS_PORTS_MASK;
+    if (!host->ports) {
+        kprintf("EHCI: controller at %x reports no ports\n", (unsigned)physical);
         return -1;
     }
 
-    release_from_firmware(&device, capabilities);
-    if (reset_controller() != 0) return -1;
+    release_from_firmware(device, capabilities);
+    if (reset_controller(host) != 0) return -1;
 
+    build_async_ring(host);
+    if (start_controller(host) != 0) return -1;
+
+    host->present = 1;
+    kprintf("EHCI: %x.%x at %x, %u ports, async schedule running\n",
+            (unsigned)(host->version >> 8), (unsigned)(host->version & 0xFF),
+            (unsigned)physical, (unsigned)host->ports);
+    enumerate_ports(host);
+    return 0;
+}
+
+int ehci_init(void) {
+    /* Every USB controller the machine has is listed, whether this driver can
+       use it or not. On hardware with no serial port this log is the only way
+       to find out why a stick was not seen, and "there is no EHCI here" and
+       "the EHCI here found nothing" are very different answers. */
+    struct pci_device device;
+    for (unsigned nth = 0;
+         pci_find_nth_class(PCI_CLASS_SERIAL_BUS, PCI_SUBCLASS_USB, nth,
+                            &device) == 0; nth++) {
+        const char *kind = "unknown";
+        if (device.prog_if == 0x00U) kind = "uhci";
+        else if (device.prog_if == 0x10U) kind = "ohci";
+        else if (device.prog_if == PCI_PROG_IF_EHCI) kind = "ehci";
+        else if (device.prog_if == 0x30U) kind = "xhci";
+        kprintf("USB: %s at %x:%x.%x\n", kind, (unsigned)device.bus,
+                (unsigned)device.slot, (unsigned)device.function);
+    }
+
+    /* The descriptors and buffers, once, for however many controllers there
+       turn out to be: they are shared, and a transfer uses them one at a
+       time. The ring heads are per controller and come out of the same page. */
     dma_page = (uint8_t *)dma_alloc_page(&dma_physical);
     if (!dma_page) {
         kprintf("EHCI: no DMA memory below 4 GiB\n");
         return -1;
     }
-    /* One page, carved up once. Two things decide the offsets: the controller
-       wants 32-byte alignment, and a queue head is 84 bytes rather than the 64
-       it looks like -- the overlay is most of it. Spacing them a whole 256
-       bytes apart leaves no room to get that wrong. */
-    async_head = (struct ehci_qh *)(dma_page + 0x000);
-    work_qh = (struct ehci_qh *)(dma_page + 0x100);
-    qtds = (struct ehci_qtd *)(dma_page + 0x200);
-    setup_buffer = dma_page + 0x400;
-    descriptor_buffer = dma_page + 0x600;
+    /* Two things decide the offsets: the controller wants 32-byte alignment,
+       and a queue head is 84 bytes rather than the 64 it looks like -- the
+       overlay is most of it. A whole 256 bytes apart leaves no room to get
+       that wrong, and the first version of this driver did. */
+    for (unsigned which = 0; which < MAX_CONTROLLERS; which++)
+        controllers[which].async_head =
+            (struct ehci_qh *)(dma_page + which * 0x100);
+    work_qh = (struct ehci_qh *)(dma_page + 0x400);
+    qtds = (struct ehci_qtd *)(dma_page + 0x500);
+    setup_buffer = dma_page + 0x600;
+    descriptor_buffer = dma_page + 0x700;
 
-    build_async_ring();
-    if (start_controller() != 0) return -1;
+    for (unsigned nth = 0; controller_count < MAX_CONTROLLERS; nth++) {
+        if (pci_find_nth_class(PCI_CLASS_SERIAL_BUS, PCI_SUBCLASS_USB, nth,
+                               &device) != 0) break;
+        if (device.prog_if != PCI_PROG_IF_EHCI) continue;
+        if (start_one(&device, &controllers[controller_count]) == 0) controller_count++;
+        else memset(&controllers[controller_count], 0, sizeof(struct ehci));
+    }
 
-    controller.present = 1;
-    kprintf("EHCI: %x.%x, %u ports, async schedule running\n",
-            (unsigned)(controller.version >> 8),
-            (unsigned)(controller.version & 0xFF), (unsigned)controller.ports);
-    enumerate_ports();
+    if (!controller_count) return -1;
     if (ehci_storage_count()) usb_register_host(&ehci_host);
     return 0;
 }

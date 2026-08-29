@@ -5,7 +5,7 @@ Two host controllers, one transport above them.
 | Driver | Controller | What it reaches |
 | --- | --- | --- |
 | `kernel/drivers/usb/xhci.c` | xHCI (USB 3.x) | keyboards, mice, mass storage |
-| `kernel/drivers/usb/ehci.c` | EHCI (USB 2.0) | high-speed mass storage |
+| `kernel/drivers/usb/ehci.c` | EHCI (USB 2.0), all of them | high-speed mass storage |
 
 `kernel/drivers/usb/usb.c` is the seam between them and
 `kernel/drivers/usb/usb_storage.c`, which speaks the bulk-only transport and
@@ -15,9 +15,25 @@ numbers the devices of every registered controller in one flat list. Nothing
 above a controller learns which kind it is.
 
 The four kinds of USB host controller share a PCI class and subclass and are
-told apart only by the programming interface, which is why `pci_find_class()`
-grew a `pci_find_class_prog_if()` beside it: on a machine with both, looking up
-"serial bus, USB" finds whichever the firmware enumerated first.
+told apart only by the programming interface, and a machine can have several --
+old Intel chipsets split their ports across *two* EHCI controllers, and a
+machine with xHCI usually has an EHCI beside it. So neither driver looks up
+"serial bus, USB" and takes the answer: `pci_find_nth_class()` walks them all
+and each driver keeps the ones it recognises. Stopping at the first was worth
+two failed attempts on real hardware -- the stick was on the half of the ports
+belonging to the controller that was never looked at.
+
+Every USB controller found is logged whether or not it can be used:
+
+```
+USB: ehci at 0:1a.7
+USB: ehci at 0:1d.7
+USB: xhci at 0:14.0
+```
+
+"there is no EHCI here" and "the EHCI here found nothing" are different
+answers, and on a machine with no serial port this line is the only place the
+difference shows.
 
 ## Why EHCI exists here
 
