@@ -10,6 +10,7 @@
 #include "include/framebuffer.h"
 #include "include/heap.h"
 #include "include/input.h"
+#include "include/ehci.h"
 #include "include/idt.h"
 #include "include/net/net.h"
 #include "include/pmm.h"
@@ -133,6 +134,11 @@ void kmain(const struct boot_info *boot) {
        ends up with two, which the input layer already copes with. Absent or
        broken is not fatal -- the rest of the system does not depend on it. */
     (void)xhci_init();
+    /* The other one. A machine has xHCI or EHCI or both, and on the machines
+       that have both the disks are usually behind the newer one -- but the
+       stick this kernel was booted from is behind whichever the firmware used,
+       so neither can be assumed away. */
+    (void)ehci_init();
     /* Absent on a machine with a plain VGA adapter, in which case drm.c keeps
        blitting into the framebuffer the bootloader handed over. */
     (void)virtgpu_init();

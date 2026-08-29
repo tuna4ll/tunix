@@ -67,6 +67,7 @@ log in as `tunix` / `tunix` or `root` / `tunix`; Ctrl+Alt+F1 goes back.
 - [Memory Layout](docs/memory-layout.md)
 - [Mounting](docs/mounting.md)
 - [Networking](docs/networking.md)
+- [USB](docs/usb.md)
 - [Users and Permissions](docs/users-and-permissions.md)
 - [Virtual Terminals](docs/virtual-terminals.md)
 - [Power Management](docs/power-management.md)
