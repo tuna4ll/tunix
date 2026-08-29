@@ -5,6 +5,34 @@ they are started, what each of them owns privately, how the scheduler hands
 work out, and what keeps them from corrupting each other's view of memory. It
 reflects the code as it exists today.
 
+## The lock says when it is not coming
+
+Two ways the kernel lock can be lost for good, and both are silent from
+outside. An unlock with nothing held moves the ticket queue past a ticket
+nobody was serving, so every later attempt waits for a turn that has already
+gone by; a shared holder that leaves without decrementing keeps every exclusive
+waiter out. Either way the machine stops on somebody's next syscall having
+printed nothing at all.
+
+So a wait longer than twenty seconds says what it is waiting for, once per
+processor, and goes on waiting:
+
+```
+KLOCK: cpu 3 stuck waiting for ticket 26012: next 26019 serving 26011 shared 0
+KLOCK: cpu 1 holds 1
+```
+
+Twenty seconds rather than five because the lock is held across block reads,
+and a root filesystem on a USB stick makes some of those genuinely slow --
+five caught weston loading itself.
+
+The bug it was written to find was real and was in the interrupt path. The
+handler took the lock only when it was free, because an interrupt can land on
+a processor already inside the kernel; the entry stub released it
+unconditionally on the way out. So such an interrupt handed back a lock it
+never took. `kernel_lock_from_isr()` and `kernel_unlock_from_isr()` are the
+pair that agree with each other.
+
 ## The console is a shared device too
 
 Two things write into the same screen from two directions: a terminal a program
@@ -27,6 +55,13 @@ which is what a real machine printed while the trace in `verbose` was going
 out unlocked from every processor at once. Both locks turn interrupts off
 while held, because a processor that took one here would otherwise wait for
 itself.
+
+The terminal's is held across a run of characters rather than around each one:
+per character it was correct and far too expensive -- interrupts off, a
+contended cache line and a released lock for every glyph -- and what it
+produced was a processor holding the *kernel* lock for seconds at a stretch
+while it painted. `tty_write()` takes it once for the whole write, which is
+also what stops a kernel message landing in the middle of a program's line.
 
 panic() takes both back by force before it prints: the processor holding one
 may be the one that just went wrong.

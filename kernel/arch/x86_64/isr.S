@@ -4,7 +4,7 @@
 .global tss_flush
 .global idt_load
 .extern isr_handler
-.extern kernel_unlock_current
+.extern kernel_unlock_from_isr
 .extern smp_flush_interrupt
 
 /* struct cpu, as percpu.h lays it out. */
@@ -312,7 +312,7 @@ isr_common_stub:
     /* Only now: isr_handler came back with the lock still held, because its
        own return address was on the stack this may have just moved off. */
     sub rsp, 8
-    call kernel_unlock_current
+    call kernel_unlock_from_isr
     add rsp, 8
     pop rax
     mov ds, ax

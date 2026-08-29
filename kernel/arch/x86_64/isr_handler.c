@@ -311,7 +311,7 @@ void isr_handler(struct interrupt_frame *regs) {
      * not come back, and the unlock the entry stub would have done on the
      * way out is not owed to anyone.
      */
-    if (!kernel_lock_held_here()) kernel_lock();
+    kernel_lock_from_isr();
     isr_dispatch(regs);
     /* Same move as the syscall return makes, and for the same reason: the
        frame may be sitting on the kernel stack of a process this processor

@@ -62,6 +62,11 @@ void kernel_unlock_current(void);
    (take the lock as usual) from "a fault the kernel itself took while holding
    it" (do not, and do not release it either). */
 int kernel_lock_held_here(void);
+
+/* The pair the interrupt path uses. Taking it only when it is free is safe
+   only if it is released only when it was taken: see klock.c. */
+void kernel_lock_from_isr(void);
+void kernel_unlock_from_isr(void);
 /* Which mode, for the paths that have to give a shared holder back its ticket
    before doing something only an exclusive holder may do. */
 int kernel_lock_shared_here(void);
