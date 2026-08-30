@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "../include/framebuffer.h"
+#include "../include/percpu.h"
 #include "../include/smp.h"
 #include "../include/heap.h"
 #include "../include/kstring.h"
@@ -493,17 +494,29 @@ static void paint_release(uint64_t flags) {
  */
 static uint64_t paint_flags;
 static unsigned paint_depth;
+/* Which processor is inside, so a nested call can tell "somebody else has it"
+   from "I have it". Without that distinction the second call spins for a lock
+   its own processor is holding, with interrupts off, forever -- and if it got
+   there holding the kernel lock, so does the machine. */
+static volatile int paint_owner = -1;
 
 void terminal_paint_begin(void) {
+    int self = (int)cpu_current()->index;
+    if (__atomic_load_n(&paint_owner, __ATOMIC_ACQUIRE) == self) {
+        paint_depth++;
+        return;
+    }
     uint64_t flags = paint_acquire();
-    /* Only the outermost caller owns the saved flags: the inner ones took
-       nothing, because the lock is already this processor's. */
-    if (paint_depth++ == 0) paint_flags = flags;
+    __atomic_store_n(&paint_owner, self, __ATOMIC_RELEASE);
+    paint_depth = 1;
+    paint_flags = flags;
 }
 
 void terminal_paint_end(void) {
     if (paint_depth == 0) return;
-    if (--paint_depth == 0) paint_release(paint_flags);
+    if (--paint_depth) return;
+    __atomic_store_n(&paint_owner, -1, __ATOMIC_RELEASE);
+    paint_release(paint_flags);
 }
 
 void terminal_put_char(struct terminal_screen *screen, char c) {
@@ -520,6 +533,7 @@ void terminal_print(const char *text) {
    held this may be the one that went wrong. */
 void terminal_paint_lock_reset(void) {
     paint_depth = 0;
+    paint_owner = -1;
     __atomic_clear(&paint_lock, __ATOMIC_RELEASE);
 }
 
