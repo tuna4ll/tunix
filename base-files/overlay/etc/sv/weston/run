@@ -24,6 +24,21 @@ export LOGNAME=tunix
 export XDG_RUNTIME_DIR=/run/user/1000
 export XDG_CONFIG_DIRS=/etc/xdg
 export XDG_SESSION_TYPE=wayland
+# Every client inherits these, and they are what make OpenGL work at all here.
+# There is no GPU and no render node, so a client's Mesa cannot get a device
+# from the compositor: it finds no driver, falls back to Zink -- OpenGL on top
+# of Vulkan -- and dies for want of a Vulkan driver, without ever trying the
+# software rasteriser sitting right there. Naming llvmpipe is what sends it to
+# the same renderer weston is already using.
+export LIBGL_ALWAYS_SOFTWARE=1
+export GALLIUM_DRIVER=llvmpipe
+# And which platform an EGL display is being asked for. A client that names it
+# itself does not need this -- weston-simple-egl works without it -- but one
+# that calls the old eglGetDisplay() leaves Mesa to guess, and the guess is
+# wrong here: there is no X server to fall back to and no DISPLAY to hint with.
+# SDL, and so every SDL game, is in the second group. Without this line
+# SuperTuxKart tried four times to make a window and quit; with it, it starts.
+export EGL_PLATFORM=wayland
 install -d -m 0700 -o tunix -g tunix "$XDG_RUNTIME_DIR"
 
 cd "$HOME" || exit 1
