@@ -152,6 +152,25 @@ static void append_hex(char *out, size_t limit, size_t *used, uint32_t value,
     }
 }
 
+/* One sysfs attribute holding a number, written the way sysfs writes one:
+   `0x` and then fixed-width hex on a line of its own. */
+static void publish_hex_attribute(const char *directory, const char *name,
+                                  uint32_t value, unsigned digits) {
+    char path[224];
+    size_t used = 0;
+    append_string(path, sizeof(path), &used, directory);
+    append_string(path, sizeof(path), &used, "/");
+    append_string(path, sizeof(path), &used, name);
+    path[used] = '\0';
+
+    char text[16];
+    size_t length = 0;
+    append_string(text, sizeof(text), &length, "0x");
+    append_hex(text, sizeof(text), &length, value, digits);
+    append_string(text, sizeof(text), &length, "\n");
+    (void)vfs_create_file(path, text, length, 0, 1);
+}
+
 /*
  * The card's parent: the PCI device it actually is.
  *
@@ -221,6 +240,26 @@ static void publish_pci_parent(const char *name) {
     append_string(file, sizeof(file), &used, "/config");
     file[used] = '\0';
     (void)vfs_create_file(file, config, sizeof(config), 0, 1);
+
+    /*
+     * The same four numbers again, as text files.
+     *
+     * They are not a convenience: they are where libdrm actually reads the
+     * ids from. It only falls back to configuration space when the caller
+     * asked for the revision as well, and mesa never does -- so a device with
+     * `config` and without these is one libdrm cannot identify at all. It
+     * gives up on the node, finds no devices, and every step after that fails
+     * for a reason that names none of this.
+     */
+    publish_hex_attribute(path, "vendor",
+                          (uint32_t)(config[0] | (config[1] << 8)), 4);
+    publish_hex_attribute(path, "device",
+                          (uint32_t)(config[2] | (config[3] << 8)), 4);
+    publish_hex_attribute(path, "revision", config[8], 2);
+    publish_hex_attribute(path, "subsystem_vendor",
+                          (uint32_t)(config[44] | (config[45] << 8)), 4);
+    publish_hex_attribute(path, "subsystem_device",
+                          (uint32_t)(config[46] | (config[47] << 8)), 4);
 }
 
 /*
