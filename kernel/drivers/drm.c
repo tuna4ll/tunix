@@ -556,6 +556,7 @@ static struct {
 } render_contexts[DRM_MAX_CONTEXTS];
 static uint32_t next_render_context = 1;
 static void render_contexts_release(void);
+static uint32_t render_context(void);
 static uint32_t next_fb_id = 1;
 static uint32_t active_fb_id;
 static int drm_ready;
@@ -686,11 +687,21 @@ static int64_t ioctl_version(uint64_t user_argument) {
     static const char date[] = "20260721";
     static const char desc[] = "Tunix framebuffer KMS";
 
-    /* The numbers linux's virtio_gpu reports. mesa turns them into a feature
-       level, so this is not a version of ours to choose -- claiming a higher
-       one asks mesa to use calls that do not exist here. */
+    /*
+     * mesa turns these into a feature level rather than reading them as a
+     * version, so they are a statement about what this driver can do.
+     *
+     * Minor 1 is where linux's virtio_gpu started handing out sync
+     * descriptors for a submission, and mesa reads that as permission to ask
+     * for one and then wait on it. Submitting here is synchronous -- the work
+     * is done before the call returns -- so there is no descriptor to give,
+     * and saying minor 0 is how mesa is told not to ask. Claiming minor 1 and
+     * answering with no descriptor leaves mesa polling -1 for ever, which
+     * looks from outside like a compositor that renders one frame and then
+     * stops.
+     */
     version.version_major = rendering ? 0 : 1;
-    version.version_minor = rendering ? 1 : 0;
+    version.version_minor = 0;
     version.version_patchlevel = 0;
 
     /* The caller passes buffers and lengths; we fill what fits and always
@@ -873,7 +884,25 @@ static int64_t ioctl_prime_fd_to_handle(uint64_t user_argument) {
         !process->files->fds[request.fd]) return -EBADF;
     struct file *file = process->files->fds[request.fd];
     if (file->kind != FILE_KIND_DMABUF) return -EINVAL;
-    if (!buffer_find(file->dmabuf_handle)) return -ENOENT;
+    struct drm_dumb_buffer *buffer = buffer_find(file->dmabuf_handle);
+    if (!buffer) return -ENOENT;
+
+    /*
+     * A resource arriving from another process has to be granted to this one's
+     * context before it may be named in a command buffer.
+     *
+     * This is the compositor's side of a client handing over a frame: the
+     * client rendered into a host resource and passed the descriptor along,
+     * and without this the host refuses every command that mentions it. The
+     * client, waiting to be told its buffer was used, waits forever -- which
+     * is what a hung GL client on an otherwise working compositor looks like.
+     */
+    if (buffer->rendered && buffer->virtio_resource) {
+        uint32_t context = render_context();
+        if (context)
+            (void)virtgpu_context_attach(context, buffer->virtio_resource, 1);
+    }
+
     request.handle = file->dmabuf_handle;
     return copy_to_user(user_argument, &request, sizeof(request)) == 0 ? 0 : -EFAULT;
 }
