@@ -124,3 +124,35 @@ once per file. A real page cache — pages, an LRU, and eviction by page rather
 than by file — is the remaining half of this. It would stop file I/O competing
 with everything else for the same allocator, and it is what `vfs_reclaim_file_data`
 is standing in for today.
+
+## The heap ceiling follows the machine
+
+Two things are counted at the top of `heap.c` and only one of them is scarce.
+The heap extends by mapping fresh pages above what it already has and never
+shrinks that virtual extent -- but it does hand the physical pages under a
+freed block back to the PMM (`heap_release_pages`). So the extent is address
+space, of which there are terabytes, while the memory behind it is returned as
+soon as it is not wanted.
+
+A constant 2 GiB ceiling therefore rationed the wrong thing. How that showed up:
+a file lives in one contiguous buffer and grows by allocating a bigger one and
+copying, which leaves holes behind and pushes the extent to roughly twice the
+file. A 677 MB download died asking for 672 MiB with **666 MiB of the heap in
+use** --
+
+```
+VFS: ...xbps.part cannot grow to 688128 KiB: heap 666 of 2048 MiB
+```
+
+-- and the program writing the file was told `Input/output error`, which is a
+description of an exhausted address-space quota so misleading it cost a day.
+
+The ceiling is twice the machine's usable memory now, with a 2 GiB floor, and
+physical memory is left to be the real limit: `heap_grow()` already fails
+gracefully when `pmm_alloc_page()` does. The pressure signal that starts
+reclaiming cached file data was measured against the same constant and is now
+measured against physical memory, for the same reason -- the extent says
+nothing about how close the machine is to running out of anything.
+
+With that, `xbps-install -Sy supertuxkart` finishes: 32 packages, 782 MB of
+game data, no kernel complaint on the way through.

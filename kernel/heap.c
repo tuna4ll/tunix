@@ -7,20 +7,51 @@
    direct map is now direct map, which is where the extra RAM came from. */
 #define HEAP_START HEAP_VIRTUAL_BASE
 #define HEAP_INITIAL_SIZE (1024 * 1024)
-/* The heap grows on demand from the PMM, so this ceiling costs nothing until
- * hit; if physical RAM runs out first heap_grow() just fails gracefully. It was
- * 96 MiB, which capped Tunix's in-RAM filesystem (file data lives in kmalloc'd
- * buffers via memory_write) far too low: `git clone` of a real repo writes a
- * multi-MB pack into RAM and, with the capacity-doubling realloc's transient
- * ~2x peak, exhausted the heap and surfaced as EPERM write errors. 768 MiB sits
- * comfortably inside the 1 GiB virtual window above HEAP_START and lets a clone
- * fit when QEMU is given enough RAM (see the run targets' -m). */
-#define HEAP_MAX_SIZE (2048ULL * 1024 * 1024)
-/* Where "nearly full" starts. Reclaiming cached file data is not free -- the
-   bytes have to be read off the disk again -- so it should not begin the moment
-   the heap is merely busy, and it must begin early enough that the allocation
-   which actually needs the room still finds it. */
-#define HEAP_PRESSURE_SIZE (HEAP_MAX_SIZE / 4 * 3)
+/*
+ * How far the heap may extend, and why it is not a constant any more.
+ *
+ * Two things are being counted here and only one of them is scarce. The heap
+ * extends by mapping fresh pages above what it already has, and it never
+ * shrinks that virtual extent -- but it does hand the physical pages under a
+ * freed block back to the PMM (see heap_release_pages). So the extent is
+ * address space, of which there are terabytes, while the memory behind it is
+ * returned as soon as it is not wanted.
+ *
+ * Capping the extent at a constant 2 GiB therefore rationed the wrong thing,
+ * and the way it showed up was this: a file lives in one contiguous buffer and
+ * grows by allocating a bigger one and copying, which leaves holes and pushes
+ * the extent to roughly twice the file. A 677 MB download died asking for
+ * 672 MiB with only 666 MiB of the heap in use --
+ *
+ *   VFS: ...xbps.part cannot grow to 688128 KiB: heap 666 of 2048 MiB
+ *
+ * -- because the extent, not the memory, had run out.
+ *
+ * So the ceiling follows the machine now, and physical memory is left to be
+ * the real limit: heap_grow() fails gracefully when pmm_alloc_page() does, and
+ * the pressure signal below watches free pages rather than the extent.
+ */
+static uint64_t heap_extent_limit(void) {
+    static uint64_t limit;
+    if (limit) return limit;
+    uint64_t ram = pmm_usable_page_count() * (uint64_t)PMM_PAGE_SIZE;
+    limit = ram * 2ULL;
+    if (limit < 2048ULL * 1024 * 1024) limit = 2048ULL * 1024 * 1024;
+    return limit;
+}
+
+/*
+ * Where "nearly full" starts. Reclaiming cached file data is not free -- the
+ * bytes have to be read off the disk again -- so it should not begin the
+ * moment the heap is merely busy.
+ *
+ * Measured against physical memory rather than against the extent, for the
+ * reason above: the extent is address space and says nothing about how close
+ * the machine is to running out of anything.
+ */
+static uint64_t heap_pressure_size(void) {
+    return pmm_usable_page_count() * (uint64_t)PMM_PAGE_SIZE / 4ULL * 3ULL;
+}
 /*
  * The other half of "nearly full", and on most machines the half that fires.
  *
@@ -124,12 +155,13 @@ void heap_init(void) {
 /* Maps fresh physical pages right after the current end of the heap so
  * kmalloc can satisfy a request no existing free block is big enough
  * for. Returns 0 on success, -1 if physical memory is exhausted or the
- * heap has hit HEAP_MAX_SIZE. Must be called with heap_lock held. */
+ * heap has hit its extent ceiling. Must be called with heap_lock held. */
 static int heap_grow(size_t min_size) {
     uint64_t needed = (uint64_t)min_size + sizeof(heap_block_t);
     uint64_t growth = (needed + HEAP_PAGE_SIZE - 1) & ~(HEAP_PAGE_SIZE - 1);
 
-    if (heap_size >= HEAP_MAX_SIZE || growth > HEAP_MAX_SIZE - heap_size)
+    uint64_t ceiling = heap_extent_limit();
+    if (heap_size >= ceiling || growth > ceiling - heap_size)
         return -1;
 
     uint64_t base = HEAP_START + heap_size;
@@ -403,7 +435,7 @@ void kfree(void* ptr) {
 
 int heap_under_pressure(void) {
     spinlock_acquire(&heap_lock);
-    int pressed = heap_allocated >= HEAP_PRESSURE_SIZE;
+    int pressed = heap_allocated >= heap_pressure_size();
     spinlock_release(&heap_lock);
     return pressed || pmm_free_page_count() < HEAP_FREE_PAGES_FLOOR;
 }
@@ -413,5 +445,5 @@ void heap_stats(uint64_t *reserved, uint64_t *allocated, uint64_t *limit) {
     if (reserved) *reserved = heap_size;
     if (allocated) *allocated = heap_allocated;
     spinlock_release(&heap_lock);
-    if (limit) *limit = HEAP_MAX_SIZE;
+    if (limit) *limit = heap_extent_limit();
 }
