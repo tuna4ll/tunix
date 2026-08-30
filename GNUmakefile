@@ -14,7 +14,15 @@ override MAKEFLAGS += -rR
 # -R above clears make's built-in variables, and it does so after this file is
 # read: a plain `CC ?= cc` would see the built-in, decline to assign, and then
 # be wiped. Anything the environment or the command line set still wins.
-ifeq ($(origin CC),default)
+#
+# Both origins have to be caught, not just `default`. A recursive $(MAKE) --
+# `check` below is one -- inherits -R through MAKEFLAGS from the start, so by
+# the time it reads this line the built-in is already gone and the origin is
+# `undefined`. Testing only for `default` left CC empty in every sub-make, and
+# the recipe then began with `-std=gnu11`, which make reads as its own "ignore
+# errors" prefix: every compile failed with "command not found" and every
+# failure was ignored.
+ifneq ($(filter default undefined,$(origin CC)),)
   override CC := cc
 endif
 
