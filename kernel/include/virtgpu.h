@@ -39,6 +39,23 @@ uint32_t virtgpu_capset_size(void);
 int virtgpu_get_capset(uint32_t id, uint32_t version, void *out, uint32_t bytes);
 
 /*
+ * Where the card is on the PCI bus, and what it says it is.
+ *
+ * Nothing in the kernel needs this -- it drives the device through its
+ * capabilities rather than its address. It is published in sysfs, because
+ * libdrm identifies a card by its bus address and will not pair the card node
+ * with the render node without one.
+ */
+struct virtgpu_pci_identity {
+    uint8_t bus;
+    uint8_t slot;
+    uint8_t function;
+    uint16_t vendor;
+    uint16_t device;
+};
+int virtgpu_pci_identity(struct virtgpu_pci_identity *out);
+
+/*
  * A region of a resource. For an image these are pixels; for a buffer only x
  * and w are used and they are bytes.
  */

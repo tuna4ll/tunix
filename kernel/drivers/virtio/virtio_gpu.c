@@ -406,6 +406,16 @@ static void query_capsets(void) {
     }
 }
 
+int virtgpu_pci_identity(struct virtgpu_pci_identity *out) {
+    if (!ready || !out) return -1;
+    out->bus = device.pci.bus;
+    out->slot = device.pci.slot;
+    out->function = device.pci.function;
+    out->vendor = device.pci.vendor_id;
+    out->device = device.pci.device_id;
+    return 0;
+}
+
 int virtgpu_virgl_available(void) { return virgl && capset_id != 0; }
 uint32_t virtgpu_capset_id(void) { return capset_id; }
 uint32_t virtgpu_capset_version(void) { return capset_version; }

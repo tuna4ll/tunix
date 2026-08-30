@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include "../include/devnum.h"
 #include "../include/drm.h"
+#include "../include/pci.h"
 #include "../include/virtgpu.h"
 
 #include "../include/kstring.h"
@@ -138,6 +139,88 @@ static int64_t uevent_write(struct vfs_node *node, uint64_t offset, size_t size,
     /* The whole write is consumed either way: a caller given a short count for
        an action we did not recognise would keep trying to finish it. */
     return (int64_t)size;
+}
+
+/* Fixed-width lower case, which is the only form a PCI address is written in
+   and the one libdrm's parser expects to find. */
+static void append_hex(char *out, size_t limit, size_t *used, uint32_t value,
+                       unsigned digits) {
+    static const char alphabet[] = "0123456789abcdef";
+    while (digits--) {
+        if (*used + 1 >= limit) return;
+        out[(*used)++] = alphabet[(value >> (digits * 4)) & 0xFU];
+    }
+}
+
+/*
+ * The card's parent: the PCI device it actually is.
+ *
+ * libdrm will not accept a card whose bus it cannot identify. It reads three
+ * things and they all live here -- the `subsystem` link, whose last component
+ * names the bus; `PCI_SLOT_NAME` out of the uevent, which is the address; and
+ * the first 64 bytes of configuration space, which is where it takes the
+ * vendor and device ids from rather than trusting anything written beside
+ * them. Without these it cannot tell that the card and the render node are one
+ * piece of hardware, and mesa will not render through a card it cannot pair.
+ *
+ * Each node gets its own copy rather than a shared parent reached by symlinks.
+ * Nothing reads it as a tree -- every reader starts from a node it already has
+ * and looks down -- so the shape that matters is what is under each node, not
+ * that the two meet.
+ */
+static void publish_pci_parent(const char *name) {
+    struct virtgpu_pci_identity id;
+    if (virtgpu_pci_identity(&id) != 0) return;
+
+    char path[192];
+    size_t used = 0;
+    append_string(path, sizeof(path), &used, "/sys/devices/");
+    append_string(path, sizeof(path), &used, name);
+    append_string(path, sizeof(path), &used, "/device");
+    path[used] = '\0';
+    if (!vfs_mkdir_p(path)) return;
+
+    char file[224];
+    (void)vfs_mkdir_p("/sys/bus/pci");
+    used = 0;
+    append_string(file, sizeof(file), &used, path);
+    append_string(file, sizeof(file), &used, "/subsystem");
+    file[used] = '\0';
+    (void)vfs_create_symlink(file, "/sys/bus/pci", 0);
+
+    char uevent[192];
+    size_t length = 0;
+    append_string(uevent, sizeof(uevent), &length, "DRIVER=virtio-pci\nPCI_ID=");
+    append_hex(uevent, sizeof(uevent), &length, id.vendor, 4);
+    append_string(uevent, sizeof(uevent), &length, ":");
+    append_hex(uevent, sizeof(uevent), &length, id.device, 4);
+    append_string(uevent, sizeof(uevent), &length, "\nPCI_SLOT_NAME=0000:");
+    append_hex(uevent, sizeof(uevent), &length, id.bus, 2);
+    append_string(uevent, sizeof(uevent), &length, ":");
+    append_hex(uevent, sizeof(uevent), &length, id.slot, 2);
+    append_string(uevent, sizeof(uevent), &length, ".");
+    append_hex(uevent, sizeof(uevent), &length, id.function, 1);
+    append_string(uevent, sizeof(uevent), &length, "\n");
+    used = 0;
+    append_string(file, sizeof(file), &used, path);
+    append_string(file, sizeof(file), &used, "/uevent");
+    file[used] = '\0';
+    (void)vfs_create_file(file, uevent, length, 0, 1);
+
+    uint8_t config[64];
+    for (unsigned offset = 0; offset < sizeof(config); offset += 4) {
+        uint32_t word = pci_config_read32(id.bus, id.slot, id.function,
+                                          (uint8_t)offset);
+        config[offset + 0] = (uint8_t)word;
+        config[offset + 1] = (uint8_t)(word >> 8);
+        config[offset + 2] = (uint8_t)(word >> 16);
+        config[offset + 3] = (uint8_t)(word >> 24);
+    }
+    used = 0;
+    append_string(file, sizeof(file), &used, path);
+    append_string(file, sizeof(file), &used, "/config");
+    file[used] = '\0';
+    (void)vfs_create_file(file, config, sizeof(config), 0, 1);
 }
 
 /*
@@ -303,6 +386,8 @@ void sysfs_init(void) {
                            DEV_MAJOR_DRM, DEV_MINOR_DRM_RENDER0);
             publish_drm_nodes("card0");
             publish_drm_nodes("renderD128");
+            publish_pci_parent("card0");
+            publish_pci_parent("renderD128");
         }
     }
 
