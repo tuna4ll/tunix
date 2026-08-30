@@ -95,3 +95,34 @@ CPython's own socket module.
   caused it, and no `recvmmsg` to go with `sendmmsg`.
 - `ping` works but warns: it asks for `ICMP_FILTER` to choose which ICMP types
   reach it, is refused, and filters in userspace instead.
+
+## Socket options refused on principle
+
+Twice now an option this stack does not model has been refused, and twice that
+broke something with nothing to do with the option.
+
+`IP_RECVERR` was the first. glibc's resolver sets it on every nameserver socket
+and treats a refusal as fatal, so every name on the machine became unresolvable
+without a packet reaching the wire -- `Transient resolver failure` from xbps,
+`Could not resolve host` from curl.
+
+`TCP_NODELAY` was the second. libfetch sets it on every connection it opens, and
+a 677 MB download died three quarters of the way through with `Operation not
+supported`: the option is refused on every connection, and becomes fatal on the
+one libfetch opens to resume. It is accepted now, and truthfully rather than
+conveniently -- there is no Nagle here. A segment goes out when the caller
+writes it and small writes are never held back waiting for company, so the
+option describes what already happens.
+
+The rule that comes out of both: an option that only describes behaviour should
+be accepted when the behaviour is already what it asks for, and refused only
+when honouring it would matter and the stack cannot.
+
+And a refusal names itself now, once per level and option:
+
+```
+INET: setsockopt level 6 option 1 refused
+```
+
+Working out that the last two were `IP_RECVERR` and `TCP_NODELAY` cost a boot
+each. The number is free to print and it is the whole diagnosis.

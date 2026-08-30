@@ -6,6 +6,8 @@
 #include "../include/net/inet_socket.h"
 #include "../include/net/net.h"
 
+extern void kprintf(const char *fmt, ...);
+
 #define MAX_INET_SOCKETS 32
 #define SOCKET_QUEUE 8
 #define SOCKET_PACKET_MAX 2048
@@ -110,6 +112,7 @@ struct tcp_control_block {
 #define IP_HDRINCL 3
 #define IP_TTL 2
 #define IP_RECVERR 11
+#define TCP_NODELAY 1
 
 #define SIOCADDRT 0x890BU
 #define SIOCDELRT 0x890CU
@@ -938,6 +941,20 @@ int inet_socket_getpeername(struct inet_socket *socket, void *address, size_t *l
     return 0;
 }
 
+/* One line per level and option, ever. */
+static void report_refused_option(const char *what, int level, int option) {
+    static struct { int level; int option; } seen[16];
+    static unsigned count;
+    for (unsigned i = 0; i < count; i++)
+        if (seen[i].level == level && seen[i].option == option) return;
+    if (count < 16U) {
+        seen[count].level = level;
+        seen[count].option = option;
+        count++;
+    }
+    kprintf("INET: %s level %d option %d refused\n", what, level, option);
+}
+
 int inet_socket_setsockopt(struct inet_socket *socket, int level, int option,
                            const void *value, size_t length) {
     if (!socket) return -EINVAL;
@@ -975,6 +992,28 @@ int inet_socket_setsockopt(struct inet_socket *socket, int level, int option,
             return 0;
         }
     }
+    /*
+     * Nagle is not implemented here: a segment goes out when the caller writes
+     * it, and small writes are never held back waiting for company. So the
+     * option describes what this stack already does, and accepting it is the
+     * truthful answer rather than a convenient one.
+     *
+     * Refusing it was not. libfetch sets it on every connection it opens and
+     * treats the refusal as fatal, which is why a 677 MB download died three
+     * quarters of the way through with `Operation not supported` -- the same
+     * shape of failure as IP_RECVERR above, and the second time an advisory
+     * option refused on principle broke something that had nothing to do with
+     * the principle.
+     */
+    if (level == IPPROTO_TCP && option == TCP_NODELAY) return 0;
+
+    /*
+     * And the next one names itself. Working out that the last two were
+     * IP_RECVERR and TCP_NODELAY took a boot each; the option number is free
+     * to print and it is the whole diagnosis. Once per level and option, so a
+     * program that asks in a loop does not bury the log.
+     */
+    report_refused_option("setsockopt", level, option);
     return -EOPNOTSUPP;
 }
 
@@ -993,7 +1032,12 @@ int inet_socket_getsockopt(struct inet_socket *socket, int level, int option,
     else if (level == SOL_SOCKET && option == SO_BROADCAST) result = socket->broadcast;
     else if (level == IPPROTO_IP && option == IP_TTL) result = socket->ttl;
     else if (level == IPPROTO_IP && option == IP_RECVERR) result = socket->report_errors;
-    else return -EOPNOTSUPP;
+    /* Always on, because it is always true; see the note in setsockopt. */
+    else if (level == IPPROTO_TCP && option == TCP_NODELAY) result = 1;
+    else {
+        report_refused_option("getsockopt", level, option);
+        return -EOPNOTSUPP;
+    }
     memcpy(value, &result, sizeof(result));
     *length = sizeof(result);
     return 0;
