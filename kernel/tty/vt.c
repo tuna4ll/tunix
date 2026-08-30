@@ -8,6 +8,7 @@
 #include "../include/process.h"
 #include "../include/signal.h"
 #include "../include/terminal.h"
+#include "../include/serial.h"
 #include "../include/tty.h"
 #include "../include/usercopy.h"
 #include "../include/vfs.h"
@@ -296,17 +297,16 @@ int vt_input_delivered_to(unsigned index) {
 /* One byte off the serial line, or nothing. The serial port is a keyboard like
    any other as far as the terminals are concerned, and it types at whichever
    one is active. */
-static int serial_try_read(void) {
-    if (inb(0x3FD) & 1U) return inb(0x3F8);
-    return -1;
-}
-
 void vt_poll_serial(void) {
     struct tty *tty = terminals[active_index].tty;
-    if (!tty) return;
-    for (;;) {
-        int value = serial_try_read();
-        if (value < 0) break;
+    if (!tty || !serial_present()) return;
+    /* Bounded. A port that answers every read with a byte -- which is what an
+       absent one does, and what a wedged one does -- would otherwise be read
+       for ever, inside the tick, holding the kernel lock. */
+    unsigned limit = serial_read_limit();
+    for (unsigned taken = 0; taken < limit; taken++) {
+        int value = serial_read_char();
+        if (value < 0) return;
         tty_push_serial(tty, (uint8_t)value);
     }
 }

@@ -191,3 +191,36 @@ cells -- see [The desktop](desktop.md).
   Linux would keep the terminal and report it. Nothing on the image refuses.
 - **Echo is per line, not per key.** The line discipline echoes when the line is
   read, not as it is typed, which predates this work and is unchanged by it.
+
+## The serial line, and machines that do not have one
+
+The tick polls the serial port, because a byte arriving on it raises no
+interrupt anything here unmasks. That poll used to be:
+
+```c
+if (inb(0x3FD) & 1U) return inb(0x3F8);   /* line status bit 0: a byte waits */
+```
+
+in a loop until it said no. On a machine with nothing decoding 0x3F8 every read
+answers 0xFF, and 0xFF says a byte is waiting as loudly as a real byte does --
+so the loop never ended. It ran inside the timer interrupt, holding the kernel
+lock, which is a machine that stops a fraction of a second after the first
+tick, having printed whatever it had already printed, with no fault and no
+message. Every other processor then piled up behind the lock:
+
+```
+KLOCK: cpu 1 stuck waiting for ticket 28: next 31 serving 27 shared 0
+KLOCK: cpu 0 holds 1 doing 20020
+```
+
+`20020` is interrupt vector 0x20, the tick. That is the whole diagnosis.
+
+An emulator never shows it, because an emulator always has the port. The PS/2
+driver has guarded against the identical trap since it was written -- "all ones
+is an absent controller, not a full output buffer" -- and this one had not.
+
+So `serial_init()` probes the scratch register, which is the one register of a
+16550 that does nothing but remember what was written to it, and everything
+else is a no-op when there is no port. The waits are bounded as well: a port
+that is present but never reports its transmit register empty, and a port that
+answers every read with a byte, both cost a tick rather than the machine.
