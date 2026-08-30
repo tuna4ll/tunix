@@ -5817,17 +5817,24 @@ static int syscall_number_may_share(uint64_t number) {
  *
  * ENOSYS and EOPNOTSUPP are the two answers that mean a gap here rather than a
  * mistake in the program, and from userland the two are indistinguishable: a
- * package manager that cannot write a file says the same thing either way. A
- * few lines naming the call is the difference between reading the source and
- * knowing. Bounded, because a program that asks once usually asks often.
+ * package manager that cannot finish a download says the same thing either
+ * way. A line naming the call is the difference between reading the source and
+ * knowing.
+ *
+ * Once per syscall number, not a fixed number of lines in total. The first
+ * version had a budget of sixteen and glibc spent all of it on rseq before
+ * userland got as far as the thing being diagnosed -- so the one line worth
+ * having was the one that never printed.
  */
-#define UNSUPPORTED_REPORTS 16U
+#define SYSCALL_NUMBERS 512U
 
 static void report_unsupported(uint64_t number, int64_t result) {
     if (result != -EOPNOTSUPP && result != -ENOSYS) return;
-    static unsigned reported;
-    if (reported >= UNSUPPORTED_REPORTS) return;
-    reported++;
+    if (number >= SYSCALL_NUMBERS) return;
+    static uint8_t reported[SYSCALL_NUMBERS / 8U];
+    uint8_t bit = (uint8_t)(1U << (number & 7U));
+    if (reported[number / 8U] & bit) return;
+    reported[number / 8U] |= bit;
     kprintf("TUNIX: syscall %u answered %s to pid %d\n", (unsigned)number,
             result == -ENOSYS ? "ENOSYS" : "EOPNOTSUPP", (int)process_current_pid());
 }
