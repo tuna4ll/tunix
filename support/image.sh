@@ -42,14 +42,45 @@ mkdir -p "$WORK"
 
 # --- the EFI system partition ----------------------------------------------
 
+#
+# One directory per mmd and a check that each one arrived, because the way this
+# goes wrong is unreadable. mcopy answers a *missing target directory* with
+#
+#   ::/boot/limine/limine-bios.sys: no match for target
+#   Bad target ::/boot/limine/limine-bios.sys
+#
+# which names the file it was asked to write and says nothing about the
+# directory that is actually absent -- and it is reported on the copy, several
+# commands after whatever really failed. Checking here means the message names
+# the step that went wrong.
+esp_mkdir() {
+	mmd -i "$WORK/esp.img" "$1"
+	mdir -i "$WORK/esp.img" -b "$1" >/dev/null 2>&1 || {
+		echo "image.sh: mmd said it made $1 and it is not there." >&2
+		echo "image.sh: mtools is $(mtools --version 2>&1 | head -1)." >&2
+		exit 1
+	}
+}
+
+# And a source that is not there is worth its own sentence: mcopy reports it as
+# a plain "No such file or directory", which reads like a bug in the image
+# rather than a download that did not finish.
+esp_copy() {
+	[ -f "$1" ] || { echo "image.sh: $1 is missing." >&2; exit 1; }
+	mcopy -i "$WORK/esp.img" "$1" "$2"
+}
+
 echo ":: building the ESP"
 truncate -s "${ESP_MIB}M" "$WORK/esp.img"
 mformat -i "$WORK/esp.img" -F -v TUNIX ::
-mmd -i "$WORK/esp.img" ::/EFI ::/EFI/BOOT ::/boot ::/boot/limine
-mcopy -i "$WORK/esp.img" "$LIMINE_DIR/BOOTX64.EFI" ::/EFI/BOOT/BOOTX64.EFI
-mcopy -i "$WORK/esp.img" "$LIMINE_DIR/limine-bios.sys" ::/boot/limine/limine-bios.sys
-mcopy -i "$WORK/esp.img" "$LIMINE_CONF" ::/boot/limine/limine.conf
-mcopy -i "$WORK/esp.img" "$KERNEL" ::/boot/kernel.elf
+esp_mkdir ::/EFI
+esp_mkdir ::/EFI/BOOT
+esp_mkdir ::/boot
+esp_mkdir ::/boot/limine
+esp_copy "$LIMINE_DIR/BOOTX64.EFI" ::/EFI/BOOT/BOOTX64.EFI
+esp_copy "$LIMINE_DIR/limine-bios.sys" ::/boot/limine/limine-bios.sys
+esp_copy "$LIMINE_CONF" ::/boot/limine/limine.conf
+esp_copy "$KERNEL" ::/boot/kernel.elf
 
 # --- the root filesystem ----------------------------------------------------
 #
