@@ -4,19 +4,39 @@
 #include <stdint.h>
 
 /*
- * virtio-gpu, 2D.
+ * virtio-gpu.
  *
  * The display this replaces is a blit: drm.c copies a client's dumb buffer into
  * the scanout the bootloader set up, byte by byte, every frame. A virtio-gpu
  * host resource is backed by the dumb buffer's own pages, so presenting stops
  * being a copy and becomes three commands on a queue.
  *
- * 3D (virgl) is deliberately absent. Nothing here negotiates it, so the device
- * comes up in 2D mode and mesa keeps using llvmpipe.
+ * VIRGL is negotiated where the host offers it. That does not change any of
+ * the above -- the display works the same either way -- but it opens the 3D
+ * side of the device, whose first question is what the host is capable of.
  */
 
 int virtgpu_init(void);
 int virtgpu_available(void);
+
+/*
+ * Whether the host will take 3D commands *and* described what it can do with
+ * them. Both halves matter: a device can offer the feature and publish no
+ * capset, and 3D on such a host is unusable rather than merely limited.
+ */
+int virtgpu_virgl_available(void);
+uint32_t virtgpu_capset_id(void);
+uint32_t virtgpu_capset_version(void);
+uint32_t virtgpu_capset_size(void);
+
+/*
+ * Copy out the capset, which is virglrenderer's description of the GL it can
+ * offer. Nothing in the kernel reads it; mesa does, and the kernel's whole job
+ * is to hand it over unaltered. Asking for fewer bytes than the capset holds
+ * returns its first `bytes`, which is how a mesa older than the host reads the
+ * prefix it understands.
+ */
+int virtgpu_get_capset(uint32_t id, uint32_t version, void *out, uint32_t bytes);
 uint32_t virtgpu_display_width(void);
 uint32_t virtgpu_display_height(void);
 

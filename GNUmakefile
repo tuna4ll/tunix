@@ -236,7 +236,7 @@ $(OVMF_VARS): $(OVMF)
 	@mkdir -p $(dir $@)
 	cp $(CACHE)/edk2-ovmf/ovmf-vars-x86_64.fd $@
 
-.PHONY: run run-uefi run-gpu headless
+.PHONY: run run-uefi run-gpu run-virgl headless
 run: $(IMAGE)
 	rm -f $(BUILD)/serial.log
 	$(QEMU) $(QEMU_COMMON) $(QEMU_DISPLAY) -serial file:$(BUILD)/serial.log -monitor none
@@ -258,6 +258,24 @@ QEMU_GPU ?= -vga none -device virtio-vga,xres=1280,yres=720 \
 run-gpu: $(IMAGE)
 	rm -f $(BUILD)/serial.log
 	$(QEMU) $(QEMU_COMMON) $(QEMU_GPU) -serial file:$(BUILD)/serial.log -monitor none
+
+# The same adapter with the host's GL behind it. The `-gl` suffix is what makes
+# QEMU load virglrenderer and offer the VIRGL feature; without it the device is
+# identical and the guest sees a 2D card.
+#
+# The host needs a GL context of its own to render into, which is what
+# `gl=on` asks the display for. A host that cannot give one leaves the device
+# in 2D -- the guest still boots, it just finds no capset.
+QEMU_VIRGL ?= -vga none -device virtio-vga-gl,xres=1280,yres=720 	-display gtk,gl=on,zoom-to-fit=on
+# WSL has no render node, so mesa cannot find a GPU the ordinary way and falls
+# back to software -- which would put the host's rasteriser behind the guest's
+# and be slower than not doing this at all. It does have Direct3D 12 and the
+# libraries Windows exposes, and naming both reaches the real card. On a Linux
+# host with a render node the defaults are already right and this is empty.
+QEMU_GL_ENV ?= $(if $(wildcard /dev/dri),,	$(if $(wildcard /usr/lib/wsl/lib),env LD_LIBRARY_PATH=/usr/lib/wsl/lib GALLIUM_DRIVER=d3d12))
+run-virgl: $(IMAGE)
+	rm -f $(BUILD)/serial.log
+	$(QEMU_GL_ENV) $(QEMU) $(QEMU_COMMON) $(QEMU_VIRGL) 		-serial file:$(BUILD)/serial.log -monitor none
 
 headless: $(IMAGE)
 	$(QEMU) $(QEMU_COMMON) -nographic -monitor none -serial stdio

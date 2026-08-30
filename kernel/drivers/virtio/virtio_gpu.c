@@ -1,10 +1,21 @@
 /*
- * virtio-gpu, 2D mode.
+ * virtio-gpu.
  *
  * Every command is a request buffer the device reads and a response buffer it
  * writes, submitted on the control queue and waited out. The one command that
  * carries a payload is RESOURCE_ATTACH_BACKING, whose list of guest pages goes
  * in a descriptor of its own.
+ *
+ * The device is asked for VIRGL when it is attached. Where the host grants it
+ * there is a second, much larger interface behind the same queue: contexts,
+ * resources with a real format and target, and command buffers that are
+ * OpenGL work for the host to do. What the host can do with them is not
+ * guessed at -- it is read out of a capset, a blob virglrenderer fills in and
+ * mesa parses to learn which GL version and extensions it may use.
+ *
+ * Where the host does not grant it, everything past the capset query is unused
+ * and the display works exactly as it did. 2D is not a fallback bolted on
+ * underneath; it is the same set of commands either way.
  */
 #include <stddef.h>
 #include <stdint.h>
@@ -28,9 +39,33 @@ extern void kprintf(const char *fmt, ...);
 #define VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D 0x0105U
 #define VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING 0x0106U
 #define VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING 0x0107U
+#define VIRTIO_GPU_CMD_GET_CAPSET_INFO 0x0108U
+#define VIRTIO_GPU_CMD_GET_CAPSET 0x0109U
 
 #define VIRTIO_GPU_RESP_OK_NODATA 0x1100U
 #define VIRTIO_GPU_RESP_OK_DISPLAY_INFO 0x1101U
+#define VIRTIO_GPU_RESP_OK_CAPSET_INFO 0x1102U
+#define VIRTIO_GPU_RESP_OK_CAPSET 0x1103U
+/* Every ok response is 0x11xx and every error 0x12xx, so one comparison sorts
+   them without having to name each. */
+#define VIRTIO_GPU_RESP_ERR_BASE 0x1200U
+
+/* Feature bit 0: the host will accept 3D commands, and has a capset that says
+   what it can do with them. */
+#define VIRTIO_GPU_F_VIRGL 0U
+
+/* virglrenderer publishes two: the original, and the one every mesa since 2018
+   actually asks for. Which exist is the host's answer, not ours. */
+#define VIRTIO_GPU_CAPSET_VIRGL 1U
+#define VIRTIO_GPU_CAPSET_VIRGL2 2U
+
+/* struct virtio_gpu_config, whose fourth word is the number of capsets. */
+#define VIRTIO_GPU_CONFIG_NUM_CAPSETS 12U
+
+/* A virgl2 capset is a couple of kilobytes today. The device is asked how big
+   its own is before it is fetched, so this is a ceiling on what can be
+   accepted rather than a guess at the size. */
+#define MAX_CAPSET_BYTES 4096U
 
 /* XRGB8888 in memory is B, G, R, unused -- which is what this format names. */
 #define VIRTIO_GPU_FORMAT_B8G8R8X8 2U
@@ -115,6 +150,33 @@ struct virtio_gpu_resource_flush {
     uint32_t padding;
 };
 
+struct virtio_gpu_get_capset_info {
+    struct virtio_gpu_ctrl_hdr hdr;
+    uint32_t capset_index;
+    uint32_t padding;
+};
+
+struct virtio_gpu_resp_capset_info {
+    struct virtio_gpu_ctrl_hdr hdr;
+    uint32_t capset_id;
+    uint32_t capset_max_version;
+    uint32_t capset_max_size;
+    uint32_t padding;
+};
+
+struct virtio_gpu_get_capset {
+    struct virtio_gpu_ctrl_hdr hdr;
+    uint32_t capset_id;
+    uint32_t capset_version;
+};
+
+/* The capset data follows the header with nothing between, so a single
+   device-writable buffer describes the whole reply. */
+struct virtio_gpu_resp_capset {
+    struct virtio_gpu_ctrl_hdr hdr;
+    uint8_t capset_data[MAX_CAPSET_BYTES];
+};
+
 /* Static, so the physical addresses handed to the device come straight out of
    the kernel window and are contiguous without an allocator that can promise
    it. Statically sized for the same reason. */
@@ -125,9 +187,19 @@ static union {
     struct virtio_gpu_set_scanout scanout;
     struct virtio_gpu_transfer_to_host_2d transfer;
     struct virtio_gpu_resource_flush flush;
+    struct virtio_gpu_get_capset_info capset_info;
+    struct virtio_gpu_get_capset capset;
     struct virtio_gpu_ctrl_hdr hdr;
 } request;
-static struct virtio_gpu_resp_display_info response;
+/* Likewise one buffer for the reply, sized for the largest of them, which is a
+   capset. Every reply begins with the same header, so the type can be checked
+   before anything knows which shape arrived. */
+static union {
+    struct virtio_gpu_resp_display_info display;
+    struct virtio_gpu_resp_capset_info capset_info;
+    struct virtio_gpu_resp_capset capset;
+    struct virtio_gpu_ctrl_hdr hdr;
+} response;
 static struct virtio_gpu_mem_entry backing[MAX_BACKING_PAGES];
 
 static struct virtio_device device;
@@ -137,6 +209,15 @@ static uint32_t scanout_resource;
 static uint32_t display_width;
 static uint32_t display_height;
 static int ready;
+
+/* Whether the host agreed to VIRGL, and the best capset it published. A zero
+   id means there is no 3D to be had: either the device never offered the
+   feature, or it offered it and then described no capset, which is a host
+   built without virglrenderer. */
+static int virgl;
+static uint32_t capset_id;
+static uint32_t capset_version;
+static uint32_t capset_size;
 
 static int submit(uint32_t request_bytes, const void *payload, uint32_t payload_bytes,
                   uint32_t response_bytes) {
@@ -158,8 +239,7 @@ static int submit(uint32_t request_bytes, const void *payload, uint32_t payload_
 
     memset(&response, 0, response_bytes);
     if (virtio_queue_submit(&control, buffers, count, write_from) != 0) return -1;
-    if (response.hdr.type != VIRTIO_GPU_RESP_OK_NODATA &&
-        response.hdr.type != VIRTIO_GPU_RESP_OK_DISPLAY_INFO) return -1;
+    if (response.hdr.type >= VIRTIO_GPU_RESP_ERR_BASE) return -1;
     return 0;
 }
 
@@ -181,16 +261,80 @@ static int query_display_info(void) {
     begin(VIRTIO_GPU_CMD_GET_DISPLAY_INFO);
     if (submit(sizeof(request.hdr), NULL, 0, sizeof(response)) != 0) return -1;
     for (unsigned index = 0; index < VIRTIO_GPU_MAX_SCANOUTS; index++) {
-        if (!response.pmodes[index].enabled) continue;
-        display_width = response.pmodes[index].r.width;
-        display_height = response.pmodes[index].r.height;
+        if (!response.display.pmodes[index].enabled) continue;
+        display_width = response.display.pmodes[index].r.width;
+        display_height = response.display.pmodes[index].r.height;
         return 0;
     }
     return -1;
 }
 
+/*
+ * Ask the host what its 3D can do.
+ *
+ * The device says how many capsets it has in its configuration space and
+ * describes them one at a time by index; the id is what a capset turns out to
+ * be, not something to ask for. virgl2 is preferred wherever it appears
+ * because it is what mesa asks for, and having only the original means a host
+ * too old for anything current.
+ *
+ * The contents are not read here. They are a blob mesa parses and the kernel
+ * only has to hand over intact, so this records which one to fetch and how big
+ * it is; fetching waits until something asks.
+ */
+static void query_capsets(void) {
+    uint32_t count = virtio_config_read32(&device, VIRTIO_GPU_CONFIG_NUM_CAPSETS);
+    for (uint32_t index = 0; index < count; index++) {
+        begin(VIRTIO_GPU_CMD_GET_CAPSET_INFO);
+        request.capset_info.capset_index = index;
+        if (submit(sizeof(request.capset_info), NULL, 0,
+                   sizeof(response.capset_info)) != 0) continue;
+
+        uint32_t id = response.capset_info.capset_id;
+        if (id != VIRTIO_GPU_CAPSET_VIRGL && id != VIRTIO_GPU_CAPSET_VIRGL2) continue;
+        /* One that will not fit in the reply buffer cannot be handed over, and
+           a capset that arrives truncated is worse than one that never
+           arrives: mesa would read capabilities out of uninitialised bytes. */
+        if (response.capset_info.capset_max_size > MAX_CAPSET_BYTES) continue;
+        if (capset_id == VIRTIO_GPU_CAPSET_VIRGL2 && id == VIRTIO_GPU_CAPSET_VIRGL)
+            continue;
+
+        capset_id = id;
+        capset_version = response.capset_info.capset_max_version;
+        capset_size = response.capset_info.capset_max_size;
+    }
+}
+
+int virtgpu_virgl_available(void) { return virgl && capset_id != 0; }
+uint32_t virtgpu_capset_id(void) { return capset_id; }
+uint32_t virtgpu_capset_version(void) { return capset_version; }
+uint32_t virtgpu_capset_size(void) { return capset_size; }
+
+int virtgpu_get_capset(uint32_t id, uint32_t version, void *out, uint32_t bytes) {
+    if (!virtgpu_virgl_available() || !out || !bytes) return -1;
+    if (bytes > MAX_CAPSET_BYTES) return -1;
+
+    begin(VIRTIO_GPU_CMD_GET_CAPSET);
+    request.capset.capset_id = id;
+    request.capset.capset_version = version;
+    /* The device is told how much room the reply has, header included, and
+       fills what fits. Asking for less than the whole capset is how mesa reads
+       the prefix it understands of a newer one than it knows. */
+    if (submit(sizeof(request.capset), NULL, 0,
+               (uint32_t)sizeof(struct virtio_gpu_ctrl_hdr) + bytes) != 0) return -1;
+    if (response.hdr.type != VIRTIO_GPU_RESP_OK_CAPSET) return -1;
+    memcpy(out, response.capset.capset_data, bytes);
+    return 0;
+}
+
 int virtgpu_init(void) {
-    if (virtio_pci_attach(&device, VIRTIO_GPU_DEVICE_ID, 0, NULL) != 0) return -1;
+    /* Asking for a feature the device does not offer is not an error -- what
+       is negotiated is the intersection -- so this is simply how the question
+       gets asked. */
+    uint64_t granted = 0;
+    if (virtio_pci_attach(&device, VIRTIO_GPU_DEVICE_ID,
+                          1ULL << VIRTIO_GPU_F_VIRGL, &granted) != 0) return -1;
+    virgl = (granted & (1ULL << VIRTIO_GPU_F_VIRGL)) != 0;
     if (virtio_pci_setup_queue(&device, &control, VIRTIO_GPU_CONTROL_QUEUE) != 0) {
         virtio_pci_set_failed(&device);
         return -1;
@@ -202,7 +346,12 @@ int virtgpu_init(void) {
         return -1;
     }
     ready = 1;
-    kprintf("TUNIX: virtio-gpu ready\n");
+    if (virgl) query_capsets();
+    if (virtgpu_virgl_available())
+        kprintf("TUNIX: virtio-gpu ready, virgl capset %u version %u, %u bytes\n",
+                capset_id, capset_version, capset_size);
+    else
+        kprintf("TUNIX: virtio-gpu ready, 2D only\n");
     return 0;
 }
 
