@@ -481,13 +481,36 @@ int vfs_align_data(struct vfs_node *node) {
     return 0;
 }
 
+/*
+ * Where doubling stops paying for itself.
+ *
+ * A file lives in one contiguous kernel allocation here, and growing it means
+ * holding the old buffer and the new one at the same time while the contents
+ * are copied. Doubling makes that peak one and a half times the file: a write
+ * that crossed 512 MiB asked for a gigabyte while still holding half of one,
+ * which is 1.5 GiB of a 2 GiB heap with a compositor already in it. It failed,
+ * and the write failed with it -- a 677 MB download died at 512 MiB and one
+ * staging chunk, reporting an I/O error for what was really a full heap.
+ *
+ * Past this point the buffer grows by a fixed step instead. The peak becomes
+ * the file plus one step rather than half the file again, and the slack left
+ * over at the end is bounded by the step rather than by the file.
+ */
+#define VFS_GROW_LINEAR_ABOVE (32ULL * 1024ULL * 1024ULL)
+#define VFS_GROW_STEP (32ULL * 1024ULL * 1024ULL)
+
 static int ensure_capacity(struct vfs_node *node, uint64_t required) {
     if (required <= node->capacity) return 0;
     if (node->flags & VFS_READONLY) return -1;
     uint64_t capacity = node->capacity ? node->capacity : 64;
-    while (capacity < required) {
+    while (capacity < required && capacity < VFS_GROW_LINEAR_ABOVE) {
         if (capacity > UINT64_MAX / 2) return -1;
         capacity *= 2;
+    }
+    if (capacity < required) {
+        uint64_t steps = (required - capacity + VFS_GROW_STEP - 1U) / VFS_GROW_STEP;
+        if (steps > (UINT64_MAX - capacity) / VFS_GROW_STEP) return -1;
+        capacity += steps * VFS_GROW_STEP;
     }
     uint8_t *new_data = (uint8_t *)kmalloc((size_t)capacity);
     if (!new_data) return -1;

@@ -79,3 +79,28 @@ GPT so that one disk boots either firmware.
 - **No `dir_index`.** A directory is a linear scan.
 - **`fsck` on the running root** is not something to do; the fstab entry has
   pass 0 for exactly that reason.
+
+## A big file grows by a step, not by doubling
+
+A file lives in one contiguous kernel allocation. Growing it means holding the
+old buffer and the new one at once while the contents are copied, so doubling
+makes the peak one and a half times the file.
+
+That is affordable until it is not. A write crossing 512 MiB asked for a
+gigabyte while still holding half of one -- 1.5 GiB of a 2 GiB heap with a
+compositor already in it. The allocation failed, the write failed with it, and
+what the program saw was an I/O error:
+
+```
+supertuxkart-data-1.5_1.x86_64.xbps.part   537001984 bytes
+ERROR: [trans] failed to download ...: Input/output error
+```
+
+537001984 is 512 MiB and one 128 KiB staging chunk: the first write past the
+boundary.
+
+Above 32 MiB the buffer grows by a fixed 32 MiB step instead. The peak becomes
+the file plus one step rather than half the file again, and the slack left at
+the end is bounded by the step rather than by the file. It does not make the
+underlying arrangement right -- a file still has to fit in the heap, contiguously
+-- but it moves the ceiling from two thirds of the heap to nearly all of it.
