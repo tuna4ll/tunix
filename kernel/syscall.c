@@ -343,6 +343,8 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define F_SETFD 2
 #define F_GETFL 3
 #define F_SETFL 4
+#define F_ADD_SEALS 1033
+#define F_GET_SEALS 1034
 #define FIONBIO 0x5421UL
 #define F_GETLK 5
 #define F_SETLK 6
@@ -4552,10 +4554,15 @@ static int64_t sys_eventfd(uint64_t initial_value, int flags, int legacy) {
 
 /*
  * memfd_create(2). The name argument only shows up in /proc on Linux and is
- * ignored here beyond validating that it is readable. Sealing is not
- * implemented: MFD_ALLOW_SEALING is accepted and does nothing, because a client
- * that asks for it still works without it, whereas failing the call outright
- * would send libwayland down its /dev/shm fallback, which Tunix does not have.
+ * ignored here beyond validating that it is readable.
+ *
+ * MFD_ALLOW_SEALING used to be accepted and ignored, on the reasoning that a
+ * client asking for sealing still works without it. That is true of libwayland
+ * and false of Mesa, which asks for F_SEAL_SHRINK before handing a buffer to a
+ * compositor and, when the request fails, closes the descriptor and gives up.
+ * The request then went out with no descriptor attached and the compositor
+ * answered `invalid arguments for wl_shm.create_pool` -- which is how every
+ * OpenGL client on this system failed to open a window.
  */
 static int64_t sys_memfd_create(uint64_t user_name, uint32_t flags) {
     if (flags & ~(uint32_t)(MFD_CLOEXEC | MFD_ALLOW_SEALING)) return -EINVAL;
@@ -4564,6 +4571,7 @@ static int64_t sys_memfd_create(uint64_t user_name, uint32_t flags) {
 
     struct memfd_object *object = memfd_create_object();
     if (!object) return -ENOMEM;
+    if (flags & MFD_ALLOW_SEALING) memfd_allow_sealing(object);
     struct file *file = file_create_memfd(object, 0);
     if (!file) {
         memfd_destroy(object);
@@ -5330,6 +5338,18 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
                    single contending process there is nothing to wait for, so
                    it is answered like F_SETLK. */
                 frame->rax = (uint64_t)sys_fcntl_lock(fd, command, frame->rdx);
+            } else if (command == F_ADD_SEALS || command == F_GET_SEALS) {
+                /* Only a memfd has seals; every other kind answers EINVAL,
+                   which is how a caller asks whether this one can be sealed. */
+                struct file *file = process->files->fds[fd];
+                if (file->kind != FILE_KIND_MEMFD) {
+                    frame->rax = (uint64_t)-(int64_t)EINVAL;
+                } else if (command == F_GET_SEALS) {
+                    frame->rax = memfd_seals(file->memfd);
+                } else {
+                    frame->rax = (uint64_t)(int64_t)
+                        memfd_add_seals(file->memfd, (uint32_t)frame->rdx);
+                }
             } else if (command == F_GETFL) {
                 frame->rax = process->files->fds[fd]->flags;
             } else if (command == F_SETFL) {

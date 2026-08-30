@@ -20,6 +20,11 @@
 
 struct memfd_object {
     uint64_t size;      /* logical length, as set by ftruncate */
+    /* Sealing, as F_ADD_SEALS applies it. `sealable` is what
+       MFD_ALLOW_SEALING asked for; without it the file refuses every seal,
+       which is what Linux does and what a caller checks for. */
+    uint32_t seals;
+    int sealable;
     uint64_t count;     /* pages actually allocated */
     uint64_t capacity;  /* entries available in `pages` */
     uint64_t *pages;    /* physical addresses */
@@ -45,6 +50,29 @@ void memfd_destroy(struct memfd_object *object) {
     }
     kfree(object->pages);
     kfree(object);
+}
+
+void memfd_allow_sealing(struct memfd_object *object) {
+    if (object) object->sealable = 1;
+}
+
+uint32_t memfd_seals(const struct memfd_object *object) {
+    return object ? object->seals : 0;
+}
+
+/*
+ * Add seals, with the refusals Linux makes.
+ *
+ * Returns 0, or the negative errno a caller expects: -EINVAL when the file was
+ * not created sealable or the bits are not seals, -EPERM once F_SEAL_SEAL has
+ * been set and the set is closed.
+ */
+int memfd_add_seals(struct memfd_object *object, uint32_t seals) {
+    if (!object || !object->sealable) return -22;          /* EINVAL */
+    if (seals & ~(uint32_t)MEMFD_SEAL_ALL) return -22;
+    if (object->seals & MEMFD_SEAL_SEAL) return -1;        /* EPERM */
+    object->seals |= seals;
+    return 0;
 }
 
 uint64_t memfd_size(const struct memfd_object *object) {
@@ -77,6 +105,12 @@ static int reserve_pages(struct memfd_object *object, uint64_t needed) {
 int memfd_truncate(struct memfd_object *object, uint64_t size) {
     if (!object) return -1;
     if (size > MEMFD_MAX_BYTES) return -1;
+    /* The two seals that mean what they say here. A shrink-sealed file is the
+       promise Mesa wants before it hands a buffer to the compositor: the pages
+       under the mapping cannot be taken away while the other side is reading
+       them. */
+    if (size < object->size && (object->seals & MEMFD_SEAL_SHRINK)) return -1;
+    if (size > object->size && (object->seals & MEMFD_SEAL_GROW)) return -1;
 
     uint64_t wanted = pages_for(size);
     if (wanted > object->count) {
