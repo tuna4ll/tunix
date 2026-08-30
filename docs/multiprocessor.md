@@ -45,9 +45,15 @@ So a wait longer than twenty seconds says what it is waiting for, once per
 processor, and goes on waiting:
 
 ```
-KLOCK: cpu 3 stuck waiting for ticket 26012: next 26019 serving 26011 shared 0
-KLOCK: cpu 1 holds 1
+KLOCK: cpu 3 stuck waiting for ticket 26302: next 26309 serving 26301 shared 0
+KLOCK: cpu 0 holds 0 doing 20020
 ```
+
+`doing` is a breadcrumb the few places that take the lock leave behind, because
+there is no stack to walk from another processor: `0x1nnnn` is syscall `nnn`,
+`0x2nnnn` interrupt vector `nnn`, `0x30000` the first process being started and
+`0x40000` going idle. Knowing a processor is not giving the lock back is half a
+diagnosis; the half that matters is what it is holding it for.
 
 Twenty seconds rather than five because the lock is held across block reads,
 and a root filesystem on a USB stick makes some of those genuinely slow --
@@ -83,7 +89,13 @@ out unlocked from every processor at once. Both locks turn interrupts off
 while held, because a processor that took one here would otherwise wait for
 itself.
 
-The terminal's is held across a run of characters rather than around each one:
+The terminal's lock is re-entrant per processor, and that is not a nicety: it
+is held across a run of characters, and anything inside that run which prints
+-- a warning from the tty layer, say -- comes back through the same lock. A
+second acquisition that does not recognise its own processor spins for a lock
+that processor is already holding, with interrupts off, for good.
+
+It is held across a run of characters rather than around each one:
 per character it was correct and far too expensive -- interrupts off, a
 contended cache line and a released lock for every glyph -- and what it
 produced was a processor holding the *kernel* lock for seconds at a stretch

@@ -5813,6 +5813,7 @@ static int syscall_number_may_share(uint64_t number) {
 #define VERBOSE_SYSCALL_LIMIT 24U
 
 void syscall_dispatch(struct syscall_frame *frame) {
+    klock_note(KLOCK_NOTE_SYSCALL | (uint32_t)frame->rax);
     /* The first syscall is the answer to one question and it is the question
        that matters here: whether userland ran at all. */
     if (boot_verbose()) {

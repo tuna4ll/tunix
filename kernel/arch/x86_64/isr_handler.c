@@ -311,6 +311,7 @@ void isr_handler(struct interrupt_frame *regs) {
      * not come back, and the unlock the entry stub would have done on the
      * way out is not owed to anyone.
      */
+    klock_note(KLOCK_NOTE_INTERRUPT | (uint32_t)regs->int_no);
     kernel_lock_from_isr();
     isr_dispatch(regs);
     /* Same move as the syscall return makes, and for the same reason: the

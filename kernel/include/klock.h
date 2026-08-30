@@ -65,6 +65,15 @@ int kernel_lock_held_here(void);
 
 /* The pair the interrupt path uses. Taking it only when it is free is safe
    only if it is released only when it was taken: see klock.c. */
+/* Leave a note about what this processor is doing, for the lock watchdog to
+   print when somebody stops giving the lock back. KLOCK_NOTE_* below. */
+void klock_note(uint32_t what);
+
+#define KLOCK_NOTE_SYSCALL   0x10000U  /* | the syscall number */
+#define KLOCK_NOTE_INTERRUPT 0x20000U  /* | the vector */
+#define KLOCK_NOTE_FIRST_RUN 0x30000U
+#define KLOCK_NOTE_IDLE      0x40000U
+
 void kernel_lock_from_isr(void);
 void kernel_unlock_from_isr(void);
 /* Which mode, for the paths that have to give a shared holder back its ticket

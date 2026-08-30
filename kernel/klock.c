@@ -46,6 +46,20 @@ static volatile uint8_t held_mode[SMP_MAX_CPUS];
    is going to finish takes twenty. */
 #define KLOCK_WATCHDOG_NS (20ULL * 1000ULL * 1000ULL * 1000ULL)
 
+/*
+ * A breadcrumb per processor: what it was last doing that mattered.
+ *
+ * The watchdog can say a processor is holding the lock and not giving it back,
+ * which is half a diagnosis. The half that matters is what it is holding it
+ * for, and there is no stack to walk from another processor. So the few places
+ * that take the lock leave a number behind, and the report prints it.
+ */
+static volatile uint32_t breadcrumb[SMP_MAX_CPUS];
+
+void klock_note(uint32_t what) {
+    breadcrumb[cpu_current()->index] = what;
+}
+
 static volatile uint8_t watchdog_reported[SMP_MAX_CPUS];
 
 static void klock_report(const char *what, uint32_t ticket) {
@@ -62,7 +76,8 @@ static void klock_report(const char *what, uint32_t ticket) {
     for (unsigned index = 0; index < SMP_MAX_CPUS; index++) {
         struct cpu *cpu = percpu_slot(index);
         if (!cpu || !cpu->online) continue;
-        kprintf("KLOCK: cpu %u holds %u\n", index, (unsigned)held_mode[index]);
+        kprintf("KLOCK: cpu %u holds %u doing %x\n", index,
+                (unsigned)held_mode[index], (unsigned)breadcrumb[index]);
     }
 }
 

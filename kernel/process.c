@@ -726,6 +726,7 @@ static int switch_to_next(struct syscall_frame *frame, struct process *after) {
  */
 static void go_idle(void) __attribute__((noreturn));
 static void go_idle(void) {
+    klock_note(KLOCK_NOTE_IDLE);
     if (current) {
         fpu_save(current);
         current = NULL;
@@ -744,6 +745,7 @@ static void go_idle(void) {
 }
 
 void process_start_first(void) {
+    klock_note(KLOCK_NOTE_FIRST_RUN);
     kernel_lock();
     struct process *first = next_runnable(NULL);
     /* Not a failure: on a machine with several processors another one may
