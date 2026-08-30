@@ -146,6 +146,23 @@ disagreeing is a second, permanent version of the same failure, and the first
 version of this driver did exactly that: it reset its own toggle and never told
 the device.
 
+It is reset when the halt is cleared and at no other time, because clearing
+the halt is the only thing that resets the device's. A transfer that merely
+timed out moved nothing at either end; resetting ours there is how the two come
+to disagree, and once they do every transfer after it fails the same way. What
+that looked like was a 31-byte command retried with the other toggle for ever
+--
+
+```
+EHCI: bulk out endpoint 2 failed, token 1f8c80
+EHCI: bulk out endpoint 2 failed, token 801f8c80
+EXT2: write-back failed for current
+```
+
+-- six thousand times in a five-minute run, because writes are the transfers
+with two OUT stages back to back. Reads carried on working the whole time,
+which is why the machine looked fine and could not save anything.
+
 The toggle also advances by the packets actually moved rather than the packets
 asked for. A device is allowed to end a transfer early and says how much it
 left behind; counting the request instead of the answer desynchronises the
@@ -171,6 +188,10 @@ EHCI: bulk out endpoint 2 failed, token 1f8c80
 0x80 is active and 0x1f is the whole 31-byte command still waiting. A transfer
 that has not started after 20 ms turns the schedule off and on again, which is
 what restarts the traversal.
+
+Once, and late, deliberately. Turning the schedule off is not free for a
+transfer already under way: kicking every couple of milliseconds instead stops
+transfers finishing at all, and the boot does not get past its first seconds.
 
 ## The shape of the driver
 

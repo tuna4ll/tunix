@@ -609,6 +609,10 @@ static int run_qtds(struct ehci *host, struct ehci_device *device,
         if (*(volatile uint32_t *)&work_qh->overlay_token & QTD_STATUS_HALTED) break;
         uint64_t now = time_uptime_ns();
         if (now >= deadline) break;
+        /* Once, and late. Turning the schedule off is not free for a transfer
+           that is already under way -- doing it every couple of milliseconds
+           stops transfers finishing at all, which is a worse machine than a
+           slow one. */
         if (!kicked && now >= kick_at) {
             kicked = 1;
             async_kick(host);
@@ -1067,9 +1071,17 @@ static int ehci_bulk_transfer(int index, int in, uint64_t physical,
             kprintf("EHCI: bulk %s endpoint %u failed, token %x\n",
                     in ? "in" : "out", (unsigned)endpoint, (unsigned)token);
         }
-        if (token & QTD_STATUS_HALTED)
-            (void)clear_endpoint_halt(host, device, endpoint, in);
-        *toggle = 0;
+        /*
+         * The toggle is reset only when the halt is cleared, because that is
+         * the only thing that resets the device's. A transfer that merely
+         * timed out moved nothing at either end -- resetting ours there is how
+         * the two come to disagree, and once they do every transfer after it
+         * fails the same way. The evidence was a 31-byte command retried with
+         * the other toggle for ever: token 1f8c80, then 801f8c80.
+         */
+        if (token & QTD_STATUS_HALTED) {
+            if (clear_endpoint_halt(host, device, endpoint, in) == 0) *toggle = 0;
+        }
         return -1;
     }
 
