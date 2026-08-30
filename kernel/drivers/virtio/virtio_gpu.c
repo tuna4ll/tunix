@@ -42,6 +42,17 @@ extern void kprintf(const char *fmt, ...);
 #define VIRTIO_GPU_CMD_GET_CAPSET_INFO 0x0108U
 #define VIRTIO_GPU_CMD_GET_CAPSET 0x0109U
 
+/* The 3D half. Every one of these is refused outright by a host that did not
+   grant VIRGL, so nothing below is reachable without it. */
+#define VIRTIO_GPU_CMD_CTX_CREATE 0x0200U
+#define VIRTIO_GPU_CMD_CTX_DESTROY 0x0201U
+#define VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE 0x0202U
+#define VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE 0x0203U
+#define VIRTIO_GPU_CMD_RESOURCE_CREATE_3D 0x0204U
+#define VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D 0x0205U
+#define VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D 0x0206U
+#define VIRTIO_GPU_CMD_SUBMIT_3D 0x0207U
+
 #define VIRTIO_GPU_RESP_OK_NODATA 0x1100U
 #define VIRTIO_GPU_RESP_OK_DISPLAY_INFO 0x1101U
 #define VIRTIO_GPU_RESP_OK_CAPSET_INFO 0x1102U
@@ -66,6 +77,21 @@ extern void kprintf(const char *fmt, ...);
    its own is before it is fetched, so this is a ceiling on what can be
    accepted rather than a guess at the size. */
 #define MAX_CAPSET_BYTES 4096U
+
+/*
+ * Command buffers are staged through a buffer of our own rather than handed to
+ * the device where they lie.
+ *
+ * The device is given physical addresses, and the heap only promises virtually
+ * contiguous memory -- a buffer that spans a page boundary can be anywhere in
+ * physical memory on the other side of it. A static buffer is in the kernel
+ * window, where contiguous means contiguous.
+ *
+ * mesa's own ceiling is 64 KiB of commands per submission; four times that
+ * leaves room for the transfers it batches alongside them without ever being
+ * the thing that fails.
+ */
+#define MAX_COMMAND_BYTES (256U * 1024U)
 
 /* XRGB8888 in memory is B, G, R, unused -- which is what this format names. */
 #define VIRTIO_GPU_FORMAT_B8G8R8X8 2U
@@ -150,6 +176,51 @@ struct virtio_gpu_resource_flush {
     uint32_t padding;
 };
 
+struct virtio_gpu_ctx_create {
+    struct virtio_gpu_ctrl_hdr hdr;
+    uint32_t nlen;
+    uint32_t context_init;
+    char debug_name[64];
+};
+
+struct virtio_gpu_ctx_resource {
+    struct virtio_gpu_ctrl_hdr hdr;
+    uint32_t resource_id;
+    uint32_t padding;
+};
+
+struct virtio_gpu_resource_create_3d {
+    struct virtio_gpu_ctrl_hdr hdr;
+    uint32_t resource_id;
+    uint32_t target;
+    uint32_t format;
+    uint32_t bind;
+    uint32_t width;
+    uint32_t height;
+    uint32_t depth;
+    uint32_t array_size;
+    uint32_t last_level;
+    uint32_t nr_samples;
+    uint32_t flags;
+    uint32_t padding;
+};
+
+struct virtio_gpu_transfer_host_3d {
+    struct virtio_gpu_ctrl_hdr hdr;
+    struct virtgpu_box box;
+    uint64_t offset;
+    uint32_t resource_id;
+    uint32_t level;
+    uint32_t stride;
+    uint32_t layer_stride;
+};
+
+struct virtio_gpu_cmd_submit {
+    struct virtio_gpu_ctrl_hdr hdr;
+    uint32_t size;
+    uint32_t padding;
+};
+
 struct virtio_gpu_get_capset_info {
     struct virtio_gpu_ctrl_hdr hdr;
     uint32_t capset_index;
@@ -189,6 +260,11 @@ static union {
     struct virtio_gpu_resource_flush flush;
     struct virtio_gpu_get_capset_info capset_info;
     struct virtio_gpu_get_capset capset;
+    struct virtio_gpu_ctx_create ctx_create;
+    struct virtio_gpu_ctx_resource ctx_resource;
+    struct virtio_gpu_resource_create_3d create_3d;
+    struct virtio_gpu_transfer_host_3d transfer_3d;
+    struct virtio_gpu_cmd_submit submit_3d;
     struct virtio_gpu_ctrl_hdr hdr;
 } request;
 /* Likewise one buffer for the reply, sized for the largest of them, which is a
@@ -201,6 +277,7 @@ static union {
     struct virtio_gpu_ctrl_hdr hdr;
 } response;
 static struct virtio_gpu_mem_entry backing[MAX_BACKING_PAGES];
+static uint8_t commands[MAX_COMMAND_BYTES];
 
 static struct virtio_device device;
 static struct virtio_queue control;
@@ -246,6 +323,30 @@ static int submit(uint32_t request_bytes, const void *payload, uint32_t payload_
 static void begin(uint32_t type) {
     memset(&request, 0, sizeof(request));
     request.hdr.type = type;
+}
+
+/*
+ * Tell the host which guest pages are a resource's storage.
+ *
+ * A resource is created empty: it exists on the host as a description with no
+ * bytes behind it, and this is what says where the bytes are. The pages stay
+ * the guest's -- the host reads them when a transfer says to, and nothing here
+ * copies anything.
+ */
+static int attach_backing(uint32_t resource, const uint64_t *pages,
+                          uint64_t page_count) {
+    if (!page_count || page_count > MAX_BACKING_PAGES) return -1;
+    for (uint64_t index = 0; index < page_count; index++) {
+        backing[index].address = pages[index];
+        backing[index].length = 4096;
+        backing[index].padding = 0;
+    }
+    begin(VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING);
+    request.attach.resource_id = resource;
+    request.attach.nr_entries = (uint32_t)page_count;
+    return submit(sizeof(request.attach), backing,
+                  (uint32_t)(page_count * sizeof(backing[0])),
+                  sizeof(struct virtio_gpu_ctrl_hdr));
 }
 
 /*
@@ -327,6 +428,152 @@ int virtgpu_get_capset(uint32_t id, uint32_t version, void *out, uint32_t bytes)
     return 0;
 }
 
+/* --- 3D -------------------------------------------------------------------
+ *
+ * Everything below speaks for a context, which is one client's view of the
+ * host's renderer: its own resources, its own GL state. mesa makes one per
+ * screen and puts every command through it, so contexts live as long as the
+ * process does and are not something to be economical with.
+ *
+ * Every command carries its context in the header, so there is no current
+ * context to get wrong -- each one says whose it is.
+ */
+
+int virtgpu_context_create(uint32_t context, const char *name) {
+    if (!virtgpu_virgl_available() || !context) return -1;
+
+    begin(VIRTIO_GPU_CMD_CTX_CREATE);
+    request.ctx_create.hdr.ctx_id = context;
+    /* The name is for the host's own log when something goes wrong inside this
+       context, and is the only thing that tells two of them apart there. */
+    uint32_t length = 0;
+    if (name) {
+        while (name[length] &&
+               length < (uint32_t)sizeof(request.ctx_create.debug_name) - 1U) {
+            request.ctx_create.debug_name[length] = name[length];
+            length++;
+        }
+    }
+    request.ctx_create.nlen = length;
+    return submit(sizeof(request.ctx_create), NULL, 0,
+                  sizeof(struct virtio_gpu_ctrl_hdr));
+}
+
+void virtgpu_context_destroy(uint32_t context) {
+    if (!virtgpu_virgl_available() || !context) return;
+    begin(VIRTIO_GPU_CMD_CTX_DESTROY);
+    request.hdr.ctx_id = context;
+    (void)submit(sizeof(request.hdr), NULL, 0, sizeof(struct virtio_gpu_ctrl_hdr));
+}
+
+/*
+ * A resource is created outside any context and then attached to the ones
+ * allowed to name it. A command buffer that refers to a resource its context
+ * was never given is how virglrenderer gets asked to touch something it should
+ * not, and it refuses -- so this is a permission, not a formality.
+ */
+int virtgpu_context_attach(uint32_t context, uint32_t resource, int attach) {
+    if (!virtgpu_virgl_available() || !context || !resource) return -1;
+    begin(attach ? VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE
+                 : VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE);
+    request.ctx_resource.hdr.ctx_id = context;
+    request.ctx_resource.resource_id = resource;
+    return submit(sizeof(request.ctx_resource), NULL, 0,
+                  sizeof(struct virtio_gpu_ctrl_hdr));
+}
+
+/*
+ * A 3D resource: a texture, a vertex buffer, a render target.
+ *
+ * Unlike the 2D kind it has no fixed shape -- the target says whether it is a
+ * buffer or an image or an array of them, the bind flags say what it may be
+ * used as, and the host allocates to suit. Those values are mesa's and are
+ * passed through untouched; nothing here interprets a format.
+ *
+ * Backing is optional in a way it is not for 2D. A resource the guest never
+ * reads or writes -- a depth buffer, a render target -- lives only on the host
+ * and wants no guest pages behind it at all.
+ */
+uint32_t virtgpu_resource_create_3d(const struct virtgpu_resource_3d *spec,
+                                    const uint64_t *pages, uint64_t page_count) {
+    if (!virtgpu_virgl_available() || !spec) return 0;
+
+    uint32_t resource = next_resource_id;
+    begin(VIRTIO_GPU_CMD_RESOURCE_CREATE_3D);
+    request.create_3d.resource_id = resource;
+    request.create_3d.target = spec->target;
+    request.create_3d.format = spec->format;
+    request.create_3d.bind = spec->bind;
+    request.create_3d.width = spec->width;
+    request.create_3d.height = spec->height;
+    request.create_3d.depth = spec->depth;
+    request.create_3d.array_size = spec->array_size;
+    request.create_3d.last_level = spec->last_level;
+    request.create_3d.nr_samples = spec->nr_samples;
+    request.create_3d.flags = spec->flags;
+    if (submit(sizeof(request.create_3d), NULL, 0,
+               sizeof(struct virtio_gpu_ctrl_hdr)) != 0) return 0;
+
+    if (pages && page_count && attach_backing(resource, pages, page_count) != 0) {
+        virtgpu_resource_destroy(resource);
+        return 0;
+    }
+
+    next_resource_id++;
+    return resource;
+}
+
+/*
+ * Move part of a resource between the guest pages and the host's copy.
+ *
+ * Both directions happen: a texture is uploaded, and a buffer the shader wrote
+ * is read back. The box is in the resource's own units, which for a buffer
+ * means x and w are bytes rather than pixels.
+ */
+int virtgpu_transfer_3d(uint32_t context, uint32_t resource,
+                        const struct virtgpu_box *box, uint64_t offset,
+                        uint32_t level, uint32_t stride, uint32_t layer_stride,
+                        int to_host) {
+    if (!virtgpu_virgl_available() || !resource || !box) return -1;
+
+    begin(to_host ? VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D
+                  : VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D);
+    request.transfer_3d.hdr.ctx_id = context;
+    request.transfer_3d.box = *box;
+    request.transfer_3d.offset = offset;
+    request.transfer_3d.resource_id = resource;
+    request.transfer_3d.level = level;
+    request.transfer_3d.stride = stride;
+    request.transfer_3d.layer_stride = layer_stride;
+    return submit(sizeof(request.transfer_3d), NULL, 0,
+                  sizeof(struct virtio_gpu_ctrl_hdr));
+}
+
+/*
+ * Hand the host a command buffer to execute. This is where the rendering
+ * actually happens.
+ *
+ * The buffer is virglrenderer's own encoding of GL work, built by mesa; the
+ * kernel does not read a word of it beyond checking that it will fit.
+ * Submitting is synchronous because the queue is -- by the time the device
+ * hands the descriptor back the host has done the work. That is what makes a
+ * fence unnecessary here, and a frame slower than it has to be.
+ */
+int virtgpu_submit_3d(uint32_t context, const void *buffer, uint32_t bytes) {
+    if (!virtgpu_virgl_available() || !context || !buffer) return -1;
+    if (!bytes || bytes > MAX_COMMAND_BYTES) return -1;
+    /* The encoding is a stream of 32-bit words. A length that is not a whole
+       number of them would leave the host reading past the last one. */
+    if (bytes % 4U) return -1;
+
+    memcpy(commands, buffer, bytes);
+    begin(VIRTIO_GPU_CMD_SUBMIT_3D);
+    request.submit_3d.hdr.ctx_id = context;
+    request.submit_3d.size = bytes;
+    return submit(sizeof(request.submit_3d), commands, bytes,
+                  sizeof(struct virtio_gpu_ctrl_hdr));
+}
+
 int virtgpu_init(void) {
     /* Asking for a feature the device does not offer is not an error -- what
        is negotiated is the intersection -- so this is simply how the question
@@ -373,17 +620,7 @@ uint32_t virtgpu_resource_create(uint32_t width, uint32_t height,
     if (submit(sizeof(request.create), NULL, 0, sizeof(struct virtio_gpu_ctrl_hdr)) != 0)
         return 0;
 
-    for (uint64_t index = 0; index < page_count; index++) {
-        backing[index].address = pages[index];
-        backing[index].length = 4096;
-        backing[index].padding = 0;
-    }
-    begin(VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING);
-    request.attach.resource_id = resource;
-    request.attach.nr_entries = (uint32_t)page_count;
-    if (submit(sizeof(request.attach), backing,
-               (uint32_t)(page_count * sizeof(backing[0])),
-               sizeof(struct virtio_gpu_ctrl_hdr)) != 0) {
+    if (attach_backing(resource, pages, page_count) != 0) {
         virtgpu_resource_destroy(resource);
         return 0;
     }
