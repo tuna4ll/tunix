@@ -4,7 +4,9 @@ local.mk
 # Its own repository: github.com/tunixos/tunix-ports
 tunix-ports/
 *.o
-*.d
+# No *.d here on purpose. Dependency files are only ever written under build/,
+# which is ignored whole -- and the pattern also matches any *directory* whose
+# name ends in .d, which quietly kept etc/sudoers.d out of the repository.
 *.elf
 *.bin
 *.img
