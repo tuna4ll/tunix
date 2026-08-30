@@ -91,7 +91,10 @@ uint32_t virtgpu_display_height(void);
 uint32_t virtgpu_resource_create(uint32_t width, uint32_t height,
                                  const uint64_t *pages, uint64_t page_count);
 void virtgpu_resource_destroy(uint32_t resource);
-int virtgpu_present(uint32_t resource, uint32_t width, uint32_t height);
+/* `upload` sends the guest's pages to the host first, which is right for a
+   resource the CPU drew into and wrong for one the host rendered itself. */
+int virtgpu_present(uint32_t resource, uint32_t width, uint32_t height,
+                    int upload);
 void virtgpu_scanout_disable(void);
 
 /*

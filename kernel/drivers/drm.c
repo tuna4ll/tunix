@@ -23,6 +23,8 @@ extern void kprintf(const char *fmt, ...);
 #define EAGAIN 11
 #define EBADF 9
 #define EMFILE 24
+#define EIO 5
+#define ENODEV 19
 
 /* DRM_CLOEXEC in <drm/drm.h> is O_CLOEXEC by another name. */
 #define DRM_CLOEXEC 02000000
@@ -72,6 +74,144 @@ extern void kprintf(const char *fmt, ...);
 #define DRM_NR_MODE_OBJ_SETPROPERTY 0xba
 #define DRM_NR_PRIME_HANDLE_TO_FD 0x2d
 #define DRM_NR_PRIME_FD_TO_HANDLE 0x2e
+
+/*
+ * The driver-private range. Every DRM driver puts its own calls here, and
+ * which driver's they are is decided by the name VERSION reports -- so these
+ * numbers mean what virtio_gpu means by them, and only because we answer to
+ * that name.
+ */
+#define DRM_COMMAND_BASE 0x40
+#define DRM_NR_VIRTGPU_MAP (DRM_COMMAND_BASE + 0x01)
+#define DRM_NR_VIRTGPU_EXECBUFFER (DRM_COMMAND_BASE + 0x02)
+#define DRM_NR_VIRTGPU_GETPARAM (DRM_COMMAND_BASE + 0x03)
+#define DRM_NR_VIRTGPU_RESOURCE_CREATE (DRM_COMMAND_BASE + 0x04)
+#define DRM_NR_VIRTGPU_RESOURCE_INFO (DRM_COMMAND_BASE + 0x05)
+#define DRM_NR_VIRTGPU_TRANSFER_FROM_HOST (DRM_COMMAND_BASE + 0x06)
+#define DRM_NR_VIRTGPU_TRANSFER_TO_HOST (DRM_COMMAND_BASE + 0x07)
+#define DRM_NR_VIRTGPU_WAIT (DRM_COMMAND_BASE + 0x08)
+#define DRM_NR_VIRTGPU_GET_CAPS (DRM_COMMAND_BASE + 0x09)
+#define DRM_NR_VIRTGPU_RESOURCE_CREATE_BLOB (DRM_COMMAND_BASE + 0x0a)
+#define DRM_NR_VIRTGPU_CONTEXT_INIT (DRM_COMMAND_BASE + 0x0b)
+
+/*
+ * What mesa asks about before it decides how to talk to us. Answering 3D
+ * FEATURES with anything but 1 makes it give up and fall back to llvmpipe,
+ * which is the failure this whole path exists to end.
+ *
+ * CAPSET_QUERY_FIX says a capset may be asked for by id rather than by index,
+ * which every mesa in living memory assumes. The rest name features this
+ * driver does not have -- blob resources, host-visible memory, cross-device
+ * sharing -- and answering zero is how mesa is told to use the older paths
+ * that only need what is here.
+ */
+#define VIRTGPU_PARAM_3D_FEATURES 1
+#define VIRTGPU_PARAM_CAPSET_QUERY_FIX 2
+#define VIRTGPU_PARAM_RESOURCE_BLOB 3
+#define VIRTGPU_PARAM_HOST_VISIBLE 4
+#define VIRTGPU_PARAM_CROSS_DEVICE 5
+#define VIRTGPU_PARAM_CONTEXT_INIT 6
+/* A bitmask of the capsets that exist, so mesa can ask once instead of
+   probing each id in turn. */
+#define VIRTGPU_PARAM_SUPPORTED_CAPSET_IDS 7
+
+struct drm_virtgpu_map {
+    uint64_t offset;
+    uint32_t handle;
+    uint32_t pad;
+};
+
+/*
+ * `value` is where to put the answer, not the answer.
+ *
+ * It is a pointer into the caller's memory, and the answer written through it
+ * is four bytes wide however wide the field is. Filling the field in instead
+ * leaves the caller reading the zero it started with -- which for the very
+ * first question, whether there is 3D at all, reads as no, and mesa quietly
+ * goes back to the software rasteriser without ever saying why.
+ */
+struct drm_virtgpu_getparam {
+    uint64_t param;
+    uint64_t value;
+};
+
+struct drm_virtgpu_execbuffer {
+    uint32_t flags;
+    uint32_t size;
+    uint64_t command;
+    uint64_t bo_handles;
+    uint32_t num_bo_handles;
+    int32_t fence_fd;
+    uint32_t ring_idx;
+    uint32_t syncobj_stride;
+    uint32_t num_in_syncobjs;
+    uint32_t num_out_syncobjs;
+    uint64_t in_syncobjs;
+    uint64_t out_syncobjs;
+};
+
+struct drm_virtgpu_resource_create {
+    uint32_t target;
+    uint32_t format;
+    uint32_t bind;
+    uint32_t width;
+    uint32_t height;
+    uint32_t depth;
+    uint32_t array_size;
+    uint32_t last_level;
+    uint32_t nr_samples;
+    uint32_t flags;
+    uint32_t bo_handle;
+    uint32_t res_handle;
+    uint32_t size;
+    uint32_t stride;
+};
+
+struct drm_virtgpu_resource_info {
+    uint32_t bo_handle;
+    uint32_t res_handle;
+    uint32_t size;
+    uint32_t blob_mem;
+};
+
+struct drm_virtgpu_3d_box {
+    uint32_t x, y, z;
+    uint32_t w, h, d;
+};
+
+/* Both directions have the same shape; which one it is comes from the call. */
+struct drm_virtgpu_3d_transfer {
+    uint32_t bo_handle;
+    struct drm_virtgpu_3d_box box;
+    uint32_t level;
+    uint32_t offset;
+    uint32_t stride;
+    uint32_t layer_stride;
+};
+
+struct drm_virtgpu_3d_wait {
+    uint32_t handle;
+    uint32_t flags;
+};
+
+struct drm_virtgpu_get_caps {
+    uint32_t cap_set_id;
+    uint32_t cap_set_ver;
+    uint64_t addr;
+    uint32_t size;
+    uint32_t pad;
+};
+
+/* These cross to userspace, and a field in the wrong place is a resource
+   created with someone else's width. */
+typedef char drm_virtgpu_execbuffer_size_check[
+    (sizeof(struct drm_virtgpu_execbuffer) == 64) ? 1 : -1];
+typedef char drm_virtgpu_resource_create_size_check[
+    (sizeof(struct drm_virtgpu_resource_create) == 56) ? 1 : -1];
+typedef char drm_virtgpu_transfer_size_check[
+    (sizeof(struct drm_virtgpu_3d_transfer) == 44) ? 1 : -1];
+typedef char drm_virtgpu_get_caps_size_check[
+    (sizeof(struct drm_virtgpu_get_caps) == 24) ? 1 : -1];
 
 #define DRM_CAP_DUMB_BUFFER 0x1
 #define DRM_CAP_PRIME 0x5
@@ -317,7 +457,13 @@ typedef char drm_create_dumb_size_check[
 
 /* --- objects ------------------------------------------------------------ */
 
-#define DRM_MAX_BUFFERS 64
+/*
+ * A compositor holds a handful of buffers. A GL client holds one per texture,
+ * vertex buffer and render target it has live, which for a game is hundreds --
+ * so this ceiling stopped being generous the moment mesa started allocating
+ * through it.
+ */
+#define DRM_MAX_BUFFERS 512
 #define DRM_MAX_FRAMEBUFFERS 64
 
 /*
@@ -336,6 +482,10 @@ struct drm_dumb_buffer {
     /* The host resource these pages back, created on first present and 0 on a
        machine with no virtio-gpu. */
     uint32_t virtio_resource;
+    /* Set when the resource was made by RESOURCE_CREATE rather than grown out
+       of a dumb buffer: its contents are the host's, and the guest pages are a
+       staging area that transfers move to and from on demand. */
+    uint8_t rendered;
     /* Holders beyond the handle itself: every PRIME descriptor exported from
        this buffer counts. DESTROY_DUMB drops the handle's reference, but the
        pages stay until the last descriptor is closed. */
@@ -398,6 +548,14 @@ static uint32_t open_count;
 static struct drm_dumb_buffer buffers[DRM_MAX_BUFFERS];
 static struct drm_framebuffer framebuffers[DRM_MAX_FRAMEBUFFERS];
 static uint32_t next_handle = 1;
+/* One host rendering context per process; see render_context() below. */
+#define DRM_MAX_CONTEXTS 8
+static struct {
+    uint64_t pid;
+    uint32_t context;
+} render_contexts[DRM_MAX_CONTEXTS];
+static uint32_t next_render_context = 1;
+static void render_contexts_release(void);
 static uint32_t next_fb_id = 1;
 static uint32_t active_fb_id;
 static int drm_ready;
@@ -413,6 +571,8 @@ void drm_init(void) {
     event_head = event_tail = event_count = 0;
     flip_sequence = 0;
     open_count = 0;
+    memset(render_contexts, 0, sizeof(render_contexts));
+    next_render_context = 1;
     drm_ready = framebuffer_available();
 }
 
@@ -511,18 +671,32 @@ static int64_t ioctl_version(uint64_t user_argument) {
     struct drm_version version;
     if (copy_from_user(&version, user_argument, sizeof(version)) != 0) return -EFAULT;
 
-    static const char name[] = "tunixdrm";
+    /*
+     * The name is not a label, it is the driver's identity: mesa looks up
+     * `<name>_dri.so` by it and speaks that driver's private ioctls at us. So
+     * it is only virtio_gpu where the host has actually granted virgl -- claim
+     * it on a 2D device and mesa would load the virgl driver and then find
+     * none of the calls it needs.
+     */
+    int rendering = virtgpu_virgl_available();
+    static const char virtio_name[] = "virtio_gpu";
+    static const char plain_name[] = "tunixdrm";
+    const char *name = rendering ? virtio_name : plain_name;
+    size_t name_size = (rendering ? sizeof(virtio_name) : sizeof(plain_name)) - 1;
     static const char date[] = "20260721";
     static const char desc[] = "Tunix framebuffer KMS";
 
-    version.version_major = 1;
-    version.version_minor = 0;
+    /* The numbers linux's virtio_gpu reports. mesa turns them into a feature
+       level, so this is not a version of ours to choose -- claiming a higher
+       one asks mesa to use calls that do not exist here. */
+    version.version_major = rendering ? 0 : 1;
+    version.version_minor = rendering ? 1 : 0;
     version.version_patchlevel = 0;
 
     /* The caller passes buffers and lengths; we fill what fits and always
        report the true length, which is how libdrm sizes its second call. */
     struct { uint64_t pointer; uint64_t *length; const char *text; size_t size; } fields[] = {
-        { version.name, &version.name_len, name, sizeof(name) - 1 },
+        { version.name, &version.name_len, name, name_size },
         { version.date, &version.date_len, date, sizeof(date) - 1 },
         { version.desc, &version.desc_len, desc, sizeof(desc) - 1 },
     };
@@ -833,7 +1007,8 @@ static int present_via_virtgpu(const struct drm_framebuffer *fb,
     }
     uint32_t width = fb->width < stride_pixels ? fb->width : stride_pixels;
     uint32_t height = fb->height < buffer->height ? fb->height : buffer->height;
-    return virtgpu_present(buffer->virtio_resource, width, height);
+    return virtgpu_present(buffer->virtio_resource, width, height,
+                           !buffer->rendered);
 }
 
 /*
@@ -1130,6 +1305,299 @@ int64_t drm_node_ioctl(struct vfs_node *node, unsigned long request,
     return drm_file_ioctl(NULL, request, user_argument);
 }
 
+/* --- rendering ------------------------------------------------------------
+ *
+ * Everything below exists so that mesa's virgl driver has something to talk
+ * to. It is the render half of virtio_gpu: resources that live on the host,
+ * and command buffers that tell the host what to draw into them.
+ *
+ * None of it is reachable unless VERSION said virtio_gpu, which it only does
+ * when the host granted virgl -- so a machine without one behaves exactly as
+ * it did before any of this existed.
+ */
+
+/*
+ * One host context per process.
+ *
+ * A context is a client's GL state, and two clients sharing one would see each
+ * other's. The process is the right grain: mesa opens the device once per
+ * screen and a process has one screen. Two descriptors in the same process
+ * share a context, which is what they would want anyway.
+ *
+ * They are all torn down when the last descriptor on the card closes. Nothing
+ * here can see a process exit, so this is the one moment we are told that
+ * clients have gone -- and by then none of the contexts can still be in use.
+ */
+static uint32_t render_context(void) {
+    if (!virtgpu_virgl_available()) return 0;
+    struct process *process = process_current();
+    if (!process) return 0;
+
+    for (int index = 0; index < DRM_MAX_CONTEXTS; index++) {
+        if (render_contexts[index].context &&
+            render_contexts[index].pid == process->pid)
+            return render_contexts[index].context;
+    }
+    for (int index = 0; index < DRM_MAX_CONTEXTS; index++) {
+        if (render_contexts[index].context) continue;
+        uint32_t context = next_render_context;
+        if (virtgpu_context_create(context, "tunix") != 0) return 0;
+        next_render_context++;
+        render_contexts[index].pid = process->pid;
+        render_contexts[index].context = context;
+        return context;
+    }
+    return 0;
+}
+
+static void render_contexts_release(void) {
+    for (int index = 0; index < DRM_MAX_CONTEXTS; index++) {
+        if (!render_contexts[index].context) continue;
+        virtgpu_context_destroy(render_contexts[index].context);
+        render_contexts[index].context = 0;
+        render_contexts[index].pid = 0;
+    }
+}
+
+/*
+ * Pages for a resource, and a handle to call them by.
+ *
+ * The pages are the guest's side of a host resource: a staging area transfers
+ * move bytes through, not the resource itself. They are allocated even for a
+ * resource the guest will never look at, because the host has to be told where
+ * its backing is before it will accept one at all.
+ */
+static struct drm_dumb_buffer *buffer_new(uint64_t size) {
+    size = (size + 4095ULL) & ~4095ULL;
+    uint64_t page_count = size / 4096ULL;
+    if (!page_count || page_count > (256ULL * 1024ULL * 1024ULL) / 4096ULL) return NULL;
+
+    struct drm_dumb_buffer *slot = NULL;
+    for (int index = 0; index < DRM_MAX_BUFFERS; index++) {
+        if (!buffers[index].handle) { slot = &buffers[index]; break; }
+    }
+    if (!slot) return NULL;
+
+    slot->pages = (uint64_t *)kmalloc(page_count * sizeof(uint64_t));
+    if (!slot->pages) return NULL;
+    memset(slot->pages, 0, page_count * sizeof(uint64_t));
+
+    for (uint64_t index = 0; index < page_count; index++) {
+        uint64_t physical = (uint64_t)pmm_alloc_page();
+        if (!physical) {
+            slot->handle = 1;   /* so the release frees what was got */
+            slot->page_count = index;
+            buffer_release(slot);
+            return NULL;
+        }
+        memset(vmm_phys_to_virt(physical), 0, 4096);
+        slot->pages[index] = physical;
+    }
+
+    slot->handle = next_handle++;
+    slot->refs = 1;
+    slot->size = size;
+    slot->page_count = page_count;
+    return slot;
+}
+
+static int64_t ioctl_virtgpu_getparam(uint64_t user_argument) {
+    struct drm_virtgpu_getparam query;
+    if (copy_from_user(&query, user_argument, sizeof(query)) != 0) return -EFAULT;
+
+    if (!query.value) return -EINVAL;
+
+    uint32_t answer;
+    switch (query.param) {
+    case VIRTGPU_PARAM_3D_FEATURES:
+    case VIRTGPU_PARAM_CAPSET_QUERY_FIX: answer = 1; break;
+    case VIRTGPU_PARAM_RESOURCE_BLOB:
+    case VIRTGPU_PARAM_HOST_VISIBLE:
+    case VIRTGPU_PARAM_CROSS_DEVICE:
+    case VIRTGPU_PARAM_CONTEXT_INIT: answer = 0; break;
+    /*
+     * One bit per capset the host published, which for us is the one. Saying
+     * so here is what stops mesa asking for the others: it probes for the
+     * native-context capsets first, and a driver that answers those gets
+     * driven down a path it cannot follow.
+     */
+    case VIRTGPU_PARAM_SUPPORTED_CAPSET_IDS:
+        answer = virtgpu_capset_id() ? (1U << virtgpu_capset_id()) : 0;
+        break;
+    /* An unknown parameter is not an error to answer no to. mesa probes for
+       things newer than the driver it is talking to and expects to be told
+       they are absent. */
+    default: answer = 0; break;
+    }
+    return copy_to_user(query.value, &answer, sizeof(answer)) == 0 ? 0 : -EFAULT;
+}
+
+static int64_t ioctl_virtgpu_get_caps(uint64_t user_argument) {
+    struct drm_virtgpu_get_caps query;
+    if (copy_from_user(&query, user_argument, sizeof(query)) != 0) return -EFAULT;
+    if (!query.addr || !query.size) return -EINVAL;
+    /*
+     * Only the capset the host actually published. mesa asks about capsets it
+     * hopes for before the one it can definitely use, and any answer but a
+     * refusal is taken as "this exists" -- so answering a capset we do not
+     * have sends it down a path with nothing at the end of it.
+     */
+    if (query.cap_set_id != virtgpu_capset_id()) return -EINVAL;
+
+    /* mesa asks for its own idea of how big a capset is, which is bigger than
+       the host's whenever the host is older. Both sides expect the shorter of
+       the two, and mesa has already zeroed the rest. */
+    uint32_t size = virtgpu_capset_size();
+    if (query.size < size) size = query.size;
+    if (!size) return -ENODEV;
+
+    void *capset = kmalloc(size);
+    if (!capset) return -ENOMEM;
+    if (virtgpu_get_capset(query.cap_set_id, query.cap_set_ver, capset, size) != 0) {
+        kfree(capset);
+        return -EIO;
+    }
+    int copied = copy_to_user(query.addr, capset, size) == 0;
+    kfree(capset);
+    return copied ? 0 : -EFAULT;
+}
+
+static int64_t ioctl_virtgpu_resource_create(uint64_t user_argument) {
+    struct drm_virtgpu_resource_create query;
+    if (copy_from_user(&query, user_argument, sizeof(query)) != 0) return -EFAULT;
+    if (!query.size) return -EINVAL;
+
+    uint32_t context = render_context();
+    if (!context) return -ENODEV;
+
+    struct drm_dumb_buffer *buffer = buffer_new(query.size);
+    if (!buffer) return -ENOMEM;
+
+    struct virtgpu_resource_3d spec;
+    memset(&spec, 0, sizeof(spec));
+    spec.target = query.target;
+    spec.format = query.format;
+    spec.bind = query.bind;
+    spec.width = query.width;
+    spec.height = query.height;
+    spec.depth = query.depth;
+    spec.array_size = query.array_size;
+    spec.last_level = query.last_level;
+    spec.nr_samples = query.nr_samples;
+    spec.flags = query.flags;
+
+    uint32_t resource = virtgpu_resource_create_3d(&spec, buffer->pages,
+                                                   buffer->page_count);
+    if (!resource) {
+        buffer_release(buffer);
+        return -ENOMEM;
+    }
+    /* Until it is attached, naming this resource in a command buffer is a
+       protocol error the host refuses the whole submission for. */
+    if (virtgpu_context_attach(context, resource, 1) != 0) {
+        virtgpu_resource_destroy(resource);
+        buffer_release(buffer);
+        return -EIO;
+    }
+
+    buffer->virtio_resource = resource;
+    buffer->rendered = 1;
+    buffer->width = query.width;
+    buffer->height = query.height;
+    buffer->pitch = query.stride;
+
+    query.bo_handle = buffer->handle;
+    query.res_handle = resource;
+    return copy_to_user(user_argument, &query, sizeof(query)) == 0 ? 0 : -EFAULT;
+}
+
+static int64_t ioctl_virtgpu_resource_info(uint64_t user_argument) {
+    struct drm_virtgpu_resource_info query;
+    if (copy_from_user(&query, user_argument, sizeof(query)) != 0) return -EFAULT;
+    struct drm_dumb_buffer *buffer = buffer_find(query.bo_handle);
+    if (!buffer) return -ENOENT;
+
+    query.res_handle = buffer->virtio_resource;
+    query.size = (uint32_t)buffer->size;
+    query.blob_mem = 0;
+    return copy_to_user(user_argument, &query, sizeof(query)) == 0 ? 0 : -EFAULT;
+}
+
+static int64_t ioctl_virtgpu_map(uint64_t user_argument) {
+    struct drm_virtgpu_map query;
+    if (copy_from_user(&query, user_argument, sizeof(query)) != 0) return -EFAULT;
+    struct drm_dumb_buffer *buffer = buffer_find(query.handle);
+    if (!buffer) return -ENOENT;
+    /* The same token MAP_DUMB hands out, and mmap turns either back into the
+       same buffer. There is one offset space and one kind of object in it. */
+    query.offset = DRM_MAP_OFFSET_BASE + (uint64_t)buffer->handle * 4096ULL;
+    return copy_to_user(user_argument, &query, sizeof(query)) == 0 ? 0 : -EFAULT;
+}
+
+static int64_t ioctl_virtgpu_transfer(uint64_t user_argument, int to_host) {
+    struct drm_virtgpu_3d_transfer query;
+    if (copy_from_user(&query, user_argument, sizeof(query)) != 0) return -EFAULT;
+    struct drm_dumb_buffer *buffer = buffer_find(query.bo_handle);
+    if (!buffer || !buffer->virtio_resource) return -ENOENT;
+
+    struct virtgpu_box box;
+    box.x = query.box.x;
+    box.y = query.box.y;
+    box.z = query.box.z;
+    box.w = query.box.w;
+    box.h = query.box.h;
+    box.d = query.box.d;
+    if (virtgpu_transfer_3d(render_context(), buffer->virtio_resource, &box,
+                            query.offset, query.level, query.stride,
+                            query.layer_stride, to_host) != 0) return -EIO;
+    return 0;
+}
+
+/* mesa's own ceiling is a quarter of this; anything larger is a corrupt
+   request rather than a large one. */
+#define DRM_MAX_COMMAND_BYTES (256U * 1024U)
+
+static int64_t ioctl_virtgpu_execbuffer(uint64_t user_argument) {
+    struct drm_virtgpu_execbuffer query;
+    if (copy_from_user(&query, user_argument, sizeof(query)) != 0) return -EFAULT;
+    if (!query.command || !query.size) return -EINVAL;
+    if (query.size > DRM_MAX_COMMAND_BYTES) return -EINVAL;
+
+    uint32_t context = render_context();
+    if (!context) return -ENODEV;
+
+    void *staging = kmalloc(query.size);
+    if (!staging) return -ENOMEM;
+    if (copy_from_user(staging, query.command, query.size) != 0) {
+        kfree(staging);
+        return -EFAULT;
+    }
+    /* The handles the submission mentions are not looked at. They exist so a
+       driver with a real fence can hold the buffers until the host is done
+       with them; here the submission has already finished by the time it
+       returns, and nothing can be freed underneath it. */
+    int submitted = virtgpu_submit_3d(context, staging, query.size);
+    kfree(staging);
+    if (submitted != 0) return -EIO;
+
+    /* Nothing was left outstanding, so there is nothing to wait on. */
+    query.fence_fd = -1;
+    return copy_to_user(user_argument, &query, sizeof(query)) == 0 ? 0 : -EFAULT;
+}
+
+/*
+ * Wait for a resource to be idle, which it always is: submission does not
+ * return until the host has finished, so there is never work outstanding to
+ * wait for. This is the whole cost of a synchronous queue, paid here as an
+ * answer that is true but was expensive to make true.
+ */
+static int64_t ioctl_virtgpu_wait(uint64_t user_argument) {
+    struct drm_virtgpu_3d_wait query;
+    if (copy_from_user(&query, user_argument, sizeof(query)) != 0) return -EFAULT;
+    if (!buffer_find(query.handle)) return -ENOENT;
+    return 0;
+}
+
 int64_t drm_file_ioctl(struct file *file, unsigned long request,
                        uint64_t user_argument) {
     (void)file;
@@ -1181,6 +1649,41 @@ int64_t drm_file_ioctl(struct file *file, unsigned long request,
     case DRM_NR_MODE_RMFB: return ioctl_rmfb(user_argument);
     /* Dumb buffers are GEM objects, so libdrm frees them either way. */
     case DRM_NR_GEM_CLOSE: return ioctl_gem_close(user_argument);
+
+    /* The driver-private calls, which mean virtio_gpu's calls only because
+       VERSION said that is who we are. On a device without virgl the name is
+       different and these numbers belong to nobody, so they are refused the
+       same way an unknown ioctl is. */
+    case DRM_NR_VIRTGPU_GETPARAM:
+    case DRM_NR_VIRTGPU_GET_CAPS:
+    case DRM_NR_VIRTGPU_RESOURCE_CREATE:
+    case DRM_NR_VIRTGPU_RESOURCE_INFO:
+    case DRM_NR_VIRTGPU_MAP:
+    case DRM_NR_VIRTGPU_TRANSFER_FROM_HOST:
+    case DRM_NR_VIRTGPU_TRANSFER_TO_HOST:
+    case DRM_NR_VIRTGPU_EXECBUFFER:
+    case DRM_NR_VIRTGPU_WAIT:
+        if (!virtgpu_virgl_available()) return -ENOTTY;
+        switch (IOCTL_NR(request)) {
+        case DRM_NR_VIRTGPU_GETPARAM: return ioctl_virtgpu_getparam(user_argument);
+        case DRM_NR_VIRTGPU_GET_CAPS: return ioctl_virtgpu_get_caps(user_argument);
+        case DRM_NR_VIRTGPU_RESOURCE_CREATE:
+            return ioctl_virtgpu_resource_create(user_argument);
+        case DRM_NR_VIRTGPU_RESOURCE_INFO:
+            return ioctl_virtgpu_resource_info(user_argument);
+        case DRM_NR_VIRTGPU_MAP: return ioctl_virtgpu_map(user_argument);
+        case DRM_NR_VIRTGPU_TRANSFER_FROM_HOST:
+            return ioctl_virtgpu_transfer(user_argument, 0);
+        case DRM_NR_VIRTGPU_TRANSFER_TO_HOST:
+            return ioctl_virtgpu_transfer(user_argument, 1);
+        case DRM_NR_VIRTGPU_EXECBUFFER: return ioctl_virtgpu_execbuffer(user_argument);
+        default: return ioctl_virtgpu_wait(user_argument);
+        }
+    /* Refused on purpose, and GETPARAM already said so: blob resources and
+       explicit context types are how a newer mesa would ask for memory shared
+       with the host, which this driver does not have. */
+    case DRM_NR_VIRTGPU_RESOURCE_CREATE_BLOB:
+    case DRM_NR_VIRTGPU_CONTEXT_INIT: return -EINVAL;
     default: return -ENOTTY;
     }
 }
@@ -1239,6 +1742,7 @@ void drm_device_close(struct vfs_node *node) {
     if (open_count) return;
     active_fb_id = 0;
     event_head = event_tail = event_count = 0;
+    render_contexts_release();
     virtgpu_scanout_disable();
     (void)framebuffer_release_graphics(&drm_display_owner, 0);
 }

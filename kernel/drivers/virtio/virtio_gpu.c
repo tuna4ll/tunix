@@ -647,7 +647,8 @@ static void set_rect(struct virtio_gpu_rect *r, uint32_t width, uint32_t height)
     r->height = height;
 }
 
-int virtgpu_present(uint32_t resource, uint32_t width, uint32_t height) {
+int virtgpu_present(uint32_t resource, uint32_t width, uint32_t height,
+                    int upload) {
     if (!ready || !resource || !width || !height) return -1;
 
     if (scanout_resource != resource) {
@@ -659,11 +660,21 @@ int virtgpu_present(uint32_t resource, uint32_t width, uint32_t height) {
         scanout_resource = resource;
     }
 
-    begin(VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D);
-    set_rect(&request.transfer.r, width, height);
-    request.transfer.resource_id = resource;
-    if (submit(sizeof(request.transfer), NULL, 0,
-               sizeof(struct virtio_gpu_ctrl_hdr)) != 0) return -1;
+    /*
+     * Whether the guest pages are the picture, or stale.
+     *
+     * A resource the CPU drew into has to be sent to the host before it can be
+     * shown. One the host itself rendered into is already right, and copying
+     * the guest's pages over it would replace the frame with whatever those
+     * pages last held -- which is nothing, so the screen would go black.
+     */
+    if (upload) {
+        begin(VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D);
+        set_rect(&request.transfer.r, width, height);
+        request.transfer.resource_id = resource;
+        if (submit(sizeof(request.transfer), NULL, 0,
+                   sizeof(struct virtio_gpu_ctrl_hdr)) != 0) return -1;
+    }
 
     begin(VIRTIO_GPU_CMD_RESOURCE_FLUSH);
     set_rect(&request.flush.r, width, height);
@@ -690,7 +701,7 @@ int virtgpu_console_present(uint64_t physical, uint32_t stride_pixels,
         kfree(pages);
         if (!console_resource) return -1;
     }
-    return virtgpu_present(console_resource, width, height);
+    return virtgpu_present(console_resource, width, height, 1);
 }
 
 void virtgpu_scanout_disable(void) {
