@@ -142,7 +142,7 @@ VOID_INSTALL ?= base-files bash coreutils util-linux findutils diffutils \
 	grep sed gawk tar gzip xz procps-ng psmisc iproute2 iputils file less \
 	which ncurses shadow sudo runit runit-void tzdata ca-certificates \
 	e2fsprogs kbd nano htop curl fastfetch \
-	$(VOID_INSTALL_GRAPHICAL)
+	$(VOID_INSTALL_GRAPHICAL) $(VOID_INSTALL_GAMES)
 
 # The graphical session. weston pulls most of its own world in; what is listed
 # beside it is what a compositor needs and nothing depends on: the software
@@ -150,6 +150,13 @@ VOID_INSTALL ?= base-files bash coreutils util-linux findutils diffutils \
 # the seat daemon weston asks for a device through.
 VOID_INSTALL_GRAPHICAL ?= weston mesa-dri xkeyboard-config dejavu-fonts-ttf \
 	seatd xcursor-vanilla-dmz
+
+# A game, and the only thing on the image that is there to be enjoyed rather
+# than to prove something works. It is also the heaviest thing here by a long
+# way -- 677 MB of track and character data, which is most of the download and
+# most of the image. `make image VOID_INSTALL_GAMES=` leaves it out.
+VOID_INSTALL_GAMES ?= supertuxkart
+
 VOID_REMOVE ?=
 
 BASE_FILES := $(shell find base-files -type f 2>/dev/null)

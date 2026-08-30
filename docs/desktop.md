@@ -113,3 +113,46 @@ Two things had to be fixed for that to work:
   stack and a render node, which is a property of the machine Tunix is being
   run on rather than of Tunix.
 - **A second output.** DRM reports one CRTC and one connector.
+
+## OpenGL, and the two things it needed
+
+![SuperTuxKart on Tunix](../screenshots/supertuxkart.png)
+
+SuperTuxKart is on the image, with a launcher on weston's panel. Getting it to
+open a window took one kernel fix and two lines of environment, and neither had
+anything to do with the game: **no OpenGL client had ever worked here.** The
+game was simply the first program to ask.
+
+**The kernel fix was memfd sealing.** `MFD_ALLOW_SEALING` was accepted and
+ignored, with a comment explaining why that was safe: a client that asks for
+sealing still works without it. True of libwayland; false of Mesa, which asks
+for `F_SEAL_SHRINK` before handing a buffer to a compositor -- "you cannot pull
+this memory out from under me" -- and, when the request fails, closes the
+descriptor and gives up. The request then went out with no descriptor attached
+and weston answered
+
+```
+wl_display#1: error 1: invalid arguments for wl_shm#14.create_pool
+```
+
+which is what every GL client had been dying of. `F_ADD_SEALS` and
+`F_GET_SEALS` are implemented now, and the seals are enforced rather than
+recorded: a shrink-sealed file refuses to shrink.
+
+**The first environment line names the renderer.** There is no GPU and no
+render node, so a client's Mesa cannot get a device from the compositor. It
+does not fall back to the software rasteriser sitting right there -- it falls
+back to Zink, which is OpenGL on top of Vulkan, and dies for want of a Vulkan
+driver. `LIBGL_ALWAYS_SOFTWARE=1` and `GALLIUM_DRIVER=llvmpipe` send it to the
+renderer weston is already using.
+
+**The second names the platform.** A client that calls the modern
+`eglGetPlatformDisplay` says which platform it wants and works without help --
+`weston-simple-egl` did, and drew its spinning triangle, which is how OpenGL
+was first seen working on Tunix. A client that calls the old `eglGetDisplay`
+leaves Mesa to guess, and there is nothing here to guess from: no X server to
+fall back to, no `DISPLAY` to hint with. SDL is in the second group, and so is
+every SDL game. `EGL_PLATFORM=wayland` is the whole difference between four
+failed attempts to make a window and a menu screen.
+
+All three live in the weston service, so every client inherits them.
