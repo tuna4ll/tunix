@@ -8,6 +8,7 @@
 #include "../include/input.h"
 #include "../include/framebuffer.h"
 #include "../include/drm.h"
+#include "../include/virtgpu.h"
 #include "../include/pty.h"
 #include "../include/random.h"
 #include "../include/sound.h"
@@ -333,6 +334,35 @@ void devfs_init(void) {
                    when the last client goes away. */
                 card->open = drm_device_open;
                 card->close = drm_device_close;
+            }
+
+            /*
+             * The render node, where there is rendering to do.
+             *
+             * mesa will not draw through the card node: it looks for a render
+             * node beside it and gives up on the device if there is none, so
+             * this is not an alternative way in, it is the only way in. It is
+             * the same device -- the same ioctls, the same buffers -- under a
+             * second name, which is what it is on Linux too.
+             *
+             * There is none without virgl, and there should not be: a node
+             * that accepts no rendering is worse than an absent one, because
+             * mesa would choose it and then fail.
+             */
+            if (virtgpu_virgl_available()) {
+                struct vfs_node *render = attach_device(dri, "renderD128",
+                                                        VFS_CHARDEVICE, 0666,
+                                                        drm_device_read, NULL,
+                                                        drm_device_read_ready);
+                if (render) {
+                    render->dev_major = DEV_MAJOR_DRM;
+                    render->dev_minor = DEV_MINOR_DRM_RENDER0;
+                    render->gid = DEV_GROUP_VIDEO;
+                    render->ioctl = drm_node_ioctl;
+                    render->mmap = drm_device_mmap;
+                    render->open = drm_device_open;
+                    render->close = drm_device_close;
+                }
             }
         }
     }

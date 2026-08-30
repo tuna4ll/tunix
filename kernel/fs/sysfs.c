@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include "../include/devnum.h"
 #include "../include/drm.h"
+#include "../include/virtgpu.h"
 
 #include "../include/kstring.h"
 #include "../include/net/netlink.h"
@@ -140,6 +141,29 @@ static int64_t uevent_write(struct vfs_node *node, uint64_t offset, size_t size,
 }
 
 /*
+ * The other nodes of the same card, listed where libdrm looks for them.
+ *
+ * Given one node, libdrm finds the others by reading the directory
+ * `<node>/device/drm` and taking the names in it -- that is how a caller
+ * holding the card ends up with the path of the render node. It only ever
+ * reads the names, so empty directories carrying the right ones are the whole
+ * of what it needs, and inventing the parent device they hang off is not.
+ */
+static void publish_drm_nodes(const char *name) {
+    static const char *const nodes[] = { "card0", "renderD128" };
+    for (unsigned index = 0; index < 2; index++) {
+        char path[192];
+        size_t used = 0;
+        append_string(path, sizeof(path), &used, "/sys/devices/");
+        append_string(path, sizeof(path), &used, name);
+        append_string(path, sizeof(path), &used, "/device/drm/");
+        append_string(path, sizeof(path), &used, nodes[index]);
+        path[used] = '\0';
+        (void)vfs_mkdir_p(path);
+    }
+}
+
+/*
  * Register one device: its directory, its uevent, its subsystem link, and the
  * two symlinks that point back at it.
  */
@@ -257,9 +281,30 @@ void sysfs_init(void) {
        either of its two scan directories cannot be opened. */
     if (!vfs_mkdir_p("/sys/dev/block")) return;
 
-    if (drm_available())
-        publish_device("card0", "dri/card0", "drm", NULL, DEV_MAJOR_DRM,
-                       DEV_MINOR_DRM_CARD0);
+    /*
+     * The driver name, the same one VERSION reports, so userspace can find out
+     * what kind of card this is without opening it.
+     *
+     * It matters because the answer decides how a session is set up: a card
+     * with a host renderer behind it wants mesa left alone to find it, and one
+     * without wants mesa told to go straight to the software rasteriser. That
+     * is a decision the session scripts have to make before they start
+     * anything, and this is where they read it.
+     */
+    if (drm_available()) {
+        int rendering = virtgpu_virgl_available();
+        publish_device("card0", "dri/card0", "drm",
+                       rendering ? "DRIVER=virtio_gpu\nDEVTYPE=drm_minor\n"
+                                 : "DRIVER=tunixdrm\nDEVTYPE=drm_minor\n",
+                       DEV_MAJOR_DRM, DEV_MINOR_DRM_CARD0);
+        if (rendering) {
+            publish_device("renderD128", "dri/renderD128", "drm",
+                           "DRIVER=virtio_gpu\nDEVTYPE=drm_render_minor\n",
+                           DEV_MAJOR_DRM, DEV_MINOR_DRM_RENDER0);
+            publish_drm_nodes("card0");
+            publish_drm_nodes("renderD128");
+        }
+    }
 
     /* PipeWire enumerates sound cards through udev rather than by scanning
        /dev/snd, so a working card that is not published here is invisible. */

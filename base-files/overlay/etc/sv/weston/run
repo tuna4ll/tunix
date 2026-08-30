@@ -24,14 +24,26 @@ export LOGNAME=tunix
 export XDG_RUNTIME_DIR=/run/user/1000
 export XDG_CONFIG_DIRS=/etc/xdg
 export XDG_SESSION_TYPE=wayland
-# Every client inherits these, and they are what make OpenGL work at all here.
-# There is no GPU and no render node, so a client's Mesa cannot get a device
-# from the compositor: it finds no driver, falls back to Zink -- OpenGL on top
-# of Vulkan -- and dies for want of a Vulkan driver, without ever trying the
-# software rasteriser sitting right there. Naming llvmpipe is what sends it to
-# the same renderer weston is already using.
-export LIBGL_ALWAYS_SOFTWARE=1
-export GALLIUM_DRIVER=llvmpipe
+# How this session renders, which every client inherits.
+#
+# It depends on what is behind the card, and the kernel says which in the
+# uevent. Where the card is a virtio-gpu whose host granted virgl, mesa finds
+# a real driver on /dev/dri/card0 by itself and the only wrong thing to do is
+# tell it otherwise -- forcing the rasteriser here would leave a working GPU
+# idle and put every triangle back on the processor.
+#
+# Where it is not, there is no render node at all: a client's mesa finds no
+# driver, falls back to Zink -- OpenGL on top of Vulkan -- and dies for want
+# of a Vulkan driver, without ever trying the software rasteriser sitting
+# right there. Naming llvmpipe is what sends it to the same renderer weston
+# is already using.
+if grep -qs '^DRIVER=virtio_gpu$' /sys/devices/card0/uevent; then
+	unset LIBGL_ALWAYS_SOFTWARE
+	unset GALLIUM_DRIVER
+else
+	export LIBGL_ALWAYS_SOFTWARE=1
+	export GALLIUM_DRIVER=llvmpipe
+fi
 # And which platform an EGL display is being asked for. A client that names it
 # itself does not need this -- weston-simple-egl works without it -- but one
 # that calls the old eglGetDisplay() leaves Mesa to guess, and the guess is
