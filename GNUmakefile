@@ -154,8 +154,13 @@ image: $(IMAGE)
 # rebuild with `rm -f $(IMAGE)` after changing it.
 IMAGE_TABLE ?= gpt
 
+# Free space in the root filesystem, over and above what the tree needs. The
+# same caveat as above: changing it does not change a file make looks at, so
+# rebuild with `rm -f $(IMAGE)`.
+IMAGE_SLACK_MIB ?= 4096
+
 $(IMAGE): $(KERNEL) $(LIMINE_EXE) support/limine.conf support/image.sh $(SYSROOT_STAMP)
-	TABLE='$(IMAGE_TABLE)' support/image.sh $@ $(KERNEL) $(LIMINE_DIR) support/limine.conf $(SYSROOT)
+	TABLE='$(IMAGE_TABLE)' ROOT_SLACK_MIB='$(IMAGE_SLACK_MIB)' support/image.sh $@ $(KERNEL) $(LIMINE_DIR) support/limine.conf $(SYSROOT)
 
 # --- running it -------------------------------------------------------------
 

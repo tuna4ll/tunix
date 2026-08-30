@@ -148,6 +148,21 @@ cmdline: root=LABEL=tunix-root init=/usr/bin/uname
 is the only form that finds the right disk on a machine that has others;
 `root=/dev/sda2` still works and names a position in the probe order.
 
+## How much room the image has
+
+The root filesystem is as big as the tree needs plus `IMAGE_SLACK_MIB`, which
+is 4096 -- four gigabytes free on a 4.7 GB image. Half a gigabyte was enough
+while "a package" meant a compiler; it is not enough for a Qt application with
+a JVM under it that then downloads its own content.
+
+```sh
+rm -f build/tunix.img
+make image IMAGE_SLACK_MIB=8192
+```
+
+Nothing is written that is not used, so the cost is the time to build the image
+and to copy it onto a stick.
+
 ## The boot menu
 
 Three entries, and the second two exist to take a machine that will not finish

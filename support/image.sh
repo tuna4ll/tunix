@@ -29,8 +29,12 @@ esac
 
 ESP_MIB=${ESP_MIB:-64}
 # Headroom over what the tree actually needs, so that the machine has somewhere
-# to put a package it installs later.
-ROOT_SLACK_MIB=${ROOT_SLACK_MIB:-512}
+# to put what it installs later. Four gigabytes rather than the half it used to
+# be because "a package" turned out to mean things like a Qt application with a
+# JVM under it, which arrive with hundreds of megabytes of their own and then
+# download more. Nothing is written that is not used, so the cost is the time
+# to build the image and to copy it to a stick.
+ROOT_SLACK_MIB=${ROOT_SLACK_MIB:-4096}
 
 WORK=$(dirname "$IMAGE")/image
 rm -rf "$WORK"
