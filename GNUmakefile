@@ -201,6 +201,13 @@ QEMU_MEMORY ?= 4G
 QEMU_SMP    ?= 4
 QEMU_AUDIO  ?= -audiodev none,id=snd0 -device intel-hda -device hda-output,audiodev=snd0
 QEMU_NET    ?= -netdev user,id=net0 -device rtl8139,netdev=net0
+# Named rather than left to QEMU. Its default depends on how the binary was
+# built: a distribution package usually opens a window, but one built without
+# a UI -- which is what a server or a container image ships -- falls back to
+# VNC and prints a port number instead, and the machine appears not to start.
+# `make run QEMU_DISPLAY="-display sdl"` for a QEMU without GTK, and
+# `-display none` for one with no user interface at all.
+QEMU_DISPLAY ?= -display gtk
 QEMU_COMMON  = -machine q35,accel=kvm:tcg -cpu host -smp $(QEMU_SMP) \
 	-m $(QEMU_MEMORY) -drive format=raw,file=$(IMAGE),if=none,id=disk0 \
 	-device ide-hd,drive=disk0,bus=ide.0 \
@@ -232,17 +239,20 @@ $(OVMF_VARS): $(OVMF)
 .PHONY: run run-uefi run-gpu headless
 run: $(IMAGE)
 	rm -f $(BUILD)/serial.log
-	$(QEMU) $(QEMU_COMMON) -serial file:$(BUILD)/serial.log -monitor none
+	$(QEMU) $(QEMU_COMMON) $(QEMU_DISPLAY) -serial file:$(BUILD)/serial.log -monitor none
 
 run-uefi: $(IMAGE) $(OVMF) $(OVMF_VARS)
 	rm -f $(BUILD)/serial.log
-	$(QEMU) $(QEMU_COMMON) -serial file:$(BUILD)/serial.log -monitor none \
+	$(QEMU) $(QEMU_COMMON) $(QEMU_DISPLAY) -serial file:$(BUILD)/serial.log -monitor none \
 		-drive if=pflash,unit=0,format=raw,readonly=on,file=$(OVMF) \
 		-drive if=pflash,unit=1,format=raw,file=$(OVMF_VARS)
 
 # virtio-vga rather than virtio-gpu-pci: Limine sets the mode over the VGA
 # adapter and the kernel's text console draws into that framebuffer, both of
 # which only exist on the VGA-compatible variant.
+# The display is here rather than QEMU_DISPLAY because this one wants an
+# option of its own: the guest picks 1280x720 and zoom-to-fit keeps that
+# readable in a window the host may have made smaller.
 QEMU_GPU ?= -vga none -device virtio-vga,xres=1280,yres=720 \
 	-display gtk,zoom-to-fit=on
 run-gpu: $(IMAGE)

@@ -112,7 +112,22 @@ Switching the value does not change a file `make` looks at, hence the `rm`.
 | `make run-gpu` | a window, with virtio-gpu scanout |
 | `make headless` | serial on stdin/stdout |
 
-Useful overrides: `QEMU_SMP`, `QEMU_MEMORY`, `QEMU_NET`, `QEMU_AUDIO`.
+Useful overrides: `QEMU_SMP`, `QEMU_MEMORY`, `QEMU_NET`, `QEMU_AUDIO`,
+`QEMU_DISPLAY`.
+
+The last one is named rather than left to QEMU, because QEMU's default depends
+on how the binary was built. A distribution package usually opens a window; one
+built without a user interface -- which is what a server or a container image
+ships -- falls back to VNC and prints a port number, and the machine looks like
+it did not start. `make run` asks for GTK. For a QEMU without it:
+
+```sh
+make run QEMU_DISPLAY="-display sdl"
+make run QEMU_DISPLAY="-display none"
+```
+
+`make headless` is unaffected: it uses `-nographic` and takes no display at
+all.
 
 ## Debugging a boot
 
