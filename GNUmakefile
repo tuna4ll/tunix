@@ -63,9 +63,25 @@ KERNEL_SOURCES := $(shell find kernel -name '*.c' -o -name '*.S')
 KERNEL_OBJECTS := $(KERNEL_SOURCES:%=$(BUILD)/%.o)
 KERNEL_DEPS    := $(KERNEL_OBJECTS:.o=.d)
 
-.PHONY: all kernel clean distclean
+.PHONY: all kernel check clean distclean
 all: image
 kernel: $(KERNEL)
+
+# What continuous integration builds, and the reason it is not just `kernel`.
+#
+# Two of these three configurations are compiled only when asked for, so they
+# rot quietly: TUNIX_DEBUG_LOGS and TUNIX_BOOT_TIMINGS wrap code that nothing
+# else refers to, and a change that breaks one of them stays invisible until
+# somebody turns it on to debug something -- which is the worst moment to find
+# out that it no longer compiles.
+#
+# Each goes in its own directory because the objects differ by flags and
+# nothing in the generated dependencies says so. Limine is passed through
+# rather than left to follow BUILD, so the three do not clone it three times.
+check:
+	$(MAKE) kernel BUILD=$(BUILD)/check/default LIMINE_DIR=$(LIMINE_DIR)
+	$(MAKE) kernel BUILD=$(BUILD)/check/debug LIMINE_DIR=$(LIMINE_DIR) KERNEL_CFLAGS_EXTRA=-DTUNIX_DEBUG_LOGS=1
+	$(MAKE) kernel BUILD=$(BUILD)/check/timings LIMINE_DIR=$(LIMINE_DIR) KERNEL_CFLAGS_EXTRA=-DTUNIX_BOOT_TIMINGS=1
 
 $(KERNEL): $(KERNEL_OBJECTS) kernel/arch/x86_64/linker.ld
 	$(CC) $(KERNEL_LDFLAGS) $(KERNEL_OBJECTS) -o $@

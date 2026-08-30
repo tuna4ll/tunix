@@ -238,6 +238,24 @@ instead. The `SMP:` line is printed after the bring-up releases the kernel
 lock, so a machine that stops on it rather than after it is one where a
 processor took that lock and did not give it back.
 
+## What CI builds
+
+```sh
+make check
+```
+
+The kernel, three times: as it ships, with `TUNIX_DEBUG_LOGS=1`, and with
+`TUNIX_BOOT_TIMINGS=1`. The last two are the point. They wrap code nothing else
+refers to, so a change that breaks one of them compiles perfectly well and
+stays broken until somebody turns it on to debug something -- which is the
+worst moment to find out. `make kernel` passes in that state; `make check` does
+not.
+
+`.github/workflows/kernel.yml` runs it on every push and pull request. It does
+not build the image: that installs a Void sysroot with xbps, most of a gigabyte
+over the network from a mirror this repository does not control, and a build
+that fails when somebody else is having a bad day teaches people to ignore it.
+
 ## Cleaning
 
 ```sh
