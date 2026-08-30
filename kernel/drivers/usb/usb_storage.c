@@ -83,8 +83,8 @@ static uint32_t next_tag = 1;
  * through the staging page in the direction `in` says. Returns 0 when the
  * device reports the command succeeded.
  */
-static int run_command(struct usb_disk *disk, const uint8_t *command,
-                       uint8_t command_length, int in, uint32_t length) {
+static int run_command_once(struct usb_disk *disk, const uint8_t *command,
+                            uint8_t command_length, int in, uint32_t length) {
     struct command_block_wrapper *cbw = (struct command_block_wrapper *)wrapper_page;
     memset(cbw, 0, sizeof(*cbw));
     cbw->signature = CBW_SIGNATURE;
@@ -111,6 +111,49 @@ static int run_command(struct usb_disk *disk, const uint8_t *command,
 
     if (csw->signature != CSW_SIGNATURE || csw->tag != tag) return -1;
     return csw->status == 0 ? 0 : -1;
+}
+
+/*
+ * The same, retried, with the device put back in order in between.
+ *
+ * Two failures look alike from here and are not. One is a command that never
+ * left the controller -- the device saw nothing and the same command can go
+ * again. The other is a command that failed after its wrapper went out, and
+ * the device is now waiting for data or holding a status nobody collected.
+ * Sending the next command into that is how one failure becomes every failure:
+ * the device reads the new wrapper as the data it was still expecting.
+ *
+ * Telling them apart from here is not possible, so the class reset runs before
+ * every retry. It is what the specification asks for, and the cost is paid
+ * only on a path that has already gone wrong.
+ */
+#define COMMAND_ATTEMPTS 4
+/* Enough to say a disk is failing, not enough to bury the log -- and the log
+   is painted on the console, so a message per failed block is not a diagnostic
+   but a second failure on top of the first. */
+#define COMMAND_REPORTS 8U
+
+static int run_command(struct usb_disk *disk, const uint8_t *command,
+                       uint8_t command_length, int in, uint32_t length) {
+    static unsigned reported;
+
+    for (int attempt = 0; attempt < COMMAND_ATTEMPTS; attempt++) {
+        if (attempt && usb_reset_recovery(disk->controller_index) != 0) break;
+        if (run_command_once(disk, command, command_length, in, length) == 0) {
+            if (attempt && reported < COMMAND_REPORTS) {
+                reported++;
+                kprintf("USB-STORAGE: command %x needed %d attempts\n",
+                        (unsigned)command[0], attempt + 1);
+            }
+            return 0;
+        }
+    }
+    if (reported < COMMAND_REPORTS) {
+        reported++;
+        kprintf("USB-STORAGE: command %x failed %d times\n",
+                (unsigned)command[0], COMMAND_ATTEMPTS);
+    }
+    return -1;
 }
 
 /* --- the block layer's view ---------------------------------------------- */

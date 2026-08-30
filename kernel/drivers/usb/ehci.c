@@ -198,6 +198,7 @@ struct ehci_device {
     uint8_t address;
     uint8_t configuration;
     uint16_t max_packet;
+    uint8_t interface;
     uint8_t bulk_in_endpoint;
     uint8_t bulk_out_endpoint;
     uint16_t bulk_in_packet;
@@ -693,6 +694,9 @@ static int find_storage_interface(struct ehci_device *device,
             in_storage_interface = buffer[offset + 5U] == USB_CLASS_MASS_STORAGE &&
                                    buffer[offset + 6U] == USB_SUBCLASS_SCSI &&
                                    buffer[offset + 7U] == USB_PROTOCOL_BULK_ONLY;
+            /* Kept for the class reset, which is addressed to the interface
+               rather than to the device or an endpoint. */
+            if (in_storage_interface) device->interface = buffer[offset + 2U];
         } else if (type == 0x05U && length >= 7U && in_storage_interface) {
             uint8_t address = buffer[offset + 2U];
             uint8_t attributes = buffer[offset + 3U];
@@ -1095,10 +1099,40 @@ static int ehci_bulk_transfer(int index, int in, uint64_t physical,
     return 0;
 }
 
+/*
+ * Bulk-only mass storage error recovery, as the class specification defines it.
+ *
+ * A command that failed after its wrapper went out leaves the device midway
+ * through a transaction: it is waiting for data, or holding a status nobody
+ * collected. Sending the next command into that is how one failure becomes
+ * every failure -- the device reads the new wrapper as the data it was still
+ * expecting, and nothing lines up again.
+ *
+ * The reset is a class request to the interface, followed by clearing the halt
+ * on both bulk endpoints. Both endpoints reset their data toggle as part of
+ * it, so both of ours go with them.
+ */
+#define BULK_ONLY_RESET 0xFFU
+
+static int ehci_reset_recovery(int index) {
+    struct ehci *host = NULL;
+    struct ehci_device *device = storage_device(index, &host);
+    if (!device) return -1;
+
+    if (control_transfer(host, device, 0x21U, BULK_ONLY_RESET, 0,
+                         device->interface, 0, NULL) != 0) return -1;
+    (void)clear_endpoint_halt(host, device, device->bulk_in_endpoint, 1);
+    (void)clear_endpoint_halt(host, device, device->bulk_out_endpoint, 0);
+    device->bulk_in_toggle = 0;
+    device->bulk_out_toggle = 0;
+    return 0;
+}
+
 static const struct usb_host ehci_host = {
     .name = "ehci",
     .storage_count = ehci_storage_count,
     .bulk_transfer = ehci_bulk_transfer,
+    .reset_recovery = ehci_reset_recovery,
 };
 
 /* Bring one controller up. Failing here is not fatal to the others. */

@@ -40,3 +40,16 @@ int usb_bulk_transfer(int index, int in, uint64_t physical, uint32_t length) {
     }
     return -1;
 }
+
+int usb_reset_recovery(int index) {
+    if (index < 0) return -1;
+    for (int host = 0; host < host_count; host++) {
+        int found = hosts[host]->storage_count();
+        if (index < found) {
+            if (!hosts[host]->reset_recovery) return -1;
+            return hosts[host]->reset_recovery(index);
+        }
+        index -= found;
+    }
+    return -1;
+}

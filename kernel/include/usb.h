@@ -23,6 +23,9 @@ struct usb_host {
     /* `physical` is a DMA address and `in` is 1 for device-to-host. Returns 0
        when the whole transfer completed. */
     int (*bulk_transfer)(int index, int in, uint64_t physical, uint32_t length);
+    /* Put a device that failed midway through a command back where a new one
+       can be sent to it. May be NULL on a controller that cannot. */
+    int (*reset_recovery)(int index);
 };
 
 /* Called by a controller driver once it is running and has enumerated. */
@@ -32,5 +35,7 @@ void usb_register_host(const struct usb_host *host);
    zero in registration order. */
 int usb_storage_count(void);
 int usb_bulk_transfer(int index, int in, uint64_t physical, uint32_t length);
+/* 0 when the device was reset, -1 when it could not be. */
+int usb_reset_recovery(int index);
 
 #endif

@@ -193,6 +193,32 @@ Once, and late, deliberately. Turning the schedule off is not free for a
 transfer already under way: kicking every couple of milliseconds instead stops
 transfers finishing at all, and the boot does not get past its first seconds.
 
+## A failed command is retried, after the device is put back in order
+
+A transfer can fail without the device having seen anything: the controller
+drops a command that never left its schedule, and what comes back is a
+descriptor with all 31 bytes of the wrapper still waiting. That is not a disk
+problem, and failing an install over it is the wrong answer -- a 677 MB
+download is a hundred thousand writes and one of them going astray ended the
+whole thing with `Operation not supported`.
+
+But the two kinds of failure look alike from the transport and are not. The
+other kind is a command that failed *after* its wrapper went out, and the
+device is then waiting for data or holding a status nobody collected. Sending
+the next command into that is how one failure becomes every failure: the device
+reads the new wrapper as the data it was still expecting, and nothing lines up
+again. Retrying without that distinction turned a handful of failures into a
+hundred and twenty-nine thousand.
+
+Telling them apart from the transport is not possible, so the class reset runs
+before every retry: a Bulk-Only Mass Storage Reset addressed to the interface,
+then the halt cleared on both bulk endpoints, then both toggles back to zero.
+It is what the specification asks for and it is paid only on a path that has
+already gone wrong.
+
+The log is capped at eight lines. It is painted on the console, so a message
+per failed block is not a diagnostic but a second failure on top of the first.
+
 ## The shape of the driver
 
 The asynchronous schedule and nothing else. Two queue heads sit in a ring --
