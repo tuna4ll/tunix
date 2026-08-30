@@ -178,7 +178,15 @@ A prompt from the third means the kernel, the disk, the loader and libc are all
 fine and what is wrong is above them.
 
 `verbose` prints the first two dozen faults and the first two dozen syscalls
-and then goes quiet:
+and then goes quiet. It is the only syscall tracing left in the kernel: a
+reporter that named every call answered `ENOSYS` or `EOPNOTSUPP` earned its
+keep twice -- it is how `TCP_NODELAY` was found -- and then printed seven lines
+about `rseq` on every boot forever after, which is not a diagnostic. The
+failures that still speak up are the ones that only happen when something is
+wrong: a refused socket option, a file that cannot grow, a disk command that
+had to be retried, a lock nobody gives back.
+
+The trace looks like this:
 
 ```
 syscall: 257 from pid 1
