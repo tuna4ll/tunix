@@ -9,6 +9,8 @@
 #include "../include/pipe.h"
 #include "../include/vfs.h"
 
+extern void kprintf(const char *fmt, ...);
+
 #define VFS_PATH_MAX 256
 #define VFS_SYMLINK_MAX_DEPTH 16
 #define VFS_MOUNT_MAX_DEPTH 16
@@ -513,7 +515,39 @@ static int ensure_capacity(struct vfs_node *node, uint64_t required) {
         capacity += steps * VFS_GROW_STEP;
     }
     uint8_t *new_data = (uint8_t *)kmalloc((size_t)capacity);
-    if (!new_data) return -1;
+    if (!new_data) {
+        /*
+         * Before giving up: most of the heap is other files' contents, and
+         * those are on the disk. Dropping them costs a re-read; failing this
+         * costs the write, and the program is told "I/O error" for what is
+         * really a full cache.
+         *
+         * The cutoff is the current second, which is what keeps the file being
+         * grown from being dropped by its own rescue: it was written a moment
+         * ago by definition, and reclaim_below() leaves anything touched that
+         * recently alone.
+         */
+        uint32_t now = (uint32_t)time_epoch_seconds();
+        if (reclaim_below(vfs_root, now))
+            new_data = (uint8_t *)kmalloc((size_t)capacity);
+    }
+    if (!new_data) {
+        /* The one failure that has to name its numbers. A file that cannot
+           grow reports an I/O error to the program writing it, which is a
+           description of a full heap so misleading that it cost a day. */
+        static unsigned reported;
+        if (reported < 4U) {
+            uint64_t reserved = 0, allocated = 0, limit = 0;
+            heap_stats(&reserved, &allocated, &limit);
+            reported++;
+            kprintf("VFS: %s cannot grow to %u KiB: heap %u used, %u reserved, %u MiB ceiling\n",
+                    node->name, (unsigned)(capacity / 1024U),
+                    (unsigned)(allocated / (1024U * 1024U)),
+                    (unsigned)(reserved / (1024U * 1024U)),
+                    (unsigned)(limit / (1024U * 1024U)));
+        }
+        return -1;
+    }
     memset(new_data, 0, (size_t)capacity);
     if (node->data && node->length) memcpy(new_data, node->data, (size_t)node->length);
     free_node_data(node);
