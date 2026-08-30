@@ -5812,7 +5812,28 @@ static int syscall_number_may_share(uint64_t number) {
 
 #define VERBOSE_SYSCALL_LIMIT 24U
 
+/*
+ * The kernel saying "I do not do that".
+ *
+ * ENOSYS and EOPNOTSUPP are the two answers that mean a gap here rather than a
+ * mistake in the program, and from userland the two are indistinguishable: a
+ * package manager that cannot write a file says the same thing either way. A
+ * few lines naming the call is the difference between reading the source and
+ * knowing. Bounded, because a program that asks once usually asks often.
+ */
+#define UNSUPPORTED_REPORTS 16U
+
+static void report_unsupported(uint64_t number, int64_t result) {
+    if (result != -EOPNOTSUPP && result != -ENOSYS) return;
+    static unsigned reported;
+    if (reported >= UNSUPPORTED_REPORTS) return;
+    reported++;
+    kprintf("TUNIX: syscall %u answered %s to pid %d\n", (unsigned)number,
+            result == -ENOSYS ? "ENOSYS" : "EOPNOTSUPP", (int)process_current_pid());
+}
+
 void syscall_dispatch(struct syscall_frame *frame) {
+    uint64_t number = frame->rax;
     klock_note(KLOCK_NOTE_SYSCALL | (uint32_t)frame->rax);
     /* The first syscall is the answer to one question and it is the question
        that matters here: whether userland ran at all. */
@@ -5828,6 +5849,7 @@ void syscall_dispatch(struct syscall_frame *frame) {
     if (syscall_number_may_share(frame->rax)) {
         kernel_lock_shared();
         if (syscall_try_shared(frame)) {
+            report_unsupported(number, (int64_t)frame->rax);
             /* The entry stub releases whichever mode is held. */
             uint64_t top = cpu_current()->kernel_rsp;
             if (top) {
@@ -5842,6 +5864,7 @@ void syscall_dispatch(struct syscall_frame *frame) {
 
     kernel_lock();
     syscall_dispatch_locked(frame);
+    report_unsupported(number, (int64_t)frame->rax);
     uint64_t stack_top = cpu_current()->kernel_rsp;
     if (stack_top) {
         struct syscall_frame *resumed =
