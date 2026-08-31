@@ -79,6 +79,33 @@ machine, and the two are hard to tell apart. The build now looks for a
 PulseAudio socket, at `/mnt/wslg/PulseServer` under WSL or in
 `XDG_RUNTIME_DIR` on a Linux desktop, and uses it where there is one.
 
+## Why it arrived in pieces
+
+Sound that plays but stutters is a different fault from sound that does not
+play, and it was not in the guest. Measured from inside the driver, as the
+longest the application went without feeding the card in each five second
+window:
+
+```
+file sink (-audiodev wav):     41, 43, 48, 42, 44, 44, 41, 43 ms
+PulseAudio, as it was:         41, 896, 111, 41, 50, 44, 262 ms
+PulseAudio, with room:         41, 41, 44, 41, 41, 45, 48, 40 ms
+```
+
+The guest is identical in all three. What changed is the host: QEMU asks
+PulseAudio for 15 milliseconds of latency by default, which is a fair bargain
+when the sound server is a local process, and a bad one under WSL, where the
+samples go over an RDP channel to Windows. When that channel takes its time it
+stops the emulator with it, and 896 milliseconds is five times the whole
+buffer, so what comes out is pieces. The build now asks for a tenth of a second
+of latency and twice that of buffer.
+
+What is left is a handful of glitches in the first seconds, while the game
+loads its assets, and they are not a buffering problem: raising the buffer from
+170 to 256 milliseconds removed two of eleven. Something in the kernel holds
+everything up for longer than that during heavy reading, and the giant lock is
+the obvious suspect. Once the game is running the stream is clean.
+
 ## Verified
 
 SuperTuxKart, run under weston, recorded through QEMU's `wav` backend:
