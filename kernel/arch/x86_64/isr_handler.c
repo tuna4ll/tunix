@@ -3,6 +3,7 @@
 #include "../../include/input.h"
 #include "../../include/power.h"
 #include "../../include/interrupt.h"
+#include "../../include/irq.h"
 #include "../../include/klock.h"
 #include "../../include/percpu.h"
 #include "../../include/pic.h"
@@ -80,6 +81,18 @@ static void isr_dispatch(struct interrupt_frame *regs) {
     if (regs->int_no == ACPI_SCI_VECTOR) {
         apic_send_eoi();
         if (acpi_sci_interrupt()) power_button_pressed();
+        return;
+    }
+    /*
+     * A driver's own interrupt. Acknowledged first, like the tick above it:
+     * the local APIC is the only thing that can deliver up here -- MSI and
+     * MSI-X write straight to it, and a line routed through the IOAPIC ends
+     * at it too -- so the 8259 path is not a case this can take.
+     */
+    if (regs->int_no >= IRQ_VECTOR_FIRST &&
+        regs->int_no < IRQ_VECTOR_FIRST + IRQ_VECTOR_COUNT) {
+        apic_send_eoi();
+        irq_dispatch((unsigned)regs->int_no);
         return;
     }
     if (regs->int_no < 32) {

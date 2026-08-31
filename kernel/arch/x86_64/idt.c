@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include "../../include/acpi.h"
 #include "../../include/idt.h"
+#include "../../include/irq.h"
 #include "../../include/smp.h"
 
 struct idt_entry {
@@ -71,6 +72,10 @@ extern void irq12(void);
 extern void irq_sci(void);
 extern void irq_lapic_timer(void);
 extern void irq_invalidate_tlb(void);
+/* The device vectors, as a table: which driver ends up on which of them is
+   decided at boot by irq.c, so there is nothing here worth naming one by one.
+   isr.S builds both the stubs and this. */
+extern void (*const irq_device_stubs[IRQ_VECTOR_COUNT])(void);
 
 void idt_init(void) {
     idtp.limit = (sizeof(struct idt_entry) * 256) - 1;
@@ -120,6 +125,10 @@ void idt_init(void) {
     idt_set_gate(ACPI_SCI_VECTOR, (uint64_t)irq_sci, 0x08, 0x8E, 0);
     idt_set_gate(SMP_TIMER_VECTOR, (uint64_t)irq_lapic_timer, 0x08, 0x8E, 0);
     idt_set_gate(SMP_INVALIDATE_VECTOR, (uint64_t)irq_invalidate_tlb, 0x08, 0x8E, 0);
+
+    for (unsigned index = 0; index < IRQ_VECTOR_COUNT; index++)
+        idt_set_gate((uint8_t)(IRQ_VECTOR_FIRST + index),
+                     (uint64_t)irq_device_stubs[index], 0x08, 0x8E, 0);
 
     idt_load((uint64_t)&idtp);
 }

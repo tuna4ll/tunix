@@ -423,3 +423,31 @@ irq_invalidate_tlb:
     swapgs
 2:
     iretq
+
+/*
+ * The device vectors, 0x40 through 0x4F.
+ *
+ * Unlike every stub above, these are not one device each: a driver asks irq.c
+ * for one and is given whichever is free, so what a vector means is decided at
+ * boot rather than here. They are otherwise ordinary interrupts and go through
+ * the common stub, which is what puts them under the kernel lock.
+ *
+ * Generated rather than written out sixteen times, and collected into a table
+ * so idt.c can install them in a loop instead of naming each one.
+ */
+.irp number, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+.global irq_device\number
+irq_device\number:
+    cli
+    push 0
+    push 0x40 + \number
+    jmp isr_common_stub
+.endr
+
+.section .rodata
+.global irq_device_stubs
+irq_device_stubs:
+.irp number, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+    .quad irq_device\number
+.endr
+.section .text

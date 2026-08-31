@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include "../include/ext2.h"
 #include "../include/heap.h"
+#include "../include/irq.h"
 #include "../include/file.h"
 #include "../include/kstring.h"
 #include "../include/pmm.h"
@@ -179,6 +180,40 @@ static int64_t proc_uptime_read(struct vfs_node *node, uint64_t offset,
     if (fraction < 10) text_char(&text, '0');
     text_unsigned(&text, fraction);
     text_string(&text, " 0.00\n");
+    return text_read(&text, offset, size, output);
+}
+
+/*
+ * /proc/interrupts, which is the answer to "is any of this arriving".
+ *
+ * Only the vectors drivers asked for are here. The tick and the two PS/2 lines
+ * are wired into the dispatcher by hand and counted nowhere, and inventing
+ * rows for them would make this file a worse witness than it is: what it shows
+ * is exactly what irq.c has handed out.
+ *
+ * Linux pads its first column to the widest processor count and lists one
+ * column per processor. There is one column here because a vector is bound to
+ * one processor at a time; see pci_msix_bind().
+ */
+static int64_t proc_interrupts_read(struct vfs_node *node, uint64_t offset,
+                                    size_t size, void *output) {
+    (void)node;
+    struct text_buffer text = {{0}, 0};
+    text_string(&text, "           CPU0\n");
+    for (unsigned slot = 0; slot < IRQ_VECTOR_COUNT; slot++) {
+        unsigned vector = 0;
+        uint64_t count = 0;
+        const char *name = NULL;
+        if (irq_describe(slot, &vector, &count, &name) != 0) break;
+        if (!name) continue;
+        if (vector < 100U) text_char(&text, ' ');
+        text_unsigned(&text, vector);
+        text_string(&text, ": ");
+        text_unsigned(&text, count);
+        text_string(&text, "   PCI-MSI   ");
+        text_string(&text, name);
+        text_char(&text, '\n');
+    }
     return text_read(&text, offset, size, output);
 }
 
@@ -729,6 +764,7 @@ void procfs_init(void) {
     virtual_file(root, "stat", proc_stat_read, 0);
     virtual_file(root, "loadavg", proc_loadavg_read, 0);
     virtual_file(root, "cmdline", proc_cmdline_line_read, 0);
+    virtual_file(root, "interrupts", proc_interrupts_read, 0);
 
     struct vfs_node *kernel = vfs_mkdir_p("/proc/sys/kernel");
     if (kernel) {
