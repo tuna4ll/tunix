@@ -27,9 +27,17 @@
 
 typedef void (*irq_handler_fn)(void *context);
 
-/* Claim a vector, or 0 when the pool is empty. `name` is not copied: it is
-   reported as-is by /proc/interrupts, so it has to outlive the driver. */
-unsigned irq_request(const char *name, irq_handler_fn handler, void *context);
+/*
+ * Claim a vector, or 0 when the pool is empty.
+ *
+ * `kind` is how the interrupt is delivered -- "PCI-MSI" for a message,
+ * "IO-APIC" for a line -- and is reported beside the count, because the two
+ * behave differently enough that a person reading /proc/interrupts wants to
+ * know which one they are looking at. Neither string is copied: both are
+ * reported as they are, so both have to outlive the driver.
+ */
+unsigned irq_request(const char *name, const char *kind, irq_handler_fn handler,
+                     void *context);
 
 /* Answer one. True when the vector belonged to a driver, which is also how a
    vector nobody claimed tells itself apart from a handler that did nothing. */
@@ -38,7 +46,7 @@ int irq_dispatch(unsigned vector);
 /* Walk what has been claimed, for /proc/interrupts. Returns 0 while `slot` is
    in range, whether or not anything holds it. */
 int irq_describe(unsigned slot, unsigned *vector, uint64_t *count,
-                 const char **name);
+                 const char **name, const char **kind);
 
 /* How many interrupts have been delivered to drivers in total. The cheap
    version of the question "is any of this actually arriving". */

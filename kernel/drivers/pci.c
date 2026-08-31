@@ -1,6 +1,5 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../include/apic.h"
 #include "../include/io.h"
 #include "../include/kstring.h"
 #include "../include/pci.h"
@@ -122,6 +121,16 @@ uint8_t pci_find_capability(const struct pci_device *device, uint8_t id) {
     return 0;
 }
 
+/* Bits 31..24 of EBX from leaf 1: the identifier the local APIC was given at
+   reset, readable whether or not anything has mapped it. */
+static uint32_t initial_apic_id(void) {
+    uint32_t eax, ebx, ecx, edx;
+    __asm__ volatile("cpuid"
+                     : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                     : "a"(1U), "c"(0U));
+    return ebx >> 24;
+}
+
 static void msix_write_control(const struct pci_device *device, uint16_t control) {
     uint32_t header = pci_config_read32(device->bus, device->slot, device->function,
                                         device->msix_capability);
@@ -173,9 +182,13 @@ int pci_msix_bind(struct pci_device *device, unsigned entry, unsigned vector) {
     volatile uint32_t *slot = device->msix_table + entry * MSIX_ENTRY_WORDS;
     /* Whichever processor is doing the setting up, which is the one that
        booted: there is no interrupt balancing here, and a device pointed at a
-       processor that never comes up interrupts nobody. */
+       processor that never comes up interrupts nobody.
+       Asked of the processor rather than of the local APIC, because a driver
+       may bind a vector before apic_init() has mapped one -- virtio-gpu does,
+       and the address it wrote was right only because the id it did not have
+       happened to be zero. */
     slot[MSIX_ENTRY_ADDRESS_LOW] =
-        APIC_MESSAGE_ADDRESS | (apic_local_id() << APIC_MESSAGE_DESTINATION_SHIFT);
+        APIC_MESSAGE_ADDRESS | (initial_apic_id() << APIC_MESSAGE_DESTINATION_SHIFT);
     slot[MSIX_ENTRY_ADDRESS_HIGH] = 0;
     slot[MSIX_ENTRY_DATA] = vector;
     /* Unmasked last, once the entry describes somewhere real. */

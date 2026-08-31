@@ -35,6 +35,9 @@ struct net_arp_record {
 
 void net_init(void);
 void net_poll(void);
+/* Give the adapter its interrupt. Separate from net_init() because it needs an
+   interrupt controller, and the adapter is set up before there is one. */
+void net_enable_interrupts(void);
 const struct net_config *net_get_config(void);
 void net_set_address(uint32_t address);
 void net_set_netmask(uint32_t netmask);

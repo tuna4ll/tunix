@@ -204,13 +204,16 @@ static int64_t proc_interrupts_read(struct vfs_node *node, uint64_t offset,
         unsigned vector = 0;
         uint64_t count = 0;
         const char *name = NULL;
-        if (irq_describe(slot, &vector, &count, &name) != 0) break;
+        const char *kind = NULL;
+        if (irq_describe(slot, &vector, &count, &name, &kind) != 0) break;
         if (!name) continue;
         if (vector < 100U) text_char(&text, ' ');
         text_unsigned(&text, vector);
         text_string(&text, ": ");
         text_unsigned(&text, count);
-        text_string(&text, "   PCI-MSI   ");
+        text_string(&text, "   ");
+        text_string(&text, kind);
+        text_string(&text, "   ");
         text_string(&text, name);
         text_char(&text, '\n');
     }

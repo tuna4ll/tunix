@@ -195,6 +195,9 @@ void kmain(const struct boot_info *boot) {
        carried: it needs the IOAPIC, so a machine that stayed on the 8259 pair
        simply does not get one. */
     if (apic) acpi_power_button_enable(ACPI_SCI_VECTOR);
+    /* And the network adapter's own line, for the same reason: it is routed
+       through the controller this just brought up. */
+    net_enable_interrupts();
     devfs_init();
     /* After devfs: the entries describe the devices it just attached. */
     sysfs_init();

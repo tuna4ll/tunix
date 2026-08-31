@@ -469,6 +469,21 @@ void net_init(void) {
     }
 }
 
+/*
+ * Called once the interrupt controller is up, which is long after net_init():
+ * the adapter is found early so a boot problem can be reported over the
+ * network, and the IOAPIC that a line has to be routed through does not exist
+ * yet at that point. Routing there fails, silently and permanently, which is
+ * exactly what it did until this was split out.
+ */
+void net_enable_interrupts(void) {
+    if (!config.link_up) return;
+    rtl8139_enable_interrupt();
+    if (rtl8139_interrupt_vector())
+        kprintf("NET: rtl8139 interrupts on vector %u\n",
+                rtl8139_interrupt_vector());
+}
+
 /* Hand queued local packets back to the receive path. Bounded rather than
    drained to empty: handling one can queue the next (a SYN produces a SYN-ACK),
    and a burst cap is what stops two sockets talking to each other from holding
@@ -510,7 +525,13 @@ void net_set_dns(uint32_t value) { config.dns = value; }
 void net_set_interface_up(int up) { config.interface_up = up != 0; }
 uint64_t net_rx_packets(void) { return stack_rx; }
 uint64_t net_tx_packets(void) { return stack_tx; }
-uint64_t net_rx_dropped(void) { return stack_drop + loopback_dropped + rtl8139_rx_dropped(); }
+/* Three ways to lose a frame, and /proc/net/dev asks for one number: the
+   stack refusing it, the loopback queue overflowing, the adapter's ring going
+   bad, and now the adapter's own queue filling because the stack fell behind. */
+uint64_t net_rx_dropped(void) {
+    return stack_drop + loopback_dropped + rtl8139_rx_dropped() +
+           rtl8139_queue_dropped();
+}
 
 size_t net_arp_snapshot(struct net_arp_record *records, size_t capacity) {
     size_t count = 0;
