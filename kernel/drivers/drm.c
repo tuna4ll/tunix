@@ -1584,9 +1584,21 @@ static int64_t ioctl_virtgpu_transfer(uint64_t user_argument, int to_host) {
     return 0;
 }
 
-/* mesa's own ceiling is a quarter of this; anything larger is a corrupt
-   request rather than a large one. */
-#define DRM_MAX_COMMAND_BYTES (256U * 1024U)
+/*
+ * A ceiling on one submission, and it has to be a generous one.
+ *
+ * The guess that mesa's command stream stays inside 64 KiB was wrong: it packs
+ * texture uploads into the same buffer, and SuperTuxKart loading a track was
+ * measured sending 266224 bytes -- just past a 256 KiB limit, which is the
+ * worst place for a limit to be. A rejected submission is not a dropped frame
+ * either; mesa prints "expect bad rendering" and carries on with a broken
+ * context.
+ *
+ * A megabyte is four times the largest seen. It costs nothing in the image --
+ * the staging buffer is zero-initialised, so it is address space rather than
+ * bytes on disk.
+ */
+#define DRM_MAX_COMMAND_BYTES (1024U * 1024U)
 
 static int64_t ioctl_virtgpu_execbuffer(uint64_t user_argument) {
     struct drm_virtgpu_execbuffer query;

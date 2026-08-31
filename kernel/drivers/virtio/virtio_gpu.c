@@ -87,11 +87,11 @@ extern void kprintf(const char *fmt, ...);
  * physical memory on the other side of it. A static buffer is in the kernel
  * window, where contiguous means contiguous.
  *
- * mesa's own ceiling is 64 KiB of commands per submission; four times that
- * leaves room for the transfers it batches alongside them without ever being
- * the thing that fails.
+ * A megabyte, because mesa batches texture uploads into the command stream and
+ * a track loading in SuperTuxKart was measured at 266224 bytes. Keep this and
+ * DRM_MAX_COMMAND_BYTES the same: the one is copied into the other.
  */
-#define MAX_COMMAND_BYTES (256U * 1024U)
+#define MAX_COMMAND_BYTES (1024U * 1024U)
 
 /* XRGB8888 in memory is B, G, R, unused -- which is what this format names. */
 #define VIRTIO_GPU_FORMAT_B8G8R8X8 2U
