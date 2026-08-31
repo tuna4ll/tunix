@@ -21,6 +21,7 @@
 #include <stdint.h>
 
 #include "../../include/heap.h"
+#include "../../include/dma.h"
 #include "../../include/kstring.h"
 #include "../../include/virtgpu.h"
 #include "../../include/virtio.h"
@@ -276,8 +277,17 @@ static union {
     struct virtio_gpu_resp_capset capset;
     struct virtio_gpu_ctrl_hdr hdr;
 } response;
-static struct virtio_gpu_mem_entry backing[MAX_BACKING_PAGES];
-static uint8_t commands[MAX_COMMAND_BYTES];
+/*
+ * The two buffers the device is pointed at, rather than two static arrays.
+ *
+ * Between them they are a megabyte and a half of the kernel image, reserved on
+ * every machine including the ones with no virtio-gpu in them at all. They have
+ * to be contiguous, which is the only reason they were static; dma_alloc()
+ * makes that available at run time, so now they cost nothing until the device
+ * turns out to be there.
+ */
+static struct virtio_gpu_mem_entry *backing;
+static uint8_t *commands;
 
 static struct virtio_device device;
 static struct virtio_queue control;
@@ -625,6 +635,24 @@ int virtgpu_init(void) {
     uint64_t granted = 0;
     if (virtio_pci_attach(&device, VIRTIO_GPU_DEVICE_ID,
                           1ULL << VIRTIO_GPU_F_VIRGL, &granted) != 0) return -1;
+
+    /* After the device is known to be there, and before anything is submitted
+       through them. */
+    /* The physical addresses are asked for and then dropped: submit() derives
+       them from the pointer, the same way it does for every other buffer it is
+       handed, and one path for that is better than two. */
+    uint64_t discarded = 0;
+    backing = (struct virtio_gpu_mem_entry *)dma_alloc(
+        sizeof(*backing) * MAX_BACKING_PAGES, 0, &discarded);
+    commands = (uint8_t *)dma_alloc(MAX_COMMAND_BYTES, 0, &discarded);
+    if (!backing || !commands) {
+        if (backing) dma_free(backing, sizeof(*backing) * MAX_BACKING_PAGES);
+        if (commands) dma_free(commands, MAX_COMMAND_BYTES);
+        backing = NULL;
+        commands = NULL;
+        virtio_pci_set_failed(&device);
+        return -1;
+    }
     virgl = (granted & (1ULL << VIRTIO_GPU_F_VIRGL)) != 0;
     /* Before the queue, because a queue is pointed at the device's vector as it
        is set up and there is no second chance afterwards. A device that cannot

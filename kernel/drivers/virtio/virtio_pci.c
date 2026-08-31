@@ -51,7 +51,10 @@
    way it reports that: the write itself is silent. */
 #define MSIX_NO_VECTOR 0xFFFFU
 
-#define QUEUE_SIZE_MAX 64U
+/* Not a device limit -- it is what this driver is willing to allocate rings
+   for, and it was 64 only because three rings had to fit in three pages. The
+   devices here offer 256. */
+#define QUEUE_SIZE_MAX 256U
 #define RESET_TIMEOUT_NS (500ULL * 1000ULL * 1000ULL)
 
 static uint8_t mapped_bars;
@@ -214,6 +217,8 @@ int virtio_pci_setup_queue(struct virtio_device *device, struct virtio_queue *qu
         write16(device->common, COMMON_QUEUE_MSIX_VECTOR, 0);
         if (read16(device->common, COMMON_QUEUE_MSIX_VECTOR) == MSIX_NO_VECTOR)
             device->vector = 0;
+        else
+            queue->interrupt_driven = 1;
     }
     write64(device->common, COMMON_QUEUE_DESC, vmm_virt_to_phys_direct(queue->descriptors));
     write64(device->common, COMMON_QUEUE_DRIVER, vmm_virt_to_phys_direct(queue->available));
@@ -231,7 +236,7 @@ int virtio_pci_request_irq(struct virtio_device *device, const char *name,
     if (!device || !device->common || !handler) return -1;
     if (pci_msix_enable(&device->pci) != 0) return -1;
 
-    unsigned vector = irq_request(name, handler, context);
+    unsigned vector = irq_request(name, "PCI-MSI", handler, context);
     if (!vector) return -1;
     if (pci_msix_bind(&device->pci, 0, vector) != 0) return -1;
 

@@ -24,6 +24,12 @@
 
 #define VIRTIO_F_VERSION_1 32U
 
+/* In the available ring's flags: "do not interrupt me". A driver that is
+   watching the used ring anyway is asking to be told something it already
+   knows, and being told costs the device a message and this machine a
+   delivery. */
+#define VIRTQ_AVAIL_F_NO_INTERRUPT 1U
+
 #define VIRTQ_DESC_F_NEXT 1U
 #define VIRTQ_DESC_F_WRITE 2U
 
@@ -65,6 +71,14 @@ struct virtio_queue {
     struct virtq_avail *available;
     struct virtq_used *used;
     volatile uint16_t *doorbell;
+    /* The one allocation the three rings live in, and how big it is. Held so
+       the queue can be given back, which matters on the path where a device
+       is found, set up, and then turns out not to work. */
+    void *memory;
+    uint64_t bytes;
+    /* Set when the device raises an interrupt for this queue, which is what
+       lets a waiter sleep instead of spinning. */
+    int interrupt_driven;
 };
 
 struct virtio_device {
@@ -118,5 +132,6 @@ struct virtio_buffer {
 int virtio_queue_submit(struct virtio_queue *queue, const struct virtio_buffer *buffers,
                         unsigned count, unsigned write_from);
 int virtio_ring_alloc(struct virtio_queue *queue, uint16_t size);
+void virtio_ring_free(struct virtio_queue *queue);
 
 #endif
