@@ -199,7 +199,21 @@ $(IMAGE): $(KERNEL) $(LIMINE_EXE) support/limine.conf support/image.sh $(SYSROOT
 # describes, and a desktop under a software rasteriser wants the memory.
 QEMU_MEMORY ?= 4G
 QEMU_SMP    ?= 4
-QEMU_AUDIO  ?= -audiodev none,id=snd0 -device intel-hda -device hda-output,audiodev=snd0
+# Where the sound goes.
+#
+# The card was always here; what was missing was anywhere for it to play. With
+# `none` the guest drives a card whose samples are thrown away, which is a
+# working driver and a silent machine, and the two are hard to tell apart.
+#
+# A PulseAudio socket is what both hosts this runs on offer: WSL publishes one
+# for Windows at /mnt/wslg/PulseServer, and a Linux desktop has its own under
+# XDG_RUNTIME_DIR. Where there is neither, `none` is still right -- QEMU exits
+# rather than starts if it is told to open a server that is not there.
+COMMA := ,
+PULSE_SOCKET := $(firstword $(wildcard /mnt/wslg/PulseServer $(XDG_RUNTIME_DIR)/pulse/native))
+QEMU_AUDIO_BACKEND ?= $(if $(PULSE_SOCKET),pa$(COMMA)server=$(PULSE_SOCKET),none)
+QEMU_AUDIO  ?= -audiodev $(QEMU_AUDIO_BACKEND)$(COMMA)id=snd0 \
+	-device intel-hda -device hda-output,audiodev=snd0
 QEMU_NET    ?= -netdev user,id=net0 -device rtl8139,netdev=net0
 # Named rather than left to QEMU. Its default depends on how the binary was
 # built: a distribution package usually opens a window, but one built without
