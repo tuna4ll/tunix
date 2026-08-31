@@ -24,6 +24,22 @@
 
 void pmm_init(const struct boot_memory_region *regions, uint32_t count);
 void *pmm_alloc_page(void);
+/*
+ * A run of pages that are next to each other in physical memory, aligned to a
+ * multiple of the page size, or NULL.
+ *
+ * Single pages are all a process ever needs -- its address space hides where
+ * they landed -- but a device has no address space. Anything a controller is
+ * pointed at and told a length for has to be contiguous for the whole length,
+ * and until this existed the only way to have that was a static array in the
+ * kernel image, which every driver here duly has.
+ *
+ * The pages are handed back one at a time by pmm_free_pages(), which is why
+ * there is nothing to remember about the run: it is an ordinary allocation
+ * that happens to be adjacent.
+ */
+void *pmm_alloc_pages(uint64_t count, uint64_t alignment_bytes);
+void pmm_free_pages(void *physical_address, uint64_t count);
 /* Drops one reference; the page returns to the allocator at the last one. */
 void pmm_free_page(void *physical_address);
 /* Share an allocated page with another owner. 0 on success, -1 if the page is

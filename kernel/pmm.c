@@ -186,6 +186,60 @@ static void *pmm_alloc_page_locked(void) {
 }
 
 /*
+ * A run, found by walking the bitmap for `count` clear bits in a row.
+ *
+ * Linear, and deliberately so: the runs asked for here are a few hundred pages
+ * at most and are asked for once, at boot, by a driver setting itself up. A
+ * buddy allocator would be the right answer to a caller that did this often,
+ * and there is no such caller.
+ *
+ * Fragmentation is the real limit rather than free memory: a machine that has
+ * been up for a while can have plenty free and no long run left, which is why
+ * this can fail when pmm_alloc_page() would not.
+ */
+void *pmm_alloc_pages(uint64_t count, uint64_t alignment_bytes) {
+    if (!count) return NULL;
+    uint64_t stride = alignment_bytes > PMM_PAGE_SIZE
+                          ? alignment_bytes / PMM_PAGE_SIZE
+                          : 1ULL;
+    if (alignment_bytes & (alignment_bytes - 1ULL)) return NULL;
+
+    oplock_enter();
+    void *found = NULL;
+    if (free_pages >= count) {
+        for (uint64_t first = stride; first + count <= total_pages; first += stride) {
+            uint64_t page = first;
+            while (page < first + count && !bit_test(page)) page++;
+            if (page < first + count) {
+                /* Restart past the page that was taken, rounded up to the next
+                   aligned position: everything between here and there would
+                   fail on the same page. */
+                first = page - (page % stride);
+                continue;
+            }
+            for (page = first; page < first + count; page++) {
+                bit_set(page);
+                refcounts[page] = 1;
+            }
+            free_pages -= count;
+            found = (void *)(first * PMM_PAGE_SIZE);
+            break;
+        }
+    }
+    oplock_leave();
+    return found;
+}
+
+void pmm_free_pages(void *physical_address, uint64_t count) {
+    if (!physical_address || !count) return;
+    uint64_t physical = (uint64_t)physical_address;
+    oplock_enter();
+    for (uint64_t index = 0; index < count; index++)
+        pmm_free_page_locked((void *)(physical + index * PMM_PAGE_SIZE));
+    oplock_leave();
+}
+
+/*
  * Drops one reference and only returns the page to the allocator when the last
  * one goes away. Every existing caller was written when a page had exactly one
  * owner, and for those pages the behaviour is unchanged; shared pages simply
