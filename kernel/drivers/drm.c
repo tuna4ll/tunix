@@ -1515,8 +1515,10 @@ static int64_t ioctl_virtgpu_resource_create(uint64_t user_argument) {
     spec.nr_samples = query.nr_samples;
     spec.flags = query.flags;
 
+    /* The size mesa asked for, not the size of the pages it landed in. */
     uint32_t resource = virtgpu_resource_create_3d(&spec, buffer->pages,
-                                                   buffer->page_count);
+                                                   buffer->page_count,
+                                                   query.size);
     if (!resource) {
         buffer_release(buffer);
         return -ENOMEM;

@@ -332,14 +332,24 @@ static void begin(uint32_t type) {
  * bytes behind it, and this is what says where the bytes are. The pages stay
  * the guest's -- the host reads them when a transfer says to, and nothing here
  * copies anything.
+ *
+ * `bytes` is the resource's real size, which is not the size of the pages
+ * holding it: a 250x250 texture is 250000 bytes and lives in 62 pages of
+ * 253952. Describing all of that as backing makes the host refuse every
+ * transfer -- "IOV data size exceeds resource capacity" -- because it is being
+ * handed more storage than the resource it belongs to can hold. So the last
+ * page is described by the part of it that is actually the resource.
  */
 static int attach_backing(uint32_t resource, const uint64_t *pages,
-                          uint64_t page_count) {
+                          uint64_t page_count, uint64_t bytes) {
     if (!page_count || page_count > MAX_BACKING_PAGES) return -1;
+    if (!bytes || bytes > page_count * 4096ULL) bytes = page_count * 4096ULL;
+    uint64_t remaining = bytes;
     for (uint64_t index = 0; index < page_count; index++) {
         backing[index].address = pages[index];
-        backing[index].length = 4096;
+        backing[index].length = remaining > 4096ULL ? 4096U : (uint32_t)remaining;
         backing[index].padding = 0;
+        remaining -= backing[index].length;
     }
     begin(VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING);
     request.attach.resource_id = resource;
@@ -505,7 +515,8 @@ int virtgpu_context_attach(uint32_t context, uint32_t resource, int attach) {
  * and wants no guest pages behind it at all.
  */
 uint32_t virtgpu_resource_create_3d(const struct virtgpu_resource_3d *spec,
-                                    const uint64_t *pages, uint64_t page_count) {
+                                    const uint64_t *pages, uint64_t page_count,
+                                    uint64_t bytes) {
     if (!virtgpu_virgl_available() || !spec) return 0;
 
     uint32_t resource = next_resource_id;
@@ -524,7 +535,8 @@ uint32_t virtgpu_resource_create_3d(const struct virtgpu_resource_3d *spec,
     if (submit(sizeof(request.create_3d), NULL, 0,
                sizeof(struct virtio_gpu_ctrl_hdr)) != 0) return 0;
 
-    if (pages && page_count && attach_backing(resource, pages, page_count) != 0) {
+    if (pages && page_count &&
+        attach_backing(resource, pages, page_count, bytes) != 0) {
         virtgpu_resource_destroy(resource);
         return 0;
     }
@@ -630,7 +642,10 @@ uint32_t virtgpu_resource_create(uint32_t width, uint32_t height,
     if (submit(sizeof(request.create), NULL, 0, sizeof(struct virtio_gpu_ctrl_hdr)) != 0)
         return 0;
 
-    if (attach_backing(resource, pages, page_count) != 0) {
+    /* A 2D resource is exactly its pixels, and the caller sized the pages to
+       hold them. */
+    if (attach_backing(resource, pages, page_count,
+                       (uint64_t)width * 4ULL * height) != 0) {
         virtgpu_resource_destroy(resource);
         return 0;
     }

@@ -90,10 +90,18 @@ void virtgpu_context_destroy(uint32_t context);
    that mentions one it was not given is refused by the host. */
 int virtgpu_context_attach(uint32_t context, uint32_t resource, int attach);
 
-/* `pages` may be NULL, for a resource that lives only on the host and is never
-   read or written by the guest. Returns the resource id, or 0. */
+/*
+ * `pages` may be NULL, for a resource that lives only on the host and is never
+ * read or written by the guest. `bytes` is the resource's own size, which is
+ * smaller than the pages holding it whenever it does not end on a page
+ * boundary -- and describing the whole of the last page instead makes the host
+ * refuse every transfer to or from the resource.
+ *
+ * Returns the resource id, or 0.
+ */
 uint32_t virtgpu_resource_create_3d(const struct virtgpu_resource_3d *spec,
-                                    const uint64_t *pages, uint64_t page_count);
+                                    const uint64_t *pages, uint64_t page_count,
+                                    uint64_t bytes);
 int virtgpu_transfer_3d(uint32_t context, uint32_t resource,
                         const struct virtgpu_box *box, uint64_t offset,
                         uint32_t level, uint32_t stride, uint32_t layer_stride,
