@@ -18,6 +18,10 @@
 
 int virtgpu_init(void);
 int virtgpu_available(void);
+/* How many times the device has raised its interrupt. Zero on a device with no
+   MSI-X, and zero is also what a vector that was accepted but never delivered
+   looks like, which is the failure worth being able to see. */
+uint64_t virtgpu_interrupt_count(void);
 
 /*
  * Whether the host will take 3D commands *and* described what it can do with

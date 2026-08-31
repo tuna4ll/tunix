@@ -2,12 +2,16 @@
 #define TUNIX_VIRTIO_H
 
 #include <stdint.h>
+#include "irq.h"
 #include "pci.h"
 
 /*
- * The modern (virtio 1.0) PCI transport and a split virtqueue, polled. There is
- * no interrupt path: a request is kicked and then waited out on the used ring,
- * the same bargain rtl8139 makes.
+ * The modern (virtio 1.0) PCI transport and a split virtqueue.
+ *
+ * Requests are still waited out on the used ring. What virtio_pci_request_irq()
+ * adds is a device that also *says* when it has finished one, which is the
+ * half that was missing: a queue the driver has to look at to learn anything
+ * cannot be drained by the device's own timing, only by the driver's.
  */
 
 #define VIRTIO_VENDOR_ID 0x1AF4U
@@ -70,6 +74,9 @@ struct virtio_device {
     volatile uint8_t *isr;
     volatile uint8_t *config;
     uint32_t notify_multiplier;
+    /* The vector the device was given, or 0 while it has none. Queues set up
+       after this is non-zero are pointed at it. */
+    unsigned vector;
 };
 
 /* Find, reset and take ownership of a virtio device, negotiating VERSION_1 plus
@@ -80,6 +87,21 @@ int virtio_pci_attach(struct virtio_device *device, uint16_t device_id,
 int virtio_pci_setup_queue(struct virtio_device *device, struct virtio_queue *queue,
                            uint16_t index);
 void virtio_pci_set_driver_ok(struct virtio_device *device);
+
+/*
+ * Give the device an interrupt of its own, between attach and the first queue.
+ *
+ * One MSI-X entry covers the whole device: its configuration changes and every
+ * queue on it. A device with several busy queues would want one each so they
+ * can be told apart without reading anything, but nothing here has that yet,
+ * and one vector is what makes the difference between an interrupt and none.
+ *
+ * Fails when the device has no MSI-X capability, when the vector pool is
+ * empty, or when the device refuses the vector -- and a driver may carry on
+ * regardless, since polling is what it did before.
+ */
+int virtio_pci_request_irq(struct virtio_device *device, const char *name,
+                           irq_handler_fn handler, void *context);
 void virtio_pci_set_failed(struct virtio_device *device);
 uint32_t virtio_config_read32(const struct virtio_device *device, uint32_t offset);
 

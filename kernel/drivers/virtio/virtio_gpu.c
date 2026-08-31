@@ -596,6 +596,28 @@ int virtgpu_submit_3d(uint32_t context, const void *buffer, uint32_t bytes) {
                   sizeof(struct virtio_gpu_ctrl_hdr));
 }
 
+/*
+ * What the device raises when it has put something on the used ring.
+ *
+ * It does not do the waiting -- submit() still watches the ring, because that
+ * is where the answer is -- so all this does today is count. That is on
+ * purpose: an interrupt arriving at all is the thing being proven here, and a
+ * handler that also did the work would make a delivery failure look like a
+ * hang rather than a number that stays at zero.
+ *
+ * It runs inside whatever the interrupted processor was doing, including a
+ * submit() that is holding the kernel lock, so it must not touch anything
+ * submit() is in the middle of.
+ */
+static uint64_t completions;
+
+static void control_queue_interrupt(void *context) {
+    (void)context;
+    completions++;
+}
+
+uint64_t virtgpu_interrupt_count(void) { return completions; }
+
 int virtgpu_init(void) {
     /* Asking for a feature the device does not offer is not an error -- what
        is negotiated is the intersection -- so this is simply how the question
@@ -604,6 +626,11 @@ int virtgpu_init(void) {
     if (virtio_pci_attach(&device, VIRTIO_GPU_DEVICE_ID,
                           1ULL << VIRTIO_GPU_F_VIRGL, &granted) != 0) return -1;
     virgl = (granted & (1ULL << VIRTIO_GPU_F_VIRGL)) != 0;
+    /* Before the queue, because a queue is pointed at the device's vector as it
+       is set up and there is no second chance afterwards. A device that cannot
+       give one is not a failure: this driver polled from the day it was written
+       and still does. */
+    virtio_pci_request_irq(&device, "virtio-gpu", control_queue_interrupt, NULL);
     if (virtio_pci_setup_queue(&device, &control, VIRTIO_GPU_CONTROL_QUEUE) != 0) {
         virtio_pci_set_failed(&device);
         return -1;
@@ -621,6 +648,8 @@ int virtgpu_init(void) {
                 capset_id, capset_version, capset_size);
     else
         kprintf("TUNIX: virtio-gpu ready, 2D only\n");
+    if (device.vector)
+        kprintf("TUNIX: virtio-gpu interrupts on vector %u\n", device.vector);
     return 0;
 }
 
