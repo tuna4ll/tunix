@@ -5433,36 +5433,95 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         case SYS_UMASK: frame->rax = process_set_umask((uint32_t)frame->rdi); break;
         case SYS_GETTIMEOFDAY: frame->rax = (uint64_t)sys_gettimeofday(frame->rdi); break;
         case SYS_GETRLIMIT: frame->rax = (uint64_t)sys_prlimit(frame->rdi, frame->rsi); break;
-        /* The scheduler is round-robin with one priority level, so every
-           process runs at nice 0 and a request to change that is recorded
-           nowhere. Answering is still necessary: getpriority reports 20 - nice
-           so that a negative nice is not mistaken for an error, and pam_limits
-           treats a failure here as a reason to abort the whole session. */
-        case SYS_GETPRIORITY: frame->rax = 20; break;
-        case SYS_SETPRIORITY: frame->rax = 0; break;
+        /*
+         * nice, which is remembered and reported and changes nothing: it asks
+         * for a share of the processor and there is nothing here that divides
+         * one. getpriority reports 20 - nice so that a negative nice is not
+         * mistaken for an error, and pam_limits treats a failure here as a
+         * reason to abort the whole session.
+         *
+         * PRIO_PROCESS is the only `which` that means anything to this: a
+         * process group or a user is not something the scheduler knows.
+         */
+        case SYS_GETPRIORITY: {
+            int nice = 0;
+            frame->rax = process_get_nice(frame->rdi == 0 ? frame->rsi : 0, &nice) == 0
+                             ? (uint64_t)(20 - nice) : 20;
+            break;
+        }
+        case SYS_SETPRIORITY: {
+            int result = process_set_nice(frame->rdi == 0 ? frame->rsi : 0,
+                                          (int)(int32_t)frame->rdx);
+            frame->rax = result == 0 ? 0 : (uint64_t)(int64_t)result;
+            break;
+        }
         case SYS_GETRUSAGE: frame->rax = (uint64_t)sys_getrusage(frame->rsi); break;
         /*
-         * Scheduling policy. There is one: round robin over every runnable
-         * process at a single priority. SCHED_OTHER is what that is called, and
-         * it is the only thing that can be set; asking for SCHED_FIFO would be
-         * answered with a lie, so it is refused instead. Answering at all
-         * matters because a daemon that cannot read its own policy -- and
-         * procps reads it for every process -- treats the error as fatal.
+         * Scheduling policy, which a thread may now actually have. What it
+         * buys is being taken off the runnable list first; see next_runnable()
+         * in process.c, and docs/sound.md for the program that asked.
+         *
+         * A thread id, not a process id: pthread_setschedparam passes one, and
+         * the thread that wants this is one of several inside a process.
          */
-        case SYS_SCHED_GETSCHEDULER: frame->rax = 0; break;
-        case SYS_SCHED_SETSCHEDULER: frame->rax = frame->rsi == 0 ? 0 : (uint64_t)-(int64_t)EINVAL; break;
+        case SYS_SCHED_GETSCHEDULER: {
+            int policy = 0;
+            int result = process_get_scheduler(frame->rdi, &policy, NULL);
+            frame->rax = result == 0 ? (uint64_t)policy : (uint64_t)(int64_t)result;
+            break;
+        }
+        case SYS_SCHED_SETSCHEDULER: {
+            uint32_t priority = 0;
+            if (frame->rdx &&
+                copy_from_user(&priority, frame->rdx, sizeof(priority)) != 0) {
+                frame->rax = (uint64_t)-(int64_t)EFAULT;
+                break;
+            }
+            int result = process_set_scheduler(frame->rdi, (int)frame->rsi,
+                                               (int)priority);
+            frame->rax = result == 0 ? 0 : (uint64_t)(int64_t)result;
+            break;
+        }
         case SYS_SCHED_GETPARAM:
         case SYS_SCHED_SETPARAM: {
             uint32_t priority = 0;
-            frame->rax = syscall_number == SYS_SCHED_SETPARAM
-                ? 0
-                : (copy_to_user(frame->rsi, &priority, sizeof(priority)) == 0
-                       ? 0 : (uint64_t)-(int64_t)EFAULT);
+            if (syscall_number == SYS_SCHED_SETPARAM) {
+                if (copy_from_user(&priority, frame->rsi, sizeof(priority)) != 0) {
+                    frame->rax = (uint64_t)-(int64_t)EFAULT;
+                    break;
+                }
+                /* The policy stays what it was; only the number inside it
+                   moves, which is what sched_setparam means. */
+                int policy = PROCESS_SCHED_OTHER;
+                int result = process_get_scheduler(frame->rdi, &policy, NULL);
+                if (result == 0)
+                    result = process_set_scheduler(frame->rdi, policy, (int)priority);
+                frame->rax = result == 0 ? 0 : (uint64_t)(int64_t)result;
+                break;
+            }
+            int stored = 0;
+            int result = process_get_scheduler(frame->rdi, NULL, &stored);
+            if (result != 0) {
+                frame->rax = (uint64_t)(int64_t)result;
+                break;
+            }
+            priority = (uint32_t)stored;
+            frame->rax = copy_to_user(frame->rsi, &priority, sizeof(priority)) == 0
+                             ? 0 : (uint64_t)-(int64_t)EFAULT;
             break;
         }
         /* Both zero, which is what Linux answers for SCHED_OTHER. */
+        /* The range a policy's priority may take. Zero for the ordinary band
+           and 1..99 for the real-time ones, as everywhere else. */
         case SYS_SCHED_GET_PRIORITY_MAX:
-        case SYS_SCHED_GET_PRIORITY_MIN: frame->rax = 0; break;
+            frame->rax = (frame->rdi == PROCESS_SCHED_FIFO ||
+                          frame->rdi == PROCESS_SCHED_RR)
+                             ? PROCESS_RT_PRIORITY_MAX : 0;
+            break;
+        case SYS_SCHED_GET_PRIORITY_MIN:
+            frame->rax = (frame->rdi == PROCESS_SCHED_FIFO ||
+                          frame->rdi == PROCESS_SCHED_RR) ? 1 : 0;
+            break;
         case SYS_SCHED_RR_GET_INTERVAL: {
             struct { int64_t seconds; int64_t nanoseconds; } slice = {0, 0};
             frame->rax = copy_to_user(frame->rsi, &slice, sizeof(slice)) == 0

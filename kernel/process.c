@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "include/build_config.h"
+#include "include/cred.h"
 #include "include/elf.h"
 #include "include/file.h"
 #include "include/gdt.h"
@@ -43,6 +44,7 @@ static int process_wake_all_locked(const void *channel);
 #define EINVAL 22
 #define ESRCH 3
 #define EPERM 1
+#define EACCES 13
 #define EAGAIN 11
 #define EFAULT 14
 #define ETIMEDOUT 110
@@ -602,17 +604,120 @@ static void wake_expired_futex_waiters(void) {
     } while (item != queue);
 }
 
+/*
+ * Who runs next: the highest priority anything runnable has, and round robin
+ * among the threads that share it.
+ *
+ * Every thread was equal here until a sound mixer asked not to be. It wakes
+ * every twenty milliseconds, writes for a few hundred microseconds and sleeps
+ * again, and being put at the back of a queue behind a game drawing a hundred
+ * frames a second is the difference between sound and stuttering. Nothing else
+ * on this image asks, which is the usual shape of the thing: a real-time
+ * priority is for a thread that is almost always asleep.
+ *
+ * That also bounds the damage. A thread that asks for a priority and then does
+ * not sleep starves everything below it, exactly as it would on Linux, and
+ * nothing here prevents that -- but the quantum still preempts it in favour of
+ * its equals, so it cannot lock the machine against another thread at its own
+ * priority.
+ *
+ * Two passes over a list that is walked anyway. It is short, and one of the
+ * passes only reads.
+ */
+/* Is anything runnable with a stronger claim than this? Walks the same short
+   list the scheduler walks; the answer is only interesting on a tick. */
+static int higher_priority_waiting(const struct process *than) {
+    if (!queue || !than) return 0;
+    struct process *walk = queue;
+    do {
+        if (walk != than && runnable(walk) && walk->rt_priority > than->rt_priority)
+            return 1;
+        walk = walk->next;
+    } while (walk != queue);
+    return 0;
+}
+
 static struct process *next_runnable(struct process *after) {
     if (!queue) return NULL;
     wake_expired_itimers();
     wake_expired_futex_waiters();
+
+    int best = -1;
+    struct process *walk = queue;
+    do {
+        if (runnable(walk) && walk->rt_priority > best) best = walk->rt_priority;
+        walk = walk->next;
+    } while (walk != queue);
+    if (best < 0) return NULL;
+
     struct process *candidate = after ? after->next : queue;
     struct process *start = candidate;
     do {
-        if (runnable(candidate)) return candidate;
+        if (runnable(candidate) && candidate->rt_priority == best) return candidate;
         candidate = candidate->next;
     } while (candidate != start);
     return NULL;
+}
+
+/*
+ * A thread's own scheduling, or the calling thread's when `tid` is 0.
+ *
+ * SCHED_FIFO is accepted and then scheduled as SCHED_RR: the difference is
+ * whether the tick may take the processor away from a thread with an equal to
+ * run, and answering that faithfully means a single spinning thread can stop
+ * this machine with no way back in. The distinction only shows with two
+ * runnable threads at one priority, neither of which ever blocks. Nothing here
+ * is that, and the honest trade is a scheduler that keeps answering.
+ */
+static struct process *scheduling_target(uint64_t tid) {
+    if (!tid) return current;
+    return process_find(tid);
+}
+
+int process_set_scheduler(uint64_t tid, int policy, int rt_priority) {
+    struct process *target = scheduling_target(tid);
+    if (!target) return -ESRCH;
+
+    int real_time = policy == PROCESS_SCHED_FIFO || policy == PROCESS_SCHED_RR;
+    if (!real_time && policy != PROCESS_SCHED_OTHER &&
+        policy != PROCESS_SCHED_BATCH && policy != PROCESS_SCHED_IDLE)
+        return -EINVAL;
+    if (real_time) {
+        if (rt_priority < 1 || rt_priority > PROCESS_RT_PRIORITY_MAX) return -EINVAL;
+        if (!cred_is_root() && rt_priority > PROCESS_RT_PRIORITY_UNPRIVILEGED_MAX)
+            rt_priority = PROCESS_RT_PRIORITY_UNPRIVILEGED_MAX;
+    } else {
+        if (rt_priority != 0) return -EINVAL;
+    }
+
+    target->policy = policy;
+    target->rt_priority = real_time ? rt_priority : 0;
+    return 0;
+}
+
+int process_get_scheduler(uint64_t tid, int *policy, int *rt_priority) {
+    struct process *target = scheduling_target(tid);
+    if (!target) return -ESRCH;
+    if (policy) *policy = target->policy;
+    if (rt_priority) *rt_priority = target->rt_priority;
+    return 0;
+}
+
+int process_set_nice(uint64_t tid, int nice) {
+    struct process *target = scheduling_target(tid);
+    if (!target) return -ESRCH;
+    if (nice < -20) nice = -20;
+    if (nice > 19) nice = 19;
+    if (nice < target->nice && !cred_is_root()) return -EACCES;
+    target->nice = nice;
+    return 0;
+}
+
+int process_get_nice(uint64_t tid, int *nice) {
+    struct process *target = scheduling_target(tid);
+    if (!target) return -ESRCH;
+    if (nice) *nice = target->nice;
+    return 0;
 }
 
 static void fpu_save(struct process *process) {
@@ -1097,7 +1202,16 @@ void process_timer_interrupt(struct interrupt_frame *frame) {
 
     struct syscall_frame resume = current->saved_frame;
     if (current->time_slice_ticks) current->time_slice_ticks--;
-    if (!current->time_slice_ticks) {
+    /*
+     * A priority is worth little without this. The quantum is five ticks, so a
+     * thread that wakes with a claim on the processor would otherwise wait out
+     * whatever is running -- up to twenty milliseconds, which is a whole audio
+     * period. Measured: worst-case wake-up went from 44 ms to 20 ms when
+     * priorities arrived, and the twenty was this. Giving the tick permission
+     * to take the processor away for a higher priority is what makes the rest
+     * of it mean something.
+     */
+    if (!current->time_slice_ticks || higher_priority_waiting(current)) {
         struct process *preempted = current;
         preempted->state = PROCESS_READY;
         struct process *next = next_runnable(preempted);
@@ -1364,6 +1478,11 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame) {
     child->controlling_pty = parent->controlling_pty;
     child->umask = parent->umask;
     child->cred = parent->cred;
+    /* Scheduling is inherited, as it is on Linux: a thread the mixer starts
+       has the same claim on the processor its parent had. */
+    child->policy = parent->policy;
+    child->rt_priority = parent->rt_priority;
+    child->nice = parent->nice;
     child->signal_stack_pointer = parent->signal_stack_pointer;
     child->signal_stack_size = parent->signal_stack_size;
     child->signal_stack_flags = parent->signal_stack_flags;
@@ -1459,6 +1578,11 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
     child->controlling_pty = parent->controlling_pty;
     child->umask = parent->umask;
     child->cred = parent->cred;
+    /* Scheduling is inherited, as it is on Linux: a thread the mixer starts
+       has the same claim on the processor its parent had. */
+    child->policy = parent->policy;
+    child->rt_priority = parent->rt_priority;
+    child->nice = parent->nice;
     child->signal_stack_flags = SS_DISABLE;
     child->dumpable = parent->dumpable;
     child->no_new_privs = parent->no_new_privs;

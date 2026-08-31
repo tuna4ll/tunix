@@ -144,6 +144,16 @@ struct process {
     uint64_t runtime_ns;
     uint64_t last_scheduled_ns;
     uint32_t time_slice_ticks;
+    /*
+     * Scheduling. `policy` is the number the syscall uses (SCHED_OTHER and
+     * friends); `rt_priority` is 0 for the ordinary band and 1..99 above it,
+     * and is the only thing the scheduler looks at. `nice` is remembered and
+     * reported and does nothing else: it is a share of the processor, and
+     * there is nothing here that divides one.
+     */
+    int policy;
+    int rt_priority;
+    int nice;
     uint64_t involuntary_switches;
     char cmdline[512];
     uint64_t cmdline_length;
@@ -217,6 +227,31 @@ struct process *process_current(void);
    Bound to Ctrl+Alt+D on the console; see the definition for why. */
 void process_dump_all(void);
 struct process *process_find(uint64_t pid);
+
+/*
+ * Scheduling policy, per thread. `tid` of 0 means the calling thread, and a
+ * thread is what these address: pthread_setschedparam passes a thread id, and
+ * an audio mixer raising its own priority is the whole point of them.
+ *
+ * SCHED_FIFO and SCHED_RR both mean "before everything in the ordinary band,
+ * highest number first"; see process.c for why FIFO is not exactly itself.
+ */
+#define PROCESS_SCHED_OTHER 0
+#define PROCESS_SCHED_FIFO 1
+#define PROCESS_SCHED_RR 2
+#define PROCESS_SCHED_BATCH 3
+#define PROCESS_SCHED_IDLE 5
+#define PROCESS_RT_PRIORITY_MAX 99
+/* What a process that is not root may ask for. Linux wants a capability or an
+   rlimit for any of this; there is neither here, and refusing the ordinary
+   user would make the feature useless to the one program that asks -- the
+   sound mixer, which runs as the desktop user. */
+#define PROCESS_RT_PRIORITY_UNPRIVILEGED_MAX 20
+
+int process_set_scheduler(uint64_t tid, int policy, int rt_priority);
+int process_get_scheduler(uint64_t tid, int *policy, int *rt_priority);
+int process_set_nice(uint64_t tid, int nice);
+int process_get_nice(uint64_t tid, int *nice);
 uint64_t process_current_pid(void);
 uint64_t process_current_tid(void);
 uint64_t process_current_ppid(void);
