@@ -122,8 +122,16 @@ frames a second on llvmpipe and 110 through virgl.
 
 ## What is deliberately not here
 
-**Interrupts, and more than one request in flight.** Both follow from the
-polling above.
+**A queue interrupt that anything waits on.** The device has a vector, bound
+through MSI-X, and the driver asks it not to use it: the available ring carries
+`VIRTQ_AVAIL_F_NO_INTERRUPT` while a request is being waited out. Sleeping
+instead of spinning would mean giving back a processor that is holding the
+kernel lock, so every other processor would stop too and the machine would wait
+exactly as long, having also stopped. It was tried, and it cost SuperTuxKart its
+whole start-up. The wait becomes a sleep when that lock is no longer the whole
+kernel's.
+
+**More than one request in flight.** Follows from the polling above.
 
 **A second scanout.** DRM reports one CRTC and one connector, so there is
 nothing above this that could ask for one.

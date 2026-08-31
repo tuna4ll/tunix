@@ -26,6 +26,39 @@ The source address is picked per destination (`net_source_for()`): a packet to
 the reply is matched by four-tuple, so a client that stamped the adapter's
 address on a loopback connection could not recognise its own SYN-ACK.
 
+## How a frame gets in
+
+The card interrupts, and the handler does exactly one thing: it empties the
+card's ring into a queue of 128 frames. It does not touch the network stack.
+
+It cannot. An interrupt arrives inside whatever the processor was doing, which
+may be a system call already halfway through that same stack, and the kernel
+lock does not separate the two -- the handler runs *inside* the lock its victim
+is holding. So the work is split by deadline. Getting frames out of the card
+before the ring wraps over them has one; parsing them does not.
+
+`net_poll()` then hands queued frames to the stack at syscall time, as it always
+did, and sweeps the card itself when there is no interrupt to be had -- a
+machine where the line could not be routed still receives, exactly as it did
+before.
+
+Which line that is takes a guess. A PCI interrupt pin reaches an IOAPIC input
+that ACPI's `_PRT` describes, in AML, which this kernel does not interpret; the
+number in config space is the one the 8259 would have wanted, and on q35 it is
+not the IOAPIC's. So `rtl8139_enable_interrupt()` routes every input the card
+could be on -- the config-space line and 16 through 19 -- to one handler that
+reads the card's status register and returns when the card has nothing to say.
+Sharing a level-triggered pin means doing that anyway.
+
+Routing happens after `apic_init()`, not in `net_init()`. The adapter is set up
+early, before there is an interrupt controller to route through, and routing
+there fails silently and permanently -- which it did, until the two were split.
+
+Measured: 15.5 MB over HTTP raises about 10,000 interrupts, one per frame, and
+takes the same 25 seconds it took when the ring was swept at syscall time. The
+gain is not throughput for a program sitting in `recv()`; it is that frames stop
+depending on one being called.
+
 ## TCP servers
 
 `bind`, `listen` and `accept` work on `AF_INET` sockets.
