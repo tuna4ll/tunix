@@ -209,9 +209,22 @@ QEMU_SMP    ?= 4
 # for Windows at /mnt/wslg/PulseServer, and a Linux desktop has its own under
 # XDG_RUNTIME_DIR. Where there is neither, `none` is still right -- QEMU exits
 # rather than starts if it is told to open a server that is not there.
+#
+# The two numbers matter as much as the socket does. QEMU asks PulseAudio for
+# 15 milliseconds of latency by default, which is a fine bargain on a machine
+# where the sound server is a local process. Under WSL it is not: the samples
+# go over an RDP channel to Windows, and when that channel takes its time it
+# stops the emulator with it. Measured from inside the guest, the application
+# fed the card every 45 milliseconds through a file sink and went as long as
+# 896 milliseconds without feeding it through this one -- five times the whole
+# buffer, so the sound arrived in pieces.
+#
+# A tenth of a second of latency, and twice that of buffer, is enough to ride
+# out those pauses. Nothing here is interactive enough to miss the latency.
 COMMA := ,
 PULSE_SOCKET := $(firstword $(wildcard /mnt/wslg/PulseServer $(XDG_RUNTIME_DIR)/pulse/native))
-QEMU_AUDIO_BACKEND ?= $(if $(PULSE_SOCKET),pa$(COMMA)server=$(PULSE_SOCKET),none)
+PULSE_TUNING := $(COMMA)out.latency=100000$(COMMA)out.buffer-length=200000
+QEMU_AUDIO_BACKEND ?= $(if $(PULSE_SOCKET),pa$(COMMA)server=$(PULSE_SOCKET)$(PULSE_TUNING),none)
 QEMU_AUDIO  ?= -audiodev $(QEMU_AUDIO_BACKEND)$(COMMA)id=snd0 \
 	-device intel-hda -device hda-output,audiodev=snd0
 QEMU_NET    ?= -netdev user,id=net0 -device rtl8139,netdev=net0
