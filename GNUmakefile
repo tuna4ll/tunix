@@ -207,7 +207,13 @@ QEMU_NET    ?= -netdev user,id=net0 -device rtl8139,netdev=net0
 # VNC and prints a port number instead, and the machine appears not to start.
 # `make run QEMU_DISPLAY="-display sdl"` for a QEMU without GTK, and
 # `-display none` for one with no user interface at all.
-QEMU_DISPLAY ?= -display gtk
+#
+# grab-on-hover, because the pointer the guest has is a relative one: it is
+# told how far the mouse moved, never where it is. QEMU only sends that while
+# it holds the host pointer, so without this nothing moves until you click in
+# the window -- which looks exactly like a machine whose mouse does not work.
+# Hovering grabs, leaving releases, and ctrl+alt+g releases by hand.
+QEMU_DISPLAY ?= -display gtk,grab-on-hover=on
 QEMU_COMMON  = -machine q35,accel=kvm:tcg -cpu host -smp $(QEMU_SMP) \
 	-m $(QEMU_MEMORY) -drive format=raw,file=$(IMAGE),if=none,id=disk0 \
 	-device ide-hd,drive=disk0,bus=ide.0 \
@@ -254,7 +260,7 @@ run-uefi: $(IMAGE) $(OVMF) $(OVMF_VARS)
 # option of its own: the guest picks 1280x720 and zoom-to-fit keeps that
 # readable in a window the host may have made smaller.
 QEMU_GPU ?= -vga none -device virtio-vga,xres=1280,yres=720 \
-	-display gtk,zoom-to-fit=on
+	-display gtk,zoom-to-fit=on,grab-on-hover=on
 run-gpu: $(IMAGE)
 	rm -f $(BUILD)/serial.log
 	$(QEMU) $(QEMU_COMMON) $(QEMU_GPU) -serial file:$(BUILD)/serial.log -monitor none
@@ -266,16 +272,19 @@ run-gpu: $(IMAGE)
 # The host needs a GL context of its own to render into, which is what
 # `gl=on` asks the display for. A host that cannot give one leaves the device
 # in 2D -- the guest still boots, it just finds no capset.
-QEMU_VIRGL ?= -vga none -device virtio-vga-gl,xres=1280,yres=720 	-display gtk,gl=on,zoom-to-fit=on
+QEMU_VIRGL ?= -vga none -device virtio-vga-gl,xres=1280,yres=720 \
+	-display gtk,gl=on,zoom-to-fit=on,grab-on-hover=on
 # WSL has no render node, so mesa cannot find a GPU the ordinary way and falls
 # back to software -- which would put the host's rasteriser behind the guest's
 # and be slower than not doing this at all. It does have Direct3D 12 and the
 # libraries Windows exposes, and naming both reaches the real card. On a Linux
 # host with a render node the defaults are already right and this is empty.
-QEMU_GL_ENV ?= $(if $(wildcard /dev/dri),,	$(if $(wildcard /usr/lib/wsl/lib),env LD_LIBRARY_PATH=/usr/lib/wsl/lib GALLIUM_DRIVER=d3d12))
+QEMU_GL_ENV ?= $(if $(wildcard /dev/dri),,\
+	$(if $(wildcard /usr/lib/wsl/lib),env LD_LIBRARY_PATH=/usr/lib/wsl/lib GALLIUM_DRIVER=d3d12))
 run-virgl: $(IMAGE)
 	rm -f $(BUILD)/serial.log
-	$(QEMU_GL_ENV) $(QEMU) $(QEMU_COMMON) $(QEMU_VIRGL) 		-serial file:$(BUILD)/serial.log -monitor none
+	$(QEMU_GL_ENV) $(QEMU) $(QEMU_COMMON) $(QEMU_VIRGL) \
+		-serial file:$(BUILD)/serial.log -monitor none
 
 headless: $(IMAGE)
 	$(QEMU) $(QEMU_COMMON) -nographic -monitor none -serial stdio
