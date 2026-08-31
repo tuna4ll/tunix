@@ -272,11 +272,19 @@ run-gpu: $(IMAGE)
 # The host needs a GL context of its own to render into, which is what
 # `gl=on` asks the display for. A host that cannot give one leaves the device
 # in 2D -- the guest still boots, it just finds no capset.
-# No zoom-to-fit here, unlike the 2D target. The guest comes up at exactly the
-# size asked for, so there is nothing to scale -- and GTK's GL widget is the
-# one place where scaling and pointer handling have been seen to disagree.
+# SDL rather than GTK, and only here.
+#
+# GTK's GL widget does not deliver pointer motion to the guest: the same image
+# under `-display gtk` with a 2D card has a working mouse, and under
+# `-display sdl,gl=on` it has a working mouse, but `-display gtk,gl=on` has
+# none -- with or without scaling, and with grab-on-hover either way. Nothing
+# on the guest side differs between the three; the pointer is drawn and moved
+# the moment motion arrives.
+#
+# No zoom-to-fit either: the guest now comes up at exactly the size asked for,
+# so there is nothing to scale and nothing left over to show as a black band.
 QEMU_VIRGL ?= -vga none -device virtio-vga-gl,xres=1280,yres=720 \
-	-display gtk,gl=on,grab-on-hover=on
+	-display sdl,gl=on
 # WSL has no render node, so mesa cannot find a GPU the ordinary way and falls
 # back to software -- which would put the host's rasteriser behind the guest's
 # and be slower than not doing this at all. It does have Direct3D 12 and the
