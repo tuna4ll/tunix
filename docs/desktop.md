@@ -109,9 +109,10 @@ Two things had to be fixed for that to work:
 - **A display manager.** The session is one user's, started by runit, with no
   greeter in front of it.
 - **XWayland.** Nothing in the image is an X client.
-- **Hardware acceleration.** virgl would need the host to have a working GL
-  stack and a render node, which is a property of the machine Tunix is being
-  run on rather than of Tunix.
+- **Hardware acceleration by default.** `make run-virgl` gives the session the
+  host's GPU through virgl; every other target leaves it on llvmpipe, because
+  the host having a usable GL stack is a property of the machine rather than of
+  Tunix.
 - **A second output.** DRM reports one CRTC and one connector.
 
 ## OpenGL, and the two things it needed

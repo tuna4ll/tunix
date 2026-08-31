@@ -110,12 +110,17 @@ gives a full-size desktop; `QEMU_GPU_DISPLAY=gtk,full-screen=on` skips the step.
 The guest is unaffected either way — DRM reports one mode, the bootloader's, and
 nothing reads the host's ui_info.
 
-## What is deliberately not here
+## 3D
 
-**3D.** Nothing negotiates `VIRTIO_GPU_F_VIRGL`, so the device comes up in 2D
-mode and mesa keeps rasterising with llvmpipe. virgl would need the host to have
-a working GL stack and a render node, which is a property of the machine Tunix is
-being run on rather than of Tunix.
+The driver negotiates `VIRTIO_GPU_F_VIRGL` where the host offers it, so mesa
+finds a real driver on `/dev/dri/renderD128` and the host renders on its own
+GPU. `make run-virgl` is the target that asks QEMU for it; without it the device
+is the same one in 2D mode and mesa rasterises with llvmpipe.
+
+The difference is the whole point: SuperTuxKart's own profiling lap runs at 49
+frames a second on llvmpipe and 110 through virgl.
+
+## What is deliberately not here
 
 **Interrupts, and more than one request in flight.** Both follow from the
 polling above.
