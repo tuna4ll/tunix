@@ -401,6 +401,9 @@ static uint32_t ring_limit_bytes(void) {
 static int hw_refine(struct snd_pcm_hw_params *params) {
     const struct snd_hardware *hardware = &card->hardware;
     uint32_t allowed[SNDRV_MASK_WORDS];
+    /* Kept to answer the only question the caller asks afterwards: which of
+       these parameters did you change. See the end of this function. */
+    struct snd_pcm_hw_params before = *params;
 
     supported_access_mask(allowed);
     (void)mask_intersect(mask_of(params, SNDRV_PCM_HW_PARAM_ACCESS), allowed);
@@ -462,6 +465,27 @@ static int hw_refine(struct snd_pcm_hw_params *params) {
         changed |= relate_muldiv(period_bytes, period_size, frame_bits, 8);
         changed |= relate_muldiv(buffer_bytes, buffer_size, frame_bits, 8);
         changed |= relate_muldiv(buffer_size, period_size, periods, 1);
+        /*
+         * And the part that is not a bound: the buffer is a whole number of
+         * periods, so with a period fixed, a buffer that is not a multiple of
+         * it does not exist.
+         *
+         * relate_muldiv() alone says only that 1536 frames lies between two
+         * and three 528-frame periods, which is true and useless. Answering
+         * that leaves alsa-lib holding a set with no solution in it, and it
+         * does not find that out until it commits -- so the failure surfaces
+         * as snd_pcm_hw_params() returning EINVAL with no ioctl behind it,
+         * from a library that was told the configuration was available.
+         * Refusing it here is what sends the caller back to ask for a buffer
+         * that exists, which is what every program does next.
+         */
+        if (!period_size->empty && period_size->min == period_size->max &&
+            period_size->min) {
+            uint64_t one = period_size->min;
+            changed |= interval_refine(buffer_size,
+                                       divide_up(buffer_size->min, one) * one,
+                                       divide_down(buffer_size->max, one) * one);
+        }
         /* The two time parameters, in microseconds, both ways. */
         changed |= interval_refine(period_time,
                                    divide_down((uint64_t)period_size->min * 1000000U, rate->max),
@@ -487,7 +511,44 @@ static int hw_refine(struct snd_pcm_hw_params *params) {
     params->rate_num = rate->max;
     params->rate_den = 1;
     params->fifo_size = hardware->fifo_size;
-    params->cmask = params->rmask;
+
+    /*
+     * Which parameters this call actually narrowed, one bit each.
+     *
+     * It used to answer `cmask = rmask`: "everything you asked about changed",
+     * which is not an approximation, it is a different statement. Opening the
+     * card directly survives it because the hw plugin takes the answer and
+     * asks nothing more. A plugin chain does not: alsa-lib refines the slave,
+     * maps whatever cmask names back up through the chain, and repeats until
+     * nothing changes. Told that everything changes, it re-derives the client
+     * parameters from a slave that never moved, gets a set it cannot satisfy,
+     * and gives up in the library -- `snd_pcm_hw_params` returning EINVAL with
+     * no ioctl behind it, which is a hard thing to see from in here.
+     *
+     * What that looked like: `aplay -D hw:0,0` worked and `aplay -D default`
+     * did not, and neither did anything else that goes through `plug`, which
+     * is nearly every program. OpenAL, and so SuperTuxKart, is in that group.
+     */
+    uint32_t changed_mask = 0;
+    for (unsigned index = 0; index < SNDRV_PCM_HW_PARAM_MASK_COUNT; index++) {
+        for (unsigned word = 0; word < SNDRV_MASK_WORDS; word++)
+            if (before.masks[index].bits[word] != params->masks[index].bits[word]) {
+                changed_mask |= 1U << (SNDRV_PCM_HW_PARAM_FIRST_MASK + index);
+                break;
+            }
+    }
+    for (unsigned index = 0; index < SNDRV_PCM_HW_PARAM_INTERVAL_COUNT; index++) {
+        const struct snd_interval *was = &before.intervals[index];
+        const struct snd_interval *now = &params->intervals[index];
+        if (was->min != now->min || was->max != now->max ||
+            was->openmin != now->openmin || was->openmax != now->openmax ||
+            was->integer != now->integer || was->empty != now->empty)
+            changed_mask |= 1U << (SNDRV_PCM_HW_PARAM_FIRST_INTERVAL + index);
+    }
+    params->cmask = changed_mask;
+    /* Consumed: the request has been answered, and leaving it set makes the
+       next caller's refine look like a repeat of this one. */
+    params->rmask = 0;
     return 0;
 }
 
