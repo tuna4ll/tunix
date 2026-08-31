@@ -51,18 +51,22 @@ whole thing works.
 
 ## What the game needed on top
 
-OpenAL Soft asks for a 33 millisecond buffer: three periods of 512 frames. That
-is a fair bargain on hardware, where the mixing thread runs at a raised priority
-and the card wakes it. Here it is neither. Nothing in this kernel implements
-scheduling priorities, so `pthread_setschedparam` fails and the mixer runs at
-the same priority as the game drawing a hundred frames a second beside it, and
-the wake-up comes from the tick at four milliseconds' resolution. The stream
-underran continuously: `mmap commit error: Broken pipe`, over and over, and
-silence.
+OpenAL Soft asks for a 33 millisecond buffer: three periods of 512 frames, and
+it raises its mixing thread's priority so it can keep one that small. Both
+halves of that mattered here.
 
-`/etc/openal/alsoft.conf` asks for 8192 frames instead, which is 170
-milliseconds. Far more latency than a game wants, and enough to survive being
-descheduled for a whole frame. Lower it when the scheduler grows priorities.
+The kernel had one priority level, so `pthread_setschedparam` was refused and
+the mixer ran level with the game drawing a hundred frames a second beside it.
+The stream underran continuously: `mmap commit error: Broken pipe`, over and
+over, and silence. It has priorities now (see
+[Syscalls and Scheduler](syscalls-and-scheduler.md)), and with the same image
+and the same emulator, only the kernel differing, a run of the game went from
+**322 underruns to none**.
+
+`/etc/openal/alsoft.conf` still asks for 8192 frames, which is 170
+milliseconds, because the priority is not the whole story: 512 frames times 4
+was tried once priorities existed and produced 5086 underruns under a software
+renderer. Something here still stops for longer than 43 milliseconds at a time.
 
 `/etc/asound.conf` is the other half: the stock configuration for an HD Audio
 card sends `default` through dmix, which mixes in the library using SysV
@@ -100,11 +104,10 @@ stops the emulator with it, and 896 milliseconds is five times the whole
 buffer, so what comes out is pieces. The build now asks for a tenth of a second
 of latency and twice that of buffer.
 
-What is left is a handful of glitches in the first seconds, while the game
-loads its assets, and they are not a buffering problem: raising the buffer from
-170 to 256 milliseconds removed two of eleven. Something in the kernel holds
-everything up for longer than that during heavy reading, and the giant lock is
-the obvious suspect. Once the game is running the stream is clean.
+A handful of glitches remained after that, in the first seconds while the game
+loaded its assets, and they were not a buffering problem: raising the buffer
+from 170 to 256 milliseconds removed two of eleven. Scheduling priorities
+removed all of them.
 
 ## Verified
 

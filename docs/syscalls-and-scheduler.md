@@ -149,10 +149,34 @@ The scheduler is round robin over the circular `queue`, shared by every
 processor — see [Multiprocessor](multiprocessor.md) for how they are started
 and what keeps them out of each other's way:
 
-- `next_runnable(after)` (`kernel/process.c:385`) walks forward from
-  `after` (or from the head if `after` is `NULL`) and returns the first
-  process in `PROCESS_READY` state, wrapping around the list once. A `RUNNING`
-  process is not a candidate: it is loaded on some processor already.
+- `next_runnable(after)` finds the highest `rt_priority` anything runnable
+  has, then walks forward from `after` (or from the head if `after` is `NULL`)
+  and returns the first process in `PROCESS_READY` state holding it, wrapping
+  around the list once. A `RUNNING` process is not a candidate: it is loaded on
+  some processor already.
+- `rt_priority` is 0 for everything unless a thread asks, through
+  `sched_setscheduler(SCHED_FIFO|SCHED_RR)`, for 1 to 99. Higher runs first and
+  equals take turns. `SCHED_FIFO` is accepted and then scheduled as `SCHED_RR`:
+  running a thread until it blocks, as FIFO promises, lets one loop stop the
+  machine with no way back in, and the difference only shows between two
+  runnable threads at one priority that never sleep.
+- A tick also hands the processor over when something with a higher priority is
+  waiting, rather than only when the quantum runs out. Without that a priority
+  is worth a great deal less: the waiting thread would sit through up to a
+  whole 20 ms quantum. Measured, on a machine with six spinners and four
+  processors, as how late a thread asking to wake every 20 ms actually woke:
+
+  ```
+  ordinary priority            median 8.4 ms, worst 43.0 ms
+  SCHED_RR 10, no preemption   median 11.5 ms, worst 23.5 ms
+  SCHED_RR 10, with it         median 4.5 ms, worst 23.6 ms
+  ```
+
+  What asks for this is the sound mixer; see [Sound](sound.md), where the same
+  change took a game from 322 underruns to none.
+- `nice` is remembered, reported through `getpriority`, and does nothing.
+  It asks for a share of the processor and there is nothing here that divides
+  one.
 - The quantum is `PROCESS_DEFAULT_QUANTUM_TICKS` = 5 timer ticks
   (`kernel/process.c:33`). The timer runs at `TIMER_FREQUENCY_HZ` = 250 Hz
   (`kernel/include/timer.h:8`), a PIT rate generator programmed by
