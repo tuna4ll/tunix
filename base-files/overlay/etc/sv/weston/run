@@ -2,7 +2,9 @@
 # Weston, as the ordinary user rather than as root.
 #
 # It gets the display and the input devices from seatd instead of opening them
-# itself, which is why the account only has to be in the _seatd group.
+# itself, which is why the account only has to be in the _seatd group -- and in
+# audio, because /dev/snd is 0660 root:audio and chpst below hands the session
+# exactly the groups it is named, not the ones /etc/group would give a login.
 exec 2>&1
 
 # Wait for the socket, not for the service: seatd is reported up as soon as it
@@ -54,4 +56,4 @@ export EGL_PLATFORM=wayland
 install -d -m 0700 -o tunix -g tunix "$XDG_RUNTIME_DIR"
 
 cd "$HOME" || exit 1
-exec chpst -u tunix:tunix:_seatd weston
+exec chpst -u tunix:tunix:_seatd:audio weston

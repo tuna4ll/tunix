@@ -157,6 +157,10 @@ sed -i 's|^wheel:x:\([0-9]*\):.*|wheel:x:\1:tunix|' "$SYSROOT/etc/group"
 # display and the input devices rather than opening them itself. The group is
 # created by the seatd package, so only the membership is written here.
 sed -i 's|^_seatd:x:\([0-9]*\):.*|_seatd:x:\1:tunix|' "$SYSROOT/etc/group"
+# The sound devices are 0660 root:audio, so an account that is not in the group
+# has no sound at all -- and nothing says so: a program opens the card, is
+# refused, and reports that it found none.
+sed -i 's|^audio:x:\([0-9]*\):.*|audio:x:\1:tunix|' "$SYSROOT/etc/group"
 
 chown -R 1000:1000 "$SYSROOT/home/tunix"
 chmod 0700 "$SYSROOT/home/tunix"
