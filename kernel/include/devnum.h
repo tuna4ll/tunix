@@ -35,13 +35,24 @@
 /*
  * The groups a device node belongs to. They are how a normal user reaches the
  * hardware at all: the desktop needs the display and the input devices, and
- * without these it would need to be root to have them. /etc/group carries the
- * same numbers.
+ * without these it would need to be root to have them.
+ *
+ * These are numbers, and the *only* thing that gives a number meaning is the
+ * `/etc/group` of the userland on the image -- which is Void's. They were
+ * Debian's, from the days when the userland was built here: audio was 29 and
+ * video 44, which on this image name no group at all. A node in a group nobody
+ * is in is a node only root can open, and nothing says so. What it looks like
+ * instead is a program reporting that the machine has no sound card, while the
+ * same program run from a login shell works, because udev quietly corrects the
+ * ownership seconds later.
+ *
+ * Taken from Void's `base-files`. Check them against the image's /etc/group
+ * before changing the distribution underneath.
  */
 #define DEV_GROUP_TTY 5
-#define DEV_GROUP_DISK 6
-#define DEV_GROUP_AUDIO 29
-#define DEV_GROUP_VIDEO 44
-#define DEV_GROUP_INPUT 45
+#define DEV_GROUP_DISK 9
+#define DEV_GROUP_AUDIO 12
+#define DEV_GROUP_VIDEO 13
+#define DEV_GROUP_INPUT 25
 
 #endif
