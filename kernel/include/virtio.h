@@ -164,6 +164,11 @@ int virtio_queue_post(struct virtio_queue *queue, const struct virtio_buffer *bu
                       unsigned count, unsigned write_from);
 /* Take back every chain the device has finished with. Returns how many. */
 unsigned virtio_queue_reclaim(struct virtio_queue *queue);
+/* Take one completed chain back and report what the device returned. The head
+   descriptor's address identifies a driver's receive buffer. Returns 1 when a
+   chain was taken, zero when the used ring is empty. */
+int virtio_queue_take_used(struct virtio_queue *queue, uint64_t *address,
+                           uint32_t *length);
 /* Wait until nothing is outstanding. 0, or -1 if the device stopped answering. */
 int virtio_queue_drain(struct virtio_queue *queue);
 uint64_t virtio_queue_outstanding(const struct virtio_queue *queue);

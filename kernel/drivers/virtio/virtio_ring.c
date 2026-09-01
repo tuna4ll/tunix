@@ -111,7 +111,7 @@ int virtio_queue_post(struct virtio_queue *queue, const struct virtio_buffer *bu
     /* Silence first, watch second: nothing here waits for an interrupt, and
        one raised for a completion the driver will notice anyway is a message,
        a vector and a trip through the dispatcher spent saying so. */
-    queue->available->flags = VIRTQ_AVAIL_F_NO_INTERRUPT;
+    queue->available->flags = queue->interrupt_driven ? 0 : VIRTQ_AVAIL_F_NO_INTERRUPT;
     queue->available->ring[queue->available->index % queue->size] = (uint16_t)head;
     __sync_synchronize();
     queue->available->index++;
@@ -134,6 +134,24 @@ unsigned virtio_queue_reclaim(struct virtio_queue *queue) {
         taken++;
     }
     return taken;
+}
+
+int virtio_queue_take_used(struct virtio_queue *queue, uint64_t *address,
+                           uint32_t *length) {
+    if (!queue || !queue->size || queue->used->index == queue->last_used) return 0;
+    __sync_synchronize();
+    struct virtq_used_element used = queue->used->ring[queue->last_used % queue->size];
+    if (used.id >= queue->size) {
+        queue->last_used++;
+        queue->completed++;
+        return 0;
+    }
+    if (address) *address = queue->descriptors[used.id].address;
+    if (length) *length = used.length;
+    give_descriptors_back(queue, (uint16_t)used.id);
+    queue->last_used++;
+    queue->completed++;
+    return 1;
 }
 
 uint64_t virtio_queue_outstanding(const struct virtio_queue *queue) {
