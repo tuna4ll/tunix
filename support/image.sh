@@ -43,39 +43,26 @@ mkdir -p "$WORK"
 # --- the EFI system partition ----------------------------------------------
 
 #
-# One directory per mmd, because the way a later copy goes wrong is unreadable.
-# mcopy answers a *missing target directory* with
-#
-#   ::/boot/limine/limine-bios.sys: no match for target
-#   Bad target ::/boot/limine/limine-bios.sys
-#
-# which names the file it was asked to write and says nothing about the
-# directory that is actually absent. With `set -e`, mmd itself is the reliable
-# check: probing an empty directory afterward has produced false negatives in
-# released mtools versions even though the directory was created successfully.
-esp_mkdir() {
-	mmd -i "$WORK/esp.img" "$1"
-}
-
 # And a source that is not there is worth its own sentence: mcopy reports it as
 # a plain "No such file or directory", which reads like a bug in the image
 # rather than a download that did not finish.
 esp_copy() {
 	[ -f "$1" ] || { echo "image.sh: $1 is missing." >&2; exit 1; }
-	mcopy -i "$WORK/esp.img" "$1" "$2"
+	cp "$1" "$WORK/esp-root/$2"
 }
 
 echo ":: building the ESP"
 truncate -s "${ESP_MIB}M" "$WORK/esp.img"
 mformat -i "$WORK/esp.img" -F -v TUNIX ::
-esp_mkdir ::/EFI
-esp_mkdir ::/EFI/BOOT
-esp_mkdir ::/boot
-esp_mkdir ::/boot/limine
-esp_copy "$LIMINE_DIR/BOOTX64.EFI" ::/EFI/BOOT/BOOTX64.EFI
-esp_copy "$LIMINE_DIR/limine-bios.sys" ::/boot/limine/limine-bios.sys
-esp_copy "$LIMINE_CONF" ::/boot/limine/limine.conf
-esp_copy "$KERNEL" ::/boot/kernel.elf
+mkdir -p "$WORK/esp-root/EFI/BOOT" "$WORK/esp-root/boot/limine"
+esp_copy "$LIMINE_DIR/BOOTX64.EFI" EFI/BOOT/BOOTX64.EFI
+esp_copy "$LIMINE_DIR/limine-bios.sys" boot/limine/limine-bios.sys
+esp_copy "$LIMINE_CONF" boot/limine/limine.conf
+esp_copy "$KERNEL" boot/kernel.elf
+# Populate the filesystem in one mtools process. Separate mmd and mcopy
+# invocations have been observed to disagree about directories that mdir can
+# subsequently see, causing mcopy to reject an existing target as "Bad target".
+mcopy -s -i "$WORK/esp.img" "$WORK/esp-root"/* ::
 
 # --- the root filesystem ----------------------------------------------------
 #
