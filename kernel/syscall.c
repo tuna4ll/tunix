@@ -4166,13 +4166,13 @@ static int64_t sys_getrandom(uint64_t user_buffer, size_t length, unsigned flags
  * however many it is running. The return value is the number of bytes written,
  * not zero, which is the part callers actually read.
  */
-static int64_t sys_sched_getaffinity(size_t size, uint64_t user_mask) {
+static int64_t sys_sched_getaffinity(uint64_t tid, size_t size, uint64_t user_mask) {
     if (!user_mask) return -EFAULT;
     if (size < sizeof(uint64_t) || (size & (sizeof(uint64_t) - 1))) return -EINVAL;
 
-    unsigned cpus = smp_cpu_count();
-    if (cpus > 64) cpus = 64;
-    uint64_t mask = cpus >= 64 ? ~0ULL : (1ULL << cpus) - 1ULL;
+    uint64_t mask = 0;
+    int result = process_get_affinity(tid, &mask);
+    if (result != 0) return result;
 
     size_t bytes = size > sizeof(uint64_t) ? sizeof(uint64_t) : size;
     if (copy_to_user(user_mask, &mask, bytes) != 0) return -EFAULT;
@@ -4181,6 +4181,14 @@ static int64_t sys_sched_getaffinity(size_t size, uint64_t user_mask) {
         if (copy_to_user(user_mask + offset, &zero, sizeof(zero)) != 0) return -EFAULT;
     }
     return (int64_t)size;
+}
+
+static int64_t sys_sched_setaffinity(uint64_t tid, size_t size, uint64_t user_mask) {
+    if (!user_mask) return -EFAULT;
+    if (size < sizeof(uint64_t) || (size & (sizeof(uint64_t) - 1))) return -EINVAL;
+    uint64_t mask = 0;
+    if (copy_from_user(&mask, user_mask, sizeof(mask)) != 0) return -EFAULT;
+    return process_set_affinity(tid, mask);
 }
 
 static int64_t sys_arch_prctl(int code, uint64_t address) {
@@ -5043,12 +5051,19 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         }
         case SYS_SCHED_YIELD: frame->rax = 0; process_yield_from_syscall(frame); break;
         case SYS_SCHED_GETAFFINITY:
-            frame->rax = (uint64_t)sys_sched_getaffinity((size_t)frame->rsi, frame->rdx);
+            frame->rax = (uint64_t)sys_sched_getaffinity(frame->rdi,
+                                                        (size_t)frame->rsi, frame->rdx);
             break;
-        /* Every processor is equal here and nothing is pinned, so the only
-           honest answer to a request to narrow the set is that it changed
-           nothing -- which is what a caller asking for the default gets. */
-        case SYS_SCHED_SETAFFINITY: frame->rax = 0; break;
+        case SYS_SCHED_SETAFFINITY:
+            frame->rax = (uint64_t)sys_sched_setaffinity(frame->rdi,
+                                                        (size_t)frame->rsi, frame->rdx);
+            if ((int64_t)frame->rax == 0) {
+                uint64_t mask = 0;
+                if (process_get_affinity(0, &mask) == 0 &&
+                    !(mask & (1ULL << cpu_current()->index)))
+                    process_yield_from_syscall(frame);
+            }
+            break;
         case SYS_EPOLL_CREATE:
             frame->rax = frame->rdi == 0 ? (uint64_t)-(int64_t)EINVAL :
                          (uint64_t)sys_epoll_create(0);
@@ -5434,9 +5449,8 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         case SYS_GETTIMEOFDAY: frame->rax = (uint64_t)sys_gettimeofday(frame->rdi); break;
         case SYS_GETRLIMIT: frame->rax = (uint64_t)sys_prlimit(frame->rdi, frame->rsi); break;
         /*
-         * nice, which is remembered and reported and changes nothing: it asks
-         * for a share of the processor and there is nothing here that divides
-         * one. getpriority reports 20 - nice so that a negative nice is not
+         * Nice selects a weight in the ordinary scheduler band. getpriority
+         * reports 20 - nice so that a negative nice is not
          * mistaken for an error, and pam_limits treats a failure here as a
          * reason to abort the whole session.
          *
