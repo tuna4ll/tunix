@@ -178,6 +178,11 @@ done
 # directory as 0777 and cp -a faithfully copies that.
 chmod 0750 "$SYSROOT/etc/sudoers.d"
 chmod 0440 "$SYSROOT/etc/sudoers.d/tunix"
+# sudo ignores policy files that are writable by, or owned by, the account
+# they authorize. The overlay comes from the checkout and may therefore carry
+# the builder's uid; normalize both objects to root before the filesystem is
+# packed into the image.
+chown 0:0 "$SYSROOT/etc/sudoers.d" "$SYSROOT/etc/sudoers.d/tunix"
 
 # /dev, /proc, /sys, /run and /tmp belong to the kernel, which fills them in at
 # boot. Whatever a package left in them here would sit underneath and shadow
