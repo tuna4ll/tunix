@@ -121,4 +121,11 @@ dd if="$WORK/root.img" of="$IMAGE" bs=4M oflag=seek_bytes \
 "$LIMINE_DIR/limine" bios-install "$IMAGE"
 
 rm -rf "$WORK"
+# `make image` often needs root for the sysroot, but QEMU must be able to open
+# the resulting disk as the desktop user. Return ownership to the caller when
+# sudo supplied its original uid/gid; a directly-rooted build keeps its normal
+# root ownership.
+if [ -n "${SUDO_UID:-}" ] && [ -n "${SUDO_GID:-}" ]; then
+	chown "$SUDO_UID:$SUDO_GID" "$IMAGE"
+fi
 echo ":: $IMAGE ready, $TABLE ($(du -h "$IMAGE" | cut -f1))"
