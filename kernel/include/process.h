@@ -143,17 +143,17 @@ struct process {
     uint64_t start_time_ns;
     uint64_t runtime_ns;
     uint64_t last_scheduled_ns;
+    uint64_t virtual_runtime_ns;
     uint32_t time_slice_ticks;
     /*
      * Scheduling. `policy` is the number the syscall uses (SCHED_OTHER and
      * friends); `rt_priority` is 0 for the ordinary band and 1..99 above it,
-     * and is the only thing the scheduler looks at. `nice` is remembered and
-     * reported and does nothing else: it is a share of the processor, and
-     * there is nothing here that divides one.
+     * `nice` weights virtual runtime in the ordinary scheduling band.
      */
     int policy;
     int rt_priority;
     int nice;
+    uint64_t affinity_mask;
     uint64_t involuntary_switches;
     char cmdline[512];
     uint64_t cmdline_length;
@@ -252,6 +252,8 @@ int process_set_scheduler(uint64_t tid, int policy, int rt_priority);
 int process_get_scheduler(uint64_t tid, int *policy, int *rt_priority);
 int process_set_nice(uint64_t tid, int nice);
 int process_get_nice(uint64_t tid, int *nice);
+int process_set_affinity(uint64_t tid, uint64_t mask);
+int process_get_affinity(uint64_t tid, uint64_t *mask);
 uint64_t process_current_pid(void);
 uint64_t process_current_tid(void);
 uint64_t process_current_ppid(void);

@@ -16,6 +16,7 @@ static int process_wake_all_locked(const void *channel);
 #include "include/pmm.h"
 #include "include/process.h"
 #include "include/procfs.h"
+#include "include/smp.h"
 #include "include/syscall.h"
 #include "include/time.h"
 #include "include/tty.h"
@@ -55,6 +56,25 @@ static int process_wake_all_locked(const void *channel);
 #define ROBUST_LIST_LIMIT 2048U
 #define DEFAULT_TIMERSLACK_NS 50000ULL
 #define PROCESS_DEFAULT_QUANTUM_TICKS 5U
+#define SCHED_TARGET_LATENCY_TICKS 6U
+#define SCHED_MIN_GRANULARITY_TICKS 1U
+#define SCHED_WAKEUP_GRANULARITY_NS 4000000ULL
+#define NICE_0_WEIGHT 1024ULL
+
+/* Linux's well-tested geometric nice scale, rounded to integer weights. */
+static const uint32_t nice_weights[40] = {
+    88761, 71755, 56483, 46273, 36291, 29154, 23254, 18705, 14949, 11916,
+     9548,  7620,  6100,  4904,  3906,  3121,  2501,  1991,  1586,  1277,
+     1024,   820,   655,   526,   423,   335,   272,   215,   172,   137,
+      110,    87,    70,    56,    45,    36,    29,    23,    18,    15,
+};
+
+static uint64_t process_weight(const struct process *process) {
+    int nice = process ? process->nice : 0;
+    if (nice < -20) nice = -20;
+    if (nice > 19) nice = 19;
+    return nice_weights[nice + 20];
+}
 
 extern void process_enter_user(uint64_t entry, uint64_t user_stack, uint64_t cr3) __attribute__((noreturn));
 /* Park on the idle stack. The first releases the kernel lock on the way, for
@@ -555,8 +575,14 @@ uint32_t process_set_umask(uint32_t mask) {
  * up marks it READY (or blocked, or dead) before it looks for the next one, so
  * nothing is lost by refusing to consider it while it is still on a processor.
  */
+static int allowed_on_this_cpu(const struct process *process) {
+    if (!process) return 0;
+    uint64_t mask = process->affinity_mask ? process->affinity_mask : ~0ULL;
+    return (mask & (1ULL << cpu_current()->index)) != 0;
+}
+
 static int runnable(const struct process *process) {
-    return process && process->state == PROCESS_READY;
+    return process && process->state == PROCESS_READY && allowed_on_this_cpu(process);
 }
 
 static void signal_one_process(struct process *target, int signal_number);
@@ -637,6 +663,41 @@ static int higher_priority_waiting(const struct process *than) {
     return 0;
 }
 
+static int ordinary_should_preempt(const struct process *running) {
+    if (!queue || !running || running->rt_priority) return 0;
+    struct process *walk = queue;
+    do {
+        if (walk != running && runnable(walk) && !walk->rt_priority &&
+            walk->virtual_runtime_ns + SCHED_WAKEUP_GRANULARITY_NS <
+                running->virtual_runtime_ns)
+            return 1;
+        walk = walk->next;
+    } while (walk != queue);
+    return 0;
+}
+
+static uint32_t ordinary_slice_ticks(const struct process *selected) {
+    uint64_t total_weight = 0;
+    unsigned runnable_count = 0;
+    struct process *walk = queue;
+    if (!walk || !selected) return PROCESS_DEFAULT_QUANTUM_TICKS;
+    do {
+        if (runnable(walk) && !walk->rt_priority) {
+            total_weight += process_weight(walk);
+            runnable_count++;
+        }
+        walk = walk->next;
+    } while (walk != queue);
+
+    if (!total_weight) return PROCESS_DEFAULT_QUANTUM_TICKS;
+    uint64_t period = SCHED_TARGET_LATENCY_TICKS;
+    if (runnable_count > period) period = runnable_count;
+    uint64_t ticks = period * process_weight(selected) / total_weight;
+    if (ticks < SCHED_MIN_GRANULARITY_TICKS) ticks = SCHED_MIN_GRANULARITY_TICKS;
+    if (ticks > SCHED_TARGET_LATENCY_TICKS) ticks = SCHED_TARGET_LATENCY_TICKS;
+    return (uint32_t)ticks;
+}
+
 static struct process *next_runnable(struct process *after) {
     if (!queue) return NULL;
     wake_expired_itimers();
@@ -652,6 +713,16 @@ static struct process *next_runnable(struct process *after) {
 
     struct process *candidate = after ? after->next : queue;
     struct process *start = candidate;
+    if (best == 0) {
+        struct process *selected = NULL;
+        do {
+            if (runnable(candidate) && !candidate->rt_priority &&
+                (!selected || candidate->virtual_runtime_ns < selected->virtual_runtime_ns))
+                selected = candidate;
+            candidate = candidate->next;
+        } while (candidate != start);
+        return selected;
+    }
     do {
         if (runnable(candidate) && candidate->rt_priority == best) return candidate;
         candidate = candidate->next;
@@ -720,6 +791,28 @@ int process_get_nice(uint64_t tid, int *nice) {
     return 0;
 }
 
+static uint64_t online_cpu_mask(void) {
+    unsigned cpus = smp_cpu_count();
+    return cpus >= 64 ? ~0ULL : (1ULL << cpus) - 1ULL;
+}
+
+int process_set_affinity(uint64_t tid, uint64_t mask) {
+    struct process *target = scheduling_target(tid);
+    if (!target) return -ESRCH;
+    mask &= online_cpu_mask();
+    if (!mask) return -EINVAL;
+    target->affinity_mask = mask;
+    return 0;
+}
+
+int process_get_affinity(uint64_t tid, uint64_t *mask) {
+    struct process *target = scheduling_target(tid);
+    if (!target) return -ESRCH;
+    if (mask) *mask = (target->affinity_mask ? target->affinity_mask : ~0ULL) &
+                      online_cpu_mask();
+    return 0;
+}
+
 static void fpu_save(struct process *process) {
     if (process) __asm__ volatile("fxsave64 (%0)" : : "r"(process->fpu_state) : "memory");
 }
@@ -753,7 +846,9 @@ static void activate_process(struct process *process) {
     if (current && current != process) fpu_save(current);
     current = process;
     if (!process->time_slice_ticks)
-        process->time_slice_ticks = PROCESS_DEFAULT_QUANTUM_TICKS;
+        process->time_slice_ticks = process->rt_priority
+                                      ? PROCESS_DEFAULT_QUANTUM_TICKS
+                                      : ordinary_slice_ticks(process);
     process->last_scheduled_ns = time_uptime_ns();
     process->state = PROCESS_RUNNING;
     set_kernel_stack(process->kernel_stack_top);
@@ -1211,7 +1306,8 @@ void process_timer_interrupt(struct interrupt_frame *frame) {
      * to take the processor away for a higher priority is what makes the rest
      * of it mean something.
      */
-    if (!current->time_slice_ticks || higher_priority_waiting(current)) {
+    if (!current->time_slice_ticks || higher_priority_waiting(current) ||
+        ordinary_should_preempt(current) || !allowed_on_this_cpu(current)) {
         struct process *preempted = current;
         preempted->state = PROCESS_READY;
         struct process *next = next_runnable(preempted);
@@ -1220,8 +1316,11 @@ void process_timer_interrupt(struct interrupt_frame *frame) {
             resume = next->saved_frame;
             activate_process(next);
         } else {
+            if (!allowed_on_this_cpu(preempted)) go_idle();
             preempted->state = PROCESS_RUNNING;
-            preempted->time_slice_ticks = PROCESS_DEFAULT_QUANTUM_TICKS;
+            preempted->time_slice_ticks = preempted->rt_priority
+                                           ? PROCESS_DEFAULT_QUANTUM_TICKS
+                                           : ordinary_slice_ticks(preempted);
             current = preempted;
         }
     }
@@ -1483,6 +1582,8 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame) {
     child->policy = parent->policy;
     child->rt_priority = parent->rt_priority;
     child->nice = parent->nice;
+    child->virtual_runtime_ns = parent->virtual_runtime_ns;
+    child->affinity_mask = parent->affinity_mask;
     child->signal_stack_pointer = parent->signal_stack_pointer;
     child->signal_stack_size = parent->signal_stack_size;
     child->signal_stack_flags = parent->signal_stack_flags;
@@ -1583,6 +1684,8 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
     child->policy = parent->policy;
     child->rt_priority = parent->rt_priority;
     child->nice = parent->nice;
+    child->virtual_runtime_ns = parent->virtual_runtime_ns;
+    child->affinity_mask = parent->affinity_mask;
     child->signal_stack_flags = SS_DISABLE;
     child->dumpable = parent->dumpable;
     child->no_new_privs = parent->no_new_privs;
@@ -2416,7 +2519,14 @@ uint64_t process_get_fs_base(void) {
 void process_account_runtime(void) {
     if (!current || current->state != PROCESS_RUNNING || !current->last_scheduled_ns) return;
     uint64_t now = time_uptime_ns();
-    if (now >= current->last_scheduled_ns) current->runtime_ns += now - current->last_scheduled_ns;
+    if (now >= current->last_scheduled_ns) {
+        uint64_t elapsed = now - current->last_scheduled_ns;
+        current->runtime_ns += elapsed;
+        if (!current->rt_priority) {
+            uint64_t weight = process_weight(current);
+            current->virtual_runtime_ns += elapsed * NICE_0_WEIGHT / weight;
+        }
+    }
     current->last_scheduled_ns = now;
 }
 
