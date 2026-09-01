@@ -79,6 +79,19 @@ struct virtio_queue {
     /* Set when the device raises an interrupt for this queue, which is what
        lets a waiter sleep instead of spinning. */
     int interrupt_driven;
+    /*
+     * The descriptors nobody is using, as a list threaded through their own
+     * `next` fields, and how many requests are in the device's hands.
+     *
+     * A queue that only ever held one request needed none of this: it wrote
+     * descriptor zero and waited. Holding several means knowing which are
+     * free, and the device tells you a chain is finished by handing back its
+     * head.
+     */
+    uint16_t free_head;
+    uint16_t free_count;
+    uint64_t posted;
+    uint64_t completed;
 };
 
 struct virtio_device {
@@ -131,6 +144,26 @@ struct virtio_buffer {
 
 int virtio_queue_submit(struct virtio_queue *queue, const struct virtio_buffer *buffers,
                         unsigned count, unsigned write_from);
+
+/*
+ * Hand the device a request and come back without waiting for it.
+ *
+ * The buffers must stay where they are, and stay untouched, until the device
+ * has finished with them: it is reading them after this returns. What tells
+ * you it has finished is virtio_queue_reclaim(), which is also the only thing
+ * that gives the descriptors back, so a driver that never calls it will run
+ * out of them.
+ *
+ * Fails when there are not enough free descriptors, which is the caller's cue
+ * to reclaim or to drain.
+ */
+int virtio_queue_post(struct virtio_queue *queue, const struct virtio_buffer *buffers,
+                      unsigned count, unsigned write_from);
+/* Take back every chain the device has finished with. Returns how many. */
+unsigned virtio_queue_reclaim(struct virtio_queue *queue);
+/* Wait until nothing is outstanding. 0, or -1 if the device stopped answering. */
+int virtio_queue_drain(struct virtio_queue *queue);
+uint64_t virtio_queue_outstanding(const struct virtio_queue *queue);
 int virtio_ring_alloc(struct virtio_queue *queue, uint16_t size);
 void virtio_ring_free(struct virtio_queue *queue);
 

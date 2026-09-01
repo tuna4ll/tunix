@@ -18,6 +18,9 @@
 
 int virtgpu_init(void);
 int virtgpu_available(void);
+/* Wait for everything posted to the device to have finished. What a client's
+   DRM_IOCTL_VIRTGPU_WAIT has to mean now that commands are not waited out. */
+int virtgpu_flush_pending(void);
 /* How many times the device has raised its interrupt. Zero on a device with no
    MSI-X, and zero is also what a vector that was accepted but never delivered
    looks like, which is the failure worth being able to see. */

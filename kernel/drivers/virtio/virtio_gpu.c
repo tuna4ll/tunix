@@ -23,6 +23,7 @@
 #include "../../include/heap.h"
 #include "../../include/dma.h"
 #include "../../include/kstring.h"
+#include "../../include/time.h"
 #include "../../include/virtgpu.h"
 #include "../../include/virtio.h"
 #include "../../include/vmm.h"
@@ -306,6 +307,114 @@ static uint32_t capset_id;
 static uint32_t capset_version;
 static uint32_t capset_size;
 
+
+/*
+ * Requests the host is left to finish on its own.
+ *
+ * Everything here used to be handed over and then waited out, one at a time.
+ * Measured while SuperTuxKart ran: 1300 to 1600 requests a second, and 609 to
+ * 734 milliseconds of every second spent inside that wait -- with the kernel
+ * lock held, so nothing else on any processor could move either. The host was
+ * not slow; the round trip was, and there were seventeen of them per frame.
+ *
+ * A request that carries no answer does not need waiting for. What stops it
+ * being posted and forgotten is memory: the device reads the request out of
+ * guest memory *after* the call returns, so the buffers cannot be the single
+ * staging pair every caller shares. Each one in flight gets its own.
+ *
+ * The resources a command touches are a separate promise, and it is mesa that
+ * keeps it: it marks a resource busy when a submission mentions it and asks
+ * DRM_IOCTL_VIRTGPU_WAIT before touching it again, which drains this queue.
+ */
+#define ASYNC_SLOTS 32U
+#define ASYNC_REQUEST_BYTES 128U
+#define ASYNC_PAYLOAD_BYTES (32U * 1024U)
+#define ASYNC_RESPONSE_BYTES 64U
+#define ASYNC_SLOT_BYTES (ASYNC_REQUEST_BYTES + ASYNC_PAYLOAD_BYTES + ASYNC_RESPONSE_BYTES)
+
+struct async_slot {
+    uint8_t *base;
+    uint64_t physical;
+    /* Which submission this slot went out as, so its memory can be reused once
+       the device has got that far. 0 while the slot has never been used. */
+    uint64_t sequence;
+};
+
+static struct async_slot async_slots[ASYNC_SLOTS];
+static uint8_t *async_arena;
+static uint64_t async_arena_physical;
+static unsigned async_errors_reported;
+
+static int async_ready(void) { return async_arena != NULL; }
+
+/* A slot whose submission the device has finished with, or NULL. */
+static struct async_slot *async_take_slot(void) {
+    virtio_queue_reclaim(&control);
+    for (unsigned index = 0; index < ASYNC_SLOTS; index++) {
+        struct async_slot *slot = &async_slots[index];
+        if (slot->sequence > control.completed) continue;
+        if (slot->sequence) {
+            /* Its answer arrived while nobody was looking. Reading it now is
+               late, but a host refusing every command is worth saying out loud
+               once rather than never. */
+            const struct virtio_gpu_ctrl_hdr *answer =
+                (const struct virtio_gpu_ctrl_hdr *)(slot->base + ASYNC_REQUEST_BYTES +
+                                                     ASYNC_PAYLOAD_BYTES);
+            if (answer->type >= VIRTIO_GPU_RESP_ERR_BASE && async_errors_reported < 4U) {
+                async_errors_reported++;
+                kprintf("virtio-gpu: the host refused a posted command (%x)\n",
+                        (unsigned)answer->type);
+            }
+        }
+        return slot;
+    }
+    return NULL;
+}
+
+/*
+ * Post without waiting. -1 when there is no slot free or the payload will not
+ * fit one, which is the caller's cue to use the waiting path instead.
+ */
+static int submit_async(uint32_t request_bytes, const void *payload,
+                        uint32_t payload_bytes) {
+    if (!async_ready() || request_bytes > ASYNC_REQUEST_BYTES) return -1;
+    if (payload_bytes > ASYNC_PAYLOAD_BYTES) return -1;
+
+    struct async_slot *slot = async_take_slot();
+    if (!slot) return -1;
+
+    memcpy(slot->base, &request, request_bytes);
+    if (payload && payload_bytes)
+        memcpy(slot->base + ASYNC_REQUEST_BYTES, payload, payload_bytes);
+    memset(slot->base + ASYNC_REQUEST_BYTES + ASYNC_PAYLOAD_BYTES, 0,
+           ASYNC_RESPONSE_BYTES);
+
+    struct virtio_buffer buffers[3];
+    unsigned count = 0;
+    buffers[count].physical = slot->physical;
+    buffers[count].length = request_bytes;
+    count++;
+    if (payload && payload_bytes) {
+        buffers[count].physical = slot->physical + ASYNC_REQUEST_BYTES;
+        buffers[count].length = payload_bytes;
+        count++;
+    }
+    unsigned write_from = count;
+    buffers[count].physical = slot->physical + ASYNC_REQUEST_BYTES + ASYNC_PAYLOAD_BYTES;
+    buffers[count].length = ASYNC_RESPONSE_BYTES;
+    count++;
+
+    if (virtio_queue_post(&control, buffers, count, write_from) != 0) return -1;
+    slot->sequence = control.posted;
+    return 0;
+}
+
+/* Everything posted, finished. What DRM_IOCTL_VIRTGPU_WAIT is. */
+int virtgpu_flush_pending(void) {
+    if (!ready) return 0;
+    return virtio_queue_drain(&control);
+}
+
 static int submit(uint32_t request_bytes, const void *payload, uint32_t payload_bytes,
                   uint32_t response_bytes) {
     struct virtio_buffer buffers[3];
@@ -364,6 +473,8 @@ static int attach_backing(uint32_t resource, const uint64_t *pages,
     begin(VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING);
     request.attach.resource_id = resource;
     request.attach.nr_entries = (uint32_t)page_count;
+    if (submit_async(sizeof(request.attach), backing,
+                     (uint32_t)(page_count * sizeof(backing[0]))) == 0) return 0;
     return submit(sizeof(request.attach), backing,
                   (uint32_t)(page_count * sizeof(backing[0])),
                   sizeof(struct virtio_gpu_ctrl_hdr));
@@ -508,6 +619,7 @@ int virtgpu_context_attach(uint32_t context, uint32_t resource, int attach) {
                  : VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE);
     request.ctx_resource.hdr.ctx_id = context;
     request.ctx_resource.resource_id = resource;
+    if (submit_async(sizeof(request.ctx_resource), NULL, 0) == 0) return 0;
     return submit(sizeof(request.ctx_resource), NULL, 0,
                   sizeof(struct virtio_gpu_ctrl_hdr));
 }
@@ -542,7 +654,8 @@ uint32_t virtgpu_resource_create_3d(const struct virtgpu_resource_3d *spec,
     request.create_3d.last_level = spec->last_level;
     request.create_3d.nr_samples = spec->nr_samples;
     request.create_3d.flags = spec->flags;
-    if (submit(sizeof(request.create_3d), NULL, 0,
+    if (submit_async(sizeof(request.create_3d), NULL, 0) != 0 &&
+        submit(sizeof(request.create_3d), NULL, 0,
                sizeof(struct virtio_gpu_ctrl_hdr)) != 0) return 0;
 
     if (pages && page_count &&
@@ -577,6 +690,10 @@ int virtgpu_transfer_3d(uint32_t context, uint32_t resource,
     request.transfer_3d.level = level;
     request.transfer_3d.stride = stride;
     request.transfer_3d.layer_stride = layer_stride;
+    /* Only the direction that hands data over. A transfer *from* the host is a
+       read the caller is about to make: posting it and returning would have
+       the caller read whatever was in the pages before. */
+    if (to_host && submit_async(sizeof(request.transfer_3d), NULL, 0) == 0) return 0;
     return submit(sizeof(request.transfer_3d), NULL, 0,
                   sizeof(struct virtio_gpu_ctrl_hdr));
 }
@@ -602,6 +719,7 @@ int virtgpu_submit_3d(uint32_t context, const void *buffer, uint32_t bytes) {
     begin(VIRTIO_GPU_CMD_SUBMIT_3D);
     request.submit_3d.hdr.ctx_id = context;
     request.submit_3d.size = bytes;
+    if (submit_async(sizeof(request.submit_3d), commands, bytes) == 0) return 0;
     return submit(sizeof(request.submit_3d), commands, bytes,
                   sizeof(struct virtio_gpu_ctrl_hdr));
 }
@@ -645,6 +763,15 @@ int virtgpu_init(void) {
     backing = (struct virtio_gpu_mem_entry *)dma_alloc(
         sizeof(*backing) * MAX_BACKING_PAGES, 0, &discarded);
     commands = (uint8_t *)dma_alloc(MAX_COMMAND_BYTES, 0, &discarded);
+    async_arena = (uint8_t *)dma_alloc((uint64_t)ASYNC_SLOTS * ASYNC_SLOT_BYTES, 0,
+                                       &async_arena_physical);
+    if (async_arena)
+        for (unsigned index = 0; index < ASYNC_SLOTS; index++) {
+            async_slots[index].base = async_arena + (uint64_t)index * ASYNC_SLOT_BYTES;
+            async_slots[index].physical =
+                async_arena_physical + (uint64_t)index * ASYNC_SLOT_BYTES;
+            async_slots[index].sequence = 0;
+        }
     if (!backing || !commands) {
         if (backing) dma_free(backing, sizeof(*backing) * MAX_BACKING_PAGES);
         if (commands) dma_free(commands, MAX_COMMAND_BYTES);
@@ -737,7 +864,8 @@ int virtgpu_present(uint32_t resource, uint32_t width, uint32_t height,
         begin(VIRTIO_GPU_CMD_SET_SCANOUT);
         set_rect(&request.scanout.r, width, height);
         request.scanout.resource_id = resource;
-        if (submit(sizeof(request.scanout), NULL, 0,
+        if (submit_async(sizeof(request.scanout), NULL, 0) != 0 &&
+            submit(sizeof(request.scanout), NULL, 0,
                    sizeof(struct virtio_gpu_ctrl_hdr)) != 0) return -1;
         scanout_resource = resource;
     }
@@ -754,13 +882,15 @@ int virtgpu_present(uint32_t resource, uint32_t width, uint32_t height,
         begin(VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D);
         set_rect(&request.transfer.r, width, height);
         request.transfer.resource_id = resource;
-        if (submit(sizeof(request.transfer), NULL, 0,
+        if (submit_async(sizeof(request.transfer), NULL, 0) != 0 &&
+            submit(sizeof(request.transfer), NULL, 0,
                    sizeof(struct virtio_gpu_ctrl_hdr)) != 0) return -1;
     }
 
     begin(VIRTIO_GPU_CMD_RESOURCE_FLUSH);
     set_rect(&request.flush.r, width, height);
     request.flush.resource_id = resource;
+    if (submit_async(sizeof(request.flush), NULL, 0) == 0) return 0;
     return submit(sizeof(request.flush), NULL, 0, sizeof(struct virtio_gpu_ctrl_hdr));
 }
 

@@ -24,6 +24,7 @@ extern void kprintf(const char *fmt, ...);
 #define EBADF 9
 #define EMFILE 24
 #define EIO 5
+#define EBUSY 16
 #define ENODEV 19
 
 /* DRM_CLOEXEC in <drm/drm.h> is O_CLOEXEC by another name. */
@@ -1663,11 +1664,23 @@ static int64_t ioctl_virtgpu_execbuffer(uint64_t user_argument) {
  * wait for. This is the whole cost of a synchronous queue, paid here as an
  * answer that is true but was expensive to make true.
  */
+/*
+ * Is the host finished with this resource.
+ *
+ * It used to be able to answer yes without looking, because every command had
+ * been waited out before its ioctl returned. Now that they are posted and left,
+ * this is the promise that makes that safe: mesa marks a resource busy when a
+ * submission mentions it and comes here before touching it again.
+ *
+ * The answer is conservative. Nothing here tracks which submission touched
+ * which resource, so waiting for this one means waiting for all of them, which
+ * is never wrong and is sometimes more than was asked.
+ */
 static int64_t ioctl_virtgpu_wait(uint64_t user_argument) {
     struct drm_virtgpu_3d_wait query;
     if (copy_from_user(&query, user_argument, sizeof(query)) != 0) return -EFAULT;
     if (!buffer_find(query.handle)) return -ENOENT;
-    return 0;
+    return virtgpu_flush_pending() == 0 ? 0 : -EBUSY;
 }
 
 int64_t drm_file_ioctl(struct file *file, unsigned long request,

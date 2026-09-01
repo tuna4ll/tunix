@@ -16,6 +16,8 @@
 #include "../../include/virtio.h"
 #include "../../include/vmm.h"
 
+extern void kprintf(const char *fmt, ...);
+
 #define SUBMIT_TIMEOUT_NS (2ULL * 1000ULL * 1000ULL * 1000ULL)
 
 /* The spec asks for 16, 2 and 4 byte alignment for the three rings. Sixteen
@@ -50,6 +52,107 @@ int virtio_ring_alloc(struct virtio_queue *queue, uint16_t size) {
     queue->available = (struct virtq_avail *)(memory + descriptor_bytes);
     queue->used = (struct virtq_used *)(memory + descriptor_bytes + available_bytes);
     queue->size = size;
+
+    /* Every descriptor free, in one list. */
+    for (uint16_t index = 0; index < size; index++)
+        queue->descriptors[index].next = (uint16_t)(index + 1U);
+    queue->free_head = 0;
+    queue->free_count = size;
+    return 0;
+}
+
+/* Take `count` descriptors off the free list and return the head, or -1. */
+static int take_descriptors(struct virtio_queue *queue, unsigned count) {
+    if (queue->free_count < count) return -1;
+    int head = queue->free_head;
+    uint16_t last = queue->free_head;
+    for (unsigned index = 0; index < count; index++) {
+        last = queue->free_head;
+        queue->free_head = queue->descriptors[last].next;
+        queue->free_count--;
+    }
+    (void)last;
+    return head;
+}
+
+/* Put a chain back, following it to its end. */
+static void give_descriptors_back(struct virtio_queue *queue, uint16_t head) {
+    uint16_t index = head;
+    for (unsigned guard = 0; guard < queue->size; guard++) {
+        queue->free_count++;
+        if (!(queue->descriptors[index].flags & VIRTQ_DESC_F_NEXT)) break;
+        index = queue->descriptors[index].next;
+    }
+    /* The chain's own links are already right; only its tail has to point at
+       what used to be free. */
+    queue->descriptors[index].next = queue->free_head;
+    queue->free_head = head;
+}
+
+int virtio_queue_post(struct virtio_queue *queue, const struct virtio_buffer *buffers,
+                      unsigned count, unsigned write_from) {
+    if (!queue || !queue->size || !queue->doorbell || !buffers || !count) return -1;
+    if (count > VIRTIO_MAX_CHAIN || count > queue->size) return -1;
+
+    int head = take_descriptors(queue, count);
+    if (head < 0) return -1;
+
+    uint16_t index = (uint16_t)head;
+    for (unsigned position = 0; position < count; position++) {
+        struct virtq_desc *descriptor = &queue->descriptors[index];
+        descriptor->address = buffers[position].physical;
+        descriptor->length = buffers[position].length;
+        descriptor->flags =
+            (uint16_t)((position + 1U < count ? VIRTQ_DESC_F_NEXT : 0U) |
+                       (position >= write_from ? VIRTQ_DESC_F_WRITE : 0U));
+        index = descriptor->next;
+    }
+
+    /* Silence first, watch second: nothing here waits for an interrupt, and
+       one raised for a completion the driver will notice anyway is a message,
+       a vector and a trip through the dispatcher spent saying so. */
+    queue->available->flags = VIRTQ_AVAIL_F_NO_INTERRUPT;
+    queue->available->ring[queue->available->index % queue->size] = (uint16_t)head;
+    __sync_synchronize();
+    queue->available->index++;
+    __sync_synchronize();
+    *queue->doorbell = queue->index;
+    queue->posted++;
+    return 0;
+}
+
+unsigned virtio_queue_reclaim(struct virtio_queue *queue) {
+    if (!queue || !queue->size) return 0;
+    volatile uint16_t *used_index = (volatile uint16_t *)&queue->used->index;
+    unsigned taken = 0;
+    while (*used_index != queue->last_used) {
+        __sync_synchronize();
+        uint32_t head = queue->used->ring[queue->last_used % queue->size].id;
+        if (head < queue->size) give_descriptors_back(queue, (uint16_t)head);
+        queue->last_used++;
+        queue->completed++;
+        taken++;
+    }
+    return taken;
+}
+
+uint64_t virtio_queue_outstanding(const struct virtio_queue *queue) {
+    return queue ? queue->posted - queue->completed : 0;
+}
+
+int virtio_queue_drain(struct virtio_queue *queue) {
+    if (!queue) return -1;
+    uint64_t deadline = time_uptime_ns() + SUBMIT_TIMEOUT_NS;
+    while (virtio_queue_outstanding(queue)) {
+        virtio_queue_reclaim(queue);
+        if (!virtio_queue_outstanding(queue)) break;
+        if (time_uptime_ns() > deadline) {
+            kprintf("VIRTIO drain gave up with %u outstanding\n",
+                    (unsigned)virtio_queue_outstanding(queue));
+            return -1;
+        }
+        __asm__ volatile("pause");
+    }
     return 0;
 }
 
@@ -60,55 +163,19 @@ void virtio_ring_free(struct virtio_queue *queue) {
 }
 
 /*
- * One request at a time. Descriptors are taken from the head of the table and
- * the caller is kept waiting until the device gives them back, so there is
- * nothing to allocate and nothing outstanding to track.
+ * Post one request and wait for the device to finish everything outstanding.
+ *
+ * Which is more than this request when others are in flight, and that is the
+ * point: this queue is answered in order, so waiting for the last thing posted
+ * is waiting for all of them. Callers that read a response need exactly that
+ * guarantee.
  */
 int virtio_queue_submit(struct virtio_queue *queue, const struct virtio_buffer *buffers,
                         unsigned count, unsigned write_from) {
-    if (!queue || !queue->size || !queue->doorbell || !buffers || !count) return -1;
-    if (count > VIRTIO_MAX_CHAIN || count > queue->size) return -1;
-
-    for (unsigned index = 0; index < count; index++) {
-        queue->descriptors[index].address = buffers[index].physical;
-        queue->descriptors[index].length = buffers[index].length;
-        queue->descriptors[index].flags =
-            (uint16_t)((index + 1U < count ? VIRTQ_DESC_F_NEXT : 0U) |
-                       (index >= write_from ? VIRTQ_DESC_F_WRITE : 0U));
-        queue->descriptors[index].next = (uint16_t)(index + 1U);
+    if (virtio_queue_post(queue, buffers, count, write_from) != 0) {
+        /* Out of descriptors: everything in flight has to come back first. */
+        if (virtio_queue_drain(queue) != 0) return -1;
+        if (virtio_queue_post(queue, buffers, count, write_from) != 0) return -1;
     }
-
-    /* Silence first, watch second. The wait below spins before it sleeps, and
-       for everything that finishes inside the spin an interrupt is pure cost:
-       a message from the device, a vector, a trip through the dispatcher, to
-       announce something already visible in the ring. */
-    queue->available->flags = VIRTQ_AVAIL_F_NO_INTERRUPT;
-    queue->available->ring[queue->available->index % queue->size] = 0;
-    __sync_synchronize();
-    queue->available->index++;
-    __sync_synchronize();
-    *queue->doorbell = queue->index;
-
-    /* The device writes the used index behind the compiler's back, so it has to
-       be re-read on every lap rather than cached in a register. */
-    volatile uint16_t *used_index = (volatile uint16_t *)&queue->used->index;
-    uint64_t deadline = time_uptime_ns() + SUBMIT_TIMEOUT_NS;
-    /*
-     * Still a spin, and it has to be, though the device could now say when it
-     * is done.
-     *
-     * Sleeping here would hand back a processor that is holding the kernel
-     * lock, so nothing else could run on any of the others either: the machine
-     * would wait exactly as long, having also stopped. Measured, and it is not
-     * theoretical -- a halt in this loop cost SuperTuxKart its whole start-up.
-     * The wait becomes a sleep when the lock this path holds is no longer the
-     * whole kernel's.
-     */
-    while (*used_index == queue->last_used) {
-        if (time_uptime_ns() > deadline) return -1;
-        __asm__ volatile("pause");
-    }
-    __sync_synchronize();
-    queue->last_used = *used_index;
-    return 0;
+    return virtio_queue_drain(queue);
 }
