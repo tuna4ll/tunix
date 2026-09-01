@@ -58,9 +58,12 @@ extern void kprintf(const char *fmt, ...);
 #define DRM_NR_MODE_SETCRTC 0xa2
 #define DRM_NR_MODE_GETENCODER 0xa6
 #define DRM_NR_MODE_GETCONNECTOR 0xa7
+#define DRM_NR_MODE_GETFB 0xad
 #define DRM_NR_MODE_ADDFB 0xae
 #define DRM_NR_MODE_RMFB 0xaf
 #define DRM_NR_MODE_PAGE_FLIP 0xb0
+#define DRM_NR_MODE_CURSOR 0xa3
+#define DRM_NR_MODE_CURSOR2 0xa4
 #define DRM_NR_MODE_DIRTYFB 0xb1
 #define DRM_NR_MODE_CREATE_DUMB 0xb2
 #define DRM_NR_MODE_MAP_DUMB 0xb3
@@ -387,6 +390,16 @@ struct drm_mode_crtc_page_flip {
     uint64_t user_data;
 };
 
+struct drm_mode_cursor {
+    uint32_t flags;
+    uint32_t crtc_id;
+    int32_t x;
+    int32_t y;
+    uint32_t width;
+    uint32_t height;
+    uint32_t handle;
+};
+
 struct drm_mode_create_dumb {
     uint32_t height;
     uint32_t width;
@@ -609,6 +622,33 @@ static struct drm_framebuffer *framebuffer_find(uint32_t id) {
         if (framebuffers[index].id == id) return &framebuffers[index];
     }
     return NULL;
+}
+
+static int64_t ioctl_getfb(uint64_t user_argument) {
+    struct drm_mode_fb_cmd request;
+    if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
+    struct drm_framebuffer *fb = framebuffer_find(request.fb_id);
+    if (!fb) return -ENOENT;
+    request.width = fb->width;
+    request.height = fb->height;
+    request.pitch = fb->pitch;
+    request.bpp = 32;
+    request.depth = 24;
+    request.handle = fb->handle;
+    return copy_to_user(user_argument, &request, sizeof(request)) == 0 ? 0 : -EFAULT;
+}
+
+/* virtio-gpu has no hardware cursor in this implementation. Accepting cursor
+   ioctls is nevertheless important: KWin/libdrm can fall back to its software
+   cursor only after the DRM device acknowledges the requested state. */
+static int64_t ioctl_cursor(uint64_t user_argument, int cursor2) {
+    struct drm_mode_cursor request;
+    if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
+    (void)cursor2;
+    if (request.crtc_id != DRM_CRTC_ID) return -ENOENT;
+    if ((request.flags & 1U) && request.handle && !buffer_find(request.handle))
+        return -ENOENT;
+    return 0;
 }
 
 /*
@@ -1723,6 +1763,9 @@ int64_t drm_file_ioctl(struct file *file, unsigned long request,
     case DRM_NR_MODE_GETCONNECTOR: return ioctl_get_connector(user_argument);
     case DRM_NR_MODE_GETENCODER: return ioctl_get_encoder(user_argument);
     case DRM_NR_MODE_GETCRTC: return ioctl_get_crtc(user_argument);
+    case DRM_NR_MODE_GETFB: return ioctl_getfb(user_argument);
+    case DRM_NR_MODE_CURSOR: return ioctl_cursor(user_argument, 0);
+    case DRM_NR_MODE_CURSOR2: return ioctl_cursor(user_argument, 1);
     case DRM_NR_MODE_SETCRTC: return ioctl_set_crtc(user_argument);
     case DRM_NR_MODE_PAGE_FLIP: return ioctl_page_flip(user_argument);
     case DRM_NR_MODE_DIRTYFB: return ioctl_dirty_fb(user_argument);
