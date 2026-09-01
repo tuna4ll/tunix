@@ -19,9 +19,10 @@ struct vfs_node;
  * kmscube -- talks to /dev/dri/card0 instead. Providing that node is what makes
  * unmodified graphics software able to run here at all.
  *
- * Deliberately absent: GEM sharing between processes, PRIME/dma-buf, atomic
- * modesetting, and any notion of a second CRTC or connector. There is one
- * fixed mode, the one the display is already in.
+ * Deliberately absent: atomic modesetting and any notion of a second CRTC or
+ * connector. PRIME/dma-buf export is supported for the single linear buffer
+ * path, and cursor ioctls are acknowledged for a software cursor fallback.
+ * There is one fixed mode, the one the display is already in.
  */
 
 void drm_init(void);
