@@ -120,6 +120,58 @@ is the same one in 2D mode and mesa rasterises with llvmpipe.
 The difference is the whole point: SuperTuxKart's own profiling lap runs at 49
 frames a second on llvmpipe and 110 through virgl.
 
+## Where a frame's time goes
+
+Asked, before anything was changed, with counters around each part of a
+submission while the game ran. Per second of wall clock:
+
+```
+executions      431/s        command bytes   1755 KiB/s
+copying them    1 ms         staging them    1 ms
+allocating      31 ms        waiting for the host   609 ms
+```
+
+So the copies are nothing, and the driver spent between 60 and 73 per cent of
+every second inside a spin waiting for the host to finish a command, with the
+kernel lock held, so no other processor could run kernel code either. There
+were about seventeen of those round trips per frame.
+
+A request that carries no answer does not need waiting for. Submissions now
+carry their own request, payload and response memory out of a pool of 32 slots
+and are posted and left; `virtio_queue_post` allocates descriptors from a free
+list, `virtio_queue_reclaim` takes them back, and only a caller that reads a
+response drains the queue. Measured on the same image and the same client, the
+one difference being whether the path was compiled in:
+
+```
+waiting for the host   206 ms/s   ->   20 ms/s
+```
+
+**It did not make the game faster**, and that is the finding: 116 frames a
+second before, 115 after. The waiting *was* the host rendering, so removing it
+gives the guest its processor back rather than more frames. What is faster is
+everything else on the machine, which is no longer queued behind a driver that
+holds the kernel lock for two thirds of every second.
+
+Two things make posting safe. Ordering: this queue is answered in order, so a
+command that reads back data, and any caller that waits, sees everything posted
+before it. And `DRM_IOCTL_VIRTGPU_WAIT`, which used to answer yes without
+looking and now drains the queue: mesa marks a resource busy when a submission
+mentions it and asks here before touching it again.
+
+## The crash that was blamed on mesa
+
+SuperTuxKart fell over at track load, at a null dereference inside
+`dri2_query_image`, often enough to be called intermittent and long enough to
+be assumed somebody else's bug. It was this driver's table of buffer handles:
+512 entries, a number with no reason behind it, and a track's textures, vertex
+buffers and render targets run past it. mesa answers a refused resource with a
+null image and reads through it.
+
+The table is 4096 entries now and a handle is one more than the slot it names,
+so finding one is a subtraction rather than a walk. The lap that had been
+failing about half the time has not failed since.
+
 ## What is deliberately not here
 
 **A queue interrupt that anything waits on.** The device has a vector, bound
@@ -131,7 +183,9 @@ exactly as long, having also stopped. It was tried, and it cost SuperTuxKart its
 whole start-up. The wait becomes a sleep when that lock is no longer the whole
 kernel's.
 
-**More than one request in flight.** Follows from the polling above.
+**A fence.** Waiting for one resource waits for every submission, because
+nothing here records which submission touched what. It is never wrong, only
+sometimes more than was asked for.
 
 **A second scanout.** DRM reports one CRTC and one connector, so there is
 nothing above this that could ask for one.
