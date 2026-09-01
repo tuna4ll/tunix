@@ -101,6 +101,9 @@ struct virtio_device {
     volatile uint8_t *isr;
     volatile uint8_t *config;
     uint32_t notify_multiplier;
+    /* Each virtio function owns its BAR mappings. Several functions commonly
+       use the same BAR numbers, but those numbers are local to a PCI function. */
+    volatile uint8_t *bars[6];
     /* The vector the device was given, or 0 while it has none. Queues set up
        after this is non-zero are pointed at it. */
     unsigned vector;

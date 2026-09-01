@@ -41,9 +41,6 @@
 #define COMMON_QUEUE_DRIVER 0x28U
 #define COMMON_QUEUE_DEVICE 0x30U
 
-/* The slot this driver owns in the shared device window; see vmm.h. One 64 KiB
-   sub-slot per BAR index, which is more than the 16 KiB QEMU actually uses. */
-#define VIRTIO_MMIO_VIRTUAL_BASE (DEVICE_MMIO_VIRTUAL_BASE + 0x00600000ULL)
 #define VIRTIO_MMIO_BAR_BYTES 0x10000ULL
 #define VIRTIO_MMIO_BAR_COUNT 6U
 
@@ -56,8 +53,6 @@
    devices here offer 256. */
 #define QUEUE_SIZE_MAX 256U
 #define RESET_TIMEOUT_NS (500ULL * 1000ULL * 1000ULL)
-
-static uint8_t mapped_bars;
 
 static uint8_t config_read8(const struct pci_device *pci, uint8_t offset) {
     uint32_t value = pci_config_read32(pci->bus, pci->slot, pci->function,
@@ -100,22 +95,14 @@ static void write64(volatile uint8_t *base, uint32_t offset, uint64_t value) {
     write32(base, offset + 4U, (uint32_t)(value >> 32));
 }
 
-static volatile uint8_t *map_bar(const struct pci_device *pci, unsigned index) {
+static volatile uint8_t *map_bar(struct virtio_device *device, unsigned index) {
     if (index >= VIRTIO_MMIO_BAR_COUNT) return NULL;
-    uint64_t physical = pci_bar_address(pci, index);
-    if (!physical || (physical & 0xFFFULL)) return NULL;
-
-    uint64_t virtual_base = VIRTIO_MMIO_VIRTUAL_BASE + (uint64_t)index * VIRTIO_MMIO_BAR_BYTES;
-    if (!(mapped_bars & (1U << index))) {
-        uint64_t cr3 = vmm_kernel_cr3();
-        for (uint64_t offset = 0; offset < VIRTIO_MMIO_BAR_BYTES; offset += 4096ULL) {
-            if (vmm_map_page_in(cr3, virtual_base + offset, physical + offset,
-                                PAGE_WRITE | PAGE_DEVICE | PAGE_UNCACHED | PAGE_NX) != 0)
-                return NULL;
-        }
-        mapped_bars |= (uint8_t)(1U << index);
-    }
-    return (volatile uint8_t *)virtual_base;
+    if (device->bars[index]) return device->bars[index];
+    uint64_t physical = pci_bar_address(&device->pci, index);
+    if (!physical) return NULL;
+    device->bars[index] =
+        (volatile uint8_t *)vmm_map_device(physical, VIRTIO_MMIO_BAR_BYTES);
+    return device->bars[index];
 }
 
 static void set_status(struct virtio_device *device, uint8_t bits) {
@@ -135,7 +122,7 @@ static int walk_capabilities(struct virtio_device *device) {
             uint8_t type = config_read8(pci, (uint8_t)(offset + 3U));
             uint8_t bar = config_read8(pci, (uint8_t)(offset + 4U));
             uint32_t within = config_read32_at(pci, (uint8_t)(offset + 8U));
-            volatile uint8_t *base = map_bar(pci, bar);
+            volatile uint8_t *base = map_bar(device, bar);
             if (base && within < VIRTIO_MMIO_BAR_BYTES) {
                 switch (type) {
                 case VIRTIO_PCI_CAP_COMMON_CFG: device->common = base + within; break;

@@ -43,8 +43,8 @@
  *   0x100000  ACPI tables         (2 MiB)    src/kernel/drivers/acpi.c
  *   0x400000  local APIC, IOAPIC  (8 KiB)    src/kernel/drivers/apic.c
  *   0x500000  HD Audio registers  (16 KiB)   src/kernel/drivers/audio/hda.c
- *   0x600000  virtio BARs         (384 KiB)  src/kernel/drivers/virtio/virtio_pci.c
- *   0x700000  handed out by vmm_map_device(), which is what new drivers use
+ *   0x600000  unused legacy virtio window
+ *   0x700000  handed out by vmm_map_device(), including virtio BARs
  *             instead of picking an offset and hoping.
  */
 #define DEVICE_MMIO_ARENA_OFFSET 0x00700000ULL
