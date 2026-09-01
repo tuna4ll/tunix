@@ -145,15 +145,16 @@ of the same `tgid`), `kernel_stack_top`, `saved_frame` (a full
 
 ## Scheduler
 
-The scheduler is round robin over the circular `queue`, shared by every
-processor — see [Multiprocessor](multiprocessor.md) for how they are started
-and what keeps them out of each other's way:
+The scheduler scans the circular `queue`, shared by every processor — see
+[Multiprocessor](multiprocessor.md) for how they are started and what keeps
+them out of each other's way:
 
-- `next_runnable(after)` finds the highest `rt_priority` anything runnable
-  has, then walks forward from `after` (or from the head if `after` is `NULL`)
-  and returns the first process in `PROCESS_READY` state holding it, wrapping
-  around the list once. A `RUNNING` process is not a candidate: it is loaded on
-  some processor already.
+- `next_runnable(after)` first finds the highest `rt_priority` on this CPU's
+  runnable set. Real-time equals remain round robin. In the ordinary band it
+  selects the lowest `virtual_runtime_ns`, with ties resolved by queue order.
+  A `RUNNING` process is not a candidate: it is loaded on some processor
+  already. A process whose affinity mask excludes this CPU is not a candidate
+  either.
 - `rt_priority` is 0 for everything unless a thread asks, through
   `sched_setscheduler(SCHED_FIFO|SCHED_RR)`, for 1 to 99. Higher runs first and
   equals take turns. `SCHED_FIFO` is accepted and then scheduled as `SCHED_RR`:
@@ -174,13 +175,22 @@ and what keeps them out of each other's way:
 
   What asks for this is the sound mixer; see [Sound](sound.md), where the same
   change took a game from 322 underruns to none.
-- `nice` is remembered, reported through `getpriority`, and does nothing.
-  It asks for a share of the processor and there is nothing here that divides
-  one.
-- The quantum is `PROCESS_DEFAULT_QUANTUM_TICKS` = 5 timer ticks
-  (`kernel/process.c:33`). The timer runs at `TIMER_FREQUENCY_HZ` = 250 Hz
-  (`kernel/include/timer.h:8`), a PIT rate generator programmed by
-  `timer_init` (`kernel/timer.c:14`), so a quantum is ~20 ms.
+- `nice` selects one of 40 geometric weights. Runtime advances virtual runtime
+  by `elapsed * 1024 / weight`, so a lower-weight task becomes less eligible
+  sooner. Forked processes and threads start at the parent's virtual runtime;
+  they cannot gain an initial zero-runtime advantage.
+- Ordinary quanta are proportional to weight within a 24 ms target latency,
+  with a one-tick (4 ms) minimum granularity. When the runnable population is
+  larger than the six-tick target, the period expands so every task can receive
+  at least one tick. Real-time tasks retain their five-tick quantum.
+- On each tick, an ordinary task is also preempted if another runnable task is
+  over one tick behind in virtual runtime. This is the wake-up path: an
+  interactive task that slept while CPU-bound work ran gets the processor at
+  the next tick instead of waiting for the entire runnable set to rotate.
+- `sched_setaffinity` stores a non-empty mask limited to online CPUs;
+  `sched_getaffinity` reports the selected thread's effective mask. Masks are
+  inherited by fork and clone, and a task excluded from its current CPU is
+  migrated at the next scheduling point.
 - `activate_process` (`kernel/process.c:397`) is the only place that makes
   a process "the" running one: it sets `current`, resets the quantum if it
   had run out, stamps `last_scheduled_ns`, sets state to `RUNNING`, points
@@ -188,6 +198,28 @@ and what keeps them out of each other's way:
   `kernel_rsp` in its per-CPU block) at the process's kernel stack, switches
   page tables (`vmm_activate(cr3)`), and reloads `IA32_FS_BASE` for TLS.
   `current` is per-processor: it lives in the block `GS` points at.
+
+### Scheduler benchmark
+
+The scheduler was measured in QEMU TCG with one virtual CPU and the 250 Hz
+timer. Two CPU-bound children ran for four seconds on CPU 0, one at nice 0 and
+one at nice 10. A second workload placed six CPU-bound children on CPU 0 while
+the parent requested 100 sleeps of 20 ms and measured wake-up lateness. Three
+post-change runs were used rather than selecting one favourable sample:
+
+```
+                              before       after (three-run range)
+nice 0 / nice 10 CPU ratio      1.01x       9.06x–9.14x
+wake latency median           76.073 ms     3.984–3.998 ms
+wake latency p95             100.107 ms     4.013–4.032 ms
+wake latency maximum         100.142 ms     4.019–4.350 ms
+```
+
+The nice target implied by weights 1024 and 110 is 9.31x. A separate four-CPU
+run booted all four processors, pinned the workload through
+`sched_setaffinity`, and measured 9.34x with 4.015 ms p95 wake latency. This
+also exercises affinity as scheduling behaviour rather than only checking its
+returned mask.
 
 There is no separate "context switch" assembly routine that swaps callee-
 saved registers on a kernel stack the way a traditional preemptive kernel

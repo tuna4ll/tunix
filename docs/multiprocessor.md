@@ -192,7 +192,8 @@ what that took is one line:
 
 ```c
 static int runnable(const struct process *process) {
-    return process && process->state == PROCESS_READY;
+    return process && process->state == PROCESS_READY &&
+           allowed_on_this_cpu(process);
 }
 ```
 
@@ -201,6 +202,12 @@ several it means "a processor has this loaded right now": picking it again
 elsewhere would run the same registers twice and let two return paths write the
 same saved frame. Every path that gives a process up already marks it `READY`
 (or blocked, or dead) before it looks for the next one, so nothing is lost.
+
+The other predicate is task affinity. The default mask includes every online
+processor; `sched_setaffinity` can narrow it, and fork/clone inherit it. If a
+task removes its current processor from the mask, it yields immediately. If
+another processor changes the mask of a running task, that task notices on its
+next timer tick and migrates through the ordinary READY/idle path.
 
 ### Idling
 
