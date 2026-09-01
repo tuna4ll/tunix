@@ -64,6 +64,7 @@ extern void kprintf(const char *fmt, ...);
 #define DRM_NR_MODE_PAGE_FLIP 0xb0
 #define DRM_NR_MODE_CURSOR 0xa3
 #define DRM_NR_MODE_CURSOR2 0xa4
+#define DRM_NR_MODE_ATOMIC 0xbc
 #define DRM_NR_MODE_DIRTYFB 0xb1
 #define DRM_NR_MODE_CREATE_DUMB 0xb2
 #define DRM_NR_MODE_MAP_DUMB 0xb3
@@ -225,6 +226,7 @@ typedef char drm_virtgpu_get_caps_size_check[
 #define DRM_CAP_CURSOR_WIDTH 0x8
 #define DRM_CAP_CURSOR_HEIGHT 0x9
 #define DRM_CAP_ADDFB2_MODIFIERS 0x10
+#define DRM_CAP_ATOMIC 0x15
 
 /* The single set of object ids this device ever reports. */
 #define DRM_CRTC_ID 1
@@ -241,6 +243,11 @@ typedef char drm_virtgpu_get_caps_size_check[
  * enum property, on a single primary plane, is the whole property system here.
  */
 #define DRM_PROP_TYPE_ID 10
+#define DRM_PROP_CRTC_ACTIVE 11
+#define DRM_PROP_CRTC_MODE_ID 12
+#define DRM_PROP_PLANE_CRTC_ID 13
+#define DRM_PROP_PLANE_FB_ID 14
+#define DRM_PROP_CONNECTOR_CRTC_ID 15
 
 #define DRM_MODE_OBJECT_CRTC 0xcccccccc
 #define DRM_MODE_OBJECT_CONNECTOR 0xc0c0c0c0
@@ -248,6 +255,8 @@ typedef char drm_virtgpu_get_caps_size_check[
 #define DRM_MODE_OBJECT_PLANE 0xeeeeeeee
 
 #define DRM_MODE_PROP_IMMUTABLE (1 << 2)
+#define DRM_MODE_PROP_RANGE (1 << 1)
+#define DRM_MODE_PROP_BLOB (1 << 4)
 #define DRM_MODE_PROP_ENUM (1 << 3)
 
 #define DRM_PLANE_TYPE_OVERLAY 0
@@ -464,6 +473,24 @@ struct drm_mode_obj_get_properties {
     uint32_t obj_type;
 };
 
+struct drm_mode_atomic {
+    uint32_t flags;
+    uint32_t count_objs;
+    uint64_t objs_ptr;
+    uint32_t count_props;
+    uint32_t reserved0;
+    uint64_t props_ptr;
+    uint64_t prop_values_ptr;
+    uint32_t reserved;
+    uint32_t reserved1;
+};
+
+struct drm_mode_atomic_object {
+    uint32_t object_id;
+    uint32_t count_props;
+    uint64_t props_ptr;
+};
+
 typedef char drm_modeinfo_size_check[
     (sizeof(struct drm_mode_modeinfo) == 68) ? 1 : -1];
 typedef char drm_create_dumb_size_check[
@@ -651,6 +678,67 @@ static int64_t ioctl_cursor(uint64_t user_argument, int cursor2) {
     return 0;
 }
 
+#define DRM_MODE_ATOMIC_TEST_ONLY 0x100U
+
+static int present_framebuffer(uint32_t fb_id);
+
+static int64_t ioctl_atomic(uint64_t user_argument) {
+    struct drm_mode_atomic request;
+    if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
+    if (!request.count_objs || request.count_objs > 8 || request.count_props > 32)
+        return -EINVAL;
+    struct drm_mode_atomic_object objects[8];
+    if (copy_from_user(objects, request.objs_ptr,
+                       request.count_objs * sizeof(objects[0])) != 0) return -EFAULT;
+    uint32_t new_fb = active_fb_id;
+    int new_active = active_fb_id != 0;
+    uint32_t prop_index = 0;
+    for (uint32_t object = 0; object < request.count_objs; object++) {
+        if (objects[object].count_props > 16 ||
+            prop_index + objects[object].count_props > request.count_props)
+            return -EINVAL;
+        uint32_t props[16];
+        uint64_t values[16];
+        if (objects[object].count_props &&
+            (copy_from_user(props, objects[object].props_ptr,
+                            objects[object].count_props * sizeof(props[0])) != 0 ||
+             copy_from_user(values, request.prop_values_ptr +
+                            prop_index * sizeof(values[0]),
+                            objects[object].count_props * sizeof(values[0])) != 0))
+            return -EFAULT;
+        for (uint32_t property = 0; property < objects[object].count_props; property++) {
+            uint32_t id = props[property]; uint64_t value = values[property];
+            if (objects[object].object_id == DRM_CRTC_ID && id == DRM_PROP_CRTC_ACTIVE) {
+                if (value > 1) return -EINVAL;
+                new_active = (int)value;
+            } else if (objects[object].object_id == DRM_PLANE_ID &&
+                       id == DRM_PROP_PLANE_FB_ID) {
+                if (value > UINT32_MAX || (value && !framebuffer_find((uint32_t)value)))
+                    return -EINVAL;
+                new_fb = (uint32_t)value;
+            } else if (objects[object].object_id == DRM_CONNECTOR_ID &&
+                       id == DRM_PROP_CONNECTOR_CRTC_ID) {
+                if (value != 0 && value != DRM_CRTC_ID) return -EINVAL;
+            } else if (id != DRM_PROP_CRTC_MODE_ID && id != DRM_PROP_PLANE_CRTC_ID) {
+                return -EINVAL;
+            }
+        }
+        prop_index += objects[object].count_props;
+    }
+    if (prop_index != request.count_props) return -EINVAL;
+    if (request.flags & DRM_MODE_ATOMIC_TEST_ONLY) return 0;
+    if (!new_active || !new_fb) {
+        active_fb_id = 0;
+        virtgpu_scanout_disable();
+        (void)framebuffer_release_graphics(&drm_display_owner, 0);
+        return 0;
+    }
+    int status = present_framebuffer(new_fb);
+    if (status != 0) return status;
+    active_fb_id = new_fb;
+    return 0;
+}
+
 /*
  * Drop one reference. The buffer's memory goes away with the last one, which is
  * not necessarily the handle: an exported PRIME descriptor keeps it alive after
@@ -800,6 +888,7 @@ static int64_t ioctl_get_cap(uint64_t user_argument) {
     case DRM_CAP_PRIME: cap.value = DRM_PRIME_CAP_IMPORT | DRM_PRIME_CAP_EXPORT; break;
     /* One linear layout and nothing to negotiate. */
     case DRM_CAP_ADDFB2_MODIFIERS:
+    case DRM_CAP_ATOMIC: cap.value = 1; break;
     default: cap.value = 0; break;
     }
     return copy_to_user(user_argument, &cap, sizeof(cap)) == 0 ? 0 : -EFAULT;
@@ -1023,6 +1112,48 @@ static const char *const plane_type_names[] = { "Overlay", "Primary", "Cursor" }
 static int64_t ioctl_get_property(uint64_t user_argument) {
     struct drm_mode_get_property property;
     if (copy_from_user(&property, user_argument, sizeof(property)) != 0) return -EFAULT;
+    if (property.prop_id == DRM_PROP_CRTC_ACTIVE) {
+        memset(property.name, 0, sizeof(property.name));
+        strncpy(property.name, "ACTIVE", sizeof(property.name) - 1);
+        property.flags = DRM_MODE_PROP_RANGE;
+        property.count_values = 2;
+        property.count_enum_blobs = 0;
+        uint64_t range[2] = { 0, 1 };
+        if (copy_array_out(property.values_ptr, property.count_values, range,
+                           sizeof(range[0]), 2) != 0) return -EFAULT;
+        return copy_to_user(user_argument, &property, sizeof(property)) == 0 ? 0 : -EFAULT;
+    }
+    if (property.prop_id == DRM_PROP_CRTC_MODE_ID) {
+        memset(property.name, 0, sizeof(property.name));
+        strncpy(property.name, "MODE_ID", sizeof(property.name) - 1);
+        property.flags = DRM_MODE_PROP_BLOB;
+        property.count_values = 1;
+        property.count_enum_blobs = 0;
+        return copy_to_user(user_argument, &property, sizeof(property)) == 0 ? 0 : -EFAULT;
+    }
+    if (property.prop_id == DRM_PROP_PLANE_CRTC_ID || property.prop_id == DRM_PROP_PLANE_FB_ID) {
+        memset(property.name, 0, sizeof(property.name));
+        strncpy(property.name, property.prop_id == DRM_PROP_PLANE_CRTC_ID ? "CRTC_ID" : "FB_ID",
+                sizeof(property.name) - 1);
+        property.flags = DRM_MODE_PROP_RANGE;
+        property.count_values = 2;
+        property.count_enum_blobs = 0;
+        uint64_t range[2] = { 0, 0xFFFFFFFFULL };
+        if (copy_array_out(property.values_ptr, property.count_values, range,
+                           sizeof(range[0]), 2) != 0) return -EFAULT;
+        return copy_to_user(user_argument, &property, sizeof(property)) == 0 ? 0 : -EFAULT;
+    }
+    if (property.prop_id == DRM_PROP_CONNECTOR_CRTC_ID) {
+        memset(property.name, 0, sizeof(property.name));
+        strncpy(property.name, "CRTC_ID", sizeof(property.name) - 1);
+        property.flags = DRM_MODE_PROP_RANGE;
+        property.count_values = 2;
+        property.count_enum_blobs = 0;
+        uint64_t range[2] = { 0, DRM_CRTC_ID };
+        if (copy_array_out(property.values_ptr, property.count_values, range,
+                           sizeof(range[0]), 2) != 0) return -EFAULT;
+        return copy_to_user(user_argument, &property, sizeof(property)) == 0 ? 0 : -EFAULT;
+    }
     if (property.prop_id != DRM_PROP_TYPE_ID) return -ENOENT;
 
     /* An enum property carries no values array; its choices live in the enum
@@ -1051,17 +1182,20 @@ static int64_t ioctl_obj_get_properties(uint64_t user_argument) {
     /* Only the plane has a property. CRTCs and connectors report none, which is
        legal and which weston copes with -- it only needs the call to succeed. */
     uint32_t count = 0;
-    uint32_t ids[1];
-    uint64_t values[1];
+    uint32_t ids[4];
+    uint64_t values[4];
     if (request.obj_type == DRM_MODE_OBJECT_PLANE) {
         if (request.obj_id != DRM_PLANE_ID) return -ENOENT;
-        ids[0] = DRM_PROP_TYPE_ID;
-        values[0] = DRM_PLANE_TYPE_PRIMARY;
-        count = 1;
+        ids[0] = DRM_PROP_TYPE_ID; values[0] = DRM_PLANE_TYPE_PRIMARY;
+        ids[1] = DRM_PROP_PLANE_CRTC_ID; values[1] = DRM_CRTC_ID;
+        ids[2] = DRM_PROP_PLANE_FB_ID; values[2] = active_fb_id; count = 3;
     } else if (request.obj_type == DRM_MODE_OBJECT_CRTC) {
         if (request.obj_id != DRM_CRTC_ID) return -ENOENT;
+        ids[0] = DRM_PROP_CRTC_ACTIVE; values[0] = active_fb_id != 0;
+        ids[1] = DRM_PROP_CRTC_MODE_ID; values[1] = 0; count = 2;
     } else if (request.obj_type == DRM_MODE_OBJECT_CONNECTOR) {
         if (request.obj_id != DRM_CONNECTOR_ID) return -ENOENT;
+        ids[0] = DRM_PROP_CONNECTOR_CRTC_ID; values[0] = active_fb_id ? DRM_CRTC_ID : 0; count = 1;
     } else if (request.obj_type == DRM_MODE_OBJECT_ENCODER) {
         if (request.obj_id != DRM_ENCODER_ID) return -ENOENT;
     } else {
@@ -1766,6 +1900,7 @@ int64_t drm_file_ioctl(struct file *file, unsigned long request,
     case DRM_NR_MODE_GETFB: return ioctl_getfb(user_argument);
     case DRM_NR_MODE_CURSOR: return ioctl_cursor(user_argument, 0);
     case DRM_NR_MODE_CURSOR2: return ioctl_cursor(user_argument, 1);
+    case DRM_NR_MODE_ATOMIC: return ioctl_atomic(user_argument);
     case DRM_NR_MODE_SETCRTC: return ioctl_set_crtc(user_argument);
     case DRM_NR_MODE_PAGE_FLIP: return ioctl_page_flip(user_argument);
     case DRM_NR_MODE_DIRTYFB: return ioctl_dirty_fb(user_argument);
