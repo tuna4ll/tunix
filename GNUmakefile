@@ -227,7 +227,9 @@ PULSE_TUNING := $(COMMA)out.latency=100000$(COMMA)out.buffer-length=200000
 QEMU_AUDIO_BACKEND ?= $(if $(PULSE_SOCKET),pa$(COMMA)server=$(PULSE_SOCKET)$(PULSE_TUNING),none)
 QEMU_AUDIO  ?= -audiodev $(QEMU_AUDIO_BACKEND)$(COMMA)id=snd0 \
 	-device intel-hda -device hda-output,audiodev=snd0
-QEMU_NET    ?= -netdev user,id=net0 -device rtl8139,netdev=net0
+# Modern-only makes QEMU expose the virtio 1.0 PCI device id the kernel drives;
+# the transitional id names the legacy register layout it deliberately does not.
+QEMU_NET    ?= -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
 # Named rather than left to QEMU. Its default depends on how the binary was
 # built: a distribution package usually opens a window, but one built without
 # a UI -- which is what a server or a container image ships -- falls back to

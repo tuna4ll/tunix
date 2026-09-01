@@ -1,6 +1,7 @@
 # Networking
 
-Tunix has one adapter (RTL8139), ARP, IPv4, ICMP, UDP, raw and packet sockets,
+Tunix drives virtio-net and RTL8139 adapters, one at a time, with ARP, IPv4,
+ICMP, UDP, raw and packet sockets,
 `AF_NETLINK`/rtnetlink behind iproute2's `ip` and `ss`, and TCP. Both ends of
 TCP work: a process can dial out, and a process can wait to be dialled.
 
@@ -26,7 +27,20 @@ The source address is picked per destination (`net_source_for()`): a packet to
 the reply is matched by four-tuple, so a client that stamped the adapter's
 address on a loopback connection could not recognise its own SYN-ACK.
 
-## How a frame gets in
+## The adapters
+
+QEMU gets a modern-only virtio-net PCI function by default. The driver
+negotiates the device MAC, keeps 128 receive buffers in queue 0, sends through
+queue 1, and binds both queues to one MSI-X vector. Each buffer starts with the
+12-byte version-1 virtio header and carries one Ethernet frame after it. The
+interrupt acknowledges the device; `net_poll()` takes completed buffers from
+the used ring and enters the stack where it is safe to do so.
+
+RTL8139 remains the fallback for real hardware and for
+`QEMU_NET="-netdev user,id=net0 -device rtl8139,netdev=net0"`. Its receive path
+is the one below.
+
+## How an RTL8139 frame gets in
 
 The card interrupts, and the handler does exactly one thing: it empties the
 card's ring into a queue of 128 frames. It does not touch the network stack.
