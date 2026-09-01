@@ -23,9 +23,11 @@ struct virtio_net_header {
     uint16_t gso_size;
     uint16_t checksum_start;
     uint16_t checksum_offset;
+    /* Part of the version-1 header even without merged receive buffers. */
+    uint16_t buffer_count;
 } __attribute__((packed));
 
-_Static_assert(sizeof(struct virtio_net_header) == 10U, "virtio-net header size");
+_Static_assert(sizeof(struct virtio_net_header) == 12U, "virtio-net header size");
 
 struct receive_slot {
     uint8_t bytes[VIRTIO_NET_BUFFER_BYTES];
@@ -96,6 +98,9 @@ int virtio_net_init(void) {
         return -1;
     }
 
+    /* A queue kick made before DRIVER_OK may be ignored. Publish readiness
+       first, then make every receive buffer visible and notify the device. */
+    virtio_pci_set_driver_ok(&device);
     for (unsigned index = 0; index < receive_slot_count; index++) {
         if (post_receive(index) != 0) {
             virtio_pci_set_failed(&device);
@@ -105,7 +110,6 @@ int virtio_net_init(void) {
 
     received_packets = transmitted_packets = dropped_packets = 0;
     available = 1;
-    virtio_pci_set_driver_ok(&device);
     return 0;
 }
 
