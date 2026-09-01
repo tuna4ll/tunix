@@ -65,6 +65,8 @@ extern void kprintf(const char *fmt, ...);
 #define DRM_NR_MODE_CURSOR 0xa3
 #define DRM_NR_MODE_CURSOR2 0xa4
 #define DRM_NR_MODE_ATOMIC 0xbc
+#define DRM_NR_MODE_CREATEPROPBLOB 0xbd
+#define DRM_NR_MODE_DESTROYPROPBLOB 0xbe
 #define DRM_NR_MODE_DIRTYFB 0xb1
 #define DRM_NR_MODE_CREATE_DUMB 0xb2
 #define DRM_NR_MODE_MAP_DUMB 0xb3
@@ -491,6 +493,9 @@ struct drm_mode_atomic_object {
     uint64_t props_ptr;
 };
 
+struct drm_mode_create_blob { uint64_t data; uint32_t length; uint32_t blob_id; };
+struct drm_mode_destroy_blob { uint32_t blob_id; };
+
 typedef char drm_modeinfo_size_check[
     (sizeof(struct drm_mode_modeinfo) == 68) ? 1 : -1];
 typedef char drm_create_dumb_size_check[
@@ -603,6 +608,11 @@ static uint32_t open_count;
 
 static struct drm_dumb_buffer buffers[DRM_MAX_BUFFERS];
 static struct drm_framebuffer framebuffers[DRM_MAX_FRAMEBUFFERS];
+#define DRM_MAX_BLOBS 32
+#define DRM_MAX_BLOB_BYTES 256
+struct drm_property_blob { uint32_t id; uint32_t length; uint8_t data[DRM_MAX_BLOB_BYTES]; };
+static struct drm_property_blob blobs[DRM_MAX_BLOBS];
+static uint32_t next_blob_id = 1;
 /* Where to start looking for a free slot, so a table that is mostly full is
    not walked from the beginning every time. */
 static uint32_t next_handle = 1;
@@ -624,8 +634,10 @@ static int drm_ready;
 void drm_init(void) {
     memset(buffers, 0, sizeof(buffers));
     memset(framebuffers, 0, sizeof(framebuffers));
+    memset(blobs, 0, sizeof(blobs));
     next_handle = 1;
     next_fb_id = 1;
+    next_blob_id = 1;
     active_fb_id = 0;
     event_head = event_tail = event_count = 0;
     flip_sequence = 0;
@@ -649,6 +661,37 @@ static struct drm_framebuffer *framebuffer_find(uint32_t id) {
         if (framebuffers[index].id == id) return &framebuffers[index];
     }
     return NULL;
+}
+
+static struct drm_property_blob *blob_find(uint32_t id) {
+    for (unsigned index = 0; index < DRM_MAX_BLOBS; index++)
+        if (blobs[index].id == id) return &blobs[index];
+    return NULL;
+}
+
+static int64_t ioctl_create_blob(uint64_t user_argument) {
+    struct drm_mode_create_blob request;
+    if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
+    if (!request.data || !request.length || request.length > DRM_MAX_BLOB_BYTES) return -EINVAL;
+    for (unsigned index = 0; index < DRM_MAX_BLOBS; index++) {
+        if (blobs[index].id) continue;
+        if (copy_from_user(blobs[index].data, request.data, request.length) != 0) return -EFAULT;
+        blobs[index].id = next_blob_id++;
+        if (!blobs[index].id) blobs[index].id = next_blob_id++;
+        blobs[index].length = request.length;
+        request.blob_id = blobs[index].id;
+        return copy_to_user(user_argument, &request, sizeof(request)) == 0 ? 0 : -EFAULT;
+    }
+    return -ENOMEM;
+}
+
+static int64_t ioctl_destroy_blob(uint64_t user_argument) {
+    struct drm_mode_destroy_blob request;
+    if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
+    struct drm_property_blob *blob = blob_find(request.blob_id);
+    if (!blob) return -ENOENT;
+    memset(blob, 0, sizeof(*blob));
+    return 0;
 }
 
 static int64_t ioctl_getfb(uint64_t user_argument) {
@@ -719,6 +762,13 @@ static int64_t ioctl_atomic(uint64_t user_argument) {
             } else if (objects[object].object_id == DRM_CONNECTOR_ID &&
                        id == DRM_PROP_CONNECTOR_CRTC_ID) {
                 if (value != 0 && value != DRM_CRTC_ID) return -EINVAL;
+            } else if (objects[object].object_id == DRM_CRTC_ID && id == DRM_PROP_CRTC_MODE_ID) {
+                struct drm_property_blob *blob = blob_find((uint32_t)value);
+                if (!blob || blob->length < sizeof(struct drm_mode_modeinfo)) return -EINVAL;
+                struct drm_mode_modeinfo mode;
+                memcpy(&mode, blob->data, sizeof(mode));
+                if (mode.hdisplay != framebuffer_width() || mode.vdisplay != framebuffer_height())
+                    return -EINVAL;
             } else if (id != DRM_PROP_CRTC_MODE_ID && id != DRM_PROP_PLANE_CRTC_ID) {
                 return -EINVAL;
             }
@@ -1127,7 +1177,7 @@ static int64_t ioctl_get_property(uint64_t user_argument) {
         memset(property.name, 0, sizeof(property.name));
         strncpy(property.name, "MODE_ID", sizeof(property.name) - 1);
         property.flags = DRM_MODE_PROP_BLOB;
-        property.count_values = 1;
+        property.count_values = 0;
         property.count_enum_blobs = 0;
         return copy_to_user(user_argument, &property, sizeof(property)) == 0 ? 0 : -EFAULT;
     }
@@ -1901,6 +1951,8 @@ int64_t drm_file_ioctl(struct file *file, unsigned long request,
     case DRM_NR_MODE_CURSOR: return ioctl_cursor(user_argument, 0);
     case DRM_NR_MODE_CURSOR2: return ioctl_cursor(user_argument, 1);
     case DRM_NR_MODE_ATOMIC: return ioctl_atomic(user_argument);
+    case DRM_NR_MODE_CREATEPROPBLOB: return ioctl_create_blob(user_argument);
+    case DRM_NR_MODE_DESTROYPROPBLOB: return ioctl_destroy_blob(user_argument);
     case DRM_NR_MODE_SETCRTC: return ioctl_set_crtc(user_argument);
     case DRM_NR_MODE_PAGE_FLIP: return ioctl_page_flip(user_argument);
     case DRM_NR_MODE_DIRTYFB: return ioctl_dirty_fb(user_argument);
