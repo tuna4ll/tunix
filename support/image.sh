@@ -43,23 +43,18 @@ mkdir -p "$WORK"
 # --- the EFI system partition ----------------------------------------------
 
 #
-# One directory per mmd and a check that each one arrived, because the way this
-# goes wrong is unreadable. mcopy answers a *missing target directory* with
+# One directory per mmd, because the way a later copy goes wrong is unreadable.
+# mcopy answers a *missing target directory* with
 #
 #   ::/boot/limine/limine-bios.sys: no match for target
 #   Bad target ::/boot/limine/limine-bios.sys
 #
 # which names the file it was asked to write and says nothing about the
-# directory that is actually absent -- and it is reported on the copy, several
-# commands after whatever really failed. Checking here means the message names
-# the step that went wrong.
+# directory that is actually absent. With `set -e`, mmd itself is the reliable
+# check: probing an empty directory afterward has produced false negatives in
+# released mtools versions even though the directory was created successfully.
 esp_mkdir() {
 	mmd -i "$WORK/esp.img" "$1"
-	mdir -i "$WORK/esp.img" -b "$1" >/dev/null 2>&1 || {
-		echo "image.sh: mmd said it made $1 and it is not there." >&2
-		echo "image.sh: mtools is $(mtools --version 2>&1 | head -1)." >&2
-		exit 1
-	}
 }
 
 # And a source that is not there is worth its own sentence: mcopy reports it as
