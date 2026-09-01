@@ -463,7 +463,22 @@ typedef char drm_create_dumb_size_check[
  * so this ceiling stopped being generous the moment mesa started allocating
  * through it.
  */
-#define DRM_MAX_BUFFERS 512
+/*
+ * How many buffers a client may hold at once.
+ *
+ * It was 512, which is a number rather than a reason, and SuperTuxKart runs
+ * past it while a track loads: every texture, vertex buffer and render target
+ * is one of these. What that looked like was not a full table. mesa answers a
+ * refused resource with a null image and then reads through it, so the machine
+ * reported a page fault at address zero inside libgallium, at track load,
+ * about half the time -- a crash that has been blamed on the graphics stack
+ * for as long as the game has been on the image.
+ *
+ * A handle is its slot's index now (see buffer_find), so a bigger table costs
+ * memory and nothing else. This much is 384 KiB and covers what the game asks
+ * for with room over.
+ */
+#define DRM_MAX_BUFFERS 4096
 #define DRM_MAX_FRAMEBUFFERS 64
 
 /*
@@ -547,6 +562,8 @@ static uint32_t open_count;
 
 static struct drm_dumb_buffer buffers[DRM_MAX_BUFFERS];
 static struct drm_framebuffer framebuffers[DRM_MAX_FRAMEBUFFERS];
+/* Where to start looking for a free slot, so a table that is mostly full is
+   not walked from the beginning every time. */
 static uint32_t next_handle = 1;
 /* One host rendering context per process; see render_context() below. */
 #define DRM_MAX_CONTEXTS 8
@@ -580,11 +597,9 @@ void drm_init(void) {
 int drm_available(void) { return drm_ready; }
 
 static struct drm_dumb_buffer *buffer_find(uint32_t handle) {
-    if (!handle) return NULL;
-    for (int index = 0; index < DRM_MAX_BUFFERS; index++) {
-        if (buffers[index].handle == handle) return &buffers[index];
-    }
-    return NULL;
+    if (!handle || handle > (uint32_t)DRM_MAX_BUFFERS) return NULL;
+    struct drm_dumb_buffer *buffer = &buffers[handle - 1U];
+    return buffer->handle == handle ? buffer : NULL;
 }
 
 static struct drm_framebuffer *framebuffer_find(uint32_t id) {
@@ -1213,8 +1228,15 @@ static int64_t ioctl_create_dumb(uint64_t user_argument) {
     if (!page_count || page_count > (256ULL * 1024ULL * 1024ULL) / 4096ULL) return -EINVAL;
 
     struct drm_dumb_buffer *slot = NULL;
-    for (int index = 0; index < DRM_MAX_BUFFERS; index++) {
-        if (!buffers[index].handle) { slot = &buffers[index]; break; }
+    uint32_t handle = 0;
+    for (int step = 0; step < DRM_MAX_BUFFERS; step++) {
+        uint32_t index = (next_handle - 1U + (uint32_t)step) % (uint32_t)DRM_MAX_BUFFERS;
+        if (!buffers[index].handle) {
+            slot = &buffers[index];
+            handle = index + 1U;
+            next_handle = (index + 2U) > (uint32_t)DRM_MAX_BUFFERS ? 1U : index + 2U;
+            break;
+        }
     }
     if (!slot) return -ENOMEM;
 
@@ -1234,7 +1256,7 @@ static int64_t ioctl_create_dumb(uint64_t user_argument) {
         slot->pages[index] = physical;
     }
 
-    slot->handle = next_handle++;
+    slot->handle = handle;
     slot->refs = 1;               /* the handle itself */
     slot->width = request.width;
     slot->height = request.height;
@@ -1402,8 +1424,15 @@ static struct drm_dumb_buffer *buffer_new(uint64_t size) {
     if (!page_count || page_count > (256ULL * 1024ULL * 1024ULL) / 4096ULL) return NULL;
 
     struct drm_dumb_buffer *slot = NULL;
-    for (int index = 0; index < DRM_MAX_BUFFERS; index++) {
-        if (!buffers[index].handle) { slot = &buffers[index]; break; }
+    uint32_t handle = 0;
+    for (int step = 0; step < DRM_MAX_BUFFERS; step++) {
+        uint32_t index = (next_handle - 1U + (uint32_t)step) % (uint32_t)DRM_MAX_BUFFERS;
+        if (!buffers[index].handle) {
+            slot = &buffers[index];
+            handle = index + 1U;
+            next_handle = (index + 2U) > (uint32_t)DRM_MAX_BUFFERS ? 1U : index + 2U;
+            break;
+        }
     }
     if (!slot) return NULL;
 
@@ -1423,7 +1452,7 @@ static struct drm_dumb_buffer *buffer_new(uint64_t size) {
         slot->pages[index] = physical;
     }
 
-    slot->handle = next_handle++;
+    slot->handle = handle;
     slot->refs = 1;
     slot->size = size;
     slot->page_count = page_count;
