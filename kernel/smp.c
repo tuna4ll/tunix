@@ -1,20 +1,14 @@
-/*
- * Bringing up the processors the firmware said are there.
- *
- * The sequence is fixed by the architecture and unforgiving: a processor is
- * reset with an INIT, then told where to start with a startup IPI naming a
- * page below 1 MiB, and it begins in 16-bit real mode with nothing set up. The
- * second startup is not superstition -- the manual asks for two, and some
- * processors ignore the first.
- *
- * The awkward part is the address space. The trampoline runs at a physical
- * address the kernel proper maps nowhere: everything the kernel owns is in the
- * top half. So the page it lives in has to be reachable at its own address for
- * as long as the bring-up lasts.
- *
- * Processors are started one at a time because there is one parameter block,
- * and because a failure is easier to attribute that way.
- */
+/* Bringing up the processors the firmware said are there. */
+/* The sequence is fixed by the architecture: an INIT resets a processor, a
+   startup IPI names the page below 1 MiB it begins executing at, and it starts
+   in 16-bit real mode with nothing set up. */
+/* The startup is sent twice because the manual asks for two and some processors
+   ignore the first. */
+/* The trampoline runs at a physical address the kernel proper maps nowhere, so
+   the page it lives in has to be reachable at its own address for as long as
+   the bring-up lasts. */
+/* Processors are started one at a time because there is one parameter block and
+   because a failure is easier to attribute that way. */
 #include <stddef.h>
 #include <stdint.h>
 
@@ -40,8 +34,8 @@ extern uint8_t smp_trampoline_start[];
 extern uint8_t smp_trampoline_end[];
 extern uint8_t smp_trampoline_data[];
 
-/* Must match TRAMPOLINE_BASE in trampoline.S: the blob has that address
-   compiled into its own jumps. */
+/* Must match TRAMPOLINE_BASE in trampoline.S, which has that address compiled
+   into its own jumps. */
 #define TRAMPOLINE_PHYSICAL 0x8000ULL
 #define TRAMPOLINE_PAGE ((uint8_t)(TRAMPOLINE_PHYSICAL >> 12))
 
@@ -53,8 +47,8 @@ extern uint8_t smp_trampoline_data[];
 #define STARTUP_TIMEOUT_MS 200ULL
 #define INIT_SETTLE_MS 10ULL
 #define STARTUP_SETTLE_US 200ULL
-/* Long enough that a busy processor always answers, short enough that a
-   processor that never will does not take the machine with it. */
+/* Long enough that a busy processor always answers and short enough that one
+   which never will does not take the machine with it. */
 #define FLUSH_TIMEOUT_NS (2ULL * 1000ULL * 1000ULL * 1000ULL)
 
 static unsigned online_cpus = 1;
@@ -74,7 +68,7 @@ void smp_service_flush(void) {
     __atomic_store_n(&self->flush_pending, 0, __ATOMIC_RELEASE);
 }
 
-/* What the interrupt itself runs. Deliberately short and lock-free. */
+/* What the interrupt itself runs, kept short and lock-free on purpose. */
 void smp_flush_interrupt(void) {
     apic_send_eoi();
     smp_service_flush();
@@ -85,9 +79,9 @@ void smp_flush_address_space(uint64_t cr3) {
 
     unsigned self = cpu_current()->index;
     int asked = 0;
-    /* Which processors are looking at this space cannot change underneath:
-       only a processor inside the kernel changes its own, and the caller is
-       the one holding the kernel lock. */
+    /* Which processors are looking at this space cannot change underneath,
+       because only a processor inside the kernel changes its own and the caller
+       holds the kernel lock. */
     for (unsigned index = 0; index < SMP_MAX_CPUS; index++) {
         struct cpu *cpu = percpu_slot(index);
         if (index == self || !cpu->online || cpu->address_space != cr3) continue;
@@ -100,15 +94,12 @@ void smp_flush_address_space(uint64_t cr3) {
     for (unsigned index = 0; index < SMP_MAX_CPUS; index++) {
         struct cpu *cpu = percpu_slot(index);
         if (index == self || !cpu->online) continue;
-        /*
-         * Bounded, because this runs with the kernel lock held. A processor
-         * that is marked online and does not answer -- one that came up, said
-         * so and then went wrong -- would otherwise stop the whole machine
-         * here, holding the one lock everything else needs, having printed
-         * nothing. Giving up leaves that processor with stale translations,
-         * which is a worse machine than a correct one and a much better one
-         * than a dead one.
-         */
+        /* Bounded, because this runs with the kernel lock held and a processor
+           that came up, said so and then went wrong would otherwise stop the
+           whole machine here having printed nothing. */
+        /* Giving up leaves that processor with stale translations, which is a
+           worse machine than a correct one and a much better one than a dead
+           one. */
         uint64_t deadline = time_uptime_ns() + FLUSH_TIMEOUT_NS;
         while (__atomic_load_n(&cpu->flush_pending, __ATOMIC_ACQUIRE)) {
             if (time_uptime_ns() >= deadline) {
@@ -138,16 +129,14 @@ static void write_parameter(unsigned offset, uint64_t value) {
 
 static int trampoline_page_added;
 
-/*
- * The trampoline's own page, mapped to itself.
- *
- * The instruction that turns paging on is followed by one that has to be
- * fetched through the tables it just installed, and the kernel maps nothing
- * down here. The loader's identity map usually survives in the tables the
- * kernel inherited, in which case there is nothing to do -- and it is a huge
- * page, so trying to map over it would fail rather than be redundant. Only
- * when it is absent is a mapping added, and then only this page.
- */
+/* The trampoline's own page, mapped to itself. */
+/* The instruction that turns paging on is followed by one that has to be
+   fetched through the tables it just installed, and the kernel maps nothing
+   down here. */
+/* The loader's identity map usually survives in the tables the kernel
+   inherited, and it is a huge page, so mapping over it would fail rather than
+   be redundant. */
+/* Only when it is absent is a mapping added, and then only this page. */
 static int map_trampoline_page(void) {
     uint64_t cr3 = vmm_kernel_cr3();
     uint64_t physical = 0;
@@ -170,13 +159,13 @@ static void unmap_trampoline_page(void) {
 /* Runs on the new processor, on its own idle stack, with the kernel's page
    tables already loaded by the trampoline. */
 void smp_ap_entry(uint64_t index) {
-    /* First, so that the window the starter brackets it with is as tight as the
+    /* First, so the window the starter brackets it with is as tight as the
        bring-up allows. */
     time_mark_processor((unsigned)index);
     gdt_init_cpu((unsigned)index);
     idt_activate();
-    /* The syscall entry MSRs are per-processor; a processor that skipped this
-       would take its first syscall as an invalid opcode. */
+    /* The syscall entry MSRs are per-processor, and one that skipped this would
+       take its first syscall as an invalid opcode. */
     syscall_init();
     apic_enable_local();
     percpu_slot((unsigned)index)->apic_id = apic_local_id();
@@ -194,9 +183,8 @@ static int start_processor(unsigned index, uint32_t apic_id) {
     write_parameter(DATA_ENTRY, (uint64_t)smp_ap_entry);
     write_parameter(DATA_INDEX, index);
 
-    /* Read before the processor is woken and again once it answers, so that the
-       reading it takes for itself in between can be checked against a window
-       this processor knows it happened inside. */
+    /* Read before the processor is woken and again once it answers, so the
+       reading it takes for itself falls inside a window this one knows. */
     uint64_t before = time_uptime_ns();
     apic_send_init(apic_id);
     wait_ns(INIT_SETTLE_MS * 1000000ULL);
@@ -215,10 +203,10 @@ void smp_init(void) {
     percpu_mark_online(0);
     percpu_slot(0)->apic_id = apic_local_id();
 
-    /* nosmp on the command line keeps the machine on one processor. It is
-       for a machine that will not finish booting: everything the other
-       processors bring with them -- the shootdown, the contention, one of
-       them running init while the first idles -- stops being a suspect. */
+    /* nosmp on the command line keeps the machine on one processor, for a
+       machine that will not finish booting: the shootdown, the contention and
+       one of them running init while the first idles all stop being
+       suspects. */
     if (boot_command_line_flag("nosmp")) {
         kprintf("SMP: one processor, nosmp\n");
         return;
@@ -236,12 +224,9 @@ void smp_init(void) {
         return;
     }
 
-    /*
-     * Held for the whole of the bring-up. A processor that is already up is
-     * taking timer interrupts and running processes by the time the next one
-     * is started, and the page tables being edited here are the ones it is
-     * running on.
-     */
+    /* Held for the whole of the bring-up, because a processor that is already
+       up is taking timer interrupts and running processes by the time the next
+       one is started, on the page tables being edited here. */
     kernel_lock();
     if (map_trampoline_page() != 0) {
         kernel_unlock();
@@ -259,31 +244,32 @@ void smp_init(void) {
             kprintf("SMP: apic %u did not come up\n", (unsigned)machine->cpus[i].apic_id);
             missing++;
         }
-        /* The slot is spent either way. A processor that missed the deadline
-           has not necessarily failed -- it may still be on its way -- and
-           handing its index and its stack to the next one is how two
-           processors end up running on one stack. */
+        /* The slot is spent either way, because a processor that missed the
+           deadline may still be on its way and handing its index and its stack
+           to the next one is how two end up running on one stack. */
         index++;
     }
 
-    /* The trampoline page stays mapped when something did not check in, for
-       the same reason: a processor still inside it faults on the instruction
-       after paging comes on if the page it is executing from has gone. One
-       page of low memory is a cheap price for not doing that to a machine. */
+    /* The trampoline page stays mapped when something did not check in, because
+       a processor still inside it faults on the instruction after paging comes
+       on if the page it is executing from has gone. */
+    /* One page of low memory is a cheap price for not doing that to a
+       machine. */
     if (!missing) unmap_trampoline_page();
     online_cpus = percpu_online_count();
     kernel_unlock();
-    /* After the unlock, not before. The bring-up holds the kernel lock from
-       end to end and the processors it started are already contending for
-       it, so a line printed inside says only that the loop finished -- and a
-       machine that stops at this line rather than the next one is a machine
-       where one of them took the lock and did not give it back. */
+    /* After the unlock and not before, because the bring-up holds the lock end
+       to end and a line printed inside would say only that the loop
+       finished. */
+    /* A machine that stops at this line rather than the next one is a machine
+       where one of the processors took the lock and did not give it back. */
     kprintf("SMP: %u of %u processors running\n", online_cpus,
             (unsigned)machine->cpu_count);
     /* Only with more than one, because one processor has one counter and
-       nothing to disagree with. Where the promise is missing, two readings
-       taken on different processors are not two readings of one clock -- which
-       is what a virtual runtime, a deadline and a slice all assume. */
+       nothing to disagree with. */
+    /* Where the promise is missing, two readings taken on different processors
+       are not two readings of one clock, which is what a virtual runtime, a
+       deadline and a slice all assume. */
     if (online_cpus > 1 && !time_tsc_is_invariant())
         kprintf("SMP: the TSC is not invariant; timing may drift between processors\n");
 }

@@ -43,9 +43,9 @@ static void cpuid(uint32_t leaf, uint32_t subleaf,
                      : "a"(leaf), "c"(subleaf));
 }
 
-/* CPUID leaf 0x80000007, EDX bit 8. A processor that does not set it may stop
-   the counter in a sleep state or run it at whatever frequency it happens to be
-   at, and neither is a clock a scheduler can subtract two readings of. */
+/* CPUID leaf 0x80000007 EDX bit 8, and a processor that leaves it clear may
+   stop the counter in a sleep state or vary its rate. */
+/* Neither of those is a clock a scheduler can subtract two readings of. */
 static int invariant_from_cpuid(void) {
     uint32_t a, b, c, d;
     cpuid(0x80000000U, 0, &a, &b, &c, &d);
@@ -227,18 +227,16 @@ void time_init(void) {
     boot_realtime_ns = rtc_to_epoch(&rtc) * 1000000000ULL;
 }
 
-/*
- * Nanoseconds since the clock was calibrated, on whichever processor asks.
- *
- * The reading is clamped at the bottom rather than allowed to wrap. There is
- * one boot_tsc for the whole machine and nothing guarantees the processors
- * agree: firmware that left one behind the one time_init() ran on makes the
- * subtraction below underflow, and the unsigned result of that is about two
- * hundred years -- a number that expires every timeout in the system at once,
- * charges a task two centuries of virtual runtime, and takes it out of the
- * running for good. Zero is wrong too, but it is wrong by the skew rather than
- * by the width of the type.
- */
+/* Nanoseconds since the clock was calibrated, on whichever processor asks. */
+/* There is one boot_tsc for the whole machine and nothing guarantees the
+   processors agree with it. */
+/* Firmware that left one behind the processor time_init() ran on makes the
+   subtraction below underflow, and the unsigned result of that is about two
+   hundred years. */
+/* Such a reading expires every timeout in the system at once and charges the
+   next task to run there two centuries of virtual runtime. */
+/* So it is clamped at the bottom: zero is wrong by the skew, where the wrap is
+   wrong by the width of the type. */
 uint64_t time_uptime_ns(void) {
     uint64_t raw = read_tsc();
     if (raw < boot_tsc) return 0;
@@ -264,14 +262,13 @@ void time_mark_processor(unsigned index) {
     if (index < SMP_MAX_CPUS) processor_mark[index] = time_uptime_ns();
 }
 
-/*
- * The starter reads the clock before it wakes a processor and again once that
- * processor has said it is up, so the reading the processor took in between has
- * to lie between the two. One that does not is a processor whose counter does
- * not share the machine's, and how far outside it fell is a floor on how far
- * apart they are -- which is worth a line, because everything above this treats
- * the clock as one clock.
- */
+/* The starter reads the clock before it wakes a processor and again once that
+   processor has answered, so the reading taken in between must lie between the
+   two. */
+/* One that does not is a counter that does not share the machine's, and how far
+   outside it fell is a floor on how far apart they are. */
+/* It is worth a line because everything above this treats the clock as one
+   clock. */
 void time_check_processor(unsigned index, uint64_t before, uint64_t after) {
     if (index >= SMP_MAX_CPUS) return;
     uint64_t mark = processor_mark[index];
