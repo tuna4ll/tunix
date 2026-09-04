@@ -1409,10 +1409,15 @@ void process_timer_interrupt(struct interrupt_frame *frame) {
             activate_process(next);
         } else {
             if (!allowed_on_this_cpu(preempted)) go_idle();
-            preempted->state = PROCESS_RUNNING;
+            /* Before the state changes, not after. ordinary_slice_ticks()
+               divides the period among the tasks that are READY, so a task
+               already marked RUNNING is counted out of its own share -- which
+               is what made the two callers of it disagree about the same
+               task. activate_process() has always done it in this order. */
             preempted->time_slice_ticks = preempted->rt_priority
                                            ? PROCESS_DEFAULT_QUANTUM_TICKS
                                            : ordinary_slice_ticks(preempted);
+            preempted->state = PROCESS_RUNNING;
             current = preempted;
         }
     }
