@@ -63,6 +63,18 @@ static int process_wake_all_locked(const void *channel);
 #define NICE_0_WEIGHT 1024ULL
 #define TICK_NS (1000000000ULL / TIMER_FREQUENCY_HZ)
 #define SCHED_TARGET_LATENCY_NS (SCHED_TARGET_LATENCY_TICKS * TICK_NS)
+/*
+ * A slice is never this long, so a sample that is did not measure one: it
+ * subtracted two clocks that do not agree.
+ *
+ * There is one boot_tsc for the whole machine and the processors are not
+ * checked against it. One whose counter runs ahead hands a task that migrated
+ * onto it a delta of whole seconds, and charging that to virtual runtime puts
+ * the task behind everything for ever -- runnable, never chosen, which from the
+ * outside is the desktop stopping. Dropping the sample loses a slice of
+ * accounting and keeps the scheduler answering.
+ */
+#define SCHED_MAX_SAMPLE_NS 1000000000ULL
 
 /* Linux's well-tested geometric nice scale, rounded to integer weights. */
 static const uint32_t nice_weights[40] = {
@@ -2618,10 +2630,12 @@ void process_account_runtime(void) {
     uint64_t now = time_uptime_ns();
     if (now >= current->last_scheduled_ns) {
         uint64_t elapsed = now - current->last_scheduled_ns;
-        current->runtime_ns += elapsed;
-        if (!current->rt_priority) {
-            uint64_t weight = process_weight(current);
-            current->virtual_runtime_ns += elapsed * NICE_0_WEIGHT / weight;
+        if (elapsed <= SCHED_MAX_SAMPLE_NS) {
+            current->runtime_ns += elapsed;
+            if (!current->rt_priority) {
+                uint64_t weight = process_weight(current);
+                current->virtual_runtime_ns += elapsed * NICE_0_WEIGHT / weight;
+            }
         }
     }
     current->last_scheduled_ns = now;

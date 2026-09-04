@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include "include/io.h"
+#include "include/percpu.h"
 #include "include/time.h"
 
 #define PIT_FREQUENCY 1193182ULL
@@ -9,6 +10,7 @@
 #define CMOS_UPDATE_IN_PROGRESS 0x80U
 
 extern void panic(const char *message) __attribute__((noreturn));
+extern void kprintf(const char *fmt, ...);
 
 struct rtc_snapshot {
     uint8_t second;
@@ -24,6 +26,8 @@ struct rtc_snapshot {
 static uint64_t boot_tsc;
 static uint64_t tsc_hz;
 static uint64_t boot_realtime_ns;
+static int tsc_invariant;
+static uint64_t processor_mark[SMP_MAX_CPUS];
 
 static inline uint64_t read_tsc(void) {
     uint32_t low;
@@ -38,6 +42,19 @@ static void cpuid(uint32_t leaf, uint32_t subleaf,
                      : "=a"(*a), "=b"(*b), "=c"(*c), "=d"(*d)
                      : "a"(leaf), "c"(subleaf));
 }
+
+/* CPUID leaf 0x80000007, EDX bit 8. A processor that does not set it may stop
+   the counter in a sleep state or run it at whatever frequency it happens to be
+   at, and neither is a clock a scheduler can subtract two readings of. */
+static int invariant_from_cpuid(void) {
+    uint32_t a, b, c, d;
+    cpuid(0x80000000U, 0, &a, &b, &c, &d);
+    if (a < 0x80000007U) return 0;
+    cpuid(0x80000007U, 0, &a, &b, &c, &d);
+    return (d & (1U << 8)) != 0;
+}
+
+int time_tsc_is_invariant(void) { return tsc_invariant; }
 
 static uint64_t frequency_from_cpuid(void) {
     uint32_t a, b, c, d;
@@ -203,14 +220,29 @@ void time_init(void) {
     if (!tsc_hz) tsc_hz = frequency_from_pit();
     if (tsc_hz < 1000000ULL) panic("unable to calibrate TSC");
     boot_tsc = read_tsc();
+    tsc_invariant = invariant_from_cpuid();
 
     struct tunix_rtc_time rtc;
     if (time_get_rtc(&rtc) != 0) panic("unable to read CMOS RTC");
     boot_realtime_ns = rtc_to_epoch(&rtc) * 1000000000ULL;
 }
 
+/*
+ * Nanoseconds since the clock was calibrated, on whichever processor asks.
+ *
+ * The reading is clamped at the bottom rather than allowed to wrap. There is
+ * one boot_tsc for the whole machine and nothing guarantees the processors
+ * agree: firmware that left one behind the one time_init() ran on makes the
+ * subtraction below underflow, and the unsigned result of that is about two
+ * hundred years -- a number that expires every timeout in the system at once,
+ * charges a task two centuries of virtual runtime, and takes it out of the
+ * running for good. Zero is wrong too, but it is wrong by the skew rather than
+ * by the width of the type.
+ */
 uint64_t time_uptime_ns(void) {
-    uint64_t delta = read_tsc() - boot_tsc;
+    uint64_t raw = read_tsc();
+    if (raw < boot_tsc) return 0;
+    uint64_t delta = raw - boot_tsc;
     uint64_t seconds = delta / tsc_hz;
     uint64_t remainder = delta % tsc_hz;
     return seconds * 1000000000ULL + (remainder * 1000000000ULL) / tsc_hz;
@@ -226,4 +258,25 @@ uint64_t time_epoch_seconds(void) {
 
 uint64_t time_tsc_frequency(void) {
     return tsc_hz;
+}
+
+void time_mark_processor(unsigned index) {
+    if (index < SMP_MAX_CPUS) processor_mark[index] = time_uptime_ns();
+}
+
+/*
+ * The starter reads the clock before it wakes a processor and again once that
+ * processor has said it is up, so the reading the processor took in between has
+ * to lie between the two. One that does not is a processor whose counter does
+ * not share the machine's, and how far outside it fell is a floor on how far
+ * apart they are -- which is worth a line, because everything above this treats
+ * the clock as one clock.
+ */
+void time_check_processor(unsigned index, uint64_t before, uint64_t after) {
+    if (index >= SMP_MAX_CPUS) return;
+    uint64_t mark = processor_mark[index];
+    if (mark >= before && mark <= after) return;
+    uint64_t skew = mark < before ? before - mark : mark - after;
+    kprintf("TIME: cpu %u clock disagrees by at least %u ms\n", index,
+            (unsigned)(skew / 1000000ULL));
 }

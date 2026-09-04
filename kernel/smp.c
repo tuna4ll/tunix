@@ -170,6 +170,9 @@ static void unmap_trampoline_page(void) {
 /* Runs on the new processor, on its own idle stack, with the kernel's page
    tables already loaded by the trampoline. */
 void smp_ap_entry(uint64_t index) {
+    /* First, so that the window the starter brackets it with is as tight as the
+       bring-up allows. */
+    time_mark_processor((unsigned)index);
     gdt_init_cpu((unsigned)index);
     idt_activate();
     /* The syscall entry MSRs are per-processor; a processor that skipped this
@@ -191,6 +194,10 @@ static int start_processor(unsigned index, uint32_t apic_id) {
     write_parameter(DATA_ENTRY, (uint64_t)smp_ap_entry);
     write_parameter(DATA_INDEX, index);
 
+    /* Read before the processor is woken and again once it answers, so that the
+       reading it takes for itself in between can be checked against a window
+       this processor knows it happened inside. */
+    uint64_t before = time_uptime_ns();
     apic_send_init(apic_id);
     wait_ns(INIT_SETTLE_MS * 1000000ULL);
     apic_send_startup(apic_id, TRAMPOLINE_PAGE);
@@ -199,7 +206,9 @@ static int start_processor(unsigned index, uint32_t apic_id) {
 
     uint64_t deadline = time_uptime_ns() + STARTUP_TIMEOUT_MS * 1000000ULL;
     while (!cpu->online && time_uptime_ns() < deadline) __asm__ volatile("pause");
-    return cpu->online ? 0 : -1;
+    if (!cpu->online) return -1;
+    time_check_processor(index, before, time_uptime_ns());
+    return 0;
 }
 
 void smp_init(void) {
@@ -271,4 +280,10 @@ void smp_init(void) {
        where one of them took the lock and did not give it back. */
     kprintf("SMP: %u of %u processors running\n", online_cpus,
             (unsigned)machine->cpu_count);
+    /* Only with more than one, because one processor has one counter and
+       nothing to disagree with. Where the promise is missing, two readings
+       taken on different processors are not two readings of one clock -- which
+       is what a virtual runtime, a deadline and a slice all assume. */
+    if (online_cpus > 1 && !time_tsc_is_invariant())
+        kprintf("SMP: the TSC is not invariant; timing may drift between processors\n");
 }
