@@ -353,6 +353,30 @@ processor, "not currently scheduled" and "not currently executing" are the same
 sentence. On several they are not, and every place the old kernel relied on
 that is a place to look.
 
+## A set that is missing whatever is running
+
+The same sentence has a second edge, and it cost a machine.
+
+The scheduler places a waking task at the lowest virtual runtime anything
+runnable holds, so that a task which slept does not come back owed the whole
+time it was asleep. The obvious place to take that floor from is the set
+`next_runnable()` already walks — everything `READY`. It is the wrong set. A
+task holding the lowest virtual runtime is not `READY`, it is `RUNNING`,
+because being lowest is why it was chosen; the `READY` set is what was *just
+preempted*, which is the highest.
+
+On one processor that hides one task and the floor is close enough to right. On
+four it hides four, and the floor climbs past the running set entirely — so a
+waking task gets placed *above* the tasks it is competing with and is never
+chosen again. The first version of that patch did exactly this, and what it
+produced was a four-processor machine that stopped dead in the wake-latency
+test while the one-processor machine passed it.
+
+The floor is taken over `RUNNING` as well as `READY` now, and over every
+processor rather than the ones the asking task is allowed on. "Runnable" and
+"in the runnable set" are the same phrase on one processor and different
+answers on four.
+
 ## "Nothing else to run" is now a different sentence too
 
 Several blocking paths ended with the same shape:
@@ -472,6 +496,13 @@ switch cannot fake. It was `bin/smp-test`, built against the kernel's own libc;
 that libc is gone and so is the program, but the measurement it produced is
 what the numbers below are.
 
+`support/schedbench.c` is what measures it now, and `make schedbench` is how.
+It is freestanding rather than built against a libc, so it cannot go the same
+way, and its root filesystem is one static binary — no Void download, no
+filesystem that has to hold ownership, a few seconds to build and boot. It runs
+under KVM where there is one, because the costs that separate one processor
+from four are the ones an emulator does not have.
+
 On `-smp 4` (four consecutive runs gave 338, 297, 362 and 327 percent):
 
 ```
@@ -497,11 +528,12 @@ one and a third. The spread between runs is the host showing through; the
 measurement is wall clock and the guest does not own the machine.
 
 `/proc/cpuinfo` carries one stanza per running processor. `sched_getaffinity`
-answers with all of them set, which matters more than it looks: `nproc` and
-every thread pool that sizes itself ask that first and only fall back to
-`/proc/cpuinfo`, so a kernel that returns `ENOSYS` there reports one processor
-however many it is running. `sched_setaffinity` accepts and does nothing —
-every processor here is equal and nothing is pinned.
+answers with the mask the thread actually has, which matters more than it
+looks: `nproc` and every thread pool that sizes itself ask that first and only
+fall back to `/proc/cpuinfo`, so a kernel that returns `ENOSYS` there reports
+one processor however many it is running. `sched_setaffinity` narrows the mask
+for real — see the scheduler section above, and `allowed_on_this_cpu()` in
+`kernel/process.c`.
 
 The other proof was a desktop: a full Xfce session — Xorg, xfwm4, xfce4-panel,
 xfdesktop, Thunar, all of it heavily threaded — coming up and staying up on four

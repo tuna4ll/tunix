@@ -179,6 +179,22 @@ them out of each other's way:
   by `elapsed * 1024 / weight`, so a lower-weight task becomes less eligible
   sooner. Forked processes and threads start at the parent's virtual runtime;
   they cannot gain an initial zero-runtime advantage.
+- A task that wakes is *placed* rather than left where it was. Virtual runtime
+  stands still while a task is blocked and rises for everything that runs, so
+  without this a task that slept for two seconds came back two seconds of credit
+  ahead and then held the processor until it had spent all of it — measured at
+  1500 ms of a spinner not being scheduled once. `place_waking_task`
+  (`kernel/process.c`) puts it at the runnable set's own virtual runtime less
+  half the target latency: the subtraction is what keeps an interactive task
+  prompt, the floor is what stops the debt being unbounded.
+- That floor is taken over `RUNNING` tasks as well as `READY` ones. The task
+  holding the lowest virtual runtime is the one running, so a floor drawn from
+  the ready set alone is drawn from what was just preempted — and on four
+  processors that is four tasks hidden and a floor that climbs past all of them.
+  See [Multiprocessor](multiprocessor.md).
+- A single accounting sample longer than a second is dropped. A slice is never
+  that long, so such a sample subtracted two clocks that do not agree, and
+  charging it would put the task behind everything for ever.
 - Ordinary quanta are proportional to weight within a 24 ms target latency,
   with a one-tick (4 ms) minimum granularity. When the runnable population is
   larger than the six-tick target, the period expands so every task can receive
@@ -196,12 +212,41 @@ them out of each other's way:
   had run out, stamps `last_scheduled_ns`, sets state to `RUNNING`, points
   both kernel-stack registers (this processor's TSS `rsp0` and the
   `kernel_rsp` in its per-CPU block) at the process's kernel stack, switches
-  page tables (`vmm_activate(cr3)`), and reloads `IA32_FS_BASE` for TLS.
-  `current` is per-processor: it lives in the block `GS` points at.
+  page tables, and reloads `IA32_FS_BASE` for TLS. `current` is per-processor:
+  it lives in the block `GS` points at.
+
+  `vmm_activate(cr3)` runs only when the incoming process's address space is
+  not the one already loaded. Writing CR3 discards every translation the
+  processor had cached, and two threads of one process share a `cr3`, so
+  switching between them used to flush the TLB for nothing. Measured, the two
+  halves of the `SWITCH` benchmark — a ping-pong between two threads of one
+  process, and the same between two processes — cost 2606 ns each before and
+  1848 ns against 2575 ns after.
 
 ### Scheduler benchmark
 
-The scheduler was measured in QEMU TCG with one virtual CPU and the 250 Hz
+`support/schedbench.c` is the program, and `make schedbench` builds a machine
+whose entire userland is it and boots it. It is freestanding — it issues its own
+syscalls and links no libc — so it cannot go the way the last one did, and it
+asks for KVM because a reload of CR3, a TLB that has to be refilled and a cache
+line another processor owns are exactly the costs an emulator does not have.
+
+Seven measurements, on four processors under KVM, over three runs:
+
+```
+NICE      ratio 9.05-9.06                (the weights ask for 9.31)
+QUANTUM   two equals, median wait 12.03 ms; four equals, 12.03 ms
+WAKE      six spinners, median 3.99 ms p95 4.00 ms
+SWITCH    thread 1848-1901 ns, process 2575-2723 ns
+PARALLEL  four workers, speedup 3.46-3.82 (0.99 on one processor)
+SLEEPER   a spinner starved for 20-24 ms
+```
+
+`SLEEPER` read 1500.070 ms before waking tasks were placed, and `SWITCH`
+thread read 2606 ns — the same as `SWITCH` process — before the address space
+stopped being reloaded when it had not changed.
+
+The numbers below are older, from QEMU TCG with one virtual CPU and the 250 Hz
 timer. Two CPU-bound children ran for four seconds on CPU 0, one at nice 0 and
 one at nice 10. A second workload placed six CPU-bound children on CPU 0 while
 the parent requested 100 sleeps of 20 ms and measured wake-up lateness. Three
