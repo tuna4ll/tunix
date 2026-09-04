@@ -2,7 +2,7 @@
 .section .text
 .global cpu_enter_idle
 .global cpu_idle_park
-.extern kernel_unlock
+.extern kernel_unlock_current
 
 /*
  * Park a processor on its idle stack.
@@ -17,11 +17,16 @@
  * arrives after the halt instead of before it -- otherwise a processor could
  * miss its wakeup and stay asleep with work waiting.
  */
+/* kernel_unlock_current rather than kernel_unlock, because the mode is chosen
+   per syscall in C and this is reached from paths that could hold either: an
+   unlock that names the wrong one moves the ticket queue past a ticket nobody
+   was serving, and every later attempt then waits for a turn that has already
+   gone by. */
 cpu_enter_idle:
     cli
     mov rsp, rdi
     xor rbp, rbp
-    call kernel_unlock
+    call kernel_unlock_current
     jmp idle_loop
 
 /* The same, for a processor that has just come up and holds nothing. */
