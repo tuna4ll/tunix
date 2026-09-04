@@ -929,8 +929,24 @@ static void activate_process(struct process *process) {
     process->state = PROCESS_RUNNING;
     set_kernel_stack(process->kernel_stack_top);
     syscall_set_kernel_stack(process->kernel_stack_top);
-    vmm_activate(process->cr3);
-    cpu_current()->address_space = process->cr3;
+    /*
+     * Only when it is a different one. Writing CR3 throws away every
+     * translation this processor had cached, and two threads of one process
+     * share a cr3 -- so switching between them used to flush the TLB for
+     * nothing. Measured: a ping-pong between two threads of one process cost
+     * exactly what the same ping-pong between two processes cost, which is what
+     * it looks like when the page tables are reloaded either way.
+     *
+     * The comparison is safe because this field is written every time the
+     * processor changes what it has loaded: go_idle() zeroes it, and every
+     * other path through here sets it. It can never name a space this processor
+     * is not actually running on, which is the only way a skipped reload could
+     * leave stale translations behind.
+     */
+    if (cpu_current()->address_space != process->cr3) {
+        vmm_activate(process->cr3);
+        cpu_current()->address_space = process->cr3;
+    }
     wrmsr(IA32_FS_BASE, process->fs_base);
     fpu_restore(process);
 }
