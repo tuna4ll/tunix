@@ -19,6 +19,7 @@ static int process_wake_all_locked(const void *channel);
 #include "include/smp.h"
 #include "include/syscall.h"
 #include "include/time.h"
+#include "include/timer.h"
 #include "include/tty.h"
 #include "include/vt.h"
 #include "include/vfs.h"
@@ -60,6 +61,8 @@ static int process_wake_all_locked(const void *channel);
 #define SCHED_MIN_GRANULARITY_TICKS 1U
 #define SCHED_WAKEUP_GRANULARITY_NS 4000000ULL
 #define NICE_0_WEIGHT 1024ULL
+#define TICK_NS (1000000000ULL / TIMER_FREQUENCY_HZ)
+#define SCHED_TARGET_LATENCY_NS (SCHED_TARGET_LATENCY_TICKS * TICK_NS)
 
 /* Linux's well-tested geometric nice scale, rounded to integer weights. */
 static const uint32_t nice_weights[40] = {
@@ -585,6 +588,53 @@ static int runnable(const struct process *process) {
     return process && process->state == PROCESS_READY && allowed_on_this_cpu(process);
 }
 
+/*
+ * The virtual runtime the runnable set has reached, which only ever goes
+ * forward. next_runnable() already visits every task to find the lowest, so
+ * this costs the assignment and nothing else.
+ */
+static uint64_t minimum_virtual_runtime;
+
+/*
+ * Where a task that has been asleep is put when it wakes.
+ *
+ * Virtual runtime stands still while a task is blocked and goes on rising for
+ * everything that runs, so a task that slept for two seconds comes back two
+ * seconds of credit ahead of the machine -- and next_runnable(), which picks
+ * the lowest, then hands it the processor and nothing else until that credit is
+ * spent. Measured before this, by SLEEPER in support/schedbench.c: a spinner
+ * sharing a processor with a task that slept for two seconds and then wanted to
+ * run went 1500 ms without being scheduled once, which is the whole of the
+ * sleeper's burst.
+ *
+ * So a waking task is placed at the runnable set's own virtual runtime, less
+ * half the target latency. The subtraction keeps a genuinely interactive task
+ * ahead of the CPU-bound ones -- it wakes owed one scheduling round, which is
+ * what makes it run promptly -- and the floor is what stops that debt growing
+ * without limit.
+ *
+ * Real-time tasks are not placed: they are not chosen by virtual runtime and
+ * they do not accumulate it.
+ */
+static void place_waking_task(struct process *process) {
+    if (!process || process->rt_priority) return;
+    uint64_t credit = SCHED_TARGET_LATENCY_NS / 2;
+    uint64_t floor = minimum_virtual_runtime > credit ? minimum_virtual_runtime - credit : 0;
+    if (process->virtual_runtime_ns < floor) process->virtual_runtime_ns = floor;
+}
+
+/*
+ * Runnable again after being off the queue, which is the transition that needs
+ * placing. A task that gave the processor up while still runnable -- preempted,
+ * or yielding -- keeps the virtual runtime it earned and does not come through
+ * here.
+ */
+static void wake_to_ready(struct process *process) {
+    if (!process) return;
+    place_waking_task(process);
+    process->state = PROCESS_READY;
+}
+
 static void signal_one_process(struct process *target, int signal_number);
 
 static void wake_expired_itimers(void) {
@@ -624,7 +674,7 @@ static void wake_expired_futex_waiters(void) {
             item->futex_wait_address = 0;
             item->futex_wait_deadline_ns = 0;
             item->saved_frame.rax = (uint64_t)-(int64_t)ETIMEDOUT;
-            item->state = PROCESS_READY;
+            wake_to_ready(item);
         }
         item = item->next;
     } while (item != queue);
@@ -667,9 +717,11 @@ static int ordinary_should_preempt(const struct process *running) {
     if (!queue || !running || running->rt_priority) return 0;
     struct process *walk = queue;
     do {
+        /* Signed, so that the comparison keeps meaning something if a virtual
+           runtime ever goes round: these are running totals, not instants. */
         if (walk != running && runnable(walk) && !walk->rt_priority &&
-            walk->virtual_runtime_ns + SCHED_WAKEUP_GRANULARITY_NS <
-                running->virtual_runtime_ns)
+            (int64_t)(walk->virtual_runtime_ns + SCHED_WAKEUP_GRANULARITY_NS -
+                      running->virtual_runtime_ns) < 0)
             return 1;
         walk = walk->next;
     } while (walk != queue);
@@ -715,12 +767,36 @@ static struct process *next_runnable(struct process *after) {
     struct process *start = candidate;
     if (best == 0) {
         struct process *selected = NULL;
+        /*
+         * The floor is taken over what is RUNNING as well as what is READY, and
+         * over every processor rather than the ones this task may use.
+         *
+         * A running task is the one holding the lowest virtual runtime -- it is
+         * running because it was lowest -- so a floor drawn from the READY set
+         * alone is drawn from the tasks that were just preempted, which are the
+         * highest. On one processor that hides one task and the answer is close
+         * enough; on four it hides four, and the floor climbs past the running
+         * set entirely. What that did was starve the thing it was meant to
+         * protect: a waking task was placed *above* the spinners it was
+         * competing with and then never chosen again, and the machine stopped.
+         */
+        uint64_t lowest = 0;
+        int have_lowest = 0;
         do {
+            if (!candidate->rt_priority &&
+                (candidate->state == PROCESS_READY || candidate->state == PROCESS_RUNNING) &&
+                (!have_lowest || (int64_t)(candidate->virtual_runtime_ns - lowest) < 0)) {
+                lowest = candidate->virtual_runtime_ns;
+                have_lowest = 1;
+            }
             if (runnable(candidate) && !candidate->rt_priority &&
-                (!selected || candidate->virtual_runtime_ns < selected->virtual_runtime_ns))
+                (!selected || (int64_t)(candidate->virtual_runtime_ns -
+                                        selected->virtual_runtime_ns) < 0))
                 selected = candidate;
             candidate = candidate->next;
         } while (candidate != start);
+        if (have_lowest && (int64_t)(lowest - minimum_virtual_runtime) > 0)
+            minimum_virtual_runtime = lowest;
         return selected;
     }
     do {
@@ -1402,7 +1478,7 @@ static void notify_parent_of_exit(struct process *child) {
         parent->wait_pid = 0;
         parent->wait_status_user = 0;
         parent->wait_options = 0;
-        parent->state = PROCESS_READY;
+        wake_to_ready(parent);
         child->state = PROCESS_DEAD;
     }
 }
@@ -1424,7 +1500,7 @@ static int notify_parent_of_job_change(struct process *child, int wait_flag, int
     parent->wait_pid = 0;
     parent->wait_status_user = 0;
     parent->wait_options = 0;
-    parent->state = PROCESS_READY;
+    wake_to_ready(parent);
     return 1;
 }
 
@@ -1847,7 +1923,7 @@ static int process_wake_all_locked(const void *channel) {
         if (item->state == PROCESS_BLOCKED &&
             (item->wait_channel == channel || item->wait_channel == &io_wait_token)) {
             item->wait_channel = NULL;
-            item->state = PROCESS_READY;
+            wake_to_ready(item);
             woken++;
         }
         item = item->next;
@@ -1901,7 +1977,7 @@ int process_futex_wake(uint64_t address, int maximum, uint32_t bitset) {
             item->futex_wait_address = 0;
             item->futex_wait_deadline_ns = 0;
             item->saved_frame.rax = 0;
-            item->state = PROCESS_READY;
+            wake_to_ready(item);
             woken++;
             if (woken >= maximum) break;
         }
@@ -2226,9 +2302,9 @@ int64_t process_waitid_from_syscall(int64_t pid_spec, uint64_t info_user,
 static void signal_one_process(struct process *target, int signal_number) {
     if (signal_number == 0) return;
     if (signal_number == SIGKILL && target->state == PROCESS_STOPPED)
-        target->state = PROCESS_READY;
+        wake_to_ready(target);
     if (signal_number == SIGCONT && target->state == PROCESS_STOPPED) {
-        target->state = PROCESS_READY;
+        wake_to_ready(target);
         target->continued_pending = 1;
         target->stop_reported = 0;
         target->signal_pending &= ~(signal_bit(SIGSTOP) | signal_bit(SIGTSTP) |
@@ -2257,7 +2333,7 @@ static void signal_one_process(struct process *target, int signal_number) {
         target->wait_pid = 0;
         target->wait_status_user = 0;
         target->wait_options = 0;
-        target->state = PROCESS_READY;
+        wake_to_ready(target);
     }
 }
 
