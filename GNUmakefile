@@ -328,3 +328,18 @@ run-virgl: $(IMAGE)
 
 headless: $(IMAGE)
 	$(QEMU) $(QEMU_COMMON) -nographic -monitor none -serial stdio
+
+# --- measuring the scheduler ------------------------------------------------
+#
+# A machine whose entire userland is one static benchmark, which is why this
+# needs neither the Void download nor a filesystem that can hold ownership: it
+# builds and runs as an ordinary user in a few seconds.
+#
+# SCHEDBENCH_CPUS is the processor count to boot with, and the point of it is
+# the comparison -- most of what the scheduler gets wrong is only visible in the
+# difference between one processor and several.
+SCHEDBENCH_CPUS ?= 4
+
+.PHONY: schedbench
+schedbench: $(KERNEL) $(LIMINE_EXE)
+	support/schedbench.sh $(SCHEDBENCH_CPUS) $(KERNEL)
