@@ -75,7 +75,7 @@ done
 kill $QEMU 2>/dev/null || true
 wait $QEMU 2>/dev/null || true
 
-grep -E "^(PERF|SYSCALL|PIPE|FAULT|FORK|FORKNOWAIT|THREAD|FILE|STARTUP|SHOOTDOWN)" "$LOG" || {
+grep -E "^(PERF|SYSCALL|PIPE|FAULT|FORK|FORKNOWAIT|THREAD|FILE|STARTUP|SHOOTDOWN|ONCE)" "$LOG" || {
 	echo "drmtest: the machine printed no results; $LOG has the boot" >&2
 	exit 1
 }

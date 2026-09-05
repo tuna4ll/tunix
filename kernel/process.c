@@ -923,23 +923,31 @@ static void go_idle(void) {
     cpu_enter_idle(cpu_current()->idle_stack_top);
 }
 
+/*
+ * Park, and let the ordinary path start the first process.
+ *
+ * This used to enter user mode itself, at the program's ELF entry point, which
+ * is right exactly once. The processors smp_init() brings up take work off the
+ * queue as soon as they have a tick, and boot still has milliseconds to run
+ * after that, so by the time this was reached the first process was often
+ * already running somewhere else -- and starting it again from its entry point
+ * ran the whole program a second time in the same address space.
+ *
+ * What that looks like from userland is a syscall that happened twice for one
+ * call. Measured: on four processors, one fork() out of two hundred made two
+ * children, the same descriptor was opened twice, and the same evdev device
+ * ended up with more readers than there were openers. On one and on two
+ * processors it never happened, because the window needs a processor that is
+ * already scheduling while this one is still booting.
+ *
+ * A process is resumed from its saved frame everywhere else, and the frame a
+ * fresh one is created with points at its entry -- so parking here and letting
+ * the tick pick it up starts it correctly whether or not it has run before.
+ */
 void process_start_first(void) {
     klock_note(KLOCK_NOTE_FIRST_RUN);
     kernel_lock();
-    struct process *first = next_runnable(NULL);
-    /* Not a failure: another processor may have taken the first process already. */
-    if (!first) {
-        kprintf("TUNIX: cpu %u has nothing to run\n", cpu_current()->index);
-        go_idle();
-    }
-    activate_process(first);
-    uint64_t entry = first->entry;
-    uint64_t stack = first->user_stack_top;
-    uint64_t cr3 = first->cr3;
-    kernel_unlock();
-    kprintf("TUNIX: cpu %u entering user mode\n", cpu_current()->index);
-    process_enter_user(entry, stack, cr3);
-    panic("process_enter_user returned");
+    go_idle();
 }
 
 /* Every processor but the first arrives here, with nothing to run yet. */

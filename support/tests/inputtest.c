@@ -162,6 +162,26 @@ static int run_all(void) {
     put("INPUT total=");
     put_number(total);
     put("\n");
+
+    /* What the kernel says it produced, read the way a person would read it on
+       the machine itself: from a terminal, with nothing written to a disk. */
+    int history = (int)syscall3(SYS_open, (s64)"/proc/inputlog", 0, 0);
+    if (history < 0) {
+        put("INPUT history unavailable\n");
+    } else {
+        static char text[4096];
+        s64 got = syscall3(SYS_read, history, (s64)text, sizeof(text) - 1);
+        (void)syscall1(SYS_close, history);
+        if (got <= 0) {
+            put("INPUT history empty\n");
+        } else {
+            unsigned lines = 0;
+            for (s64 at = 0; at < got; at++) if (text[at] == '\n') lines++;
+            put("INPUT history_lines=");
+            put_number(lines);
+            put("\n");
+        }
+    }
     put("INPUTTEST DONE\n");
     return 0;
 }

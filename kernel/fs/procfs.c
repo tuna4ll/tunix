@@ -9,6 +9,7 @@
 #include "../include/process.h"
 #include "../include/boot.h"
 #include "../include/block.h"
+#include "../include/input.h"
 #include "../include/procfs.h"
 #include "../include/uts.h"
 #include "../include/smp.h"
@@ -187,6 +188,30 @@ static int64_t proc_blockstat_read(struct vfs_node *node, uint64_t offset,
     text_string(&text, "\nwrite_failures ");
     text_unsigned(&text, write_failures);
     text_char(&text, '\n');
+    return text_read(&text, offset, size, output);
+}
+
+/* What the keyboard actually produced, for a compositor that types a key more
+   than once: one line per event, oldest first. */
+static int64_t proc_inputlog_read(struct vfs_node *node, uint64_t offset,
+                                  size_t size, void *output) {
+    (void)node;
+    struct text_buffer text = {{0}, 0};
+    text_string(&text, "ms code value readers\n");
+    unsigned total = input_key_history_count();
+    unsigned first = total > INPUT_KEY_HISTORY ? total - INPUT_KEY_HISTORY : 0;
+    for (unsigned index = first; index < total; index++) {
+        struct input_key_event event;
+        if (input_key_history_at(index, &event) != 0) continue;
+        text_unsigned(&text, event.millisecond);
+        text_char(&text, ' ');
+        text_unsigned(&text, event.code);
+        text_char(&text, ' ');
+        text_unsigned(&text, event.value);
+        text_char(&text, ' ');
+        text_unsigned(&text, event.readers);
+        text_char(&text, '\n');
+    }
     return text_read(&text, offset, size, output);
 }
 
@@ -784,6 +809,7 @@ void procfs_init(void) {
     virtual_file(root, "meminfo", proc_meminfo_read, 0);
     virtual_file(root, "uptime", proc_uptime_read, 0);
     virtual_file(root, "blockstat", proc_blockstat_read, 0);
+    virtual_file(root, "inputlog", proc_inputlog_read, 0);
     virtual_file(root, "version", proc_version_read, 0);
     virtual_file(root, "mounts", proc_mounts_read, 0);
     virtual_file(root, "stat", proc_stat_read, 0);

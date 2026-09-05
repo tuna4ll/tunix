@@ -422,6 +422,99 @@ static void test_unmap_shootdown(u64 pages, unsigned helpers) {
     put("\n");
 }
 
+#define SYS_dup 32
+
+/*
+ * Whether one syscall instruction ever runs twice.
+ *
+ * dup() is the question to ask: it takes the lowest free descriptor, so the
+ * same call repeated from the same state must answer with the same number
+ * every time. A second execution leaks a descriptor, and every answer after it
+ * is one higher -- which is visible without any timing at all.
+ */
+static void test_syscall_once(unsigned rounds) {
+    int first = (int)syscall1(SYS_dup, 0);
+    if (first < 0) { put("ONCE dup unavailable\n"); return; }
+    (void)syscall1(SYS_close, first);
+
+    unsigned wrong = 0;
+    int highest = first;
+    for (unsigned round = 0; round < rounds; round++) {
+        int fd = (int)syscall1(SYS_dup, 0);
+        if (fd < 0) break;
+        if (fd != first) {
+            wrong++;
+            if (fd > highest) highest = fd;
+        }
+        (void)syscall1(SYS_close, fd);
+    }
+    put("ONCE dups=");
+    put_number(rounds);
+    put(" unexpected=");
+    put_number(wrong);
+    put(" first=");
+    put_number((u64)first);
+    put(" highest=");
+    put_number((u64)highest);
+    put("\n");
+}
+
+/* The same question of fork, which answers it with a whole process. */
+static void test_fork_once(unsigned rounds) {
+    static s64 made[512];
+    static s64 seen[512];
+    unsigned started = 0;
+    for (unsigned round = 0; round < rounds && started < 512; round++) {
+        s64 child = syscall1(SYS_fork, 0);
+        if (child == 0) (void)syscall1(SYS_exit_group, 0);
+        if (child < 0) break;
+        made[started++] = child;
+    }
+    /* Every child there is, with its number, because "one more than asked for"
+       has two explanations and they are not the same bug: a fork that ran
+       twice makes a process nobody was told about, and a wait that reports the
+       same child twice makes none. */
+    unsigned reaped = 0;
+    unsigned repeated = 0;
+    unsigned unknown = 0;
+    for (unsigned round = 0; round < 400; round++) {
+        s64 got = syscall4(SYS_wait4, -1, 0, 1 /* WNOHANG */, 0);
+        if (got > 0) {
+            int already = 0;
+            for (unsigned i = 0; i < reaped && i < 512; i++)
+                if (seen[i] == got) already = 1;
+            if (already) repeated++;
+            else if (reaped < 512) seen[reaped] = got;
+            int asked = 0;
+            for (unsigned i = 0; i < started; i++) if (made[i] == got) asked = 1;
+            if (!asked) {
+                unknown++;
+                put("ONCE unasked_pid=");
+                put_number((u64)got);
+                put(" first_asked=");
+                put_number((u64)(started ? made[0] : 0));
+                put(" last_asked=");
+                put_number((u64)(started ? made[started - 1] : 0));
+                put("\n");
+            }
+            reaped++;
+            round = 0;
+            continue;
+        }
+        if (got < 0) break;
+        sleep_ns(5000000UL);
+    }
+    put("ONCE forks=");
+    put_number(started);
+    put(" reaped=");
+    put_number(reaped);
+    put(" repeated=");
+    put_number(repeated);
+    put(" unasked=");
+    put_number(unknown);
+    put("\n");
+}
+
 /* One number out of a /proc file that holds `name value` lines. */
 static u64 proc_value(const char *path, const char *name) {
     char text[512];
@@ -499,6 +592,9 @@ static int run_all(void) {
        syscall the others make would then be paying for them. */
     /* Before anything maps memory, so the address space it clones is only what
        the program started with. */
+    /* First, before anything else has made a process: an extra child is only
+       evidence if nothing else could have left one behind. */
+    test_fork_once(200);
     test_fork_cost(300, 0);
     test_thread_cost(300);
     test_pipe_throughput(4UL * 1024 * 1024, 64);
@@ -514,6 +610,7 @@ static int run_all(void) {
        others would then be measuring: fork takes a 32 KiB kernel stack from it
        and went from 17.9 to 50 us when this ran first. */
     test_startup_reads(400);
+    test_syscall_once(20000);
     test_syscall_cost();
     put("PERF DONE\n");
     return 0;

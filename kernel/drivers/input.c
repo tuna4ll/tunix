@@ -6,6 +6,7 @@ extern void kprintf(const char *fmt, ...);
 #include "../include/input.h"
 #include "../include/io.h"
 #include "../include/kstring.h"
+#include "../include/process.h"
 #include "../include/time.h"
 #include "../include/xhci.h"
 #include "../include/tty.h"
@@ -239,6 +240,34 @@ static void reader_push(struct input_reader *reader,
     reader->count++;
 }
 
+static struct input_key_event key_history[INPUT_KEY_HISTORY];
+/* Every event ever, so the ring can be handed back oldest first. */
+static unsigned key_history_total;
+
+unsigned input_key_history_count(void) {
+    return key_history_total;
+}
+
+int input_key_history_at(unsigned index, struct input_key_event *out) {
+    if (!out || index >= key_history_total) return -1;
+    if (key_history_total > INPUT_KEY_HISTORY &&
+        index < key_history_total - INPUT_KEY_HISTORY) return -1;
+    uint64_t flags = interrupt_save();
+    *out = key_history[index % INPUT_KEY_HISTORY];
+    interrupt_restore(flags);
+    return 0;
+}
+
+static void remember_key(uint64_t timestamp, uint16_t code, int32_t value,
+                         unsigned delivered) {
+    struct input_key_event *slot = &key_history[key_history_total % INPUT_KEY_HISTORY];
+    slot->millisecond = (uint32_t)(timestamp / 1000000ULL);
+    slot->code = code;
+    slot->value = (uint16_t)value;
+    slot->readers = (uint16_t)delivered;
+    key_history_total++;
+}
+
 static void input_emit_at(unsigned device_id, uint64_t timestamp,
                           uint16_t type, uint16_t code, int32_t value) {
     struct input_record event = {
@@ -258,6 +287,7 @@ static void input_emit_at(unsigned device_id, uint64_t timestamp,
         reader_push(reader, &event);
         delivered++;
     }
+    if (type == TUNIX_EV_KEY) remember_key(timestamp, code, value, delivered);
     if (input_logging && type == TUNIX_EV_KEY) {
         static unsigned logged;
         if (logged < INPUT_LOG_LIMIT) {
@@ -699,7 +729,15 @@ struct input_reader *input_reader_open(unsigned device_id) {
     uint64_t flags = interrupt_save();
     reader->next = input_readers;
     input_readers = reader;
+    unsigned total = 0;
+    for (struct input_reader *walk = input_readers; walk; walk = walk->next)
+        if (walk->device_id == device_id) total++;
     interrupt_restore(flags);
+    /* One line per open, so a device that ends up with more readers than there
+       are openers says so. */
+    if (input_logging)
+        kprintf("INPUT: open device %u vt %u by pid %d, %u readers now\n",
+                device_id, reader->vt_index, (int)process_current_pid(), total);
     return reader;
 }
 
@@ -714,6 +752,9 @@ void input_reader_close(struct input_reader *reader) {
     /* A compositor that exited or crashed while holding a grab hands the
        keyboard back here; the console has been deaf since the grab. */
     if (was_grabbed) tty_reset_keyboard_state();
+    if (input_logging)
+        kprintf("INPUT: close device %u vt %u\n", reader->device_id,
+                reader->vt_index);
     kfree(reader);
 }
 
