@@ -164,23 +164,64 @@ void kernel_unlock_shared(void) {
  * already gone by. What that looks like is a machine that stops on its next
  * syscall having printed nothing.
  */
+/* What the handler did to the lock on the way in, so the way out can undo it. */
+#define ISR_LOCK_NOTHING 0U
+#define ISR_LOCK_TAKEN   1U
+#define ISR_LOCK_SHARED  2U
+
 static volatile uint8_t taken_by_isr[SMP_MAX_CPUS];
+/* Processor index plus one, zero for nobody. */
+static volatile uint32_t isr_holder;
 
 void kernel_lock_from_isr(void) {
     unsigned index = cpu_current()->index;
+    /*
+     * A shared holder excludes nobody, so an interrupt that landed on one used
+     * to be let through here as if it already had the lock -- and then ran
+     * beside another processor's handler doing the same thing. Both walk the
+     * run queue, drain the keyboard controller and dispatch driver interrupts,
+     * none of which is written to be entered twice at once.
+     *
+     * Upgrading is not the answer: an exclusive ticket waits for the shared
+     * holders inside to leave, and this processor is one of them, so it would
+     * wait for itself. What the handler gets instead is exclusion against the
+     * one thing its shared claim does not already give it -- another
+     * processor's handler. Nothing exclusive can be inside while either of us
+     * is, because it would have waited for our shared claims to go.
+     */
+    if (kernel_lock_shared_here()) {
+        uint32_t me = index + 1U;
+        /* A fault taken inside a handler, which panics; do not wait for a
+           ticket this processor is already holding. */
+        if (__atomic_load_n(&isr_holder, __ATOMIC_RELAXED) == me) {
+            taken_by_isr[index] = ISR_LOCK_NOTHING;
+            return;
+        }
+        for (;;) {
+            uint32_t nobody = 0;
+            if (__atomic_compare_exchange_n(&isr_holder, &nobody, me, 0,
+                                            __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+                break;
+            __asm__ volatile("pause");
+        }
+        taken_by_isr[index] = ISR_LOCK_SHARED;
+        return;
+    }
     if (kernel_lock_held_here()) {
-        taken_by_isr[index] = 0;
+        taken_by_isr[index] = ISR_LOCK_NOTHING;
         return;
     }
     kernel_lock();
-    taken_by_isr[index] = 1;
+    taken_by_isr[index] = ISR_LOCK_TAKEN;
 }
 
 void kernel_unlock_from_isr(void) {
     unsigned index = cpu_current()->index;
-    if (!taken_by_isr[index]) return;
-    taken_by_isr[index] = 0;
-    kernel_unlock_current();
+    uint8_t state = taken_by_isr[index];
+    taken_by_isr[index] = ISR_LOCK_NOTHING;
+    if (state == ISR_LOCK_TAKEN) kernel_unlock_current();
+    else if (state == ISR_LOCK_SHARED)
+        __atomic_store_n(&isr_holder, 0U, __ATOMIC_RELEASE);
 }
 
 int kernel_lock_held_here(void) {
