@@ -1106,26 +1106,22 @@ static int ehci_bulk_transfer(int index, int in, uint64_t physical,
     build_qtd(&qtds[0], in ? QTD_PID_IN : QTD_PID_OUT, physical, length, *toggle);
     int failed = run_qtds(host, device, endpoint, packet, 0, &qtds[0], &qtds[0],
                           TRANSFER_TIMEOUT_NS) != 0;
-    uint32_t token = *(volatile uint32_t *)&qtds[0].token;
+    uint32_t token = dma_load32(&qtds[0].token);
 
     if (failed) {
+        /* The controller works on a copy of the descriptor in the queue head's
+           overlay and only writes that back when the descriptor retires, so
+           the overlay is where its own state is. */
+        uint32_t overlay = dma_load32(&host->work_qh->overlay_token);
+        uint32_t current = dma_load32(&host->work_qh->current_qtd);
+
         /* Worth saying out loud, and worth saying only a few times: a disk
            that has started failing fails on every block after it, and the
            first few lines are the ones that name what went wrong. */
         static unsigned reported;
         if (reported < BULK_FAILURES_REPORTED) {
             reported++;
-            /* The qTD alone cannot say why. */
-            /* The controller works on a copy of it in the queue head's overlay
-               and only writes that back when the descriptor retires, so an
-               untouched qTD means "did not finish" and nothing more: a device
-               NAKing while it commits a write looks exactly like a controller
-               that never started. */
-            /* The overlay says which -- its status and its NAK counter are the
-               controller's own working state -- and USBSTS says whether the
-               asynchronous schedule was running at all. */
-            uint32_t overlay = *(volatile uint32_t *)&host->work_qh->overlay_token;
-            uint32_t current = *(volatile uint32_t *)&host->work_qh->current_qtd;
+            /* USBSTS says whether the asynchronous schedule was running at all. */
             uint32_t status = mmio_read32(operational(host, EHCI_USBSTS));
             uint32_t command = mmio_read32(operational(host, EHCI_USBCMD));
             kprintf("EHCI: bulk %s endpoint %u failed, token %x overlay %x "
@@ -1141,8 +1137,20 @@ static int ehci_bulk_transfer(int index, int in, uint64_t physical,
          * the two come to disagree, and once they do every transfer after it
          * fails the same way. The evidence was a 31-byte command retried with
          * the other toggle for ever: token 1f8c80, then 801f8c80.
+         *
+         * The overlay counts as much as the descriptor. A stalled endpoint
+         * halts the queue head, and the halt is written back to the descriptor
+         * only when it retires -- which a halted queue head never does. Asking
+         * the descriptor alone therefore missed exactly the case the clear
+         * exists for:
+         *
+         *   token 801f8c80 overlay 8c40
+         *
+         * where the descriptor is still active with all 31 bytes to send and
+         * the overlay is halted. The endpoint stayed stalled and every command
+         * after it needed the class reset to get anywhere.
          */
-        if (token & QTD_STATUS_HALTED) {
+        if ((token | overlay) & QTD_STATUS_HALTED) {
             if (clear_endpoint_halt(host, device, endpoint, in) == 0) *toggle = 0;
         }
         return -1;
