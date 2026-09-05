@@ -496,7 +496,7 @@ switch cannot fake. It was `bin/smp-test`, built against the kernel's own libc;
 that libc is gone and so is the program, but the measurement it produced is
 what the numbers below are.
 
-`support/schedbench.c` is what measures it now, and `make schedbench` is how.
+`support/tests/schedbench.c` is what measures it now, and `make schedbench` is how.
 It is freestanding rather than built against a libc, so it cannot go the same
 way, and its root filesystem is one static binary — no Void download, no
 filesystem that has to hold ownership, a few seconds to build and boot. It runs

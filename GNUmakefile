@@ -387,4 +387,4 @@ SCHEDBENCH_CPUS ?= 4
 
 .PHONY: schedbench
 schedbench: $(KERNEL) $(LIMINE_EXE)
-	support/schedbench.sh $(SCHEDBENCH_CPUS) $(KERNEL)
+	support/tests/schedbench.sh $(SCHEDBENCH_CPUS) $(KERNEL)

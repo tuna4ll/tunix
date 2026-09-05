@@ -9,7 +9,7 @@
 # Nothing here needs either, because the root is one static binary running as
 # init, so the image is a few megabytes and builds as an ordinary user.
 #
-# Usage: support/schedbench.sh CPUS [KERNEL]
+# Usage: support/tests/schedbench.sh CPUS [KERNEL]
 set -euo pipefail
 
 CPUS=${1:-4}
@@ -31,7 +31,7 @@ mkdir -p "$WORK/root/sbin" "$WORK/root/dev" "$WORK/root/proc"
 cc -std=gnu11 -Wall -Wextra -Werror -O2 -static -nostdlib -nostartfiles \
 	-fno-stack-protector -fno-pic -fno-pie -fno-builtin -fno-asynchronous-unwind-tables \
 	-DTUNIX_BENCH_CPUS="$CPUS" \
-	support/schedbench.c -o "$WORK/root/sbin/init"
+	support/tests/schedbench.c -o "$WORK/root/sbin/init"
 
 # A GPT disk with an ESP and a classic-ext2 root, with 16 MiB of slack rather
 # than the 4 GiB an installable image wants.

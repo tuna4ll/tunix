@@ -225,7 +225,7 @@ them out of each other's way:
 
 ### Scheduler benchmark
 
-`support/schedbench.c` is the program, and `make schedbench` builds a machine
+`support/tests/schedbench.c` is the program, and `make schedbench` builds a machine
 whose entire userland is it and boots it. It is freestanding — it issues its own
 syscalls and links no libc — so it cannot go the way the last one did, and it
 asks for KVM because a reload of CR3, a TLB that has to be refilled and a cache

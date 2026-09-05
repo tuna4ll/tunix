@@ -599,7 +599,7 @@ static uint64_t minimum_virtual_runtime;
    seconds of credit ahead of the machine. */
 /* next_runnable() picks the lowest, so it then hands that task the processor
    and nothing else until the credit is spent. */
-/* Measured before this by SLEEPER in support/schedbench.c, a spinner sharing a
+/* Measured before this by SLEEPER in support/tests/schedbench.c, a spinner sharing a
    processor with a task that slept for two seconds went 1500 ms without being
    scheduled once, which is the whole of the sleeper's burst. */
 /* So a waking task is placed at the runnable set's own virtual runtime, less
