@@ -28,6 +28,7 @@ typedef unsigned int u32;
 #define PROT_WRITE 2
 #define MAP_PRIVATE 2
 #define MAP_ANONYMOUS 0x20
+#define THREAD_FLAGS 0x10F00UL   /* VM | FS | FILES | SIGHAND | THREAD */
 
 static inline s64 syscall0(s64 n) {
     s64 r;
@@ -67,6 +68,27 @@ static inline s64 syscall6(s64 n, s64 a, s64 b, s64 c, s64 d, s64 e, s64 f) {
                      : "rcx", "r11", "memory");
     return r;
 }
+
+/* The child comes back on a stack of its own, which no C function can do. */
+extern s64 spawn_thread(u64 flags, void *child_stack_top);
+__asm__(".text\n"
+        ".globl spawn_thread\n"
+        "spawn_thread:\n"
+        "    xor %edx, %edx\n"
+        "    xor %r10d, %r10d\n"
+        "    xor %r8d, %r8d\n"
+        "    mov $56, %eax\n"
+        "    syscall\n"
+        "    test %rax, %rax\n"
+        "    jnz 1f\n"
+        "    xor %ebp, %ebp\n"
+        "    pop %rax\n"
+        "    call *%rax\n"
+        "    xor %edi, %edi\n"
+        "    mov $60, %eax\n"
+        "    syscall\n"
+        "    hlt\n"
+        "1:  ret\n");
 
 static void put(const char *text) {
     u64 length = 0;
@@ -167,17 +189,18 @@ static void test_syscall_cost(void) {
 }
 
 /* A byte through a pipe and back, which is two syscalls and a context switch. */
-static void test_pipe_throughput(u64 bytes) {
+static void test_pipe_throughput(u64 bytes, u64 block_size) {
     int up[2], down[2];
     if (syscall1(SYS_pipe, (s64)up) != 0 || syscall1(SYS_pipe, (s64)down) != 0) return;
     static char block[4096];
+    if (block_size > sizeof(block)) block_size = sizeof(block);
 
     s64 child = syscall1(SYS_fork, 0);
     if (child == 0) {
         (void)syscall1(SYS_close, up[1]);
         (void)syscall1(SYS_close, down[0]);
         for (;;) {
-            s64 got = syscall3(SYS_read, up[0], (s64)block, sizeof(block));
+            s64 got = syscall3(SYS_read, up[0], (s64)block, (s64)block_size);
             if (got <= 0) break;
             if (syscall3(SYS_write, down[1], (s64)block, 1) != 1) break;
         }
@@ -189,22 +212,22 @@ static void test_pipe_throughput(u64 bytes) {
     u64 sent = 0;
     u64 begun = now_ns();
     while (sent < bytes) {
-        if (syscall3(SYS_write, up[1], (s64)block, sizeof(block)) != (s64)sizeof(block)) break;
+        if (syscall3(SYS_write, up[1], (s64)block, (s64)block_size) != (s64)block_size) break;
         char reply;
         if (syscall3(SYS_read, down[0], (s64)&reply, 1) != 1) break;
-        sent += sizeof(block);
+        sent += block_size;
     }
     u64 elapsed = now_ns() - begun;
     (void)syscall1(SYS_close, up[1]);
     (void)syscall1(SYS_close, down[0]);
     (void)syscall4(SYS_wait4, child, 0, 0, 0);
 
-    put("PIPE bytes=");
-    put_number(sent);
+    put("PIPE block=");
+    put_number(block_size);
     put(" MB_per_s=");
     put_number(elapsed ? sent * 1000UL / elapsed : 0);
     put(" roundtrip_ns=");
-    put_number(sent ? elapsed / (sent / sizeof(block)) : 0);
+    put_number(sent ? elapsed / (sent / block_size) : 0);
     put("\n");
 }
 
@@ -227,7 +250,15 @@ static void test_page_fault(u64 pages) {
 
 /* fork, and the child leaving straight away, so what it times is the copy of an
    address space and the teardown of one. */
-static void test_fork_cost(u64 count) {
+static void test_fork_cost(u64 count, u64 extra_pages) {
+    s64 extra = 0;
+    if (extra_pages) {
+        extra = syscall6(SYS_mmap, 0, (s64)(extra_pages * 4096UL), PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if ((u64)extra >= (u64)-4095L) extra = 0;
+        else for (u64 i = 0; i < extra_pages; i++)
+            *(volatile char *)(extra + i * 4096UL) = 1;
+    }
     u64 begun = now_ns();
     u64 done = 0;
     for (u64 i = 0; i < count; i++) {
@@ -238,8 +269,9 @@ static void test_fork_cost(u64 count) {
         done++;
     }
     u64 elapsed = now_ns() - begun;
-    put("FORK count=");
-    put_number(done);
+    if (extra) (void)syscall2(SYS_munmap, extra, (s64)(extra_pages * 4096UL));
+    put("FORK mapped_pages=");
+    put_number(extra_pages);
     put(" us_each=");
     put_fixed(done ? elapsed / done : 0, 3);
     put("\n");
@@ -274,14 +306,66 @@ static void test_file_read(u64 rounds) {
     put("\n");
 }
 
+/* Creating a thread shares the address space and the descriptor table, so what
+   it costs is everything fork does except cloning those two. */
+static volatile u64 thread_done;
+static void thread_body(void) { thread_done = 1; }
+
+/* fork and the child leaving, with nothing waited for until the end, so what it
+   times is creation and teardown without the wait. */
+static void test_fork_nowait(u64 count) {
+    u64 begun = now_ns();
+    u64 done = 0;
+    for (u64 i = 0; i < count; i++) {
+        s64 child = syscall1(SYS_fork, 0);
+        if (child == 0) (void)syscall1(SYS_exit_group, 0);
+        if (child < 0) break;
+        done++;
+    }
+    u64 elapsed = now_ns() - begun;
+    for (u64 i = 0; i < done; i++) (void)syscall4(SYS_wait4, -1, 0, 0, 0);
+    put("FORKNOWAIT count=");
+    put_number(done);
+    put(" us_each=");
+    put_fixed(done ? elapsed / done : 0, 3);
+    put("\n");
+}
+
+static void test_thread_cost(u64 count) {
+    static char stack[65536] __attribute__((aligned(16)));
+    u64 begun = now_ns();
+    u64 done = 0;
+    for (u64 i = 0; i < count; i++) {
+        thread_done = 0;
+        char *top = stack + sizeof(stack) - 8;
+        *(void **)top = (void *)thread_body;
+        if (spawn_thread(THREAD_FLAGS, top) < 0) break;
+        while (!thread_done) { }
+        done++;
+    }
+    u64 elapsed = now_ns() - begun;
+    put("THREAD count=");
+    put_number(done);
+    put(" us_each=");
+    put_fixed(done ? elapsed / done : 0, 3);
+    put("\n");
+}
+
 static int run_all(void) {
     put("PERF START\n");
     pin_to_cpu(0);
     /* The queue-length test goes last: it leaves processes behind, and every
        syscall the others make would then be paying for them. */
-    test_pipe_throughput(64UL * 1024 * 1024);
+    /* Before anything maps memory, so the address space it clones is only what
+       the program started with. */
+    test_fork_cost(300, 0);
+    test_thread_cost(300);
+    test_pipe_throughput(4UL * 1024 * 1024, 64);
+    test_pipe_throughput(64UL * 1024 * 1024, 4096);
     test_page_fault(20000);
-    test_fork_cost(300);
+    test_fork_cost(300, 0);
+    test_fork_nowait(300);
+    test_fork_cost(200, 16384);
     test_file_read(20000);
     test_syscall_cost();
     put("PERF DONE\n");
