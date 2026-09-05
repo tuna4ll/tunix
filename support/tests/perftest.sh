@@ -16,6 +16,13 @@ LOG=$BUILD/perftest-$CPUS.log
 rm -rf "$WORK"
 mkdir -p "$WORK/root/sbin" "$WORK/root/dev" "$WORK/root/proc"
 
+# Several hundred small files, because opening that many is what a startup
+# does and every one of them is inodes and directory blocks off the medium.
+mkdir -p "$WORK/root/files"
+for i in $(seq 0 399); do
+	printf %s "$(head -c 8192 /dev/zero | tr "\\0" "x")" > "$WORK/root/files/f$(printf %03d $i)"
+done
+
 # -static and no libc at all, so that what the benchmark reports is the kernel
 # with nothing in between.
 cc -std=gnu11 -Wall -Wextra -Werror -O2 -static -nostdlib -nostartfiles \
@@ -68,7 +75,7 @@ done
 kill $QEMU 2>/dev/null || true
 wait $QEMU 2>/dev/null || true
 
-grep -E "^(PERF|SYSCALL|PIPE|FAULT|FORK|FORKNOWAIT|THREAD|FILE)" "$LOG" || {
+grep -E "^(PERF|SYSCALL|PIPE|FAULT|FORK|FORKNOWAIT|THREAD|FILE|STARTUP)" "$LOG" || {
 	echo "drmtest: the machine printed no results; $LOG has the boot" >&2
 	exit 1
 }

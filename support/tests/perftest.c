@@ -363,6 +363,75 @@ static void test_thread_cost(u64 count) {
     put("\n");
 }
 
+/* One number out of a /proc file that holds `name value` lines. */
+static u64 proc_value(const char *path, const char *name) {
+    char text[512];
+    int fd = (int)syscall3(SYS_open, (s64)path, 0, 0);
+    if (fd < 0) return 0;
+    s64 got = syscall3(SYS_read, fd, (s64)text, sizeof(text) - 1);
+    (void)syscall1(SYS_close, fd);
+    if (got <= 0) return 0;
+    text[got] = 0;
+    for (s64 i = 0; i < got; i++) {
+        u64 k = 0;
+        while (name[k] && i + (s64)k < got && text[i + k] == name[k]) k++;
+        if (name[k] || text[i + k] != ' ') continue;
+        u64 value = 0;
+        for (s64 j = i + (s64)k + 1; j < got && text[j] >= '0' && text[j] <= '9'; j++)
+            value = value * 10 + (u64)(text[j] - '0');
+        return value;
+    }
+    return 0;
+}
+
+/* What a startup costs the disk. */
+/* Opening several hundred files is what runit and a compositor do, and every
+   inode, directory block and indirect block behind them is a read that reaches
+   the medium with the kernel lock held. */
+static void test_startup_reads(unsigned count) {
+    u64 reads_before = proc_value("/proc/blockstat", "reads");
+    u64 sectors_before = proc_value("/proc/blockstat", "sectors");
+    u64 wait_before = proc_value("/proc/blockstat", "wait_ns");
+
+    static char block[4096];
+    u64 opened = 0, bytes = 0;
+    u64 begun = now_ns();
+    for (unsigned index = 0; index < count; index++) {
+        char path[32];
+        const char *prefix = "/files/f";
+        u64 at = 0;
+        while (prefix[at]) { path[at] = prefix[at]; at++; }
+        path[at++] = (char)('0' + (index / 100) % 10);
+        path[at++] = (char)('0' + (index / 10) % 10);
+        path[at++] = (char)('0' + index % 10);
+        path[at] = 0;
+        int fd = (int)syscall3(SYS_open, (s64)path, 0, 0);
+        if (fd < 0) continue;
+        opened++;
+        for (;;) {
+            s64 got = syscall3(SYS_read, fd, (s64)block, sizeof(block));
+            if (got <= 0) break;
+            bytes += (u64)got;
+        }
+        (void)syscall1(SYS_close, fd);
+    }
+    u64 elapsed = now_ns() - begun;
+
+    put("STARTUP files=");
+    put_number(opened);
+    put(" bytes=");
+    put_number(bytes);
+    put(" ms=");
+    put_fixed(elapsed / 1000UL, 3);
+    put(" reads=");
+    put_number(proc_value("/proc/blockstat", "reads") - reads_before);
+    put(" sectors=");
+    put_number(proc_value("/proc/blockstat", "sectors") - sectors_before);
+    put(" disk_ms=");
+    put_fixed((proc_value("/proc/blockstat", "wait_ns") - wait_before) / 1000UL, 3);
+    put("\n");
+}
+
 static int run_all(void) {
     open_results();
     put("PERF START\n");
@@ -380,6 +449,10 @@ static int run_all(void) {
     test_fork_nowait(300);
     test_fork_cost(200, 16384);
     test_file_read(20000);
+    /* Late, because reading a few megabytes leaves the heap in a state the
+       others would then be measuring: fork takes a 32 KiB kernel stack from it
+       and went from 17.9 to 50 us when this ran first. */
+    test_startup_reads(400);
     test_syscall_cost();
     put("PERF DONE\n");
     return 0;
