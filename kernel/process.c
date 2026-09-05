@@ -84,6 +84,9 @@ extern void panic(const char *msg) __attribute__((noreturn));
 
 static struct process *queue;
 static uint64_t next_pid = 1;
+/* Whether anything is waiting to be reaped, so the entry path can look at one
+   word instead of walking the queue on every syscall. */
+static int reap_pending;
 
 /* The running process, per processor, as a macro so the GS load cannot be hoisted. */
 #define current (cpu_current()->current)
@@ -382,35 +385,48 @@ static void destroy_process_resources(struct process *process) {
     KDEBUG("process: reaped pid=%u\n", (unsigned)pid);
 }
 
+/* Called at the top of every syscall, so the cost of finding nothing to do is
+   the cost of every syscall: it used to walk the queue twice each time, which
+   measured 321 ns for getpid on an empty machine and 1349 ns with 193
+   processes on it. */
 void process_reap_deferred(void) {
+    if (!reap_pending) return;
+
+    int skipped = 0;
     for (;;) {
-        if (!queue) return;
+        if (!queue) break;
 
-        struct process *tail = queue;
-        while (tail->next != queue) tail = tail->next;
-
-        struct process *previous = tail;
+        struct process *previous = NULL;
         struct process *item = queue;
         struct process *victim = NULL;
         do {
-            if (item != current && item->state == PROCESS_DEAD) {
-                victim = item;
-                break;
+            if (item->state == PROCESS_DEAD) {
+                /* Dead but loaded on this processor, so somebody is still
+                   standing on its stack. */
+                if (item == current) skipped = 1;
+                else { victim = item; break; }
             }
             previous = item;
             item = item->next;
         } while (item != queue);
 
-        if (!victim) return;
+        if (!victim) break;
         if (victim->next == victim) {
             queue = NULL;
         } else {
+            /* The head has no predecessor until the ring is walked for one, and
+               only the head ever needs it. */
+            if (!previous) {
+                previous = queue;
+                while (previous->next != queue) previous = previous->next;
+            }
             previous->next = victim->next;
             if (queue == victim) queue = victim->next;
         }
         victim->next = NULL;
         destroy_process_resources(victim);
     }
+    reap_pending = skipped;
 }
 
 static void install_console(struct process *process) {
@@ -562,6 +578,13 @@ static void place_waking_task(struct process *process) {
 }
 
 /* Runnable again after being off the queue, which is the transition that needs placing. */
+/* Finished, and the reaper has something to do. */
+static void mark_dead(struct process *process) {
+    if (!process) return;
+    process->state = PROCESS_DEAD;
+    reap_pending = 1;
+}
+
 static void wake_to_ready(struct process *process) {
     if (!process) return;
     place_waking_task(process);
@@ -1290,7 +1313,7 @@ static int store_job_status(struct process *parent, int status, uint64_t status_
 static void notify_parent_of_exit(struct process *child) {
     struct process *parent = find_parent(child);
     if (!parent) {
-        child->state = PROCESS_DEAD;
+        mark_dead(child);
         return;
     }
 
@@ -1304,7 +1327,7 @@ static void notify_parent_of_exit(struct process *child) {
         parent->wait_status_user = 0;
         parent->wait_options = 0;
         wake_to_ready(parent);
-        child->state = PROCESS_DEAD;
+        mark_dead(child);
     }
 }
 
@@ -1442,7 +1465,7 @@ void process_exit_from_syscall(struct syscall_frame *frame, int status) {
         vt_process_exited(exiting->pid,
                           /* Only the leader's exit ends the session. */
                           exiting->sid == exiting->pid ? exiting->sid : 0);
-    if (exiting->is_thread) exiting->state = PROCESS_DEAD;
+    if (exiting->is_thread) mark_dead(exiting);
     else notify_parent_of_exit(exiting);
     KDEBUG("process: pid=%u exited status=%d\n", (unsigned)exiting->pid, status);
 
@@ -1815,7 +1838,7 @@ static void terminate_sibling_threads(int status) {
                 item->clear_child_tid_user = 0;
                 (void)process_futex_wake(clear_address, 1, FUTEX_BITSET_MATCH_ANY);
             }
-            item->state = PROCESS_DEAD;
+            mark_dead(item);
             process_release_files(item);
         }
         item = item->next;
@@ -1917,7 +1940,7 @@ int64_t process_waitpid_from_syscall(struct syscall_frame *frame, int64_t pid,
                 has_child = 1;
                 if (item->state == PROCESS_ZOMBIE) {
                     if (store_wait_status(parent, item, status_user) != 0) return -EINVAL;
-                    item->state = PROCESS_DEAD;
+                    mark_dead(item);
                     return (int64_t)item->pid;
                 }
                 if ((options & WUNTRACED) && item->state == PROCESS_STOPPED &&
@@ -1993,7 +2016,7 @@ int64_t process_waitid_from_syscall(int64_t pid_spec, uint64_t info_user,
                     }
                     if (vmm_copy_to_space(parent->cr3, info_user, &info,
                                           sizeof(info)) != 0) return -EFAULT;
-                    item->state = PROCESS_DEAD;
+                    mark_dead(item);
                     return 0;
                 }
                 if ((options & WSTOPPED) && item->state == PROCESS_STOPPED &&
