@@ -262,12 +262,17 @@ void devfs_init(void) {
         (void)attach_terminal(dev, name, index, DEV_MAJOR_TTY, index);
     }
 
-    (void)attach_device(dev, "null", VFS_CHARDEVICE, 0666,
-                        null_read, discard_write, always_ready);
-    (void)attach_device(dev, "zero", VFS_CHARDEVICE, 0666,
-                        zero_read, discard_write, always_ready);
-    (void)attach_device(dev, "full", VFS_CHARDEVICE, 0666,
-                        zero_read, full_write, always_ready);
+    /* These three keep nothing, which is what lets a read of one run without
+       excluding the rest of the kernel; see file_may_share(). */
+    struct vfs_node *stateless[3];
+    stateless[0] = attach_device(dev, "null", VFS_CHARDEVICE, 0666,
+                                 null_read, discard_write, always_ready);
+    stateless[1] = attach_device(dev, "zero", VFS_CHARDEVICE, 0666,
+                                 zero_read, discard_write, always_ready);
+    stateless[2] = attach_device(dev, "full", VFS_CHARDEVICE, 0666,
+                                 zero_read, full_write, always_ready);
+    for (unsigned index = 0; index < 3U; index++)
+        if (stateless[index]) stateless[index]->stateless = 1U;
     (void)attach_device(dev, "random", VFS_CHARDEVICE, 0666,
                         random_read, random_write, random_ready);
     (void)attach_device(dev, "urandom", VFS_CHARDEVICE, 0666,

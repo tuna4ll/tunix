@@ -87,6 +87,9 @@ struct vfs_node {
     /* Device number for character and block devices, as st_rdev reports it. */
     uint32_t dev_major;
     uint32_t dev_minor;
+    /* No state of its own, so a read or a write may run beside the rest of the
+       kernel. Set by hand, because nothing about a node can be read off it. */
+    uint8_t stateless;
     void *data;
     /* The buffer behind a FIFO. Created on the first open and freed with the
        node, so that a FIFO nobody has open is still a FIFO. */

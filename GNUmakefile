@@ -223,7 +223,7 @@ headless: $(IMAGE)
 # --- measuring the scheduler: a machine whose entire userland is one static benchmark.
 SCHEDBENCH_CPUS ?= 4
 
-.PHONY: schedbench drmtest perftest testimage
+.PHONY: schedbench drmtest perftest inputtest testimage
 schedbench: $(KERNEL) $(LIMINE_EXE)
 	support/tests/schedbench.sh $(SCHEDBENCH_CPUS) $(KERNEL)
 
@@ -234,6 +234,10 @@ drmtest: $(KERNEL) $(LIMINE_EXE)
 # What the kernel costs: a syscall, a pipe, a page fault, a fork and a read.
 perftest: $(KERNEL) $(LIMINE_EXE)
 	support/tests/perftest.sh $(SCHEDBENCH_CPUS) $(KERNEL)
+
+# Keys typed into the machine while several processors read the keyboard.
+inputtest: $(KERNEL) $(LIMINE_EXE)
+	support/tests/inputtest.sh $(SCHEDBENCH_CPUS) $(KERNEL)
 
 # The same image, built and not booted, for writing to a stick and running on a
 # real machine; TEST names which one and the results land on its root

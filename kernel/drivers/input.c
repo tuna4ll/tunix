@@ -1,6 +1,8 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "../include/heap.h"
+extern void kprintf(const char *fmt, ...);
+#include "../include/boot.h"
 #include "../include/input.h"
 #include "../include/io.h"
 #include "../include/kstring.h"
@@ -82,6 +84,11 @@ static size_t raw_count;
 static unsigned raw_listeners;
 
 static struct input_reader *input_readers;
+
+/* Whether to say what each key event was, asked for with `inputlog`. */
+/* Bounded, because a stuck key would otherwise fill the console. */
+#define INPUT_LOG_LIMIT 120U
+static int input_logging;
 static uint8_t key_down[INPUT_KEY_STATE_SIZE];
 static unsigned keyboard_extended;
 static unsigned keyboard_pause_bytes;
@@ -240,10 +247,25 @@ static void input_emit_at(unsigned device_id, uint64_t timestamp,
         .code = code,
         .value = value
     };
+    /* What the kernel actually produced, when `inputlog` asks. */
+    /* A key that arrives once and is typed several times is either delivered
+       twice here or delivered once and repeated above us, and only the two
+       timestamps of a press and its release tell those apart. */
+    unsigned delivered = 0;
     for (struct input_reader *reader = input_readers; reader; reader = reader->next) {
         if (reader->device_id != device_id) continue;
         if (!vt_input_delivered_to(reader->vt_index)) continue;
         reader_push(reader, &event);
+        delivered++;
+    }
+    if (input_logging && type == TUNIX_EV_KEY) {
+        static unsigned logged;
+        if (logged < INPUT_LOG_LIMIT) {
+            logged++;
+            kprintf("INPUT: key code %u value %d readers %u at %u ms\n",
+                    (unsigned)code, (int)value, delivered,
+                    (unsigned)(timestamp / 1000000ULL));
+        }
     }
 }
 
@@ -480,6 +502,7 @@ static void mouse_handle_byte(uint8_t byte) {
 }
 
 void input_init(void) {
+    input_logging = boot_command_line_flag("inputlog");
     uint8_t config = 0;
 
     raw_head = 0;

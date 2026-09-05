@@ -5850,20 +5850,26 @@ _Static_assert(sizeof(struct syscall_frame) == 144, "syscall_entry.S assumes 144
  *
  * The test is not "is this fast" but "is everything it touches either private
  * to this process or behind a lock of its own". A pipe qualifies because it
- * has a lock now and its whole state is inside it. A character device whose
- * handler keeps no state -- /dev/zero, /dev/null and their kind -- qualifies
- * because there is nothing to protect. Everything else, including regular
- * files (whose writes reach the disk and the persistence hooks), sockets, ptys
- * and terminals, does not, and takes the kernel lock exclusively as before.
+ * has a lock now and its whole state is inside it. A character device
+ * qualifies only when devfs said so by hand.
+ *
+ * It used to be inferred, from a null `data` pointer and a zero length. That
+ * is not a property of the device: it is a property of what the driver chose
+ * to keep there, and three drivers keep the number zero. /dev/input/event0 is
+ * one of them -- device id zero is the keyboard -- so every evdev read ran
+ * beside the interrupt that fills the same ring, and the reader's head and
+ * count raced the writer's tail and count. A lost decrement leaves a slot to
+ * be read a second time, which is a key typed twice. /dev/tty0 and
+ * /dev/console (terminal zero is "whichever is active") and /dev/random (no
+ * data pointer, but a generator behind it) went the same way.
  */
 static int file_may_share(const struct file *file) {
     if (!file) return 0;
     if (file->kind == FILE_KIND_PIPE_READ || file->kind == FILE_KIND_PIPE_WRITE)
         return 1;
     if (file->kind != FILE_KIND_VFS || !file->node) return 0;
-    /* A stateless device: no data of its own, so its handler cannot race. */
     if ((file->node->flags & 0xFFU) != VFS_CHARDEVICE) return 0;
-    return file->node->data == NULL && file->node->length == 0;
+    return file->node->stateless != 0;
 }
 
 /*
