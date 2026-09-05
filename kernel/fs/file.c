@@ -43,29 +43,11 @@ struct file *file_open_node(struct vfs_node *node, uint32_t flags) {
     file->kind = FILE_KIND_VFS;
     file->flags = flags;
     file->node = node;
-    /*
-     * An open file keeps its node alive. Without this, unlink() frees the
-     * contents out from under everyone still using them: destroy_node() only
-     * spares a node that something holds a reference to, and until now the
-     * only thing that ever took one was a process's working directory.
-     *
-     * That is POSIX's rule -- a file goes away when its last name and its
-     * last descriptor are both gone -- but here it is also a memory-safety
-     * one, because file data lives in kmalloc'd buffers and a mapping points
-     * straight at them. A package manager replacing a shared library does
-     * exactly the unsupported thing: it unlinks the old libfoo.so while the
-     * running process still has it mapped, the buffer goes back to the heap,
-     * and the next allocation to land there is quietly overwritten by a
-     * process that has no idea its own text moved.
-     */
+    /* An open file keeps its node alive, so unlink does not free the
+       contents underneath it. */
     vfs_node_ref(node);
-    /*
-     * A FIFO is not read and written through the node at all: both ends are
-     * ordinary pipe descriptors onto one buffer the node owns. Opening never
-     * blocks waiting for the other side, which POSIX would have it do -- the
-     * programs that use FIFOs here open both ends themselves, and a rendezvous
-     * nothing completes is a hang with no way out.
-     */
+    /* A FIFO is not read through the node at all: both ends are pipe
+       descriptors onto one buffer. */
     if ((node->flags & 0xFFU) == VFS_PIPE) {
         int write_end = (flags & 3U) != 0;
         if (!node->fifo) {
@@ -220,12 +202,8 @@ struct file *file_create_pty_endpoint(struct pty_pair *pty, int master,
 const void *file_read_wait_channel(struct file *file) {
     if (file && file->kind == FILE_KIND_PIPE_READ && file->pipe)
         return &file->pipe->data_wait;
-    /*
-     * A virtual terminal, which the keyboard wakes. Without this a login
-     * prompt waiting for somebody to type is rewound and retried on every
-     * schedule, and four of them -- one per terminal -- keep four processors
-     * busy doing nothing at all.
-     */
+    /* A virtual terminal, which the keyboard wakes, so a login prompt is
+       not rewound and retried. */
     if (file && file->kind == FILE_KIND_VFS && file->node &&
         file->node->read == vt_node_read)
         return vt_input_wait_channel();
@@ -238,15 +216,8 @@ const void *file_write_wait_channel(struct file *file) {
     return NULL;
 }
 
-/*
- * Advisory whole-file locking, flock(2) style.
- *
- * The lock belongs to the *open file description*, not to the descriptor or the
- * process, which is why the holder is this struct file: dup() and fork() share
- * one, so they share the lock, while a second open() of the same path gets its
- * own and contends. libwayland relies on exactly that to stop two compositors
- * claiming the same socket name.
- */
+/* Advisory whole-file locking, held by the open file description rather
+   than the descriptor. */
 void file_flock_release(struct file *file) {
     if (!file || !file->flock_type || !file->node) {
         if (file) file->flock_type = 0;
@@ -309,9 +280,8 @@ void file_unref(struct file *file) {
     /* The last descriptor referring to this open file description is going
        away, which is exactly when flock releases its lock. */
     file_flock_release(file);
-    /* POSIX locks go the other way round: they belong to the process, and
-       closing *any* descriptor on the file drops them. Doing it here is what
-       keeps a process that exited from holding a database shut. */
+    /* POSIX locks belong to the process, so closing any descriptor on the
+       file drops them. */
     if (file->kind == FILE_KIND_VFS && file->node &&
         file->node->posix_lock_pid == process_current_pid()) {
         file->node->posix_lock_pid = 0;
@@ -319,6 +289,10 @@ void file_unref(struct file *file) {
     }
     if ((file->kind == FILE_KIND_PIPE_READ || file->kind == FILE_KIND_PIPE_WRITE) && file->pipe)
         pipe_release(file->pipe, file->kind == FILE_KIND_PIPE_WRITE);
+    /* Before the node's close, so the driver still knows whose objects these were. */
+    if (file->kind == FILE_KIND_VFS && file->node &&
+        file->node->file_ioctl == drm_file_ioctl)
+        drm_file_close(file);
     if (file->kind == FILE_KIND_VFS && file->node && file->node->close)
         file->node->close(file->node);
     if (file->kind == FILE_KIND_INPUT && file->input_reader)
@@ -347,9 +321,8 @@ void file_unref(struct file *file) {
         netlink_socket_unref(file->netlink_socket);
     if ((file->kind == FILE_KIND_PTY_MASTER || file->kind == FILE_KIND_PTY_SLAVE) && file->pty)
         pty_close_endpoint(file->pty, file->kind == FILE_KIND_PTY_MASTER);
-    /* The other half of the reference taken when the node was opened. Last:
-       for a node already unlinked this is what finally frees it, and the
-       close callback above still wants it to exist. */
+    /* The other half of the reference the open took, and last because the
+       close still wants it. */
     vfs_node_unref(file->node);
     kfree(file);
 }

@@ -151,11 +151,7 @@ static int64_t rtc_ioctl(struct vfs_node *node, unsigned long request,
     return copy_to_user(user_argument, &value, sizeof(value)) == 0 ? 0 : -EFAULT;
 }
 
-/*
- * /dev/sda, /dev/sda1, /dev/sdb, ... one node per device the block layer holds,
- * disks and partitions alike. The name is the block layer's, looked up rather
- * than derived, so the node and the device cannot drift apart.
- */
+/* One node per device the block layer holds, disks and partitions alike. */
 static const struct block_device *disk_of(const struct vfs_node *node) {
     return block_device_at(block_device_index_by_name(node->name));
 }
@@ -205,15 +201,8 @@ static int64_t input_event_ioctl(struct vfs_node *node, unsigned long request,
     return copy_to_user(user_argument, &info, sizeof(info)) == 0 ? 0 : -EFAULT;
 }
 
-/*
- * The terminal devices.
- *
- * /dev/tty1../dev/ttyN are the virtual terminals themselves; /dev/tty0 and
- * /dev/console both mean whichever one is active, which is where a program that
- * wants to drive the display asks its VT questions; /dev/tty means the caller's
- * own controlling terminal. All four go through the same operations, and which
- * terminal is meant is carried in the node.
- */
+/* The terminal devices, where /dev/tty0 and /dev/console mean whichever
+   one is active. */
 static struct vfs_node *attach_terminal(struct vfs_node *dev, const char *name,
                                         unsigned index, uint32_t major,
                                         uint32_t minor) {
@@ -252,9 +241,8 @@ void devfs_init(void) {
     vfs_mount_builtin("devtmpfs", "/dev", "devtmpfs", dev);
     pty_init();
 
-    /* /dev/console is the active terminal, as it is on Linux when the kernel
-       console is a VT: a service that writes to it writes to whatever the user
-       is looking at. */
+    /* /dev/console is the active terminal, as it is on Linux when the
+       console is a VT. */
     (void)attach_terminal(dev, "console", VT_NODE_ACTIVE, DEV_MAJOR_TTYAUX,
                           DEV_MINOR_TTYAUX_CONSOLE);
     (void)attach_terminal(dev, "tty0", VT_NODE_ACTIVE, DEV_MAJOR_TTY, 0);
@@ -328,7 +316,7 @@ void devfs_init(void) {
                 card->dev_major = DEV_MAJOR_DRM;
                 card->dev_minor = DEV_MINOR_DRM_CARD0;
                 card->gid = DEV_GROUP_VIDEO;
-                card->ioctl = drm_node_ioctl;
+                card->file_ioctl = drm_file_ioctl;
                 card->mmap = drm_device_mmap;
                 /* Open/close counting is how the console gets the display back
                    when the last client goes away. */
@@ -336,19 +324,8 @@ void devfs_init(void) {
                 card->close = drm_device_close;
             }
 
-            /*
-             * The render node, where there is rendering to do.
-             *
-             * mesa will not draw through the card node: it looks for a render
-             * node beside it and gives up on the device if there is none, so
-             * this is not an alternative way in, it is the only way in. It is
-             * the same device -- the same ioctls, the same buffers -- under a
-             * second name, which is what it is on Linux too.
-             *
-             * There is none without virgl, and there should not be: a node
-             * that accepts no rendering is worse than an absent one, because
-             * mesa would choose it and then fail.
-             */
+            /* The render node, which is the only way in for mesa and exists only
+               where virgl does. */
             if (virtgpu_virgl_available()) {
                 struct vfs_node *render = attach_device(dri, "renderD128",
                                                         VFS_CHARDEVICE, 0666,
@@ -358,7 +335,7 @@ void devfs_init(void) {
                     render->dev_major = DEV_MAJOR_DRM;
                     render->dev_minor = DEV_MINOR_DRM_RENDER0;
                     render->gid = DEV_GROUP_VIDEO;
-                    render->ioctl = drm_node_ioctl;
+                    render->file_ioctl = drm_file_ioctl;
                     render->mmap = drm_device_mmap;
                     render->open = drm_device_open;
                     render->close = drm_device_close;
@@ -373,9 +350,8 @@ void devfs_init(void) {
     if (sound_card_available()) {
         struct vfs_node *snd = vfs_mkdir_p("/dev/snd");
         if (snd) {
-            /* No read-readiness: read() on a control device delivers element
-               change events, and this driver never generates one. Claiming
-               POLLIN would spin any mixer that waits on it. */
+            /* No read-readiness, because this driver never generates an element
+               change event. */
             struct vfs_node *control = attach_device(snd, "controlC0",
                 VFS_CHARDEVICE, 0660, NULL, NULL, NULL);
             if (control) {
@@ -439,9 +415,8 @@ void devfs_init(void) {
     }
     (void)vfs_create_symlink("/dev/rtc0", "/dev/rtc", 0);
 
-    /* Where shm_open(3) puts its files. A tmpfs of its own so that nothing
-       under it is ever written to the disk, and a mount so that the init
-       scripts see one already there. */
+    /* Where shm_open puts its files, on a tmpfs of its own so nothing
+       reaches the disk. */
     struct vfs_node *shm = vfs_mkdir_p("/dev/shm");
     if (shm) {
         shm->mode = 01777;

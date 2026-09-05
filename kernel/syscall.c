@@ -2402,6 +2402,8 @@ static int64_t sys_ioctl(int fd, unsigned long request, uint64_t user_argument) 
             return input_reader_ioctl(file->input_reader,
                                       (unsigned)(uintptr_t)file->node->data,
                                       request, user_argument);
+        if (file->node->file_ioctl)
+            return file->node->file_ioctl(file, request, user_argument);
         if (file->node->ioctl)
             return file->node->ioctl(file->node, request, user_argument);
     }
@@ -2432,6 +2434,8 @@ static int64_t sys_ioctl(int fd, unsigned long request, uint64_t user_argument) 
         return copy_to_user(user_argument, argument, argument_size) == 0 ? 0 : -EFAULT;
     }
     if (file->kind != FILE_KIND_VFS || !file->node || (file->node->flags & 0xFFU) != VFS_CHARDEVICE) return -ENOTTY;
+    if (file->node->file_ioctl)
+        return file->node->file_ioctl(file, request, user_argument);
     if (file->node->ioctl) return file->node->ioctl(file->node, request, user_argument);
 
     /*
