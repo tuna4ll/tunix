@@ -385,6 +385,10 @@ headless: $(IMAGE)
 # the difference between one processor and several.
 SCHEDBENCH_CPUS ?= 4
 
-.PHONY: schedbench
+.PHONY: schedbench drmtest
 schedbench: $(KERNEL) $(LIMINE_EXE)
 	support/tests/schedbench.sh $(SCHEDBENCH_CPUS) $(KERNEL)
+
+# The DRM device asked what a Linux graphics client asks, with Linux's own structures.
+drmtest: $(KERNEL) $(LIMINE_EXE)
+	support/tests/drmtest.sh $(SCHEDBENCH_CPUS) $(KERNEL)
