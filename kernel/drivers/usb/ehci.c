@@ -142,7 +142,26 @@ extern void kprintf(const char *fmt, ...);
 #define RESET_TIMEOUT_NS (1000ULL * 1000ULL * 1000ULL)
 #define PORT_RESET_HOLD_NS (50ULL * 1000ULL * 1000ULL)
 #define PORT_ENABLE_TIMEOUT_NS (200ULL * 1000ULL * 1000ULL)
-#define TRANSFER_TIMEOUT_NS (2000ULL * 1000ULL * 1000ULL)
+/*
+ * How long a bulk transfer may take, and how long it may make no progress.
+ *
+ * Two seconds for the whole transfer turned out to be the thing that broke the
+ * session. A stick that is committing a write NAKs -- the controller sits in
+ * the ping state and the descriptor stays active with its error count
+ * untouched -- and a cheap one does that for longer than two seconds while it
+ * erases a block. Giving up there abandons a transaction the device is still
+ * in the middle of, and the next command wrapper goes into an endpoint that
+ * then stalls, which is where every later failure came from:
+ *
+ *   token 90008c80 overlay e008c81   4096 asked for, 512 moved, pinging
+ *   token 1f8c40   overlay 1f8c40    the next wrapper, halted, for ever
+ *
+ * So the transfer is given ten seconds while the controller is working on it,
+ * and two while it is not -- an idle overlay means the queue never started,
+ * which is a different failure and does not need waiting out.
+ */
+#define TRANSFER_TIMEOUT_NS (10000ULL * 1000ULL * 1000ULL)
+#define TRANSFER_QUIET_NS (2000ULL * 1000ULL * 1000ULL)
 /* Enumeration is allowed far less patience than a disk transfer. A device that
    is not going to answer a control request has already not answered it, and
    there can be a great many of these: every port of every hub of every
@@ -587,6 +606,26 @@ static void build_qtd(struct ehci_qtd *qtd, uint32_t pid, uint64_t physical,
 #define ASYNC_KICK_AFTER_NS (20ULL * 1000ULL * 1000ULL)
 #define ASYNC_KICK_TIMEOUT_NS (100ULL * 1000ULL * 1000ULL)
 
+/*
+ * Wait for the controller to let go of the queue heads it has cached.
+ *
+ * The specification's own handshake. It is rung only when a transfer is
+ * abandoned: the controller may still have the descriptor in the overlay and
+ * still be talking to the device about it, and returning while that is true is
+ * how the buffer under it comes to be reused mid-transaction.
+ */
+#define ASYNC_ADVANCE_TIMEOUT_NS (10ULL * 1000ULL * 1000ULL)
+
+static void async_advance(struct ehci *host) {
+    uint32_t command = mmio_read32(operational(host, EHCI_USBCMD));
+    if (!(command & USBCMD_ASYNC_ENABLE) || !(command & USBCMD_RUN)) return;
+    mmio_write32(operational(host, EHCI_USBSTS), USBSTS_ASYNC_ADVANCE);
+    mmio_write32(operational(host, EHCI_USBCMD), command | USBCMD_ASYNC_DOORBELL);
+    (void)wait_for(operational(host, EHCI_USBSTS), USBSTS_ASYNC_ADVANCE,
+                   USBSTS_ASYNC_ADVANCE, ASYNC_ADVANCE_TIMEOUT_NS);
+    mmio_write32(operational(host, EHCI_USBSTS), USBSTS_ASYNC_ADVANCE);
+}
+
 static void async_kick(struct ehci *host) {
     uint32_t command = mmio_read32(operational(host, EHCI_USBCMD));
     mmio_write32(operational(host, EHCI_USBCMD), command & ~USBCMD_ASYNC_ENABLE);
@@ -643,19 +682,35 @@ static int run_qtds(struct ehci *host, struct ehci_device *device,
     /* Last, and what starts the transfer. */
     dma_store32(&work_qh->overlay_next, physical_of(first));
 
-    uint64_t deadline = time_uptime_ns() + timeout_ns;
-    uint64_t kick_at = time_uptime_ns() + ASYNC_KICK_AFTER_NS;
+    uint64_t started = time_uptime_ns();
+    uint64_t deadline = started + timeout_ns;
+    uint64_t kick_at = started + ASYNC_KICK_AFTER_NS;
+    /* The overlay is the controller's own working state, so a change in it is
+       what "still going" means -- a device that NAKs leaves it alone but keeps
+       the active bit set, which is the case worth waiting out. */
+    uint64_t quiet_since = started;
+    uint32_t seen_overlay = dma_load32(&work_qh->overlay_token);
     int kicked = 0;
     int status = -1;
+    int abandoned = 0;
     for (;;) {
         uint32_t token = dma_load32(&last->token);
         if (!(token & QTD_STATUS_ACTIVE)) {
             status = (token & QTD_STATUS_ERROR_MASK) ? -1 : 0;
             break;
         }
-        if (dma_load32(&work_qh->overlay_token) & QTD_STATUS_HALTED) break;
+        uint32_t overlay = dma_load32(&work_qh->overlay_token);
+        if (overlay & QTD_STATUS_HALTED) break;
         uint64_t now = time_uptime_ns();
-        if (now >= deadline) break;
+        if (overlay != seen_overlay) {
+            seen_overlay = overlay;
+            quiet_since = now;
+        }
+        if (now >= deadline ||
+            (!(overlay & QTD_STATUS_ACTIVE) && now - quiet_since >= TRANSFER_QUIET_NS)) {
+            abandoned = 1;
+            break;
+        }
         /* Once, and late. Turning the schedule off is not free for a transfer
            that is already under way -- doing it every couple of milliseconds
            stops transfers finishing at all, which is a worse machine than a
@@ -669,6 +724,9 @@ static int run_qtds(struct ehci *host, struct ehci_device *device,
 
     /* Idle again, and still linked. */
     dma_store32(&work_qh->overlay_next, LINK_TERMINATE);
+    /* A transfer walked away from is one the controller may still be running,
+       and the buffer under it is about to belong to something else. */
+    if (abandoned) async_advance(host);
     return status;
 }
 
@@ -1157,7 +1215,14 @@ static int ehci_bulk_transfer(int index, int in, uint64_t physical,
          * after it needed the class reset to get anywhere.
          */
         if ((token | overlay) & QTD_STATUS_HALTED) {
-            if (clear_endpoint_halt(host, device, endpoint, in) == 0) *toggle = 0;
+            if (clear_endpoint_halt(host, device, endpoint, in) == 0) {
+                *toggle = 0;
+            } else if (seen <= BULK_FAILURES_REPORTED) {
+                /* Worth its own line: a halt that will not clear is a device
+                   that needs the class reset, not another transfer. */
+                kprintf("EHCI: the halt on endpoint %u would not clear\n",
+                        (unsigned)endpoint);
+            }
         }
         return -1;
     }
