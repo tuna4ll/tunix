@@ -161,11 +161,29 @@ static int run_command_once(struct usb_disk *disk, const uint8_t *command,
    but a second failure on top of the first. */
 #define COMMAND_REPORTS 8U
 
+/*
+ * How many commands may fail in a row before the retries are given up on.
+ *
+ * A retry is worth its cost when the failure was a one-off. It is worth
+ * nothing when the last several commands all failed the same way, and the cost
+ * is real: every attempt waits out a two-second transfer timeout and a class
+ * reset, with the kernel lock held the whole time, so one refused write stops
+ * the machine for the best part of half a minute -- long enough for the lock
+ * watchdog to start reporting. Backing down to a single attempt keeps a
+ * failing disk from taking the rest of the system with it, and one success
+ * puts the retries back.
+ */
+#define FAILURES_BEFORE_BACKING_OFF 3U
+
+static unsigned consecutive_failures;
+
 static int run_command(struct usb_disk *disk, const uint8_t *command,
                        uint8_t command_length, int in, uint32_t length) {
     static unsigned reported;
+    int attempts = consecutive_failures >= FAILURES_BEFORE_BACKING_OFF
+                       ? 1 : COMMAND_ATTEMPTS;
 
-    for (int attempt = 0; attempt < COMMAND_ATTEMPTS; attempt++) {
+    for (int attempt = 0; attempt < attempts; attempt++) {
         if (attempt && usb_reset_recovery(disk->controller_index) != 0) break;
         int status = run_command_once(disk, command, command_length, in, length);
         if (status == 0) {
@@ -174,6 +192,7 @@ static int run_command(struct usb_disk *disk, const uint8_t *command,
                 kprintf("USB-STORAGE: command %x needed %d attempts\n",
                         (unsigned)command[0], attempt + 1);
             }
+            consecutive_failures = 0;
             return 0;
         }
         /*
@@ -188,13 +207,17 @@ static int run_command(struct usb_disk *disk, const uint8_t *command,
                 kprintf("USB-STORAGE: the device refused command %x\n",
                         (unsigned)command[0]);
             }
+            consecutive_failures++;
             return -1;
         }
     }
+    consecutive_failures++;
     if (reported < COMMAND_REPORTS) {
         reported++;
-        kprintf("USB-STORAGE: command %x failed %d times\n",
-                (unsigned)command[0], COMMAND_ATTEMPTS);
+        kprintf("USB-STORAGE: command %x failed %d times%s\n",
+                (unsigned)command[0], attempts,
+                consecutive_failures >= FAILURES_BEFORE_BACKING_OFF
+                    ? ", retries given up until one works" : "");
     }
     return -1;
 }
