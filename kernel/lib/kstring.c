@@ -2,24 +2,45 @@
 #include <stdint.h>
 #include "../include/kstring.h"
 
+/* The string instructions rather than a byte loop in C. */
+/* These two are what every copy in the kernel goes through -- a user copy, a
+   pipe, a page table being zeroed, a struct assignment the compiler turned into
+   a call -- and a loop that moves one byte per iteration was costing about a
+   nanosecond a byte. */
+/* The direction flag is clear whenever kernel code runs: FMASK clears it on the
+   syscall path and the interrupt stubs `cld` on theirs. */
+/* General registers only, which is what -mgeneral-regs-only asks for. */
 void *memset(void *dst, int value, size_t count) {
-    uint8_t *out = (uint8_t *)dst;
-    while (count--) *out++ = (uint8_t)value;
+    void *out = dst;
+    __asm__ volatile("rep stosb"
+                     : "+D"(out), "+c"(count)
+                     : "a"((uint8_t)value)
+                     : "memory");
     return dst;
 }
 
 void *memcpy(void *dst, const void *src, size_t count) {
-    uint8_t *out = (uint8_t *)dst;
-    const uint8_t *in = (const uint8_t *)src;
-    while (count--) *out++ = *in++;
+    void *out = dst;
+    const void *in = src;
+    __asm__ volatile("rep movsb"
+                     : "+D"(out), "+S"(in), "+c"(count)
+                     :
+                     : "memory");
     return dst;
 }
 
+/* Only the descending case is written out, because the ascending one is a plain
+   copy and the flag this sets has to be cleared again before any C runs. */
 void *memmove(void *dst, const void *src, size_t count) {
     uint8_t *out = (uint8_t *)dst;
     const uint8_t *in = (const uint8_t *)src;
-    if (out < in) return memcpy(dst, src, count);
-    while (count--) out[count] = in[count];
+    if (out < in || !count) return memcpy(dst, src, count);
+    void *last_out = out + count - 1;
+    const void *last_in = in + count - 1;
+    __asm__ volatile("std; rep movsb; cld"
+                     : "+D"(last_out), "+S"(last_in), "+c"(count)
+                     :
+                     : "memory");
     return dst;
 }
 
