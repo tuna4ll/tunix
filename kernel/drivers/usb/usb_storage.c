@@ -98,9 +98,16 @@ static uint32_t next_tag = 1;
 
 /*
  * Run one SCSI command. `data` may be NULL; when it is not, `length` bytes move
- * through the staging page in the direction `in` says. Returns 0 when the
- * device reports the command succeeded.
+ * through the staging page in the direction `in` says.
+ *
+ * Zero is success, TRANSPORT_FAILED is a transfer that did not complete and
+ * REJECTED is the device answering properly to say no -- a write to a medium
+ * that is write-protected, a sector it cannot read. The two are not the same
+ * thing and must not be retried the same way.
  */
+#define TRANSPORT_FAILED (-1)
+#define REJECTED (-2)
+
 static int run_command_once(struct usb_disk *disk, const uint8_t *command,
                             uint8_t command_length, int in, uint32_t length) {
     struct command_block_wrapper *cbw = (struct command_block_wrapper *)wrapper_page;
@@ -115,20 +122,23 @@ static int run_command_once(struct usb_disk *disk, const uint8_t *command,
     uint32_t tag = cbw->tag;
 
     if (usb_bulk_transfer(disk->controller_index, 0, wrapper_physical,
-                           sizeof(*cbw)) != 0) return -1;
+                           sizeof(*cbw)) != 0) return TRANSPORT_FAILED;
 
     if (length &&
         usb_bulk_transfer(disk->controller_index, in, staging_physical, length) != 0)
-        return -1;
+        return TRANSPORT_FAILED;
 
     struct command_status_wrapper *csw =
         (struct command_status_wrapper *)(wrapper_page + 64);
     memset(csw, 0, sizeof(*csw));
     if (usb_bulk_transfer(disk->controller_index, 1, wrapper_physical + 64,
-                           sizeof(*csw)) != 0) return -1;
+                           sizeof(*csw)) != 0) return TRANSPORT_FAILED;
 
-    if (csw->signature != CSW_SIGNATURE || csw->tag != tag) return -1;
-    return csw->status == 0 ? 0 : -1;
+    if (csw->signature != CSW_SIGNATURE || csw->tag != tag) return TRANSPORT_FAILED;
+    if (csw->status == 0) return 0;
+    /* Status two is a phase error, which the specification answers with the
+       reset the retry already does. One is the device saying no. */
+    return csw->status == 2U ? TRANSPORT_FAILED : REJECTED;
 }
 
 /*
@@ -157,13 +167,28 @@ static int run_command(struct usb_disk *disk, const uint8_t *command,
 
     for (int attempt = 0; attempt < COMMAND_ATTEMPTS; attempt++) {
         if (attempt && usb_reset_recovery(disk->controller_index) != 0) break;
-        if (run_command_once(disk, command, command_length, in, length) == 0) {
+        int status = run_command_once(disk, command, command_length, in, length);
+        if (status == 0) {
             if (attempt && reported < COMMAND_REPORTS) {
                 reported++;
                 kprintf("USB-STORAGE: command %x needed %d attempts\n",
                         (unsigned)command[0], attempt + 1);
             }
             return 0;
+        }
+        /*
+         * The device answered and said no, so there is nothing to recover:
+         * resetting it and asking three more times is four seconds of a held
+         * kernel lock to be told the same thing again. A write-protected stick
+         * spent that on every block a filesystem tried to flush.
+         */
+        if (status == REJECTED) {
+            if (reported < COMMAND_REPORTS) {
+                reported++;
+                kprintf("USB-STORAGE: the device refused command %x\n",
+                        (unsigned)command[0]);
+            }
+            return -1;
         }
     }
     if (reported < COMMAND_REPORTS) {
