@@ -487,6 +487,53 @@ was the cause:
 None of this was caused by more processors. It was reachable all along; four
 processors and a desktop are what got somebody looking.
 
+## Asking the machine what it is
+
+Everything above was measured on an emulator, and the emulator is the one
+machine that cannot disagree with the assumptions underneath it: its counter is
+synthesised from one clock, every processor's timer runs at the same rate, and
+the firmware tables say what QEMU decided to say. Real hardware is where those
+stop being free.
+
+`hwreport` on the kernel command line -- or the boot menu entry of that name --
+prints what this machine turned out to be and writes the same text to
+`/tunix-hwreport.txt` on the root filesystem. The file is the point: a machine
+with no serial cable can still be asked, because the disk can be read anywhere
+else afterwards.
+
+```
+tunix hardware report
+
+processor
+  name        AMD Ryzen 5 3600 6-Core Processor
+  vendor      AuthenticAMD family 23 model 1 stepping 0
+  cmdline     root=LABEL=tunix-root hwreport
+clock
+  tsc_hz      3600606282
+  invariant   NO -- the counter may stop or change rate
+processors
+  firmware    4 described, 4 running
+  madt[0]     acpi_id 0 apic_id 0 usable
+  cpu 0       apic_id 0 timer PIT clock_skew_ns 0
+  cpu 1       apic_id 1 lapic_hz 62519800 count 250079 clock_skew_ns 0
+memory
+  usable_mib  4084
+```
+
+Three of those lines are there because of a specific way a real machine can go
+wrong and an emulated one cannot:
+
+- **`invariant`**, because a counter that stops in a sleep state or changes rate
+  is not a clock two processors can subtract readings of, and a virtual runtime,
+  a deadline and a slice all assume they can.
+- **`clock_skew_ns`**, which is how far a processor's own reading of the clock
+  fell outside the window the starter bracketed it with. Anything but zero means
+  the processors do not share a counter.
+- **`count`**, the local timer divisor each processor measured for itself. One
+  that calibrated wrong gets a count of 1, which is millions of interrupts a
+  second on that processor and a machine that stops; the report says so rather
+  than leaving it to be guessed at.
+
 ## Proving it
 
 A program that times one child doing a fixed amount of arithmetic, then four

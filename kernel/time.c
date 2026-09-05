@@ -28,6 +28,8 @@ static uint64_t tsc_hz;
 static uint64_t boot_realtime_ns;
 static int tsc_invariant;
 static uint64_t processor_mark[SMP_MAX_CPUS];
+/* How far each processor's reading fell outside the window, or zero. */
+static uint64_t processor_skew[SMP_MAX_CPUS];
 
 static inline uint64_t read_tsc(void) {
     uint32_t low;
@@ -256,8 +258,13 @@ void time_mark_processor(unsigned index) {
 void time_check_processor(unsigned index, uint64_t before, uint64_t after) {
     if (index >= SMP_MAX_CPUS) return;
     uint64_t mark = processor_mark[index];
-    if (mark >= before && mark <= after) return;
+    if (mark >= before && mark <= after) { processor_skew[index] = 0; return; }
     uint64_t skew = mark < before ? before - mark : mark - after;
+    processor_skew[index] = skew;
     kprintf("TIME: cpu %u clock disagrees by at least %u ms\n", index,
             (unsigned)(skew / 1000000ULL));
+}
+
+uint64_t time_processor_skew(unsigned index) {
+    return index < SMP_MAX_CPUS ? processor_skew[index] : 0;
 }

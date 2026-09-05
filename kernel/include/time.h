@@ -29,5 +29,7 @@ void time_mark_processor(unsigned index);
 /* Say so if that reading did not fall between the two the starter took around
    it, which is the only way from here to see counters that disagree. */
 void time_check_processor(unsigned index, uint64_t before, uint64_t after);
+/* How far that reading fell outside the window, or zero when it agreed. */
+uint64_t time_processor_skew(unsigned index);
 
 #endif

@@ -45,5 +45,8 @@ void apic_send_ipi_to_others(uint8_t vector);
 /* The per-processor timer, measured against the TSC because nothing reports
    the rate it counts at. */
 void apic_timer_start(uint32_t hz, uint8_t vector);
+/* What that calibration measured on one processor, for the hardware report. */
+void apic_timer_calibration(unsigned index, uint64_t *measured_hz,
+                            uint32_t *initial_count);
 
 #endif

@@ -32,7 +32,7 @@ serial: yes
 /Tunix
     protocol: limine
     path: boot():/boot/kernel.elf
-    cmdline: root=LABEL=tunix-root
+    cmdline: root=LABEL=tunix-root ${EXTRA_CMDLINE:-}
 EOF
 
 TABLE=gpt ROOT_SLACK_MIB=16 \

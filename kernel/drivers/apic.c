@@ -17,6 +17,7 @@
 
 #include "../include/acpi.h"
 #include "../include/apic.h"
+#include "../include/percpu.h"
 #include "../include/pic.h"
 #include "../include/time.h"
 #include "../include/vmm.h"
@@ -223,6 +224,9 @@ void apic_send_ipi_to_others(uint8_t vector) {
  * it is measured against the TSC -- counting down from the top for a known
  * number of milliseconds and seeing how far it got.
  */
+static uint64_t timer_measured_hz[SMP_MAX_CPUS];
+static uint32_t timer_initial_count[SMP_MAX_CPUS];
+
 void apic_timer_start(uint32_t hz, uint8_t vector) {
     if (!active || !hz) return;
 
@@ -240,9 +244,24 @@ void apic_timer_start(uint32_t hz, uint8_t vector) {
     uint64_t per_second = (elapsed * 1000ULL) / CALIBRATION_MS;
     uint32_t count = per_second > hz ? (uint32_t)(per_second / hz) : 1U;
 
+    /* Kept so a report can say what this processor measured, because a
+       calibration that went wrong is invisible from anywhere else. */
+    unsigned index = cpu_current() ? cpu_current()->index : 0;
+    if (index < SMP_MAX_CPUS) {
+        timer_measured_hz[index] = per_second;
+        timer_initial_count[index] = count;
+    }
+
     lapic_write(LAPIC_TIMER_DIVIDE, TIMER_DIVIDE_16);
     lapic_write(LAPIC_LVT_TIMER, LVT_PERIODIC | vector);
     lapic_write(LAPIC_TIMER_INITIAL, count);
+}
+
+void apic_timer_calibration(unsigned index, uint64_t *measured_hz,
+                            uint32_t *initial_count) {
+    if (index >= SMP_MAX_CPUS) return;
+    if (measured_hz) *measured_hz = timer_measured_hz[index];
+    if (initial_count) *initial_count = timer_initial_count[index];
 }
 
 int apic_init(void) {

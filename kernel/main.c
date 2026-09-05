@@ -9,6 +9,7 @@
 #include "include/gdt.h"
 #include "include/framebuffer.h"
 #include "include/heap.h"
+#include "include/hwreport.h"
 #include "include/input.h"
 #include "include/ehci.h"
 #include "include/idt.h"
@@ -231,6 +232,10 @@ void kmain(const struct boot_info *boot) {
        start taking work off the queue immediately, so everything they might
        touch has to already exist. */
     smp_init();
+    /* After the processors are up, because most of what it has to say is about
+       them, and before init, because a machine that will not get that far is
+       exactly the one worth asking. */
+    hwreport_emit();
     /* The last thing the kernel says on its own behalf. Everything after it
        on the console comes from init. */
     kprintf("TUNIX: starting %s\n", init_path);
