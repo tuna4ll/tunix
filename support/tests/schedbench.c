@@ -5,6 +5,7 @@ typedef long s64;
 
 #define SYS_read 0
 #define SYS_write 1
+#define SYS_open 2
 #define SYS_close 3
 #define SYS_pipe 22
 #define SYS_nanosleep 35
@@ -96,10 +97,22 @@ __asm__(".text\n"
         "    hlt\n"
         "1:  ret\n");
 
+/* Everything printed goes to a file as well, so a machine with no serial
+   cable can be read afterwards by mounting its disk. */
+static int results_fd = -1;
+
 static void put(const char *text) {
     u64 length = 0;
     while (text[length]) length++;
     (void)syscall3(SYS_write, 1, (s64)text, (s64)length);
+    if (results_fd >= 0) (void)syscall3(SYS_write, results_fd, (s64)text, (s64)length);
+}
+
+#define O_WRONLY_CREAT_TRUNC 0x241   /* O_WRONLY | O_CREAT | O_TRUNC */
+
+static void open_results(void) {
+    results_fd = (int)syscall3(SYS_open, (s64)"/tunix-schedbench-results.txt",
+                               O_WRONLY_CREAT_TRUNC, 0644);
 }
 
 /* Three digits of fraction is what makes a microsecond legible in a
@@ -590,6 +603,7 @@ static void test_socket_wait_cost(u64 rounds) {
 }
 
 static int run_all(unsigned cpus) {
+    open_results();
     put("BENCH START cpus=");
     put_number(cpus);
     put("\n");

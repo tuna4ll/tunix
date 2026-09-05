@@ -53,10 +53,22 @@ static inline s64 syscall6(s64 n, s64 a, s64 b, s64 c, s64 d, s64 e, s64 f) {
     return r;
 }
 
+/* Everything printed goes to a file as well, so a machine with no serial
+   cable can be read afterwards by mounting its disk. */
+static int results_fd = -1;
+
 static void put(const char *text) {
     u64 length = 0;
     while (text[length]) length++;
     (void)syscall3(SYS_write, 1, (s64)text, (s64)length);
+    if (results_fd >= 0) (void)syscall3(SYS_write, results_fd, (s64)text, (s64)length);
+}
+
+#define O_WRONLY_CREAT_TRUNC 0x241   /* O_WRONLY | O_CREAT | O_TRUNC */
+
+static void open_results(void) {
+    results_fd = (int)syscall3(SYS_open, (s64)"/tunix-drmtest-results.txt",
+                               O_WRONLY_CREAT_TRUNC, 0644);
 }
 
 static void put_signed(s64 value) {
@@ -537,6 +549,7 @@ static void test_size_overflow(void) {
 
 static int run(void) {
     card = (int)syscall3(SYS_open, (s64)"/dev/dri/card0", O_RDWR | O_NONBLOCK, 0);
+    open_results();
     put("DRMTEST START card=");
     put_signed(card);
     put("\n");

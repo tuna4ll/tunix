@@ -520,8 +520,15 @@ memory
   usable_mib  4084
 ```
 
-Three of those lines are there because of a specific way a real machine can go
-wrong and an emulated one cannot:
+The benchmarks go the same way. `make testimage TEST=schedbench` builds the
+image without booting it -- `IMAGE_TABLE=mbr` for an old BIOS booting from a
+stick -- and the program writes everything it prints to
+`/tunix-<test>-results.txt` as well as to the console, so a run on real hardware
+can be read afterwards without a cable. `TEST` is `schedbench`, `perftest` or
+`drmtest`.
+
+Three of the report's lines are there because of a specific way a real machine
+can go wrong and an emulated one cannot:
 
 - **`invariant`**, because a counter that stops in a sleep state or changes rate
   is not a clock two processors can subtract readings of, and a virtual runtime,

@@ -35,8 +35,15 @@ serial: yes
     cmdline: root=LABEL=tunix-root ${EXTRA_CMDLINE:-}
 EOF
 
-TABLE=gpt ROOT_SLACK_MIB=16 \
+TABLE=${IMAGE_TABLE:-gpt} ROOT_SLACK_MIB=16 \
 	support/image.sh "$IMAGE" "$KERNEL" "$LIMINE_DIR" "$WORK/limine.conf" "$WORK/root" >/dev/null
+
+# BOOT=0 stops with the image built, for writing to a stick and booting a real
+# machine; the results land in a file on its root filesystem.
+if [ "${BOOT:-1}" = 0 ]; then
+	echo ":: $IMAGE ready -- write it with: sudo dd if=$IMAGE of=/dev/sdX bs=4M oflag=direct status=progress"
+	exit 0
+fi
 
 # KVM where there is one, because a CR3 reload and a TLB refill are costs an emulator does not have.
 ACCEL=tcg
