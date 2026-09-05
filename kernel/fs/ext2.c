@@ -941,8 +941,13 @@ static int create_one(struct vfs_node *node) {
     inode.i_mtime = node->mtime;
 
     if (kind == VFS_DIRECTORY) {
+        failed_stage = "directory block";
         uint32_t block = alloc_block();
         if (!block || dir_write_initial_block(block, ino, parent_ino) != 0) {
+            /* The block was taken before the write that failed, and nothing
+               else knows about it yet: leaving it allocated loses a block per
+               attempt on a medium that fails every attempt. */
+            if (block) free_block(block);
             free_inode(ino, 0);
             return -1;
         }
@@ -959,6 +964,7 @@ static int create_one(struct vfs_node *node) {
         if (length < 60U) {
             memcpy(inode.i_block, node->data, (size_t)length);
         } else if (length < EXT2_BLOCK_SIZE) {
+            failed_stage = "symlink block";
             uint32_t block = alloc_block();
             if (!block) {
                 free_inode(ino, 0);
@@ -967,6 +973,7 @@ static int create_one(struct vfs_node *node) {
             memset(data_buf, 0, sizeof(data_buf));
             memcpy(data_buf, node->data, (size_t)length);
             if (write_block(block, data_buf) != 0) {
+                free_block(block);
                 free_inode(ino, 0);
                 return -1;
             }
@@ -981,8 +988,13 @@ static int create_one(struct vfs_node *node) {
         inode.i_links_count = 1;
     }
 
-    if (inode_write(ino, &inode) != 0 ||
-        dir_add_entry(parent_ino, node->name, ino, dirent_type_for(node)) != 0) {
+    failed_stage = "inode write";
+    if (inode_write(ino, &inode) != 0) {
+        free_inode(ino, kind == VFS_DIRECTORY);
+        return -1;
+    }
+    failed_stage = "directory entry";
+    if (dir_add_entry(parent_ino, node->name, ino, dirent_type_for(node)) != 0) {
         free_inode(ino, kind == VFS_DIRECTORY);
         return -1;
     }
