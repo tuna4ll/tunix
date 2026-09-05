@@ -515,6 +515,27 @@ static void test_fork_once(unsigned rounds) {
     put("\n");
 }
 
+/* Every line of /proc/klock, tagged so the harness can pick them out. */
+static void report_lock_holds(void) {
+    int fd = (int)syscall3(SYS_open, (s64)"/proc/klock", 0, 0);
+    if (fd < 0) return;
+    static char text[4096];
+    s64 got = syscall3(SYS_read, fd, (s64)text, sizeof(text) - 1);
+    (void)syscall1(SYS_close, fd);
+    if (got <= 0) return;
+    s64 start = 0;
+    for (s64 at = 0; at <= got; at++) {
+        if (at != got && text[at] != '\n') continue;
+        if (at > start) {
+            text[at] = 0;
+            put("KLOCK ");
+            put(text + start);
+            put("\n");
+        }
+        start = at + 1;
+    }
+}
+
 /* One number out of a /proc file that holds `name value` lines. */
 static u64 proc_value(const char *path, const char *name) {
     char text[512];
@@ -609,7 +630,23 @@ static int run_all(void) {
     /* Late, because reading a few megabytes leaves the heap in a state the
        others would then be measuring: fork takes a 32 KiB kernel stack from it
        and went from 17.9 to 50 us when this ran first. */
+    /* Started here, so what it reports is the reads below and not the whole
+       run: a hold is how long an input event waits before anything can look
+       at it, and the disk is where the long ones come from. */
+    int klock = (int)syscall3(SYS_open, (s64)"/proc/klock", 1 /* O_WRONLY */, 0);
+    if (klock >= 0) {
+        (void)syscall3(SYS_write, klock, (s64)"1", 1);
+        (void)syscall1(SYS_close, klock);
+    }
     test_startup_reads(400);
+    report_lock_holds();
+    if (klock >= 0) {
+        klock = (int)syscall3(SYS_open, (s64)"/proc/klock", 1 /* O_WRONLY */, 0);
+        if (klock >= 0) {
+            (void)syscall3(SYS_write, klock, (s64)"0", 1);
+            (void)syscall1(SYS_close, klock);
+        }
+    }
     test_syscall_once(20000);
     test_syscall_cost();
     put("PERF DONE\n");

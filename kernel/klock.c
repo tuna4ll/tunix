@@ -60,6 +60,100 @@ void klock_note(uint32_t what) {
     breadcrumb[cpu_current()->index] = what;
 }
 
+/*
+ * Where the waiting time goes.
+ *
+ * The watchdog only speaks after twenty seconds, and the holds that matter are
+ * far shorter than that and far more frequent: an input event is only noticed
+ * when the tick or the keyboard interrupt can take the lock, so a hold of a few
+ * hundred milliseconds is a key that reaches a compositor late enough for its
+ * own repeat to fire. Measured on real hardware: a press and its release
+ * arrived 433 ms apart under weston against about 100 ms at a terminal.
+ *
+ * So each exclusive hold is timed and filed under the breadcrumb of whoever
+ * took it, and /proc/klock reports the worst. Writing to that file is what
+ * starts the recording: measured, always-on costs a fifth of the cheapest
+ * syscall, and this is a question that is only ever asked deliberately.
+ */
+static int klock_stats_on;
+static uint64_t hold_started;
+static uint32_t hold_note;
+static struct klock_hold holds[KLOCK_HOLD_SLOTS];
+
+/* Turned on from userland -- writing to /proc/klock -- rather than at boot,
+   because two reads of the cycle counter on every syscall is a fifth of what
+   the cheapest one costs, and nobody should pay that until they are asking. */
+void klock_statistics_stop(void) {
+    __atomic_store_n(&klock_stats_on, 0, __ATOMIC_RELEASE);
+}
+
+void klock_statistics_start(void) {
+    for (unsigned index = 0; index < KLOCK_HOLD_SLOTS; index++) {
+        holds[index].note = 0;
+        holds[index].count = 0;
+        holds[index].total_ns = 0;
+        holds[index].max_ns = 0;
+    }
+    hold_started = 0;
+    __atomic_store_n(&klock_stats_on, 1, __ATOMIC_RELEASE);
+}
+
+/* The counter itself, not a converted time: two of these is what the
+   measurement costs every syscall, and the arithmetic can wait until somebody
+   reads the report. */
+static inline uint64_t read_tsc(void) {
+    uint32_t low, high;
+    __asm__ volatile("rdtsc" : "=a"(low), "=d"(high));
+    return ((uint64_t)high << 32) | low;
+}
+
+int klock_statistics(unsigned index, struct klock_hold *out) {
+    if (!out || index >= KLOCK_HOLD_SLOTS || !holds[index].count) return -1;
+    *out = holds[index];
+    uint64_t hz = time_tsc_frequency();
+    if (!hz) return 0;
+    out->total_ns = out->total_ns / (hz / 1000000ULL) * 1000ULL;
+    out->max_ns = out->max_ns / (hz / 1000000ULL) * 1000ULL;
+    return 0;
+}
+
+/* Filed under the breadcrumb, with the slowest kept when the table is full:
+   what is worth reporting is the hold that made somebody wait. */
+static void record_hold(uint32_t note, uint64_t nanoseconds) {
+    unsigned free_slot = KLOCK_HOLD_SLOTS;
+    unsigned weakest = 0;
+    for (unsigned index = 0; index < KLOCK_HOLD_SLOTS; index++) {
+        if (holds[index].count && holds[index].note == note) {
+            holds[index].count++;
+            holds[index].total_ns += nanoseconds;
+            if (nanoseconds > holds[index].max_ns) holds[index].max_ns = nanoseconds;
+            return;
+        }
+        if (!holds[index].count && free_slot == KLOCK_HOLD_SLOTS) free_slot = index;
+        if (holds[index].max_ns < holds[weakest].max_ns) weakest = index;
+    }
+    unsigned slot = free_slot < KLOCK_HOLD_SLOTS ? free_slot : weakest;
+    if (free_slot == KLOCK_HOLD_SLOTS && nanoseconds <= holds[slot].max_ns) return;
+    holds[slot].note = note;
+    holds[slot].count = 1;
+    holds[slot].total_ns = nanoseconds;
+    holds[slot].max_ns = nanoseconds;
+}
+
+static void hold_begin(void) {
+    if (!__atomic_load_n(&klock_stats_on, __ATOMIC_RELAXED)) return;
+    hold_note = breadcrumb[cpu_current()->index];
+    hold_started = read_tsc();
+}
+
+static void hold_end(void) {
+    if (!hold_started) return;
+    uint64_t now = read_tsc();
+    uint64_t held = now > hold_started ? now - hold_started : 0;
+    hold_started = 0;
+    record_hold(hold_note, held);
+}
+
 static volatile uint8_t watchdog_reported[SMP_MAX_CPUS];
 
 static void klock_report(const char *what, uint32_t ticket) {
@@ -110,9 +204,11 @@ void kernel_lock(void) {
         }
     }
     held_mode[cpu_current()->index] = KLOCK_MODE_EXCLUSIVE;
+    hold_begin();
 }
 
 void kernel_unlock(void) {
+    hold_end();
     held_mode[cpu_current()->index] = KLOCK_MODE_NONE;
     __atomic_store_n(&now_serving, now_serving + 1, __ATOMIC_RELEASE);
 }

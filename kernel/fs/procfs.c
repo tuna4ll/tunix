@@ -10,6 +10,7 @@
 #include "../include/boot.h"
 #include "../include/block.h"
 #include "../include/input.h"
+#include "../include/klock.h"
 #include "../include/procfs.h"
 #include "../include/uts.h"
 #include "../include/smp.h"
@@ -213,6 +214,42 @@ static int64_t proc_inputlog_read(struct vfs_node *node, uint64_t offset,
         text_char(&text, '\n');
     }
     return text_read(&text, offset, size, output);
+}
+
+static void text_hex32(struct text_buffer *text, uint32_t value);
+
+/* Who holds the kernel lock, for how long, and at worst how long: an input
+   event is only seen when the tick can take the lock, so a long hold is a key
+   that reaches its reader late. */
+static int64_t proc_klock_read(struct vfs_node *node, uint64_t offset,
+                               size_t size, void *output) {
+    (void)node;
+    struct text_buffer text = {{0}, 0};
+    text_string(&text, "note count total_us max_us\n");
+    for (unsigned index = 0; index < KLOCK_HOLD_SLOTS; index++) {
+        struct klock_hold hold;
+        if (klock_statistics(index, &hold) != 0) continue;
+        text_string(&text, "0x");
+        text_hex32(&text, hold.note);
+        text_char(&text, ' ');
+        text_unsigned(&text, hold.count);
+        text_char(&text, ' ');
+        text_unsigned(&text, hold.total_ns / 1000ULL);
+        text_char(&text, ' ');
+        text_unsigned(&text, hold.max_ns / 1000ULL);
+        text_char(&text, '\n');
+    }
+    return text_read(&text, offset, size, output);
+}
+
+/* A zero stops the measurement; anything else starts a fresh one. */
+static int64_t proc_klock_write(struct vfs_node *node, uint64_t offset,
+                                size_t size, const void *input) {
+    (void)node; (void)offset;
+    const char *text = (const char *)input;
+    if (size && text && text[0] == '0') klock_statistics_stop();
+    else klock_statistics_start();
+    return (int64_t)size;
 }
 
 static int64_t proc_uptime_read(struct vfs_node *node, uint64_t offset,
@@ -810,6 +847,11 @@ void procfs_init(void) {
     virtual_file(root, "uptime", proc_uptime_read, 0);
     virtual_file(root, "blockstat", proc_blockstat_read, 0);
     virtual_file(root, "inputlog", proc_inputlog_read, 0);
+    struct vfs_node *klock = virtual_file(root, "klock", proc_klock_read, 0);
+    if (klock) {
+        klock->mode = 0644;
+        klock->write = proc_klock_write;
+    }
     virtual_file(root, "version", proc_version_read, 0);
     virtual_file(root, "mounts", proc_mounts_read, 0);
     virtual_file(root, "stat", proc_stat_read, 0);
