@@ -475,6 +475,8 @@ typedef char drm_create_dumb_size_check[
 
 /* --- objects ------------------------------------------------------------ */
 
+/* Wide enough for any display here, and narrow enough that width * 4 * height cannot overflow. */
+#define DRM_MAX_DIMENSION 16384U
 #define DRM_MAX_BUFFERS 4096
 #define DRM_MAX_FRAMEBUFFERS 64
 
@@ -1403,6 +1405,10 @@ static int64_t ioctl_create_dumb(const struct file *client, uint64_t user_argume
     struct drm_mode_create_dumb request;
     if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
     if (!request.width || !request.height || request.bpp != 32) return -EINVAL;
+    /* Bounded before they are multiplied, because width * 4 * height
+       overflows 64 bits. */
+    if (request.width > DRM_MAX_DIMENSION || request.height > DRM_MAX_DIMENSION)
+        return -EINVAL;
 
     uint64_t pitch = (uint64_t)request.width * 4ULL;
     uint64_t size = pitch * request.height;
