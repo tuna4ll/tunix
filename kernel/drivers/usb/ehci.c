@@ -166,6 +166,9 @@ extern void kprintf(const char *fmt, ...);
 #define CONFIGURATION_BYTES 512U
 /* Enough to name the failure, not enough to bury the log. */
 #define BULK_FAILURES_REPORTED 8U
+/* And one in every this many after that, so a long failure still says what it
+   is doing rather than going quiet. */
+#define BULK_FAILURE_INTERVAL 64U
 
 struct ehci_qtd {
     uint32_t next;
@@ -1118,15 +1121,18 @@ static int ehci_bulk_transfer(int index, int in, uint64_t physical,
         /* Worth saying out loud, and worth saying only a few times: a disk
            that has started failing fails on every block after it, and the
            first few lines are the ones that name what went wrong. */
-        static unsigned reported;
-        if (reported < BULK_FAILURES_REPORTED) {
-            reported++;
+        /* The first few, and then one in every so many: a run that fails for
+           minutes used to say nothing at all after the eighth line, which is
+           exactly the run whose later failures are worth seeing. */
+        static unsigned seen;
+        seen++;
+        if (seen <= BULK_FAILURES_REPORTED || seen % BULK_FAILURE_INTERVAL == 0) {
             /* USBSTS says whether the asynchronous schedule was running at all. */
             uint32_t status = mmio_read32(operational(host, EHCI_USBSTS));
             uint32_t command = mmio_read32(operational(host, EHCI_USBCMD));
-            kprintf("EHCI: bulk %s endpoint %u failed, token %x overlay %x "
-                    "current %x usbsts %x usbcmd %x\n",
-                    in ? "in" : "out", (unsigned)endpoint, (unsigned)token,
+            kprintf("EHCI: bulk %s endpoint %u failed (%u so far), token %x "
+                    "overlay %x current %x usbsts %x usbcmd %x\n",
+                    in ? "in" : "out", (unsigned)endpoint, seen, (unsigned)token,
                     (unsigned)overlay, (unsigned)current,
                     (unsigned)status, (unsigned)command);
         }
