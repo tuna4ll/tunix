@@ -148,6 +148,8 @@ void vmm_activate(uint64_t cr3_physical);
 int vmm_map_page_in(uint64_t cr3_physical, uint64_t virtual_address,
                     uint64_t physical_address, uint64_t flags);
 int vmm_unmap_page_in(uint64_t cr3_physical, uint64_t virtual_address);
+/* Give back the tables an unmapped range left behind. */
+void vmm_prune_empty_tables(uint64_t cr3_physical, uint64_t start, uint64_t end);
 int vmm_protect_page_in(uint64_t cr3_physical, uint64_t virtual_address, uint64_t flags);
 int vmm_translate(uint64_t cr3_physical, uint64_t virtual_address,
                   uint64_t *physical_out, uint64_t *flags_out);

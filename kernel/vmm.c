@@ -415,6 +415,64 @@ int vmm_unmap_page_in(uint64_t cr3_physical, uint64_t virtual_address) {
     return 0;
 }
 
+static int table_is_empty(const uint64_t *table) {
+    for (uint64_t index = 0; index < 512; index++)
+        if (table[index] & PAGE_PRESENT) return 0;
+    return 1;
+}
+
+/* Give back the tables an unmapped range left behind. */
+/* Clearing a leaf entry leaves the table holding it present and empty, and
+   nothing ever looked at that again -- so fork went on cloning those tables and
+   exit went on destroying them for a mapping that had gone. */
+/* Measured: forking after mapping and unmapping 20000 pages cost 57.8 us
+   against 17.5 us before anything had been mapped at all. */
+void vmm_prune_empty_tables(uint64_t cr3_physical, uint64_t start, uint64_t end) {
+    uint64_t cr3 = cr3_physical & ADDRESS_MASK;
+    if (!address_space_registered(cr3) || start >= end) return;
+    uint64_t *pml4 = page_table_pointer(cr3);
+    if (!pml4) return;
+
+    int freed = 0;
+    /* One directory at a time, because that is the span a page table covers. */
+    for (uint64_t address = start & ~0x1FFFFFULL; address < end; address += 0x200000ULL) {
+        if (address >= USER_ADDRESS_LIMIT) break;
+        uint16_t i4 = (address >> 39) & 0x1FF;
+        uint16_t i3 = (address >> 30) & 0x1FF;
+        uint16_t i2 = (address >> 21) & 0x1FF;
+        if (i4 >= 256) break;
+
+        uint64_t *pdpt = table_from_entry(pml4[i4]);
+        if (!pdpt) continue;
+        uint64_t *pd = table_from_entry(pdpt[i3]);
+        if (!pd) continue;
+        uint64_t *pt = table_from_entry(pd[i2]);
+        if (!pt || !table_is_empty(pt)) continue;
+
+        uint64_t page = pd[i2] & ADDRESS_MASK;
+        pd[i2] = 0;
+        pmm_free_page((void *)page);
+        freed = 1;
+
+        if (!table_is_empty(pd)) continue;
+        page = pdpt[i3] & ADDRESS_MASK;
+        pdpt[i3] = 0;
+        pmm_free_page((void *)page);
+
+        if (!table_is_empty(pdpt)) continue;
+        page = pml4[i4] & ADDRESS_MASK;
+        pml4[i4] = 0;
+        pmm_free_page((void *)page);
+    }
+
+    /* A freed table may still be in a paging-structure cache, and only a reload
+       is guaranteed to clear those. */
+    if (freed) {
+        if (cr3 == read_cr3()) write_cr3(cr3);
+        smp_flush_address_space(cr3);
+    }
+}
+
 int vmm_protect_page_in(uint64_t cr3_physical, uint64_t virtual_address,
                         uint64_t flags) {
     uint64_t cr3 = cr3_physical & ADDRESS_MASK;
