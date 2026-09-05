@@ -1072,8 +1072,24 @@ static int ehci_bulk_transfer(int index, int in, uint64_t physical,
         static unsigned reported;
         if (reported < BULK_FAILURES_REPORTED) {
             reported++;
-            kprintf("EHCI: bulk %s endpoint %u failed, token %x\n",
-                    in ? "in" : "out", (unsigned)endpoint, (unsigned)token);
+            /* The qTD alone cannot say why. */
+            /* The controller works on a copy of it in the queue head's overlay
+               and only writes that back when the descriptor retires, so an
+               untouched qTD means "did not finish" and nothing more: a device
+               NAKing while it commits a write looks exactly like a controller
+               that never started. */
+            /* The overlay says which -- its status and its NAK counter are the
+               controller's own working state -- and USBSTS says whether the
+               asynchronous schedule was running at all. */
+            uint32_t overlay = *(volatile uint32_t *)&host->work_qh->overlay_token;
+            uint32_t current = *(volatile uint32_t *)&host->work_qh->current_qtd;
+            uint32_t status = mmio_read32(operational(host, EHCI_USBSTS));
+            uint32_t command = mmio_read32(operational(host, EHCI_USBCMD));
+            kprintf("EHCI: bulk %s endpoint %u failed, token %x overlay %x "
+                    "current %x usbsts %x usbcmd %x\n",
+                    in ? "in" : "out", (unsigned)endpoint, (unsigned)token,
+                    (unsigned)overlay, (unsigned)current,
+                    (unsigned)status, (unsigned)command);
         }
         /*
          * The toggle is reset only when the halt is cleared, because that is
