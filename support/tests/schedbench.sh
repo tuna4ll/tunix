@@ -61,7 +61,7 @@ done
 kill $QEMU 2>/dev/null || true
 wait $QEMU 2>/dev/null || true
 
-grep -E "^(BENCH|NICE|QUANTUM|WAKE|SWITCH|PARALLEL|SLEEPER)" "$LOG" || {
+grep -E "^(BENCH|NICE|QUANTUM|WAKE|SWITCH|PARALLEL|SLEEPER|SOCKWAIT|ACCEPT)" "$LOG" || {
 	echo "schedbench: the machine printed no results; $LOG has the boot" >&2
 	exit 1
 }

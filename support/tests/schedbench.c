@@ -19,6 +19,15 @@ typedef long s64;
 #define SYS_clock_gettime 228
 #define SYS_exit_group 231
 #define SYS_reboot 169
+#define SYS_socket 41
+#define SYS_connect 42
+#define SYS_accept 43
+#define SYS_bind 49
+#define SYS_listen 50
+#define SYS_unlink 87
+
+#define AF_UNIX 1
+#define SOCK_STREAM 1
 
 #define CLONE_VM 0x00000100UL
 #define CLONE_FS 0x00000200UL
@@ -464,6 +473,122 @@ static void test_sleeper_credit(void) {
     put("ms\n");
 }
 
+/* What a waiting process costs the processor: nothing if it sleeps, everything
+   it would have run if it rewinds the syscall and yields instead. */
+static u64 time_spinner_beside(int waiter_kind, u64 rounds) {
+    static const char socket_path[] = "/schedbench.sock";
+    int channel[2] = {-1, -1};
+    s64 waiter = -1;
+
+    if (waiter_kind == 1) {
+        if (syscall1(SYS_pipe, (s64)channel) != 0) return 0;
+        waiter = syscall1(SYS_fork, 0);
+        if (waiter == 0) {
+            pin_to_cpu(0);
+            (void)syscall1(SYS_close, channel[1]);
+            char byte;
+            (void)syscall3(SYS_read, channel[0], (s64)&byte, 1);
+            (void)syscall1(SYS_exit_group, 0);
+        }
+        (void)syscall1(SYS_close, channel[0]);
+    } else if (waiter_kind == 2) {
+        (void)syscall1(SYS_unlink, (s64)socket_path);
+        int listener = (int)syscall3(SYS_socket, AF_UNIX, SOCK_STREAM, 0);
+        if (listener < 0) return 0;
+        struct { unsigned short family; char path[108]; } address;
+        for (unsigned i = 0; i < sizeof(address); i++) ((char *)&address)[i] = 0;
+        address.family = AF_UNIX;
+        for (unsigned i = 0; socket_path[i]; i++) address.path[i] = socket_path[i];
+        if (syscall3(SYS_bind, listener, (s64)&address, sizeof(address)) != 0 ||
+            syscall2(SYS_listen, listener, 4) != 0) {
+            (void)syscall1(SYS_close, listener);
+            return 0;
+        }
+        waiter = syscall1(SYS_fork, 0);
+        if (waiter == 0) {
+            pin_to_cpu(0);
+            /* Nothing ever connects, so this waits for the whole measurement. */
+            (void)syscall3(SYS_accept, listener, 0, 0);
+            (void)syscall1(SYS_exit_group, 0);
+        }
+        (void)syscall1(SYS_close, listener);
+    }
+
+    /* Let the waiter reach its wait before the clock starts. */
+    sleep_ns(200000000UL);
+
+    u64 begun = now_ns();
+    s64 worker = syscall1(SYS_fork, 0);
+    if (worker == 0) {
+        pin_to_cpu(0);
+        spin_rounds(rounds);
+        (void)syscall1(SYS_exit_group, 0);
+    }
+    (void)syscall4(SYS_wait4, worker, 0, 0, 0);
+    u64 elapsed = now_ns() - begun;
+
+    if (waiter > 0) {
+        (void)syscall2(SYS_kill, waiter, SIGKILL);
+        (void)syscall4(SYS_wait4, waiter, 0, 0, 0);
+    }
+    if (waiter_kind == 1) (void)syscall1(SYS_close, channel[1]);
+    if (waiter_kind == 2) (void)syscall1(SYS_unlink, (s64)socket_path);
+    return elapsed;
+}
+
+/* A blocking accept still has to answer when somebody does connect. */
+static void test_accept_completes(void) {
+    static const char socket_path[] = "/schedbench-accept.sock";
+    (void)syscall1(SYS_unlink, (s64)socket_path);
+    int listener = (int)syscall3(SYS_socket, AF_UNIX, SOCK_STREAM, 0);
+    if (listener < 0) { put("ACCEPT socket failed\n"); return; }
+    struct { unsigned short family; char path[108]; } address;
+    for (unsigned i = 0; i < sizeof(address); i++) ((char *)&address)[i] = 0;
+    address.family = AF_UNIX;
+    for (unsigned i = 0; socket_path[i]; i++) address.path[i] = socket_path[i];
+    if (syscall3(SYS_bind, listener, (s64)&address, sizeof(address)) != 0 ||
+        syscall2(SYS_listen, listener, 4) != 0) { put("ACCEPT bind failed\n"); return; }
+
+    s64 client = syscall1(SYS_fork, 0);
+    if (client == 0) {
+        /* Late enough that the parent is already asleep inside accept(). */
+        sleep_ns(300000000UL);
+        int sock = (int)syscall3(SYS_socket, AF_UNIX, SOCK_STREAM, 0);
+        (void)syscall3(SYS_connect, sock, (s64)&address, sizeof(address));
+        sleep_ns(200000000UL);
+        (void)syscall1(SYS_exit_group, 0);
+    }
+
+    u64 begun = now_ns();
+    s64 accepted = syscall3(SYS_accept, listener, 0, 0);
+    u64 waited = now_ns() - begun;
+    put("ACCEPT returned fd=");
+    put_fixed((u64)(accepted < 0 ? -accepted : accepted), 0);
+    if (accepted < 0) put(" (errno)");
+    put(" after=");
+    put_fixed(waited / 1000UL, 3);
+    put("ms\n");
+    if (accepted >= 0) (void)syscall1(SYS_close, accepted);
+    (void)syscall1(SYS_close, listener);
+    (void)syscall4(SYS_wait4, client, 0, 0, 0);
+    (void)syscall1(SYS_unlink, (s64)socket_path);
+}
+
+static void test_socket_wait_cost(u64 rounds) {
+    u64 alone = time_spinner_beside(0, rounds);
+    u64 sleeping = time_spinner_beside(1, rounds);
+    u64 accepting = time_spinner_beside(2, rounds);
+    put("SOCKWAIT alone=");
+    put_fixed(alone / 1000UL, 3);
+    put("ms beside_pipe_read=");
+    put_fixed(sleeping / 1000UL, 3);
+    put("ms beside_accept=");
+    put_fixed(accepting / 1000UL, 3);
+    put("ms accept_costs=");
+    put_fixed(sleeping ? accepting * 100UL / sleeping : 0, 2);
+    put("x\n");
+}
+
 static int run_all(unsigned cpus) {
     put("BENCH START cpus=");
     put_number(cpus);
@@ -477,6 +602,8 @@ static int run_all(unsigned cpus) {
     test_switch_cost(0, 20000, cpus);
     test_parallel_speedup(4, 120000);
     test_sleeper_credit();
+    test_socket_wait_cost(200000);
+    test_accept_completes();
 
     put("BENCH DONE\n");
     return 0;
