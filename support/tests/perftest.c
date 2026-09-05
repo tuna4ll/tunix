@@ -363,6 +363,65 @@ static void test_thread_cost(u64 count) {
     put("\n");
 }
 
+/* Unmapping while other threads of the same process are running.
+   Each page used to interrupt every processor sharing the address space and
+   spin until all of them had answered, so the cost was per page and only
+   appeared on a machine with more than one processor. */
+static volatile int helpers_stop;
+static volatile unsigned helpers_running;
+
+static void helper_body(void) {
+    __atomic_add_fetch(&helpers_running, 1, __ATOMIC_RELAXED);
+    while (!__atomic_load_n(&helpers_stop, __ATOMIC_RELAXED)) { }
+}
+
+#define MAX_HELPERS 3
+
+static void test_unmap_shootdown(u64 pages, unsigned helpers) {
+    static char stacks[MAX_HELPERS][65536] __attribute__((aligned(16)));
+    if (helpers > MAX_HELPERS) helpers = MAX_HELPERS;
+    __atomic_store_n(&helpers_stop, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&helpers_running, 0, __ATOMIC_RELAXED);
+
+    unsigned started = 0;
+    for (unsigned index = 0; index < helpers; index++) {
+        char *top = stacks[index] + sizeof(stacks[index]) - 8;
+        *(void **)top = (void *)helper_body;
+        if (spawn_thread(THREAD_FLAGS, top) < 0) break;
+        started++;
+    }
+    /* They have to be on a processor, not merely created: a thread that has not
+       run yet is not looking at the address space. */
+    while (__atomic_load_n(&helpers_running, __ATOMIC_RELAXED) < started) { }
+
+    u64 length = pages * 4096UL;
+    s64 base = syscall6(SYS_mmap, 0, (s64)length, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if ((u64)base >= (u64)-4095L) {
+        __atomic_store_n(&helpers_stop, 1, __ATOMIC_RELAXED);
+        put("SHOOTDOWN mmap failed\n");
+        return;
+    }
+    for (u64 i = 0; i < pages; i++) *(volatile char *)(base + i * 4096UL) = 1;
+
+    u64 begun = now_ns();
+    (void)syscall2(SYS_munmap, base, (s64)length);
+    u64 elapsed = now_ns() - begun;
+
+    __atomic_store_n(&helpers_stop, 1, __ATOMIC_RELAXED);
+    sleep_ns(50000000UL);
+
+    put("SHOOTDOWN threads=");
+    put_number(started);
+    put(" pages=");
+    put_number(pages);
+    put(" ns_each=");
+    put_number(elapsed / pages);
+    put(" total_us=");
+    put_fixed(elapsed / 1000UL, 0);
+    put("\n");
+}
+
 /* One number out of a /proc file that holds `name value` lines. */
 static u64 proc_value(const char *path, const char *name) {
     char text[512];
@@ -448,6 +507,8 @@ static int run_all(void) {
     test_fork_cost(300, 0);
     test_fork_nowait(300);
     test_fork_cost(200, 16384);
+    test_unmap_shootdown(8192, 0);
+    test_unmap_shootdown(8192, 3);
     test_file_read(20000);
     /* Late, because reading a few megabytes leaves the heap in a state the
        others would then be measuring: fork takes a 32 KiB kernel stack from it

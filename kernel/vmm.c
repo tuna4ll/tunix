@@ -394,6 +394,52 @@ static int vmm_map_page_in_locked(uint64_t cr3_physical, uint64_t virtual_addres
     return 0;
 }
 
+/*
+ * One shootdown for a run of pages instead of one for each.
+ *
+ * Every page unmapped or reprotected used to interrupt every other processor
+ * looking at the same space and then spin until all of them had answered, so a
+ * munmap of a twenty-thousand-page mapping did that twenty thousand times.
+ * With one processor smp_flush_address_space() returns at once, which is why
+ * the cost only showed up on a machine with more.
+ *
+ * A batch is opened and closed by a caller that holds the kernel lock
+ * exclusively, so this is a plain word rather than anything atomic. The pages
+ * freed inside it cannot be handed out again before it closes -- nothing else
+ * is inside the kernel to ask for one -- so the only thing a stale translation
+ * can still reach during the batch is memory the process itself has just
+ * unmapped.
+ */
+static unsigned flush_batch_depth;
+static uint64_t flush_batch_cr3;
+static int flush_batch_pending;
+
+void vmm_flush_batch_begin(void) {
+    flush_batch_depth++;
+}
+
+void vmm_flush_batch_end(void) {
+    if (!flush_batch_depth || --flush_batch_depth) return;
+    if (!flush_batch_pending) return;
+    flush_batch_pending = 0;
+    uint64_t cr3 = flush_batch_cr3;
+    flush_batch_cr3 = 0;
+    smp_flush_address_space(cr3);
+}
+
+static void flush_others(uint64_t cr3) {
+    if (!flush_batch_depth) {
+        smp_flush_address_space(cr3);
+        return;
+    }
+    /* No caller touches two spaces in one batch, but if one ever does the
+       earlier space is shot down here rather than forgotten. */
+    if (flush_batch_pending && flush_batch_cr3 != cr3)
+        smp_flush_address_space(flush_batch_cr3);
+    flush_batch_cr3 = cr3;
+    flush_batch_pending = 1;
+}
+
 int vmm_unmap_page_in(uint64_t cr3_physical, uint64_t virtual_address) {
     uint64_t cr3 = cr3_physical & ADDRESS_MASK;
     if (!address_space_registered(cr3)) return -1;
@@ -411,7 +457,7 @@ int vmm_unmap_page_in(uint64_t cr3_physical, uint64_t virtual_address) {
     if (!pt || !(pt[i1] & PAGE_PRESENT)) return -1;
     pt[i1] = 0;
     if (cr3 == read_cr3()) invalidate(virtual_address);
-    smp_flush_address_space(cr3);
+    flush_others(cr3);
     return 0;
 }
 
@@ -469,7 +515,7 @@ void vmm_prune_empty_tables(uint64_t cr3_physical, uint64_t start, uint64_t end)
        is guaranteed to clear those. */
     if (freed) {
         if (cr3 == read_cr3()) write_cr3(cr3);
-        smp_flush_address_space(cr3);
+        flush_others(cr3);
     }
 }
 
@@ -492,7 +538,7 @@ int vmm_protect_page_in(uint64_t cr3_physical, uint64_t virtual_address,
     uint64_t physical = pt[i1] & ADDRESS_MASK;
     pt[i1] = physical | (flags & ~ADDRESS_MASK) | PAGE_PRESENT;
     if (cr3 == read_cr3()) invalidate(virtual_address);
-    smp_flush_address_space(cr3);
+    flush_others(cr3);
     return 0;
 }
 

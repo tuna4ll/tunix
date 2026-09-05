@@ -150,6 +150,12 @@ int vmm_map_page_in(uint64_t cr3_physical, uint64_t virtual_address,
 int vmm_unmap_page_in(uint64_t cr3_physical, uint64_t virtual_address);
 /* Give back the tables an unmapped range left behind. */
 void vmm_prune_empty_tables(uint64_t cr3_physical, uint64_t start, uint64_t end);
+
+/* Hold the other processors' shootdown until the whole run of pages is done. */
+/* Paired, and nestable; only a caller holding the kernel lock exclusively
+   may open one, because the batch is not per-processor state. */
+void vmm_flush_batch_begin(void);
+void vmm_flush_batch_end(void);
 int vmm_protect_page_in(uint64_t cr3_physical, uint64_t virtual_address, uint64_t flags);
 int vmm_translate(uint64_t cr3_physical, uint64_t virtual_address,
                   uint64_t *physical_out, uint64_t *flags_out);

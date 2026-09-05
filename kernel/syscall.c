@@ -3137,6 +3137,9 @@ static void unmap_pages(struct process *process, uint64_t start, uint64_t end) {
     /* Forget any mapping record here first: the table must never describe
        pages that are no longer mapped. */
     process_unmap_area(start, end);
+    /* One shootdown for the range rather than one per page: see
+       vmm_flush_batch_begin(). */
+    vmm_flush_batch_begin();
     for (uint64_t address = start; address < end; address += 4096) {
         uint64_t physical;
         uint64_t flags;
@@ -3146,6 +3149,7 @@ static void unmap_pages(struct process *process, uint64_t start, uint64_t end) {
         }
     }
     vmm_prune_empty_tables(process->cr3, start, end);
+    vmm_flush_batch_end();
 }
 
 
@@ -3223,9 +3227,16 @@ static int copy_file_tail(struct process *process, struct file *file,
     }
     if (!(prot & PROT_WRITE)) {
         uint64_t final_flags = PAGE_USER | PAGE_PRESENT | page_flags;
+        int failed = 0;
+        vmm_flush_batch_begin();
         for (uint64_t page = base + start; page < base + end; page += 4096) {
-            if (vmm_protect_page_in(process->cr3, page, final_flags) != 0) return -1;
+            if (vmm_protect_page_in(process->cr3, page, final_flags) != 0) {
+                failed = 1;
+                break;
+            }
         }
+        vmm_flush_batch_end();
+        if (failed) return -1;
     }
     return 0;
 }
@@ -3478,11 +3489,18 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
     }
     if (file && !(prot & PROT_WRITE)) {
         uint64_t final_flags = PAGE_USER | PAGE_PRESENT | page_flags;
+        int failed = 0;
+        vmm_flush_batch_begin();
         for (uint64_t page = base; page < base + length; page += 4096) {
             if (vmm_protect_page_in(process->cr3, page, final_flags) != 0) {
-                unmap_pages(process, base, base + length);
-                return -ENOMEM;
+                failed = 1;
+                break;
             }
+        }
+        vmm_flush_batch_end();
+        if (failed) {
+            unmap_pages(process, base, base + length);
+            return -ENOMEM;
         }
     }
     if (advance_mmap_base) {
@@ -3731,11 +3749,14 @@ static int64_t sys_mprotect(uint64_t address, uint64_t length, int prot) {
        map so they get them when a fault commits them. */
     process_protect_area(address, address + length, flags | PAGE_PRESENT);
     int reserved = !process_area_range_free(address, address + length);
+    int failed = 0;
+    vmm_flush_batch_begin();
     for (uint64_t page = address; page < address + length; page += 4096) {
         uint64_t old_flags;
         if (vmm_translate(process->cr3, page, NULL, &old_flags) != 0) {
             if (reserved) continue;
-            return -ENOMEM;
+            failed = 1;
+            break;
         }
         uint64_t effective_flags = flags | (old_flags & (PAGE_DEVICE | PAGE_SHARED));
         if (nx_enabled && (old_flags & PAGE_DEVICE)) effective_flags |= PAGE_NX;
@@ -3752,9 +3773,13 @@ static int64_t sys_mprotect(uint64_t address, uint64_t length, int prot) {
         if (old_flags & PAGE_COW) {
             if (prot & PROT_WRITE) effective_flags = (effective_flags & ~PAGE_WRITE) | PAGE_COW;
         }
-        if (vmm_protect_page_in(process->cr3, page, effective_flags) != 0) return -ENOMEM;
+        if (vmm_protect_page_in(process->cr3, page, effective_flags) != 0) {
+            failed = 1;
+            break;
+        }
     }
-    return 0;
+    vmm_flush_batch_end();
+    return failed ? -ENOMEM : 0;
 }
 
 static int copy_exec_vector(uint64_t user_vector, char storage[MAX_EXEC_ITEMS][MAX_EXEC_STRING],
