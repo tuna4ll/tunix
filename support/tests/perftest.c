@@ -1,0 +1,306 @@
+/* What the kernel costs, measured from inside it, with no libc in between. */
+/* It runs as init, prints one tagged line per measurement, and ends with PERF DONE. */
+
+typedef unsigned long u64;
+typedef long s64;
+typedef unsigned int u32;
+
+#define SYS_read 0
+#define SYS_write 1
+#define SYS_open 2
+#define SYS_close 3
+#define SYS_mmap 9
+#define SYS_munmap 11
+#define SYS_pipe 22
+#define SYS_nanosleep 35
+#define SYS_getpid 39
+#define SYS_fork 57
+#define SYS_exit_group 231
+#define SYS_wait4 61
+#define SYS_kill 62
+#define SYS_clock_gettime 228
+#define SYS_lseek 8
+#define SYS_sched_setaffinity 203
+
+#define CLOCK_MONOTONIC 1
+#define SIGKILL 9
+#define PROT_READ 1
+#define PROT_WRITE 2
+#define MAP_PRIVATE 2
+#define MAP_ANONYMOUS 0x20
+
+static inline s64 syscall0(s64 n) {
+    s64 r;
+    __asm__ volatile("syscall" : "=a"(r) : "a"(n) : "rcx", "r11", "memory");
+    return r;
+}
+static inline s64 syscall1(s64 n, s64 a) {
+    s64 r;
+    __asm__ volatile("syscall" : "=a"(r) : "a"(n), "D"(a) : "rcx", "r11", "memory");
+    return r;
+}
+static inline s64 syscall2(s64 n, s64 a, s64 b) {
+    s64 r;
+    __asm__ volatile("syscall" : "=a"(r) : "a"(n), "D"(a), "S"(b) : "rcx", "r11", "memory");
+    return r;
+}
+static inline s64 syscall3(s64 n, s64 a, s64 b, s64 c) {
+    s64 r;
+    __asm__ volatile("syscall" : "=a"(r) : "a"(n), "D"(a), "S"(b), "d"(c)
+                     : "rcx", "r11", "memory");
+    return r;
+}
+static inline s64 syscall4(s64 n, s64 a, s64 b, s64 c, s64 d) {
+    s64 r;
+    register s64 r10 __asm__("r10") = d;
+    __asm__ volatile("syscall" : "=a"(r) : "a"(n), "D"(a), "S"(b), "d"(c), "r"(r10)
+                     : "rcx", "r11", "memory");
+    return r;
+}
+static inline s64 syscall6(s64 n, s64 a, s64 b, s64 c, s64 d, s64 e, s64 f) {
+    s64 r;
+    register s64 r10 __asm__("r10") = d;
+    register s64 r8 __asm__("r8") = e;
+    register s64 r9 __asm__("r9") = f;
+    __asm__ volatile("syscall" : "=a"(r)
+                     : "a"(n), "D"(a), "S"(b), "d"(c), "r"(r10), "r"(r8), "r"(r9)
+                     : "rcx", "r11", "memory");
+    return r;
+}
+
+static void put(const char *text) {
+    u64 length = 0;
+    while (text[length]) length++;
+    (void)syscall3(SYS_write, 1, (s64)text, (s64)length);
+}
+
+static void put_fixed(u64 value, unsigned fraction_digits) {
+    char buffer[32];
+    int index = (int)sizeof(buffer);
+    buffer[--index] = 0;
+    unsigned digits = 0;
+    do {
+        buffer[--index] = (char)('0' + value % 10);
+        value /= 10;
+        digits++;
+        if (digits == fraction_digits) buffer[--index] = '.';
+    } while (value || digits < fraction_digits + 1);
+    put(buffer + index);
+}
+
+static void put_number(u64 value) { put_fixed(value, 0); }
+
+static u64 now_ns(void) {
+    struct { s64 seconds, nanoseconds; } value = {0, 0};
+    (void)syscall2(SYS_clock_gettime, CLOCK_MONOTONIC, (s64)&value);
+    return (u64)value.seconds * 1000000000UL + (u64)value.nanoseconds;
+}
+
+static void sleep_ns(u64 nanoseconds) {
+    struct { s64 seconds, nanoseconds; } request;
+    request.seconds = (s64)(nanoseconds / 1000000000UL);
+    request.nanoseconds = (s64)(nanoseconds % 1000000000UL);
+    (void)syscall2(SYS_nanosleep, (s64)&request, 0);
+}
+
+static void pin_to_cpu(unsigned cpu) {
+    u64 mask = 1UL << cpu;
+    (void)syscall3(SYS_sched_setaffinity, 0, sizeof(mask), (s64)&mask);
+}
+
+/* getpid does nothing but enter and leave, so what it times is the entry, the
+   dispatch and everything the kernel does before it looks at the number. */
+static u64 syscall_cost_ns(u64 count) {
+    u64 begun = now_ns();
+    for (u64 i = 0; i < count; i++) (void)syscall0(SYS_getpid);
+    return (now_ns() - begun) / count;
+}
+
+/* The same cost with more processes on the queue, which is what shows whether
+   anything on the entry path walks it. */
+static void test_syscall_cost(void) {
+    static s64 idle[400];
+    static const unsigned steps[] = { 0, 64, 192 };
+    int channel[2];
+    if (syscall1(SYS_pipe, (s64)channel) != 0) { put("SYSCALL pipe failed\n"); return; }
+
+    unsigned started = 0;
+    for (unsigned step = 0; step < sizeof(steps) / sizeof(steps[0]); step++) {
+        while (started < steps[step] && started < 400) {
+            s64 child = syscall1(SYS_fork, 0);
+            if (child == 0) {
+                char byte;
+                /* Asleep for the whole measurement, so they cost the queue its
+                   length and nothing else. */
+                (void)syscall3(SYS_read, channel[0], (s64)&byte, 1);
+                (void)syscall1(SYS_exit_group, 0);
+            }
+            if (child <= 0) break;
+            idle[started++] = child;
+        }
+        sleep_ns(200000000UL);
+        put("SYSCALL processes=");
+        put_number(started + 1);
+        put(" getpid_ns=");
+        put_number(syscall_cost_ns(200000));
+        put("\n");
+    }
+
+    for (unsigned i = 0; i < started; i++) (void)syscall2(SYS_kill, idle[i], SIGKILL);
+    /* WNOHANG and a bound, because a blocking wait4 here does not come back. */
+    unsigned reaped = 0;
+    for (unsigned round = 0; round < 200 && reaped < started; round++) {
+        for (;;) {
+            s64 got = syscall4(SYS_wait4, -1, 0, 1 /* WNOHANG */, 0);
+            if (got <= 0) break;
+            reaped++;
+        }
+        if (reaped < started) sleep_ns(20000000UL);
+    }
+    put("SYSCALL killed=");
+    put_number(started);
+    put(" reaped=");
+    put_number(reaped);
+    put("\n");
+    (void)syscall1(SYS_close, channel[0]);
+    (void)syscall1(SYS_close, channel[1]);
+}
+
+/* A byte through a pipe and back, which is two syscalls and a context switch. */
+static void test_pipe_throughput(u64 bytes) {
+    int up[2], down[2];
+    if (syscall1(SYS_pipe, (s64)up) != 0 || syscall1(SYS_pipe, (s64)down) != 0) return;
+    static char block[4096];
+
+    s64 child = syscall1(SYS_fork, 0);
+    if (child == 0) {
+        (void)syscall1(SYS_close, up[1]);
+        (void)syscall1(SYS_close, down[0]);
+        for (;;) {
+            s64 got = syscall3(SYS_read, up[0], (s64)block, sizeof(block));
+            if (got <= 0) break;
+            if (syscall3(SYS_write, down[1], (s64)block, 1) != 1) break;
+        }
+        (void)syscall1(SYS_exit_group, 0);
+    }
+    (void)syscall1(SYS_close, up[0]);
+    (void)syscall1(SYS_close, down[1]);
+
+    u64 sent = 0;
+    u64 begun = now_ns();
+    while (sent < bytes) {
+        if (syscall3(SYS_write, up[1], (s64)block, sizeof(block)) != (s64)sizeof(block)) break;
+        char reply;
+        if (syscall3(SYS_read, down[0], (s64)&reply, 1) != 1) break;
+        sent += sizeof(block);
+    }
+    u64 elapsed = now_ns() - begun;
+    (void)syscall1(SYS_close, up[1]);
+    (void)syscall1(SYS_close, down[0]);
+    (void)syscall4(SYS_wait4, child, 0, 0, 0);
+
+    put("PIPE bytes=");
+    put_number(sent);
+    put(" MB_per_s=");
+    put_number(elapsed ? sent * 1000UL / elapsed : 0);
+    put(" roundtrip_ns=");
+    put_number(sent ? elapsed / (sent / sizeof(block)) : 0);
+    put("\n");
+}
+
+/* The first touch of an anonymous page, which is a fault and a page committed. */
+static void test_page_fault(u64 pages) {
+    u64 length = pages * 4096UL;
+    s64 base = syscall6(SYS_mmap, 0, (s64)length, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if ((u64)base >= (u64)-4095L) { put("FAULT mmap failed\n"); return; }
+    u64 begun = now_ns();
+    for (u64 i = 0; i < pages; i++) *(volatile char *)(base + i * 4096UL) = 1;
+    u64 elapsed = now_ns() - begun;
+    (void)syscall2(SYS_munmap, base, (s64)length);
+    put("FAULT pages=");
+    put_number(pages);
+    put(" ns_each=");
+    put_number(elapsed / pages);
+    put("\n");
+}
+
+/* fork, and the child leaving straight away, so what it times is the copy of an
+   address space and the teardown of one. */
+static void test_fork_cost(u64 count) {
+    u64 begun = now_ns();
+    u64 done = 0;
+    for (u64 i = 0; i < count; i++) {
+        s64 child = syscall1(SYS_fork, 0);
+        if (child == 0) (void)syscall1(SYS_exit_group, 0);
+        if (child < 0) break;
+        (void)syscall4(SYS_wait4, child, 0, 0, 0);
+        done++;
+    }
+    u64 elapsed = now_ns() - begun;
+    put("FORK count=");
+    put_number(done);
+    put(" us_each=");
+    put_fixed(done ? elapsed / done : 0, 3);
+    put("\n");
+}
+
+/* Reading a file the kernel already has cached, which is the copy and the VFS
+   walk and nothing else. */
+static void test_file_read(u64 rounds) {
+    int fd = (int)syscall3(SYS_open, (s64)"/sbin/init", 0, 0);
+    if (fd < 0) { put("FILE open failed\n"); return; }
+    static char block[4096];
+    u64 total = 0;
+    u64 reads = 0;
+    u64 begun = now_ns();
+    for (u64 i = 0; i < rounds; i++) {
+        s64 got = syscall3(SYS_read, fd, (s64)block, sizeof(block));
+        if (got <= 0) {
+            (void)syscall3(SYS_lseek, fd, 0, 0);
+            continue;
+        }
+        total += (u64)got;
+        reads++;
+    }
+    u64 elapsed = now_ns() - begun;
+    (void)syscall1(SYS_close, fd);
+    put("FILE bytes=");
+    put_number(total);
+    put(" MB_per_s=");
+    put_number(elapsed ? total * 1000UL / elapsed : 0);
+    put(" read_ns=");
+    put_number(reads ? elapsed / reads : 0);
+    put("\n");
+}
+
+static int run_all(void) {
+    put("PERF START\n");
+    pin_to_cpu(0);
+    /* The queue-length test goes last: it leaves processes behind, and every
+       syscall the others make would then be paying for them. */
+    test_pipe_throughput(64UL * 1024 * 1024);
+    test_page_fault(20000);
+    test_fork_cost(300);
+    test_file_read(20000);
+    test_syscall_cost();
+    put("PERF DONE\n");
+    return 0;
+}
+
+/* Init returning is a panic, which is not the report anybody wants. */
+static void run_and_park(void) __attribute__((noreturn, used));
+static void run_and_park(void) {
+    (void)run_all();
+    for (;;) sleep_ns(1000000000UL);
+}
+
+/* The entry point aligns the stack itself, because there is no libc here to
+   have done it and the compiler is promised a 16-byte boundary. */
+__asm__(".text\n"
+        ".globl _start\n"
+        "_start:\n"
+        "    xor %ebp, %ebp\n"
+        "    and $-16, %rsp\n"
+        "    call run_and_park\n"
+        "    hlt\n");

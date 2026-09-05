@@ -223,10 +223,14 @@ headless: $(IMAGE)
 # --- measuring the scheduler: a machine whose entire userland is one static benchmark.
 SCHEDBENCH_CPUS ?= 4
 
-.PHONY: schedbench drmtest
+.PHONY: schedbench drmtest perftest
 schedbench: $(KERNEL) $(LIMINE_EXE)
 	support/tests/schedbench.sh $(SCHEDBENCH_CPUS) $(KERNEL)
 
 # The DRM device asked what a Linux graphics client asks, with Linux's own structures.
 drmtest: $(KERNEL) $(LIMINE_EXE)
 	support/tests/drmtest.sh $(SCHEDBENCH_CPUS) $(KERNEL)
+
+# What the kernel costs: a syscall, a pipe, a page fault, a fork and a read.
+perftest: $(KERNEL) $(LIMINE_EXE)
+	support/tests/perftest.sh $(SCHEDBENCH_CPUS) $(KERNEL)
