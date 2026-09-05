@@ -180,11 +180,15 @@ static unsigned consecutive_failures;
 static int run_command(struct usb_disk *disk, const uint8_t *command,
                        uint8_t command_length, int in, uint32_t length) {
     static unsigned reported;
-    int attempts = consecutive_failures >= FAILURES_BEFORE_BACKING_OFF
-                       ? 1 : COMMAND_ATTEMPTS;
+    int backed_off = consecutive_failures >= FAILURES_BEFORE_BACKING_OFF;
+    int attempts = backed_off ? 1 : COMMAND_ATTEMPTS;
 
     for (int attempt = 0; attempt < attempts; attempt++) {
-        if (attempt && usb_reset_recovery(disk->controller_index) != 0) break;
+        /* The reset is what puts a device that stalled mid-command back in a
+           state where anything works, so backing off must not skip it: one
+           reset and one attempt per command, rather than none at all. */
+        if ((attempt || backed_off) &&
+            usb_reset_recovery(disk->controller_index) != 0) break;
         int status = run_command_once(disk, command, command_length, in, length);
         if (status == 0) {
             if (attempt && reported < COMMAND_REPORTS) {
