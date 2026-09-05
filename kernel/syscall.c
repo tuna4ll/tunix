@@ -1459,6 +1459,9 @@ static int64_t install_accepted(struct file *file, int flags,
     return new_fd;
 }
 
+static void block_and_retry(struct syscall_frame *frame, uint64_t syscall_number,
+                            struct file *file, int writing);
+
 static int64_t sys_accept(int fd, uint64_t user_address, uint64_t user_length, int flags) {
     if (flags & ~(O_NONBLOCK | O_CLOEXEC)) return -EINVAL;
     struct unix_socket *listener = socket_from_fd(fd);
@@ -1497,9 +1500,8 @@ static int64_t sys_accept(int fd, uint64_t user_address, uint64_t user_length, i
  * pending, so a plain blocking accept had never been tried until Python did
  * one and got EAGAIN out of a socket it had not asked to be non-blocking.
  *
- * The retry is the same rewind recvfrom uses: step the frame back onto the
- * syscall instruction, put the number back in rax and yield, so the process
- * re-runs it after other work has had a chance to connect.
+ * It sleeps rather than yields, because a rewound syscall that yields stays
+ * READY and is handed the processor again for as long as nothing connects.
  */
 static void accept_or_block(struct syscall_frame *frame, uint64_t syscall_number,
                             int fd, uint64_t user_address, uint64_t user_length,
@@ -1509,10 +1511,7 @@ static void accept_or_block(struct syscall_frame *frame, uint64_t syscall_number
     struct file *file = process && fd >= 0 && fd < PROCESS_MAX_FDS
                             ? process->files->fds[fd] : NULL;
     if (result == -EAGAIN && file && !(file->flags & O_NONBLOCK)) {
-        frame->user_rip -= 2U;
-        frame->rax = syscall_number;
-        process->syscall_rewound = 1;
-        process_yield_from_syscall(frame);
+        block_and_retry(frame, syscall_number, file, 0);
         return;
     }
     frame->rax = (uint64_t)result;
@@ -5210,10 +5209,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
                pumps net_poll) unless the socket is non-blocking. */
             if (result == -EINPROGRESS && file && file->kind == FILE_KIND_INET_SOCKET &&
                 !(file->flags & O_NONBLOCK)) {
-                frame->user_rip -= 2U;
-                frame->rax = SYS_CONNECT;
-                if (process) process->syscall_rewound = 1;
-                process_yield_from_syscall(frame);
+                block_and_retry(frame, SYS_CONNECT, file, 1);
             } else {
                 frame->rax = (uint64_t)result;
             }
@@ -5230,10 +5226,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             struct process *process = process_current();
             struct file *file = process && fd >= 0 && fd < PROCESS_MAX_FDS ? process->files->fds[fd] : NULL;
             if (result == -EAGAIN && file && !(file->flags & O_NONBLOCK) && !(flags & MSG_DONTWAIT)) {
-                frame->user_rip -= 2U;
-                frame->rax = SYS_RECVFROM;
-                if (process) process->syscall_rewound = 1;
-                process_yield_from_syscall(frame);
+                block_and_retry(frame, SYS_RECVFROM, file, 0);
             } else {
                 frame->rax = (uint64_t)result;
             }
@@ -5248,10 +5241,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             struct process *process = process_current();
             struct file *file = process && fd >= 0 && fd < PROCESS_MAX_FDS ? process->files->fds[fd] : NULL;
             if (result == -EAGAIN && file && !(file->flags & O_NONBLOCK) && !(flags & MSG_DONTWAIT)) {
-                frame->user_rip -= 2U;
-                frame->rax = SYS_RECVMSG;
-                if (process) process->syscall_rewound = 1;
-                process_yield_from_syscall(frame);
+                block_and_retry(frame, SYS_RECVMSG, file, 0);
             } else {
                 frame->rax = (uint64_t)result;
             }
