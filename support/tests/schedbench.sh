@@ -1,15 +1,5 @@
 #!/bin/bash
-#
-# Build a machine whose whole userland is the scheduler benchmark, boot it, and
-# print what it measured.
-#
-# The image the ordinary targets build is Void's, which takes a 600 MB download
-# and a filesystem that can hold ownership.
-#
-# Nothing here needs either, because the root is one static binary running as
-# init, so the image is a few megabytes and builds as an ordinary user.
-#
-# Usage: support/tests/schedbench.sh CPUS [KERNEL]
+# Build a machine whose whole userland is one static test, boot it, and print what it measured.
 set -euo pipefail
 
 CPUS=${1:-4}
@@ -48,9 +38,7 @@ EOF
 TABLE=gpt ROOT_SLACK_MIB=16 \
 	support/image.sh "$IMAGE" "$KERNEL" "$LIMINE_DIR" "$WORK/limine.conf" "$WORK/root" >/dev/null
 
-# KVM where there is one, because the costs this measures -- a reload of CR3, a
-# TLB that has to be refilled, a cache line another processor owns -- are the
-# ones an emulator does not have.
+# KVM where there is one, because a CR3 reload and a TLB refill are costs an emulator does not have.
 ACCEL=tcg
 [ -w /dev/kvm ] && ACCEL=kvm
 

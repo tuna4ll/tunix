@@ -1,13 +1,4 @@
-/* The scheduler, measured from inside the machine it schedules. */
-/* The numbers in docs/syscalls-and-scheduler.md came from a program built
-   against the kernel's own libc, and that libc and that program are both
-   gone. */
-/* This is the replacement, and it is freestanding on purpose so that what it
-   measures is the kernel with no libc between them. */
-/* It runs as init, and every test prints one line beginning with a tag a script
-   can grep for. */
-/* The last line is BENCH DONE, which is what the harness waits for before it
-   takes the machine down. */
+/* The scheduler measured from inside the machine it schedules, with no libc in between. */
 
 typedef unsigned long u64;
 typedef long s64;
@@ -169,9 +160,7 @@ static void spin_round(void) {
     sink = accumulator;
 }
 
-/* The clock is read once every 64 rounds rather than every one, because reading
-   it is a syscall, every syscall takes the one kernel lock, and a loop that took
-   it that often would measure the lock instead of the processor. */
+/* Two equal children, one reniced, and the ratio of the work they got through. */
 static u64 spin_for(u64 nanoseconds) {
     u64 deadline = now_ns() + nanoseconds;
     u64 rounds = 0;
@@ -190,10 +179,7 @@ static void spin_forever(void) {
     for (;;) spin_round();
 }
 
-/* Two equal-weight children, one reniced, and the ratio of the work they got
-   through. */
-/* The weights are 1024 and 110, so the answer the scheduler owes is 9.31 and
-   one that ignores nice answers 1. */
+/* Two equal children, one reniced, and the ratio of the work they got through. */
 static void test_nice_ratio(u64 duration_ns) {
     int channel[2];
     if (syscall1(SYS_pipe, (s64)channel) != 0) { put("NICE fail pipe\n"); return; }
@@ -232,10 +218,7 @@ static void test_nice_ratio(u64 duration_ns) {
     put("\n");
 }
 
-/* How late a thread that asked to wake every 20 ms actually woke, with the
-   processors already full. */
-/* This is the number a quantum longer than it should be shows up in, and the
-   one an audio period cares about. */
+/* How late a thread asking to wake every 20 ms actually woke, with the processors full. */
 static void test_wake_latency(unsigned spinners, unsigned samples, unsigned cpus) {
     static u64 lateness[512];
     if (samples > 512) samples = 512;
@@ -290,13 +273,7 @@ static void pingpong_partner(void) {
     }
 }
 
-/* The cost of handing the processor over and getting it back, measured once
-   between two threads of one process and once between two processes. */
-/* The pair is the point, because both switch and both go through the same
-   scheduler while only the second changes address space. */
-/* So the difference between them is what the page tables cost, which is the
-   whole of what a reload of CR3 that did not have to happen would add to the
-   first. */
+/* The cost of a switch, between two threads of one process and between two processes. */
 static void test_switch_cost(int threaded, u64 rounds, unsigned cpus) {
     static char thread_stack[65536] __attribute__((aligned(16)));
     if (syscall1(SYS_pipe, (s64)pingpong_up) != 0) return;
@@ -346,11 +323,7 @@ static void test_switch_cost(int threaded, u64 rounds, unsigned cpus) {
     pin_to_all(cpus);
 }
 
-/* Whether the machine is using the processors it was given. */
-/* Four children each doing a fixed amount of arithmetic, against one child
-   doing it alone. */
-/* The ratio is a number a fast context switch cannot fake, being 100 on one
-   processor and on four whatever the scheduler managed to spread. */
+/* Whether the machine uses the processors it was given, which a fast switch cannot fake. */
 static u64 time_workers(unsigned workers, u64 rounds_each) {
     s64 children[16];
     unsigned started = 0;
@@ -381,12 +354,7 @@ static void test_parallel_speedup(unsigned workers, u64 rounds_each) {
     put("\n");
 }
 
-/* How long a runnable task waits while an equal one has the processor, which is
-   the quantum the scheduler handed out and nothing else. */
-/* Both are pinned to one processor and neither ever sleeps, so every gap this
-   measures is a full slice of the other's. */
-/* The target latency is 6 ticks over however many are runnable, so two equals
-   should each see about 3 ticks and four about 1 tick each between them. */
+/* How long a runnable task waits while an equal one has the processor. */
 static void test_quantum(unsigned equals) {
     int channel[2];
     if (syscall1(SYS_pipe, (s64)channel) != 0) return;
@@ -446,12 +414,8 @@ static void test_quantum(unsigned equals) {
     put("ms\n");
 }
 
-/* A thread that has been asleep for a while and then wants the processor. */
-/* It sleeps for two seconds beside a spinner, wakes, and asks how long the
-   spinner then went without running. */
-/* A scheduler that hands a sleeper the credit for the whole time it slept
-   answers with most of a second, where one that places a waking task next to
-   the others answers with a quantum. */
+/* A task that slept beside a spinner, and how long the spinner then went
+   without running. */
 static void test_sleeper_credit(void) {
     int channel[2];
     if (syscall1(SYS_pipe, (s64)channel) != 0) return;
@@ -526,9 +490,8 @@ static void run_and_park(void) {
     for (;;) sleep_ns(1000000000UL);
 }
 
-/* The entry point aligns the stack itself, because the ABI promises the
-   compiler a 16-byte boundary that only a call from an aligned frame provides
-   and there is no libc here to have done it already. */
+/* A task that slept beside a spinner, and how long the spinner then
+   went without running. */
 __asm__(".text\n"
         ".globl _start\n"
         "_start:\n"

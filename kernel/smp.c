@@ -1,14 +1,5 @@
-/* Bringing up the processors the firmware said are there. */
-/* The sequence is fixed by the architecture: an INIT resets a processor, a
-   startup IPI names the page below 1 MiB it begins executing at, and it starts
-   in 16-bit real mode with nothing set up. */
-/* The startup is sent twice because the manual asks for two and some processors
-   ignore the first. */
-/* The trampoline runs at a physical address the kernel proper maps nowhere, so
-   the page it lives in has to be reachable at its own address for as long as
-   the bring-up lasts. */
-/* Processors are started one at a time because there is one parameter block and
-   because a failure is easier to attribute that way. */
+/* Bringing up the processors the firmware described: an INIT, two startup
+   IPIs, and one at a time. */
 #include <stddef.h>
 #include <stdint.h>
 
@@ -79,9 +70,8 @@ void smp_flush_address_space(uint64_t cr3) {
 
     unsigned self = cpu_current()->index;
     int asked = 0;
-    /* Which processors are looking at this space cannot change underneath,
-       because only a processor inside the kernel changes its own and the caller
-       holds the kernel lock. */
+    /* Which processors are looking at this space cannot change while the
+       caller holds the lock. */
     for (unsigned index = 0; index < SMP_MAX_CPUS; index++) {
         struct cpu *cpu = percpu_slot(index);
         if (index == self || !cpu->online || cpu->address_space != cr3) continue;
@@ -94,12 +84,8 @@ void smp_flush_address_space(uint64_t cr3) {
     for (unsigned index = 0; index < SMP_MAX_CPUS; index++) {
         struct cpu *cpu = percpu_slot(index);
         if (index == self || !cpu->online) continue;
-        /* Bounded, because this runs with the kernel lock held and a processor
-           that came up, said so and then went wrong would otherwise stop the
-           whole machine here having printed nothing. */
-        /* Giving up leaves that processor with stale translations, which is a
-           worse machine than a correct one and a much better one than a dead
-           one. */
+        /* Bounded, because stale translations on one processor beat a machine
+           that stopped. */
         uint64_t deadline = time_uptime_ns() + FLUSH_TIMEOUT_NS;
         while (__atomic_load_n(&cpu->flush_pending, __ATOMIC_ACQUIRE)) {
             if (time_uptime_ns() >= deadline) {
@@ -129,14 +115,8 @@ static void write_parameter(unsigned offset, uint64_t value) {
 
 static int trampoline_page_added;
 
-/* The trampoline's own page, mapped to itself. */
-/* The instruction that turns paging on is followed by one that has to be
-   fetched through the tables it just installed, and the kernel maps nothing
-   down here. */
-/* The loader's identity map usually survives in the tables the kernel
-   inherited, and it is a huge page, so mapping over it would fail rather than
-   be redundant. */
-/* Only when it is absent is a mapping added, and then only this page. */
+/* The trampoline's page mapped to itself, and only when the loader's
+   identity map is gone. */
 static int map_trampoline_page(void) {
     uint64_t cr3 = vmm_kernel_cr3();
     uint64_t physical = 0;
@@ -203,10 +183,8 @@ void smp_init(void) {
     percpu_mark_online(0);
     percpu_slot(0)->apic_id = apic_local_id();
 
-    /* nosmp on the command line keeps the machine on one processor, for a
-       machine that will not finish booting: the shootdown, the contention and
-       one of them running init while the first idles all stop being
-       suspects. */
+    /* nosmp keeps the machine on one processor, so the other processors
+       stop being suspects. */
     if (boot_command_line_flag("nosmp")) {
         kprintf("SMP: one processor, nosmp\n");
         return;
@@ -224,9 +202,8 @@ void smp_init(void) {
         return;
     }
 
-    /* Held for the whole of the bring-up, because a processor that is already
-       up is taking timer interrupts and running processes by the time the next
-       one is started, on the page tables being edited here. */
+    /* Held end to end, because a processor already up is running processes
+       on these page tables. */
     kernel_lock();
     if (map_trampoline_page() != 0) {
         kernel_unlock();
@@ -244,32 +221,22 @@ void smp_init(void) {
             kprintf("SMP: apic %u did not come up\n", (unsigned)machine->cpus[i].apic_id);
             missing++;
         }
-        /* The slot is spent either way, because a processor that missed the
-           deadline may still be on its way and handing its index and its stack
-           to the next one is how two end up running on one stack. */
+        /* The slot is spent either way, or two processors end up running on one
+           stack. */
         index++;
     }
 
-    /* The trampoline page stays mapped when something did not check in, because
-       a processor still inside it faults on the instruction after paging comes
-       on if the page it is executing from has gone. */
-    /* One page of low memory is a cheap price for not doing that to a
-       machine. */
+    /* The page stays mapped when something did not check in, for a processor
+       still inside it. */
     if (!missing) unmap_trampoline_page();
     online_cpus = percpu_online_count();
     kernel_unlock();
-    /* After the unlock and not before, because the bring-up holds the lock end
-       to end and a line printed inside would say only that the loop
-       finished. */
-    /* A machine that stops at this line rather than the next one is a machine
-       where one of the processors took the lock and did not give it back. */
+    /* After the unlock, so that stopping here rather than at the next line
+       means something. */
     kprintf("SMP: %u of %u processors running\n", online_cpus,
             (unsigned)machine->cpu_count);
-    /* Only with more than one, because one processor has one counter and
-       nothing to disagree with. */
-    /* Where the promise is missing, two readings taken on different processors
-       are not two readings of one clock, which is what a virtual runtime, a
-       deadline and a slice all assume. */
+    /* Only with more than one, because two readings on different processors
+       are not one clock. */
     if (online_cpus > 1 && !time_tsc_is_invariant())
         kprintf("SMP: the TSC is not invariant; timing may drift between processors\n");
 }

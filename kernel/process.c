@@ -25,17 +25,8 @@ static int process_wake_all_locked(const void *channel);
 #include "include/vfs.h"
 #include "include/vmm.h"
 
-/* The kernel stack a process runs its syscalls and interrupts on. */
-/* 32 KiB rather than 16 for headroom rather than for a bug, because the deepest
-   ordinary path through syscall_dispatch measures about 9700 bytes. */
-/* sys_read's 4 KiB copy buffer calling a /proc reader with another 4 KiB of its
-   own is most of 16 before the VFS frames between them, and an interrupt lands
-   on top of whatever is there. */
-/* Running out is not a soft failure, because the page below the stack is
-   unmapped once the heap has handed its pages back. */
-/* The fault handler has no stack to be delivered on either, so what the machine
-   actually does is reset with nothing printed. */
-/* The double-fault handler is what turns that into a message. */
+/* 32 KiB of kernel stack, because overflowing it resets the machine with
+   nothing printed. */
 #define KERNEL_STACK_SIZE (32 * 1024)
 #define ECHILD 10
 #define EINTR 4
@@ -59,15 +50,7 @@ static int process_wake_all_locked(const void *channel);
 #define NICE_0_WEIGHT 1024ULL
 #define TICK_NS (1000000000ULL / TIMER_FREQUENCY_HZ)
 #define SCHED_TARGET_LATENCY_NS (SCHED_TARGET_LATENCY_TICKS * TICK_NS)
-/* A slice is never this long, so a sample that is subtracted two clocks which
-   do not agree. */
-/* There is one boot_tsc for the whole machine and the processors are not
-   checked against it. */
-/* One whose counter runs ahead hands a task that migrated onto it a delta of
-   whole seconds, and charging that to virtual runtime leaves the task runnable
-   and never chosen again. */
-/* Dropping the sample loses a slice of accounting and keeps the scheduler
-   answering. */
+/* A sample longer than a second measured two clocks that disagree, so it is dropped. */
 #define SCHED_MAX_SAMPLE_NS 1000000000ULL
 
 /* Linux's well-tested geometric nice scale, rounded to integer weights. */
@@ -86,9 +69,8 @@ static uint64_t process_weight(const struct process *process) {
 }
 
 extern void process_enter_user(uint64_t entry, uint64_t user_stack, uint64_t cr3) __attribute__((noreturn));
-/* Park on the idle stack, where the first releases the kernel lock on the way
-   for the paths that got here holding it and the second is for a processor that
-   has never held it. */
+/* Park on the idle stack; the first releases the kernel lock, the
+   second never held it. */
 extern void cpu_enter_idle(uint64_t idle_stack_top) __attribute__((noreturn));
 extern void cpu_idle_park(uint64_t idle_stack_top) __attribute__((noreturn));
 extern void kprintf(const char *fmt, ...);
@@ -103,12 +85,7 @@ extern void panic(const char *msg) __attribute__((noreturn));
 static struct process *queue;
 static uint64_t next_pid = 1;
 
-/* The running process, which is a different one on every processor. */
-/* A macro rather than an accessor because it is written as often as it is read
-   and because reading it must never be hoisted across a context switch. */
-/* `current` after activate_process() is the process that just came in rather
-   than the one that went out, and the GS-relative load makes that literally
-   true. */
+/* The running process, per processor, as a macro so the GS load cannot be hoisted. */
 #define current (cpu_current()->current)
 
 static void signal_one_process(struct process *target, int signal_number);
@@ -144,9 +121,8 @@ static void memory_unref(struct process_memory *memory) {
     kfree(memory);
 }
 
-/* fork gives the child its own address space and the shared file mappings are
-   inherited along with the pages, so the records have to be copied and their
-   files referenced again. */
+/* fork gives the child its own space, so the mapping records are copied
+   and referenced again. */
 static void memory_copy_mappings(struct process_memory *destination,
                                  const struct process_memory *source) {
     if (!destination || !source) return;
@@ -226,10 +202,7 @@ static const char *state_name(int state) {
     }
 }
 
-/* The mapped object a user address falls in, for a process that is not the one
-   running. */
-/* Same idea as the fault reporter, which cannot be reused here because it only
-   ever asks about current. */
+/* The mapped object a user address falls in, for a process that is not the running one. */
 static const char *object_at(const struct process *process, uint64_t address,
                              uint64_t *offset_out) {
     *offset_out = address;
@@ -244,12 +217,7 @@ static const char *object_at(const struct process *process, uint64_t address,
     return "?";
 }
 
-/* Every process, what it is doing and where it stopped doing it. */
-/* A hung desktop is a dozen processes of which one is stuck and the rest are
-   waiting on it, and telling those apart from the outside is guesswork. */
-/* This prints the state, whatever the process is blocked on -- a retried
-   syscall, a futex address, a wait channel, a child -- and the user address it
-   last executed, named by the library it lands in. */
+/* Every process, what it is doing, and the user address where it stopped doing it. */
 void process_dump_wakes(void);
 static void futex_note(char kind, uint64_t address, int woken, int maximum, unsigned value);
 
@@ -570,13 +538,7 @@ uint32_t process_set_umask(uint32_t mask) {
     return old;
 }
 
-/* READY and not RUNNING, which is the whole difference between one processor
-   and several. */
-/* RUNNING means a processor has this loaded right now, so picking it again on a
-   second one would run the same registers twice and let two return paths write
-   the same saved frame. */
-/* Every path that gives a process up marks it READY, blocked or dead before it
-   looks for the next one, so nothing is lost by refusing it here. */
+/* READY and not RUNNING, because RUNNING means a processor has it loaded right now. */
 static int allowed_on_this_cpu(const struct process *process) {
     if (!process) return 0;
     uint64_t mask = process->affinity_mask ? process->affinity_mask : ~0ULL;
@@ -587,28 +549,11 @@ static int runnable(const struct process *process) {
     return process && process->state == PROCESS_READY && allowed_on_this_cpu(process);
 }
 
-/* The virtual runtime the runnable set has reached, which only ever goes
-   forward. */
-/* next_runnable() already visits every task to find the lowest, so this costs
-   the assignment and nothing else. */
+/* The virtual runtime the runnable set has reached, which only goes forward. */
 static uint64_t minimum_virtual_runtime;
 
-/* Where a task that has been asleep is put when it wakes. */
-/* Virtual runtime stands still while a task is blocked and goes on rising for
-   everything that runs, so a task that slept for two seconds comes back two
-   seconds of credit ahead of the machine. */
-/* next_runnable() picks the lowest, so it then hands that task the processor
-   and nothing else until the credit is spent. */
-/* Measured before this by SLEEPER in support/tests/schedbench.c, a spinner sharing a
-   processor with a task that slept for two seconds went 1500 ms without being
-   scheduled once, which is the whole of the sleeper's burst. */
-/* So a waking task is placed at the runnable set's own virtual runtime, less
-   half the target latency. */
-/* The subtraction keeps a genuinely interactive task ahead of the CPU-bound
-   ones by waking it owed one scheduling round, and the floor is what stops that
-   debt growing without limit. */
-/* Real-time tasks are not placed, because they are not chosen by virtual
-   runtime and do not accumulate it. */
+/* Where a sleeper is placed on waking, or it comes back with the credit
+   of everything it missed. */
 static void place_waking_task(struct process *process) {
     if (!process || process->rt_priority) return;
     uint64_t credit = SCHED_TARGET_LATENCY_NS / 2;
@@ -616,11 +561,7 @@ static void place_waking_task(struct process *process) {
     if (process->virtual_runtime_ns < floor) process->virtual_runtime_ns = floor;
 }
 
-/* Runnable again after being off the queue, which is the transition that needs
-   placing. */
-/* A task that gave the processor up while still runnable, preempted or
-   yielding, keeps the virtual runtime it earned and does not come through
-   here. */
+/* Runnable again after being off the queue, which is the transition that needs placing. */
 static void wake_to_ready(struct process *process) {
     if (!process) return;
     place_waking_task(process);
@@ -672,24 +613,7 @@ static void wake_expired_futex_waiters(void) {
     } while (item != queue);
 }
 
-/* Who runs next is the highest priority anything runnable has, round robin
-   among the threads that share it. */
-/* Every thread was equal here until a sound mixer asked not to be. */
-/* It wakes every twenty milliseconds, writes for a few hundred microseconds and
-   sleeps again, and being put behind a game drawing a hundred frames a second
-   is the difference between sound and stuttering. */
-/* Nothing else on this image asks, which is the usual shape of it: a real-time
-   priority is for a thread that is almost always asleep. */
-/* That also bounds the damage, because a thread which asks for a priority and
-   then does not sleep starves everything below it exactly as it would on
-   Linux. */
-/* The quantum still preempts it in favour of its equals, so it cannot lock the
-   machine against another thread at its own priority. */
-/* Two passes over a list that is walked anyway, which is short and one of which
-   only reads. */
-/* Whether anything runnable has a stronger claim than this, walking the same
-   short list the scheduler walks. */
-/* The answer is only interesting on a tick. */
+/* Who runs next: the highest priority anything runnable has, round robin among equals. */
 static int higher_priority_waiting(const struct process *than) {
     if (!queue || !than) return 0;
     struct process *walk = queue;
@@ -705,9 +629,7 @@ static int ordinary_should_preempt(const struct process *running) {
     if (!queue || !running || running->rt_priority) return 0;
     struct process *walk = queue;
     do {
-        /* Signed, so the comparison keeps meaning something if a virtual
-           runtime ever goes round, because these are running totals rather than
-           instants. */
+        /* Signed, so the comparison survives a virtual runtime going round. */
         if (walk != running && runnable(walk) && !walk->rt_priority &&
             (int64_t)(walk->virtual_runtime_ns + SCHED_WAKEUP_GRANULARITY_NS -
                       running->virtual_runtime_ns) < 0)
@@ -756,18 +678,8 @@ static struct process *next_runnable(struct process *after) {
     struct process *start = candidate;
     if (best == 0) {
         struct process *selected = NULL;
-        /* The floor is taken over what is RUNNING as well as what is READY,
-           and over every processor rather than the ones this task may use. */
-        /* A running task is the one holding the lowest virtual runtime, because
-           being lowest is why it was chosen. */
-        /* So a floor drawn from the READY set alone is drawn from the tasks
-           that were just preempted, which are the highest. */
-        /* On one processor that hides one task and the answer is close enough,
-           and on four it hides four and the floor climbs past the running set
-           entirely. */
-        /* What that did was starve the thing it was meant to protect: a waking
-           task was placed above the spinners it competed with, was never chosen
-           again, and the machine stopped. */
+        /* The floor is taken over RUNNING as well as READY, or on four processors
+           it runs away. */
         uint64_t lowest = 0;
         int have_lowest = 0;
         do {
@@ -794,14 +706,7 @@ static struct process *next_runnable(struct process *after) {
     return NULL;
 }
 
-/* A thread's own scheduling, or the calling thread's when `tid` is 0. */
-/* SCHED_FIFO is accepted and then scheduled as SCHED_RR, the difference being
-   whether the tick may take the processor away from a thread with an equal to
-   run. */
-/* Answering that faithfully means a single spinning thread can stop this
-   machine with no way back in. */
-/* The distinction only shows with two runnable threads at one priority, neither
-   of which ever blocks, which nothing here is. */
+/* A thread's own scheduling, where SCHED_FIFO is accepted and scheduled as SCHED_RR. */
 static struct process *scheduling_target(uint64_t tid) {
     if (!tid) return current;
     return process_find(tid);
@@ -883,10 +788,8 @@ static void fpu_restore(struct process *process) {
     if (process) __asm__ volatile("fxrstor64 (%0)" : : "r"(process->fpu_state) : "memory");
 }
 
-/* The register state a process starts with, which is what FNINIT and a default
-   MXCSR give. */
-/* Built by hand rather than by running FNINIT, because doing that here would
-   disturb the registers of whichever process is currently loaded. */
+/* The register state a process starts with, built by hand so the live
+   registers are untouched. */
 static void fpu_init_state(struct process *process) {
     if (!process) return;
     memset(process->fpu_state, 0, sizeof(process->fpu_state));
@@ -917,16 +820,7 @@ static void activate_process(struct process *process) {
     set_kernel_stack(process->kernel_stack_top);
     syscall_set_kernel_stack(process->kernel_stack_top);
     /* Only when it is a different one, because writing CR3 throws away every
-       translation this processor had cached and two threads of one process
-       share a cr3. */
-    /* Measured, a ping-pong between two threads of one process cost exactly
-       what the same ping-pong between two processes cost, which is what it
-       looks like when the page tables are reloaded either way. */
-    /* The comparison is safe because this field is written every time the
-       processor changes what it has loaded, go_idle() zeroing it and every
-       other path through here setting it. */
-    /* So it can never name a space this processor is not running on, which is
-       the only way a skipped reload could leave stale translations behind. */
+       cached translation. */
     if (cpu_current()->address_space != process->cr3) {
         vmm_activate(process->cr3);
         cpu_current()->address_space = process->cr3;
@@ -990,13 +884,7 @@ static int switch_to_next(struct syscall_frame *frame, struct process *after) {
     return 0;
 }
 
-/* Nothing left to run here, so the processor drops the process it was holding,
-   returns to the kernel address space so that process's own can be torn down,
-   and parks on its idle stack with interrupts on. */
-/* Its next timer tick is what wakes it up with work. */
-/* The kernel stack it was using is abandoned rather than unwound because
-   everything worth keeping is already in the process, which is the same reason
-   a blocking syscall can switch away mid-call. */
+/* Nothing left to run, so the processor parks and its next tick brings it work. */
 static void go_idle(void) __attribute__((noreturn));
 static void go_idle(void) {
     klock_note(KLOCK_NOTE_IDLE);
@@ -1006,13 +894,7 @@ static void go_idle(void) {
     }
     vmm_activate(vmm_kernel_cr3());
     cpu_current()->address_space = 0;
-    /* Both kernel-stack pointers name the process that has just been let go
-       of, whose stack can be reaped and its pages handed back at any moment. */
-    /* Nothing should reach them while the processor is idle, because an entry
-       from user mode is the only thing that uses them and there is no user to
-       enter from. */
-    /* Leaving a freed address in a register the processor reads is still not
-       worth the argument. */
+    /* Both kernel-stack pointers name a process that may be reaped at any moment. */
     set_kernel_stack(cpu_current()->idle_stack_top);
     syscall_set_kernel_stack(cpu_current()->idle_stack_top);
     cpu_enter_idle(cpu_current()->idle_stack_top);
@@ -1022,11 +904,7 @@ void process_start_first(void) {
     klock_note(KLOCK_NOTE_FIRST_RUN);
     kernel_lock();
     struct process *first = next_runnable(NULL);
-    /* Not a failure, because on a machine with several processors another one
-       may have taken the first process already and this one simply has nothing
-       yet. */
-    /* Worth a line even so, since it is the difference between a machine whose
-       init is running somewhere else and one whose init never ran. */
+    /* Not a failure: another processor may have taken the first process already. */
     if (!first) {
         kprintf("TUNIX: cpu %u has nothing to run\n", cpu_current()->index);
         go_idle();
@@ -1046,17 +924,7 @@ void process_run_idle(void) {
     cpu_idle_park(cpu_current()->idle_stack_top);
 }
 
-/* Map one more stack page for the current process. */
-/* Called from the page-fault handler before the fault is turned into a signal,
-   so a program that walks past the initial mapping simply gets more stack
-   instead of dying. */
-/* Only the address range is checked and not its distance from rsp, where Linux
-   is stricter and so catches a wild pointer that lands in the stack window. */
-/* Here a compiler that writes below rsp before adjusting it, which does happen
-   without stack-clash protection, matters more than that diagnostic. */
-/* Returns 1 when a page was mapped and the faulting instruction should be
-   retried, and 0 when the fault was not a stack growth. */
-/* --- the address-space map ---------------------------------------------- */
+/* Map one more stack page, so walking past the initial mapping grows the stack. */
 
 static struct vm_area **area_list(void) {
     return current && current->memory ? &current->memory->areas : NULL;
@@ -1121,10 +989,7 @@ int process_map_area(uint64_t start, uint64_t end, uint64_t page_flags,
     return 0;
 }
 
-/* Remove [start, end) from the map, where an area the range falls inside splits
-   in two, which is the case munmap and mprotect hit most. */
-/* If the tail cannot be allocated the area is simply truncated, so the map
-   never describes memory that is not there. */
+/* Remove a range from the map, splitting the area it falls inside. */
 void process_unmap_area(uint64_t start, uint64_t end) {
     struct vm_area **list = area_list();
     if (!list || start >= end) return;
@@ -1170,16 +1035,8 @@ void process_protect_area(uint64_t start, uint64_t end, uint64_t page_flags) {
             link = &area->next;
             continue;
         }
-        /* Trim whatever lies outside the range into an area of its own, then
-           look at what is left rather than stepping over it. */
-        /* A cut at the end leaves the head exactly equal to the range, and
-           stepping over it was how an mprotect that shrank an area from the
-           tail came to change no permissions at all. */
-        /* glibc's malloc does exactly that, reserving an arena PROT_NONE and
-           making its first pages readable and writable, so the first write into
-           a new arena died on a page the kernel had committed read-only. */
-        /* Each pass either splits, after which the head falls outside the range
-           or matches it exactly, or advances, so this still terminates. */
+        /* Trim what lies outside the range rather than stepping over it, which
+           changed nothing at all. */
         if (area->start < start || area->end > end) {
             uint64_t cut = area->start < start ? start : end;
             if (!area_split_at(area, cut)) {
@@ -1233,10 +1090,7 @@ int process_commit_area(uint64_t fault_address) {
     uint64_t page = fault_address & ~4095ULL;
     struct vm_area *area = process_find_area(page);
     if (!area || !(area->kind & VM_ANONYMOUS)) return 0;
-    /* Mapped already, and the caller only gets here for a not-present fault, so
-       another thread of this process committed the page on another processor
-       between the fault and now. */
-    /* Retrying the instruction is all that is left to do. */
+    /* Mapped already, so another thread committed it between the fault and the handler. */
     if (vmm_translate(current->cr3, page, NULL, NULL) == 0) return 1;
 
     uint64_t physical = (uint64_t)pmm_alloc_page();
@@ -1300,21 +1154,13 @@ int process_grow_user_stack(uint64_t fault_address) {
     return 1;
 }
 
-/* First write to a page that fork shared instead of copying. */
-/* Returns non-zero when the page was made private and writable so the faulting
-   instruction can be retried, and zero when this was not a copy-on-write page
-   and the caller should continue to the signal path. */
+/* First write to a page fork shared, which is made private and the instruction retried. */
 int process_handle_cow_fault(uint64_t fault_address) {
     if (!current || current->state != PROCESS_RUNNING || !current->cr3) return 0;
     return vmm_handle_cow_fault(current->cr3, fault_address & ~4095ULL) == 0;
 }
 
-/* A CPU exception raised in user mode is that process's fault rather than the
-   kernel's. */
-/* Turning it into a signal lets the offending program die on its own instead of
-   taking the machine down, since only a fault raised in kernel mode is genuinely
-   unrecoverable. */
-/* Returns non-zero when the fault was handled. */
+/* A user-mode exception is the program's fault, so it dies rather than the machine. */
 int process_fault_from_interrupt(struct interrupt_frame *frame, int signal_number) {
     if (!frame || (frame->cs & 3U) != 3U || !current ||
         current->state != PROCESS_RUNNING) return 0;
@@ -1324,9 +1170,8 @@ int process_fault_from_interrupt(struct interrupt_frame *frame, int signal_numbe
     struct syscall_frame resume = current->saved_frame;
 
     (void)process_send_signal((int64_t)current->pid, signal_number);
-    /* Delivers the signal by redirecting to a handler if one is installed, or
-       terminating the process and switching away when the action is
-       default. */
+    /* Redirects to a handler if there is one, or terminates and switches
+       away if there is not. */
     process_prepare_user_return(&resume);
     if (!current || current->state != PROCESS_RUNNING) return 1;
     current->saved_frame = resume;
@@ -1334,11 +1179,7 @@ int process_fault_from_interrupt(struct interrupt_frame *frame, int signal_numbe
     return 1;
 }
 
-/* A tick that arrived in the idle loop, where the interrupt came from kernel
-   mode but long mode pushes SS:RSP for those too. */
-/* So the frame can be replaced wholesale with a process's and the iretq lands
-   in user mode, which is how an idle processor picks up work with no context to
-   unwind. */
+/* A tick in the idle loop, whose frame can be replaced because long mode pushes SS:RSP. */
 static void resume_from_idle(struct interrupt_frame *frame) {
     struct process *next = next_runnable(NULL);
     if (!next) return;
@@ -1363,14 +1204,7 @@ void process_timer_interrupt(struct interrupt_frame *frame) {
 
     struct syscall_frame resume = current->saved_frame;
     if (current->time_slice_ticks) current->time_slice_ticks--;
-    /* A priority is worth little without this. */
-    /* The quantum is five ticks, so a thread that wakes with a claim on the
-       processor would otherwise wait out whatever is running, up to twenty
-       milliseconds and a whole audio period. */
-    /* Measured, worst-case wake-up went from 44 ms to 20 ms when priorities
-       arrived, and the twenty was this. */
-    /* Giving the tick permission to take the processor away for a higher
-       priority is what makes the rest of it mean something. */
+    /* Without this a thread that wakes with a claim waits out a whole quantum. */
     if (!current->time_slice_ticks || higher_priority_waiting(current) ||
         ordinary_should_preempt(current) || !allowed_on_this_cpu(current)) {
         struct process *preempted = current;
@@ -1382,13 +1216,8 @@ void process_timer_interrupt(struct interrupt_frame *frame) {
             activate_process(next);
         } else {
             if (!allowed_on_this_cpu(preempted)) go_idle();
-            /* Before the state changes and not after, because
-               ordinary_slice_ticks() divides the period among the tasks that
-               are READY. */
-            /* A task already marked RUNNING is counted out of its own share,
-               which is what made the two callers of it disagree about the same
-               task. */
-            /* activate_process() has always done it in this order. */
+            /* Before the state changes, because the slice is divided among the tasks
+               that are READY. */
             preempted->time_slice_ticks = preempted->rt_priority
                                            ? PROCESS_DEFAULT_QUANTUM_TICKS
                                            : ordinary_slice_ticks(preempted);
@@ -1580,9 +1409,8 @@ static void process_exit_from_signal(struct syscall_frame *frame, int signal_num
                 signal_number, (void *)(frame ? frame->user_rip : 0),
                 (void *)(frame ? frame->user_rsp : 0));
     if (current) current->termination_signal = signal_number;
-    /* The signal was aimed at the process and the thread it landed on is an
-       accident of scheduling, so taking only that one down would leave the rest
-       running with the process's files still open. */
+    /* The signal was aimed at the process, so taking one thread down leaves
+       its files open. */
     terminate_sibling_threads(128 + signal_number);
     if (current) current->is_thread = 0;
     process_exit_from_syscall(frame, 128 + signal_number);
@@ -1591,10 +1419,7 @@ static void process_exit_from_signal(struct syscall_frame *frame, int signal_num
 void process_exit_from_syscall(struct syscall_frame *frame, int status) {
     if (!current || !frame) panic("process: exit without current process");
     struct process *exiting = current;
-    /* Init leaving is the end of the machine and it has to say so. */
-    /* There is nothing left to boot into, no parent to report to, and every
-       processor goes idle, which from the outside is a black screen and a
-       cursor indistinguishable from a kernel that hung. */
+    /* Init leaving is the end of the machine, and from outside it looks like a hang. */
     if (!exiting->is_thread && exiting->pid == 1) {
         kprintf("TUNIX: init exited, status %d\n", status);
         panic("init exited");
@@ -1611,14 +1436,11 @@ void process_exit_from_syscall(struct syscall_frame *frame, int status) {
         (void)process_futex_wake(clear_address, 1, FUTEX_BITSET_MATCH_ANY);
     }
     process_release_files(exiting);
-    /* A process that drove a virtual terminal has to let go of it here, or the
-       display stays owed to a program that no longer exists and a switch it was
-       asked to release is never answered. */
+    /* A terminal has to be let go here, or the display stays owed to a
+       program that has gone. */
     if (!exiting->is_thread)
         vt_process_exited(exiting->pid,
-                          /* Only the leader's exit ends the session, because a
-                             child shell leaving is not the login going
-                             away. */
+                          /* Only the leader's exit ends the session. */
                           exiting->sid == exiting->pid ? exiting->sid : 0);
     if (exiting->is_thread) exiting->state = PROCESS_DEAD;
     else notify_parent_of_exit(exiting);
@@ -1641,9 +1463,7 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame) {
     child->sid = parent->sid;
     child->state = PROCESS_READY;
     child->cwd = parent->cwd;
-    /* Counted like the fds below, so the child keeps the directory alive on its
-       own and neither the parent chdir'ing nor the directory being removed can
-       leave it pointing at freed memory. */
+    /* Counted like the fds, so the child keeps the directory alive on its own. */
     vfs_node_ref(child->cwd);
     child->controlling_pty = parent->controlling_pty;
     child->umask = parent->umask;
@@ -1682,10 +1502,8 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame) {
     /* Shared file mappings are inherited with the pages, so the records that
        describe them have to come along. */
     memory_copy_mappings(child->memory, parent->memory);
-    /* The child continues from where the parent is, x87 and SSE registers
-       included. */
-    /* The parent is the running process, so its live registers have to be put
-       into its save area before they can be copied out of it. */
+    /* The child continues with the parent's floating-point state, saved
+       before it is copied. */
     fpu_save(parent);
     memcpy(child->fpu_state, parent->fpu_state, sizeof(child->fpu_state));
     child->entry = parent->entry;
@@ -1790,9 +1608,8 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
     child->signal_blocked = parent->signal_blocked;
     memcpy(child->signal_actions, parent->signal_actions, sizeof(child->signal_actions));
 
-    /* CLONE_FILES means threads share one descriptor table rather than copying
-       it, so an fd any thread opens or closes from here on is immediately
-       visible to every sibling. */
+    /* CLONE_FILES shares one table, so an fd any thread opens is visible to
+       every sibling. */
     child->files = parent->files;
     child->files->refs++;
 
@@ -1846,11 +1663,8 @@ int64_t process_futex_wait(struct syscall_frame *frame, uint64_t address,
     futex_note('W', address, 0, 0, expected);
     waiting->futex_wait_deadline_ns = timeout_ns < 0 ? UINT64_MAX :
         time_uptime_ns() + (uint64_t)timeout_ns;
-    /* Unlike wait4, EAGAIN here is a true answer rather than a lie, because it
-       is what a futex whose value no longer matches returns and the caller
-       re-reads and tries again. */
-    /* It costs a spin rather than a park, which is why the two are not the
-       same. */
+    /* EAGAIN here is a true answer: a futex whose value moved is re-read and
+       tried again. */
     if (switch_to_next(frame, waiting) != 0) {
         waiting->state = PROCESS_RUNNING;
         waiting->futex_wait_active = 0;
@@ -1868,22 +1682,8 @@ int process_sleep_on(struct syscall_frame *frame, const void *channel) {
     waiting->state = PROCESS_BLOCKED;
     waiting->wait_channel = channel;
     if (switch_to_next(frame, waiting) != 0) {
-        /* Nothing else to run, so park the processor rather than refuse to
-           sleep. */
-        /* It used to refuse, so that a wakeup which never arrived became a slow
-           loop instead of a hang, but "nothing else to run" is what an idle
-           machine looks like and the safety net was paid for continuously. */
-        /* Measured on a machine doing nothing at all with a shell at a prompt
-           on two terminals, three of its four processors were spinning here for
-           ever. */
-        /* Parking is safe now because the tick wakes the general io channel,
-           so a sleeper whose own wakeup was missed is still re-tested a few
-           hundred times a second. */
-        /* The processor halts until the next interrupt, which is what an idle
-           processor should cost. */
-        /* This does not return, because the kernel stack it was using belongs
-           to the process that has just gone to sleep and everything worth
-           keeping was written into saved_frame above. */
+        /* Nothing else to run, so park rather than spin; the tick re-tests every
+           sleeper. */
         go_idle();
     }
     return 0;
@@ -1910,10 +1710,8 @@ static int process_wake_all_locked(const void *channel) {
     int woken = 0;
     struct process *item = queue;
     do {
-        /* Anything that made one wait channel ready may have made a poll()
-           ready too, and the poller cannot know which queue to have joined. */
-        /* Releasing the io waiters alongside costs nothing because they
-           re-test, and saves them waiting for the next tick to notice. */
+        /* A wakeup on one channel may have made a poll() ready, and the poller
+           cannot know which. */
         if (item->state == PROCESS_BLOCKED &&
             (item->wait_channel == channel || item->wait_channel == &io_wait_token)) {
             item->wait_channel = NULL;
@@ -1981,36 +1779,8 @@ int process_futex_wake(uint64_t address, int maximum, uint32_t bitset) {
     return woken;
 }
 
-/* End every other thread sharing the caller's thread group. */
-/* A process is its thread group, which exit_group says outright and a fatal
-   signal means even though it arrives at one thread. */
-/* Leaving the siblings running is not a tidiness problem, because they hold the
-   process's open files and so nothing it had open is ever closed. */
-/* That is how killing the browser left five WebKitWebProcess threads alive at a
-   quarter gigabyte each with their sockets open, so the helper processes on the
-   far end never saw the end-of-file that tells them to exit either. */
-/* Take the rest of the thread group down with this thread. */
-/* A sibling that is PROCESS_RUNNING is loaded on another processor and is
-   executing its own user code right now. */
-/* Tearing it down from here, closing its files and marking it dead so it can be
-   reaped and its address space freed, pulls the ground out from under a thread
-   still standing on it. */
-/* The first thing that processor does with it then turns into a kernel panic
-   rather than a signal. */
-/* On one processor the case could not arise, because a sibling was always ready
-   or blocked and never actually executing. */
-/* So such a thread is told to leave instead of being made to, reading the flag
-   on its own next return to user mode and running the same exit path it would
-   have run for itself. */
-/* CLONE_SIGHAND is mandatory for a thread here, so the handler table belongs to
-   the thread group rather than to one thread. */
-/* Threads are given a copy of it when they are created, so a later sigaction
-   has to be written through to the siblings as well. */
-/* musl is what makes this load-bearing, because setuid and friends in a
-   threaded process install a SIGSYNCCALL handler and then signal every other
-   thread with it. */
-/* A sibling still holding SIG_DFL for a real-time signal takes the whole
-   process down instead of answering. */
+/* End every other thread of the group, but tell a running one to leave
+   rather than tear it down. */
 void process_set_sigaction(int signal_number,
                            const struct tunix_sigaction *action) {
     if (!current || signal_number < 1 || signal_number > TUNIX_NSIG) return;
@@ -2088,9 +1858,7 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
     current->tgid = current->pid;
     current->is_thread = 0;
     current->entry = image.entry;
-    /* A different program entirely must not inherit the old one's
-       floating-point registers, so they are reset and the reset state loaded,
-       these being the live registers of the running process. */
+    /* A new program must not inherit the old one's floating-point registers. */
     fpu_init_state(current);
     fpu_restore(current);
     current->user_stack_top = image.user_stack_top;
@@ -2126,10 +1894,8 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
     frame->user_rsp = current->user_stack_top;
     frame->user_rflags = 0x202;
     vmm_activate(new_cr3);
-    /* The processor is looking at a different space now, and the record of
-       which space that is decides who gets told when a mapping in it
-       changes. */
-    /* Left stale, this processor is invisible to the next flush. */
+    /* The record of which space is loaded decides who is told when a mapping
+       in it changes. */
     cpu_current()->address_space = new_cr3;
     wrmsr(IA32_FS_BASE, 0);
     if (old_memory) memory_unref(old_memory);
@@ -2179,31 +1945,13 @@ int64_t process_waitpid_from_syscall(struct syscall_frame *frame, int64_t pid,
     parent->wait_pid = pid;
     parent->wait_status_user = status_user;
     parent->wait_options = options;
-    /* Nothing else to run here is not the same as nothing else to run. */
-    /* The child this caller is waiting for is very likely the reason, being
-       PROCESS_RUNNING on another processor and so exactly the thing
-       next_runnable() must not pick. */
-    /* Reporting ECHILD then is a lie, because the child exists and is
-       executing, and a shell believes it. */
-    /* bash reads it as "the job is gone" and runs the next command over the top
-       of one that is still going. */
-    /* So the processor parks instead, and the child's exit wakes the
-       sleeper. */
+    /* Nothing to run here is not nothing to run, so ECHILD would be a lie and
+       this parks instead. */
     if (switch_to_next(frame, parent) != 0) go_idle();
     return 0;
 }
 
-/* waitid(2), the non-blocking core. */
-/* dinit's event library reaps every service exit through waitid(P_ALL, 0,
-   &info, WNOHANG | WEXITED), and with wait4 alone a service manager stays
-   permanently blind to its children. */
-/* Services then hang in STARTING and their processes pile up as zombies. */
-/* The siginfo_t written back is the x86_64 Linux layout of 128 bytes with the
-   SIGCHLD union member starting at offset 16. */
-/* Only the fields a waiter can consume are filled and the rest stay zero. */
-/* Returns 0 with the record stored, or with si_pid zero for WNOHANG with
-   nothing ready as Linux reports it, -EAGAIN when the caller should block and
-   retry, or a negative errno. */
+/* waitid(2), which a service manager needs and wait4 alone leaves it blind without. */
 struct waitid_siginfo {
     int32_t si_signo;
     int32_t si_errno;
@@ -2302,17 +2050,8 @@ static void signal_one_process(struct process *target, int signal_number) {
         target->futex_wait_active = 0;
         target->futex_wait_address = 0;
         target->futex_wait_deadline_ns = 0;
-        /* Do not stamp -EINTR over a syscall that block_and_retry() rewound to
-           be retried, because its saved rax still holds the syscall number the
-           rewound %rip will re-issue on resume. */
-        /* process_prepare_user_return() decides that frame's fate when the
-           signal is actually taken, either restarting it for SA_RESTART or
-           converting it to -EINTR and stepping past the syscall. */
-        /* Clobbering rax here would feed -EINTR back as a syscall number, land
-           in the ENOSYS default, and surface to userspace as a bogus "read
-           error: Function not implemented". */
-        /* Non-rewound sleepers such as wait4 have no retry %rip, so -EINTR is
-           their correct return. */
+        /* Do not stamp -EINTR over a rewound syscall, whose saved rax holds the
+           syscall number. */
         if (!target->syscall_rewound)
             target->saved_frame.rax = (uint64_t)-(int64_t)EINTR;
         target->wait4_active = 0;
@@ -2342,15 +2081,8 @@ static void record_sender(struct process *target, int signal_number) {
 
 static int send_signal(int64_t pid, int signal_number, int checked) {
     if (signal_number < 0 || signal_number > TUNIX_NSIG) return -EINVAL;
-    /* A kill(2) is judged against the caller and a pid of zero means the
-       caller's own group, so both of those need one. */
-    /* A signal the kernel sends on its own behalf needs neither and frequently
+    /* A kill(2) is judged against the caller, but a signal the kernel sends
        has no caller at all. */
-    /* Ctrl+Alt+F2 is the case that matters, arriving as an interrupt on a
-       processor that is usually idle and so has no current process. */
-    /* The release signal to whoever owns the terminal was refused with EINVAL
-       and the screen stayed where it was, which looked exactly like a
-       compositor refusing to let go. */
     if ((checked || pid == 0) && !current) return -EINVAL;
     if (pid > 0) {
         struct process *target = process_find((uint64_t)pid);
@@ -2466,8 +2198,7 @@ void process_prepare_user_return(struct syscall_frame *frame) {
         current->state = PROCESS_STOPPED;
         current->stop_reported = notify_parent_of_job_change(
             current, WUNTRACED, ((signal_number & 0xFF) << 8) | 0x7F);
-        /* Same as wait4, where with nothing else ready here the answer is to
-           park the processor rather than keep running a process that has been
+        /* Same as wait4: park the processor rather than keep running a process
            told to stop. */
         if (switch_to_next(frame, current) != 0) go_idle();
         return;
@@ -2481,9 +2212,8 @@ void process_prepare_user_return(struct syscall_frame *frame) {
         return;
     }
 
-    /* A frame rewound to retry a blocking syscall must observe the signal by
-       returning -EINTR at the instruction after the syscall, so the retry does
-       not silently restart unless the handler asked for SA_RESTART. */
+    /* A rewound frame must observe the signal, unless the handler asked for
+       SA_RESTART. */
     if (current->syscall_rewound) {
         current->syscall_rewound = 0;
         if (!(action->flags & SA_RESTART)) {
@@ -2501,14 +2231,8 @@ void process_prepare_user_return(struct syscall_frame *frame) {
         !on_signal_stack(current, frame->user_rsp)) {
         stack_top = current->signal_stack_pointer + current->signal_stack_size;
     }
-    /* SA_SIGINFO handlers are called as (signo, siginfo_t *, void *) and they
-       dereference the second argument. */
-    /* sudo's event loop is one of them, and with only rdi set it read its
-       siginfo through whatever the interrupted frame left in rsi and faulted on
-       every signal it was sent. */
-    /* Both structures are built on the user stack, and the context is zeroed
-       rather than filled because nothing here inspects a machine context and
-       reading zeroes beats reading rubbish. */
+    /* SA_SIGINFO handlers dereference their second argument, so both
+       structures are built. */
     uint64_t area = stack_top & ~15ULL;
     uint64_t siginfo_address = 0;
     uint64_t context_address = 0;
@@ -2526,14 +2250,8 @@ void process_prepare_user_return(struct syscall_frame *frame) {
         info[0] = signal_number;
         int from_user = (current->signal_user_sent & bit) != 0;
         info[2] = from_user ? SI_USER : SI_KERNEL;
-        /* si_pid and si_uid, at offsets 16 and 20 of the x86_64 siginfo_t. */
-        /* A handler that only wants to know it was signalled ignores these,
-           where one that has to tell its children apart cannot. */
-        /* LightDM is the second kind, because the X server reports itself ready
-           by raising SIGUSR1 and LightDM looks the sender up by pid to decide
-           which server it was. */
-        /* A zero here left it waiting forever for a signal it had already been
-           sent. */
+        /* si_pid and si_uid, which a handler that has to tell its children apart
+           cannot do without. */
         if (from_user) {
             info[4] = (int32_t)current->signal_sender_pid[signal_number - 1];
             info[5] = (int32_t)current->signal_sender_uid[signal_number - 1];
