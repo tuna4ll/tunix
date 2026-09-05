@@ -48,6 +48,15 @@ extern void kprintf(const char *fmt, ...);
    smaller of the two is what a single buffer can promise. */
 #define STAGING_BYTES 16384U
 #define STAGING_SECTORS (STAGING_BYTES / BLOCK_SECTOR_SIZE)
+/* Writes stay at one page, because the larger transfer buys nothing there and
+   costs something real. */
+/* A stick answers the status phase only once it has committed the data, and it
+   NAKs until then -- which is not an error, so the transfer stays active until
+   it times out. Four pages of flash take longer to commit than one, and on a
+   Core i5 M 430 booting from a stick that was long enough: every WRITE_10 in
+   runit's second stage timed out four times over, eight seconds of the kernel
+   lock each, and the machine never reached weston. */
+#define STAGING_WRITE_SECTORS (4096U / BLOCK_SECTOR_SIZE)
 
 struct command_block_wrapper {
     uint32_t signature;
@@ -222,7 +231,7 @@ static int usb_write(void *context, uint64_t lba, uint32_t count, const void *so
     struct usb_disk *disk = (struct usb_disk *)context;
     const uint8_t *in = (const uint8_t *)source;
     while (count) {
-        uint32_t chunk = count > STAGING_SECTORS ? STAGING_SECTORS : count;
+        uint32_t chunk = count > STAGING_WRITE_SECTORS ? STAGING_WRITE_SECTORS : count;
         if (chunk % disk->sectors_per_block)
             chunk -= chunk % disk->sectors_per_block;
         if (!chunk) return -1;
