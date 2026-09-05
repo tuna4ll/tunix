@@ -825,10 +825,14 @@ static int run_append(struct run_writer *run, uint32_t block, const void *data) 
     return 0;
 }
 
+/* Which step gave up, because "it failed" is not a thing anybody can act on. */
+static const char *failed_stage = "?";
+
 /* Returns -1 on error, 1 when blocks were allocated, 0 otherwise. */
 static int file_write_range(uint32_t ino, struct vfs_node *node,
                             uint64_t offset, uint64_t size) {
     struct ext2_inode inode;
+    failed_stage = "inode read";
     if (inode_read(ino, &inode) != 0) return -1;
     int allocated = 0;
 
@@ -842,6 +846,7 @@ static int file_write_range(uint32_t ino, struct vfs_node *node,
         for (uint32_t file_block = first; file_block <= last; file_block++) {
             int dirty = 0;
             int64_t block = inode_bmap(&inode, file_block, 1, &dirty);
+            failed_stage = "block map";
             if (block <= 0) return -1;
             if (dirty) allocated = 1;
             uint64_t start = (uint64_t)file_block * EXT2_BLOCK_SIZE;
@@ -851,8 +856,10 @@ static int file_write_range(uint32_t ino, struct vfs_node *node,
             memset(data_buf, 0, sizeof(data_buf));
             if (chunk && node->data)
                 memcpy(data_buf, (const uint8_t *)node->data + start, chunk);
+            failed_stage = "data write";
             if (run_append(&run, (uint32_t)block, data_buf) != 0) return -1;
         }
+        failed_stage = "data write";
         if (run_flush(&run) != 0) return -1;
     }
 
@@ -861,6 +868,7 @@ static int file_write_range(uint32_t ino, struct vfs_node *node,
     inode.i_atime = node->atime;
     inode.i_ctime = node->ctime;
     inode.i_mtime = node->mtime;
+    failed_stage = "inode write";
     if (inode_write(ino, &inode) != 0) return -1;
     return allocated;
 }
@@ -888,6 +896,25 @@ static int under_volatile(const struct vfs_node *node) {
 }
 
 /* Returns 0 on success, 1 for intentionally skipped nodes, -1 on error. */
+/*
+ * One line a person can act on: which step, and what the filesystem still has.
+ *
+ * A medium that will not take a write fails every write, so this is bounded --
+ * the log the failure produced was twenty identical lines naming neither the
+ * step that gave up nor whether the disk had simply filled.
+ */
+#define FAILURE_REPORT_LIMIT 8U
+
+static void report_failure(const char *what, const char *name) {
+    static unsigned reported;
+    if (reported >= FAILURE_REPORT_LIMIT) return;
+    reported++;
+    kprintf("EXT2: could not %s %s at the %s, %u blocks and %u inodes free%s\n",
+            what, name, failed_stage, (unsigned)sb.s_free_blocks_count,
+            (unsigned)sb.s_free_inodes_count,
+            reported == FAILURE_REPORT_LIMIT ? " (last report)" : "");
+}
+
 static int create_one(struct vfs_node *node) {
     if (!node->parent || !node->parent->disk_inode || node->disk_inode) return -1;
     uint32_t kind = node->flags & 0xFFU;
@@ -898,6 +925,7 @@ static int create_one(struct vfs_node *node) {
     if (kind != VFS_FILE && kind != VFS_DIRECTORY && kind != VFS_SYMLINK)
         return 1;
 
+    failed_stage = "inode allocation";
     uint32_t ino = alloc_inode();
     if (!ino) return -1;
     uint32_t parent_ino = node->parent->disk_inode;
@@ -1066,7 +1094,7 @@ static void ext2_event_created(struct vfs_node *node) {
         !node->parent->disk_inode) return;
     int status = create_one(node);
     if (status < 0)
-        kprintf("EXT2: cannot persist %s\n", node->name);
+        report_failure("create", node->name);
     else if (status == 0)
         flush_meta();
 }
@@ -1158,7 +1186,7 @@ static void ext2_event_written(struct vfs_node *node, uint64_t offset,
     if (!ext2_tracks(node) || (node->flags & 0xFFU) != VFS_FILE || !size) return;
     int result = file_write_range(node->disk_inode, node, offset, size);
     if (result < 0)
-        kprintf("EXT2: write-back failed for %s\n", node->name);
+        report_failure("write back", node->name);
     else if (result > 0)
         flush_meta();
     else

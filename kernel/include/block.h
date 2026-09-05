@@ -83,6 +83,7 @@ uint64_t block_sectors(void);
 void block_probe(void);
 
 /* How many reads reached the medium, how many sectors, and how long they took. */
-void block_statistics(uint64_t *reads, uint64_t *sectors, uint64_t *nanoseconds);
+void block_statistics(uint64_t *reads, uint64_t *sectors, uint64_t *nanoseconds,
+                      uint64_t *write_failures);
 
 #endif

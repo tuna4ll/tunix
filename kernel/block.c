@@ -148,11 +148,14 @@ void block_select_root(int index) {
 static uint64_t block_reads;
 static uint64_t block_sectors_read;
 static uint64_t block_read_ns;
+static uint64_t block_write_failures;
 
-void block_statistics(uint64_t *reads, uint64_t *sectors, uint64_t *nanoseconds) {
+void block_statistics(uint64_t *reads, uint64_t *sectors, uint64_t *nanoseconds,
+                      uint64_t *write_failures) {
     if (reads) *reads = block_reads;
     if (sectors) *sectors = block_sectors_read;
     if (nanoseconds) *nanoseconds = block_read_ns;
+    if (write_failures) *write_failures = block_write_failures;
 }
 
 static int device_read_counted(const struct block_device *device, uint64_t lba,
@@ -173,11 +176,26 @@ int block_read(uint64_t lba, uint32_t count, void *destination) {
     return device_read_counted(device, lba, count, destination);
 }
 
+/* Bounded: a medium that fails at all fails a great deal, and the first few
+   say everything the later ones would. */
+#define WRITE_FAILURE_REPORT_LIMIT 8U
+
 int block_write(uint64_t lba, uint32_t count, const void *source) {
     const struct block_device *device = block_root();
     if (!device || !device->write || !count || !source) return -1;
     if (lba + count > device->sectors) return -1;
-    return device->write(device->context, lba, count, source);
+    int status = device->write(device->context, lba, count, source);
+    /* Said here rather than left to the filesystem, which only knows that
+       something above the medium would not persist. */
+    if (status != 0) {
+        block_write_failures++;
+        if (block_write_failures <= WRITE_FAILURE_REPORT_LIMIT)
+            kprintf("BLOCK: write of %u sectors at lba %u failed (%d)%s\n",
+                    (unsigned)count, (unsigned)lba, status,
+                    block_write_failures == WRITE_FAILURE_REPORT_LIMIT
+                        ? ", further failures counted in /proc/blockstat" : "");
+    }
+    return status;
 }
 
 int block_flush(void) {

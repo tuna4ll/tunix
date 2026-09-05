@@ -176,14 +176,16 @@ static int64_t proc_blockstat_read(struct vfs_node *node, uint64_t offset,
                                    size_t size, void *output) {
     (void)node;
     struct text_buffer text = {{0}, 0};
-    uint64_t reads = 0, sectors = 0, nanoseconds = 0;
-    block_statistics(&reads, &sectors, &nanoseconds);
+    uint64_t reads = 0, sectors = 0, nanoseconds = 0, write_failures = 0;
+    block_statistics(&reads, &sectors, &nanoseconds, &write_failures);
     text_string(&text, "reads ");
     text_unsigned(&text, reads);
     text_string(&text, "\nsectors ");
     text_unsigned(&text, sectors);
     text_string(&text, "\nwait_ns ");
     text_unsigned(&text, nanoseconds);
+    text_string(&text, "\nwrite_failures ");
+    text_unsigned(&text, write_failures);
     text_char(&text, '\n');
     return text_read(&text, offset, size, output);
 }
