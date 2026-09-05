@@ -73,8 +73,10 @@ extern void kprintf(const char *fmt, ...);
 #define USBCMD_RUN (1U << 0)
 #define USBCMD_RESET (1U << 1)
 #define USBCMD_ASYNC_ENABLE (1U << 5)
+#define USBCMD_ASYNC_DOORBELL (1U << 6)
 #define USBCMD_INTERRUPT_THRESHOLD_SHIFT 16U
 
+#define USBSTS_ASYNC_ADVANCE (1U << 5)
 #define USBSTS_HALTED (1U << 12)
 #define USBSTS_ASYNC_RUNNING (1U << 15)
 
@@ -232,6 +234,10 @@ struct ehci {
     unsigned ports;
     struct ehci_qh *async_head;
     struct ehci_qh *work_qh;
+    /* What the working queue head already describes, so a transfer to the same
+       endpoint as the last one needs no doorbell. */
+    uint32_t work_characteristics;
+    uint32_t work_capabilities;
     struct ehci_device devices[MAX_DEVICES];
     unsigned device_count;
 };
@@ -245,6 +251,26 @@ static uint64_t dma_physical;
 static struct ehci_qtd *qtds;
 static uint8_t *setup_buffer;
 static uint8_t *descriptor_buffer;
+
+/*
+ * A word the controller reads or writes by itself.
+ *
+ * These have to be volatile, and the reason is not tidiness. The queue head is
+ * rewritten in a fixed order, and the order is the whole interlock -- but the
+ * fields are plain memory as far as the compiler is concerned, so it deleted
+ * the store that made the queue head inert on the grounds that a later store
+ * to the same word overwrites it. What the object file did was rewrite a live
+ * queue head with no interlock at all, which is a transfer the controller
+ * never starts: the last descriptor comes back still active, its error count
+ * untouched and every byte still to move.
+ */
+static inline void dma_store32(uint32_t *field, uint32_t value) {
+    *(volatile uint32_t *)field = value;
+}
+
+static inline uint32_t dma_load32(const uint32_t *field) {
+    return *(const volatile uint32_t *)field;
+}
 
 static inline uint32_t mmio_read32(uint64_t address) {
     return *(volatile uint32_t *)address;
@@ -408,6 +434,8 @@ static void build_async_ring(struct ehci *host) {
     work->horizontal = physical_of(async_head) | LINK_TYPE_QH;
     work->overlay_next = LINK_TERMINATE;
     work->overlay_alternate = LINK_TERMINATE;
+    host->work_characteristics = 0;
+    host->work_capabilities = 0;
 }
 
 static int start_controller(struct ehci *host) {
@@ -518,21 +546,26 @@ static int reset_port(struct ehci *host, unsigned port) {
  */
 static void build_qtd(struct ehci_qtd *qtd, uint32_t pid, uint64_t physical,
                       uint32_t length, int toggle) {
-    memset(qtd, 0, sizeof(*qtd));
-    qtd->next = LINK_TERMINATE;
-    qtd->alternate = LINK_TERMINATE;
-    qtd->token = (length << QTD_LENGTH_SHIFT) | (3U << QTD_ERROR_COUNT_SHIFT) |
-                 (pid << QTD_PID_SHIFT) | QTD_STATUS_ACTIVE |
-                 QTD_INTERRUPT_ON_COMPLETE;
-    if (toggle) qtd->token |= QTD_DATA_TOGGLE;
+    for (unsigned page = 0; page < 5U; page++) {
+        dma_store32(&qtd->buffer[page], 0);
+        dma_store32(&qtd->buffer_high[page], 0);
+    }
+    dma_store32(&qtd->next, LINK_TERMINATE);
+    dma_store32(&qtd->alternate, LINK_TERMINATE);
 
-    if (!length) return;
+    uint32_t token = (length << QTD_LENGTH_SHIFT) | (3U << QTD_ERROR_COUNT_SHIFT) |
+                     (pid << QTD_PID_SHIFT) | QTD_STATUS_ACTIVE |
+                     QTD_INTERRUPT_ON_COMPLETE;
+    if (toggle) token |= QTD_DATA_TOGGLE;
+
     uint64_t address = physical;
     uint64_t end = physical + length;
-    for (unsigned page = 0; page < 5U && address < end; page++) {
-        qtd->buffer[page] = (uint32_t)address;
+    for (unsigned page = 0; length && page < 5U && address < end; page++) {
+        dma_store32(&qtd->buffer[page], (uint32_t)address);
         address = (address & ~0xFFFULL) + 0x1000ULL;
     }
+    /* Last, so the descriptor is complete before it is armed. */
+    dma_store32(&qtd->token, token);
 }
 
 /*
@@ -576,38 +609,48 @@ static int run_qtds(struct ehci *host, struct ehci_device *device,
                     uint64_t timeout_ns) {
     struct ehci_qh *work_qh = host->work_qh;
 
-    /* Inert first. The queue head is in the schedule the whole time, so the
-       order of these writes is the interlock: with no descriptor to follow the
-       controller walks past it, and everything else can be rewritten safely.
-       The pointer to the first descriptor goes last, and is what starts the
-       transfer. */
-    work_qh->overlay_next = LINK_TERMINATE;
-    work_qh->overlay_token = 0;
-    work_qh->current_qtd = 0;
-    work_qh->overlay_alternate = LINK_TERMINATE;
-    work_qh->characteristics = device->address |
-                               ((uint32_t)endpoint << QH_ENDPOINT_SHIFT) |
-                               QH_SPEED_HIGH | QH_DATA_TOGGLE_CONTROL |
-                               ((uint32_t)max_packet << QH_MAX_PACKET_SHIFT) |
-                               (3U << QH_RELOAD_SHIFT);
+    /* Inert first, and in this order: with nothing to follow, the next pass
+       walks past the queue head instead of starting a transfer out of a
+       half-written one. */
+    dma_store32(&work_qh->overlay_next, LINK_TERMINATE);
+    dma_store32(&work_qh->overlay_token, 0);
+    dma_store32(&work_qh->overlay_alternate, LINK_TERMINATE);
+    dma_store32(&work_qh->current_qtd, 0);
+
     /* The control-endpoint flag is for full- and low-speed endpoints only.
        Setting it on a high-speed one, which is all this driver talks to, makes
        the controller run a protocol the device is not speaking. */
     (void)is_control;
-    work_qh->capabilities = (1U << QH_MULT_SHIFT);
-    work_qh->overlay_next = physical_of(first);
+    uint32_t characteristics = device->address |
+                               ((uint32_t)endpoint << QH_ENDPOINT_SHIFT) |
+                               QH_SPEED_HIGH | QH_DATA_TOGGLE_CONTROL |
+                               ((uint32_t)max_packet << QH_MAX_PACKET_SHIFT) |
+                               (3U << QH_RELOAD_SHIFT);
+    uint32_t capabilities = (1U << QH_MULT_SHIFT);
+    /* Which endpoint the queue head describes is the one thing the controller
+       may be holding a copy of, so it is written only when it changes. */
+    if (characteristics != host->work_characteristics ||
+        capabilities != host->work_capabilities) {
+        dma_store32(&work_qh->characteristics, characteristics);
+        dma_store32(&work_qh->capabilities, capabilities);
+        host->work_characteristics = characteristics;
+        host->work_capabilities = capabilities;
+    }
+
+    /* Last, and what starts the transfer. */
+    dma_store32(&work_qh->overlay_next, physical_of(first));
 
     uint64_t deadline = time_uptime_ns() + timeout_ns;
     uint64_t kick_at = time_uptime_ns() + ASYNC_KICK_AFTER_NS;
     int kicked = 0;
     int status = -1;
     for (;;) {
-        uint32_t token = *(volatile uint32_t *)&last->token;
+        uint32_t token = dma_load32(&last->token);
         if (!(token & QTD_STATUS_ACTIVE)) {
             status = (token & QTD_STATUS_ERROR_MASK) ? -1 : 0;
             break;
         }
-        if (*(volatile uint32_t *)&work_qh->overlay_token & QTD_STATUS_HALTED) break;
+        if (dma_load32(&work_qh->overlay_token) & QTD_STATUS_HALTED) break;
         uint64_t now = time_uptime_ns();
         if (now >= deadline) break;
         /* Once, and late. Turning the schedule off is not free for a transfer
@@ -622,7 +665,7 @@ static int run_qtds(struct ehci *host, struct ehci_device *device,
     }
 
     /* Idle again, and still linked. */
-    work_qh->overlay_next = LINK_TERMINATE;
+    dma_store32(&work_qh->overlay_next, LINK_TERMINATE);
     return status;
 }
 
