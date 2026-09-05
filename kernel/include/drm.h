@@ -7,29 +7,12 @@
 struct file;
 struct vfs_node;
 
-/*
- * A DRM/KMS device in the spirit of Linux's simpledrm: the only memory objects
- * are dumb buffers -- plain pages userspace maps and draws into with the CPU.
- * The scanout is the framebuffer the bootloader handed us, unless there is a
- * virtio-gpu, in which case a dumb buffer is scanned out where it lies (see
- * virtgpu.h).
- *
- * This exists because /dev/fb0 and the TUNIX_FBIO_* ioctls are ours alone.
- * Everything in the Linux graphics world -- mesa's GBM, weston's drm backend,
- * kmscube -- talks to /dev/dri/card0 instead. Providing that node is what makes
- * unmodified graphics software able to run here at all.
- *
- * Deliberately absent: atomic modesetting and any notion of a second CRTC or
- * connector. PRIME/dma-buf export is supported for the single linear buffer
- * path, and cursor ioctls are acknowledged for a software cursor fallback.
- * There is one fixed mode, the one the display is already in.
- */
+/* A DRM/KMS device in the spirit of simpledrm: dumb buffers, and the
+   scanout the bootloader left. */
 
 void drm_init(void);
 int drm_available(void);
 
-int64_t drm_node_ioctl(struct vfs_node *node, unsigned long request,
-                       uint64_t user_argument);
 int64_t drm_file_ioctl(struct file *file, unsigned long request,
                        uint64_t user_argument);
 int64_t drm_device_mmap(struct vfs_node *node, struct file *file,
@@ -50,13 +33,7 @@ void drm_device_open(struct vfs_node *node);
 void drm_device_close(struct vfs_node *node);
 void drm_file_close(struct file *file);
 
-/*
- * The virtual terminal the client is on has been switched away from, or back
- * to. Suspending stops presenting and hands a virtio-gpu's scanout back, so the
- * text console has the screen; resuming puts the last frame that was presented
- * back up, because the client has gone on drawing into its own buffer all along
- * and has no reason to think anything changed.
- */
+/* Release a reference a PRIME export took, which the handle may already be gone by. */
 void drm_display_suspend(void);
 /* Scan the text console out, for as long as it is the thing in front. */
 void drm_console_present(void);

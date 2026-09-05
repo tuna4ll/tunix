@@ -26,19 +26,15 @@ extern void kprintf(const char *fmt, ...);
 #define EIO 5
 #define EBUSY 16
 #define ENODEV 19
+#define EOPNOTSUPP 95
 
 /* DRM_CLOEXEC in <drm/drm.h> is O_CLOEXEC by another name. */
 #define DRM_CLOEXEC 02000000
 
-/*
- * See include/drm.h for what this is and is not. The ABI below is Linux's, from
- * <drm/drm.h> and <drm/drm_mode.h>; userspace reaches it through libdrm, so the
- * layouts have to match exactly and are asserted where it matters.
- */
+/* The ABI below is Linux's, from <drm/drm.h> and <drm/drm_mode.h>. */
 
-/* ioctls are decoded rather than matched against fully encoded constants: the
-   number is the stable part, while the size field differs between libdrm
-   versions and between 32- and 64-bit callers. */
+/* Decoded by type and number, because the size field differs between
+   libdrm versions. */
 #define DRM_IOCTL_TYPE 'd'
 #define IOCTL_TYPE(request) (((request) >> 8) & 0xFFU)
 #define IOCTL_NR(request) ((request) & 0xFFU)
@@ -82,12 +78,7 @@ extern void kprintf(const char *fmt, ...);
 #define DRM_NR_PRIME_HANDLE_TO_FD 0x2d
 #define DRM_NR_PRIME_FD_TO_HANDLE 0x2e
 
-/*
- * The driver-private range. Every DRM driver puts its own calls here, and
- * which driver's they are is decided by the name VERSION reports -- so these
- * numbers mean what virtio_gpu means by them, and only because we answer to
- * that name.
- */
+/* The driver-private range, which means virtio_gpu's calls because VERSION says so. */
 #define DRM_COMMAND_BASE 0x40
 #define DRM_NR_VIRTGPU_MAP (DRM_COMMAND_BASE + 0x01)
 #define DRM_NR_VIRTGPU_EXECBUFFER (DRM_COMMAND_BASE + 0x02)
@@ -101,17 +92,8 @@ extern void kprintf(const char *fmt, ...);
 #define DRM_NR_VIRTGPU_RESOURCE_CREATE_BLOB (DRM_COMMAND_BASE + 0x0a)
 #define DRM_NR_VIRTGPU_CONTEXT_INIT (DRM_COMMAND_BASE + 0x0b)
 
-/*
- * What mesa asks about before it decides how to talk to us. Answering 3D
- * FEATURES with anything but 1 makes it give up and fall back to llvmpipe,
- * which is the failure this whole path exists to end.
- *
- * CAPSET_QUERY_FIX says a capset may be asked for by id rather than by index,
- * which every mesa in living memory assumes. The rest name features this
- * driver does not have -- blob resources, host-visible memory, cross-device
- * sharing -- and answering zero is how mesa is told to use the older paths
- * that only need what is here.
- */
+/* What mesa asks before deciding how to talk to us; zero sends it down
+   the older path. */
 #define VIRTGPU_PARAM_3D_FEATURES 1
 #define VIRTGPU_PARAM_CAPSET_QUERY_FIX 2
 #define VIRTGPU_PARAM_RESOURCE_BLOB 3
@@ -128,15 +110,7 @@ struct drm_virtgpu_map {
     uint32_t pad;
 };
 
-/*
- * `value` is where to put the answer, not the answer.
- *
- * It is a pointer into the caller's memory, and the answer written through it
- * is four bytes wide however wide the field is. Filling the field in instead
- * leaves the caller reading the zero it started with -- which for the very
- * first question, whether there is 3D at all, reads as no, and mesa quietly
- * goes back to the software rasteriser without ever saying why.
- */
+/* `value` is where to put the answer, and the answer is four bytes wide. */
 struct drm_virtgpu_getparam {
     uint64_t param;
     uint64_t value;
@@ -228,7 +202,6 @@ typedef char drm_virtgpu_get_caps_size_check[
 #define DRM_CAP_CURSOR_WIDTH 0x8
 #define DRM_CAP_CURSOR_HEIGHT 0x9
 #define DRM_CAP_ADDFB2_MODIFIERS 0x10
-#define DRM_CAP_ATOMIC 0x15
 
 /* The single set of object ids this device ever reports. */
 #define DRM_CRTC_ID 1
@@ -236,20 +209,25 @@ typedef char drm_virtgpu_get_caps_size_check[
 #define DRM_ENCODER_ID 3
 #define DRM_PLANE_ID 4
 
-/*
- * The one property this device exposes.
- *
- * Weston refuses to run without DRM_CLIENT_CAP_UNIVERSAL_PLANES, and a universal
- * plane is only usable if its "type" says what it is -- weston reads that
- * property and bails out on a plane whose type it cannot resolve. So a single
- * enum property, on a single primary plane, is the whole property system here.
- */
+/* The one property this device exposes, because weston needs a plane with a type. */
 #define DRM_PROP_TYPE_ID 10
 #define DRM_PROP_CRTC_ACTIVE 11
 #define DRM_PROP_CRTC_MODE_ID 12
 #define DRM_PROP_PLANE_CRTC_ID 13
 #define DRM_PROP_PLANE_FB_ID 14
 #define DRM_PROP_CONNECTOR_CRTC_ID 15
+/* Where the plane reads from and where it lands, which an atomic commit must
+   set: without them it has not said where the plane goes. */
+#define DRM_PROP_PLANE_SRC_X 16
+#define DRM_PROP_PLANE_SRC_Y 17
+#define DRM_PROP_PLANE_SRC_W 18
+#define DRM_PROP_PLANE_SRC_H 19
+#define DRM_PROP_PLANE_CRTC_X 20
+#define DRM_PROP_PLANE_CRTC_Y 21
+#define DRM_PROP_PLANE_CRTC_W 22
+#define DRM_PROP_PLANE_CRTC_H 23
+#define DRM_PROP_PLANE_FIRST_RECT DRM_PROP_PLANE_SRC_X
+#define DRM_PROP_PLANE_LAST_RECT DRM_PROP_PLANE_CRTC_H
 
 #define DRM_MODE_OBJECT_CRTC 0xcccccccc
 #define DRM_MODE_OBJECT_CONNECTOR 0xc0c0c0c0
@@ -475,22 +453,16 @@ struct drm_mode_obj_get_properties {
     uint32_t obj_type;
 };
 
+/* Linux's layout: flat object ids, and per-object counts behind count_props_ptr. */
 struct drm_mode_atomic {
     uint32_t flags;
     uint32_t count_objs;
     uint64_t objs_ptr;
-    uint32_t count_props;
-    uint32_t reserved0;
+    uint64_t count_props_ptr;
     uint64_t props_ptr;
     uint64_t prop_values_ptr;
-    uint32_t reserved;
-    uint32_t reserved1;
-};
-
-struct drm_mode_atomic_object {
-    uint32_t object_id;
-    uint32_t count_props;
-    uint64_t props_ptr;
+    uint64_t reserved;
+    uint64_t user_data;
 };
 
 struct drm_mode_create_blob { uint64_t data; uint32_t length; uint32_t blob_id; };
@@ -503,37 +475,16 @@ typedef char drm_create_dumb_size_check[
 
 /* --- objects ------------------------------------------------------------ */
 
-/*
- * A compositor holds a handful of buffers. A GL client holds one per texture,
- * vertex buffer and render target it has live, which for a game is hundreds --
- * so this ceiling stopped being generous the moment mesa started allocating
- * through it.
- */
-/*
- * How many buffers a client may hold at once.
- *
- * It was 512, which is a number rather than a reason, and SuperTuxKart runs
- * past it while a track loads: every texture, vertex buffer and render target
- * is one of these. What that looked like was not a full table. mesa answers a
- * refused resource with a null image and then reads through it, so the machine
- * reported a page fault at address zero inside libgallium, at track load,
- * about half the time -- a crash that has been blamed on the graphics stack
- * for as long as the game has been on the image.
- *
- * A handle is its slot's index now (see buffer_find), so a bigger table costs
- * memory and nothing else. This much is 384 KiB and covers what the game asks
- * for with room over.
- */
 #define DRM_MAX_BUFFERS 4096
 #define DRM_MAX_FRAMEBUFFERS 64
 
-/*
- * A dumb buffer: a run of ordinary pages that userspace maps and draws into.
- * `map_offset` is the fake mmap offset MAP_DUMB hands out; it is just the
- * handle scaled by a page so the offset alone identifies the buffer.
- */
+/* A run of ordinary pages userspace maps and draws into. */
 struct drm_dumb_buffer {
     uint32_t handle;      /* 0 when the slot is free */
+    /* The open file that made it; handles are private to one client. */
+    const struct file *owner;
+    /* Set by a PRIME export, after which the descriptor is the capability. */
+    uint8_t shared;
     uint32_t width;
     uint32_t height;
     uint32_t pitch;
@@ -543,33 +494,23 @@ struct drm_dumb_buffer {
     /* The host resource these pages back, created on first present and 0 on a
        machine with no virtio-gpu. */
     uint32_t virtio_resource;
-    /* Set when the resource was made by RESOURCE_CREATE rather than grown out
-       of a dumb buffer: its contents are the host's, and the guest pages are a
-       staging area that transfers move to and from on demand. */
+    /* Made by RESOURCE_CREATE, so the contents are the host's and the pages
+       are staging. */
     uint8_t rendered;
-    /* Holders beyond the handle itself: every PRIME descriptor exported from
-       this buffer counts. DESTROY_DUMB drops the handle's reference, but the
-       pages stay until the last descriptor is closed. */
+    /* Holders beyond the handle: every PRIME descriptor and every framebuffer. */
     uint32_t refs;
 };
 
 struct drm_framebuffer {
     uint32_t id;          /* 0 when the slot is free */
+    const struct file *owner;
     uint32_t handle;
     uint32_t width;
     uint32_t height;
     uint32_t pitch;
 };
 
-/*
- * Completion events, read back off the device descriptor.
- *
- * A compositor flips with DRM_MODE_PAGE_FLIP_EVENT and then waits for the
- * completion before drawing the next frame; weston does this every frame, so
- * without a queue it stalls forever. Presentation here is synchronous -- the
- * flip is a blit that has already finished by the time the ioctl returns -- so
- * the event is queued immediately and the reader never actually waits.
- */
+/* Completion events read back off the descriptor; presentation is synchronous. */
 #define DRM_EVENT_FLIP_COMPLETE 0x02
 #define DRM_MAX_EVENTS 16
 
@@ -593,16 +534,7 @@ static uint32_t event_tail;
 static uint32_t event_count;
 static uint32_t flip_sequence;
 
-/*
- * Display arbitration.
- *
- * The console and DRM draw into the same scanout, so one of them has to stand
- * down. `drm_display_owner` is nothing but a unique address to hand
- * framebuffer_claim_graphics() as an identity; `open_count` tracks how many
- * descriptors are open on the card so the console can come back when the last
- * one goes away -- which is what makes weston exiting leave a usable shell
- * rather than a frozen picture.
- */
+/* The console and DRM share one scanout, so one of them has to stand down. */
 static const char drm_display_owner;
 static uint32_t open_count;
 
@@ -610,7 +542,10 @@ static struct drm_dumb_buffer buffers[DRM_MAX_BUFFERS];
 static struct drm_framebuffer framebuffers[DRM_MAX_FRAMEBUFFERS];
 #define DRM_MAX_BLOBS 32
 #define DRM_MAX_BLOB_BYTES 256
-struct drm_property_blob { uint32_t id; uint32_t length; uint8_t data[DRM_MAX_BLOB_BYTES]; };
+struct drm_property_blob {
+    uint32_t id; const struct file *owner;
+    uint32_t length; uint8_t data[DRM_MAX_BLOB_BYTES];
+};
 static struct drm_property_blob blobs[DRM_MAX_BLOBS];
 static uint32_t next_blob_id = 1;
 /* Where to start looking for a free slot, so a table that is mostly full is
@@ -664,12 +599,31 @@ static struct drm_framebuffer *framebuffer_find(uint32_t id) {
 }
 
 static struct drm_property_blob *blob_find(uint32_t id) {
+    /* Zero is not an id, and without this it matches the first free slot. */
+    if (!id) return NULL;
     for (unsigned index = 0; index < DRM_MAX_BLOBS; index++)
         if (blobs[index].id == id) return &blobs[index];
     return NULL;
 }
 
-static int64_t ioctl_create_blob(uint64_t user_argument) {
+/* Refusing an object this client was never given, because handles are guessable. */
+static struct drm_dumb_buffer *buffer_of(const struct file *client, uint32_t handle) {
+    struct drm_dumb_buffer *buffer = buffer_find(handle);
+    if (!buffer) return NULL;
+    return (buffer->owner == client || buffer->shared) ? buffer : NULL;
+}
+
+static struct drm_framebuffer *framebuffer_of(const struct file *client, uint32_t id) {
+    struct drm_framebuffer *fb = framebuffer_find(id);
+    return (fb && fb->owner == client) ? fb : NULL;
+}
+
+static struct drm_property_blob *blob_of(const struct file *client, uint32_t id) {
+    struct drm_property_blob *blob = blob_find(id);
+    return (blob && blob->owner == client) ? blob : NULL;
+}
+
+static int64_t ioctl_create_blob(const struct file *client, uint64_t user_argument) {
     struct drm_mode_create_blob request;
     if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
     if (!request.data || !request.length || request.length > DRM_MAX_BLOB_BYTES) return -EINVAL;
@@ -678,6 +632,7 @@ static int64_t ioctl_create_blob(uint64_t user_argument) {
         if (copy_from_user(blobs[index].data, request.data, request.length) != 0) return -EFAULT;
         blobs[index].id = next_blob_id++;
         if (!blobs[index].id) blobs[index].id = next_blob_id++;
+        blobs[index].owner = client;
         blobs[index].length = request.length;
         request.blob_id = blobs[index].id;
         return copy_to_user(user_argument, &request, sizeof(request)) == 0 ? 0 : -EFAULT;
@@ -685,19 +640,19 @@ static int64_t ioctl_create_blob(uint64_t user_argument) {
     return -ENOMEM;
 }
 
-static int64_t ioctl_destroy_blob(uint64_t user_argument) {
+static int64_t ioctl_destroy_blob(const struct file *client, uint64_t user_argument) {
     struct drm_mode_destroy_blob request;
     if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
-    struct drm_property_blob *blob = blob_find(request.blob_id);
+    struct drm_property_blob *blob = blob_of(client, request.blob_id);
     if (!blob) return -ENOENT;
     memset(blob, 0, sizeof(*blob));
     return 0;
 }
 
-static int64_t ioctl_getfb(uint64_t user_argument) {
+static int64_t ioctl_getfb(const struct file *client, uint64_t user_argument) {
     struct drm_mode_fb_cmd request;
     if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
-    struct drm_framebuffer *fb = framebuffer_find(request.fb_id);
+    struct drm_framebuffer *fb = framebuffer_of(client, request.fb_id);
     if (!fb) return -ENOENT;
     request.width = fb->width;
     request.height = fb->height;
@@ -708,92 +663,132 @@ static int64_t ioctl_getfb(uint64_t user_argument) {
     return copy_to_user(user_argument, &request, sizeof(request)) == 0 ? 0 : -EFAULT;
 }
 
-/* virtio-gpu has no hardware cursor in this implementation. Accepting cursor
-   ioctls is nevertheless important: KWin/libdrm can fall back to its software
-   cursor only after the DRM device acknowledges the requested state. */
-static int64_t ioctl_cursor(uint64_t user_argument, int cursor2) {
+/* No hardware cursor, but acknowledging this is what allows a software one. */
+static int64_t ioctl_cursor(const struct file *client, uint64_t user_argument, int cursor2) {
     struct drm_mode_cursor request;
     if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
     (void)cursor2;
     if (request.crtc_id != DRM_CRTC_ID) return -ENOENT;
-    if ((request.flags & 1U) && request.handle && !buffer_find(request.handle))
+    if ((request.flags & 1U) && request.handle && !buffer_of(client, request.handle))
         return -ENOENT;
     return 0;
 }
 
+#define DRM_MODE_PAGE_FLIP_EVENT 0x01U
 #define DRM_MODE_ATOMIC_TEST_ONLY 0x100U
+#define DRM_MODE_ATOMIC_NONBLOCK 0x200U
+#define DRM_MODE_ATOMIC_ALLOW_MODESET 0x400U
+#define DRM_MODE_PAGE_FLIP_ASYNC 0x02U
+#define DRM_ATOMIC_MAX_OBJECTS 16U
+#define DRM_ATOMIC_MAX_PROPS 64U
 
-static int present_framebuffer(uint32_t fb_id);
+static int present_framebuffer(const struct file *client, uint32_t fb_id);
+static void queue_flip_event(uint64_t user_data);
 
-static int64_t ioctl_atomic(uint64_t user_argument) {
+/* Nothing here can scale or move the one plane, so a commit may only ask for
+   the whole scanout at the origin. */
+static int plane_rectangle_ok(uint32_t property, uint64_t value) {
+    switch (property) {
+    case DRM_PROP_PLANE_SRC_X:
+    case DRM_PROP_PLANE_SRC_Y:
+    case DRM_PROP_PLANE_CRTC_X:
+    case DRM_PROP_PLANE_CRTC_Y: return value == 0;
+    case DRM_PROP_PLANE_SRC_W: return value == ((uint64_t)framebuffer_width() << 16);
+    case DRM_PROP_PLANE_SRC_H: return value == ((uint64_t)framebuffer_height() << 16);
+    case DRM_PROP_PLANE_CRTC_W: return value == framebuffer_width();
+    case DRM_PROP_PLANE_CRTC_H: return value == framebuffer_height();
+    default: return 0;
+    }
+}
+
+/* One description of the whole display, in the arrays libdrm actually sends. */
+static int64_t ioctl_atomic(const struct file *client, uint64_t user_argument) {
     struct drm_mode_atomic request;
     if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
-    if (!request.count_objs || request.count_objs > 8 || request.count_props > 32)
+    /* Async flips are not implemented, so asking for one is refused rather
+       than quietly answered as if it had happened. */
+    if (request.flags & ~(DRM_MODE_ATOMIC_TEST_ONLY | DRM_MODE_ATOMIC_NONBLOCK |
+                          DRM_MODE_ATOMIC_ALLOW_MODESET | DRM_MODE_PAGE_FLIP_EVENT))
         return -EINVAL;
-    struct drm_mode_atomic_object objects[8];
-    if (copy_from_user(objects, request.objs_ptr,
-                       request.count_objs * sizeof(objects[0])) != 0) return -EFAULT;
+    if (!request.count_objs || request.count_objs > DRM_ATOMIC_MAX_OBJECTS) return -EINVAL;
+
+    uint32_t objects[DRM_ATOMIC_MAX_OBJECTS];
+    uint32_t counts[DRM_ATOMIC_MAX_OBJECTS];
+    uint64_t bytes = (uint64_t)request.count_objs * sizeof(objects[0]);
+    if (copy_from_user(objects, request.objs_ptr, bytes) != 0 ||
+        copy_from_user(counts, request.count_props_ptr, bytes) != 0) return -EFAULT;
+
+    uint32_t total = 0;
+    for (uint32_t object = 0; object < request.count_objs; object++) {
+        if (counts[object] > DRM_ATOMIC_MAX_PROPS ||
+            total + counts[object] > DRM_ATOMIC_MAX_PROPS) return -EINVAL;
+        total += counts[object];
+    }
+    if (!total) return -EINVAL;
+
+    uint32_t props[DRM_ATOMIC_MAX_PROPS];
+    uint64_t values[DRM_ATOMIC_MAX_PROPS];
+    if (copy_from_user(props, request.props_ptr, (uint64_t)total * sizeof(props[0])) != 0 ||
+        copy_from_user(values, request.prop_values_ptr,
+                       (uint64_t)total * sizeof(values[0])) != 0) return -EFAULT;
+
     uint32_t new_fb = active_fb_id;
     int new_active = active_fb_id != 0;
-    uint32_t prop_index = 0;
+    int mode_cleared = 0;
+    uint32_t taken = 0;
     for (uint32_t object = 0; object < request.count_objs; object++) {
-        if (objects[object].count_props > 16 ||
-            prop_index + objects[object].count_props > request.count_props)
-            return -EINVAL;
-        uint32_t props[16];
-        uint64_t values[16];
-        if (objects[object].count_props &&
-            (copy_from_user(props, objects[object].props_ptr,
-                            objects[object].count_props * sizeof(props[0])) != 0 ||
-             copy_from_user(values, request.prop_values_ptr +
-                            prop_index * sizeof(values[0]),
-                            objects[object].count_props * sizeof(values[0])) != 0))
-            return -EFAULT;
-        for (uint32_t property = 0; property < objects[object].count_props; property++) {
-            uint32_t id = props[property]; uint64_t value = values[property];
-            if (objects[object].object_id == DRM_CRTC_ID && id == DRM_PROP_CRTC_ACTIVE) {
+        for (uint32_t index = 0; index < counts[object]; index++, taken++) {
+            uint32_t id = props[taken];
+            uint64_t value = values[taken];
+            if (objects[object] == DRM_CRTC_ID && id == DRM_PROP_CRTC_ACTIVE) {
                 if (value > 1) return -EINVAL;
                 new_active = (int)value;
-            } else if (objects[object].object_id == DRM_PLANE_ID &&
-                       id == DRM_PROP_PLANE_FB_ID) {
-                if (value > UINT32_MAX || (value && !framebuffer_find((uint32_t)value)))
-                    return -EINVAL;
-                new_fb = (uint32_t)value;
-            } else if (objects[object].object_id == DRM_CONNECTOR_ID &&
-                       id == DRM_PROP_CONNECTOR_CRTC_ID) {
-                if (value != 0 && value != DRM_CRTC_ID) return -EINVAL;
-            } else if (objects[object].object_id == DRM_CRTC_ID && id == DRM_PROP_CRTC_MODE_ID) {
-                struct drm_property_blob *blob = blob_find((uint32_t)value);
+            } else if (objects[object] == DRM_CRTC_ID && id == DRM_PROP_CRTC_MODE_ID) {
+                /* Zero is how a commit turns the output off, and it is not a
+                   blob that failed to be found. */
+                if (!value) { mode_cleared = 1; continue; }
+                struct drm_property_blob *blob = blob_of(client, (uint32_t)value);
                 if (!blob || blob->length < sizeof(struct drm_mode_modeinfo)) return -EINVAL;
                 struct drm_mode_modeinfo mode;
                 memcpy(&mode, blob->data, sizeof(mode));
-                if (mode.hdisplay != framebuffer_width() || mode.vdisplay != framebuffer_height())
-                    return -EINVAL;
-            } else if (id != DRM_PROP_CRTC_MODE_ID && id != DRM_PROP_PLANE_CRTC_ID) {
+                if (mode.hdisplay != framebuffer_width() ||
+                    mode.vdisplay != framebuffer_height()) return -EINVAL;
+            } else if (objects[object] == DRM_PLANE_ID && id == DRM_PROP_PLANE_FB_ID) {
+                if (value > UINT32_MAX ||
+                    (value && !framebuffer_of(client, (uint32_t)value))) return -EINVAL;
+                new_fb = (uint32_t)value;
+            } else if (objects[object] == DRM_PLANE_ID && id == DRM_PROP_PLANE_CRTC_ID) {
+                if (value != 0 && value != DRM_CRTC_ID) return -EINVAL;
+            } else if (objects[object] == DRM_PLANE_ID &&
+                       id >= DRM_PROP_PLANE_FIRST_RECT && id <= DRM_PROP_PLANE_LAST_RECT) {
+                if (!plane_rectangle_ok(id, value)) return -EINVAL;
+            } else if (objects[object] == DRM_CONNECTOR_ID &&
+                       id == DRM_PROP_CONNECTOR_CRTC_ID) {
+                if (value != 0 && value != DRM_CRTC_ID) return -EINVAL;
+            } else {
                 return -EINVAL;
             }
         }
-        prop_index += objects[object].count_props;
     }
-    if (prop_index != request.count_props) return -EINVAL;
+    if (mode_cleared) new_active = 0;
     if (request.flags & DRM_MODE_ATOMIC_TEST_ONLY) return 0;
+
     if (!new_active || !new_fb) {
         active_fb_id = 0;
         virtgpu_scanout_disable();
         (void)framebuffer_release_graphics(&drm_display_owner, 0);
-        return 0;
+    } else {
+        int status = present_framebuffer(client, new_fb);
+        if (status != 0) return status;
+        active_fb_id = new_fb;
     }
-    int status = present_framebuffer(new_fb);
-    if (status != 0) return status;
-    active_fb_id = new_fb;
+    /* The commit has already happened, so the completion is queued rather
+       than promised. */
+    if (request.flags & DRM_MODE_PAGE_FLIP_EVENT) queue_flip_event(request.user_data);
     return 0;
 }
 
-/*
- * Drop one reference. The buffer's memory goes away with the last one, which is
- * not necessarily the handle: an exported PRIME descriptor keeps it alive after
- * DESTROY_DUMB, which is the entire point of exporting it.
- */
+/* Drop one reference, which an exported descriptor can outlive the handle by. */
 static void buffer_release(struct drm_dumb_buffer *buffer) {
     if (!buffer || !buffer->handle) return;
     if (buffer->refs > 1) { buffer->refs--; return; }
@@ -808,11 +803,7 @@ static void buffer_release(struct drm_dumb_buffer *buffer) {
 
 /* --- mode ---------------------------------------------------------------- */
 
-/*
- * One mode, describing the display exactly as it already is. The timings are
- * synthesised: there is no real CRTC to program, and userspace only reads them
- * to pick a mode.
- */
+/* One mode, the display as it already is, with synthesised timings. */
 static void fill_mode(struct drm_mode_modeinfo *mode) {
     uint32_t width = framebuffer_width();
     uint32_t height = framebuffer_height();
@@ -866,13 +857,7 @@ static int64_t ioctl_version(uint64_t user_argument) {
     struct drm_version version;
     if (copy_from_user(&version, user_argument, sizeof(version)) != 0) return -EFAULT;
 
-    /*
-     * The name is not a label, it is the driver's identity: mesa looks up
-     * `<name>_dri.so` by it and speaks that driver's private ioctls at us. So
-     * it is only virtio_gpu where the host has actually granted virgl -- claim
-     * it on a 2D device and mesa would load the virgl driver and then find
-     * none of the calls it needs.
-     */
+    /* The name is the driver's identity: mesa loads `<name>_dri.so` by it. */
     int rendering = virtgpu_virgl_available();
     static const char virtio_name[] = "virtio_gpu";
     static const char plain_name[] = "tunixdrm";
@@ -881,19 +866,7 @@ static int64_t ioctl_version(uint64_t user_argument) {
     static const char date[] = "20260721";
     static const char desc[] = "Tunix framebuffer KMS";
 
-    /*
-     * mesa turns these into a feature level rather than reading them as a
-     * version, so they are a statement about what this driver can do.
-     *
-     * Minor 1 is where linux's virtio_gpu started handing out sync
-     * descriptors for a submission, and mesa reads that as permission to ask
-     * for one and then wait on it. Submitting here is synchronous -- the work
-     * is done before the call returns -- so there is no descriptor to give,
-     * and saying minor 0 is how mesa is told not to ask. Claiming minor 1 and
-     * answering with no descriptor leaves mesa polling -1 for ever, which
-     * looks from outside like a compositor that renders one frame and then
-     * stops.
-     */
+    /* mesa reads these as a feature level, and minor 0 says not to ask for a fence. */
     version.version_major = rendering ? 0 : 1;
     version.version_minor = 0;
     version.version_patchlevel = 0;
@@ -917,6 +890,19 @@ static int64_t ioctl_version(uint64_t user_argument) {
     return copy_to_user(user_argument, &version, sizeof(version)) == 0 ? 0 : -EFAULT;
 }
 
+#define DRM_CLIENT_CAP_STEREO_3D 1
+#define DRM_CLIENT_CAP_UNIVERSAL_PLANES 2
+#define DRM_CLIENT_CAP_ATOMIC 3
+
+/* Saying yes to every capability was worse than saying no to the ones we lack. */
+static int64_t ioctl_set_client_cap(uint64_t user_argument) {
+    struct drm_set_client_cap { uint64_t capability; uint64_t value; } request;
+    if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
+    if (request.capability != DRM_CLIENT_CAP_UNIVERSAL_PLANES &&
+        request.capability != DRM_CLIENT_CAP_ATOMIC) return -EOPNOTSUPP;
+    return 0;
+}
+
 static int64_t ioctl_get_cap(uint64_t user_argument) {
     struct drm_get_cap cap;
     if (copy_from_user(&cap, user_argument, sizeof(cap)) != 0) return -EFAULT;
@@ -929,16 +915,11 @@ static int64_t ioctl_get_cap(uint64_t user_argument) {
        for a software one, and libdrm's callers expect *some* answer. */
     case DRM_CAP_CURSOR_WIDTH:
     case DRM_CAP_CURSOR_HEIGHT: cap.value = 64; break;
-    /*
-     * Buffer sharing by descriptor, both directions. This is not decoration:
-     * mesa reads this exact capability to decide how GBM allocates. Reporting
-     * zero makes it fall back to a path whose buffers have no DRI image, and it
-     * then dereferences that NULL itself.
-     */
+    /* mesa reads this exact capability to decide how GBM allocates. */
     case DRM_CAP_PRIME: cap.value = DRM_PRIME_CAP_IMPORT | DRM_PRIME_CAP_EXPORT; break;
     /* One linear layout and nothing to negotiate. */
-    case DRM_CAP_ADDFB2_MODIFIERS:
-    case DRM_CAP_ATOMIC: cap.value = 1; break;
+    case DRM_CAP_ADDFB2_MODIFIERS: cap.value = 1; break;
+    /* Linux has no atomic capability, and 0x15 is the one for async page flips. */
     default: cap.value = 0; break;
     }
     return copy_to_user(user_argument, &cap, sizeof(cap)) == 0 ? 0 : -EFAULT;
@@ -1025,37 +1006,23 @@ static int64_t ioctl_get_crtc(uint64_t user_argument) {
     return copy_to_user(user_argument, &crtc, sizeof(crtc)) == 0 ? 0 : -EFAULT;
 }
 
-/*
- * Planes.
- *
- * There is exactly one, the primary plane of the only CRTC, and it cannot be
- * moved, scaled or composited -- SETPLANE is refused. It exists because
- * DRM_CLIENT_CAP_UNIVERSAL_PLANES is not optional for weston: it enumerates
- * planes, and a plane whose "type" property it cannot read is a fatal error.
- */
-/* --- PRIME ---------------------------------------------------------------
- *
- * Exporting a buffer as a descriptor. There is no separate dma-buf object here:
- * the descriptor simply names a dumb buffer and holds a reference to it, which
- * is enough for what mesa does with it -- allocate through GBM, hand the buffer
- * to another process or map it, and hand the handle back later.
- *
- * The handle namespace is per-device rather than per-file, so importing a
- * descriptor gives back the handle it was exported from.
- */
+/* Release a reference a PRIME export took, which the handle may already be gone by. */
 void drm_buffer_put(uint32_t handle) {
     struct drm_dumb_buffer *buffer = buffer_find(handle);
     if (buffer) buffer_release(buffer);
 }
 
-static int64_t ioctl_prime_handle_to_fd(uint64_t user_argument) {
+static int64_t ioctl_prime_handle_to_fd(const struct file *client, uint64_t user_argument) {
     struct drm_prime_handle request;
     if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
-    struct drm_dumb_buffer *buffer = buffer_find(request.handle);
+    struct drm_dumb_buffer *buffer = buffer_of(client, request.handle);
     if (!buffer) return -ENOENT;
     if (buffer->refs == 0xFFFFFFFFU) return -EMFILE;
 
     buffer->refs++;
+    /* Exported, so a handle to it is reachable by whoever holds the
+       descriptor. */
+    buffer->shared = 1;
     struct file *file = file_create_dmabuf(request.handle, 0);
     if (!file) {
         buffer_release(buffer);
@@ -1082,16 +1049,7 @@ static int64_t ioctl_prime_fd_to_handle(uint64_t user_argument) {
     struct drm_dumb_buffer *buffer = buffer_find(file->dmabuf_handle);
     if (!buffer) return -ENOENT;
 
-    /*
-     * A resource arriving from another process has to be granted to this one's
-     * context before it may be named in a command buffer.
-     *
-     * This is the compositor's side of a client handing over a frame: the
-     * client rendered into a host resource and passed the descriptor along,
-     * and without this the host refuses every command that mentions it. The
-     * client, waiting to be told its buffer was used, waits forever -- which
-     * is what a hung GL client on an otherwise working compositor looks like.
-     */
+    /* A resource from another process has to be granted to this context first. */
     if (buffer->rendered && buffer->virtio_resource) {
         uint32_t context = render_context();
         if (context)
@@ -1204,6 +1162,23 @@ static int64_t ioctl_get_property(uint64_t user_argument) {
                            sizeof(range[0]), 2) != 0) return -EFAULT;
         return copy_to_user(user_argument, &property, sizeof(property)) == 0 ? 0 : -EFAULT;
     }
+    if (property.prop_id >= DRM_PROP_PLANE_FIRST_RECT &&
+        property.prop_id <= DRM_PROP_PLANE_LAST_RECT) {
+        static const char *const rectangle_names[] = {
+            "SRC_X", "SRC_Y", "SRC_W", "SRC_H",
+            "CRTC_X", "CRTC_Y", "CRTC_W", "CRTC_H",
+        };
+        memset(property.name, 0, sizeof(property.name));
+        strncpy(property.name, rectangle_names[property.prop_id - DRM_PROP_PLANE_FIRST_RECT],
+                sizeof(property.name) - 1);
+        property.flags = DRM_MODE_PROP_RANGE;
+        property.count_values = 2;
+        property.count_enum_blobs = 0;
+        uint64_t range[2] = { 0, 0xFFFFFFFFULL };
+        if (copy_array_out(property.values_ptr, property.count_values, range,
+                           sizeof(range[0]), 2) != 0) return -EFAULT;
+        return copy_to_user(user_argument, &property, sizeof(property)) == 0 ? 0 : -EFAULT;
+    }
     if (property.prop_id != DRM_PROP_TYPE_ID) return -ENOENT;
 
     /* An enum property carries no values array; its choices live in the enum
@@ -1232,13 +1207,24 @@ static int64_t ioctl_obj_get_properties(uint64_t user_argument) {
     /* Only the plane has a property. CRTCs and connectors report none, which is
        legal and which weston copes with -- it only needs the call to succeed. */
     uint32_t count = 0;
-    uint32_t ids[4];
-    uint64_t values[4];
+    uint32_t ids[16];
+    uint64_t values[16];
     if (request.obj_type == DRM_MODE_OBJECT_PLANE) {
         if (request.obj_id != DRM_PLANE_ID) return -ENOENT;
         ids[0] = DRM_PROP_TYPE_ID; values[0] = DRM_PLANE_TYPE_PRIMARY;
         ids[1] = DRM_PROP_PLANE_CRTC_ID; values[1] = DRM_CRTC_ID;
-        ids[2] = DRM_PROP_PLANE_FB_ID; values[2] = active_fb_id; count = 3;
+        ids[2] = DRM_PROP_PLANE_FB_ID; values[2] = active_fb_id;
+        /* An atomic client sets all eight of these on every commit, and a
+           plane that does not have them cannot be committed at all. */
+        ids[3] = DRM_PROP_PLANE_SRC_X; values[3] = 0;
+        ids[4] = DRM_PROP_PLANE_SRC_Y; values[4] = 0;
+        ids[5] = DRM_PROP_PLANE_SRC_W; values[5] = (uint64_t)framebuffer_width() << 16;
+        ids[6] = DRM_PROP_PLANE_SRC_H; values[6] = (uint64_t)framebuffer_height() << 16;
+        ids[7] = DRM_PROP_PLANE_CRTC_X; values[7] = 0;
+        ids[8] = DRM_PROP_PLANE_CRTC_Y; values[8] = 0;
+        ids[9] = DRM_PROP_PLANE_CRTC_W; values[9] = framebuffer_width();
+        ids[10] = DRM_PROP_PLANE_CRTC_H; values[10] = framebuffer_height();
+        count = 11;
     } else if (request.obj_type == DRM_MODE_OBJECT_CRTC) {
         if (request.obj_id != DRM_CRTC_ID) return -ENOENT;
         ids[0] = DRM_PROP_CRTC_ACTIVE; values[0] = active_fb_id != 0;
@@ -1260,11 +1246,7 @@ static int64_t ioctl_obj_get_properties(uint64_t user_argument) {
     return copy_to_user(user_argument, &request, sizeof(request)) == 0 ? 0 : -EFAULT;
 }
 
-/*
- * With a virtio-gpu behind the display there is a real scanout to point at, so
- * the buffer's own pages become the host resource and presenting costs three
- * commands instead of a screenful of memcpy.
- */
+/* With a virtio-gpu the buffer's own pages are the resource, so nothing is copied. */
 static int present_via_virtgpu(const struct drm_framebuffer *fb,
                                struct drm_dumb_buffer *buffer) {
     uint32_t stride_pixels = buffer->pitch / 4U;
@@ -1280,31 +1262,19 @@ static int present_via_virtgpu(const struct drm_framebuffer *fb,
                            !buffer->rendered);
 }
 
-/*
- * Present a framebuffer. Without a GPU the display is a fixed region the
- * bootloader handed over and there is no CRTC to reprogram, so presenting
- * means blitting into it.
- */
-static int present_framebuffer(uint32_t fb_id) {
-    struct drm_framebuffer *fb = framebuffer_find(fb_id);
+/* Without a GPU there is no CRTC to reprogram, so presenting means blitting. */
+static int present_framebuffer(const struct file *client, uint32_t fb_id) {
+    struct drm_framebuffer *fb = client ? framebuffer_of(client, fb_id) : framebuffer_find(fb_id);
     if (!fb) return -ENOENT;
     struct drm_dumb_buffer *buffer = buffer_find(fb->handle);
     if (!buffer) return -ENOENT;
 
-    /* Take the display away from the text console before touching a pixel:
-       otherwise the console keeps writing into the same scanout and the two
-       fight over every frame. Claiming here rather than at open() means a
-       client that only queries the device leaves the console alone. */
+    /* Take the display from the console first, or the two fight over every frame. */
     int status = framebuffer_claim_graphics(&drm_display_owner);
     if (status != 0) return status;
 
-    /*
-     * The client is on a virtual terminal the user has switched away from. It
-     * keeps drawing -- a compositor has no reason to stop, and stopping it is
-     * not this driver's business -- but none of it reaches the screen, and the
-     * call still succeeds: a frame that was refused would be reported as a
-     * device error, and the last one presented goes back up on the switch back.
-     */
+    /* Switched away, so it keeps drawing, nothing reaches the screen, and
+       this succeeds. */
     if (!framebuffer_graphics_foreground(&drm_display_owner)) return 0;
 
     if (virtgpu_available() && present_via_virtgpu(fb, buffer) == 0) return 0;
@@ -1337,7 +1307,7 @@ static int present_framebuffer(uint32_t fb_id) {
     return 0;
 }
 
-static int64_t ioctl_set_crtc(uint64_t user_argument) {
+static int64_t ioctl_set_crtc(const struct file *client, uint64_t user_argument) {
     struct drm_mode_crtc crtc;
     if (copy_from_user(&crtc, user_argument, sizeof(crtc)) != 0) return -EFAULT;
     if (crtc.crtc_id != DRM_CRTC_ID) return -ENOENT;
@@ -1350,7 +1320,7 @@ static int64_t ioctl_set_crtc(uint64_t user_argument) {
         (void)framebuffer_release_graphics(&drm_display_owner, 0);
         return 0;
     }
-    int status = present_framebuffer(crtc.fb_id);
+    int status = present_framebuffer(client, crtc.fb_id);
     if (status != 0) return status;
     active_fb_id = crtc.fb_id;
     return 0;
@@ -1364,20 +1334,12 @@ struct drm_mode_fb_dirty_cmd {
     uint64_t clips_ptr;
 };
 
-/*
- * DIRTYFB flushes a framebuffer whose contents userspace changed in place.
- * Drivers that scan out the buffer directly need do nothing, but this display
- * is a copy, so a dirty flush means re-presenting. The Xorg modesetting DDX
- * (no glamor, no ShadowFB) draws straight into its dumb buffer and relies on
- * this to reach the screen; the clip rectangles are only a hint, so copy whole.
- */
-static int64_t ioctl_dirty_fb(uint64_t user_argument) {
+/* A display that is a copy needs a dirty flush to mean re-presenting. */
+static int64_t ioctl_dirty_fb(const struct file *client, uint64_t user_argument) {
     struct drm_mode_fb_dirty_cmd cmd;
     if (copy_from_user(&cmd, user_argument, sizeof(cmd)) != 0) return -EFAULT;
-    return present_framebuffer(cmd.fb_id);
+    return present_framebuffer(client, cmd.fb_id);
 }
-
-#define DRM_MODE_PAGE_FLIP_EVENT 0x01
 
 /* The flip has already been presented by the time this runs, so the completion
    is reported with the current time and simply queued. */
@@ -1402,11 +1364,7 @@ static void queue_flip_event(uint64_t user_data) {
     event_count++;
 }
 
-/*
- * read() on the device hands back whole events, oldest first. Partial events
- * are never returned: DRM's contract is that a reader with room for one event
- * gets exactly one, and a reader with no room gets nothing.
- */
+/* Whole events, oldest first, because a partial event is never returned. */
 int64_t drm_device_read(struct vfs_node *node, uint64_t offset,
                         size_t size, void *buffer) {
     (void)node;
@@ -1430,18 +1388,18 @@ int drm_device_read_ready(struct vfs_node *node) {
     return event_count != 0;
 }
 
-static int64_t ioctl_page_flip(uint64_t user_argument) {
+static int64_t ioctl_page_flip(const struct file *client, uint64_t user_argument) {
     struct drm_mode_crtc_page_flip flip;
     if (copy_from_user(&flip, user_argument, sizeof(flip)) != 0) return -EFAULT;
     if (flip.crtc_id != DRM_CRTC_ID) return -ENOENT;
-    int status = present_framebuffer(flip.fb_id);
+    int status = present_framebuffer(client, flip.fb_id);
     if (status != 0) return status;
     active_fb_id = flip.fb_id;
     if (flip.flags & DRM_MODE_PAGE_FLIP_EVENT) queue_flip_event(flip.user_data);
     return 0;
 }
 
-static int64_t ioctl_create_dumb(uint64_t user_argument) {
+static int64_t ioctl_create_dumb(const struct file *client, uint64_t user_argument) {
     struct drm_mode_create_dumb request;
     if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
     if (!request.width || !request.height || request.bpp != 32) return -EINVAL;
@@ -1482,6 +1440,7 @@ static int64_t ioctl_create_dumb(uint64_t user_argument) {
     }
 
     slot->handle = handle;
+    slot->owner = client;
     slot->refs = 1;               /* the handle itself */
     slot->width = request.width;
     slot->height = request.height;
@@ -1495,35 +1454,40 @@ static int64_t ioctl_create_dumb(uint64_t user_argument) {
     return copy_to_user(user_argument, &request, sizeof(request)) == 0 ? 0 : -EFAULT;
 }
 
-static int64_t ioctl_map_dumb(uint64_t user_argument) {
+static int64_t ioctl_map_dumb(const struct file *client, uint64_t user_argument) {
     struct drm_mode_map_dumb request;
     if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
-    struct drm_dumb_buffer *buffer = buffer_find(request.handle);
+    struct drm_dumb_buffer *buffer = buffer_of(client, request.handle);
     if (!buffer) return -ENOENT;
     /* The offset is a token, not a location: mmap turns it back into a handle. */
     request.offset = DRM_MAP_OFFSET_BASE + (uint64_t)buffer->handle * 4096ULL;
     return copy_to_user(user_argument, &request, sizeof(request)) == 0 ? 0 : -EFAULT;
 }
 
-static int64_t ioctl_destroy_dumb(uint64_t user_argument) {
+static int64_t ioctl_destroy_dumb(const struct file *client, uint64_t user_argument) {
     struct drm_mode_destroy_dumb request;
     if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
-    struct drm_dumb_buffer *buffer = buffer_find(request.handle);
+    struct drm_dumb_buffer *buffer = buffer_of(client, request.handle);
     if (!buffer) return -ENOENT;
     buffer_release(buffer);
     return 0;
 }
 
-static int64_t ioctl_add_framebuffer(uint32_t handle, uint32_t width, uint32_t height,
+static int64_t ioctl_add_framebuffer(const struct file *client, uint32_t handle,
+                                     uint32_t width, uint32_t height,
                                      uint32_t pitch, uint32_t *fb_id_out) {
-    struct drm_dumb_buffer *buffer = buffer_find(handle);
+    struct drm_dumb_buffer *buffer = buffer_of(client, handle);
     if (!buffer) return -ENOENT;
     struct drm_framebuffer *slot = NULL;
     for (int index = 0; index < DRM_MAX_FRAMEBUFFERS; index++) {
         if (!framebuffers[index].id) { slot = &framebuffers[index]; break; }
     }
     if (!slot) return -ENOMEM;
+    /* The framebuffer holds the buffer, or a stale id comes to name new pages. */
+    if (buffer->refs == 0xFFFFFFFFU) return -EMFILE;
+    buffer->refs++;
     slot->id = next_fb_id++;
+    slot->owner = client;
     slot->handle = handle;
     slot->width = width;
     slot->height = height;
@@ -1532,78 +1496,52 @@ static int64_t ioctl_add_framebuffer(uint32_t handle, uint32_t width, uint32_t h
     return 0;
 }
 
-static int64_t ioctl_addfb(uint64_t user_argument) {
+static int64_t ioctl_addfb(const struct file *client, uint64_t user_argument) {
     struct drm_mode_fb_cmd request;
     if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
-    int64_t status = ioctl_add_framebuffer(request.handle, request.width,
+    int64_t status = ioctl_add_framebuffer(client, request.handle, request.width,
                                            request.height, request.pitch,
                                            &request.fb_id);
     if (status != 0) return status;
     return copy_to_user(user_argument, &request, sizeof(request)) == 0 ? 0 : -EFAULT;
 }
 
-static int64_t ioctl_addfb2(uint64_t user_argument) {
+static int64_t ioctl_addfb2(const struct file *client, uint64_t user_argument) {
     struct drm_mode_fb_cmd2 request;
     if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
     /* Single-plane formats only; there is no YUV path here. */
     if (request.handles[1] || request.handles[2] || request.handles[3]) return -EINVAL;
-    int64_t status = ioctl_add_framebuffer(request.handles[0], request.width,
+    int64_t status = ioctl_add_framebuffer(client, request.handles[0], request.width,
                                            request.height, request.pitches[0],
                                            &request.fb_id);
     if (status != 0) return status;
     return copy_to_user(user_argument, &request, sizeof(request)) == 0 ? 0 : -EFAULT;
 }
 
-static int64_t ioctl_rmfb(uint64_t user_argument) {
+static int64_t ioctl_rmfb(const struct file *client, uint64_t user_argument) {
     uint32_t fb_id;
     if (copy_from_user(&fb_id, user_argument, sizeof(fb_id)) != 0) return -EFAULT;
-    struct drm_framebuffer *fb = framebuffer_find(fb_id);
+    struct drm_framebuffer *fb = framebuffer_of(client, fb_id);
     if (!fb) return -ENOENT;
     if (active_fb_id == fb_id) active_fb_id = 0;
+    struct drm_dumb_buffer *buffer = buffer_find(fb->handle);
     memset(fb, 0, sizeof(*fb));
+    if (buffer) buffer_release(buffer);
     return 0;
 }
 
-static int64_t ioctl_gem_close(uint64_t user_argument) {
+static int64_t ioctl_gem_close(const struct file *client, uint64_t user_argument) {
     struct drm_gem_close request;
     if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
-    struct drm_dumb_buffer *buffer = buffer_find(request.handle);
+    struct drm_dumb_buffer *buffer = buffer_of(client, request.handle);
     if (!buffer) return -ENOENT;
     buffer_release(buffer);
     return 0;
 }
 
-/* The VFS calls ioctl with the node, not the file; nothing here is per-file
-   yet, so the node form is the one devfs installs. */
-int64_t drm_node_ioctl(struct vfs_node *node, unsigned long request,
-                       uint64_t user_argument) {
-    (void)node;
-    return drm_file_ioctl(NULL, request, user_argument);
-}
+/* --- rendering: what mesa's virgl driver talks to, and only where virgl exists. */
 
-/* --- rendering ------------------------------------------------------------
- *
- * Everything below exists so that mesa's virgl driver has something to talk
- * to. It is the render half of virtio_gpu: resources that live on the host,
- * and command buffers that tell the host what to draw into them.
- *
- * None of it is reachable unless VERSION said virtio_gpu, which it only does
- * when the host granted virgl -- so a machine without one behaves exactly as
- * it did before any of this existed.
- */
-
-/*
- * One host context per process.
- *
- * A context is a client's GL state, and two clients sharing one would see each
- * other's. The process is the right grain: mesa opens the device once per
- * screen and a process has one screen. Two descriptors in the same process
- * share a context, which is what they would want anyway.
- *
- * They are all torn down when the last descriptor on the card closes. Nothing
- * here can see a process exit, so this is the one moment we are told that
- * clients have gone -- and by then none of the contexts can still be in use.
- */
+/* One host context per thread group, torn down when the last descriptor goes. */
 static uint32_t render_context(void) {
     if (!virtgpu_virgl_available()) return 0;
     struct process *process = process_current();
@@ -1635,15 +1573,8 @@ static void render_contexts_release(void) {
     }
 }
 
-/*
- * Pages for a resource, and a handle to call them by.
- *
- * The pages are the guest's side of a host resource: a staging area transfers
- * move bytes through, not the resource itself. They are allocated even for a
- * resource the guest will never look at, because the host has to be told where
- * its backing is before it will accept one at all.
- */
-static struct drm_dumb_buffer *buffer_new(uint64_t size) {
+/* Pages for a resource: the guest's staging side, and a handle to call it by. */
+static struct drm_dumb_buffer *buffer_new(const struct file *client, uint64_t size) {
     size = (size + 4095ULL) & ~4095ULL;
     uint64_t page_count = size / 4096ULL;
     if (!page_count || page_count > (256ULL * 1024ULL * 1024ULL) / 4096ULL) return NULL;
@@ -1678,6 +1609,7 @@ static struct drm_dumb_buffer *buffer_new(uint64_t size) {
     }
 
     slot->handle = handle;
+    slot->owner = client;
     slot->refs = 1;
     slot->size = size;
     slot->page_count = page_count;
@@ -1698,18 +1630,11 @@ static int64_t ioctl_virtgpu_getparam(uint64_t user_argument) {
     case VIRTGPU_PARAM_HOST_VISIBLE:
     case VIRTGPU_PARAM_CROSS_DEVICE:
     case VIRTGPU_PARAM_CONTEXT_INIT: answer = 0; break;
-    /*
-     * One bit per capset the host published, which for us is the one. Saying
-     * so here is what stops mesa asking for the others: it probes for the
-     * native-context capsets first, and a driver that answers those gets
-     * driven down a path it cannot follow.
-     */
+    /* One bit per capset the host published, which stops mesa probing for the rest. */
     case VIRTGPU_PARAM_SUPPORTED_CAPSET_IDS:
         answer = virtgpu_capset_id() ? (1U << virtgpu_capset_id()) : 0;
         break;
-    /* An unknown parameter is not an error to answer no to. mesa probes for
-       things newer than the driver it is talking to and expects to be told
-       they are absent. */
+    /* An unknown parameter is answered no rather than refused. */
     default: answer = 0; break;
     }
     return copy_to_user(query.value, &answer, sizeof(answer)) == 0 ? 0 : -EFAULT;
@@ -1719,17 +1644,11 @@ static int64_t ioctl_virtgpu_get_caps(uint64_t user_argument) {
     struct drm_virtgpu_get_caps query;
     if (copy_from_user(&query, user_argument, sizeof(query)) != 0) return -EFAULT;
     if (!query.addr || !query.size) return -EINVAL;
-    /*
-     * Only the capset the host actually published. mesa asks about capsets it
-     * hopes for before the one it can definitely use, and any answer but a
-     * refusal is taken as "this exists" -- so answering a capset we do not
-     * have sends it down a path with nothing at the end of it.
-     */
+    /* Only the capset the host published, because any other answer is read
+       as a promise. */
     if (query.cap_set_id != virtgpu_capset_id()) return -EINVAL;
 
-    /* mesa asks for its own idea of how big a capset is, which is bigger than
-       the host's whenever the host is older. Both sides expect the shorter of
-       the two, and mesa has already zeroed the rest. */
+    /* Both sides expect the shorter of the two lengths. */
     uint32_t size = virtgpu_capset_size();
     if (query.size < size) size = query.size;
     if (!size) return -ENODEV;
@@ -1745,7 +1664,7 @@ static int64_t ioctl_virtgpu_get_caps(uint64_t user_argument) {
     return copied ? 0 : -EFAULT;
 }
 
-static int64_t ioctl_virtgpu_resource_create(uint64_t user_argument) {
+static int64_t ioctl_virtgpu_resource_create(const struct file *client, uint64_t user_argument) {
     struct drm_virtgpu_resource_create query;
     if (copy_from_user(&query, user_argument, sizeof(query)) != 0) return -EFAULT;
     if (!query.size) return -EINVAL;
@@ -1753,7 +1672,7 @@ static int64_t ioctl_virtgpu_resource_create(uint64_t user_argument) {
     uint32_t context = render_context();
     if (!context) return -ENODEV;
 
-    struct drm_dumb_buffer *buffer = buffer_new(query.size);
+    struct drm_dumb_buffer *buffer = buffer_new(client, query.size);
     if (!buffer) return -ENOMEM;
 
     struct virtgpu_resource_3d spec;
@@ -1796,10 +1715,10 @@ static int64_t ioctl_virtgpu_resource_create(uint64_t user_argument) {
     return copy_to_user(user_argument, &query, sizeof(query)) == 0 ? 0 : -EFAULT;
 }
 
-static int64_t ioctl_virtgpu_resource_info(uint64_t user_argument) {
+static int64_t ioctl_virtgpu_resource_info(const struct file *client, uint64_t user_argument) {
     struct drm_virtgpu_resource_info query;
     if (copy_from_user(&query, user_argument, sizeof(query)) != 0) return -EFAULT;
-    struct drm_dumb_buffer *buffer = buffer_find(query.bo_handle);
+    struct drm_dumb_buffer *buffer = buffer_of(client, query.bo_handle);
     if (!buffer) return -ENOENT;
 
     query.res_handle = buffer->virtio_resource;
@@ -1808,10 +1727,10 @@ static int64_t ioctl_virtgpu_resource_info(uint64_t user_argument) {
     return copy_to_user(user_argument, &query, sizeof(query)) == 0 ? 0 : -EFAULT;
 }
 
-static int64_t ioctl_virtgpu_map(uint64_t user_argument) {
+static int64_t ioctl_virtgpu_map(const struct file *client, uint64_t user_argument) {
     struct drm_virtgpu_map query;
     if (copy_from_user(&query, user_argument, sizeof(query)) != 0) return -EFAULT;
-    struct drm_dumb_buffer *buffer = buffer_find(query.handle);
+    struct drm_dumb_buffer *buffer = buffer_of(client, query.handle);
     if (!buffer) return -ENOENT;
     /* The same token MAP_DUMB hands out, and mmap turns either back into the
        same buffer. There is one offset space and one kind of object in it. */
@@ -1819,10 +1738,10 @@ static int64_t ioctl_virtgpu_map(uint64_t user_argument) {
     return copy_to_user(user_argument, &query, sizeof(query)) == 0 ? 0 : -EFAULT;
 }
 
-static int64_t ioctl_virtgpu_transfer(uint64_t user_argument, int to_host) {
+static int64_t ioctl_virtgpu_transfer(const struct file *client, uint64_t user_argument, int to_host) {
     struct drm_virtgpu_3d_transfer query;
     if (copy_from_user(&query, user_argument, sizeof(query)) != 0) return -EFAULT;
-    struct drm_dumb_buffer *buffer = buffer_find(query.bo_handle);
+    struct drm_dumb_buffer *buffer = buffer_of(client, query.bo_handle);
     if (!buffer || !buffer->virtio_resource) return -ENOENT;
 
     struct virtgpu_box box;
@@ -1838,20 +1757,7 @@ static int64_t ioctl_virtgpu_transfer(uint64_t user_argument, int to_host) {
     return 0;
 }
 
-/*
- * A ceiling on one submission, and it has to be a generous one.
- *
- * The guess that mesa's command stream stays inside 64 KiB was wrong: it packs
- * texture uploads into the same buffer, and SuperTuxKart loading a track was
- * measured sending 266224 bytes -- just past a 256 KiB limit, which is the
- * worst place for a limit to be. A rejected submission is not a dropped frame
- * either; mesa prints "expect bad rendering" and carries on with a broken
- * context.
- *
- * A megabyte is four times the largest seen. It costs nothing in the image --
- * the staging buffer is zero-initialised, so it is address space rather than
- * bytes on disk.
- */
+/* A generous ceiling on one submission, because mesa packs uploads inline. */
 #define DRM_MAX_COMMAND_BYTES (1024U * 1024U)
 
 static int64_t ioctl_virtgpu_execbuffer(uint64_t user_argument) {
@@ -1869,10 +1775,8 @@ static int64_t ioctl_virtgpu_execbuffer(uint64_t user_argument) {
         kfree(staging);
         return -EFAULT;
     }
-    /* The handles the submission mentions are not looked at. They exist so a
-       driver with a real fence can hold the buffers until the host is done
-       with them; here the submission has already finished by the time it
-       returns, and nothing can be freed underneath it. */
+    /* The handles are not looked at: the submission has finished by the
+       time this returns. */
     int submitted = virtgpu_submit_3d(context, staging, query.size);
     kfree(staging);
     if (submitted != 0) return -EIO;
@@ -1882,47 +1786,25 @@ static int64_t ioctl_virtgpu_execbuffer(uint64_t user_argument) {
     return copy_to_user(user_argument, &query, sizeof(query)) == 0 ? 0 : -EFAULT;
 }
 
-/*
- * Wait for a resource to be idle, which it always is: submission does not
- * return until the host has finished, so there is never work outstanding to
- * wait for. This is the whole cost of a synchronous queue, paid here as an
- * answer that is true but was expensive to make true.
- */
-/*
- * Is the host finished with this resource.
- *
- * It used to be able to answer yes without looking, because every command had
- * been waited out before its ioctl returned. Now that they are posted and left,
- * this is the promise that makes that safe: mesa marks a resource busy when a
- * submission mentions it and comes here before touching it again.
- *
- * The answer is conservative. Nothing here tracks which submission touched
- * which resource, so waiting for this one means waiting for all of them, which
- * is never wrong and is sometimes more than was asked.
- */
-static int64_t ioctl_virtgpu_wait(uint64_t user_argument) {
+/* Idle always, because submission does not return until the host has finished. */
+static int64_t ioctl_virtgpu_wait(const struct file *client, uint64_t user_argument) {
     struct drm_virtgpu_3d_wait query;
     if (copy_from_user(&query, user_argument, sizeof(query)) != 0) return -EFAULT;
-    if (!buffer_find(query.handle)) return -ENOENT;
+    if (!buffer_of(client, query.handle)) return -ENOENT;
     return virtgpu_flush_pending() == 0 ? 0 : -EBUSY;
 }
 
 int64_t drm_file_ioctl(struct file *file, unsigned long request,
                        uint64_t user_argument) {
-    (void)file;
     if (!drm_ready) return -ENOTTY;
     if (IOCTL_TYPE(request) != (unsigned)DRM_IOCTL_TYPE) return -ENOTTY;
 
     switch (IOCTL_NR(request)) {
     case DRM_NR_VERSION: return ioctl_version(user_argument);
     case DRM_NR_GET_CAP: return ioctl_get_cap(user_argument);
-    /* Accepted and ignored: every capability a client can set is one we do not
-       implement, and refusing would stop libdrm rather than degrade it. */
-    case DRM_NR_SET_CLIENT_CAP: return 0;
+    case DRM_NR_SET_CLIENT_CAP: return ioctl_set_client_cap(user_argument);
     case DRM_NR_SET_VERSION: return 0;
-    /* Single-master device with no authentication: there is nothing to hand
-       out magic tokens for. Dropping master does mean giving the display back,
-       though -- that is how a compositor hands the console over on VT switch. */
+    /* No authentication to do, but dropping master does hand the display back. */
     case DRM_NR_DROP_MASTER:
         active_fb_id = 0;
         virtgpu_scanout_disable();
@@ -1931,15 +1813,13 @@ int64_t drm_file_ioctl(struct file *file, unsigned long request,
     case DRM_NR_SET_MASTER:
     case DRM_NR_GET_MAGIC:
     case DRM_NR_AUTH_MAGIC: return 0;
-    case DRM_NR_PRIME_HANDLE_TO_FD: return ioctl_prime_handle_to_fd(user_argument);
+    case DRM_NR_PRIME_HANDLE_TO_FD: return ioctl_prime_handle_to_fd(file, user_argument);
     case DRM_NR_PRIME_FD_TO_HANDLE: return ioctl_prime_fd_to_handle(user_argument);
     case DRM_NR_MODE_GETPLANERESOURCES: return ioctl_get_plane_resources(user_argument);
     case DRM_NR_MODE_GETPLANE: return ioctl_get_plane(user_argument);
     case DRM_NR_MODE_GETPROPERTY: return ioctl_get_property(user_argument);
     case DRM_NR_MODE_OBJ_GETPROPERTIES: return ioctl_obj_get_properties(user_argument);
-    /* Every property here is immutable, and the one plane cannot be moved:
-       there is a single scanout and SETCRTC/PAGE_FLIP are the only ways to
-       change what is on it. */
+    /* Every property here is immutable and the one plane cannot be moved. */
     case DRM_NR_MODE_SETPROPERTY:
     case DRM_NR_MODE_OBJ_SETPROPERTY:
     case DRM_NR_MODE_SETPLANE: return -EINVAL;
@@ -1947,28 +1827,25 @@ int64_t drm_file_ioctl(struct file *file, unsigned long request,
     case DRM_NR_MODE_GETCONNECTOR: return ioctl_get_connector(user_argument);
     case DRM_NR_MODE_GETENCODER: return ioctl_get_encoder(user_argument);
     case DRM_NR_MODE_GETCRTC: return ioctl_get_crtc(user_argument);
-    case DRM_NR_MODE_GETFB: return ioctl_getfb(user_argument);
-    case DRM_NR_MODE_CURSOR: return ioctl_cursor(user_argument, 0);
-    case DRM_NR_MODE_CURSOR2: return ioctl_cursor(user_argument, 1);
-    case DRM_NR_MODE_ATOMIC: return ioctl_atomic(user_argument);
-    case DRM_NR_MODE_CREATEPROPBLOB: return ioctl_create_blob(user_argument);
-    case DRM_NR_MODE_DESTROYPROPBLOB: return ioctl_destroy_blob(user_argument);
-    case DRM_NR_MODE_SETCRTC: return ioctl_set_crtc(user_argument);
-    case DRM_NR_MODE_PAGE_FLIP: return ioctl_page_flip(user_argument);
-    case DRM_NR_MODE_DIRTYFB: return ioctl_dirty_fb(user_argument);
-    case DRM_NR_MODE_CREATE_DUMB: return ioctl_create_dumb(user_argument);
-    case DRM_NR_MODE_MAP_DUMB: return ioctl_map_dumb(user_argument);
-    case DRM_NR_MODE_DESTROY_DUMB: return ioctl_destroy_dumb(user_argument);
-    case DRM_NR_MODE_ADDFB: return ioctl_addfb(user_argument);
-    case DRM_NR_MODE_ADDFB2: return ioctl_addfb2(user_argument);
-    case DRM_NR_MODE_RMFB: return ioctl_rmfb(user_argument);
+    case DRM_NR_MODE_GETFB: return ioctl_getfb(file, user_argument);
+    case DRM_NR_MODE_CURSOR: return ioctl_cursor(file, user_argument, 0);
+    case DRM_NR_MODE_CURSOR2: return ioctl_cursor(file, user_argument, 1);
+    case DRM_NR_MODE_ATOMIC: return ioctl_atomic(file, user_argument);
+    case DRM_NR_MODE_CREATEPROPBLOB: return ioctl_create_blob(file, user_argument);
+    case DRM_NR_MODE_DESTROYPROPBLOB: return ioctl_destroy_blob(file, user_argument);
+    case DRM_NR_MODE_SETCRTC: return ioctl_set_crtc(file, user_argument);
+    case DRM_NR_MODE_PAGE_FLIP: return ioctl_page_flip(file, user_argument);
+    case DRM_NR_MODE_DIRTYFB: return ioctl_dirty_fb(file, user_argument);
+    case DRM_NR_MODE_CREATE_DUMB: return ioctl_create_dumb(file, user_argument);
+    case DRM_NR_MODE_MAP_DUMB: return ioctl_map_dumb(file, user_argument);
+    case DRM_NR_MODE_DESTROY_DUMB: return ioctl_destroy_dumb(file, user_argument);
+    case DRM_NR_MODE_ADDFB: return ioctl_addfb(file, user_argument);
+    case DRM_NR_MODE_ADDFB2: return ioctl_addfb2(file, user_argument);
+    case DRM_NR_MODE_RMFB: return ioctl_rmfb(file, user_argument);
     /* Dumb buffers are GEM objects, so libdrm frees them either way. */
-    case DRM_NR_GEM_CLOSE: return ioctl_gem_close(user_argument);
+    case DRM_NR_GEM_CLOSE: return ioctl_gem_close(file, user_argument);
 
-    /* The driver-private calls, which mean virtio_gpu's calls only because
-       VERSION said that is who we are. On a device without virgl the name is
-       different and these numbers belong to nobody, so they are refused the
-       same way an unknown ioctl is. */
+    /* Refused on a device without virgl, where these numbers belong to nobody. */
     case DRM_NR_VIRTGPU_GETPARAM:
     case DRM_NR_VIRTGPU_GET_CAPS:
     case DRM_NR_VIRTGPU_RESOURCE_CREATE:
@@ -1983,41 +1860,35 @@ int64_t drm_file_ioctl(struct file *file, unsigned long request,
         case DRM_NR_VIRTGPU_GETPARAM: return ioctl_virtgpu_getparam(user_argument);
         case DRM_NR_VIRTGPU_GET_CAPS: return ioctl_virtgpu_get_caps(user_argument);
         case DRM_NR_VIRTGPU_RESOURCE_CREATE:
-            return ioctl_virtgpu_resource_create(user_argument);
+            return ioctl_virtgpu_resource_create(file, user_argument);
         case DRM_NR_VIRTGPU_RESOURCE_INFO:
-            return ioctl_virtgpu_resource_info(user_argument);
-        case DRM_NR_VIRTGPU_MAP: return ioctl_virtgpu_map(user_argument);
+            return ioctl_virtgpu_resource_info(file, user_argument);
+        case DRM_NR_VIRTGPU_MAP: return ioctl_virtgpu_map(file, user_argument);
         case DRM_NR_VIRTGPU_TRANSFER_FROM_HOST:
-            return ioctl_virtgpu_transfer(user_argument, 0);
+            return ioctl_virtgpu_transfer(file, user_argument, 0);
         case DRM_NR_VIRTGPU_TRANSFER_TO_HOST:
-            return ioctl_virtgpu_transfer(user_argument, 1);
+            return ioctl_virtgpu_transfer(file, user_argument, 1);
         case DRM_NR_VIRTGPU_EXECBUFFER: return ioctl_virtgpu_execbuffer(user_argument);
-        default: return ioctl_virtgpu_wait(user_argument);
+        default: return ioctl_virtgpu_wait(file, user_argument);
         }
-    /* Refused on purpose, and GETPARAM already said so: blob resources and
-       explicit context types are how a newer mesa would ask for memory shared
-       with the host, which this driver does not have. */
+    /* Refused on purpose, and GETPARAM has already said neither is here. */
     case DRM_NR_VIRTGPU_RESOURCE_CREATE_BLOB:
     case DRM_NR_VIRTGPU_CONTEXT_INIT: return -EINVAL;
     default: return -ENOTTY;
     }
 }
 
-/*
- * mmap of a dumb buffer. The offset is the token MAP_DUMB produced, so the
- * lookup is by handle rather than by address.
- */
+/* mmap of a dumb buffer, looked up by the token MAP_DUMB produced. */
 int64_t drm_device_mmap(struct vfs_node *node, struct file *file,
                         uint64_t cr3, uint64_t virtual_address,
                         uint64_t length, uint64_t offset,
                         uint64_t page_flags) {
     (void)node;
-    (void)file;
     if (!drm_ready || !length) return -EINVAL;
     if (offset < DRM_MAP_OFFSET_BASE) return -EINVAL;
 
     uint32_t handle = (uint32_t)((offset - DRM_MAP_OFFSET_BASE) / 4096ULL);
-    struct drm_dumb_buffer *buffer = buffer_find(handle);
+    struct drm_dumb_buffer *buffer = buffer_of(file, handle);
     if (!buffer) return -ENOENT;
     if (length > buffer->size) return -EINVAL;
 
@@ -2045,12 +1916,7 @@ void drm_device_open(struct vfs_node *node) {
     open_count++;
 }
 
-/*
- * The last descriptor on the card is gone, so whoever was driving the display
- * is gone with it: hand the scanout back and let the console redraw. Without
- * this, a compositor that exits or crashes leaves its final frame frozen on
- * screen with a live shell invisible underneath it.
- */
+/* The last descriptor is gone, so the console gets the display back. */
 void drm_device_close(struct vfs_node *node) {
     (void)node;
     if (open_count) open_count--;
@@ -2062,38 +1928,31 @@ void drm_device_close(struct vfs_node *node) {
     (void)framebuffer_release_graphics(&drm_display_owner, 0);
 }
 
+/* Everything this client made goes with it, and the pages are reference counted. */
 void drm_file_close(struct file *file) {
-    (void)file;
-    /* Buffers outlive the descriptor deliberately: a mapping may still be in
-       use, and the pages are reference counted. Ownership of the display is
-       handled by drm_device_close(), which the VFS calls with the node. */
+    if (!file) return;
+    for (int index = 0; index < DRM_MAX_FRAMEBUFFERS; index++) {
+        if (!framebuffers[index].id || framebuffers[index].owner != file) continue;
+        if (active_fb_id == framebuffers[index].id) active_fb_id = 0;
+        struct drm_dumb_buffer *buffer = buffer_find(framebuffers[index].handle);
+        memset(&framebuffers[index], 0, sizeof(framebuffers[index]));
+        if (buffer) buffer_release(buffer);
+    }
+    for (unsigned index = 0; index < DRM_MAX_BLOBS; index++)
+        if (blobs[index].id && blobs[index].owner == file)
+            memset(&blobs[index], 0, sizeof(blobs[index]));
+    for (int index = 0; index < DRM_MAX_BUFFERS; index++)
+        if (buffers[index].handle && buffers[index].owner == file)
+            buffer_release(&buffers[index]);
 }
 
-/*
- * The user has switched to another virtual terminal.
- *
- * A virtio-gpu is scanning out the client's buffer directly, so the scanout has
- * to be handed back before the console draws anything -- the console paints
- * into the framebuffer the bootloader set up, and on a virtio-vga that is only
- * on the screen while no resource is bound. Without the GPU there is nothing to
- * undo: presenting is a copy, and simply not copying is enough.
- */
+/* Switched away, so a virtio-gpu's scanout has to be handed back explicitly. */
 void drm_display_suspend(void) {
     if (!drm_ready) return;
     drm_console_present();
 }
 
-/*
- * Put the text console on the screen.
- *
- * Without a virtio-gpu this is nothing at all: the console draws into the
- * scanout the bootloader set up and the host sees it there. With one, the
- * console has to be scanned out like any other buffer -- and it has to be done
- * again as the console changes, because a host resource is a copy of the guest
- * pages rather than a window onto them. The timer calls this while the console
- * is in front; a screenful of transfer at that rate is the same cost the
- * display had before virtio-gpu, and only while nothing else wants the screen.
- */
+/* The console is scanned out like any other buffer, and re-sent as it changes. */
 void drm_console_present(void) {
     if (!virtgpu_available()) return;
     uint32_t pitch = framebuffer_pitch();
@@ -2106,5 +1965,5 @@ void drm_console_present(void) {
 
 void drm_display_resume(void) {
     if (!drm_ready || !active_fb_id) return;
-    (void)present_framebuffer(active_fb_id);
+    (void)present_framebuffer(NULL, active_fb_id);
 }
