@@ -5,7 +5,9 @@
 #include <stdint.h>
 #include "spinlock.h"
 
+/* A power of two, because the ring wraps with a mask rather than a division. */
 #define PIPE_CAPACITY 4096
+_Static_assert((PIPE_CAPACITY & (PIPE_CAPACITY - 1)) == 0, "pipe capacity must be a power of two");
 
 struct file;
 
