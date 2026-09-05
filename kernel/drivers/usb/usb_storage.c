@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "../../include/block.h"
+#include "../../include/dma.h"
 #include "../../include/kstring.h"
 #include "../../include/pmm.h"
 #include "../../include/usb_storage.h"
@@ -38,7 +39,15 @@ extern void kprintf(const char *fmt, ...);
 
 #define USB_STORAGE_MAX 4
 /* One page of staging is 8 sectors of 512 bytes. */
-#define STAGING_SECTORS (4096U / BLOCK_SECTOR_SIZE)
+/* Four pages, because a transfer costs far more than the bytes in it. */
+/* Every SCSI command is three polled transfers -- the wrapper out, the data,
+   the status back -- and the driver spins on each one with the kernel lock
+   held, so a read split into four commands stops the machine four times. */
+/* Four rather than more because EHCI describes a transfer with five page
+   pointers and nothing larger fits in one qTD; xHCI would take more, and the
+   smaller of the two is what a single buffer can promise. */
+#define STAGING_BYTES 16384U
+#define STAGING_SECTORS (STAGING_BYTES / BLOCK_SECTOR_SIZE)
 
 struct command_block_wrapper {
     uint32_t signature;
@@ -270,10 +279,9 @@ void usb_storage_init(void) {
     if (!present) return;
 
     wrapper_page = (uint8_t *)vmm_phys_to_virt((wrapper_physical = (uint64_t)pmm_alloc_page()));
-    staging_page = (uint8_t *)vmm_phys_to_virt((staging_physical = (uint64_t)pmm_alloc_page()));
-    if (!wrapper_physical || !staging_physical) return;
+    staging_page = (uint8_t *)dma_alloc(STAGING_BYTES, 4096, &staging_physical);
+    if (!wrapper_physical || !staging_page || !staging_physical) return;
     memset(wrapper_page, 0, 4096);
-    memset(staging_page, 0, 4096);
 
     for (int index = 0; index < present && disk_count < USB_STORAGE_MAX; index++) {
         struct usb_disk *disk = &disks[disk_count];
