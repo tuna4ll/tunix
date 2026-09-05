@@ -8,6 +8,7 @@
 #include "../include/pmm.h"
 #include "../include/process.h"
 #include "../include/boot.h"
+#include "../include/block.h"
 #include "../include/procfs.h"
 #include "../include/uts.h"
 #include "../include/smp.h"
@@ -166,6 +167,24 @@ static int64_t proc_meminfo_read(struct vfs_node *node, uint64_t offset,
     text_string(&text, "Slab:           "); text_unsigned(&text, heap_allocated / 1024ULL); text_string(&text, " kB\n");
     text_string(&text, "SUnreclaim:     "); text_unsigned(&text, heap_reserved / 1024ULL); text_string(&text, " kB\n");
     text_string(&text, "KernelHeapMax:  "); text_unsigned(&text, heap_limit / 1024ULL); text_string(&text, " kB\n");
+    return text_read(&text, offset, size, output);
+}
+
+/* What the disk cost, because a read reaching the medium stops every processor
+   for as long as the driver waits on it. */
+static int64_t proc_blockstat_read(struct vfs_node *node, uint64_t offset,
+                                   size_t size, void *output) {
+    (void)node;
+    struct text_buffer text = {{0}, 0};
+    uint64_t reads = 0, sectors = 0, nanoseconds = 0;
+    block_statistics(&reads, &sectors, &nanoseconds);
+    text_string(&text, "reads ");
+    text_unsigned(&text, reads);
+    text_string(&text, "\nsectors ");
+    text_unsigned(&text, sectors);
+    text_string(&text, "\nwait_ns ");
+    text_unsigned(&text, nanoseconds);
+    text_char(&text, '\n');
     return text_read(&text, offset, size, output);
 }
 
@@ -762,6 +781,7 @@ void procfs_init(void) {
     virtual_file(root, "cpuinfo", proc_cpuinfo_read, 0);
     virtual_file(root, "meminfo", proc_meminfo_read, 0);
     virtual_file(root, "uptime", proc_uptime_read, 0);
+    virtual_file(root, "blockstat", proc_blockstat_read, 0);
     virtual_file(root, "version", proc_version_read, 0);
     virtual_file(root, "mounts", proc_mounts_read, 0);
     virtual_file(root, "stat", proc_stat_read, 0);

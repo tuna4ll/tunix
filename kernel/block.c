@@ -6,6 +6,7 @@
 #include "include/kstring.h"
 #include "include/nvme.h"
 #include "include/partition.h"
+#include "include/time.h"
 #include "include/usb_storage.h"
 
 /* See include/block.h for what this is and why the early boot read is not
@@ -140,11 +141,36 @@ void block_select_root(int index) {
     if (device_count) kprintf("BLOCK: root on %s\n", devices[root_index].dev_name);
 }
 
+/* What the medium was actually asked for. */
+/* A read reaches the device with the kernel lock held and the driver waiting on
+   it, so the count and the time are between them what a slow disk does to the
+   whole machine rather than to one process. */
+static uint64_t block_reads;
+static uint64_t block_sectors_read;
+static uint64_t block_read_ns;
+
+void block_statistics(uint64_t *reads, uint64_t *sectors, uint64_t *nanoseconds) {
+    if (reads) *reads = block_reads;
+    if (sectors) *sectors = block_sectors_read;
+    if (nanoseconds) *nanoseconds = block_read_ns;
+}
+
+static int device_read_counted(const struct block_device *device, uint64_t lba,
+                               uint32_t count, void *destination) {
+    uint64_t begun = time_uptime_ns();
+    int status = device->read(device->context, lba, count, destination);
+    uint64_t now = time_uptime_ns();
+    block_reads++;
+    block_sectors_read += count;
+    if (now > begun) block_read_ns += now - begun;
+    return status;
+}
+
 int block_read(uint64_t lba, uint32_t count, void *destination) {
     const struct block_device *device = block_root();
     if (!device || !count || !destination) return -1;
     if (lba + count > device->sectors) return -1;
-    return device->read(device->context, lba, count, destination);
+    return device_read_counted(device, lba, count, destination);
 }
 
 int block_write(uint64_t lba, uint32_t count, const void *source) {
@@ -199,7 +225,7 @@ int block_device_write_bytes(const struct block_device *device, uint64_t offset,
         }
 
         /* A partial sector is somebody else's data either side of it. */
-        if (device->read(device->context, lba, 1, sector) != 0) return -1;
+        if (device_read_counted(device, lba, 1, sector) != 0) return -1;
         size_t chunk = BLOCK_SECTOR_SIZE - within;
         if (chunk > size) chunk = size;
         memcpy(sector + within, in, chunk);
@@ -227,7 +253,7 @@ int block_device_read_bytes(const struct block_device *device, uint64_t offset,
             uint64_t whole = size / BLOCK_SECTOR_SIZE;
             if (whole > device->sectors - lba) whole = device->sectors - lba;
             if (whole > 0xFFFFU) whole = 0xFFFFU;
-            if (device->read(device->context, lba, (uint32_t)whole, out) != 0) return -1;
+            if (device_read_counted(device, lba, (uint32_t)whole, out) != 0) return -1;
             size_t moved = (size_t)whole * BLOCK_SECTOR_SIZE;
             out += moved;
             offset += moved;
@@ -235,7 +261,7 @@ int block_device_read_bytes(const struct block_device *device, uint64_t offset,
             continue;
         }
 
-        if (device->read(device->context, lba, 1, sector) != 0) return -1;
+        if (device_read_counted(device, lba, 1, sector) != 0) return -1;
         size_t chunk = BLOCK_SECTOR_SIZE - within;
         if (chunk > size) chunk = size;
         memcpy(out, sector + within, chunk);
