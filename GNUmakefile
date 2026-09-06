@@ -108,7 +108,7 @@ VOID_INSTALL ?= base-files bash coreutils util-linux findutils diffutils \
 	$(VOID_INSTALL_GRAPHICAL) $(VOID_INSTALL_GAMES)
 
 # The graphical session: weston, and what a compositor needs that nothing depends on.
-VOID_INSTALL_GRAPHICAL ?= weston mesa-dri xkeyboard-config dejavu-fonts-ttf \
+VOID_INSTALL_GRAPHICAL ?= weston mesa-dri xorg-server-xwayland xkeyboard-config dejavu-fonts-ttf \
 	seatd xcursor-vanilla-dmz
 
 # A game, and the heaviest thing here; `make image VOID_INSTALL_GAMES=` leaves it out.
