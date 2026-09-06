@@ -14,6 +14,9 @@ typedef unsigned int u32;
 #define SYS_ioctl 16
 #define SYS_nanosleep 35
 #define SYS_clock_gettime 228
+#define SYS_fork 57
+#define SYS_wait4 61
+#define SYS_exit_group 231
 #define CLOCK_MONOTONIC 1
 #define O_RDWR 2
 #define O_WRONLY_CREAT_TRUNC 0x241
@@ -31,6 +34,14 @@ static inline s64 syscall2(s64 n, s64 a, s64 b) {
 static inline s64 syscall3(s64 n, s64 a, s64 b, s64 c) {
     s64 r;
     __asm__ volatile("syscall" : "=a"(r) : "a"(n), "D"(a), "S"(b), "d"(c)
+                     : "rcx", "r11", "memory");
+    return r;
+}
+
+static inline s64 syscall4(s64 n, s64 a, s64 b, s64 c, s64 d) {
+    s64 r;
+    register s64 r10 __asm__("r10") = d;
+    __asm__ volatile("syscall" : "=a"(r) : "a"(n), "D"(a), "S"(b), "d"(c), "r"(r10)
                      : "rcx", "r11", "memory");
     return r;
 }
@@ -245,7 +256,14 @@ static void test_pointer_survives_a_stall(u64 stall_ns) {
  * the ordinary gap between the hardware taking a frame and the writer being
  * scheduled -- which stopped the stream for good and was silence, not crackle.
  */
-static void test_continuous_playback(u64 duration_ns) {
+static int present_frames_until(u64 deadline_ns, unsigned *commits);
+static void test_playback(u64 duration_ns, int presenting);
+
+static void test_continuous_playback(u64 duration_ns) { return test_playback(duration_ns, 0); }
+
+/* `presenting` forks a second process that pushes frames through the kernel for
+   as long as the sound plays, which is the shape a game has. */
+static void test_playback(u64 duration_ns, int presenting) {
     if (syscall3(SYS_ioctl, pcm, (s64)IOC(0u, 'A', NR_PREPARE, 0), 0) != 0) {
         put("SOUND prepare failed\n"); return;
     }
@@ -259,12 +277,25 @@ static void test_continuous_playback(u64 duration_ns) {
     if (status(&begin_status) != 0) { put("SOUND status failed\n"); return; }
 
     u64 begun = now_ns();
+    s64 painter = -1;
+    if (presenting) {
+        painter = syscall1(SYS_fork, 0);
+        if (painter == 0) {
+            unsigned commits = 0;
+            (void)present_frames_until(begun + duration_ns, &commits);
+            (void)syscall1(SYS_exit_group, 0);
+        }
+    }
     u64 written = 0;
     unsigned stalls = 0;
+    unsigned empty = 0;         /* the ring ran dry: what a gap in the sound is */
+    unsigned nearly = 0;        /* under a period left: the edge of one */
     struct pcm_status now_status = begin_status;
     while (now_ns() - begun < duration_ns) {
         if (status(&now_status) != 0) break;
         if (now_status.state != 3) { stalls++; break; }
+        if (now_status.avail >= BUFFER_FRAMES) empty++;
+        else if (now_status.avail > BUFFER_FRAMES - PERIOD_FRAMES) nearly++;
         u64 room = now_status.avail;
         if (room > PERIOD_FRAMES) room = PERIOD_FRAMES;
         if (room) {
@@ -289,6 +320,12 @@ static void test_continuous_playback(u64 duration_ns) {
     put_signed((s64)advanced);
     put(" expected=");
     put_signed((s64)expected);
+    if (painter > 0) (void)syscall4(SYS_wait4, painter, 0, 0, 0);
+    put(presenting ? " presenting=yes" : " presenting=no");
+    put(" ran_dry=");
+    put_signed((s64)empty);
+    put(" nearly_dry=");
+    put_signed((s64)nearly);
     put(" state=");
     put_signed(now_status.state);
     put(now_status.state == 3 ? " (RUNNING)" : " (STOPPED)");
@@ -341,6 +378,101 @@ static void test_xrun_recovery(void) {
     put(advanced > 1000 ? " PLAYING\n" : " SILENT\n");
 }
 
+
+/* --- the frame the sound has to survive ---------------------------------- */
+/*
+ * A second process presenting frames as fast as it can, which is what a game
+ * does while it plays sound. Every present is a whole screen through the
+ * kernel, and audio that runs dry underneath it is what crackles.
+ */
+#define DRM_TYPE 'd'
+#define NR_MODE_GETCRTC 0xa1
+#define NR_MODE_CREATE_DUMB 0xb2
+#define NR_MODE_ADDFB2 0xb8
+#define NR_MODE_ATOMIC 0xbc
+#define NR_MODE_CREATEPROPBLOB 0xbd
+
+struct drm_mode_crtc {
+    u64 set_connectors_ptr; u32 count_connectors;
+    u32 crtc_id, fb_id, x, y, gamma_size, mode_valid;
+    struct drm_mode_modeinfo_snd { char bytes[68]; } mode;
+};
+
+struct drm_mode_create_dumb {
+    u32 height, width, bpp, flags; u32 handle, pitch; u64 size;
+};
+
+struct drm_mode_fb_cmd2 {
+    u32 fb_id, width, height, pixel_format, flags;
+    u32 handles[4]; u32 pitches[4]; u32 offsets[4]; u64 modifier[4];
+};
+
+struct drm_mode_create_blob { u64 data; u32 length; u32 blob_id; };
+
+struct drm_mode_atomic {
+    u32 flags; u32 count_objs;
+    u64 objs_ptr;
+    u64 count_props_ptr;
+    u64 props_ptr;
+    u64 prop_values_ptr;
+    u64 reserved;
+    u64 user_data;
+};
+
+#define DRM_IOWR(nr, type) IOC(3u, DRM_TYPE, nr, sizeof(type))
+
+static int present_frames_until(u64 deadline_ns, unsigned *commits) {
+    int card = (int)syscall3(SYS_open, (s64)"/dev/dri/card0", O_RDWR, 0);
+    if (card < 0) return -1;
+
+    struct drm_mode_crtc crtc;
+    for (unsigned i = 0; i < sizeof(crtc); i++) ((char *)&crtc)[i] = 0;
+    crtc.crtc_id = 1;
+    if (syscall3(SYS_ioctl, card, (s64)DRM_IOWR(NR_MODE_GETCRTC, struct drm_mode_crtc),
+                 (s64)&crtc) != 0) return -1;
+    unsigned short width = *(unsigned short *)(crtc.mode.bytes + 4);
+    unsigned short height = *(unsigned short *)(crtc.mode.bytes + 14);
+
+    struct drm_mode_create_dumb create;
+    for (unsigned i = 0; i < sizeof(create); i++) ((char *)&create)[i] = 0;
+    create.width = width; create.height = height; create.bpp = 32;
+    if (syscall3(SYS_ioctl, card, (s64)DRM_IOWR(NR_MODE_CREATE_DUMB, struct drm_mode_create_dumb),
+                 (s64)&create) != 0) return -1;
+
+    struct drm_mode_fb_cmd2 fb;
+    for (unsigned i = 0; i < sizeof(fb); i++) ((char *)&fb)[i] = 0;
+    fb.width = width; fb.height = height; fb.pixel_format = 0x34325258;
+    fb.handles[0] = create.handle; fb.pitches[0] = create.pitch;
+    if (syscall3(SYS_ioctl, card, (s64)DRM_IOWR(NR_MODE_ADDFB2, struct drm_mode_fb_cmd2),
+                 (s64)&fb) != 0) return -1;
+
+    struct drm_mode_create_blob blob;
+    for (unsigned i = 0; i < sizeof(blob); i++) ((char *)&blob)[i] = 0;
+    blob.data = (u64)crtc.mode.bytes; blob.length = 68;
+    if (syscall3(SYS_ioctl, card, (s64)DRM_IOWR(NR_MODE_CREATEPROPBLOB, struct drm_mode_create_blob),
+                 (s64)&blob) != 0) return -1;
+
+    u32 objs[3]   = { 1, 2, 4 };
+    u32 counts[3] = { 2, 1, 10 };
+    u32 props[13] = { 11, 12, 15, 14, 13, 16, 17, 18, 19, 20, 21, 22, 23 };
+    u64 values[13] = { 1, blob.blob_id, 1, fb.fb_id, 1,
+                       0, 0, (u64)width << 16, (u64)height << 16, 0, 0, width, height };
+    struct drm_mode_atomic atomic;
+    for (unsigned i = 0; i < sizeof(atomic); i++) ((char *)&atomic)[i] = 0;
+    atomic.count_objs = 3;
+    atomic.objs_ptr = (u64)objs;
+    atomic.count_props_ptr = (u64)counts;
+    atomic.props_ptr = (u64)props;
+    atomic.prop_values_ptr = (u64)values;
+
+    while (now_ns() < deadline_ns) {
+        if (syscall3(SYS_ioctl, card, (s64)DRM_IOWR(NR_MODE_ATOMIC, struct drm_mode_atomic),
+                     (s64)&atomic) != 0) break;
+        (*commits)++;
+    }
+    return 0;
+}
+
 static int run(void) {
     results_fd = (int)syscall3(SYS_open, (s64)"/tunix-soundtest-results.txt",
                                O_WRONLY_CREAT_TRUNC, 0644);
@@ -366,11 +498,23 @@ static int run(void) {
     put("\n");
 
     /* Inside a lap, which always worked, and then past one, which did not. */
-    test_continuous_playback(1000000000UL);
+    test_continuous_playback(5000000000UL);
+    test_playback(5000000000UL, 1);
     test_xrun_recovery();
     test_pointer_survives_a_stall(40000000UL);
     test_pointer_survives_a_stall(200000000UL);
     test_pointer_survives_a_stall(500000000UL);
+
+    /* Ends starved on purpose and stays that way: whatever the card plays from
+       here is what an underrun sounds like, and the tail of the recording is
+       checked for it. A ring nobody refills is replayed by the engine for ever
+       unless the driver silences what is in front of the writer. */
+    if (syscall3(SYS_ioctl, pcm, (s64)IOC(0u, 'A', NR_PREPARE, 0), 0) == 0) {
+        struct writei burst = { 0, tone, BUFFER_FRAMES };
+        (void)syscall3(SYS_ioctl, pcm, (s64)IOW(NR_WRITEI, struct writei), (s64)&burst);
+        (void)syscall3(SYS_ioctl, pcm, (s64)IOC(0u, 'A', NR_START, 0), 0);
+        sleep_ns(2000000000UL);
+    }
     put("SOUNDTEST DONE\n");
     return 0;
 }

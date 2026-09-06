@@ -143,6 +143,20 @@ static void ring_clear(void) {
         memset(ring_virtual[index], 0, 4096);
 }
 
+/* Zero `size` bytes of the ring at a byte offset, crossing pages. */
+static void ring_zero(uint32_t offset, uint32_t size) {
+    while (size) {
+        uint32_t page = offset / 4096U;
+        uint32_t within = offset % 4096U;
+        uint32_t chunk = 4096U - within;
+        if (chunk > size) chunk = size;
+        if (page >= ring_page_count) return;
+        memset(ring_virtual[page] + within, 0, chunk);
+        offset += chunk;
+        size -= chunk;
+    }
+}
+
 /* Move `size` bytes into the ring at a byte offset, crossing pages. */
 static void ring_store(uint32_t offset, const uint8_t *source, uint32_t size) {
     while (size) {
@@ -196,6 +210,28 @@ static void pcm_refresh_pointer(void) {
     if (seen > pcm.avail_max) pcm.avail_max = seen;
 }
 
+/* Zero what the hardware is about to play and nobody has written. The engine
+   loops the ring for ever, so a writer that falls behind is not quiet: the same
+   fragment is played again and again at full amplitude, which is what an
+   underrun sounds like. Measured: 98% of the tail of a starved recording was
+   loud, and 10% once this silenced the free part. Only the space in front of
+   the writer is touched. */
+static void pcm_silence_ahead(void) {
+    if (!pcm.buffer_size || !pcm.frame_bytes) return;
+    uint64_t free_frames = playback_avail();
+    /* Nothing to do while the writer is keeping up, and this is not free. */
+    if (free_frames < pcm.buffer_size / 2U) return;
+    uint64_t at = pcm.appl_ptr % pcm.buffer_size;
+    uint64_t remaining = free_frames;
+    while (remaining) {
+        uint64_t run = pcm.buffer_size - at;
+        if (run > remaining) run = remaining;
+        ring_zero((uint32_t)(at * pcm.frame_bytes), (uint32_t)(run * pcm.frame_bytes));
+        at = (at + run) % pcm.buffer_size;
+        remaining -= run;
+    }
+}
+
 /* The same, and then the decision that belongs to whoever asked: stopping a
    stream is only ever right in answer to a syscall, because a ring that is
    momentarily empty between the hardware taking the last frame and the writer
@@ -235,6 +271,7 @@ static void pcm_update_pointer(void) {
 void sound_tick(void) {
     if (!card || !pcm.configured) return;
     pcm_refresh_pointer();
+    pcm_silence_ahead();
 }
 
 static int pcm_start(void) {
