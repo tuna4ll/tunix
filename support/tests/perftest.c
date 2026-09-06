@@ -180,10 +180,15 @@ static void test_syscall_cost(void) {
         put("\n");
     }
 
+    /* Every one of them is blocked in read(), which is the case a signal used to
+       be lost in: a rewound syscall wakes, re-runs, finds nothing and sleeps
+       again without ever reaching the code that delivers one. Half of these
+       stayed alive for as long as anything waited. */
+    u64 kill_begun = now_ns();
     for (unsigned i = 0; i < started; i++) (void)syscall2(SYS_kill, idle[i], SIGKILL);
     /* WNOHANG and a bound, because a blocking wait4 here does not come back. */
     unsigned reaped = 0;
-    for (unsigned round = 0; round < 200 && reaped < started; round++) {
+    for (unsigned round = 0; round < 500 && reaped < started; round++) {
         for (;;) {
             s64 got = syscall4(SYS_wait4, -1, 0, 1 /* WNOHANG */, 0);
             if (got <= 0) break;
@@ -195,6 +200,8 @@ static void test_syscall_cost(void) {
     put_number(started);
     put(" reaped=");
     put_number(reaped);
+    put(" ms=");
+    put_number((now_ns() - kill_begun) / 1000000UL);
     put("\n");
     (void)syscall1(SYS_close, channel[0]);
     (void)syscall1(SYS_close, channel[1]);

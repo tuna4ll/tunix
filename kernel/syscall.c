@@ -876,6 +876,14 @@ static int retry_io_wait(struct syscall_frame *frame, uint64_t syscall_number,
         clear_io_wait(waiting);
         return 0;
     }
+    /* A signal is only looked at on the way back to user mode, which a syscall
+       that rewinds and sleeps never reaches; see
+       process_signal_interrupts_wait(). */
+    if (process_signal_interrupts_wait()) {
+        clear_io_wait(waiting);
+        frame->rax = (uint64_t)-(int64_t)EINTR;
+        return 1;
+    }
 
     frame->user_rip -= 2U;
     frame->rax = syscall_number;
@@ -3837,6 +3845,12 @@ static int64_t sys_sigprocmask(int how, uint64_t user_set, uint64_t user_old_set
  */
 static void block_and_retry(struct syscall_frame *frame, uint64_t syscall_number,
                             struct file *file, int writing) {
+    /* Answer rather than sleep when a signal is waiting: a rewound syscall goes
+       back to sleep without ever reaching the code that delivers one. */
+    if (process_signal_interrupts_wait()) {
+        frame->rax = (uint64_t)-(int64_t)EINTR;
+        return;
+    }
     frame->user_rip -= 2U;
     frame->rax = syscall_number;
     struct process *process = process_current();
@@ -4760,6 +4774,10 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
                  * which is exactly what a display manager expects of
                  * VT_WAITACTIVE, and what it would otherwise spin on.
                  */
+                if (process_signal_interrupts_wait()) {
+                    frame->rax = (uint64_t)-(int64_t)EINTR;
+                    break;
+                }
                 frame->user_rip -= 2U;
                 frame->rax = SYS_IOCTL;
                 struct process *waiter = process_current();

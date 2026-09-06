@@ -34,19 +34,10 @@ struct vfs_node;
 struct pty_pair;
 struct interrupt_frame;
 
-/*
- * One mapped range of the address space.
- *
- * The kernel used to infer this from the page tables, which can only say what
- * is resident, not what a range is *for*. That is why anonymous memory had to
- * be committed at mmap time -- an untouched page and an unmapped one looked
- * identical -- and why finding a free range meant walking every page of every
- * candidate. With the ranges written down, memory is handed out as address
- * space and paid for a page at a time when it is touched.
- *
- * The list is sorted by start address and never overlaps; splitting is what
- * munmap and mprotect do to it.
- */
+/* One mapped range of the address space, sorted by start and never
+   overlapping. The page tables can only say what is resident, not what a range
+   is for, so anonymous memory used to be committed at mmap time; with the
+   ranges written down it is paid for a page at a time. */
 #define VM_ANONYMOUS 0x1U
 /* The range maps the file's cached contents rather than a copy of them, so the
    area holds one vfs_map_ref() on the node for as long as it exists. Splitting
@@ -228,14 +219,9 @@ struct process *process_current(void);
 void process_dump_all(void);
 struct process *process_find(uint64_t pid);
 
-/*
- * Scheduling policy, per thread. `tid` of 0 means the calling thread, and a
- * thread is what these address: pthread_setschedparam passes a thread id, and
- * an audio mixer raising its own priority is the whole point of them.
- *
- * SCHED_FIFO and SCHED_RR both mean "before everything in the ordinary band,
- * highest number first"; see process.c for why FIFO is not exactly itself.
- */
+/* Scheduling policy, per thread -- pthread_setschedparam passes a thread id.
+   SCHED_FIFO and SCHED_RR both mean "before everything in the ordinary band,
+   highest number first"; see process.c for why FIFO is not exactly itself. */
 #define PROCESS_SCHED_OTHER 0
 #define PROCESS_SCHED_FIFO 1
 #define PROCESS_SCHED_RR 2
@@ -314,6 +300,10 @@ void process_set_sigaction(int signal_number, const struct tunix_sigaction *acti
 int process_setpgid(int64_t pid, int64_t pgid);
 int64_t process_setsid(void);
 void process_prepare_user_return(struct syscall_frame *frame);
+
+/* Whether a syscall that is about to block should answer EINTR instead: a
+   sleeping process is resumed without its pending signals being looked at. */
+int process_signal_interrupts_wait(void);
 int process_sigreturn(struct syscall_frame *frame);
 /* A wake that reaches every waiter, whichever bits it asked for. */
 #define FUTEX_BITSET_MATCH_ANY 0xFFFFFFFFU
@@ -323,33 +313,18 @@ int64_t process_futex_wait(struct syscall_frame *frame, uint64_t address,
                            uint32_t bitset);
 int process_futex_wake(uint64_t address, int maximum, uint32_t bitset);
 
-/*
- * Sleep on an opaque channel -- any stable kernel address identifying what is
- * being waited for. Returns 0 once the caller has been woken, or -EAGAIN when
- * nothing else was runnable and switching away would have hung the machine; in
- * that case the caller must fall back to retrying.
- *
- * Callers rewind the syscall so it re-executes on wake, which means a wakeup is
- * only a hint: the condition is always re-tested, so a spurious wake is safe.
- */
+/* Sleep on an opaque channel: any stable kernel address naming what is waited
+   for. Returns 0 once woken, or -EAGAIN when nothing else was runnable, in
+   which case the caller must retry. A wakeup is only a hint -- the caller
+   rewinds the syscall, so the condition is always re-tested. */
 int process_sleep_on(struct syscall_frame *frame, const void *channel);
 int process_wake_all(const void *channel);
-/*
- * The channel a syscall waits on when it has nothing better.
- *
- * poll() and select() wait on several descriptors at once, so no single
- * object's wait queue is the right one to sleep on, and some descriptors --
- * a TCP socket, say -- have no queue at all because nothing signals them.
- * Both used to be answered by rewinding the syscall and yielding, which is
- * a spin: an idle machine with a shell at a prompt on each terminal burned
- * three of its four processors doing nothing.
- *
- * So they sleep here instead, and this is woken generously: by any other
- * wakeup (process_wake_all), and by the tick, which is what covers a source
- * that signals nothing at all. Every sleeper re-tests its own condition and
- * its own deadline on waking, so waking too often is only ever wasted work
- * -- and waking too rarely, which a per-source queue would risk, is a hang.
- */
+/* The channel a syscall waits on when it has nothing better: poll() and
+   select() watch several descriptors, and some have no queue at all. Woken
+   generously -- by any other wakeup and by the tick -- because every sleeper
+   re-tests its own condition, so waking too often only wastes work while
+   waking too rarely is a hang. Rewinding and yielding instead was a spin that
+   burned three processors on an idle machine. */
 const void *process_io_wait_channel(void);
 int process_wake_io(void);
 uint32_t process_get_umask(void);
