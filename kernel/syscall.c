@@ -13,6 +13,7 @@
 #include "include/input.h"
 #include "include/heap.h"
 #include "include/klock.h"
+#include "include/klog.h"
 #include "include/percpu.h"
 #include "include/smp.h"
 #include "include/kstring.h"
@@ -172,6 +173,7 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define SYS_GETTIMEOFDAY 96
 #define SYS_GETRLIMIT 97
 #define SYS_GETRUSAGE 98
+#define SYS_SYSLOG 103
 #define SYS_GETPRIORITY 140
 #define SYS_SETPRIORITY 141
 #define SYS_GETUID 102
@@ -3982,6 +3984,62 @@ static int64_t sys_getrusage(uint64_t user_buffer) {
     return copy_to_user(user_buffer, value, sizeof(value)) == 0 ? 0 : -EFAULT;
 }
 
+/* syslog(2), which is how dmesg reads the log: it asks for this before it
+   falls back to anything, so a kernel that keeps a log and publishes
+   /dev/kmsg still answered "Function not implemented". Reading destructively
+   is not modelled -- the ring is one nothing else consumes -- so READ and
+   READ_CLEAR answer what READ_ALL does, and CLEAR is accepted and does
+   nothing. */
+#define SYSLOG_ACTION_CLOSE 0
+#define SYSLOG_ACTION_OPEN 1
+#define SYSLOG_ACTION_READ 2
+#define SYSLOG_ACTION_READ_ALL 3
+#define SYSLOG_ACTION_READ_CLEAR 4
+#define SYSLOG_ACTION_CLEAR 5
+#define SYSLOG_ACTION_CONSOLE_OFF 6
+#define SYSLOG_ACTION_CONSOLE_ON 7
+#define SYSLOG_ACTION_CONSOLE_LEVEL 8
+#define SYSLOG_ACTION_SIZE_UNREAD 9
+#define SYSLOG_ACTION_SIZE_BUFFER 10
+
+static int64_t sys_syslog(int action, uint64_t user_buffer, int length) {
+    switch (action) {
+    case SYSLOG_ACTION_CLOSE:
+    case SYSLOG_ACTION_OPEN:
+    case SYSLOG_ACTION_CLEAR:
+        return 0;
+    case SYSLOG_ACTION_CONSOLE_OFF: klog_console(0); return 0;
+    case SYSLOG_ACTION_CONSOLE_ON: klog_console(1); return 0;
+    case SYSLOG_ACTION_CONSOLE_LEVEL: return 0;
+    case SYSLOG_ACTION_SIZE_UNREAD: return 0;
+    case SYSLOG_ACTION_SIZE_BUFFER: return (int64_t)klog_size();
+    case SYSLOG_ACTION_READ:
+    case SYSLOG_ACTION_READ_ALL:
+    case SYSLOG_ACTION_READ_CLEAR: {
+        if (length < 0 || !user_buffer) return -EINVAL;
+        size_t held = klog_size();
+        size_t want = (size_t)length;
+        /* The tail, as Linux gives it: a buffer smaller than the log gets the
+           most recent bytes rather than the oldest. */
+        uint64_t offset = held > want ? held - want : 0;
+        if (want > held - offset) want = held - offset;
+        static char staging[1024];
+        size_t produced = 0;
+        while (produced < want) {
+            size_t chunk = want - produced;
+            if (chunk > sizeof(staging)) chunk = sizeof(staging);
+            int64_t got = klog_read(offset + produced, chunk, staging);
+            if (got <= 0) break;
+            if (copy_to_user(user_buffer + produced, staging, (size_t)got) != 0)
+                return produced ? (int64_t)produced : -EFAULT;
+            produced += (size_t)got;
+        }
+        return (int64_t)produced;
+    }
+    default: return -EINVAL;
+    }
+}
+
 static int64_t sys_uname(uint64_t user_buffer) {
     struct linux_utsname value;
     memset(&value, 0, sizeof(value));
@@ -5172,6 +5230,10 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         case SYS_TKILL: frame->rax = (uint64_t)process_send_signal_checked((int64_t)frame->rdi, (int)frame->rsi); break;
         case SYS_TGKILL: frame->rax = (uint64_t)process_send_signal_checked((int64_t)frame->rsi, (int)frame->rdx); break;
         case SYS_UNAME: frame->rax = (uint64_t)sys_uname(frame->rdi); break;
+        case SYS_SYSLOG:
+            frame->rax = (uint64_t)sys_syslog((int)frame->rdi, frame->rsi,
+                                              (int)frame->rdx);
+            break;
         case SYS_SETHOSTNAME:
             frame->rax = (uint64_t)set_machine_name(0, frame->rdi, frame->rsi);
             break;

@@ -430,6 +430,7 @@ static void test_unmap_shootdown(u64 pages, unsigned helpers) {
 }
 
 #define SYS_dup 32
+#define SYS_syslog 103
 
 /* Whether one syscall instruction ever runs twice. dup() takes the lowest free
    descriptor, so the same call from the same state must answer the same number
@@ -584,6 +585,25 @@ static void test_orphan_reaped(unsigned rounds) {
     put("\n");
 }
 
+/* Whether dmesg can read the kernel's log. It asks syslog(2) before it falls
+   back to anything, so a kernel without it answers "Function not implemented"
+   and the log cannot be read by the one program everybody reads it with. */
+static void test_syslog(void) {
+    static char text[4096];
+    s64 held = syscall3(SYS_syslog, 10 /* SIZE_BUFFER */, 0, 0);
+    s64 got = syscall3(SYS_syslog, 3 /* READ_ALL */, (s64)text, sizeof(text));
+    unsigned lines = 0;
+    for (s64 at = 0; at < got; at++) if (text[at] == '\n') lines++;
+    put("SYSLOG size=");
+    put_number((u64)(held < 0 ? -held : held));
+    put(" read=");
+    put_number((u64)(got < 0 ? -got : got));
+    put(got < 0 ? " (errno)" : "");
+    put(" lines=");
+    put_number(lines);
+    put(got > 0 && lines > 0 ? " READABLE\n" : " UNREADABLE\n");
+}
+
 /* One number out of a /proc file that holds `name value` lines. */
 static u64 proc_value(const char *path, const char *name) {
     char text[512];
@@ -697,6 +717,7 @@ static int run_all(void) {
             (void)syscall1(SYS_close, klock);
         }
     }
+    test_syslog();
     test_syscall_once(20000);
     test_syscall_cost();
     put("PERF DONE\n");
