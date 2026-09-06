@@ -544,6 +544,46 @@ static void report_lock_holds(void) { report_lock_holds_as("KLOCK"); }
 /* What boot itself held, when the command line asked for the measurement. */
 static void report_boot_lock_holds(void) { report_lock_holds_as("KLOCKBOOT"); }
 
+/* Whether a process whose parent has gone can still be reaped.
+   A child that outlives its parent belongs to init, which is the only thing
+   left that can wait for it -- and a supervisor makes one of these every time
+   it starts a service. */
+static void test_orphan_reaped(unsigned rounds) {
+    unsigned made = 0;
+    for (unsigned round = 0; round < rounds; round++) {
+        s64 child = syscall1(SYS_fork, 0);
+        if (child == 0) {
+            s64 grandchild = syscall1(SYS_fork, 0);
+            if (grandchild == 0) {
+                /* Outlives its parent, so it is an orphan by the time it goes. */
+                sleep_ns(60000000UL);
+                (void)syscall1(SYS_exit_group, 0);
+            }
+            (void)syscall1(SYS_exit_group, 0);
+        }
+        if (child < 0) break;
+        made += 2;
+    }
+
+    unsigned reaped = 0;
+    u64 begun = now_ns();
+    for (unsigned round = 0; round < 400 && reaped < made; round++) {
+        for (;;) {
+            s64 got = syscall4(SYS_wait4, -1, 0, 1 /* WNOHANG */, 0);
+            if (got <= 0) break;
+            reaped++;
+        }
+        if (reaped < made) sleep_ns(20000000UL);
+    }
+    put("ORPHAN made=");
+    put_number(made);
+    put(" reaped=");
+    put_number(reaped);
+    put(" ms=");
+    put_number((now_ns() - begun) / 1000000UL);
+    put("\n");
+}
+
 /* One number out of a /proc file that holds `name value` lines. */
 static u64 proc_value(const char *path, const char *name) {
     char text[512];
@@ -624,6 +664,7 @@ static int run_all(void) {
     /* First, before anything else has made a process: an extra child is only
        evidence if nothing else could have left one behind. */
     test_fork_once(200);
+    test_orphan_reaped(50);
     test_fork_cost(300, 0);
     test_thread_cost(300);
     test_pipe_throughput(4UL * 1024 * 1024, 64);
