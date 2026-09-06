@@ -1318,14 +1318,7 @@ static int present_framebuffer(const struct file *client, uint32_t fb_id) {
        this succeeds. */
     if (!framebuffer_graphics_foreground(&drm_display_owner)) return 0;
 
-    /* The same bargain as the blit below: the host is waited on with the kernel
-       lock given up, and drm_enter() is what keeps a second processor out. */
-    if (virtgpu_available()) {
-        int gpu_released = kernel_lock_release_for_wait();
-        int shown = present_via_virtgpu(fb, buffer) == 0;
-        kernel_lock_retake_after_wait(gpu_released);
-        if (shown) return 0;
-    }
+    if (virtgpu_available() && present_via_virtgpu(fb, buffer) == 0) return 0;
 
     uint8_t *scanout = framebuffer_scanout();
     if (!scanout) return -EPERM;

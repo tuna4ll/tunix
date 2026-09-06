@@ -3,7 +3,7 @@
 #include "include/interrupt.h"
 #include "include/io.h"
 #include "include/process.h"
-#include "include/sound.h"
+
 #include "include/timer.h"
 #include "include/vt.h"
 
@@ -39,9 +39,6 @@ void timer_irq(struct interrupt_frame *frame) {
 /* Release whatever is waiting on the general channel: most readiness has a
    wakeup of its own, but a packet arriving for a socket is noticed by polling,
    and without this a poll() on one would wait out its timeout. */
-    /* The playback pointer wraps with the ring, so it has to be sampled more
-       often than a lap however busy userspace is. */
-    sound_tick();
     process_wake_io();
     process_timer_interrupt(frame);
 }

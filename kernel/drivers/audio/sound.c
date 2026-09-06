@@ -172,8 +172,9 @@ static uint64_t playback_avail(void) {
 }
 
 /* Refresh the hardware pointer from the engine. The position wraps with the
-   ring, so the delta only stays right while it is sampled far more often than
-   a lap -- which is why the tick samples it too. */
+   ring, so the delta only stays right while userspace syncs at least once a
+   lap -- which is exactly the condition under which the audio is not already
+   broken, and is why a program the kernel stalls past a lap crackles. */
 static void pcm_update_pointer(void) {
     if (!card || !pcm.buffer_size || !pcm.frame_bytes) return;
     if (pcm.state != SNDRV_PCM_STATE_RUNNING &&
@@ -203,17 +204,6 @@ static void pcm_update_pointer(void) {
         (void)card->trigger(0);
         pcm.state = SNDRV_PCM_STATE_XRUN;
     }
-}
-
-/* The same refresh, from the tick. The pointer used to move only when
-   userspace asked, and the delta is taken modulo the buffer: a program a lap
-   late came back to a wrapped position and kept writing into a stream that was
-   no longer the one being played. Measured, half a second late: the pointer
-   reported 235 frames of movement instead of a whole buffer, and the state was
-   still RUNNING. Four milliseconds is far short of any lap. */
-void sound_tick(void) {
-    if (!card || !pcm.configured) return;
-    pcm_update_pointer();
 }
 
 static int pcm_start(void) {

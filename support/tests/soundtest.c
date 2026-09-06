@@ -238,6 +238,63 @@ static void test_pointer_survives_a_stall(u64 stall_ns) {
     put("\n");
 }
 
+/*
+ * Playback that is fed properly, which must not be stopped by anything the
+ * kernel does on its own. The tick samples the pointer between syscalls, and
+ * a tick that also decided when the ring had run dry declared an underrun on
+ * the ordinary gap between the hardware taking a frame and the writer being
+ * scheduled -- which stopped the stream for good and was silence, not crackle.
+ */
+static void test_continuous_playback(u64 duration_ns) {
+    if (syscall3(SYS_ioctl, pcm, (s64)IOC(0u, 'A', NR_PREPARE, 0), 0) != 0) {
+        put("SOUND prepare failed\n"); return;
+    }
+    struct writei first = { 0, tone, BUFFER_FRAMES };
+    if (syscall3(SYS_ioctl, pcm, (s64)IOW(NR_WRITEI, struct writei), (s64)&first) < 0) {
+        put("SOUND writei failed\n"); return;
+    }
+    (void)syscall3(SYS_ioctl, pcm, (s64)IOC(0u, 'A', NR_START, 0), 0);
+
+    struct pcm_status begin_status;
+    if (status(&begin_status) != 0) { put("SOUND status failed\n"); return; }
+
+    u64 begun = now_ns();
+    u64 written = 0;
+    unsigned stalls = 0;
+    struct pcm_status now_status = begin_status;
+    while (now_ns() - begun < duration_ns) {
+        if (status(&now_status) != 0) break;
+        if (now_status.state != 3) { stalls++; break; }
+        u64 room = now_status.avail;
+        if (room > PERIOD_FRAMES) room = PERIOD_FRAMES;
+        if (room) {
+            struct writei more = { 0, tone, room };
+            if (syscall3(SYS_ioctl, pcm, (s64)IOW(NR_WRITEI, struct writei),
+                         (s64)&more) < 0) { stalls++; break; }
+            written += room;
+        }
+        sleep_ns(5000000UL);
+    }
+    u64 elapsed = now_ns() - begun;
+    (void)status(&now_status);
+    u64 advanced = now_status.hw_ptr - begin_status.hw_ptr;
+    u64 expected = elapsed / 1000000UL * RATE / 1000UL;
+    (void)syscall3(SYS_ioctl, pcm, (s64)IOC(0u, 'A', NR_DROP, 0), 0);
+
+    put("SOUND played_ms=");
+    put_signed((s64)(elapsed / 1000000UL));
+    put(" frames_written=");
+    put_signed((s64)written);
+    put(" hw_advanced=");
+    put_signed((s64)advanced);
+    put(" expected=");
+    put_signed((s64)expected);
+    put(" state=");
+    put_signed(now_status.state);
+    put(now_status.state == 3 ? " (RUNNING)" : " (STOPPED)");
+    put(stalls ? " STALLED\n" : "\n");
+}
+
 static int run(void) {
     results_fd = (int)syscall3(SYS_open, (s64)"/tunix-soundtest-results.txt",
                                O_WRONLY_CREAT_TRUNC, 0644);
@@ -263,6 +320,7 @@ static int run(void) {
     put("\n");
 
     /* Inside a lap, which always worked, and then past one, which did not. */
+    test_continuous_playback(1000000000UL);
     test_pointer_survives_a_stall(40000000UL);
     test_pointer_survives_a_stall(200000000UL);
     test_pointer_survives_a_stall(500000000UL);

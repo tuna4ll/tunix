@@ -88,8 +88,4 @@ void sound_pcm_close(struct vfs_node *node);
 int64_t sound_control_ioctl(struct vfs_node *node, unsigned long request,
                             uint64_t user_argument);
 
-/* Keep the playback pointer honest between one syscall and the next: the
-   hardware position wraps, so it has to be sampled far more often than a lap. */
-void sound_tick(void);
-
 #endif
