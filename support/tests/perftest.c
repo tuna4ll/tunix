@@ -516,7 +516,7 @@ static void test_fork_once(unsigned rounds) {
 }
 
 /* Every line of /proc/klock, tagged so the harness can pick them out. */
-static void report_lock_holds(void) {
+static void report_lock_holds_as(const char *tag) {
     int fd = (int)syscall3(SYS_open, (s64)"/proc/klock", 0, 0);
     if (fd < 0) return;
     static char text[4096];
@@ -528,13 +528,19 @@ static void report_lock_holds(void) {
         if (at != got && text[at] != '\n') continue;
         if (at > start) {
             text[at] = 0;
-            put("KLOCK ");
+            put(tag);
+            put(" ");
             put(text + start);
             put("\n");
         }
         start = at + 1;
     }
 }
+
+static void report_lock_holds(void) { report_lock_holds_as("KLOCK"); }
+
+/* What boot itself held, when the command line asked for the measurement. */
+static void report_boot_lock_holds(void) { report_lock_holds_as("KLOCKBOOT"); }
 
 /* One number out of a /proc file that holds `name value` lines. */
 static u64 proc_value(const char *path, const char *name) {
@@ -633,6 +639,7 @@ static int run_all(void) {
     /* Started here, so what it reports is the reads below and not the whole
        run: a hold is how long an input event waits before anything can look
        at it, and the disk is where the long ones come from. */
+    report_boot_lock_holds();
     int klock = (int)syscall3(SYS_open, (s64)"/proc/klock", 1 /* O_WRONLY */, 0);
     if (klock >= 0) {
         (void)syscall3(SYS_write, klock, (s64)"1", 1);

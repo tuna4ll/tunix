@@ -10,6 +10,7 @@
 #include "include/framebuffer.h"
 #include "include/heap.h"
 #include "include/hwreport.h"
+#include "include/klock.h"
 #include "include/input.h"
 #include "include/ehci.h"
 #include "include/idt.h"
@@ -236,6 +237,10 @@ void kmain(const struct boot_info *boot) {
        them, and before init, because a machine that will not get that far is
        exactly the one worth asking. */
     hwreport_emit();
+    /* Before init, because the holds worth catching are the ones a startup
+       makes: by the time a shell exists to ask for the measurement, the part
+       that froze is over. */
+    if (boot_command_line_flag("klockstat")) klock_statistics_start();
     /* The last thing the kernel says on its own behalf. Everything after it
        on the console comes from init. */
     kprintf("TUNIX: starting %s\n", init_path);
