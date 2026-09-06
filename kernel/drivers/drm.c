@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "../include/klock.h"
+#include "../include/percpu.h"
 #include "../include/drm.h"
 #include "../include/file.h"
 #include "../include/framebuffer.h"
@@ -1265,6 +1266,43 @@ static int present_via_virtgpu(const struct drm_framebuffer *fb,
                            !buffer->rendered);
 }
 
+/* One processor inside this driver at a time, so the kernel lock does not have
+   to be: a whole-screen blit reads a client's buffer and writes the scanout,
+   and the only thing that would be unsafe beside it is freeing that buffer.
+   Measured through /proc/klock: 421 ms for one ioctl on real hardware. */
+static int64_t drm_dispatch_ioctl(struct file *file, unsigned long request,
+                                  uint64_t user_argument);
+
+static volatile uint32_t drm_busy_holder;   /* processor index + 1, 0 for nobody */
+
+static void drm_enter(void) {
+    uint32_t me = cpu_current()->index + 1U;
+    for (;;) {
+        uint32_t nobody = 0;
+        if (__atomic_compare_exchange_n(&drm_busy_holder, &nobody, me, 0,
+                                        __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+            return;
+        /* Waiting with the kernel lock held would put the stall back where it
+           was, so it is given up here too. */
+        int released = kernel_lock_release_for_wait();
+        while (__atomic_load_n(&drm_busy_holder, __ATOMIC_RELAXED)) {
+            kernel_lock_wait_tick();
+            __asm__ volatile("pause");
+        }
+        kernel_lock_retake_after_wait(released);
+    }
+}
+
+static void drm_leave(void) {
+    __atomic_store_n(&drm_busy_holder, 0U, __ATOMIC_RELEASE);
+}
+
+/* Whether a blit is running on another processor right now, for the paths that
+   would rather skip a frame than wait for one. */
+static int drm_is_busy(void) {
+    return __atomic_load_n(&drm_busy_holder, __ATOMIC_RELAXED) != 0;
+}
+
 /* Without a GPU there is no CRTC to reprogram, so presenting means blitting. */
 static int present_framebuffer(const struct file *client, uint32_t fb_id) {
     struct drm_framebuffer *fb = client ? framebuffer_of(client, fb_id) : framebuffer_find(fb_id);
@@ -1290,6 +1328,10 @@ static int present_framebuffer(const struct file *client, uint32_t fb_id) {
     uint32_t rows = fb->height < screen_height ? fb->height : screen_height;
     uint32_t row_bytes = fb->pitch < screen_pitch ? fb->pitch : screen_pitch;
     uint64_t started_ns = time_uptime_ns();
+    /* The copy itself, with the kernel lock given up: drm_enter() is already
+       held, so nothing can free the buffer under it, and everything else --
+       the tick, the keyboard, another processor's syscall -- runs. */
+    int released = kernel_lock_release_for_wait();
     for (uint32_t row = 0; row < rows; row++) {
         uint64_t source_offset = (uint64_t)row * fb->pitch;
         uint64_t page = source_offset / 4096ULL;
@@ -1306,7 +1348,11 @@ static int present_framebuffer(const struct file *client, uint32_t fb_id) {
             page++;
             within = 0;
         }
+        /* Interrupts are off, so a shootdown asked for by another processor is
+           only answered here. */
+        kernel_lock_wait_tick();
     }
+    kernel_lock_retake_after_wait(released);
     framebuffer_present();
     /* How fast the scanout actually takes a whole frame, said a few times:
        a blit that runs at uncached speed and one that runs at write-combining
@@ -1825,6 +1871,14 @@ int64_t drm_file_ioctl(struct file *file, unsigned long request,
     /* Which request, so a lock held for a fifth of a second has a name; see
        /proc/klock. */
     klock_note(KLOCK_NOTE_IOCTL | (uint32_t)IOCTL_NR(request));
+    drm_enter();
+    int64_t answer = drm_dispatch_ioctl(file, request, user_argument);
+    drm_leave();
+    return answer;
+}
+
+static int64_t drm_dispatch_ioctl(struct file *file, unsigned long request,
+                                  uint64_t user_argument) {
 
     switch (IOCTL_NR(request)) {
     case DRM_NR_VERSION: return ioctl_version(user_argument);
@@ -1946,18 +2000,24 @@ void drm_device_open(struct vfs_node *node) {
 /* The last descriptor is gone, so the console gets the display back. */
 void drm_device_close(struct vfs_node *node) {
     (void)node;
+    /* Takes the scanout away, which a blit is writing into. */
+    drm_enter();
     if (open_count) open_count--;
-    if (open_count) return;
-    active_fb_id = 0;
-    event_head = event_tail = event_count = 0;
-    render_contexts_release();
-    virtgpu_scanout_disable();
-    (void)framebuffer_release_graphics(&drm_display_owner, 0);
+    if (!open_count) {
+        active_fb_id = 0;
+        event_head = event_tail = event_count = 0;
+        render_contexts_release();
+        virtgpu_scanout_disable();
+        (void)framebuffer_release_graphics(&drm_display_owner, 0);
+    }
+    drm_leave();
 }
 
 /* Everything this client made goes with it, and the pages are reference counted. */
 void drm_file_close(struct file *file) {
     if (!file) return;
+    /* Frees the very buffers a blit may be reading. */
+    drm_enter();
     for (int index = 0; index < DRM_MAX_FRAMEBUFFERS; index++) {
         if (!framebuffers[index].id || framebuffers[index].owner != file) continue;
         if (active_fb_id == framebuffers[index].id) active_fb_id = 0;
@@ -1971,6 +2031,7 @@ void drm_file_close(struct file *file) {
     for (int index = 0; index < DRM_MAX_BUFFERS; index++)
         if (buffers[index].handle && buffers[index].owner == file)
             buffer_release(&buffers[index]);
+    drm_leave();
 }
 
 /* Switched away, so a virtio-gpu's scanout has to be handed back explicitly. */
@@ -1982,6 +2043,9 @@ void drm_display_suspend(void) {
 /* The console is scanned out like any other buffer, and re-sent as it changes. */
 void drm_console_present(void) {
     if (!virtgpu_available()) return;
+    /* Thirty times a second from the tick: a frame skipped while a client's
+       blit is in flight costs nothing, and waiting would put the stall back. */
+    if (drm_is_busy()) return;
     uint32_t pitch = framebuffer_pitch();
     if (!pitch) return;
     (void)virtgpu_console_present(framebuffer_physical_address() +
@@ -1992,5 +2056,7 @@ void drm_console_present(void) {
 
 void drm_display_resume(void) {
     if (!drm_ready || !active_fb_id) return;
+    drm_enter();
     (void)present_framebuffer(NULL, active_fb_id);
+    drm_leave();
 }

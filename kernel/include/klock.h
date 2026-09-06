@@ -37,6 +37,18 @@ void kernel_unlock_shared(void);
    because the mode is chosen per syscall after the stub has been entered. */
 void kernel_unlock_current(void);
 
+/* Give the lock up for the length of a wait on a device and take it again.
+   The caller must exclude other processors from its own work first, and must
+   call kernel_lock_wait_tick() around the wait so shootdown requests from
+   other processors are still answered. */
+/* Returns whether the lock was actually given up, which is what the retake
+   must be told: an interrupt handler is standing on a syscall's own claim and
+   may not release it. */
+int kernel_lock_release_for_wait(void);
+void kernel_lock_retake_after_wait(int released);
+void kernel_lock_wait_tick(void);
+int kernel_lock_in_interrupt(void);
+
 /* Whether this processor is inside the lock at all, in either mode. Only the
    exception entry path needs it, and only to tell "a fault from user code"
    (take the lock as usual) from "a fault the kernel itself took while holding

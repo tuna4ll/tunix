@@ -15,6 +15,9 @@ typedef int s32;
 #define SYS_exit_group 231
 #define SYS_wait4 61
 #define SYS_nanosleep 35
+#define SYS_pipe 22
+#define SYS_clock_gettime 228
+#define CLOCK_MONOTONIC 1
 
 #define O_RDWR 2
 /* The event read must not block: a driver that never queues one would hang this. */
@@ -227,6 +230,9 @@ static void test_atomic_advertised(void) {
 }
 
 /* An ioctl number is a direction, a size, a type and an index. */
+static void test_present_latency(u32 fb_id, u32 blob_id, unsigned short width,
+                                 unsigned short height, unsigned commits);
+
 static void test_atomic_modeset(void) {
     struct drm_mode_crtc crtc;
     for (unsigned i = 0; i < sizeof(crtc); i++) ((char *)&crtc)[i] = 0;
@@ -296,6 +302,9 @@ static void test_atomic_modeset(void) {
         put_signed((s64)*(u64 *)(event + 8));
     }
     put("\n");
+
+    /* Before the teardown, while there is something to present. */
+    test_present_latency(fb.fb_id, blob.blob_id, width, height, 200);
 
     struct drm_mode_destroy_blob kill = { blob.blob_id };
     (void)call(IOWR(NR_MODE_DESTROYPROPBLOB, struct drm_mode_destroy_blob), &kill);
@@ -545,6 +554,87 @@ static void test_size_overflow(void) {
 
     struct drm_mode_destroy_dumb drop = { create.handle, 0 };
     (void)call(IOWR(NR_MODE_DESTROY_DUMB, struct drm_mode_destroy_dumb), &drop);
+}
+
+/* Longer than a blit takes here, so a gap this size is one the lock caused. */
+#define LONG_GAP_NS 150000UL
+
+static u64 now_ns(void) {
+    struct { s64 seconds, nanoseconds; } value = {0, 0};
+    (void)syscall2(SYS_clock_gettime, CLOCK_MONOTONIC, (s64)&value);
+    return (u64)value.seconds * 1000000000UL + (u64)value.nanoseconds;
+}
+
+/* How long the rest of the machine is stopped while a frame is presented. The
+   probe is a second process doing nothing but reading the clock, which needs
+   the kernel lock -- so a gap longer than a blit takes is one the lock caused.
+   The count matters more than the maximum: under emulation a blit is shorter
+   than a scheduling quantum, so the maximum is noise. */
+static void test_present_latency(u32 fb_id, u32 blob_id, unsigned short width,
+                                 unsigned short height, unsigned commits) {
+    int channel[2];
+    if (syscall1(SYS_pipe, (s64)channel) != 0) { put("LATENCY pipe failed\n"); return; }
+
+    /* The maximum alone is noise on an emulated machine, where a blit is far
+       shorter than a scheduling quantum. What separates the two cases is how
+       *often* the clock was out of reach for longer than a blit takes. */
+    s64 child = syscall1(SYS_fork, 0);
+    if (child == 0) {
+        (void)syscall1(SYS_close, channel[0]);
+        u64 report[2] = { 0, 0 };            /* worst gap, long gaps */
+        u64 started = now_ns();
+        u64 last = started;
+        while (now_ns() - started < 400000000UL) {
+            u64 at = now_ns();
+            u64 gap = at - last;
+            if (gap > report[0]) report[0] = gap;
+            if (gap > LONG_GAP_NS) report[1]++;
+            last = at;
+        }
+        (void)syscall3(SYS_write, channel[1], (s64)report, sizeof(report));
+        (void)syscall1(SYS_exit_group, 0);
+    }
+    (void)syscall1(SYS_close, channel[1]);
+
+    u32 objs[3]   = { 1, 2, 4 };
+    u32 counts[3] = { 2, 1, 10 };
+    u32 props[13] = { 11, 12, 15, 14, 13, 16, 17, 18, 19, 20, 21, 22, 23 };
+    u64 values[13] = {
+        1, blob_id, 1, fb_id, 1,
+        0, 0, (u64)width << 16, (u64)height << 16, 0, 0, width, height,
+    };
+    struct drm_mode_atomic atomic;
+    for (unsigned i = 0; i < sizeof(atomic); i++) ((char *)&atomic)[i] = 0;
+    atomic.count_objs = 3;
+    atomic.objs_ptr = (u64)objs;
+    atomic.count_props_ptr = (u64)counts;
+    atomic.props_ptr = (u64)props;
+    atomic.prop_values_ptr = (u64)values;
+
+    u64 begun = now_ns();
+    unsigned done = 0;
+    for (unsigned round = 0; round < commits; round++) {
+        if (call(IOWR(NR_MODE_ATOMIC, struct drm_mode_atomic), &atomic) != 0) break;
+        done++;
+    }
+    u64 elapsed = now_ns() - begun;
+
+    u64 report[2] = { 0, 0 };
+    (void)syscall3(SYS_read, channel[0], (s64)report, sizeof(report));
+    (void)syscall1(SYS_close, channel[0]);
+    (void)syscall4(SYS_wait4, child, 0, 0, 0);
+
+    put("LATENCY commits=");
+    put_signed((s64)done);
+    put(" us_each=");
+    put_signed(done ? (s64)(elapsed / done / 1000UL) : 0);
+    put(" stalls_over_");
+    put_signed(LONG_GAP_NS / 1000UL);
+    put("us=");
+    put_signed((s64)report[1]);
+    put(" worst_us=");
+    put_signed((s64)(report[0] / 1000UL));
+    put("\n");
 }
 
 static int run(void) {

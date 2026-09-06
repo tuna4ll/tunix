@@ -182,6 +182,32 @@ void kernel_lock(void) {
     hold_begin();
 }
 
+/* Give the lock up for the length of a wait on a device and take it again.
+   A blit to the scanout is the caller's own work and touches nothing shared,
+   but it is slow: one DRM ioctl held this for 421 ms on real hardware, with
+   the tick and the keyboard waiting behind it. The caller must arrange its own
+   exclusion first, because dropping this lets a second processor in. */
+int kernel_lock_release_for_wait(void) {
+    if (kernel_lock_in_interrupt()) return 0;
+    if (held_mode[cpu_current()->index] != KLOCK_MODE_EXCLUSIVE) return 0;
+    kernel_unlock();
+    return 1;
+}
+
+void kernel_lock_retake_after_wait(int released) {
+    if (!released) return;
+    kernel_lock();
+}
+
+/*
+ * Interrupts are off in kernel mode, so a processor that has given the lock up
+ * for a long wait cannot answer a shootdown request as an interrupt: another
+ * processor asking would spin for its whole timeout. Long waits call this.
+ */
+void kernel_lock_wait_tick(void) {
+    smp_service_flush();
+}
+
 void kernel_unlock(void) {
     hold_end();
     held_mode[cpu_current()->index] = KLOCK_MODE_NONE;
@@ -220,9 +246,18 @@ void kernel_unlock_shared(void) {
 static volatile uint8_t taken_by_isr[SMP_MAX_CPUS];
 /* Processor index plus one, zero for nobody. */
 static volatile uint32_t isr_holder;
+/* Whether this processor is inside an interrupt handler, which is the one
+   context that may not give the lock up: it is standing on a syscall's own
+   claim, and the code it interrupted expects to still hold it. */
+static volatile uint8_t isr_depth[SMP_MAX_CPUS];
+
+int kernel_lock_in_interrupt(void) {
+    return isr_depth[cpu_current()->index] != 0;
+}
 
 void kernel_lock_from_isr(void) {
     unsigned index = cpu_current()->index;
+    isr_depth[index]++;
     /* A shared holder excludes nobody, so a handler on one used to run beside
        another processor's handler. Upgrading would wait for this processor's
        own shared claim, so the handler takes a lock of its own instead. */
@@ -254,6 +289,7 @@ void kernel_lock_from_isr(void) {
 
 void kernel_unlock_from_isr(void) {
     unsigned index = cpu_current()->index;
+    if (isr_depth[index]) isr_depth[index]--;
     uint8_t state = taken_by_isr[index];
     taken_by_isr[index] = ISR_LOCK_NOTHING;
     if (state == ISR_LOCK_TAKEN) kernel_unlock_current();
