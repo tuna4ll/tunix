@@ -585,6 +585,67 @@ static void test_orphan_reaped(unsigned rounds) {
     put("\n");
 }
 
+/* Whether the kernel survives being entered with the direction flag set. User
+   code sets it legitimately -- musl's memmove does, for an overlapping copy --
+   and the C the kernel is built from assumes it is clear: a memset is a
+   `rep stos`, which walks backwards when DF is set. The guard in front of the
+   buffer the kernel writes into is what that would destroy. */
+#define DF_GUARD_BYTES 4096U
+#define DF_GUARD_PATTERN 0xA5
+
+static unsigned char df_area[DF_GUARD_BYTES * 2U];
+
+/* A syscall made with the flag set, and cleared again before any C runs. */
+static s64 syscall_with_df(s64 n, s64 a, s64 b, s64 c) {
+    s64 r;
+    __asm__ volatile("std\n\tsyscall\n\tcld"
+                     : "=a"(r) : "a"(n), "D"(a), "S"(b), "d"(c)
+                     : "rcx", "r11", "memory", "cc");
+    return r;
+}
+
+/* Set, spun on so a timer interrupt lands inside the window, and read back. */
+static int df_survives_interrupts(u64 spins) {
+    u64 flags = 0;
+    __asm__ volatile("std\n\t"
+                     "1: dec %[n]\n\t"
+                     "jnz 1b\n\t"
+                     "pushfq\n\t"
+                     "pop %[out]\n\t"
+                     "cld"
+                     : [out] "=&r"(flags), [n] "+r"(spins)
+                     : : "cc", "memory");
+    return (int)((flags >> 10) & 1U);
+}
+
+static void test_direction_flag(unsigned rounds) {
+    int zero = (int)syscall3(SYS_open, (s64)"/dev/zero", 0, 0);
+    if (zero < 0) { put("DF /dev/zero unavailable\n"); return; }
+
+    unsigned damaged = 0;
+    unsigned lost = 0;
+    for (unsigned round = 0; round < rounds; round++) {
+        for (unsigned i = 0; i < sizeof(df_area); i++) df_area[i] = DF_GUARD_PATTERN;
+        /* The kernel fills the second half; the first is what a backwards
+           `rep stos` would run into. */
+        s64 got = syscall_with_df(SYS_read, zero,
+                                  (s64)(df_area + DF_GUARD_BYTES), DF_GUARD_BYTES);
+        if (got != (s64)DF_GUARD_BYTES) { damaged++; break; }
+        for (unsigned i = 0; i < DF_GUARD_BYTES; i++)
+            if (df_area[i] != DF_GUARD_PATTERN) { damaged++; break; }
+        if (!df_survives_interrupts(2000000UL)) lost++;
+    }
+    (void)syscall1(SYS_close, zero);
+
+    put("DF rounds=");
+    put_number(rounds);
+    put(" guard_damaged=");
+    put_number(damaged);
+    put(" flag_lost=");
+    put_number(lost);
+    put(damaged || lost ? " BROKEN\n" : " CLEAN\n");
+}
+
 /* Whether dmesg can read the kernel's log. It asks syslog(2) before it falls
    back to anything, so a kernel without it answers "Function not implemented"
    and the log cannot be read by the one program everybody reads it with. */
@@ -718,6 +779,7 @@ static int run_all(void) {
         }
     }
     test_syslog();
+    test_direction_flag(200);
     test_syscall_once(20000);
     test_syscall_cost();
     put("PERF DONE\n");

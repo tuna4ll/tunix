@@ -473,6 +473,43 @@ static int present_frames_until(u64 deadline_ns, unsigned *commits) {
     return 0;
 }
 
+/* The tick's own string instruction, met with the direction flag set: a starved
+   ring is silenced from the tick, and that silencing is a memset. */
+#define DF_GUARD 4096U
+#define DF_PATTERN 0x5A
+static unsigned char df_area[DF_GUARD * 2U];
+
+static int df_spin_returns_flag(u64 spins) {
+    u64 flags = 0;
+    __asm__ volatile("std\n\t"
+                     "1: dec %[n]\n\t"
+                     "jnz 1b\n\t"
+                     "pushfq\n\t"
+                     "pop %[out]\n\t"
+                     "cld"
+                     : [out] "=&r"(flags), [n] "+r"(spins)
+                     : : "cc", "memory");
+    return (int)((flags >> 10) & 1U);
+}
+
+/* Called while the ring is starved, so the tick is silencing it every 4 ms. */
+static void test_direction_flag_under_silencing(unsigned rounds) {
+    unsigned damaged = 0, lost = 0;
+    for (unsigned round = 0; round < rounds; round++) {
+        for (unsigned i = 0; i < sizeof(df_area); i++) df_area[i] = DF_PATTERN;
+        if (!df_spin_returns_flag(4000000UL)) lost++;
+        for (unsigned i = 0; i < sizeof(df_area); i++)
+            if (df_area[i] != DF_PATTERN) { damaged++; break; }
+    }
+    put("DF rounds=");
+    put_signed((s64)rounds);
+    put(" guard_damaged=");
+    put_signed((s64)damaged);
+    put(" flag_lost=");
+    put_signed((s64)lost);
+    put(damaged || lost ? " BROKEN\n" : " CLEAN\n");
+}
+
 static int run(void) {
     results_fd = (int)syscall3(SYS_open, (s64)"/tunix-soundtest-results.txt",
                                O_WRONLY_CREAT_TRUNC, 0644);
@@ -505,6 +542,17 @@ static int run(void) {
     test_pointer_survives_a_stall(200000000UL);
     test_pointer_survives_a_stall(500000000UL);
 
+    /* Starved on purpose so the tick is silencing the ring, and the flag held
+       set across it. */
+    if (syscall3(SYS_ioctl, pcm, (s64)IOC(0u, 'A', NR_PREPARE, 0), 0) == 0) {
+        struct writei burst = { 0, tone, BUFFER_FRAMES };
+        (void)syscall3(SYS_ioctl, pcm, (s64)IOW(NR_WRITEI, struct writei), (s64)&burst);
+        (void)syscall3(SYS_ioctl, pcm, (s64)IOC(0u, 'A', NR_START, 0), 0);
+        sleep_ns(200000000UL);
+        test_direction_flag_under_silencing(60);
+        (void)syscall3(SYS_ioctl, pcm, (s64)IOC(0u, 'A', NR_DROP, 0), 0);
+    }
+
     /* Ends starved on purpose and stays that way: whatever the card plays from
        here is what an underrun sounds like, and the tail of the recording is
        checked for it. A ring nobody refills is replayed by the engine for ever
@@ -513,7 +561,7 @@ static int run(void) {
         struct writei burst = { 0, tone, BUFFER_FRAMES };
         (void)syscall3(SYS_ioctl, pcm, (s64)IOW(NR_WRITEI, struct writei), (s64)&burst);
         (void)syscall3(SYS_ioctl, pcm, (s64)IOC(0u, 'A', NR_START, 0), 0);
-        sleep_ns(2000000000UL);
+        sleep_ns(1500000000UL);
     }
     put("SOUNDTEST DONE\n");
     return 0;

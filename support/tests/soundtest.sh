@@ -80,7 +80,7 @@ wait $QEMU 2>/dev/null || true
 # and a host that plays nothing look the same from inside the machine.
 [ -f "$WAV" ] && python3 support/tests/wavcheck.py "$WAV" || echo "WAV missing"
 
-grep -E "^(SOUND|SOUNDTEST)" "$LOG" || {
+grep -E "^(SOUND|DF|SOUNDTEST)" "$LOG" || {
 	echo "drmtest: the machine printed no results; $LOG has the boot" >&2
 	exit 1
 }

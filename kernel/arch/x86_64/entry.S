@@ -7,6 +7,13 @@
 
 kernel_entry:
     cli
+    /* Before the first string instruction, which is the one below that clears
+       the BSS. The handover is not a function call, so nothing promises the
+       direction flag is clear -- and a `rep stos` that walks backwards from
+       __bss_start erases the kernel's own text and data before a single line
+       has been printed. Every interrupt entry clears it for the same reason;
+       this is the one place that runs before any of them. */
+    cld
 
     mov rax, cr0
     and rax, -5
