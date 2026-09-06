@@ -1,33 +1,8 @@
-/*
- * EHCI: the USB 2.0 host controller, and on a machine old enough to boot with
- * a BIOS the only one there is.
- *
- * It exists for one reason. The bootloader reads the kernel off a USB stick
- * through the firmware, hands over, and from that moment the stick is only
- * reachable by whatever driver the kernel has -- so on a pre-xHCI machine the
- * root filesystem was on a disk nothing here could see, and the boot ended in
- * `root filesystem mount failed` with the internal disk listed and the stick
- * absent.
- *
- * What this driver does and does not do is worth stating plainly, because EHCI
- * is a controller with a companion:
- *
- * - High-speed devices only. A full- or low-speed device on the same port is
- *   handed to the companion UHCI/OHCI controller by writing Port Owner, which
- *   is what the specification asks for and what the firmware expects. There is
- *   no companion driver here, so such a device is simply not reached -- and it
- *   does not matter, because a USB stick is high speed and a keyboard behind
- *   the BIOS's legacy emulation never gets this far.
- * - No split transactions and no hubs. A device behind a hub is not found.
- * - Mass storage only, no HID. See above: the devices EHCI would have to talk
- *   to at full speed are the ones this driver deliberately gives away.
- *
- * The schedule is the asynchronous one and nothing else. A queue head sits in
- * a ring that points at itself, transfer descriptors are appended to it, and
- * the controller walks the ring on its own -- there is no doorbell in EHCI,
- * which is why every transfer here ends in a poll on the descriptor's own
- * status byte rather than on an event ring.
- */
+/* EHCI, the USB 2.0 host controller, and on a BIOS machine the only one there
+   is: without it the stick the bootloader read the kernel from is invisible to
+   the kernel itself. High-speed mass storage only -- anything slower goes to
+   the companion controller -- and the asynchronous schedule only, which has no
+   doorbell, so a transfer ends in a poll on the descriptor's status byte. */
 #include <stdint.h>
 #include <stddef.h>
 
@@ -142,24 +117,11 @@ extern void kprintf(const char *fmt, ...);
 #define RESET_TIMEOUT_NS (1000ULL * 1000ULL * 1000ULL)
 #define PORT_RESET_HOLD_NS (50ULL * 1000ULL * 1000ULL)
 #define PORT_ENABLE_TIMEOUT_NS (200ULL * 1000ULL * 1000ULL)
-/*
- * How long a bulk transfer may take, and how long it may make no progress.
- *
- * Two seconds for the whole transfer turned out to be the thing that broke the
- * session. A stick that is committing a write NAKs -- the controller sits in
- * the ping state and the descriptor stays active with its error count
- * untouched -- and a cheap one does that for longer than two seconds while it
- * erases a block. Giving up there abandons a transaction the device is still
- * in the middle of, and the next command wrapper goes into an endpoint that
- * then stalls, which is where every later failure came from:
- *
- *   token 90008c80 overlay e008c81   4096 asked for, 512 moved, pinging
- *   token 1f8c40   overlay 1f8c40    the next wrapper, halted, for ever
- *
- * So the transfer is given ten seconds while the controller is working on it,
- * and two while it is not -- an idle overlay means the queue never started,
- * which is a different failure and does not need waiting out.
- */
+/* How long a bulk transfer may take, and how long it may make no progress.
+   A stick committing a write NAKs for longer than two seconds, and giving up
+   there abandons a transaction the device is still in -- which stalls the
+   endpoint the next wrapper goes into. Ten seconds while the controller is
+   working on it, two while the overlay is idle. */
 #define TRANSFER_TIMEOUT_NS (10000ULL * 1000ULL * 1000ULL)
 #define TRANSFER_QUIET_NS (2000ULL * 1000ULL * 1000ULL)
 /* Enumeration is allowed far less patience than a disk transfer. A device that
@@ -238,16 +200,9 @@ struct ehci_device {
 typedef char ehci_qh_size_check[(sizeof(struct ehci_qh) <= 0x100) ? 1 : -1];
 typedef char ehci_qtd_size_check[(3 * sizeof(struct ehci_qtd) <= 0x100) ? 1 : -1];
 
-/*
- * One of these per controller. An old Intel chipset splits its ports across
- * two EHCI controllers, and the stick is on whichever half the port belongs
- * to, so finding one and stopping is the same as not looking.
- *
- * The ring head and the working queue head are per controller because they
- * live in that controller's schedule permanently. The descriptors and the
- * buffers are shared, because a transfer here is synchronous: only one of them
- * is ever in flight.
- */
+/* One of these per controller: an old Intel chipset splits its ports across
+   two, so finding one and stopping is the same as not looking. The descriptors
+   and buffers are shared, because a transfer here is synchronous. */
 struct ehci {
     int present;
     uint16_t version;
@@ -274,18 +229,10 @@ static struct ehci_qtd *qtds;
 static uint8_t *setup_buffer;
 static uint8_t *descriptor_buffer;
 
-/*
- * A word the controller reads or writes by itself.
- *
- * These have to be volatile, and the reason is not tidiness. The queue head is
- * rewritten in a fixed order, and the order is the whole interlock -- but the
- * fields are plain memory as far as the compiler is concerned, so it deleted
- * the store that made the queue head inert on the grounds that a later store
- * to the same word overwrites it. What the object file did was rewrite a live
- * queue head with no interlock at all, which is a transfer the controller
- * never starts: the last descriptor comes back still active, its error count
- * untouched and every byte still to move.
- */
+/* A word the controller reads or writes by itself. Volatile, because the queue
+   head is rewritten in a fixed order and that order is the whole interlock:
+   the compiler deleted the store that made it inert as dead, and a live queue
+   head rewritten under the controller is a transfer that never starts. */
 static inline void dma_store32(uint32_t *field, uint32_t value) {
     *(volatile uint32_t *)field = value;
 }
@@ -326,15 +273,8 @@ static void delay_ns(uint64_t nanoseconds) {
     while (time_uptime_ns() < deadline) __asm__ volatile("pause");
 }
 
-/*
- * One page of DMA memory below 4 GiB.
- *
- * Every pointer the controller follows is a 32-bit value whose high half comes
- * from CTRLDSSEGMENT and is shared by all of them, so a structure above 4 GiB
- * is not something this driver can describe. Rather than program a segment it
- * could not then honour for a buffer handed down from the transport above,
- * everything stays in the low 4 GiB and CTRLDSSEGMENT stays zero.
- */
+/* One page of DMA memory below 4 GiB: every pointer the controller follows is
+   32 bits over a shared CTRLDSSEGMENT, which stays zero. */
 #define DMA_ALLOCATION_ATTEMPTS 64
 #define DMA_LIMIT 0x100000000ULL
 
@@ -370,14 +310,9 @@ static uint32_t physical_of(const void *within_dma_page) {
     return (uint32_t)(dma_physical + offset);
 }
 
-/*
- * Take the controller from the firmware.
- *
- * Until this handshake completes the BIOS still owns the controller and still
- * services its interrupts, and everything written to the operational registers
- * is liable to be undone. The capability is optional: if HCCPARAMS names no
- * pointer there is nothing to take.
- */
+/* Take the controller from the firmware: until this handshake completes the
+   BIOS still owns it and undoes what is written. Optional, so a HCCPARAMS
+   naming no pointer means there is nothing to take. */
 static void release_from_firmware(const struct pci_device *device,
                                   uint32_t capabilities) {
     uint8_t pointer = (uint8_t)((capabilities >> HCCPARAMS_EECP_SHIFT) &
@@ -437,15 +372,9 @@ static void build_async_ring(struct ehci *host) {
     memset(async_head, 0, sizeof(*async_head));
     memset(work, 0, sizeof(*work));
 
-    /* Two queue heads in a ring, and neither is ever taken out of it again.
-       The specification is strict about removal: a queue head that has been
-       unlinked may not be touched until the controller has acknowledged the
-       interrupt-on-async-advance doorbell, because it caches queue heads and
-       is very likely still following the one just removed. Linking and
-       unlinking around every transfer -- which is what this did first, and
-       what an emulated controller forgives -- is exactly that mistake, once
-       per transfer. Keeping both in the ring for good means never making it:
-       an idle queue head with no descriptors is skipped. */
+    /* Two queue heads in a ring, and neither ever leaves it: an unlinked one
+       may not be touched until the async-advance doorbell is acknowledged,
+       and an idle queue head with no descriptors is skipped anyway. */
     async_head->horizontal = physical_of(work) | LINK_TYPE_QH;
     async_head->characteristics = QH_HEAD_OF_LIST | QH_SPEED_HIGH |
                                   (64U << QH_MAX_PACKET_SHIFT);
@@ -486,20 +415,9 @@ static int start_controller(struct ehci *host) {
        this is written the ports belong to UHCI/OHCI and read as empty. */
     mmio_write32(operational(host, EHCI_CONFIGFLAG), 1U);
 
-    /*
-     * Power every port, and only then wait.
-     *
-     * A controller with port power control comes out of a reset with its ports
-     * unpowered, and an unpowered port reports no connection -- so asking
-     * whether something is plugged in before turning the port on is asking a
-     * question with one possible answer. It cost a boot on real hardware to
-     * find that out, because the emulated controller powers its ports itself
-     * and never says no.
-     *
-     * The debounce a connection needs afterwards is long -- the specification
-     * asks for 100 ms -- so it is not waited for here: every controller is
-     * powered first and ehci_init() waits once for all of them.
-     */
+    /* Power every port, and only then wait: an unpowered port reports no
+       connection, so asking what is plugged into one first has a single
+       possible answer. The 100 ms debounce is waited out once, in ehci_init(). */
     for (unsigned port = 0; port < host->ports && port < MAX_PORTS; port++) {
         uint32_t status = mmio_read32(port_register(host, port));
         /* Port Owner goes with it. The firmware hands ports to the companion
@@ -590,30 +508,16 @@ static void build_qtd(struct ehci_qtd *qtd, uint32_t pid, uint64_t physical,
     dma_store32(&qtd->token, token);
 }
 
-/*
- * Make the controller look at the schedule again.
- *
- * EHCI notices an asynchronous schedule with nothing to do in it and stops
- * walking it. There is no doorbell to ring, so work put into a queue head that
- * is already on the ring can simply never start: what comes back is a
- * descriptor still marked active with none of its bytes moved --
- *
- *   EHCI: bulk out endpoint 2 failed, token 1f8c80
- *
- * where 0x80 is active and 0x1f is the whole 31-byte command still waiting.
- * Turning the schedule off and on again is what starts the traversal.
- */
+/* Make the controller look at the schedule again. EHCI stops walking an async
+   schedule with nothing in it and there is no doorbell, so work put into a
+   queue head already on the ring can simply never start; turning the schedule
+   off and on is what restarts the traversal. */
 #define ASYNC_KICK_AFTER_NS (20ULL * 1000ULL * 1000ULL)
 #define ASYNC_KICK_TIMEOUT_NS (100ULL * 1000ULL * 1000ULL)
 
-/*
- * Wait for the controller to let go of the queue heads it has cached.
- *
- * The specification's own handshake. It is rung only when a transfer is
- * abandoned: the controller may still have the descriptor in the overlay and
- * still be talking to the device about it, and returning while that is true is
- * how the buffer under it comes to be reused mid-transaction.
- */
+/* Wait for the controller to let go of the queue heads it has cached. Rung
+   only when a transfer is abandoned: it may still be talking to the device
+   about a descriptor whose buffer is about to be reused. */
 #define ASYNC_ADVANCE_TIMEOUT_NS (10ULL * 1000ULL * 1000ULL)
 
 static void async_advance(struct ehci *host) {
@@ -636,15 +540,9 @@ static void async_kick(struct ehci *host) {
                    USBSTS_ASYNC_RUNNING, ASYNC_KICK_TIMEOUT_NS);
 }
 
-/*
- * Point the working queue head at a chain of descriptors, link it into the
- * ring, and wait for the last one to go inactive.
- *
- * The queue head is rewritten rather than reused because every transfer here
- * is synchronous: there is never a second one in flight to disturb. It is
- * unlinked again at the end for the same reason -- leaving it in the ring
- * would have the controller walking descriptors that are about to change.
- */
+/* Point the working queue head at a chain of descriptors and wait for the last
+   one to go inactive. Rewritten rather than reused, and unlinked at the end,
+   because every transfer here is synchronous. */
 static int run_qtds(struct ehci *host, struct ehci_device *device,
                     uint8_t endpoint, uint16_t max_packet, int is_control,
                     struct ehci_qtd *first, struct ehci_qtd *last,
@@ -843,20 +741,11 @@ static const char *port_name(unsigned where) {
     return name;
 }
 
-/*
- * Put a device on an address and report what kind it is.
- *
- * The first eight bytes of the device descriptor carry both things worth
- * knowing this early: the real maximum packet size for the default pipe, and
- * the device class -- which is how a hub is recognised before anything asks it
- * for a configuration it does not have.
- *
- * `where` is the port it was found on: the root port in the high nibble and
- * the port below it on a hub in the low one, logged as "1.2" for the second
- * port of the hub on root port 1 and "1.0" for root port 1 itself.
- *
- * Returns the class, or -1.
- */
+/* Put a device on an address and report what kind it is: the first eight bytes
+   of the descriptor carry both the real maximum packet size and the class,
+   which is how a hub is known before it is asked for a configuration it has
+   not got. `where` is the root port in the high nibble, the hub port in the
+   low one. Returns the class, or -1. */
 static int address_device(struct ehci *host, struct ehci_device *device,
                           uint8_t address, unsigned where) {
     memset(device, 0, sizeof(*device));
@@ -884,15 +773,9 @@ static int address_device(struct ehci *host, struct ehci_device *device,
     return header[4];
 }
 
-/*
- * The configuration descriptor, and the bulk endpoints of a mass-storage
- * interface inside it.
- *
- * Every way this can fail says so. A device that is simply not a disk is the
- * common case and, from outside, looks exactly like a disk that would not
- * talk -- which is a whole boot spent guessing when the machine has no serial
- * port to explain itself over.
- */
+/* The configuration descriptor, and the bulk endpoints of a mass-storage
+   interface inside it. Every way it can fail says so: a device that is not a
+   disk looks exactly like a disk that would not talk. */
 static int enumerate_storage(struct ehci *host, struct ehci_device *device,
                              unsigned where) {
     uint8_t header[9];
@@ -934,19 +817,9 @@ static int enumerate_storage(struct ehci *host, struct ehci_device *device,
     return 0;
 }
 
-/* --- hubs ------------------------------------------------------------------
- *
- * Not an optional extra on the machines this driver exists for. Intel chipsets
- * of the era put a rate-matching hub on the root port of each EHCI controller
- * and hang every physical socket off it, so the root ports hold one device
- * each and it is never the disk. A machine whose root ports all read connected
- * and enabled and yield nothing is this.
- *
- * Only the management of the hub is needed, not split transactions: a
- * high-speed device behind a high-speed hub is addressed directly and the hub
- * is transparent to its transfers. A slower device behind one would need
- * transactions this driver does not do, and is skipped with a line saying so.
- */
+/* --- hubs -- not optional here: Intel chipsets of the era put a rate-matching
+   hub on each EHCI root port and hang every socket off it. Only the management
+   is needed, not split transactions; a slower device behind one is skipped. */
 
 #define USB_CLASS_HUB 0x09U
 #define HUB_REQUEST_GET_STATUS 0x00U
@@ -1133,16 +1006,10 @@ static int ehci_storage_count(void) {
     return count;
 }
 
-/*
- * Clear a halted endpoint.
- *
- * A device halts an endpoint to refuse something, and it stays halted: every
- * transfer after it fails, and since each one waits out the timeout first, a
- * machine in this state is not frozen but crawling -- which from the front is
- * the same thing. The device also resets its data toggle when the halt is
- * cleared, which is why the software toggle is reset with it: leaving the two
- * disagreeing is a second, permanent version of the same failure.
- */
+/* Clear a halted endpoint. A halt stays until it is cleared and every transfer
+   after it waits out the timeout first, so the machine crawls rather than
+   stops. The device resets its data toggle with the halt, which is why ours
+   goes with it. */
 static int clear_endpoint_halt(struct ehci *host, struct ehci_device *device,
                                uint8_t endpoint, int in) {
     uint16_t address = (uint16_t)(endpoint | (in ? 0x80U : 0x00U));
@@ -1194,26 +1061,12 @@ static int ehci_bulk_transfer(int index, int in, uint64_t physical,
                     (unsigned)overlay, (unsigned)current,
                     (unsigned)status, (unsigned)command);
         }
-        /*
-         * The toggle is reset only when the halt is cleared, because that is
-         * the only thing that resets the device's. A transfer that merely
-         * timed out moved nothing at either end -- resetting ours there is how
-         * the two come to disagree, and once they do every transfer after it
-         * fails the same way. The evidence was a 31-byte command retried with
-         * the other toggle for ever: token 1f8c80, then 801f8c80.
-         *
-         * The overlay counts as much as the descriptor. A stalled endpoint
-         * halts the queue head, and the halt is written back to the descriptor
-         * only when it retires -- which a halted queue head never does. Asking
-         * the descriptor alone therefore missed exactly the case the clear
-         * exists for:
-         *
-         *   token 801f8c80 overlay 8c40
-         *
-         * where the descriptor is still active with all 31 bytes to send and
-         * the overlay is halted. The endpoint stayed stalled and every command
-         * after it needed the class reset to get anywhere.
-         */
+        /* The toggle is reset only when the halt is cleared, because that is
+           the only thing that resets the device's -- a transfer that merely
+           timed out moved nothing at either end. The overlay counts as much as
+           the descriptor: a stalled endpoint halts the queue head, and a
+           halted queue head never retires the descriptor the halt would have
+           been written back to. */
         if ((token | overlay) & QTD_STATUS_HALTED) {
             if (clear_endpoint_halt(host, device, endpoint, in) == 0) {
                 *toggle = 0;
@@ -1237,19 +1090,10 @@ static int ehci_bulk_transfer(int index, int in, uint64_t physical,
     return 0;
 }
 
-/*
- * Bulk-only mass storage error recovery, as the class specification defines it.
- *
- * A command that failed after its wrapper went out leaves the device midway
- * through a transaction: it is waiting for data, or holding a status nobody
- * collected. Sending the next command into that is how one failure becomes
- * every failure -- the device reads the new wrapper as the data it was still
- * expecting, and nothing lines up again.
- *
- * The reset is a class request to the interface, followed by clearing the halt
- * on both bulk endpoints. Both endpoints reset their data toggle as part of
- * it, so both of ours go with them.
- */
+/* Bulk-only mass storage error recovery, as the class specification defines
+   it: a class request to the interface, then the halt cleared on both bulk
+   endpoints, whose toggles reset with it. Without it the device reads the next
+   command wrapper as the data it was still expecting. */
 #define BULK_ONLY_RESET 0xFFU
 
 static int ehci_reset_recovery(int index) {

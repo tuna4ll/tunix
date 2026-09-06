@@ -266,18 +266,8 @@ static int64_t proc_uptime_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
-/*
- * /proc/interrupts, which is the answer to "is any of this arriving".
- *
- * Only the vectors drivers asked for are here. The tick and the two PS/2 lines
- * are wired into the dispatcher by hand and counted nowhere, and inventing
- * rows for them would make this file a worse witness than it is: what it shows
- * is exactly what irq.c has handed out.
- *
- * Linux pads its first column to the widest processor count and lists one
- * column per processor. There is one column here because a vector is bound to
- * one processor at a time; see pci_msix_bind().
- */
+/* /proc/interrupts. Only the vectors drivers asked for, and one column,
+   because a vector is bound to one processor at a time. */
 static int64_t proc_interrupts_read(struct vfs_node *node, uint64_t offset,
                                     size_t size, void *output) {
     (void)node;
@@ -333,15 +323,8 @@ static int64_t proc_hostname_write(struct vfs_node *node, uint64_t offset,
     return (int64_t)size;
 }
 
-/*
- * The integer knobs under /proc/sys.
- *
- * None of them do anything: there is no dmesg to restrict and no pointers to
- * hide. They exist because `sysctl --system` runs on the way up and prints an
- * error for each one it cannot find, and because /etc/runit/core-services
- * tests kernel.dmesg_restrict with `[ $(sysctl -n ...) -eq 1 ]`, which is a
- * syntax error rather than a false when the value is the empty string.
- */
+/* The integer knobs under /proc/sys. None of them do anything; they exist so
+   that sysctl and the runit core services find a value to read. */
 static int64_t proc_knob_read(struct vfs_node *node, uint64_t offset,
                               size_t size, void *output) {
     struct text_buffer text = {{0}, 0};
@@ -749,15 +732,8 @@ static void task_path(uint64_t pid, const char *suffix, char output[PROC_PATH_MA
     output[at] = '\0';
 }
 
-/*
- * /proc/<pid>/fd. The contents are the descriptor table as it stands right now,
- * so they are rebuilt whenever the directory is searched or read rather than
- * kept in step with every open and close.
- *
- * ttyname(3) is what needs this: musl answers it by reading the link for the
- * descriptor and comparing the result with the descriptor itself, and su(1)
- * refuses to run for a non-root caller whose terminal it cannot name.
- */
+/* /proc/<pid>/fd, rebuilt on every search: ttyname(3) reads these links, and
+   su(1) refuses a caller whose terminal it cannot name. */
 static void describe_file(const struct file *file, char *output, size_t capacity) {
     output[0] = '\0';
     if (!file) return;

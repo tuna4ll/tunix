@@ -144,6 +144,10 @@ void smp_ap_entry(uint64_t index) {
     time_mark_processor((unsigned)index);
     gdt_init_cpu((unsigned)index);
     idt_activate();
+    /* Per-processor, and the framebuffer is mapped through a slot it defines:
+       a processor without it writes the screen through the cache while another
+       writes it write-combining. */
+    vmm_configure_processor();
     /* The syscall entry MSRs are per-processor, and one that skipped this would
        take its first syscall as an invalid opcode. */
     syscall_init();

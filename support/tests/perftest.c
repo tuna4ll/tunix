@@ -424,14 +424,9 @@ static void test_unmap_shootdown(u64 pages, unsigned helpers) {
 
 #define SYS_dup 32
 
-/*
- * Whether one syscall instruction ever runs twice.
- *
- * dup() is the question to ask: it takes the lowest free descriptor, so the
- * same call repeated from the same state must answer with the same number
- * every time. A second execution leaks a descriptor, and every answer after it
- * is one higher -- which is visible without any timing at all.
- */
+/* Whether one syscall instruction ever runs twice. dup() takes the lowest free
+   descriptor, so the same call from the same state must answer the same number
+   every time; a second execution leaks one and every answer after is higher. */
 static void test_syscall_once(unsigned rounds) {
     int first = (int)syscall1(SYS_dup, 0);
     if (first < 0) { put("ONCE dup unavailable\n"); return; }

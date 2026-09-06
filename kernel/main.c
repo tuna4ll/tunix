@@ -60,17 +60,10 @@ static void boot_log_stage(const char *name, uint64_t *started) {
 }
 #endif
 
-/*
- * root= names the device the filesystem is on, in one of two forms.
- *
- * root=LABEL=tunix-root asks for the disk whose ext2 label says so, and is
- * what the image ships with: it is the only form that survives being plugged
- * into a machine that already has disks of its own. root=/dev/sda2, or sda2,
- * names a position in the probe order instead, which is still the right answer
- * when a machine has one disk and the label is not known.
- *
- * Without either the kernel takes whatever the block layer registered first.
- */
+/* root= names the device the filesystem is on: LABEL=tunix-root asks for the
+   disk whose ext2 label says so and is the only form that survives being
+   plugged into a machine with disks of its own; /dev/sda2 names a position
+   in the probe order. Without either, the first disk registered. */
 static int root_device_index(void) {
     const char *value = boot_command_line_value("root");
     if (!value) return 0;

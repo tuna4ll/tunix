@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
+#include "../include/klock.h"
 #include "../include/drm.h"
 #include "../include/file.h"
 #include "../include/framebuffer.h"
@@ -1288,6 +1289,7 @@ static int present_framebuffer(const struct file *client, uint32_t fb_id) {
     uint32_t screen_pitch = framebuffer_pitch();
     uint32_t rows = fb->height < screen_height ? fb->height : screen_height;
     uint32_t row_bytes = fb->pitch < screen_pitch ? fb->pitch : screen_pitch;
+    uint64_t started_ns = time_uptime_ns();
     for (uint32_t row = 0; row < rows; row++) {
         uint64_t source_offset = (uint64_t)row * fb->pitch;
         uint64_t page = source_offset / 4096ULL;
@@ -1306,6 +1308,22 @@ static int present_framebuffer(const struct file *client, uint32_t fb_id) {
         }
     }
     framebuffer_present();
+    /* How fast the scanout actually takes a whole frame, said a few times:
+       a blit that runs at uncached speed and one that runs at write-combining
+       speed differ by more than a factor of ten, and only the machine knows
+       which it got. */
+    {
+        static unsigned reported;
+        if (reported < 4U) {
+            reported++;
+            uint64_t elapsed = time_uptime_ns() - started_ns;
+            uint64_t bytes = (uint64_t)rows * row_bytes;
+            kprintf("DRM: present %u rows of %u bytes in %u us (%u MB/s)\n",
+                    (unsigned)rows, (unsigned)row_bytes,
+                    (unsigned)(elapsed / 1000ULL),
+                    (unsigned)(elapsed ? bytes * 1000ULL / elapsed : 0));
+        }
+    }
     return 0;
 }
 
@@ -1804,6 +1822,9 @@ int64_t drm_file_ioctl(struct file *file, unsigned long request,
                        uint64_t user_argument) {
     if (!drm_ready) return -ENOTTY;
     if (IOCTL_TYPE(request) != (unsigned)DRM_IOCTL_TYPE) return -ENOTTY;
+    /* Which request, so a lock held for a fifth of a second has a name; see
+       /proc/klock. */
+    klock_note(KLOCK_NOTE_IOCTL | (uint32_t)IOCTL_NR(request));
 
     switch (IOCTL_NR(request)) {
     case DRM_NR_VERSION: return ioctl_version(user_argument);

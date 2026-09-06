@@ -65,16 +65,8 @@ void *vmm_phys_to_virt(uint64_t physical) {
     return (void *)(DIRECT_MAP_BASE + physical);
 }
 
-/*
- * The other direction, and it has to accept two windows.
- *
- * Most callers hand back something vmm_phys_to_virt() gave them, which is in
- * the direct map. But the DMA drivers hand it a *static* buffer -- rtl8139's
- * receive ring and transmit slots are plain arrays in the kernel image -- and
- * those live in the image's own mapping. That one is no longer "physical plus
- * KERNEL_BASE": Limine loads the image wherever it likes and reports where,
- * so the offset between the two comes from the loader rather than a constant.
- */
+/* The other direction, and it has to accept two windows: the direct map, and
+   the kernel image, whose offset comes from the loader rather than a constant. */
 uint64_t vmm_virt_to_phys_direct(const void *virtual_address) {
     const struct boot_info *boot = boot_info();
     uint64_t value = (uint64_t)virtual_address;
@@ -183,16 +175,8 @@ static uint64_t *next_table(uint64_t *table, uint16_t index,
     return new_table;
 }
 
-/*
- * Put write-combining where a page table entry can ask for it.
- *
- * The PAT is eight slots, and a page selects one with three bits spread across
- * its entry. The first four slots keep their power-on meanings so that every
- * existing mapping keeps behaving exactly as it did; only slot 4 -- which no
- * mapping selects until one sets bit 7 -- is changed from write-back to
- * write-combining. That is the same slot Linux repurposes, and for the same
- * reason: it is the one that can be changed without auditing everything else.
- */
+/* Put write-combining where a page table entry can ask for it. Only slot 4 is
+   changed, because nothing selects it until a mapping sets bit 7. */
 #define IA32_PAT_MSR 0x277U
 #define CPUID_FEATURES_LEAF 1U
 #define CPUID_EDX_PAT (1U << 16)
@@ -201,10 +185,18 @@ static uint64_t *next_table(uint64_t *table, uint16_t index,
 #define PAT_WITH_WRITE_COMBINING 0x0007040100070406ULL
 
 static int write_combining;
+static void configure_page_attributes(void);
 
 static inline void write_msr(uint32_t msr, uint64_t value) {
     __asm__ volatile("wrmsr" : : "c"(msr), "a"((uint32_t)value),
                                  "d"((uint32_t)(value >> 32)));
+}
+
+/* Once per processor, because the PAT is a per-processor register. Only the
+   boot processor used to be given it, which left the framebuffer
+   write-combining on one processor and cached on the others. */
+void vmm_configure_processor(void) {
+    configure_page_attributes();
 }
 
 static void configure_page_attributes(void) {
@@ -226,29 +218,15 @@ void vmm_init(void) {
 
     kernel_cr3_physical = read_cr3();
 
-    /*
-     * Everything up to the point the direct map exists has to be reached
-     * through the loader's window instead, because page_table_pointer() now
-     * answers with an address that is not mapped yet. `early` is that window:
-     * Limine's higher-half direct map, which covers every page the tables
-     * below are allocated from.
-     *
-     * The kernel image's own mapping is left exactly as the loader made it.
-     * The framebuffer and device windows sit in the gigabyte above it, which
-     * Limine leaves empty, so there is nothing here to take back first.
-     */
+    /* Everything up to the point the direct map exists is reached through the
+       loader's own higher-half window instead, which covers every page the
+       tables below are allocated from. */
     const uint64_t hhdm = boot_info()->hhdm_offset;
 #define early(physical) ((uint64_t *)(hhdm + ((physical) & ADDRESS_MASK)))
     uint64_t *pml4 = early(kernel_cr3_physical);
 
-    /*
-     * The direct map, in a PML4 entry of its own.
-     *
-     * Only as much of it as there is RAM to map: the ceiling is what the
-     * address space allows, not what has to be built. A gigabyte of physical
-     * memory costs one page of directory here, so a machine with four costs
-     * sixteen kilobytes.
-     */
+    /* The direct map, in a PML4 entry of its own, and only as much of it as
+       there is RAM: a gigabyte costs one page of directory here. */
     uint16_t direct_pml4 = (uint16_t)((DIRECT_MAP_BASE >> 39) & 0x1FF);
     uint64_t direct_pdpt_physical = (uint64_t)pmm_alloc_page();
     if (!direct_pdpt_physical) panic("VMM: direct map PDPT unavailable");
@@ -394,22 +372,9 @@ static int vmm_map_page_in_locked(uint64_t cr3_physical, uint64_t virtual_addres
     return 0;
 }
 
-/*
- * One shootdown for a run of pages instead of one for each.
- *
- * Every page unmapped or reprotected used to interrupt every other processor
- * looking at the same space and then spin until all of them had answered, so a
- * munmap of a twenty-thousand-page mapping did that twenty thousand times.
- * With one processor smp_flush_address_space() returns at once, which is why
- * the cost only showed up on a machine with more.
- *
- * A batch is opened and closed by a caller that holds the kernel lock
- * exclusively, so this is a plain word rather than anything atomic. The pages
- * freed inside it cannot be handed out again before it closes -- nothing else
- * is inside the kernel to ask for one -- so the only thing a stale translation
- * can still reach during the batch is memory the process itself has just
- * unmapped.
- */
+/* One shootdown for a run of pages instead of one for each. A batch is opened
+   and closed under the exclusive lock, so nothing else can be inside to take a
+   freed page, and a stale translation reaches only what was just unmapped. */
 static unsigned flush_batch_depth;
 static uint64_t flush_batch_cr3;
 static int flush_batch_pending;
@@ -622,16 +587,10 @@ int vmm_user_range_valid(uint64_t cr3_physical, uint64_t address,
     for (uint64_t page = first;; page += 4096) {
         uint64_t flags;
         if (vmm_translate(cr3_physical, page, NULL, &flags) != 0) {
-            /* Reserved but not yet touched: userspace would have faulted the
-               page in here, so do it for the kernel before giving up.
-               Both kinds of lazy page have to be handled, because the kernel
-               writes into both: an anonymous mapping's first touch, and the
-               main stack's next page down. The stack one is not hypothetical --
-               a signal frame is built *below* the stack pointer and written by
-               hand rather than through a fault, so a process signalled while
-               its stack pointer sat near a page boundary had the frame land on
-               a page it had never reached. That failed the copy, and the
-               delivery path answers a failed copy with a silent SIGSEGV. */
+            /* Reserved but not yet touched: fault it in for the kernel rather
+               than give up. A signal frame is built below the stack pointer by
+               hand, so a process signalled near a page boundary had it land on
+               a page never reached, and a failed copy is a silent SIGSEGV. */
             if (cr3_physical != read_cr3() ||
                 (!process_commit_area(page) && !process_grow_user_stack(page)) ||
                 vmm_translate(cr3_physical, page, NULL, &flags) != 0) return 0;
@@ -753,17 +712,9 @@ static uint64_t clone_user_table(uint64_t source_physical, int level) {
                     destination[index] = entry;
                     continue;
                 }
-                /*
-                 * Share rather than copy. A writable page becomes read-only and
-                 * copy-on-write in *both* address spaces, so whichever side
-                 * writes first takes the fault and gets its own copy. A page
-                 * that was already read-only needs no COW marking -- a write to
-                 * it was a fault before the fork and still is -- but it does
-                 * need the reference, because both owners will free it.
-                 *
-                 * If the reference count saturates we fall back to copying,
-                 * which is what this code did unconditionally before.
-                 */
+                /* Share rather than copy: a writable page becomes read-only
+                 * and copy-on-write in both spaces, and a read-only one needs
+                 * only the reference. A saturated count falls back to a copy. */
                 if (pmm_page_ref(source_page) == 0) {
                     uint64_t shared_flags = preserved_flags;
                     if (shared_flags & PAGE_WRITE) {

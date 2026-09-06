@@ -32,16 +32,9 @@ int64_t input_reader_ioctl(struct input_reader *reader, unsigned device_id,
                            unsigned long request, uint64_t user_argument);
 int64_t input_reader_read(struct input_reader *reader, size_t size, void *buffer);
 
-/*
- * The last few key events, as the kernel produced them.
- *
- * A key that arrives once and is typed several times is either delivered
- * several times here or delivered once and repeated above us, and the two are
- * told apart by the press, the release and the milliseconds between them.
- * Kept in memory and read through /proc/inputlog, so the answer survives a
- * compositor owning the screen and needs neither a serial cable nor a disk
- * that can be written to.
- */
+/* The last few key events as the kernel produced them, read through
+   /proc/inputlog: a key typed twice was either delivered twice or repeated
+   above us, and the timestamps tell those apart. */
 #define INPUT_KEY_HISTORY 128U
 
 struct input_key_event {

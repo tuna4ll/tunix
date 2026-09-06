@@ -1,17 +1,5 @@
-/*
- * The local APIC and the IOAPIC, which is how interrupts arrive on anything
- * newer than the 8259 pair this kernel started on.
- *
- * The difference that matters is routing. With the PIC, a device's interrupt
- * line *is* its IRQ number. With an IOAPIC the firmware decides which of its
- * inputs a line is wired to, and says so in the MADT -- so IRQ 0 commonly
- * arrives on input 2, and a line can be active-low or level-triggered where
- * the PIC's were neither. Getting that wrong does not produce a wrong
- * interrupt; it produces silence, which is much harder to read.
- *
- * Vectors are unchanged: the PIC was already remapped to 32..47, so the same
- * handlers answer and only the delivery path underneath them moves.
- */
+/* The local APIC and the IOAPIC: routing comes from the MADT rather than the
+   IRQ number, and getting it wrong produces silence, not a wrong vector. */
 #include <stdint.h>
 #include <stddef.h>
 
@@ -215,15 +203,8 @@ void apic_send_ipi_to_others(uint8_t vector) {
     wait_for_delivery();
 }
 
-/*
- * The local timer, which is the only clock an application processor has: the
- * PIT is a single device wired to one processor, so every other one is
- * preempted by this instead.
- *
- * Its rate is the bus clock divided down, and nothing reports what that is, so
- * it is measured against the TSC -- counting down from the top for a known
- * number of milliseconds and seeing how far it got.
- */
+/* The local timer, the only clock an application processor has; its rate is
+   measured against the TSC because nothing reports the bus clock. */
 static uint64_t timer_measured_hz[SMP_MAX_CPUS];
 static uint32_t timer_initial_count[SMP_MAX_CPUS];
 

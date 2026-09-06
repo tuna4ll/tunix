@@ -2,47 +2,12 @@
 #define TUNIX_KLOCK_H
 
 /*
- * The lock a processor holds while it is inside the kernel.
- *
- * It used to be one lock, held exclusively for the whole of every syscall and
- * every interrupt, because nothing in this kernel was written to be entered
- * twice at once: the process queue is a bare linked list, the VFS tree has no
- * locks of its own, the page tables are edited in place. That is still true of
- * most of it, and most of it still takes this exclusively.
- *
- * What it cost was measured rather than guessed. Four processors running
- * `dd if=/dev/zero of=/dev/null` delivered 426 MB/s between them against
- * 479 MB/s from one -- *slower* than a single processor -- and sampling every
- * processor's instruction pointer put 96% of the samples inside the wait loop
- * below. User code parallelised almost perfectly over the same four (3.3x),
- * so the ceiling was never the scheduler; it was this.
- *
- * So it is now a lock with two modes:
- *
- *   exclusive  one holder, and no shared holders. What every path that has
- *              not been audited takes, which is why converting it changed
- *              nothing: the default is the old behaviour exactly.
- *   shared     any number of holders at once. A path may only take it this
- *              way once someone has established that everything it touches is
- *              either private to the calling process or protected by a lock
- *              of its own -- see the ordering note in oplock.h.
- *
- * Tickets rather than test-and-set, so that a processor entering the kernel in
- * a tight syscall loop cannot starve one that has been waiting. A shared
- * holder passes its ticket straight on, which is what lets the shared holders
- * behind it in; an exclusive holder keeps it until it leaves, and first waits
- * for the shared holders already inside to finish.
- *
- * Kernel mode runs with interrupts off, so a processor holding this can never
- * be interrupted into wanting it again, and the wait is always finite.
- *
- * That reasoning covers interrupts and nothing else. An *exception* is not
- * maskable: a kernel-mode page fault arrives however the flags are set, and
- * the entry path that answers it would take this lock a second time on a
- * processor that already holds it -- and a ticket lock has no way to satisfy
- * that, because the holder is the one waiting. The machine would stop dead
- * with every other processor queued behind it. That is what klock_held_here()
- * is for, and why the entry path asks before taking anything.
+ * The lock a processor holds while it is inside the kernel, in two modes:
+ * exclusive, which every path that has not been audited takes, and shared, for
+ * one whose every touch is private to the caller or has a lock of its own (see
+ * oplock.h). Tickets, so a tight syscall loop cannot starve a waiter. Kernel
+ * mode runs with interrupts off, but an exception is not maskable, which is
+ * what kernel_lock_held_here() is for.
  */
 
 /* Exclusive: the old behaviour, and still the default everywhere. */
@@ -88,6 +53,8 @@ void klock_note(uint32_t what);
 #define KLOCK_NOTE_INTERRUPT 0x20000U  /* | the vector */
 #define KLOCK_NOTE_FIRST_RUN 0x30000U
 #define KLOCK_NOTE_IDLE      0x40000U
+/* | the request, for the one syscall whose cost is all in which request it is. */
+#define KLOCK_NOTE_IOCTL     0x50000U
 
 void kernel_lock_from_isr(void);
 void kernel_unlock_from_isr(void);

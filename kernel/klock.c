@@ -30,54 +30,27 @@ static volatile uint8_t held_mode[SMP_MAX_CPUS];
  * translations cannot arrive as an interrupt, and the processor doing the
  * asking may be the very one holding the lock this is waiting for.
  */
-/*
- * A wait this long is not contention, it is a lock that will never come.
- *
- * Both ways that happens are silent from outside: an unlock with nothing held
- * moves the queue past a ticket nobody was serving, and a shared holder that
- * left without decrementing keeps every exclusive waiter out for good. Either
- * way the machine stops on somebody's next syscall having printed nothing at
- * all, which is a diagnosis nobody can make. So it says what it is waiting for
- * and what the lock looks like, once, and goes on waiting.
- */
+/* A wait this long is a lock that will never come, and both ways that happens
+   are silent -- so it says what it is waiting for, once, and waits on. */
 /* Twenty seconds, not five. The lock is held across block reads, and a root
    filesystem on a USB stick makes some of those genuinely slow -- five caught
    weston loading itself, which is not the thing worth reporting. Nothing that
    is going to finish takes twenty. */
 #define KLOCK_WATCHDOG_NS (20ULL * 1000ULL * 1000ULL * 1000ULL)
 
-/*
- * A breadcrumb per processor: what it was last doing that mattered.
- *
- * The watchdog can say a processor is holding the lock and not giving it back,
- * which is half a diagnosis. The half that matters is what it is holding it
- * for, and there is no stack to walk from another processor. So the few places
- * that take the lock leave a number behind, and the report prints it.
- */
+/* A breadcrumb per processor: the watchdog can say who is holding the lock,
+   and there is no stack to walk from another processor to say what for. */
 static volatile uint32_t breadcrumb[SMP_MAX_CPUS];
 
 void klock_note(uint32_t what) {
     breadcrumb[cpu_current()->index] = what;
 }
 
-/*
- * Where the waiting time goes.
- *
- * The watchdog only speaks after twenty seconds, and the holds that matter are
- * far shorter than that and far more frequent: an input event is only noticed
- * when the tick or the keyboard interrupt can take the lock, so a hold of a few
- * hundred milliseconds is a key that reaches a compositor late enough for its
- * own repeat to fire. Measured on real hardware: a press and its release
- * arrived 433 ms apart under weston against about 100 ms at a terminal.
- *
- * So each exclusive hold is timed and filed under the breadcrumb of whoever
- * took it, and /proc/klock reports the worst. Writing to that file is what
- * starts the recording: measured, always-on costs a fifth of the cheapest
- * syscall, and this is a question that is only ever asked deliberately.
- */
+/* Where the waiting time goes. Each exclusive hold is timed and filed under
+   the breadcrumb of whoever took it; writing to /proc/klock starts the
+   recording, which costs a fifth of the cheapest syscall while it runs. */
 static int klock_stats_on;
 static uint64_t hold_started;
-static uint32_t hold_note;
 static struct klock_hold holds[KLOCK_HOLD_SLOTS];
 
 /* Turned on from userland -- writing to /proc/klock -- rather than at boot,
@@ -142,16 +115,18 @@ static void record_hold(uint32_t note, uint64_t nanoseconds) {
 
 static void hold_begin(void) {
     if (!__atomic_load_n(&klock_stats_on, __ATOMIC_RELAXED)) return;
-    hold_note = breadcrumb[cpu_current()->index];
     hold_started = read_tsc();
 }
 
+/* The breadcrumb as it is on the way out, not on the way in: a syscall that
+   knows more about itself once it has looked at its arguments -- ioctl, whose
+   whole cost is which request it is -- leaves a finer one behind. */
 static void hold_end(void) {
     if (!hold_started) return;
     uint64_t now = read_tsc();
     uint64_t held = now > hold_started ? now - hold_started : 0;
     hold_started = 0;
-    record_hold(hold_note, held);
+    record_hold(breadcrumb[cpu_current()->index], held);
 }
 
 static volatile uint8_t watchdog_reported[SMP_MAX_CPUS];
@@ -213,23 +188,9 @@ void kernel_unlock(void) {
     __atomic_store_n(&now_serving, now_serving + 1, __ATOMIC_RELEASE);
 }
 
-/*
- * Shared entry, without taking a ticket when there is nobody to queue behind.
- *
- * Taking one costs three read-modify-writes on two shared words for every
- * syscall, and the processors then hand the ticket round one at a time -- which
- * showed up as 17% of all samples once the paths that matter had been moved
- * here. So the common case is a single increment and two loads: announce
- * ourselves, then check that no exclusive holder was already inside or queued.
- *
- * The check has to come after the increment, not before. An exclusive holder
- * waits for this counter to reach zero, so a processor that announced itself
- * first is one the exclusive holder will wait for; one that looked first and
- * announced afterwards could slip in behind its back.
- *
- * If an exclusive holder is queued we stand down and take a ticket after all,
- * which is what keeps it from being starved by a stream of shared arrivals.
- */
+/* Shared entry, without a ticket when there is nobody to queue behind. The
+   announcement has to come before the check: an exclusive holder waits for
+   this counter, so looking first would let a processor slip in behind it. */
 void kernel_lock_shared(void) {
     __atomic_fetch_add(&shared_holders, 1, __ATOMIC_ACQUIRE);
     if (__atomic_load_n(&next_ticket, __ATOMIC_ACQUIRE) !=
@@ -248,18 +209,9 @@ void kernel_unlock_shared(void) {
     __atomic_fetch_sub(&shared_holders, 1, __ATOMIC_RELEASE);
 }
 
-/*
- * The lock, taken by an interrupt that may have landed on a processor already
- * holding it.
- *
- * The two halves have to agree. The handler used to take it only when it was
- * free while the entry stub released it unconditionally on the way out, so an
- * interrupt arriving on a processor that was already inside the kernel handed
- * back a lock it never took: the ticket queue moved past a ticket nobody was
- * serving, and every later attempt to take the lock waited for a turn that had
- * already gone by. What that looks like is a machine that stops on its next
- * syscall having printed nothing.
- */
+/* The lock, taken by an interrupt that may have landed on a processor already
+   holding it. Both halves have to agree, or the stub hands back a ticket
+   nobody was serving and every later attempt waits for a turn long gone. */
 /* What the handler did to the lock on the way in, so the way out can undo it. */
 #define ISR_LOCK_NOTHING 0U
 #define ISR_LOCK_TAKEN   1U
@@ -271,20 +223,9 @@ static volatile uint32_t isr_holder;
 
 void kernel_lock_from_isr(void) {
     unsigned index = cpu_current()->index;
-    /*
-     * A shared holder excludes nobody, so an interrupt that landed on one used
-     * to be let through here as if it already had the lock -- and then ran
-     * beside another processor's handler doing the same thing. Both walk the
-     * run queue, drain the keyboard controller and dispatch driver interrupts,
-     * none of which is written to be entered twice at once.
-     *
-     * Upgrading is not the answer: an exclusive ticket waits for the shared
-     * holders inside to leave, and this processor is one of them, so it would
-     * wait for itself. What the handler gets instead is exclusion against the
-     * one thing its shared claim does not already give it -- another
-     * processor's handler. Nothing exclusive can be inside while either of us
-     * is, because it would have waited for our shared claims to go.
-     */
+    /* A shared holder excludes nobody, so a handler on one used to run beside
+       another processor's handler. Upgrading would wait for this processor's
+       own shared claim, so the handler takes a lock of its own instead. */
     if (kernel_lock_shared_here()) {
         uint32_t me = index + 1U;
         /* A fault taken inside a handler, which panics; do not wait for a
@@ -328,14 +269,8 @@ int kernel_lock_shared_here(void) {
     return held_mode[cpu_current()->index] == KLOCK_MODE_SHARED;
 }
 
-/*
- * Release whichever mode this processor took.
- *
- * The entry stubs call this by name on the way out and have no way to know
- * which of the two the dispatcher chose -- that decision is made per syscall,
- * in C, after the stub has already been entered. Keeping the choice in one
- * place here is what lets the assembly stay a single unconditional call.
- */
+/* Release whichever mode this processor took: the stubs call this by name and
+   cannot know which the dispatcher chose, which keeps the assembly simple. */
 void kernel_unlock_current(void) {
     if (held_mode[cpu_current()->index] == KLOCK_MODE_SHARED) kernel_unlock_shared();
     else kernel_unlock();

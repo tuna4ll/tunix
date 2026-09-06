@@ -496,34 +496,15 @@ struct linux_clone_args {
 #define FUTEX_CMD_MASK 0x7F
 
 #define MAX_EXEC_ITEMS 64
-/* 256 was enough for every argv/envp string this kernel had ever been asked
- * to copy -- until a real distribution's login shell exported LS_COLORS.
- * dircolors's default database renders to two or three KiB, so any real
- * userland's first login-shell profile silently broke every execve() after
- * it: copy_string_from_user() has no way to say "didn't fit" separately from
- * "faulted" (see usercopy.c), and copy_exec_vector() turned that into EFAULT
- * for a perfectly valid string. 4096 covers a 256-color LS_COLORS with room
- * to spare.
- *
- * This bound applies only to storage that lives in the kmalloc'd
- * exec_arguments; see MAX_SHEBANG_LINE for the one that does not. Linux draws
- * the same line, for the same reason, and calls the two MAX_ARG_STRLEN and
- * BINPRM_BUF_SIZE. */
+/* 256 was enough until a real login shell exported LS_COLORS, whose default
+   database renders to a few KiB and broke every execve() after it. Applies
+   only to storage in the kmalloc'd exec_arguments; Linux calls it
+   MAX_ARG_STRLEN. */
 #define MAX_EXEC_STRING 4096
-/*
- * The "#!" line, which is read into ordinary local buffers rather than onto
- * the heap -- so unlike the limit above, this one is spent out of the 32 KiB
- * kernel stack, and three buffers of it are live at once while a script is
- * being resolved.
- *
- * It was briefly MAX_EXEC_STRING, which put 12 KiB of the exec path's frames
- * on that stack and overran it. A kernel stack is itself a kmalloc'd block
- * (see process.c), so the overrun landed in the neighbouring block's header
- * and did nothing at all until some later kmalloc walked the free list into
- * the wreckage and faulted -- a crash arbitrarily far from the code that
- * caused it. 256 is what Linux allows a shebang line, and no interpreter path
- * worth running is longer.
- */
+/* The "#!" line, read into local buffers rather than onto the heap, so this
+   one is spent out of the 32 KiB kernel stack with three live at once. At
+   MAX_EXEC_STRING it overran into the neighbouring heap block's header and
+   faulted arbitrarily far away. 256 is what Linux allows. */
 #define MAX_SHEBANG_LINE 256
 
 struct linux_timespec {
@@ -769,20 +750,11 @@ void syscall_init(void) {
     wrmsr(0xC0000084, 0x200ULL | 0x400ULL);
 }
 
-/*
- * How much of a write(2) is staged in one go.
- *
- * Every call into file_write() is one filesystem write-back, and on ext2 that
- * means the superblock, the group descriptors and the bitmaps go to the disk
- * with it. Staging a 4 KiB chunk at a time therefore turned a 64 KiB write into
- * sixteen of those, and the metadata dominated: it measured 82% of the cost of
- * writing a file. One block write to the disk is ~0.3 ms whatever it holds, so
- * what matters is how many there are, not how big they are.
- *
- * It matches ext2's run length (EXT2_RUN_BLOCKS * 4 KiB), which is as much as
- * the filesystem will hand the disk in a single command anyway. The buffer
- * comes from the heap because the kernel stack is 16 KiB.
- */
+/* How much of a write(2) is staged in one go. Every call into file_write() is
+   one ext2 write-back with its superblock, descriptors and bitmaps, so what
+   matters is how many there are: at 4 KiB the metadata was 82% of the cost.
+   Matches ext2's run length, and comes from the heap because the stack is
+   16 KiB. */
 #define WRITE_STAGE_MAX (128U * 1024U)
 
 /* Only regular files get the large staging buffer. A pipe or a socket write is
@@ -812,15 +784,9 @@ static int64_t sys_write(int fd, uint64_t user_buffer, size_t length) {
 
     size_t completed = 0;
     int64_t failure = 0;
-    /*
-     * An empty write is not always nothing to do. On a message socket it sends
-     * an empty datagram, which the reader is meant to see: udevd's workers
-     * report that they have finished with exactly that -- a zero-byte message
-     * whose whole content is the sender's credentials -- so skipping the call
-     * left every device event marked as still running, and every boot waiting
-     * out `udevadm settle`. Everything else treats a zero-length write as the
-     * no-op it is.
-     */
+    /* An empty write is not always nothing to do: on a message socket it sends
+       an empty datagram, which is exactly how udevd's workers report that they
+       have finished -- skipping it left every boot waiting out udevadm settle. */
     if (!length) {
         int64_t written = file_write(file, 0, buffer);
         if (written < 0) return written;
@@ -1262,17 +1228,10 @@ static int64_t sys_socket(int domain, int type, int protocol) {
     if (type_flags & ~(SOCK_NONBLOCK | SOCK_CLOEXEC)) return -EINVAL;
     struct process *process = process_current();
     if (domain == TUNIX_AF_UNIX) {
-        /*
-         * SOCK_DGRAM shares the seqpacket implementation: both keep message
-         * boundaries, and the difference left over -- sending to a path
-         * without connecting first -- is not something anything here does.
-         *
-         * Refusing it outright was worse than an approximation. musl builds
-         * if_indextoname() out of an AF_UNIX SOCK_DGRAM socket and an ioctl
-         * on it, using the socket purely as a handle, so a program asking
-         * which interface a route belongs to got nothing at all -- which is
-         * how fastfetch came to skip every interface it had just enumerated.
-         */
+        /* SOCK_DGRAM shares the seqpacket implementation: both keep message
+           boundaries, and musl builds if_indextoname() out of an AF_UNIX
+           datagram socket used purely as a handle, so refusing it outright
+           was worse than the approximation. */
         if ((base_type != TUNIX_SOCK_STREAM && base_type != TUNIX_SOCK_SEQPACKET &&
              base_type != TUNIX_SOCK_DGRAM) || protocol != 0) return -EOPNOTSUPP;
         struct unix_socket *socket =
@@ -1493,16 +1452,9 @@ static int64_t sys_accept(int fd, uint64_t user_address, uint64_t user_length, i
     return install_accepted(file, flags, &peer, peer_length, user_address, user_length);
 }
 
-/*
- * accept(2) on a blocking socket waits for a connection; only a non-blocking
- * one answers EAGAIN. Everything on the image that accepts -- X11, Wayland,
- * D-Bus -- polls first and calls accept only once a connection is already
- * pending, so a plain blocking accept had never been tried until Python did
- * one and got EAGAIN out of a socket it had not asked to be non-blocking.
- *
- * It sleeps rather than yields, because a rewound syscall that yields stays
- * READY and is handed the processor again for as long as nothing connects.
- */
+/* accept(2) on a blocking socket waits; only a non-blocking one answers EAGAIN.
+   It sleeps rather than yields, because a rewound syscall that yields stays
+   READY and takes the processor again for as long as nothing connects. */
 static void accept_or_block(struct syscall_frame *frame, uint64_t syscall_number,
                             int fd, uint64_t user_address, uint64_t user_length,
                             int flags) {
@@ -1893,21 +1845,10 @@ static int write_unix_control(struct linux_msghdr *message,
     return 0;
 }
 
-/*
- * Several messages in one call.
- *
- * The whole of it is a loop around sendmsg, which is what Linux does too: the
- * saving is the syscalls, not the sending. It is here because glibc's resolver
- * puts the A and the AAAA query for one name into a single sendmmsg, and does
- * not fall back when the call is refused -- so every name lookup made by a
- * program that asks for both families at once failed, without a packet
- * reaching the wire. xbps was one; `getent hosts`, which asks for one family,
- * was not, which is what made it look like the network was intermittent.
- *
- * The return is the number of messages accepted. An error is only reported
- * when the first one fails: a partial send is a success with a smaller count,
- * and the caller finds out by reading msg_len.
- */
+/* Several messages in one call, which is a loop around sendmsg: the saving is
+   the syscalls. glibc's resolver puts the A and the AAAA query in one
+   sendmmsg and does not fall back, so without it every dual-family lookup
+   failed without a packet reaching the wire. */
 static int64_t sys_sendmmsg(int fd, uint64_t user_vector, unsigned count, int flags) {
     if (!user_vector) return -EFAULT;
     /* UIO_MAXIOV, the same ceiling Linux puts on it. */
@@ -2156,19 +2097,10 @@ static int64_t sys_ftruncate(int fd, uint64_t length) {
     return vfs_truncate(file->node, length) == 0 ? 0 : -EIO;
 }
 
-/*
- * fallocate(2), enough of it to reserve space.
- *
- * Wayland clients allocate their shm buffers with memfd_create() followed by
- * posix_fallocate(), which musl implements with this syscall. Without it the
- * call returns ENOSYS and weston's clients die with "creating a buffer file
- * failed: Function not implemented" -- so this is what stands between a
- * compositor that starts and one that can draw.
- *
- * Only mode 0 (allocate, growing the file if needed) is supported. The punching
- * and collapsing modes describe operations on extents that neither memfd nor
- * the ext2 driver models, so they are refused rather than silently ignored.
- */
+/* fallocate(2), enough of it to reserve space: musl implements
+   posix_fallocate() with it, and Wayland clients allocate their shm buffers
+   that way. Only mode 0; punching and collapsing describe extents neither
+   memfd nor ext2 models here. */
 static int64_t sys_fallocate(int fd, int mode, uint64_t offset, uint64_t length) {
     struct process *process = process_current();
     if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) return -EBADF;
@@ -2268,24 +2200,10 @@ static int64_t sys_flock(int fd, int operation) {
     return file_flock(process->files->fds[fd], operation);
 }
 
-/*
- * POSIX advisory locks, as fcntl(F_SETLK) asks for them.
- *
- * SQLite is what needs these: it locks single bytes and small ranges to
- * arbitrate between connections, and with fcntl answering EINVAL every
- * database file it opened failed with "disk I/O error". flock(2) is a
- * different lock space and does not serve.
- *
- * The range is deliberately ignored and the whole file is locked instead.
- * That is coarser than POSIX promises, and the direction of the error matters:
- * locking more than asked can only ever refuse a lock that should have been
- * granted, never grant one that should have been refused. What it costs is
- * concurrency between processes sharing a database -- one may see EAGAIN where
- * real byte ranges would not have collided. Within a single process nothing is
- * lost, because POSIX locks belong to the process and a process never
- * conflicts with itself: SQLite holding SHARED and then taking RESERVED is one
- * owner replacing its own lock, which is exactly what happens here.
- */
+/* POSIX advisory locks, as fcntl(F_SETLK) asks for them -- SQLite needs them
+   and flock(2) is a different lock space. The range is ignored and the whole
+   file locked, which can only refuse a lock that should have been granted,
+   never the reverse; a process never conflicts with itself. */
 static int64_t vfs_posix_lock(struct vfs_node *node, int type, uint64_t pid) {
     if (type == F_UNLCK) {
         if (node->posix_lock_pid == pid) {
@@ -2341,24 +2259,14 @@ static int64_t sys_fsync(int fd) {
 static int64_t sys_ioctl(int fd, unsigned long request, uint64_t user_argument) {
     struct process *process = process_current();
     if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) return -EBADF;
-    /*
-     * An ioctl request is 32 bits. libc declares ioctl() as taking an int, so
-     * any request with the read direction set -- 0x8xxxxxxx, which is every
-     * _IOR: TIOCGPTN, EVIOCGVERSION, RTC_RD_TIME -- is negative as an int and
-     * arrives here sign-extended to 64 bits. Linux truncates because its
-     * handler takes an unsigned int; do the same, or every exact comparison
-     * below silently misses and the caller is told ENOTTY.
-     */
+    /* An ioctl request is 32 bits, and libc declares ioctl() as taking an int,
+       so every _IOR arrives sign-extended. Truncate as Linux does, or every
+       comparison below misses and the caller is told ENOTTY. */
     request &= 0xFFFFFFFFUL;
     struct file *file = process->files->fds[fd];
-    /*
-     * FIONBIO is the other way to say O_NONBLOCK, and it belongs to the
-     * descriptor rather than to whatever is behind it -- so it is answered
-     * here, before anything gets to interpret the argument. CPython's
-     * socket.settimeout() uses it in preference to fcntl, and on an inet
-     * socket it used to fall through to the interface ioctls, which read the
-     * argument as an interface name and answered EADDRNOTAVAIL.
-     */
+    /* FIONBIO is the other way to say O_NONBLOCK and belongs to the descriptor,
+       so it is answered before anything interprets the argument -- on an inet
+       socket it used to fall through to the interface ioctls. */
     if (request == FIONBIO) {
         int32_t enabled;
         if (!user_argument ||
@@ -2408,14 +2316,9 @@ static int64_t sys_ioctl(int fd, unsigned long request, uint64_t user_argument) 
     }
     if (file->kind == FILE_KIND_FRAMEBUFFER)
         return framebuffer_file_ioctl(file, request, user_argument);
-    /*
-     * The SIOCGIF* device ioctls are a property of the machine's interfaces,
-     * not of the socket they arrive on, and Linux answers them on any socket
-     * at all. That is not a nicety: musl implements if_indextoname() by
-     * opening an AF_UNIX socket and asking it for SIOCGIFNAME, so a program
-     * that resolves the interface behind a route -- fastfetch's Local IP
-     * does exactly that -- never gets an answer if only inet sockets reply.
-     */
+    /* The SIOCGIF* ioctls are a property of the machine's interfaces, not of
+       the socket they arrive on, and Linux answers them on any socket: musl
+       implements if_indextoname() by asking an AF_UNIX one. */
     if (file->kind == FILE_KIND_SOCKET && (request & 0xFF00U) == 0x8900U) {
         uint8_t argument[40];
         if (!user_argument || copy_from_user(argument, user_argument, sizeof(argument)) != 0)
@@ -2898,15 +2801,9 @@ static int64_t sys_umount2(uint64_t user_target, int flags) {
     return vfs_umount(target);
 }
 
-/*
- * mknod(2), for the one file type it can make: a FIFO.
- *
- * Device nodes are refused rather than faked. /dev is built by the kernel from
- * the devices it actually found, so a node made here would name a driver that
- * is not behind it; MAKEDEV scripts get EPERM, which is what they get on a
- * system with devtmpfs too. Making a regular file is allowed because mknod(2)
- * says it is and it costs nothing.
- */
+/* mknod(2), for the one file type it can make: a FIFO. Device nodes are
+   refused rather than faked, because /dev is built from the devices actually
+   found and a node made here would name a driver that is not behind it. */
 static int64_t sys_mknodat(int dirfd, uint64_t user_path, uint32_t mode,
                            uint64_t device) {
     (void)device;
@@ -3088,24 +2985,13 @@ static int map_zero_pages(struct process *process, uint64_t start, uint64_t end,
     return 0;
 }
 
-/*
- * Map a memfd's pages into the address space. Unlike map_zero_pages this maps
- * pages that already exist and belong to someone else, taking a reference on
- * each: that is what makes the mapping *shared* rather than a copy, so a write
- * here is visible to every other process that mapped the same object.
- *
- * PAGE_SHARED keeps fork from turning them into copy-on-write pages.
- */
-/*
- * Map a memfd's pages into a process.
- *
- * MAP_SHARED maps them writable and marked shared, which is the whole point of
- * a memfd: two processes on the same physical pages. MAP_PRIVATE maps the same
- * pages read-only and copy-on-write instead, so a reader sees the contents
- * without a copy and only pays for one if it writes. Weston's keymap goes out
- * to clients that way -- it reads a sealed memfd with MAP_PRIVATE and never
- * writes to it.
- */
+/* Map a memfd's pages into the address space: these already exist and belong
+   to someone else, so each takes a reference and PAGE_SHARED keeps fork from
+   turning them copy-on-write. */
+/* Map a memfd's pages into a process. MAP_SHARED puts two processes on the
+   same physical pages; MAP_PRIVATE maps them read-only and copy-on-write, so
+   a reader pays for a copy only if it writes -- which is how weston's keymap
+   reaches its clients. */
 static int map_shared_object(struct process *process, uint64_t start,
                              uint64_t end, struct memfd_object *object,
                              uint64_t file_offset, uint64_t flags, int private) {
@@ -3323,14 +3209,10 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
             !file->node) return -ENODEV;
         if (file->node->mmap) {
             if (!(flags & MAP_SHARED)) return -EINVAL;
-            /*
-             * A device mapping is the device's memory, not the process's, so it
-             * must survive fork as the same memory: PAGE_SHARED stops the clone
-             * turning it copy-on-write. Weston forks to launch its shell
-             * clients while holding its DRM dumb buffers mapped -- without
-             * this, every frame it drew afterwards went into a private copy and
-             * the screen stayed on whatever was there before.
-             */
+            /* A device mapping is the device's memory, not the process's, so
+               PAGE_SHARED stops fork turning it copy-on-write: weston forks
+               its shell clients while holding DRM buffers mapped, and without
+               this every frame after went into a private copy. */
             int64_t status = file->node->mmap(file->node, file, process->cr3,
                                               base, length, offset,
                                               page_flags | PAGE_SHARED);
@@ -3362,30 +3244,15 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
         return (int64_t)base;
     }
 
-    /*
-     * A read-only private file mapping is how every shared library is loaded,
-     * and copying it per process is what put webkit over the memory ceiling:
-     * libwebkit2gtk alone is 68 MiB and each of its processes wanted its own.
-     * Map the kernel's cached copy instead, taking a reference on each page and
-     * handing it over copy-on-write so a write still gets a private page.
-     *
-     * Only whole pages that lie inside the file can be shared. The page the
-     * file ends in has to read as zeros past that point -- the loader relies on
-     * it for the bss that overlaps the last page -- so it and everything after
-     * it get private pages, filled from the file and zero beyond.
-     */
-    /*
-     * MAP_SHARED is the same mapping without the copy-on-write: the pages are
-     * the kernel's cached copy of the file, so a write through them is a write
-     * every reader sees, which is what MAP_SHARED means. Before this it fell
-     * through to the generic path, got private copies, and discarded every
-     * write silently -- the kind of failure that loses data instead of
-     * reporting anything. A writable shared mapping needs a descriptor that
-     * was opened for writing, exactly as Linux requires.
-     *
-     * Durability is a separate question: the write lands in the cache, and
-     * reaching the disk still takes an fsync on the descriptor.
-     */
+    /* A read-only private file mapping is how every shared library is loaded,
+       and a copy per process is what put webkit over the memory ceiling. Map
+       the cached copy, referenced and copy-on-write. Only whole pages inside
+       the file can be shared: the last page has to read as zeros past the end,
+       so it and everything after get private pages. */
+    /* MAP_SHARED is the same without the copy-on-write, so a write is one every
+       reader sees. It used to fall through to the generic path and discard
+       every write silently. The descriptor must have been opened for writing,
+       as Linux requires; durability still takes an fsync. */
     int share_private = (flags & MAP_PRIVATE) && !(prot & PROT_WRITE);
     int share_shared = (flags & MAP_SHARED) &&
                        (!(prot & PROT_WRITE) ||
@@ -3620,20 +3487,10 @@ static int64_t sys_shmctl(int id, int command, uint64_t user_buffer) {
     }
 }
 
-/*
- * mremap(2), enough of it for a growing shm pool.
- *
- * libwayland's wl_shm resizes a client's pool by mremap()ing the server's
- * mapping of it, with no fallback: without this the compositor kills the client
- * with a "failed mremap" protocol error.
- *
- * Growing a *file* mapping means covering more of the backing object, which
- * page tables alone cannot describe -- hence the mapping table in
- * process_memory. Growing an *anonymous* mapping just needs fresh zero pages,
- * so that case works without a record, but only in place: moving anonymous
- * pages is not implemented and returns ENOMEM rather than quietly handing back
- * a mapping with the wrong contents.
- */
+/* mremap(2), enough of it for a growing shm pool: libwayland resizes a client's
+   pool this way with no fallback. Growing a file mapping means covering more
+   of the backing object, which is what the mapping table is for; an anonymous
+   one grows in place and refuses to move. */
 /*
  * Growing or shrinking a mapping in place, and moving it when it cannot grow.
  * `backing` is the object behind the mapping, already referenced by the caller:
@@ -3760,16 +3617,10 @@ static int64_t sys_mprotect(uint64_t address, uint64_t length, int prot) {
         }
         uint64_t effective_flags = flags | (old_flags & (PAGE_DEVICE | PAGE_SHARED));
         if (nx_enabled && (old_flags & PAGE_DEVICE)) effective_flags |= PAGE_NX;
-        /*
-         * A copy-on-write page must not be handed write permission here: it is
-         * still shared with whoever forked it, and granting the write directly
-         * would let the two processes scribble on each other's memory. Keep it
-         * read-only and copy-on-write so the next store faults and gets a
-         * private copy, which is the permission the caller actually asked for.
-         *
-         * Dropping write permission instead clears the marker, so that a later
-         * store gets the SIGSEGV the caller asked for rather than a silent copy.
-         */
+        /* A copy-on-write page must not be handed write permission here: it is
+           still shared with whoever forked it. Keep it read-only and marked,
+           so the next store faults and gets a private copy. Dropping write
+           permission instead clears the marker. */
         if (old_flags & PAGE_COW) {
             if (prot & PROT_WRITE) effective_flags = (effective_flags & ~PAGE_WRITE) | PAGE_COW;
         }
@@ -4187,14 +4038,9 @@ static int64_t sys_getrandom(uint64_t user_buffer, size_t length, unsigned flags
     return (int64_t)completed;
 }
 
-/*
- * The set of processors a task may run on, which is all of them.
- *
- * nproc, and every thread pool that sizes itself, asks this before it looks at
- * /proc/cpuinfo -- so a kernel that answers ENOSYS here reports one processor
- * however many it is running. The return value is the number of bytes written,
- * not zero, which is the part callers actually read.
- */
+/* The set of processors a task may run on, which is all of them. nproc asks
+   this before it looks at /proc/cpuinfo, and the return is the number of bytes
+   written rather than zero. */
 static int64_t sys_sched_getaffinity(uint64_t tid, size_t size, uint64_t user_mask) {
     if (!user_mask) return -EFAULT;
     if (size < sizeof(uint64_t) || (size & (sizeof(uint64_t) - 1))) return -EINVAL;
@@ -4415,15 +4261,9 @@ static int64_t sys_prctl(int option, uint64_t arg2, uint64_t arg3,
             return process->keep_capabilities;
         case PR_SET_KEEPCAPS:
             if (arg2 > 1) return -EINVAL;
-            /*
-             * Keep the permitted capability set across a change of uid. There
-             * are no capabilities here, so there is nothing to keep -- but the
-             * flag is a promise about a later setuid rather than an action,
-             * and refusing it is not the same as having nothing to do. It is
-             * the first thing iputils' ping asks for, and being told EINVAL
-             * made it exit with "ping: prctl: Invalid argument" before it
-             * opened a socket.
-             */
+            /* Keep the permitted capability set across a change of uid. There
+               are none here, but the flag is a promise about a later setuid
+               rather than an action, and it is the first thing ping asks for. */
             process->keep_capabilities = (int)arg2;
             return 0;
         case PR_GET_SECUREBITS:
@@ -4589,18 +4429,10 @@ static int64_t sys_eventfd(uint64_t initial_value, int flags, int legacy) {
     return install_new_file(file, flags & EFD_CLOEXEC);
 }
 
-/*
- * memfd_create(2). The name argument only shows up in /proc on Linux and is
- * ignored here beyond validating that it is readable.
- *
- * MFD_ALLOW_SEALING used to be accepted and ignored, on the reasoning that a
- * client asking for sealing still works without it. That is true of libwayland
- * and false of Mesa, which asks for F_SEAL_SHRINK before handing a buffer to a
- * compositor and, when the request fails, closes the descriptor and gives up.
- * The request then went out with no descriptor attached and the compositor
- * answered `invalid arguments for wl_shm.create_pool` -- which is how every
- * OpenGL client on this system failed to open a window.
- */
+/* memfd_create(2); the name only shows up in /proc on Linux. MFD_ALLOW_SEALING
+   has to be real: Mesa asks for F_SEAL_SHRINK before handing a buffer to a
+   compositor and gives up when the request fails, which is how every OpenGL
+   client failed to open a window. */
 static int64_t sys_memfd_create(uint64_t user_name, uint32_t flags) {
     if (flags & ~(uint32_t)(MFD_CLOEXEC | MFD_ALLOW_SEALING)) return -EINVAL;
     char name[256];
@@ -4617,15 +4449,9 @@ static int64_t sys_memfd_create(uint64_t user_name, uint32_t flags) {
     return install_new_file(file, flags & MFD_CLOEXEC);
 }
 
-/*
- * signalfd4(2). `fd` of -1 creates a descriptor; anything else re-arms the mask
- * on an existing one, which is how a program narrows or widens what it watches
- * without churning its epoll set.
- *
- * The caller is expected to have blocked these signals with sigprocmask first,
- * exactly as on Linux -- otherwise the normal delivery path consumes them
- * before a read ever happens. That is the caller's job, not ours.
- */
+/* signalfd4(2). `fd` of -1 creates one; anything else re-arms the mask on an
+   existing descriptor. The caller is expected to have blocked these signals
+   first, exactly as on Linux. */
 static int64_t sys_signalfd(int fd, uint64_t user_mask, uint64_t mask_size,
                             int flags) {
     struct process *process = process_current();
@@ -4775,16 +4601,9 @@ static int64_t sys_inotify_rm_watch(int fd, int descriptor) {
     return inotify_remove_watch(file->inotify, descriptor);
 }
 
-/*
- * How much of the machine the file cache may hold.
- *
- * A sixteenth of RAM, floored and capped so neither a small machine nor a large
- * one gets a silly answer. The number that used to bound it was the heap's own
- * ceiling -- three quarters of 2 GiB -- which on any machine with room to spare
- * meant the cache simply grew until something else could not allocate. Reading
- * a few hundred megabytes of files is an ordinary morning's work, and every
- * byte of it stayed resident for the life of the boot.
- */
+/* How much of the machine the file cache may hold: a sixteenth of RAM, floored
+   and capped. The bound used to be the heap's own ceiling, so on a machine
+   with room the cache grew until something else could not allocate. */
 static uint64_t file_cache_budget(void) {
     static uint64_t budget;
     if (budget) return budget;
@@ -4794,14 +4613,9 @@ static uint64_t file_cache_budget(void) {
     return budget;
 }
 
-/*
- * reboot(2).
- *
- * The magic numbers are not decoration: the call takes the machine away, and
- * requiring two constants and a command means a wild syscall with plausible
- * arguments cannot reach it by accident. Linux accepts four values for the
- * second one, all of them dates, and libcs differ over which they pass.
- */
+/* reboot(2). The magic numbers are not decoration: two constants and a command
+   mean a wild syscall with plausible arguments cannot take the machine away
+   by accident. */
 #define LINUX_REBOOT_MAGIC1 0xFEE1DEADU
 #define LINUX_REBOOT_MAGIC2 0x28121969U
 #define LINUX_REBOOT_MAGIC2A 0x05121996U
@@ -4930,14 +4744,10 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             int fd = (int)frame->rdi;
             int64_t result = sys_ioctl(fd, (unsigned long)frame->rsi, frame->rdx);
             struct file *file = file_from_fd(fd);
-            /*
-             * An ioctl that moves data can run out of room, and on a blocking
-             * descriptor it has to wait rather than fail -- ALSA fills its ring
-             * through SNDRV_PCM_IOCTL_WRITEI_FRAMES, and alsa-lib treats an
-             * EAGAIN from it as a hard error. Only devices that publish a
-             * write-readiness hook can block this way, which keeps every other
-             * ioctl in the tree on the path it had.
-             */
+            /* An ioctl that moves data can run out of room, and on a blocking
+               descriptor it has to wait rather than fail: alsa-lib treats an
+               EAGAIN from WRITEI_FRAMES as a hard error. Only devices with a
+               write-readiness hook can block this way. */
             if (result == -EAGAIN && file && !(file->flags & O_NONBLOCK) &&
                 file->kind == FILE_KIND_VFS && file->node &&
                 file->node->write_ready) {
@@ -5468,15 +5278,10 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         case SYS_UMASK: frame->rax = process_set_umask((uint32_t)frame->rdi); break;
         case SYS_GETTIMEOFDAY: frame->rax = (uint64_t)sys_gettimeofday(frame->rdi); break;
         case SYS_GETRLIMIT: frame->rax = (uint64_t)sys_prlimit(frame->rdi, frame->rsi); break;
-        /*
-         * Nice selects a weight in the ordinary scheduler band. getpriority
-         * reports 20 - nice so that a negative nice is not
-         * mistaken for an error, and pam_limits treats a failure here as a
-         * reason to abort the whole session.
-         *
-         * PRIO_PROCESS is the only `which` that means anything to this: a
-         * process group or a user is not something the scheduler knows.
-         */
+        /* Nice selects a weight in the ordinary band, and getpriority reports
+           20 - nice so a negative one is not mistaken for an error --
+           pam_limits aborts the session on a failure here. PRIO_PROCESS is the
+           only `which` the scheduler knows. */
         case SYS_GETPRIORITY: {
             int nice = 0;
             frame->rax = process_get_nice(frame->rdi == 0 ? frame->rsi : 0, &nice) == 0
@@ -5490,14 +5295,9 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             break;
         }
         case SYS_GETRUSAGE: frame->rax = (uint64_t)sys_getrusage(frame->rsi); break;
-        /*
-         * Scheduling policy, which a thread may now actually have. What it
-         * buys is being taken off the runnable list first; see next_runnable()
-         * in process.c, and docs/sound.md for the program that asked.
-         *
-         * A thread id, not a process id: pthread_setschedparam passes one, and
-         * the thread that wants this is one of several inside a process.
-         */
+        /* Scheduling policy, which a thread may now actually have: what it buys
+           is being taken off the runnable list first. A thread id, not a
+           process id -- pthread_setschedparam passes one. */
         case SYS_SCHED_GETSCHEDULER: {
             int policy = 0;
             int result = process_get_scheduler(frame->rdi, &policy, NULL);
@@ -5848,46 +5648,17 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
     if (!skip_signal_delivery) process_prepare_user_return(frame);
 }
 
-/*
- * The frame arrived on the kernel stack of the process that made the call, and
- * that process may not be the one this return path is heading back to: a
- * blocking syscall gives its processor away and the return frame becomes
- * somebody else's. The stack it is sitting on then belongs to a process that
- * another processor is free to schedule -- and the first thing that process
- * does on entering the kernel is write over exactly these bytes.
- *
- * So the frame is moved onto the kernel stack of whichever process is running
- * here now -- a stack nobody else can enter while this processor holds the
- * process -- and syscall_entry.S reloads rsp from the same per-CPU field, so
- * the two always agree. When nothing was switched, source and destination are
- * the same address and no copy happens.
- *
- * This function does not drop the lock. It cannot: its own return address is
- * on the stack it is trying to get off, and a `ret` executed after the lock is
- * gone reads a stack that may already have been reaped and its pages given
- * back. syscall_entry.S drops it, once rsp is somewhere safe.
- */
+/* The frame arrived on the kernel stack of the process that made the call, and
+   a blocking syscall gives its processor away -- so that stack may already
+   belong to somebody else, whose first syscall writes over these bytes. It is
+   moved onto the stack of whoever is running here now. The lock cannot be
+   dropped from here: this function's return address is on that stack. */
 _Static_assert(sizeof(struct syscall_frame) == 144, "syscall_entry.S assumes 144");
 
-/*
- * Which files a read or a write may move bytes through without excluding the
- * rest of the kernel.
- *
- * The test is not "is this fast" but "is everything it touches either private
- * to this process or behind a lock of its own". A pipe qualifies because it
- * has a lock now and its whole state is inside it. A character device
- * qualifies only when devfs said so by hand.
- *
- * It used to be inferred, from a null `data` pointer and a zero length. That
- * is not a property of the device: it is a property of what the driver chose
- * to keep there, and three drivers keep the number zero. /dev/input/event0 is
- * one of them -- device id zero is the keyboard -- so every evdev read ran
- * beside the interrupt that fills the same ring, and the reader's head and
- * count raced the writer's tail and count. A lost decrement leaves a slot to
- * be read a second time, which is a key typed twice. /dev/tty0 and
- * /dev/console (terminal zero is "whichever is active") and /dev/random (no
- * data pointer, but a generator behind it) went the same way.
- */
+/* Which files a read or a write may move bytes through without excluding the
+   rest of the kernel: everything it touches must be private to the process or
+   behind a lock of its own. Inferring it from a null `data` pointer was wrong
+   -- device id zero is the keyboard -- so devfs says so by hand now. */
 static int file_may_share(const struct file *file) {
     if (!file) return 0;
     if (file->kind == FILE_KIND_PIPE_READ || file->kind == FILE_KIND_PIPE_WRITE)

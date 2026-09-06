@@ -8,21 +8,8 @@
 #include "../../include/vmm.h"
 #include "../../include/usb.h"
 
-/*
- * USB mass storage: bulk-only transport carrying SCSI.
- *
- * Every operation is the same three steps. A 31-byte command block wrapper
- * goes out on the bulk OUT endpoint, the data moves in whichever direction the
- * wrapper declared, and a 13-byte command status wrapper comes back on bulk IN.
- * The tag in the wrapper is echoed in the status, which is the only way to be
- * sure the status belongs to the command that was just sent.
- *
- * The staging buffer is a physically contiguous page, because a bulk transfer
- * is described to the controller by one address and one length. A request
- * larger than the page is split rather than scattered -- a USB stick is not
- * where throughput is won, and one address per transfer keeps the transport
- * simple enough to reason about.
- */
+/* USB mass storage: a 31-byte command wrapper out, the data, a 13-byte status
+   wrapper in, all through one physically contiguous staging page. */
 
 extern void kprintf(const char *fmt, ...);
 
@@ -96,15 +83,8 @@ static uint8_t *staging_page;
 static uint64_t staging_physical;
 static uint32_t next_tag = 1;
 
-/*
- * Run one SCSI command. `data` may be NULL; when it is not, `length` bytes move
- * through the staging page in the direction `in` says.
- *
- * Zero is success, TRANSPORT_FAILED is a transfer that did not complete and
- * REJECTED is the device answering properly to say no -- a write to a medium
- * that is write-protected, a sector it cannot read. The two are not the same
- * thing and must not be retried the same way.
- */
+/* Run one SCSI command. Zero is success, TRANSPORT_FAILED a transfer that did
+   not complete, REJECTED the device answering properly to say no. */
 #define TRANSPORT_FAILED (-1)
 #define REJECTED (-2)
 
@@ -141,38 +121,16 @@ static int run_command_once(struct usb_disk *disk, const uint8_t *command,
     return csw->status == 2U ? TRANSPORT_FAILED : REJECTED;
 }
 
-/*
- * The same, retried, with the device put back in order in between.
- *
- * Two failures look alike from here and are not. One is a command that never
- * left the controller -- the device saw nothing and the same command can go
- * again. The other is a command that failed after its wrapper went out, and
- * the device is now waiting for data or holding a status nobody collected.
- * Sending the next command into that is how one failure becomes every failure:
- * the device reads the new wrapper as the data it was still expecting.
- *
- * Telling them apart from here is not possible, so the class reset runs before
- * every retry. It is what the specification asks for, and the cost is paid
- * only on a path that has already gone wrong.
- */
+/* The same, retried with a class reset in between: a command that failed after
+   its wrapper went out leaves the device waiting mid-transaction. */
 #define COMMAND_ATTEMPTS 4
 /* Enough to say a disk is failing, not enough to bury the log -- and the log
    is painted on the console, so a message per failed block is not a diagnostic
    but a second failure on top of the first. */
 #define COMMAND_REPORTS 8U
 
-/*
- * How many commands may fail in a row before the retries are given up on.
- *
- * A retry is worth its cost when the failure was a one-off. It is worth
- * nothing when the last several commands all failed the same way, and the cost
- * is real: every attempt waits out a two-second transfer timeout and a class
- * reset, with the kernel lock held the whole time, so one refused write stops
- * the machine for the best part of half a minute -- long enough for the lock
- * watchdog to start reporting. Backing down to a single attempt keeps a
- * failing disk from taking the rest of the system with it, and one success
- * puts the retries back.
- */
+/* How many commands may fail in a row before the retries are given up on: each
+   attempt is a two-second timeout and a reset with the kernel lock held. */
 #define FAILURES_BEFORE_BACKING_OFF 3U
 
 static unsigned consecutive_failures;

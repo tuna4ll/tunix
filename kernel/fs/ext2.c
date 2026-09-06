@@ -17,22 +17,9 @@ extern void kprintf(const char *fmt, ...);
 #define KDEBUG(...) do { } while (0)
 #endif
 
-/*
- * ext2 driver backing the entire root filesystem.
- *
- * The disk region after the initramfs holds a rev-1 ext2 filesystem (4 KiB
- * blocks, 128-byte inodes, dirent file_type) that Linux can mount directly.
- * The disk is the authoritative copy: the initramfs seeds it on first boot
- * and is not read again. Mounting restores only the tree's shape; file
- * contents arrive one file at a time through ext2_fetch_data(). The VFS tree
- * is the cache, and every mutation is mirrored to disk write-through via the
- * persistence hooks. VFS_VOLATILE directories (/tmp, /run, /dev, /proc, /sys,
- * /var/tmp) and everything under them stay RAM-only. s_state is the seed commit marker: 0 while
- * formatting, 1 only once a full seed landed.
- *
- * Metadata blocks go through single-block write-back caches flushed at the
- * end of every VFS operation; file contents move in multi-block DMA runs.
- */
+/* ext2 backing the whole root filesystem: the disk is authoritative, the VFS
+   tree is the cache, and every mutation is mirrored through the persistence
+   hooks. VFS_VOLATILE trees stay in RAM. */
 
 #define EXT2_BLOCK_SIZE 4096U
 #define EXT2_SECTORS_PER_BLOCK (EXT2_BLOCK_SIZE / 512U)
@@ -176,16 +163,8 @@ static uint8_t bulk_buf[EXT2_RUN_BLOCKS * EXT2_BLOCK_SIZE];
 
 /* --- group layout ------------------------------------------------------- */
 
-/*
- * Where a group's metadata is, according to the group itself.
- *
- * The driver used to compute all of this: it made the filesystem, so it knew
- * that every group began with a superblock backup, then the descriptor table,
- * then the two bitmaps and the inode table. mke2fs writes the image now, and
- * it does none of that reliably -- most groups have no backup (sparse_super),
- * and reserved growth blocks push the rest along -- so the descriptors are
- * read and believed instead of checked against a layout of our own.
- */
+/* Where a group's metadata is, read from the descriptor rather than computed:
+   mke2fs writes the image and its layout is not ours to predict. */
 
 static uint32_t gd_blocks_for(uint32_t groups) {
     return (groups + EXT2_GD_PER_BLOCK - 1U) / EXT2_GD_PER_BLOCK;
@@ -341,17 +320,8 @@ static int flush_meta(void) {
 
 /* --- bitmaps ------------------------------------------------------------ */
 
-/*
- * Find a free bit at or after `start`, wrapping back to the beginning once so
- * that nothing below the cursor is lost.
- *
- * A group bitmap is 32768 bits of which the used ones come in long runs, so the
- * scan reads a word at a time and skips the full ones outright: a bit-by-bit
- * walk touches memory once per bit and does it on every single allocation.
- * Bits within a byte are numbered from the least significant, which is exactly
- * how a little-endian word load orders them, so the first zero of ~word is the
- * first free bit of the word.
- */
+/* A free bit at or after `start`, wrapping once. A word at a time, because a
+   bit-by-bit walk touches memory once per bit on every allocation. */
 static int64_t bitmap_scan(const uint8_t *bits, uint32_t start, uint32_t max_bits) {
     const uint32_t *words = (const uint32_t *)bits;
     if (start >= max_bits) start = 0;
@@ -393,21 +363,8 @@ static void bitmap_release(struct block_cache *cache, uint32_t bitmap_block,
     cache->dirty = 1;
 }
 
-/*
- * Allocation resumes where the last one left off rather than restarting at the
- * beginning of the disk. That is not only about the length of the search: the
- * lowest free block is whatever hole the last deletion left, so always taking
- * it scatters a growing file across the whole filesystem, and write_blocks()
- * can then only ever write one block at a time. Carrying on from the previous
- * block hands out consecutive blocks while consecutive blocks exist, which is
- * what lets run_append() fill a 32-block transfer.
- *
- * Nothing is stranded by this: the scan wraps within the group and the group
- * walk wraps too, so a full pass still sees every free block.
- *
- * Block 0 holds the superblock and is marked used at format time, so 0 is
- * never a valid allocation and stays usable as the "no block" sentinel.
- */
+/* Allocation resumes where the last one left off, so a growing file gets
+   consecutive blocks and run_append() can fill a whole transfer. */
 static uint32_t block_cursor_group;
 static uint32_t block_cursor_bit;
 
@@ -1555,16 +1512,8 @@ static uint32_t region_usable_blocks(uint32_t region_lba) {
     return blocks;
 }
 
-/*
- * What this driver can mount.
- *
- * What is refused here is only what the code genuinely cannot cope with: a
- * block size other than 4 KiB, because every buffer in this file is sized to
- * it; an inode bigger than the classic 128 bytes; a group whose bitmap would
- * not fit in one block; and any incompatible feature but filetype -- extents
- * and 64-bit block numbers most of all. Everything else the superblock says
- * is taken as given rather than compared against a layout of our own.
- */
+/* What this driver can mount: 4 KiB blocks, 128-byte inodes, a bitmap that
+   fits one block, and no incompatible feature but filetype. */
 static int superblock_usable(uint32_t usable_blocks) {
     if (sb.s_magic != EXT2_MAGIC || sb.s_rev_level != 1 ||
         sb.s_log_block_size != 2 || sb.s_inode_size != EXT2_INODE_SIZE ||
@@ -1641,19 +1590,8 @@ int ext2fs_probe(uint32_t region_lba) {
     return superblock_usable(usable_blocks) ? 0 : -1;
 }
 
-/*
- * The index of the disk whose ext2 superblock carries this label, or -1.
- *
- * root=/dev/sda2 names a position in the probe order, and that order is a
- * property of the machine rather than of the image: put the same disk in a
- * machine that already has one and the name moves -- which is how a kernel
- * built here ends up trying to mount a stranger's second partition. The label
- * is written into the filesystem by mkfs.ext2 -L and travels with it.
- *
- * The superblock is read directly rather than through ext2fs_probe(), because
- * probing sets the driver's own state and this runs over every disk on the
- * machine, most of which are not ours.
- */
+/* The disk whose ext2 superblock carries this label, or -1: a name like
+   /dev/sda2 is a position in the probe order and moves between machines. */
 int ext2fs_find_label(const char *label) {
     if (!label || !*label) return -1;
     int count = block_device_count();

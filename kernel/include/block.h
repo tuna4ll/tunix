@@ -4,23 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/*
- * The block layer: one interface over every disk the kernel can reach.
- *
- * It exists because the filesystem used to call the IDE driver by name, so a
- * machine whose only disk is SATA or NVMe -- which is most of them, and every
- * `-machine q35` -- had no storage at all. Drivers register here; ext2 and
- * /dev/sda go through here and never learn which kind of controller answered.
- *
- * Everything is counted in 512-byte sectors, including for an NVMe namespace
- * formatted with 4 KiB blocks: the driver does the translation, because the
- * alternative is every caller knowing the geometry of every controller.
- *
- * There is no longer an early path around it. The kernel used to read a boot
- * manifest and an initramfs off the disk before the allocator existed, which
- * only port-I/O IDE could serve; Limine loads the kernel and the root lives on
- * a real partition, so the first disk read now happens with everything up.
- */
+/* The block layer: one interface over every disk, counted in 512-byte sectors
+   whatever geometry the controller underneath actually has. */
 
 #define BLOCK_SECTOR_SIZE 512U
 /* Eight disks was the old limit, from before a partition was a device. A disk

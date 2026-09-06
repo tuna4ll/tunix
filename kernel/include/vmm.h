@@ -12,16 +12,8 @@
  * why vmm_virt_to_phys_direct() asks boot_info() rather than subtracting this.
  */
 #define KERNEL_BASE 0xFFFFFFFF80000000ULL
-/*
- * The direct map: all of physical memory, in its own PML4 entry.
- *
- * It used to start at KERNEL_BASE and run up to the framebuffer window, which
- * put a hard 1792 MiB ceiling on how much RAM the machine could use -- not a
- * tuning choice but the distance between two fixed addresses in the top 2 GiB.
- * A browser tab is most of a gigabyte, so that ceiling was reachable by
- * ordinary use. Moving the map into a slot of its own, as the heap did before
- * it, replaces 1792 MiB of room with 512 GiB.
- */
+/* The direct map: all of physical memory in a PML4 slot of its own, which
+   replaced a 1792 MiB ceiling between two fixed addresses with 512 GiB. */
 #define DIRECT_MAP_BASE 0xFFFFFE8000000000ULL
 /* The kernel heap, in a PML4 entry of its own. It used to sit directly above
    the direct map, which is what held the direct map -- and so the amount of
@@ -36,8 +28,8 @@
 #define DEVICE_MMIO_VIRTUAL_BYTES 0x01000000ULL
 /*
  * Who owns what inside that window. Offsets are hard-coded by each driver, so
- * this list is the only thing keeping two of them apart -- and a collision does
- * not look like one: the second mapping just fails and the device looks absent.
+ * a collision does not look like one: the second mapping fails and the device
+ * looks absent.
  *
  *   0x000000  xHCI registers      (64 KiB)   src/kernel/drivers/usb/xhci.c
  *   0x100000  ACPI tables         (2 MiB)    src/kernel/drivers/acpi.c
@@ -45,7 +37,6 @@
  *   0x500000  HD Audio registers  (16 KiB)   src/kernel/drivers/audio/hda.c
  *   0x600000  unused legacy virtio window
  *   0x700000  handed out by vmm_map_device(), including virtio BARs
- *             instead of picking an offset and hoping.
  */
 #define DEVICE_MMIO_ARENA_OFFSET 0x00700000ULL
 #define USER_ADDRESS_LIMIT 0x0000800000000000ULL
@@ -71,23 +62,10 @@
 #define PAGE_WRITE_THROUGH (1ULL << 3)
 #define PAGE_UNCACHED (1ULL << 4)
 #define PAGE_HUGE     (1ULL << 7)
-/*
- * Write-combining, for the framebuffer.
- *
- * Bit 7 is the PAT selector in a *page table* entry and the huge-page bit in a
- * directory entry -- the same bit means two different things by level, which
- * is why this shares a value with PAGE_HUGE and must only ever be passed for a
- * 4 KiB mapping. With PWT and PCD clear it selects PAT entry 4, which
- * vmm_init() reprograms to write-combining.
- *
- * On real hardware this is not a tuning knob. A framebuffer mapped write-back
- * is wrong (the card never sees half the writes until something flushes) and
- * mapped uncached is correct but roughly two orders of magnitude slower, one
- * bus transaction per pixel. Write-combining is what makes a software-rendered
- * desktop possible at all. In QEMU the framebuffer is ordinary RAM and none of
- * this is observable, which is exactly why it is easy to get wrong and never
- * notice.
- */
+/* Write-combining, for the framebuffer. Bit 7 is the PAT selector in a page
+   table entry and the huge bit in a directory one, so pass it only for 4 KiB
+   mappings. Uncached is correct and two orders of magnitude slower; QEMU's
+   framebuffer is ordinary RAM, so none of this shows up under emulation. */
 #define PAGE_WRITE_COMBINING (1ULL << 7)
 #define PAGE_DEVICE   (1ULL << 9)
 /* Software bit (the CPU ignores 9..11). Marks a page that fork shared instead
@@ -113,28 +91,22 @@ void vmm_init(void);
    the caller should map the framebuffer uncached and accept the cost. */
 int vmm_write_combining_available(void);
 
+/* The page-attribute table, which is per-processor: every processor that comes
+   up has to be given the same one or the framebuffer's memory type depends on
+   which one is writing to it. */
+void vmm_configure_processor(void);
+
 void *vmm_phys_to_virt(uint64_t physical);
 uint64_t vmm_virt_to_phys_direct(const void *virtual_address);
-/*
- * The physical address of a buffer a device may be pointed at, or 0.
- *
- * DMA needs the whole run to be physically contiguous, which is true of the
- * direct map and of the kernel image and of nothing else the kernel hands
- * around -- a heap allocation is pieced together from whatever pages the
- * allocator had. The drivers used to answer this by subtracting a constant,
- * which stopped being right the moment a loader was free to place the image
- * where it liked.
- */
+/* The physical address of a buffer a device may be pointed at, or 0: DMA needs
+   the run contiguous, which is true of the direct map and the kernel image and
+   of nothing the heap hands out. */
 uint64_t vmm_dma_physical(const void *pointer, uint64_t length);
 uint64_t vmm_kernel_cr3(void);
-/*
- * Map a device's registers and return the address they can be reached at, or 0.
- * The window above DEVICE_MMIO_ARENA_OFFSET is handed out here rather than
- * carved up by hand, because a driver that picks a colliding offset does not
- * fail loudly -- the second mapping is refused and the device simply looks
- * absent. `physical` need not be page aligned; the offset within the page is
- * preserved in the returned address.
- */
+/* Map a device's registers and return where they can be reached, or 0. The
+   arena is handed out here rather than carved up by hand, because a colliding
+   offset makes the device look absent instead of failing loudly. `physical`
+   need not be page aligned. */
 uint64_t vmm_map_device(uint64_t physical, uint64_t bytes);
 uint64_t vmm_current_cr3(void);
 uint64_t vmm_create_address_space(void);

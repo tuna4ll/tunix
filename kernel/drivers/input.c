@@ -338,14 +338,8 @@ static uint16_t extended_keycode(uint8_t scan) {
     }
 }
 
-/*
- * One key, on its way to everything that cares.
- *
- * Returns 0 when the VT layer took the key for itself, which is how
- * Ctrl+Alt+F2 reaches the kernel and nothing else: not the evdev readers, so a
- * compositor holding a grab cannot keep the user from leaving it, and not the
- * console either, so no shell ever sees the F-key that moved the screen.
- */
+/* One key, on its way to everything that cares. Returns 0 when the VT layer
+   took it for itself, which is how Ctrl+Alt+F2 reaches nothing else. */
 static int keyboard_emit_key(uint16_t keycode, int released) {
     if (!keycode || keycode >= INPUT_KEY_STATE_SIZE) return 1;
     int ctrl_held = key_down[TUNIX_KEY_LEFTCTRL] || key_down[TUNIX_KEY_RIGHTCTRL];
@@ -372,18 +366,9 @@ static int keyboard_emit_key(uint16_t keycode, int released) {
                   TUNIX_EV_KEY, keycode, value);
     input_sync_at(TUNIX_INPUT_DEVICE_KEYBOARD, timestamp);
 
-    /*
-     * And the console, from the same place -- which is what makes a USB
-     * keyboard able to type at a login prompt. The PS/2 path used to hand its
-     * raw scancodes to the console separately, so a machine with no PS/2 port
-     * could switch terminals but not type at one.
-     *
-     * When an input stack (Xorg/libinput, a Wayland compositor) has the
-     * keyboard open on the terminal in front, it owns the keystrokes and the
-     * console must not also cook them: a keystroke typed into a window would
-     * otherwise also hit the shell underneath, and Ctrl+C would fire a console
-     * SIGINT that tears the whole session down.
-     */
+    /* And the console, unless an input stack has the keyboard open on the
+       terminal in front: then it owns the keystrokes and the console must not
+       cook them too. */
     if (!device_has_reader(TUNIX_INPUT_DEVICE_KEYBOARD))
         vt_handle_key(keycode, released ? 0 : 1);
     return 1;
@@ -393,15 +378,8 @@ static int keyboard_emit_key(uint16_t keycode, int released) {
 static void mouse_emit_button(uint64_t timestamp, uint8_t changed,
                               uint8_t state, uint8_t bit, uint16_t code);
 
-/*
- * The way in for a keyboard that is not on the PS/2 port.
- *
- * USB HID reports carry usages, not scancodes, and the driver that reads them
- * has already turned those into keycodes -- so they join the path here, past
- * the translation, and everything downstream cannot tell the two keyboards
- * apart. A machine with both ends up with one keyboard device fed from two
- * places, which is what a user expects of it.
- */
+/* The way in for a keyboard that is not on the PS/2 port: USB HID keycodes
+   join past the translation, so nothing downstream tells the two apart. */
 void input_external_key(uint16_t keycode, int released) {
     (void)keyboard_emit_key(keycode, released);
 }
