@@ -851,8 +851,35 @@ static void fill_pcm_info(struct snd_pcm_info *info) {
     info->subdevices_avail = pcm.open ? 0U : 1U;
 }
 
+static int64_t sound_pcm_ioctl_locked(struct vfs_node *node, unsigned long request,
+                                      uint64_t user_argument);
+static int64_t sound_control_ioctl_locked(struct vfs_node *node, unsigned long request,
+                                          uint64_t user_argument);
+
+/* The first few refusals, because a program that gives up on the first one
+   makes no sound at all and says nothing about why: `dmesg | grep SOUND` then
+   names the call and the answer. */
+#define SOUND_REFUSALS_REPORTED 12U
+
+static int64_t sound_report_refusal(unsigned nr, int64_t answer, const char *which) {
+    static unsigned reported;
+    if (answer < 0 && answer != -EAGAIN && reported < SOUND_REFUSALS_REPORTED) {
+        reported++;
+        kprintf("SOUND: %s request %x refused (%d), state %d\n",
+                which, nr, (int)answer, pcm.state);
+    }
+    return answer;
+}
+
 int64_t sound_pcm_ioctl(struct vfs_node *node, unsigned long request,
                         uint64_t user_argument) {
+    return sound_report_refusal((unsigned)SND_IOC_NR(request),
+                                sound_pcm_ioctl_locked(node, request, user_argument),
+                                "pcm");
+}
+
+static int64_t sound_pcm_ioctl_locked(struct vfs_node *node, unsigned long request,
+                                      uint64_t user_argument) {
     (void)node;
     if (!card) return -ENXIO;
     if (SND_IOC_TYPE(request) != 'A') return -ENOTTY;
@@ -1101,6 +1128,13 @@ static void fill_card_info(struct snd_ctl_card_info *info) {
 }
 
 int64_t sound_control_ioctl(struct vfs_node *node, unsigned long request,
+                            uint64_t user_argument) {
+    return sound_report_refusal((unsigned)SND_IOC_NR(request),
+                                sound_control_ioctl_locked(node, request, user_argument),
+                                "control");
+}
+
+static int64_t sound_control_ioctl_locked(struct vfs_node *node, unsigned long request,
                             uint64_t user_argument) {
     (void)node;
     if (!card) return -ENXIO;

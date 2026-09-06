@@ -9,6 +9,7 @@ LIMINE_DIR=$BUILD/limine
 WORK=$BUILD/drmtest
 IMAGE=$BUILD/soundtest-$CPUS.img
 LOG=$BUILD/soundtest-$CPUS.log
+WAV=$BUILD/soundtest-$CPUS.wav
 
 [ -f "$KERNEL" ] || { echo "drmtest: $KERNEL is missing; run make kernel" >&2; exit 1; }
 [ -x "$LIMINE_DIR/limine" ] || { echo "drmtest: limine is missing; run make kernel" >&2; exit 1; }
@@ -57,10 +58,10 @@ ACCEL=tcg
 [ -w /dev/kvm ] && ACCEL=kvm
 
 echo ":: booting $CPUS-processor machine on $ACCEL"
-rm -f "$LOG"
+rm -f "$LOG" "$WAV"
 timeout 240 qemu-system-x86_64 \
 	-machine "q35,accel=$ACCEL" -cpu host -smp "$CPUS" -m ${BENCH_MEMORY:-4G} \
-	-audiodev none,id=snd0 -device intel-hda -device hda-output,audiodev=snd0 -drive "format=raw,file=$IMAGE,if=none,id=disk0" \
+	-audiodev wav,id=snd0,path="$WAV" -device intel-hda -device hda-output,audiodev=snd0 -drive "format=raw,file=$IMAGE,if=none,id=disk0" \
 	-device ide-hd,drive=disk0,bus=ide.0 \
 	-display none -no-reboot -serial "file:$LOG" >/dev/null 2>&1 &
 QEMU=$!
@@ -74,6 +75,10 @@ for _ in $(seq 240); do
 done
 kill $QEMU 2>/dev/null || true
 wait $QEMU 2>/dev/null || true
+
+# What the emulated card actually produced: a driver that accepts every write
+# and a host that plays nothing look the same from inside the machine.
+[ -f "$WAV" ] && python3 support/tests/wavcheck.py "$WAV" || echo "WAV missing"
 
 grep -E "^(SOUND|SOUNDTEST)" "$LOG" || {
 	echo "drmtest: the machine printed no results; $LOG has the boot" >&2
