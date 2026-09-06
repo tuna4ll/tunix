@@ -121,7 +121,22 @@ BASE_FILES := $(shell find base-files -type f 2>/dev/null)
 .PHONY: sysroot
 sysroot: $(SYSROOT_STAMP)
 
-$(SYSROOT_STAMP): support/sysroot.sh $(BASE_FILES) GNUmakefile | $(BUILD)
+# What the sysroot is made of, written down so the stamp depends on the list
+# rather than on the whole makefile. Depending on the file itself meant that
+# changing a QEMU flag asked for a multi-gigabyte rebuild that needs root, which
+# is not what anybody editing a display option was asking for. The recipe is
+# rewritten every time and its timestamp only moves when the contents differ.
+SYSROOT_RECIPE := $(BUILD)/sysroot-recipe
+# Written while the makefile is read rather than by a rule, so there is nothing
+# for make to consider out of date: the file is replaced only when the list
+# actually differs, and its timestamp is what the stamp below compares against.
+$(shell mkdir -p $(BUILD); printf '%s\n' '$(VOID_MIRROR)' '$(VOID_ROOTFS_DATE)' \
+	'$(VOID_INSTALL)' '$(VOID_REMOVE)' > $(SYSROOT_RECIPE).tmp; \
+	cmp -s $(SYSROOT_RECIPE).tmp $(SYSROOT_RECIPE) 2>/dev/null \
+		&& rm -f $(SYSROOT_RECIPE).tmp \
+		|| mv $(SYSROOT_RECIPE).tmp $(SYSROOT_RECIPE))
+
+$(SYSROOT_STAMP): support/sysroot.sh $(BASE_FILES) $(SYSROOT_RECIPE) | $(BUILD)
 	VOID_MIRROR='$(VOID_MIRROR)' VOID_ROOTFS_DATE='$(VOID_ROOTFS_DATE)' \
 	VOID_INSTALL='$(VOID_INSTALL)' VOID_REMOVE='$(VOID_REMOVE)' \
 		support/sysroot.sh $(SYSROOT) $(CACHE)
