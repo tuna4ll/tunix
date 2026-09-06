@@ -795,6 +795,76 @@ static void test_shared_mapping(void) {
         " OK\n" : " BROKEN\n");
 }
 
+/* What happens when the machine runs out of memory.
+ *
+ * The answer used to be a SIGSEGV for whoever touched a page next and nothing
+ * reclaimed, so the next process to run got one too. Three things are checked:
+ * that the runaway is the one chosen, that it dies of SIGKILL rather than a
+ * fault, and that a small process touching memory the whole time is left
+ * alone. */
+#define OOM_CHUNK (64UL * 1024 * 1024)
+#define WNOHANG 1
+
+static int touch_and_free(u64 bytes) {
+    s64 got = syscall6(SYS_mmap, 0, (s64)bytes, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (got < 4096) return 0;
+    char *body = (char *)got;
+    for (u64 at = 0; at < bytes; at += 4096) body[at] = 1;
+    (void)syscall2(SYS_munmap, got, (s64)bytes);
+    return 1;
+}
+
+static void test_out_of_memory(void) {
+    /* Small, blameless, and touching memory the whole way through, so it is in
+       the kernel's allocator at the moment the machine runs dry. */
+    s64 bystander = syscall0(SYS_fork);
+    if (bystander == 0) {
+        for (;;) if (!touch_and_free(1024UL * 1024)) sleep_ns(1000000UL);
+        (void)syscall1(SYS_exit_group, 0);
+    }
+
+    u64 begun = now_ns();
+    s64 eater = syscall0(SYS_fork);
+    if (eater == 0) {
+        /* Kept, not freed: the point is to run the machine out. */
+        for (;;) {
+            s64 got = syscall6(SYS_mmap, 0, OOM_CHUNK, PROT_READ | PROT_WRITE,
+                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (got < 4096) break;
+            char *body = (char *)got;
+            for (u64 at = 0; at < OOM_CHUNK; at += 4096) body[at] = 1;
+        }
+        (void)syscall1(SYS_exit_group, 42);
+    }
+
+    int status = 0;
+    s64 reaped = syscall4(SYS_wait4, eater, (s64)&status, 0, 0);
+    u64 elapsed = now_ns() - begun;
+    int eater_signal = status & 0x7F;
+
+    int bystander_status = 0;
+    int bystander_gone =
+        syscall4(SYS_wait4, bystander, (s64)&bystander_status, WNOHANG, 0) == bystander;
+    (void)syscall2(SYS_kill, bystander, SIGKILL);
+    (void)syscall4(SYS_wait4, bystander, 0, 0, 0);
+
+    int alive = touch_and_free(64UL * 1024 * 1024);
+
+    put("OOM reaped=");
+    put_number((u64)(reaped == eater));
+    put(" eater_signal=");
+    put_number((u64)eater_signal);
+    put(" bystander_died=");
+    put_number((u64)bystander_gone);
+    put(" recovered=");
+    put_number((u64)alive);
+    put(" ms=");
+    put_fixed(elapsed / 1000UL, 3);
+    put(eater_signal == SIGKILL && !bystander_gone && alive ?
+        " SURVIVED\n" : " BROKEN\n");
+}
+
 static int run_all(void) {
     open_results();
     put("PERF START\n");
@@ -844,6 +914,9 @@ static int run_all(void) {
     test_direction_flag(200);
     test_syscall_once(20000);
     test_syscall_cost();
+    /* Last: it takes the machine to its knees on purpose, and everything
+       above would then be measuring the recovery. */
+    test_out_of_memory();
     put("PERF DONE\n");
     return 0;
 }

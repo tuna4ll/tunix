@@ -1128,6 +1128,43 @@ struct vm_area *process_find_area(uint64_t address) {
     return NULL;
 }
 
+/* What to do when a page cannot be had. Cheapest first: the file cache is
+   replaceable and costs a re-read, and only when it has nothing left does the
+   largest process have to die -- rather than whoever touched a page next
+   getting SIGSEGV with nothing reclaimed. 1 when it is worth trying again. */
+static int reclaim_or_kill(void) {
+    if (vfs_reclaim_file_data(vfs_root)) return 1;
+
+    struct process *victim = NULL;
+    uint64_t worst = 0;
+    struct process *item = queue;
+    if (item) do {
+        if (item->pid > 1 && !item->is_thread &&
+            item->state != PROCESS_ZOMBIE && item->state != PROCESS_DEAD &&
+            item->cr3 && !item->group_exit_pending) {
+            uint64_t pages = vmm_count_user_pages(item->cr3);
+            if (pages > worst) { worst = pages; victim = item; }
+        }
+        item = item->next;
+    } while (item != queue);
+
+    if (!victim) return 0;
+    kprintf("OOM: killing pid=%u (%s), %u MiB resident\n",
+            (unsigned)victim->pid, victim->name,
+            (unsigned)(worst / 256U));
+    (void)process_send_signal((int64_t)victim->pid, SIGKILL);
+    /* The pages come back as the victim is torn down, not here, so the caller
+       still fails this one allocation. */
+    return 0;
+}
+
+/* One page of anonymous memory, with the out-of-memory answer behind it. */
+static uint64_t alloc_user_page(void) {
+    uint64_t physical = (uint64_t)pmm_alloc_page();
+    if (!physical && reclaim_or_kill()) physical = (uint64_t)pmm_alloc_page();
+    return physical;
+}
+
 int process_commit_area(uint64_t fault_address) {
     if (!current || current->state != PROCESS_RUNNING || !current->cr3) return 0;
     uint64_t page = fault_address & ~4095ULL;
@@ -1136,7 +1173,7 @@ int process_commit_area(uint64_t fault_address) {
     /* Mapped already, so another thread committed it between the fault and the handler. */
     if (vmm_translate(current->cr3, page, NULL, NULL) == 0) return 1;
 
-    uint64_t physical = (uint64_t)pmm_alloc_page();
+    uint64_t physical = alloc_user_page();
     if (!physical) return 0;
     memset(vmm_phys_to_virt(physical), 0, 4096);
     if (vmm_map_page_in(current->cr3, page, physical, area->page_flags) != 0) {
@@ -1186,7 +1223,7 @@ int process_grow_user_stack(uint64_t fault_address) {
     if (vmm_translate(current->cr3, page, &existing_physical, &existing_flags) == 0)
         return 1;
 
-    uint64_t physical = (uint64_t)pmm_alloc_page();
+    uint64_t physical = alloc_user_page();
     if (!physical) return 0;
     memset(vmm_phys_to_virt(physical), 0, 4096);
     if (vmm_map_page_in(current->cr3, page, physical,
@@ -2228,9 +2265,7 @@ static int signal_would_act(const struct process *process, int signal_number) {
 
 /* Whether a syscall about to block should return instead. A signal is only
    looked at on the way back to user mode, which a syscall that rewinds and
-   sleeps never reaches: it wakes, re-runs, finds nothing and sleeps again.
-   Measured: of 192 processes SIGKILLed while blocked on a pipe, 96 were still
-   alive 35 seconds later, and not zombies at all. */
+   sleeps never reaches. */
 int process_signal_interrupts_wait(void) {
     if (!current || current->in_signal) return 0;
     if (!current->group_exit_pending &&
