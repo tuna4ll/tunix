@@ -24,6 +24,7 @@ typedef unsigned int u32;
 #define SYS_msync 26
 #define SYS_fsync 74
 #define SYS_ftruncate 77
+#define SYS_futex 202
 
 #define CLOCK_MONOTONIC 1
 #define SIGKILL 9
@@ -33,6 +34,8 @@ typedef unsigned int u32;
 #define MAP_ANONYMOUS 0x20
 #define MAP_SHARED 1
 #define MS_SYNC 4
+#define FUTEX_WAIT 0
+#define FUTEX_WAKE 1
 #define O_RDWR_CREAT_TRUNC 0x242   /* O_RDWR | O_CREAT | O_TRUNC */
 #define THREAD_FLAGS 0x10F00UL   /* VM | FS | FILES | SIGHAND | THREAD */
 
@@ -865,6 +868,70 @@ static void test_out_of_memory(void) {
         " SURVIVED\n" : " BROKEN\n");
 }
 
+/* Whether a futex on memory two processes share ever wakes.
+ *
+ * A waiter used to be found by the address it named inside its own address
+ * space, so nothing outside that space could reach it: every process-shared
+ * mutex and every named semaphore blocked until its timeout. Two shapes, and
+ * the second is the one an address alone cannot answer -- the same word mapped
+ * at a different place in each process. */
+static int futex_wakes_across_processes(int through_file) {
+    int fd = -1;
+    s64 shared;
+    if (through_file) {
+        fd = (int)syscall3(SYS_open, (s64)"/futex.bin", O_RDWR_CREAT_TRUNC, 0644);
+        if (fd < 0) return 0;
+        static char blank[4096];
+        if (syscall3(SYS_write, fd, (s64)blank, sizeof(blank)) != sizeof(blank)) {
+            (void)syscall1(SYS_close, fd);
+            return 0;
+        }
+        (void)syscall1(SYS_fsync, fd);
+        shared = syscall6(SYS_mmap, 0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    } else {
+        shared = syscall6(SYS_mmap, 0, 4096, PROT_READ | PROT_WRITE,
+                          MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    }
+    if (shared < 4096) { if (fd >= 0) (void)syscall1(SYS_close, fd); return 0; }
+
+    s64 child = syscall0(SYS_fork);
+    if (child == 0) {
+        s64 word = shared;
+        /* Somewhere else entirely, so that matching on the address cannot be
+           what wakes this. */
+        if (through_file) {
+            (void)syscall2(SYS_munmap, shared, 4096);
+            word = syscall6(SYS_mmap, 0x40000000, 4096, PROT_READ | PROT_WRITE,
+                            MAP_SHARED, fd, 0);
+            if (word < 4096) (void)syscall1(SYS_exit_group, 2);
+        }
+        struct { s64 seconds, nanoseconds; } patience = {5, 0};
+        s64 result = syscall6(SYS_futex, word, FUTEX_WAIT, 0, (s64)&patience, 0, 0);
+        (void)syscall1(SYS_exit_group, result == 0 ? 0 : 1);
+    }
+
+    /* Long enough for the child to have reached the wait; the word is left at
+       zero so it cannot come back with EAGAIN instead of blocking. */
+    sleep_ns(200000000UL);
+    s64 woken = syscall6(SYS_futex, shared, FUTEX_WAKE, 1, 0, 0, 0);
+
+    int status = 0;
+    (void)syscall4(SYS_wait4, child, (s64)&status, 0, 0);
+    (void)syscall2(SYS_munmap, shared, 4096);
+    if (fd >= 0) (void)syscall1(SYS_close, fd);
+    return woken == 1 && (status & 0x7F) == 0 && ((status >> 8) & 0xFF) == 0;
+}
+
+static void test_shared_futex(void) {
+    int anonymous = futex_wakes_across_processes(0);
+    int file = futex_wakes_across_processes(1);
+    put("FUTEX anon_woke=");
+    put_number((u64)anonymous);
+    put(" file_woke=");
+    put_number((u64)file);
+    put(anonymous && file ? " SHARED\n" : " BROKEN\n");
+}
+
 static int run_all(void) {
     open_results();
     put("PERF START\n");
@@ -911,6 +978,7 @@ static int run_all(void) {
     }
     test_syslog();
     test_shared_mapping();
+    test_shared_futex();
     test_direction_flag(200);
     test_syscall_once(20000);
     test_syscall_cost();

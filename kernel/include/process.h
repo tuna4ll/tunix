@@ -165,6 +165,10 @@ struct process {
 
     int futex_wait_active;
     uint64_t futex_wait_address;
+    /* The same word named in a way another address space can arrive at: the
+       physical page it sits on plus the offset into it. 0 for a futex on
+       private memory, which nothing outside this process can reach anyway. */
+    uint64_t futex_wait_key;
     /* What the waiter was told the word held. A dump that shows this next to
        what the word holds now is how a lost wakeup tells itself apart from a
        thread that simply has nothing to wait for yet. */
@@ -297,10 +301,13 @@ int process_sigreturn(struct syscall_frame *frame);
 /* A wake that reaches every waiter, whichever bits it asked for. */
 #define FUTEX_BITSET_MATCH_ANY 0xFFFFFFFFU
 
+/* `shared` is what FUTEX_PRIVATE_FLAG says: clear means the word may be in
+   memory another process has mapped, and the waiter has to be findable from
+   there. */
 int64_t process_futex_wait(struct syscall_frame *frame, uint64_t address,
                            uint32_t expected, int64_t timeout_ns,
-                           uint32_t bitset);
-int process_futex_wake(uint64_t address, int maximum, uint32_t bitset);
+                           uint32_t bitset, int shared);
+int process_futex_wake(uint64_t address, int maximum, uint32_t bitset, int shared);
 
 /* Sleep on an opaque channel: any stable kernel address naming what is waited
    for. Returns 0 once woken, or -EAGAIN when nothing else was runnable, in

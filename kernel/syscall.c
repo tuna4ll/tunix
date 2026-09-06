@@ -1737,13 +1737,8 @@ static int scatter_message_data(const struct linux_msghdr *message,
     return 0;
 }
 
-/*
- * SCM_CREDENTIALS for a netlink datagram.
- *
- * udev's monitor will not look at a message that arrives without one, and
- * throws away any whose sender is not root -- so a uevent the kernel sent has
- * to say so, with the kernel's own pid of zero and uid of zero.
- */
+/* SCM_CREDENTIALS for a netlink datagram. udev's monitor discards a message
+   without one, and any whose sender is not root. */
 static int write_netlink_control(struct linux_msghdr *message,
                                  struct netlink_socket *socket) {
     if (!netlink_socket_get_passcred(socket)) {
@@ -2356,13 +2351,9 @@ static int64_t sys_ioctl(int fd, unsigned long request, uint64_t user_argument) 
         return file->node->file_ioctl(file, request, user_argument);
     if (file->node->ioctl) return file->node->ioctl(file->node, request, user_argument);
 
-    /*
-     * A character device that is not a terminal. Every terminal there is --
-     * /dev/ttyN, /dev/tty0, /dev/tty, /dev/console -- carries vt_node_ioctl and
-     * was answered above; the pseudo-terminals have their own path further up.
-     * Saying so plainly here is what makes isatty() tell the truth about
-     * /dev/null, which the old catch-all did not.
-     */
+    /* A character device that is not a terminal: every real one carries
+       vt_node_ioctl and was answered above. Saying so is what makes isatty()
+       tell the truth about /dev/null. */
     return -ENOTTY;
 }
 
@@ -3073,13 +3064,9 @@ static int64_t sys_brk(uint64_t requested) {
     return (int64_t)requested;
 }
 
-/*
- * Both questions have to be asked. The map knows about ranges that are owned
- * but not yet resident, which the page tables cannot show; the page tables know
- * about everything mapped by a path that predates the map -- the ELF image, the
- * initial stack, device mappings. Asking the map first is what makes this cheap:
- * an occupied range is rejected without touching a single page table.
- */
+/* Both have to be asked: the map knows ranges owned but not yet resident, the
+   page tables know what was mapped before the map existed. The map first, so
+   an occupied range costs no page-table walk. */
 static int mapping_range_free(struct process *process, uint64_t base, uint64_t length) {
     if (!process || !length || base >= USER_ADDRESS_LIMIT ||
         length > USER_ADDRESS_LIMIT - base) return 0;
@@ -4220,13 +4207,9 @@ static int64_t sys_sigaltstack(struct syscall_frame *frame, uint64_t user_stack,
     return 0;
 }
 
-/* Linux capabilities, uapi/linux/capability.h. This kernel's privilege model
- * (cred.h: "the POSIX model, without capabilities") never tracks capability
- * bits separately from euid, so there is nothing to store -- capget()
- * synthesizes its answer from euid, and capset() only has to agree with
- * whatever capget() would say. The version-negotiation dance (report our
- * version back and fail once when the caller's header names an older one)
- * mirrors what real Linux does, because libcap always tries it first. */
+/* Linux capabilities. Nothing is stored: privilege here is euid, so capget()
+   synthesizes its answer and capset() only has to agree. The version
+   negotiation is mirrored because libcap always tries it first. */
 #define LINUX_CAPABILITY_VERSION_3 0x20080522U
 
 struct cap_user_header {
@@ -4427,13 +4410,9 @@ static int64_t sys_clone_fork_compat(struct syscall_frame *frame,
                                                  parent_tid_user, child_tid_user, flags);
     }
 
-    /*
-     * posix_spawn: CLONE_VM|CLONE_VFORK plus a stack for the helper that
-     * execs. The child gets a copy of the address space rather than sharing
-     * it, which is enough because the helper reports its result down a pipe,
-     * and the parent runs on rather than blocking -- it is already waiting on
-     * that pipe. GLib spawns every WebKit child process this way.
-     */
+    /* posix_spawn. The child gets a copy of the address space rather than
+       sharing it, which is enough: the helper reports down a pipe the parent
+       is already waiting on. */
     if ((flags & CLONE_VFORK) && (flags & CLONE_VM) && child_stack) {
         uint64_t vfork_allowed = CLONE_VM | CLONE_VFORK | CLONE_FS | CLONE_FILES |
                                  CLONE_SIGHAND | CLONE_SYSVSEM | CLONE_SETTLS |
@@ -4847,13 +4826,8 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
                 file->node->write_ready) {
                 block_and_retry(frame, SYS_IOCTL, file, 1);
             } else if (result == -EAGAIN && (unsigned long)frame->rsi == VT_WAITACTIVE) {
-                /*
-                 * Waiting for a terminal to come to the front. The switch is
-                 * held up by a program that was asked to release the display
-                 * and has not answered yet, so this sleeps until it does --
-                 * which is exactly what a display manager expects of
-                 * VT_WAITACTIVE, and what it would otherwise spin on.
-                 */
+                /* VT_WAITACTIVE: sleep until the program holding the display
+                   releases it, rather than let the caller spin. */
                 if (process_signal_interrupts_wait()) {
                     frame->rax = (uint64_t)-(int64_t)EINTR;
                     break;
@@ -5547,8 +5521,12 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
                 frame->rax = (uint64_t)-(int64_t)EINVAL;
                 break;
             }
+            /* A private futex is one the caller promises nothing outside this
+               process can see, so it keeps the cheaper name. */
+            int shared = !(operation & FUTEX_PRIVATE_FLAG);
             if (command == FUTEX_WAKE || command == FUTEX_WAKE_BITSET) {
-                frame->rax = (uint64_t)process_futex_wake(frame->rdi, (int)frame->rdx, bitset);
+                frame->rax = (uint64_t)process_futex_wake(frame->rdi, (int)frame->rdx,
+                                                          bitset, shared);
             } else if (command == FUTEX_WAIT || command == FUTEX_WAIT_BITSET) {
                 int64_t timeout_ns = -1;
                 if (frame->r10) {
@@ -5575,7 +5553,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
                 }
                 struct process *futex_caller = process_current();
                 int64_t result = process_futex_wait(frame, frame->rdi, (uint32_t)frame->rdx,
-                                                    timeout_ns, bitset);
+                                                    timeout_ns, bitset, shared);
                 if (process_current() == futex_caller) frame->rax = (uint64_t)result;
             } else {
                 frame->rax = (uint64_t)-(int64_t)ENOSYS;
@@ -5770,13 +5748,8 @@ static int file_may_share(const struct file *file) {
     return file->node->stateless != 0;
 }
 
-/*
- * A read or a write, attempted without excluding anyone. Returns zero when it
- * could not be finished this way -- an unsuitable file, or one that would have
- * blocked, since blocking means the scheduler and the scheduler is exclusive.
- * The caller then starts again with the kernel lock held, which is what every
- * other syscall does from the outset.
- */
+/* A read or a write attempted without excluding anyone. 0 when it could not be
+   finished that way, and the caller starts again holding the lock. */
 static int syscall_try_shared(struct syscall_frame *frame) {
     uint64_t number = frame->rax;
     int fd = (int)frame->rdi;

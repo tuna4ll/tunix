@@ -628,6 +628,7 @@ static void wake_expired_futex_waiters(void) {
             now >= item->futex_wait_deadline_ns) {
             item->futex_wait_active = 0;
             item->futex_wait_address = 0;
+            item->futex_wait_key = 0;
             item->futex_wait_deadline_ns = 0;
             item->saved_frame.rax = (uint64_t)-(int64_t)ETIMEDOUT;
             wake_to_ready(item);
@@ -1422,7 +1423,7 @@ static void robust_wake_address(struct process *process, uint64_t address) {
     if ((value & FUTEX_TID_MASK) != (uint32_t)process->pid) return;
     value = (value & ~FUTEX_TID_MASK) | FUTEX_OWNER_DIED;
     if (vmm_copy_to_space(process->cr3, address, &value, sizeof(value)) != 0) return;
-    (void)process_futex_wake(address, 1, FUTEX_BITSET_MATCH_ANY);
+    (void)process_futex_wake(address, 1, FUTEX_BITSET_MATCH_ANY, 1);
 }
 
 static int robust_futex_address(uint64_t entry, int64_t offset, uint64_t *address) {
@@ -1521,7 +1522,7 @@ void process_exit_from_syscall(struct syscall_frame *frame, int status) {
         uint32_t zero = 0;
         (void)vmm_copy_to_space(exiting->cr3, clear_address, &zero, sizeof(zero));
         exiting->clear_child_tid_user = 0;
-        (void)process_futex_wake(clear_address, 1, FUTEX_BITSET_MATCH_ANY);
+        (void)process_futex_wake(clear_address, 1, FUTEX_BITSET_MATCH_ANY, 1);
     }
     process_release_files(exiting);
     /* A terminal has to be let go here, or the display stays owed to a
@@ -1729,9 +1730,22 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
     return (int64_t)child->pid;
 }
 
+/* The name a futex answers to. A word on a page two processes share has to be
+   found from either of them, and the virtual address is not that name -- it is
+   whatever each mapping happened to land on. The physical page plus the offset
+   into it is. 0 for private memory, where the old name is the right one and
+   nothing outside can reach the word anyway. */
+static uint64_t futex_shared_key(uint64_t address) {
+    if (!current || !current->cr3) return 0;
+    uint64_t physical = 0, flags = 0;
+    if (vmm_translate(current->cr3, address, &physical, &flags) != 0) return 0;
+    if (!(flags & PAGE_SHARED)) return 0;
+    return physical;
+}
+
 int64_t process_futex_wait(struct syscall_frame *frame, uint64_t address,
                            uint32_t expected, int64_t timeout_ns,
-                           uint32_t bitset) {
+                           uint32_t bitset, int shared) {
     if (!current || !frame || (address & 3U) || address >= USER_ADDRESS_LIMIT)
         return -EINVAL;
     uint32_t value = 0;
@@ -1747,6 +1761,7 @@ int64_t process_futex_wait(struct syscall_frame *frame, uint64_t address,
     waiting->state = PROCESS_BLOCKED;
     waiting->futex_wait_active = 1;
     waiting->futex_wait_address = address;
+    waiting->futex_wait_key = shared ? futex_shared_key(address) : 0;
     waiting->futex_wait_expected = expected;
     waiting->futex_wait_bitset = bitset;
     futex_note('W', address, 0, 0, expected);
@@ -1758,6 +1773,7 @@ int64_t process_futex_wait(struct syscall_frame *frame, uint64_t address,
         waiting->state = PROCESS_RUNNING;
         waiting->futex_wait_active = 0;
         waiting->futex_wait_address = 0;
+        waiting->futex_wait_key = 0;
         waiting->futex_wait_deadline_ns = 0;
         return -EAGAIN;
     }
@@ -1845,17 +1861,22 @@ void process_dump_wakes(void) {
     }
 }
 
-int process_futex_wake(uint64_t address, int maximum, uint32_t bitset) {
+int process_futex_wake(uint64_t address, int maximum, uint32_t bitset, int shared) {
     if (!current || !queue || maximum <= 0 || !bitset) return 0;
+    uint64_t key = shared ? futex_shared_key(address) : 0;
     int woken = 0;
     struct process *item = queue;
     do {
-        if (item->state == PROCESS_BLOCKED && item->futex_wait_active &&
-            item->memory == current->memory &&
-            item->futex_wait_address == address &&
+        /* Either name will do: the shared one reaches a waiter in another
+           address space, the old one every waiter in this one. */
+        int named = (key && item->futex_wait_key == key) ||
+                    (item->memory == current->memory &&
+                     item->futex_wait_address == address);
+        if (item->state == PROCESS_BLOCKED && item->futex_wait_active && named &&
             (item->futex_wait_bitset & bitset)) {
             item->futex_wait_active = 0;
             item->futex_wait_address = 0;
+            item->futex_wait_key = 0;
             item->futex_wait_deadline_ns = 0;
             item->saved_frame.rax = 0;
             wake_to_ready(item);
@@ -1902,7 +1923,7 @@ static void terminate_sibling_threads(int status) {
                 uint32_t zero = 0;
                 (void)vmm_copy_to_space(item->cr3, clear_address, &zero, sizeof(zero));
                 item->clear_child_tid_user = 0;
-                (void)process_futex_wake(clear_address, 1, FUTEX_BITSET_MATCH_ANY);
+                (void)process_futex_wake(clear_address, 1, FUTEX_BITSET_MATCH_ANY, 1);
             }
             mark_dead(item);
             process_release_files(item);
@@ -2139,6 +2160,7 @@ static void signal_one_process(struct process *target, int signal_number) {
     if (target->state == PROCESS_BLOCKED && signal_number != SIGCHLD) {
         target->futex_wait_active = 0;
         target->futex_wait_address = 0;
+        target->futex_wait_key = 0;
         target->futex_wait_deadline_ns = 0;
         /* Do not stamp -EINTR over a rewound syscall, whose saved rax holds the
            syscall number. */
