@@ -295,6 +295,52 @@ static void test_continuous_playback(u64 duration_ns) {
     put(stalls ? " STALLED\n" : "\n");
 }
 
+/*
+ * An underrun, and then the recovery every ALSA program makes: prepare, write,
+ * start. If that does not put the stream back, the first stall a program hits
+ * is the last sound it makes -- silence rather than a gap.
+ */
+static void test_xrun_recovery(void) {
+    if (syscall3(SYS_ioctl, pcm, (s64)IOC(0u, 'A', NR_PREPARE, 0), 0) != 0) {
+        put("SOUND prepare failed\n"); return;
+    }
+    struct writei first = { 0, tone, BUFFER_FRAMES };
+    (void)syscall3(SYS_ioctl, pcm, (s64)IOW(NR_WRITEI, struct writei), (s64)&first);
+    (void)syscall3(SYS_ioctl, pcm, (s64)IOC(0u, 'A', NR_START, 0), 0);
+
+    /* Long enough that the ring has certainly run dry. */
+    sleep_ns(300000000UL);
+    struct pcm_status drained;
+    (void)status(&drained);
+
+    /* The recovery, exactly as alsa-lib does it. */
+    s64 prepared = syscall3(SYS_ioctl, pcm, (s64)IOC(0u, 'A', NR_PREPARE, 0), 0);
+    struct writei again = { 0, tone, BUFFER_FRAMES };
+    s64 rewritten = syscall3(SYS_ioctl, pcm, (s64)IOW(NR_WRITEI, struct writei), (s64)&again);
+    s64 restarted = syscall3(SYS_ioctl, pcm, (s64)IOC(0u, 'A', NR_START, 0), 0);
+
+    struct pcm_status before_run, after_run;
+    (void)status(&before_run);
+    sleep_ns(50000000UL);
+    (void)status(&after_run);
+    (void)syscall3(SYS_ioctl, pcm, (s64)IOC(0u, 'A', NR_DROP, 0), 0);
+
+    u64 advanced = after_run.hw_ptr - before_run.hw_ptr;
+    put("SOUND after_drain state=");
+    put_signed(drained.state);
+    put(" prepare=");
+    put_signed(prepared);
+    put(" write=");
+    put_signed(rewritten);
+    put(" start=");
+    put_signed(restarted);
+    put(" then_state=");
+    put_signed(after_run.state);
+    put(" advanced=");
+    put_signed((s64)advanced);
+    put(advanced > 1000 ? " PLAYING\n" : " SILENT\n");
+}
+
 static int run(void) {
     results_fd = (int)syscall3(SYS_open, (s64)"/tunix-soundtest-results.txt",
                                O_WRONLY_CREAT_TRUNC, 0644);
@@ -321,6 +367,7 @@ static int run(void) {
 
     /* Inside a lap, which always worked, and then past one, which did not. */
     test_continuous_playback(1000000000UL);
+    test_xrun_recovery();
     test_pointer_survives_a_stall(40000000UL);
     test_pointer_survives_a_stall(200000000UL);
     test_pointer_survives_a_stall(500000000UL);

@@ -171,11 +171,14 @@ static uint64_t playback_avail(void) {
     return pcm.buffer_size - used;
 }
 
-/* Refresh the hardware pointer from the engine. The position wraps with the
-   ring, so the delta only stays right while userspace syncs at least once a
-   lap -- which is exactly the condition under which the audio is not already
-   broken, and is why a program the kernel stalls past a lap crackles. */
-static void pcm_update_pointer(void) {
+/* Where the hardware is, and nothing else. The position wraps with the ring
+   and the delta is taken modulo the buffer, so it has to be sampled more often
+   than a lap -- a tenth of a second, less than one frame of a game that stalls
+   the kernel. Measured half a second late: 280 frames of movement reported
+   where a whole buffer had played, and everything written after that went
+   where the hardware had already been. No state changes here, and the pointer
+   never passes what was written, so the tick may call it. */
+static void pcm_refresh_pointer(void) {
     if (!card || !pcm.buffer_size || !pcm.frame_bytes) return;
     if (pcm.state != SNDRV_PCM_STATE_RUNNING &&
         pcm.state != SNDRV_PCM_STATE_DRAINING) return;
@@ -185,7 +188,23 @@ static void pcm_update_pointer(void) {
     if (frames >= pcm.buffer_size) frames = pcm.buffer_size - 1U;
     uint64_t current = pcm.hw_ptr % pcm.buffer_size;
     uint64_t delta = (frames + pcm.buffer_size - current) % pcm.buffer_size;
+    uint64_t used = playback_used();
+    if (delta > used) delta = used;
     pcm.hw_ptr = (pcm.hw_ptr + delta) % pcm.boundary;
+
+    uint64_t seen = playback_avail();
+    if (seen > pcm.avail_max) pcm.avail_max = seen;
+}
+
+/* The same, and then the decision that belongs to whoever asked: stopping a
+   stream is only ever right in answer to a syscall, because a ring that is
+   momentarily empty between the hardware taking the last frame and the writer
+   being scheduled is ordinary. */
+static void pcm_update_pointer(void) {
+    pcm_refresh_pointer();
+    if (!card || !pcm.buffer_size || !pcm.frame_bytes) return;
+    if (pcm.state != SNDRV_PCM_STATE_RUNNING &&
+        pcm.state != SNDRV_PCM_STATE_DRAINING) return;
 
     uint64_t avail = playback_avail();
     if (avail > pcm.avail_max) pcm.avail_max = avail;
@@ -206,8 +225,21 @@ static void pcm_update_pointer(void) {
     }
 }
 
+/* Starting a stream that is already running is not an error: the write starts
+   it as soon as start_threshold frames are in the ring, so the prepare, write,
+   start every ALSA program recovers an underrun with found it started already
+   and got EBADFD -- which alsa-lib treats as fatal, and which is silence from
+   the first underrun rather than a gap. */
+/* Sampled from the tick as well, because the position wraps with the ring and
+   a program the kernel has stalled cannot sample it itself. */
+void sound_tick(void) {
+    if (!card || !pcm.configured) return;
+    pcm_refresh_pointer();
+}
+
 static int pcm_start(void) {
     if (!card) return -ENXIO;
+    if (pcm.state == SNDRV_PCM_STATE_RUNNING) return 0;
     if (pcm.state != SNDRV_PCM_STATE_PREPARED) return -EBADFD;
     if (card->trigger(1) != 0) return -EIO;
     pcm.state = SNDRV_PCM_STATE_RUNNING;
