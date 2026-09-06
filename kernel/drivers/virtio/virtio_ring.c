@@ -1,15 +1,10 @@
-/*
- * A split virtqueue: three arrays the driver and the device share.
- *
- * They used to get a page each, because a page was the largest contiguous run
- * the physical allocator could produce, and that decided the queue size: 256
- * descriptors are 4 KiB exactly, leaving no room for the ring's own header, so
- * the ceiling was 64. With dma_alloc() the three sit in one allocation at the
- * alignments the spec asks for, and the size is the device's to choose again.
- */
+/* A split virtqueue: three arrays the driver and the device share -- the
+   descriptors, the ring the driver posts into, and the ring the device
+   answers in. */
 #include <stddef.h>
 #include <stdint.h>
 
+#include "../../include/klock.h"
 #include "../../include/dma.h"
 #include "../../include/kstring.h"
 #include "../../include/time.h"
@@ -169,6 +164,9 @@ int virtio_queue_drain(struct virtio_queue *queue) {
                     (unsigned)virtio_queue_outstanding(queue));
             return -1;
         }
+        /* A caller that gave the kernel lock up for this wait cannot answer a
+           shootdown as an interrupt, so it is answered here. */
+        kernel_lock_wait_tick();
         __asm__ volatile("pause");
     }
     return 0;
@@ -180,14 +178,8 @@ void virtio_ring_free(struct virtio_queue *queue) {
     memset(queue, 0, sizeof(*queue));
 }
 
-/*
- * Post one request and wait for the device to finish everything outstanding.
- *
- * Which is more than this request when others are in flight, and that is the
- * point: this queue is answered in order, so waiting for the last thing posted
- * is waiting for all of them. Callers that read a response need exactly that
- * guarantee.
- */
+/* Post one request and wait for the device to finish everything outstanding.
+   A caller that gave the kernel lock up for this answers shootdowns here. */
 int virtio_queue_submit(struct virtio_queue *queue, const struct virtio_buffer *buffers,
                         unsigned count, unsigned write_from) {
     if (virtio_queue_post(queue, buffers, count, write_from) != 0) {

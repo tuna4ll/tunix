@@ -1,24 +1,5 @@
-/*
- * The sound core: one card, one playback stream, ALSA's device interface.
- *
- * The shape is not a free choice. PipeWire's only backend for a PCI card is
- * its ALSA plugin, that plugin is alsa-lib, and alsa-lib talks to a kernel
- * exclusively through the ioctls on /dev/snd/pcmC0D0p and /dev/snd/controlC0.
- * So the interface here is Linux's, structure for structure, and the driver
- * underneath is reduced to four operations (see struct snd_backend).
- *
- * Two decisions are worth stating up front:
- *
- * The status and control pages are deliberately not mmap-able. alsa-lib falls
- * back to the SYNC_PTR ioctl when that mapping fails, and that fallback is the
- * only way a driver with no interrupt of its own can be correct: every read of
- * the hardware pointer happens inside a syscall, where it can be refreshed.
- * A mapped status page would go stale between periods with nothing to notice.
- *
- * The ring buffer is allocated once and kept. It is what userspace mmaps, so
- * its pages must outlive any single hw_params, and re-allocating it under a
- * live mapping is how a compositor ends up writing into freed memory.
- */
+/* The sound core: one card, one playback stream, and ALSA's device interface
+   over it. What alsa-lib asks for is answered here; hda.c moves the bytes. */
 #include <stddef.h>
 #include <stdint.h>
 
@@ -190,15 +171,9 @@ static uint64_t playback_avail(void) {
     return pcm.buffer_size - used;
 }
 
-/*
- * Refresh the hardware pointer from the engine.
- *
- * Called from every ioctl that reports a position, which is what makes an
- * interrupt-free driver work: the pointer is only ever read inside a syscall,
- * and it is recomputed there. The delta is taken modulo the buffer, so this
- * only stays correct while userspace syncs at least once per lap -- which is
- * exactly the condition under which the audio is not already broken.
- */
+/* Refresh the hardware pointer from the engine. The position wraps with the
+   ring, so the delta only stays right while it is sampled far more often than
+   a lap -- which is why the tick samples it too. */
 static void pcm_update_pointer(void) {
     if (!card || !pcm.buffer_size || !pcm.frame_bytes) return;
     if (pcm.state != SNDRV_PCM_STATE_RUNNING &&
@@ -228,6 +203,17 @@ static void pcm_update_pointer(void) {
         (void)card->trigger(0);
         pcm.state = SNDRV_PCM_STATE_XRUN;
     }
+}
+
+/* The same refresh, from the tick. The pointer used to move only when
+   userspace asked, and the delta is taken modulo the buffer: a program a lap
+   late came back to a wrapped position and kept writing into a stream that was
+   no longer the one being played. Measured, half a second late: the pointer
+   reported 235 frames of movement instead of a whole buffer, and the state was
+   still RUNNING. Four milliseconds is far short of any lap. */
+void sound_tick(void) {
+    if (!card || !pcm.configured) return;
+    pcm_update_pointer();
 }
 
 static int pcm_start(void) {
@@ -389,15 +375,7 @@ static uint32_t ring_limit_bytes(void) {
     return limit;
 }
 
-/*
- * Narrow a parameter set to what the card can do.
- *
- * Every relation between the parameters is stated once and then iterated to a
- * fixed point, because they are circular: period_bytes constrains period_size,
- * which constrains buffer_size through periods, which constrains buffer_bytes,
- * which constrains period_bytes again. One pass leaves the set inconsistent
- * and alsa-lib then asks for a value the hardware was never offered.
- */
+/* Narrow a parameter set to what the card can do. */
 static int hw_refine(struct snd_pcm_hw_params *params) {
     const struct snd_hardware *hardware = &card->hardware;
     uint32_t allowed[SNDRV_MASK_WORDS];
@@ -465,20 +443,9 @@ static int hw_refine(struct snd_pcm_hw_params *params) {
         changed |= relate_muldiv(period_bytes, period_size, frame_bits, 8);
         changed |= relate_muldiv(buffer_bytes, buffer_size, frame_bits, 8);
         changed |= relate_muldiv(buffer_size, period_size, periods, 1);
-        /*
-         * And the part that is not a bound: the buffer is a whole number of
-         * periods, so with a period fixed, a buffer that is not a multiple of
-         * it does not exist.
-         *
-         * relate_muldiv() alone says only that 1536 frames lies between two
-         * and three 528-frame periods, which is true and useless. Answering
-         * that leaves alsa-lib holding a set with no solution in it, and it
-         * does not find that out until it commits -- so the failure surfaces
-         * as snd_pcm_hw_params() returning EINVAL with no ioctl behind it,
-         * from a library that was told the configuration was available.
-         * Refusing it here is what sends the caller back to ask for a buffer
-         * that exists, which is what every program does next.
-         */
+/* And the part that is not a bound: the buffer is a whole number of periods,
+   and both are a whole number of frames, so the two intervals are refined
+   against each other rather than against the hardware alone. */
         if (!period_size->empty && period_size->min == period_size->max &&
             period_size->min) {
             uint64_t one = period_size->min;
@@ -512,23 +479,9 @@ static int hw_refine(struct snd_pcm_hw_params *params) {
     params->rate_den = 1;
     params->fifo_size = hardware->fifo_size;
 
-    /*
-     * Which parameters this call actually narrowed, one bit each.
-     *
-     * It used to answer `cmask = rmask`: "everything you asked about changed",
-     * which is not an approximation, it is a different statement. Opening the
-     * card directly survives it because the hw plugin takes the answer and
-     * asks nothing more. A plugin chain does not: alsa-lib refines the slave,
-     * maps whatever cmask names back up through the chain, and repeats until
-     * nothing changes. Told that everything changes, it re-derives the client
-     * parameters from a slave that never moved, gets a set it cannot satisfy,
-     * and gives up in the library -- `snd_pcm_hw_params` returning EINVAL with
-     * no ioctl behind it, which is a hard thing to see from in here.
-     *
-     * What that looked like: `aplay -D hw:0,0` worked and `aplay -D default`
-     * did not, and neither did anything else that goes through `plug`, which
-     * is nearly every program. OpenAL, and so SuperTuxKart, is in that group.
-     */
+/* Which parameters this call actually narrowed, one bit each: alsa-lib refines
+   in steps and re-reads only what changed, so a cmask that claims more than it
+   should makes it walk the whole set again on every pass. */
     uint32_t changed_mask = 0;
     for (unsigned index = 0; index < SNDRV_PCM_HW_PARAM_MASK_COUNT; index++) {
         for (unsigned word = 0; word < SNDRV_MASK_WORDS; word++)
@@ -722,14 +675,7 @@ static void fill_status(struct snd_pcm_status *status) {
     status->suspended_state = SNDRV_PCM_STATE_SUSPENDED;
 }
 
-/*
- * The pointer exchange, and the first thing alsa-lib asks for.
- *
- * It must answer before hw_params has ever been called: with the status page
- * unmapped, alsa-lib reads the stream state through this ioctl, and it does so
- * the moment the device is opened. Refusing an unconfigured stream here is a
- * failed snd_pcm_open, several layers away from anything that mentions sync.
- */
+/* The pointer exchange, and the first thing alsa-lib asks for. */
 static int64_t ioctl_sync_ptr(uint64_t user_argument) {
     struct snd_pcm_sync_ptr sync;
     if (copy_from_user(&sync, user_argument, sizeof(sync)) != 0) return -EFAULT;
