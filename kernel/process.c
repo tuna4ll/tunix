@@ -957,7 +957,15 @@ static struct vm_area *area_alloc(uint64_t start, uint64_t end,
     area->offset = offset;
     area->next = NULL;
     if (file) file_ref(file);
-    if ((kind & VM_FILE_PAGES) && file) vfs_map_ref(file->node);
+    if ((kind & VM_FILE_PAGES) && file) {
+        vfs_map_ref(file->node);
+        /* A file-pages area is writable only when it is MAP_SHARED: the private
+           kind is mapped read-only and faults a copy in. So the page flags are
+           enough to tell a mapping that can store into the file from one that
+           cannot. */
+        if (page_flags & PAGE_WRITE)
+            vfs_map_write_ref(file->node, offset, end - start);
+    }
     return area;
 }
 
@@ -965,7 +973,11 @@ static void area_free(struct vm_area *area) {
     if (!area) return;
     /* Before the file reference and not after, because dropping the last one
        can free the descriptor the node is reached through. */
-    if ((area->kind & VM_FILE_PAGES) && area->file) vfs_map_unref(area->file->node);
+    if ((area->kind & VM_FILE_PAGES) && area->file) {
+        /* Before the cache reference, so the contents are still there to write. */
+        if (area->page_flags & PAGE_WRITE) vfs_map_write_unref(area->file->node);
+        vfs_map_unref(area->file->node);
+    }
     if (area->file) file_unref(area->file);
     kfree(area);
 }
@@ -1087,6 +1099,23 @@ int process_find_free_range(uint64_t start, uint64_t length, uint64_t *base_out)
     if (length > USER_ADDRESS_LIMIT - base) return -1;
     *base_out = base;
     return 0;
+}
+
+/* msync(2). Says whether the range held a mapping at all, because a range that
+   holds none is an error rather than a sync of nothing. */
+int process_sync_file_areas(uint64_t start, uint64_t end) {
+    struct vm_area **list = area_list();
+    if (!list) return 0;
+    int covered = 0;
+    for (struct vm_area *area = *list; area; area = area->next) {
+        if (area->start >= end) break;
+        if (area->end <= start) continue;
+        covered = 1;
+        if ((area->kind & VM_FILE_PAGES) && area->file &&
+            (area->page_flags & PAGE_WRITE))
+            vfs_flush_mapped(area->file->node);
+    }
+    return covered;
 }
 
 struct vm_area *process_find_area(uint64_t address) {

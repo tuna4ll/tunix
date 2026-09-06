@@ -75,7 +75,30 @@ done
 kill $QEMU 2>/dev/null || true
 wait $QEMU 2>/dev/null || true
 
-grep -E "^(PERF|SYSCALL|PIPE|FAULT|FORK|FORKNOWAIT|THREAD|FILE|STARTUP|SHOOTDOWN|ONCE|ORPHAN|SYSLOG|DF|KLOCK|KLOCKBOOT)" "$LOG" || {
+grep -E "^(PERF|SYSCALL|PIPE|FAULT|FORK|FORKNOWAIT|THREAD|FILE|STARTUP|SHOOTDOWN|ONCE|ORPHAN|SYSLOG|MMAP|DF|KLOCK|KLOCKBOOT)" "$LOG" || {
 	echo "drmtest: the machine printed no results; $LOG has the boot" >&2
 	exit 1
 }
+
+# What the machine says about its own mapped writes is answered from the cache
+# it wrote them into, so the medium is read here instead: whether the bytes
+# survived is only visible from outside.
+OFFSET=$(sfdisk -d "$IMAGE" 2>/dev/null |
+	sed -n 's/^.*start= *\([0-9]*\).*type=\(83\|0FC63DAF\).*/\1/p' | head -1)
+if [ -n "$OFFSET" ]; then
+	for spec in mmapsync.bin:S mmapexit.bin:U; do
+		file=${spec%%:*}
+		want=${spec##*:}
+		got=$(debugfs -R "cat /$file" "$IMAGE?offset=$(( OFFSET * 512 ))" 2>/dev/null |
+			tr -d "\0" | head -c 8192)
+		length=${#got}
+		stray=$(printf %s "$got" | tr -d "$want" | wc -c)
+		if [ "$length" = 8192 ] && [ "$stray" = 0 ]; then
+			echo "ONDISK $file bytes=$length fill=$want PERSISTED"
+		else
+			echo "ONDISK $file bytes=$length unexpected=$stray fill=$want LOST"
+		fi
+	done
+else
+	echo "ONDISK could not find the root partition in $IMAGE" >&2
+fi

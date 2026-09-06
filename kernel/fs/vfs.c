@@ -20,14 +20,8 @@ struct vfs_node *vfs_root;
 static uint64_t next_inode = 1;
 static const struct vfs_persist_ops *persist_ops;
 
-/*
- * Two dispatches, not one. persist_ops belongs to the filesystem that owns the
- * root and is a single global; a second filesystem mounted somewhere else
- * cannot take it away. So a node's own directory gets asked as well: a driver
- * that sets `adopt` on the directories it built is told about children created
- * inside them, which is how a file created on a FAT mount reaches the medium
- * rather than living in RAM until the mount goes away.
- */
+/* The root's filesystem, and separately the node's own directory, so a mount
+   elsewhere is told about children created inside it too. */
 #define PERSIST(op, ...) \
     do { if (persist_ops && persist_ops->op) persist_ops->op(__VA_ARGS__); } while (0)
 
@@ -53,14 +47,8 @@ void vfs_notify_meta_changed(struct vfs_node *node) {
     PERSIST(meta_changed, node);
 }
 
-/*
- * Bytes of file content sitting in the heap that the disk could hand back.
- *
- * Kept as a running total rather than measured, because the budget below is
- * consulted on every syscall and walking the tree to answer would cost more
- * than the cache saves. Every transition into and out of the cacheable state
- * goes through cache_charge()/cache_discharge(), which is the whole of it.
- */
+/* Bytes of file content in the heap that the disk could hand back. Counted
+   rather than measured: the budget is consulted on every syscall. */
 static uint64_t cached_bytes;
 
 /* Whether this node's contents are the kind the disk can replace. */
@@ -102,12 +90,49 @@ void vfs_map_unref(struct vfs_node *node) {
     if (node && node->mapped_refs) node->mapped_refs--;
 }
 
+void vfs_map_write_ref(struct vfs_node *node, uint64_t offset, uint64_t length) {
+    if (!node) return;
+    node->shared_writers++;
+    uint64_t end = offset + length;
+    if (end < offset) end = UINT64_MAX;
+    if (!node->map_dirty_end) {
+        node->map_dirty_start = offset;
+        node->map_dirty_end = end;
+        return;
+    }
+    if (offset < node->map_dirty_start) node->map_dirty_start = offset;
+    if (end > node->map_dirty_end) node->map_dirty_end = end;
+}
+
+/* The span is cleared before the write and not after, so a filesystem that
+   reads the node back on the way out cannot come round again. */
+void vfs_flush_mapped(struct vfs_node *node) {
+    if (!node || !node->map_dirty_end || !node->data) return;
+    uint64_t start = node->map_dirty_start;
+    uint64_t end = node->map_dirty_end;
+    node->map_dirty_start = 0;
+    node->map_dirty_end = 0;
+    if (end > node->length) end = node->length;
+    if (start >= end) return;
+    vfs_stamp_times(node, VFS_TIME_MTIME | VFS_TIME_CTIME);
+    inotify_notify(node, TUNIX_IN_MODIFY, NULL, 0);
+    PERSIST(written, node, start, end - start);
+}
+
+void vfs_map_write_unref(struct vfs_node *node) {
+    if (!node || !node->shared_writers) return;
+    if (--node->shared_writers == 0) vfs_flush_mapped(node);
+}
+
 /* mmap copies the whole file into the process; keeping the kernel's copy as
    well doubles the cost of every shared library on the image. */
 void vfs_release_data(struct vfs_node *node) {
     if (!cacheable(node)) return;
     if (node->mapped_refs) return;
     if (!persist_ops || !persist_ops->fetch) return;
+    /* The cache is the only copy of what a mapping stored. Dropping it before
+       the disk has the bytes is how the store is lost. */
+    vfs_flush_mapped(node);
     cache_discharge(node);
     kfree(node->data);
     node->data = NULL;
@@ -115,39 +140,16 @@ void vfs_release_data(struct vfs_node *node) {
     node->flags = (node->flags & ~VFS_OWNED_DATA) | VFS_LAZY_DATA;
 }
 
-/* Drop every file body that the disk can hand back, and say how many bytes that
- * returned to the heap.
- *
- * Tunix keeps file contents in kmalloc'd buffers, and the heap never gives
- * pages back to the PMM. So the first read or write of a file converts general
- * memory into heap memory permanently: browse for a few minutes, and the
- * browser's cache alone can push the heap to its ceiling, after which kmalloc
- * returns NULL and nothing new can start -- the machine stays up and refuses to
- * launch anything, which is a confusing way to run out of memory.
- *
- * Reclaiming is only dropping a cache. Writes are persisted as they happen
- * (PERSIST(written, ...)), so the disk copy is authoritative and vfs_fault_in()
- * pulls the bytes back on the next access. vfs_release_data() already declines
- * the nodes where that is not true: anything with no disk inode behind it, and
- * anything mapped into a process.
- */
+/* Drop every file body the disk can hand back, and say how many bytes that
+   returned to the heap. Only a cache is being dropped: what was written is on
+   the medium and vfs_fault_in() reads it again. */
 static uint64_t reclaim_below(struct vfs_node *node, uint32_t newer_than) {
     if (!node || node->link_target) return 0;
 
     uint64_t reclaimed = 0;
-    /*
-     * A file touched a moment ago is one something is working through;
-     * dropping it only to read it straight back is worse than keeping it.
-     *
-     * "Touched" has to mean written as well as read. Only atime was consulted
-     * here, and a write does not set atime -- so the file a process was in the
-     * middle of writing looked like the coldest thing in the tree and was
-     * always the first to go. The next write then faulted the whole file back
-     * off the disk before it could add a byte, and again for the byte after
-     * that: downloading a 78 MB package started at 730 KB/s and was down to
-     * 110 KB/s by the time it was two thirds through, with the processor
-     * inside the ATA driver the whole way.
-     */
+    /* Touched means written as well as read: a write leaves atime alone, so
+       consulting only atime made the file being written the coldest in the
+       tree and dropped it between every byte. */
     uint32_t touched = node->atime > node->mtime ? node->atime : node->mtime;
     if ((node->flags & 0xFFU) == VFS_FILE && touched < newer_than) {
         uint64_t held = node->capacity;
@@ -166,15 +168,9 @@ uint64_t vfs_reclaim_file_data(struct vfs_node *node) {
 }
 
 
-/*
- * Hold the cache to its budget.
- *
- * Called at every syscall entry, so the common case has to be a comparison and
- * nothing more. When it does fire it starts by dropping only what has not been
- * touched recently, and widens the window until the cache fits or there is
- * nothing older left -- which is as close to least-recently-used as a tree with
- * one-second timestamps and no list can get.
- */
+/* Hold the cache to its budget. Called at every syscall entry, so the common
+   case is one comparison; when it fires it widens the age window until the
+   cache fits. */
 void vfs_trim_cache(uint64_t budget) {
     /* When a pass cannot get under the budget -- everything left is mapped, or
        was touched a moment ago -- retrying on the next syscall would walk the
@@ -432,32 +428,15 @@ static int64_t memory_read(struct vfs_node *node, uint64_t offset, size_t size, 
     uint64_t available = node->length - offset;
     if ((uint64_t)size > available) size = (size_t)available;
     memcpy(buffer, (const uint8_t *)node->data + offset, size);
-    /*
-     * A read is a use, and nothing else here said so: atime was never stamped
-     * on the read path, so the reclaimer -- which decides what to drop by how
-     * long ago a file was touched -- could not see that a file was being read
-     * at all. It would drop the very file a program was working through, and
-     * the next read pulled the whole thing back off the disk. Extracting a
-     * 78 MB package is a stream of reads over one such file.
-     *
-     * Only the in-memory stamp; nothing is written to the disk for it, which
-     * is what makes this affordable on every read.
-     */
+    /* A read is a use, and the reclaimer decides by how long ago a file was
+       touched. The in-memory stamp only, so it stays free. */
     if (size) vfs_stamp_times(node, VFS_TIME_ATIME);
     return (int64_t)size;
 }
 
-/*
- * Put a file's cached contents on a page boundary.
- *
- * mmap can only hand the cached pages themselves to a process when they start
- * on one, and the heap only aligns allocations of 64 KiB and up. Without this,
- * a shared mapping of a large file worked and a shared mapping of a small one
- * quietly fell back to private copies -- so whether writes reached the file
- * depended on its size, which is the worst of both answers. Reallocating at
- * the heap's alignment threshold costs padding on a small file, and only for
- * files somebody actually maps.
- */
+/* Put a file's cached contents on a page boundary, because mmap can only hand
+   the pages themselves over when they start on one and the heap aligns only
+   allocations of 64 KiB and up. */
 #define VFS_PAGE_ALIGN_MIN (64ULL * 1024ULL)
 
 int vfs_align_data(struct vfs_node *node) {
@@ -483,21 +462,9 @@ int vfs_align_data(struct vfs_node *node) {
     return 0;
 }
 
-/*
- * Where doubling stops paying for itself.
- *
- * A file lives in one contiguous kernel allocation here, and growing it means
- * holding the old buffer and the new one at the same time while the contents
- * are copied. Doubling makes that peak one and a half times the file: a write
- * that crossed 512 MiB asked for a gigabyte while still holding half of one,
- * which is 1.5 GiB of a 2 GiB heap with a compositor already in it. It failed,
- * and the write failed with it -- a 677 MB download died at 512 MiB and one
- * staging chunk, reporting an I/O error for what was really a full heap.
- *
- * Past this point the buffer grows by a fixed step instead. The peak becomes
- * the file plus one step rather than half the file again, and the slack left
- * over at the end is bounded by the step rather than by the file.
- */
+/* Where doubling stops paying for itself. Growing holds both buffers at once,
+   so past this size the step is fixed and the peak is the file plus one step
+   rather than half the file again. */
 #define VFS_GROW_LINEAR_ABOVE (32ULL * 1024ULL * 1024ULL)
 #define VFS_GROW_STEP (32ULL * 1024ULL * 1024ULL)
 
@@ -516,17 +483,9 @@ static int ensure_capacity(struct vfs_node *node, uint64_t required) {
     }
     uint8_t *new_data = (uint8_t *)kmalloc((size_t)capacity);
     if (!new_data) {
-        /*
-         * Before giving up: most of the heap is other files' contents, and
-         * those are on the disk. Dropping them costs a re-read; failing this
-         * costs the write, and the program is told "I/O error" for what is
-         * really a full cache.
-         *
-         * The cutoff is the current second, which is what keeps the file being
-         * grown from being dropped by its own rescue: it was written a moment
-         * ago by definition, and reclaim_below() leaves anything touched that
-         * recently alone.
-         */
+        /* Before giving up: most of the heap is other files' contents and the
+           disk has those. The cutoff is the current second, so the file being
+           grown is not dropped by its own rescue. */
         uint32_t now = (uint32_t)time_epoch_seconds();
         if (reclaim_below(vfs_root, now))
             new_data = (uint8_t *)kmalloc((size_t)capacity);
@@ -687,15 +646,8 @@ struct vfs_node *vfs_create_symlink(const char *path, const char *target,
     return node;
 }
 
-/*
- * mkfifo(3), which is what a process supervisor is built out of: runsv talks to
- * itself through supervise/control and refuses to start without it.
- *
- * The node is volatile, so it never reaches the disk. Linux would keep it
- * there, but a FIFO carries no data across a reboot and the programs that make
- * them make them again; persisting one would mean teaching the ext2 driver a
- * file type whose contents do not exist.
- */
+/* mkfifo(3), which runsv is built out of. Volatile: a FIFO carries nothing
+   across a reboot, so it never reaches the disk. */
 struct vfs_node *vfs_create_fifo(const char *path, uint32_t mode) {
     char parent_path[256];
     char name[128];
@@ -717,18 +669,9 @@ struct vfs_node *vfs_create_fifo(const char *path, uint32_t mode) {
     return node;
 }
 
-/*
- * The name bind(2) gives a unix socket.
- *
- * Nothing is ever read from or written to it: a connect(2) finds the listener
- * by path in the socket layer, and this node exists only so that the path is
- * there to be seen. Programs rely on that constantly -- waiting for a daemon
- * by testing for its socket is the usual idiom, and a socket nothing can see
- * makes every such test say the daemon is not running.
- *
- * Volatile, like a FIFO: a socket carries nothing across a reboot, and the
- * process that would answer on it is gone by then anyway.
- */
+/* The name bind(2) gives a unix socket. Nothing is read from it -- connect(2)
+   finds the listener in the socket layer -- but the path has to be there for
+   the usual "wait for the daemon's socket" test. Volatile, like a FIFO. */
 struct vfs_node *vfs_create_socket_node(const char *path, uint32_t mode) {
     char parent_path[256];
     char name[128];
@@ -818,13 +761,8 @@ int64_t vfs_readlink(struct vfs_node *node, void *buffer, size_t size) {
     return (int64_t)length;
 }
 
-/*
- * Called once the node is already detached from its parent. A node can still be
- * somebody's current working directory at that point -- Linux lets you rmdir a
- * directory a process is sitting in -- so freeing unconditionally would leave
- * that process with a dangling cwd. Instead the node is marked orphaned and the
- * last vfs_node_unref() finishes the job.
- */
+/* Called with the node already detached. It can still be somebody's working
+   directory, so it is marked orphaned and the last unref frees it. */
 static void destroy_node(struct vfs_node *node) {
     if (!node) return;
     /* A hard link owns nothing but its name, so it goes on its own. Dropping

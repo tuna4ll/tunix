@@ -132,6 +132,12 @@ struct vfs_node {
     uint32_t refs;
     /* Mappings that point straight at these pages rather than at a copy of them. */
     uint32_t mapped_refs;
+    /* Writable shared mappings, and the span of the file they may have stored
+       into. A store through a mapping is invisible to the filesystem, so the
+       span is what has to be written back when the last one goes. */
+    uint32_t shared_writers;
+    uint64_t map_dirty_start;
+    uint64_t map_dirty_end;
     /* Advisory whole-file locks, held by the open file description. */
     struct file *flock_exclusive;
     uint32_t flock_shared;
@@ -205,6 +211,15 @@ void vfs_node_unref(struct vfs_node *node);
 /* Claim the node's cached contents for a mapping, and give them back when it goes. */
 void vfs_map_ref(struct vfs_node *node);
 void vfs_map_unref(struct vfs_node *node);
+
+/* The same for a mapping that may write. Nothing tells the filesystem when a
+   store lands in a shared mapping, so the range is remembered here and written
+   back when the last writer unmaps -- without which the bytes live only in the
+   cache and go when it is dropped. */
+void vfs_map_write_ref(struct vfs_node *node, uint64_t offset, uint64_t length);
+void vfs_map_write_unref(struct vfs_node *node);
+/* Push out whatever a mapping may have stored, now. */
+void vfs_flush_mapped(struct vfs_node *node);
 
 #define VFS_TIME_ATIME 0x1U
 #define VFS_TIME_MTIME 0x2U

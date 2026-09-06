@@ -339,6 +339,9 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 /* Ceiling on what a read-only file mapping shares rather than copies. */
 #define SHARED_MAP_MAX_BYTES (256ULL * 1024 * 1024)
 #define MAP_FIXED_NOREPLACE 0x100000
+#define MS_ASYNC 1
+#define MS_INVALIDATE 2
+#define MS_SYNC 4
 
 #define F_DUPFD 0
 #define F_GETFD 1
@@ -2260,6 +2263,9 @@ static int64_t sys_fsync(int fd) {
     if (file->kind != FILE_KIND_VFS || !file->node) return -EINVAL;
     uint32_t node_type = file->node->flags & 0xFFU;
     if (node_type == VFS_FILE || node_type == VFS_DIRECTORY || node_type == VFS_BLOCKDEVICE) {
+        /* What a mapping stored is part of the file, and fsync is where a
+           program that wrote it that way expects it to become durable. */
+        vfs_flush_mapped(file->node);
         if (ext2fs_owns(file->node) && ext2fs_fsync_node(file->node) != 0) return -EIO;
         return 0;
     }
@@ -3385,6 +3391,21 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
         if (process->memory) process->memory->mmap_base = process->mmap_base;
     }
     return (int64_t)base;
+}
+
+/* A store through a shared file mapping is one the filesystem never sees, so
+   this is the only point at which a program can ask for it to be written. */
+static int64_t sys_msync(uint64_t address, uint64_t length, int flags) {
+    struct process *process = process_current();
+    if (!process || (address & 0xFFFULL)) return -EINVAL;
+    if (flags & ~(MS_ASYNC | MS_INVALIDATE | MS_SYNC)) return -EINVAL;
+    if ((flags & MS_ASYNC) && (flags & MS_SYNC)) return -EINVAL;
+    if (!length) return 0;
+    length = align_up(length, 4096);
+    if (address >= USER_ADDRESS_LIMIT || length > USER_ADDRESS_LIMIT - address)
+        return -ENOMEM;
+    if (!process_sync_file_areas(address, address + length)) return -ENOMEM;
+    return 0;
 }
 
 static int64_t sys_munmap(uint64_t address, uint64_t length) {
@@ -4785,15 +4806,16 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             frame->rax = (uint64_t)sys_mremap(frame->rdi, frame->rsi, frame->rdx,
                                               (int)frame->r10, frame->r8);
             break;
-        /* Advisory memory/file hints: our VM eagerly backs every mapping and the
-         * page cache is write-through, so there is nothing to prefetch, flush or
-         * drop. Returning 0 (rather than ENOSYS) matters because these are public
-         * libc wrappers that set errno on failure -- a stale ENOSYS then leaks
-         * into later errno checks. madvise/msync/posix_fadvise are all defined as
-         * best-effort, so a no-op is a conforming implementation. */
+        /* Advisory hints. write(2) reaches the disk as it happens and a read is
+           served from the cache either way, so there is nothing to prefetch or
+           drop. 0 rather than ENOSYS because these are public libc wrappers and
+           a stale errno leaks into later checks; both are defined as
+           best-effort, so a no-op conforms. */
         case SYS_MADVISE: frame->rax = 0; break;
-        case SYS_MSYNC: frame->rax = 0; break;
         case SYS_FADVISE64: frame->rax = 0; break;
+        case SYS_MSYNC:
+            frame->rax = (uint64_t)sys_msync(frame->rdi, frame->rsi, (int)frame->rdx);
+            break;
         case SYS_MUNMAP: frame->rax = (uint64_t)sys_munmap(frame->rdi, frame->rsi); break;
         case SYS_SHMGET:
             frame->rax = (uint64_t)sys_shmget((int32_t)frame->rdi, frame->rsi, (int)frame->rdx);

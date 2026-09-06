@@ -21,6 +21,9 @@ typedef unsigned int u32;
 #define SYS_clock_gettime 228
 #define SYS_lseek 8
 #define SYS_sched_setaffinity 203
+#define SYS_msync 26
+#define SYS_fsync 74
+#define SYS_ftruncate 77
 
 #define CLOCK_MONOTONIC 1
 #define SIGKILL 9
@@ -28,6 +31,9 @@ typedef unsigned int u32;
 #define PROT_WRITE 2
 #define MAP_PRIVATE 2
 #define MAP_ANONYMOUS 0x20
+#define MAP_SHARED 1
+#define MS_SYNC 4
+#define O_RDWR_CREAT_TRUNC 0x242   /* O_RDWR | O_CREAT | O_TRUNC */
 #define THREAD_FLAGS 0x10F00UL   /* VM | FS | FILES | SIGHAND | THREAD */
 
 static inline s64 syscall0(s64 n) {
@@ -734,6 +740,61 @@ static void test_startup_reads(unsigned count) {
     put("\n");
 }
 
+/* Whether a store through a shared file mapping reaches the disk.
+ *
+ * Nothing tells the filesystem when one lands, so a kernel that only persists
+ * write(2) keeps the bytes in its cache and loses them when the cache is
+ * dropped. Two files, because the two ways they can be written back are
+ * separate: one asks with msync, the other only unmaps. What is on the medium
+ * is checked from outside, by reading the image the machine booted from --
+ * from in here a read is answered out of the same cache and would agree
+ * whether or not anything was written. */
+#define MMAP_BYTES 8192
+
+static int write_through_mapping(const char *path, char fill, int sync) {
+    int fd = (int)syscall3(SYS_open, (s64)path, O_RDWR_CREAT_TRUNC, 0644);
+    if (fd < 0) return -1;
+    static char zeros[MMAP_BYTES];
+    for (unsigned i = 0; i < MMAP_BYTES; i++) zeros[i] = '.';
+    if (syscall3(SYS_write, fd, (s64)zeros, MMAP_BYTES) != MMAP_BYTES) {
+        (void)syscall1(SYS_close, fd);
+        return -1;
+    }
+    (void)syscall1(SYS_fsync, fd);
+    s64 mapped = syscall6(SYS_mmap, 0, MMAP_BYTES, PROT_READ | PROT_WRITE,
+                          MAP_SHARED, fd, 0);
+    /* An address, or a small negative errno; nothing is ever mapped this low. */
+    if (mapped < 4096) { (void)syscall1(SYS_close, fd); return -2; }
+    char *body = (char *)mapped;
+    for (unsigned i = 0; i < MMAP_BYTES; i++) body[i] = fill;
+    int result = 0;
+    if (sync) result = (int)syscall3(SYS_msync, mapped, MMAP_BYTES, MS_SYNC);
+    (void)syscall2(SYS_munmap, mapped, MMAP_BYTES);
+    (void)syscall1(SYS_close, fd);
+    return result;
+}
+
+static void test_shared_mapping(void) {
+    int synced = write_through_mapping("/mmapsync.bin", 'S', 1);
+    int unmapped = write_through_mapping("/mmapexit.bin", 'U', 0);
+
+    /* msync over a range nothing is mapped in is ENOMEM, and an undefined flag
+       is EINVAL. Both are what a program checks before it trusts the call. */
+    s64 nowhere = syscall3(SYS_msync, 0x300000000000UL, 4096, MS_SYNC);
+    s64 bad_flag = syscall3(SYS_msync, 0x300000000000UL, 4096, 0x40);
+
+    put("MMAP msync=");
+    put_number((u64)(synced < 0 ? -synced : synced));
+    put(" unmap=");
+    put_number((u64)(unmapped < 0 ? -unmapped : unmapped));
+    put(" nowhere=");
+    put_number((u64)-nowhere);
+    put(" badflag=");
+    put_number((u64)-bad_flag);
+    put(synced == 0 && unmapped == 0 && nowhere == -12 && bad_flag == -22 ?
+        " OK\n" : " BROKEN\n");
+}
+
 static int run_all(void) {
     open_results();
     put("PERF START\n");
@@ -779,6 +840,7 @@ static int run_all(void) {
         }
     }
     test_syslog();
+    test_shared_mapping();
     test_direction_flag(200);
     test_syscall_once(20000);
     test_syscall_cost();

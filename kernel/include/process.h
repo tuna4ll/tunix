@@ -39,11 +39,9 @@ struct interrupt_frame;
    is for, so anonymous memory used to be committed at mmap time; with the
    ranges written down it is paid for a page at a time. */
 #define VM_ANONYMOUS 0x1U
-/* The range maps the file's cached contents rather than a copy of them, so the
-   area holds one vfs_map_ref() on the node for as long as it exists. Splitting
-   an area or inheriting it across fork produces another area and another
-   reference, which is what keeps the arithmetic right without a list of
-   mappings per file. */
+/* The range maps the file's cached contents rather than a copy, so the area
+   holds one vfs_map_ref() for as long as it exists -- and one more per area a
+   split or a fork makes. */
 #define VM_FILE_PAGES 0x2U
 
 struct vm_area {
@@ -104,13 +102,8 @@ struct process {
     uint64_t user_stack_top;
     uint64_t kernel_stack_base;
     uint64_t kernel_stack_top;
-    /*
-     * The x87/SSE register file, as FXSAVE lays it out. These registers are
-     * per-process just like the general ones, and nothing else saves them: the
-     * kernel is built with -mgeneral-regs-only so it never touches them, and
-     * they are swapped here on every context switch. 16-byte alignment is an
-     * FXSAVE requirement, not a preference.
-     */
+    /* The x87/SSE register file as FXSAVE lays it out, swapped on every switch
+       because nothing else saves it. The alignment is an FXSAVE requirement. */
     uint8_t fpu_state[512] __attribute__((aligned(16)));
     uint64_t brk_start;
     uint64_t brk_end;
@@ -136,11 +129,8 @@ struct process {
     uint64_t last_scheduled_ns;
     uint64_t virtual_runtime_ns;
     uint32_t time_slice_ticks;
-    /*
-     * Scheduling. `policy` is the number the syscall uses (SCHED_OTHER and
-     * friends); `rt_priority` is 0 for the ordinary band and 1..99 above it,
-     * `nice` weights virtual runtime in the ordinary scheduling band.
-     */
+    /* Scheduling. `rt_priority` is 0 for the ordinary band and 1..99 above it;
+       `nice` weights virtual runtime inside the ordinary one. */
     int policy;
     int rt_priority;
     int nice;
@@ -151,13 +141,9 @@ struct process {
     struct vfs_node *cwd;
     struct pty_pair *controlling_pty;
     struct syscall_frame saved_frame;
-    /* The descriptor table is a separate refcounted object because threads
-       share it (CLONE_FILES): an fd opened by any thread of a group must be
-       visible to every other thread immediately, and a per-thread copy taken
-       at clone time is not that. GLib is where the difference stops being
-       theoretical -- its worker thread read()s an inotify fd the main thread
-       opened after the worker started, and with copied tables that read
-       returns EBADF, which GLib treats as fatal. fork still deep-copies. */
+    /* Refcounted and separate because threads share it (CLONE_FILES): an fd
+       opened by any thread has to be visible to the rest at once, which a copy
+       taken at clone time is not. fork still deep-copies. */
     struct file_table *files;
 
     /* Set only while blocked inside wait4(). PROCESS_BLOCKED on its own does
@@ -261,6 +247,9 @@ int process_find_free_range(uint64_t start, uint64_t length, uint64_t *base_out)
 int process_commit_area(uint64_t fault_address);
 /* The area covering `address`, or NULL when nothing is mapped there. */
 struct vm_area *process_find_area(uint64_t address);
+/* Write back what a writable shared mapping in this range may have stored.
+   0 when nothing at all is mapped there. */
+int process_sync_file_areas(uint64_t start, uint64_t end);
 
 int process_grow_user_stack(uint64_t fault_address);
 int process_handle_cow_fault(uint64_t fault_address);
