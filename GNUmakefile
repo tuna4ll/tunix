@@ -154,9 +154,19 @@ QEMU_MEMORY ?= 4G
 QEMU_SMP    ?= 4
 # Where the sound goes, with a latency high enough to ride out a slow host.
 COMMA := ,
-PULSE_SOCKET := $(firstword $(wildcard /mnt/wslg/PulseServer $(XDG_RUNTIME_DIR)/pulse/native))
+# Under sudo the invoking user's runtime directory is not in the environment,
+# and looking only at XDG_RUNTIME_DIR then finds nothing -- which used to select
+# the null backend in silence, so the machine played to nowhere and looked like
+# a driver that had stopped working.
+SUDO_RUNTIME := $(if $(SUDO_UID),/run/user/$(SUDO_UID))
+PULSE_SOCKET := $(firstword $(wildcard /mnt/wslg/PulseServer \
+	$(XDG_RUNTIME_DIR)/pulse/native $(SUDO_RUNTIME)/pulse/native))
 PULSE_TUNING := $(COMMA)out.latency=100000$(COMMA)out.buffer-length=200000
 QEMU_AUDIO_BACKEND ?= $(if $(PULSE_SOCKET),pa$(COMMA)server=$(PULSE_SOCKET)$(PULSE_TUNING),none)
+# Said out loud, because silence is the one failure that looks like every other.
+AUDIO_NOTE = $(if $(PULSE_SOCKET),@echo ":: audio -> $(PULSE_SOCKET)",\
+	@echo ":: audio -> nowhere: no PulseAudio socket found, so the machine will be silent." \
+	; echo ":: run as yourself rather than under sudo, or set PULSE_SOCKET=/path/to/native")
 QEMU_AUDIO  ?= -audiodev $(QEMU_AUDIO_BACKEND)$(COMMA)id=snd0 \
 	-device intel-hda -device hda-output,audiodev=snd0
 # Modern-only makes QEMU expose the virtio 1.0 PCI device id the kernel drives;
@@ -190,10 +200,12 @@ $(OVMF_VARS): $(OVMF)
 
 .PHONY: run run-uefi run-gpu run-virgl headless
 run: $(IMAGE)
+	$(AUDIO_NOTE)
 	rm -f $(BUILD)/serial.log
 	$(QEMU) $(QEMU_COMMON) $(QEMU_DISPLAY) -serial file:$(BUILD)/serial.log -monitor none
 
 run-uefi: $(IMAGE) $(OVMF) $(OVMF_VARS)
+	$(AUDIO_NOTE)
 	rm -f $(BUILD)/serial.log
 	$(QEMU) $(QEMU_COMMON) $(QEMU_DISPLAY) -serial file:$(BUILD)/serial.log -monitor none \
 		-drive if=pflash,unit=0,format=raw,readonly=on,file=$(OVMF) \
@@ -203,6 +215,7 @@ run-uefi: $(IMAGE) $(OVMF) $(OVMF_VARS)
 QEMU_GPU ?= -vga none -device virtio-vga,xres=1280,yres=720 \
 	-display gtk,zoom-to-fit=on,grab-on-hover=on
 run-gpu: $(IMAGE)
+	$(AUDIO_NOTE)
 	rm -f $(BUILD)/serial.log
 	$(QEMU) $(QEMU_COMMON) $(QEMU_GPU) -serial file:$(BUILD)/serial.log -monitor none
 
@@ -213,11 +226,13 @@ QEMU_VIRGL ?= -vga none -device virtio-vga-gl,xres=1280,yres=720 \
 QEMU_GL_ENV ?= $(if $(wildcard /dev/dri),,\
 	$(if $(wildcard /usr/lib/wsl/lib),env LD_LIBRARY_PATH=/usr/lib/wsl/lib GALLIUM_DRIVER=d3d12))
 run-virgl: $(IMAGE)
+	$(AUDIO_NOTE)
 	rm -f $(BUILD)/serial.log
 	$(QEMU_GL_ENV) $(QEMU) $(QEMU_COMMON) $(QEMU_VIRGL) \
 		-serial file:$(BUILD)/serial.log -monitor none
 
 headless: $(IMAGE)
+	$(AUDIO_NOTE)
 	$(QEMU) $(QEMU_COMMON) -nographic -monitor none -serial stdio
 
 # --- measuring the scheduler: a machine whose entire userland is one static benchmark.
