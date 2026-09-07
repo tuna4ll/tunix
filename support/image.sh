@@ -59,6 +59,10 @@ esp_copy "$LIMINE_DIR/BOOTX64.EFI" EFI/BOOT/BOOTX64.EFI
 esp_copy "$LIMINE_DIR/limine-bios.sys" boot/limine/limine-bios.sys
 esp_copy "$LIMINE_CONF" boot/limine/limine.conf
 esp_copy "$KERNEL" boot/kernel.elf
+# The menu's wallpaper, taken off the sysroot rather than out of the checkout:
+# it is the same file weston paints the desktop with, so the loader and the
+# session cannot drift apart. See support/limine.conf.
+esp_copy "$SYSROOT/usr/share/weston/wallpapers/tunix.png" boot/wallpaper.png
 # Populate the filesystem in one mtools process. Separate mmd and mcopy
 # invocations have been observed to disagree about directories that mdir can
 # subsequently see, causing mcopy to reject an existing target as "Bad target".
