@@ -26,6 +26,10 @@ export LOGNAME=tunix
 export XDG_RUNTIME_DIR=/run/user/1000
 export XDG_CONFIG_DIRS=/etc/xdg
 export XDG_SESSION_TYPE=wayland
+# The account's own shell. weston-terminal takes $SHELL and falls back to
+# /bin/sh when it is unset, so without this line the session's terminal was
+# dash -- not the bash /etc/passwd gives the user, and none of ~/.bashrc.
+export SHELL=/bin/bash
 # How this session renders, which every client inherits.
 #
 # It depends on what is behind the card, and the kernel says which in the
