@@ -40,6 +40,10 @@ setuid bit. See [Build and Run](docs/build-and-run.md) if yours cannot.
 It boots into Weston. Ctrl+Alt+F2 leaves it for a text console, where you can
 log in as `tunix` / `tunix` or `root` / `tunix`, and Ctrl+Alt+F1 goes back.
 
+| The boot menu | A text console |
+| --- | --- |
+| ![The Limine menu on Tunix](screenshots/boot.png) | ![A text console on Tunix](screenshots/console.png) |
+
 ## Layout
 
 ```
