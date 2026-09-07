@@ -36,6 +36,11 @@ Two runit services, both in `base-files/overlay/etc/sv`:
   execs `chpst -u tunix:tunix:_seatd weston`. The account is in `_seatd`, which
   is how it reaches a display it has no permission to open itself.
 
+The service also exports `SHELL`. weston-terminal takes the shell from there
+and falls back to `/bin/sh` when it is unset, so without it the session's
+terminal was dash and none of the account's `~/.bashrc` ever ran -- on an image
+whose `/etc/passwd` gives that account bash.
+
 `base-files/overlay/etc/xdg/weston/weston.ini` chooses the DRM backend, the
 cursor theme and the terminal font. Weston's own output goes to
 `/var/log/weston/` rather than to the console it is drawing over.

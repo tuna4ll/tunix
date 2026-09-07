@@ -9,6 +9,15 @@ that loader had written -- no ISO, no USB stick somebody else prepared, no
 firmware that only speaks EFI. Limine is a boot protocol rather than a program
 to maintain: the kernel declares what it needs and gets it.
 
+![The Limine menu on Tunix](../screenshots/boot.png)
+
+The menu is `support/limine.conf`. Its wallpaper is the desktop's, copied off
+the sysroot onto the EFI system partition, and its palette is the one the text
+console and the desktop are already in, so nothing changes colour between the
+loader and the session. `interface_resolution` is named as well as the entries'
+`resolution`: they are different modes, and left to itself the menu comes up at
+1024x768 with a 16:9 wallpaper stretched into it.
+
 ## The image
 
 `support/image.sh` builds a GPT disk with two partitions:

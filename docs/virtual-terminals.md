@@ -5,6 +5,11 @@ them, `chvt` does the same from a program, and each one keeps its own screen,
 its own keyboard queue and its own idea of who is in the foreground. The first
 is the desktop; the second, third and fourth run a login prompt.
 
+![A text console on Tunix](../screenshots/console.png)
+
+The banner is `/etc/issue`, drawn out of half-block characters, and the colours
+are agetty's `\e{...}` escapes landing on the palette in `kernel/tty/terminal.c`.
+
 Before this there was one console. Every question about which terminal was
 active had the same answer, `VT_ACTIVATE` refused anything but terminal 1, and
 the display manager and the compositor had to be told to stop asking --
