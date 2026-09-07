@@ -1,5 +1,13 @@
 NAME="Tunix"
 ID=tunix
 ID_LIKE=void
-PRETTY_NAME="Tunix"
+PRETTY_NAME="Tunix 0.1.0"
+# The release uname(2) reports, so a program that asks either way gets the same
+# answer; see sys_uname() in kernel/syscall.c.
+VERSION="0.1.0"
+VERSION_ID=0.1.0
+# What a tool that prints the name in colour uses -- the same blue the boot
+# menu, the text console and the desktop are already in.
+ANSI_COLOR="1;34"
 HOME_URL="https://github.com/tunixos/tunix"
+BUG_REPORT_URL="https://github.com/tunixos/tunix/issues"

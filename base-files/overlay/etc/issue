@@ -1,2 +1,9 @@
-Tunix on \l
+\e{blue}
+    ███ █ █ █  █ █ █   █
+     █  █ █ ██ █ █  █ █
+     █  █ █ █ ██ █   █
+     █  █ █ █  █ █  █ █
+     █  ███ █  █ █ █   █
+\e{reset}
+    \e{bold}\s \r\e{reset} \e{darkgray}(\m) on \l\e{reset}
 

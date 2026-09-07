@@ -1,1 +1,4 @@
 Tunix -- a hobby kernel under a Void Linux userland.
+
+Ctrl+Alt+F1 is the desktop and F2-F4 are the other consoles.
+fastfetch says what this machine turned out to be, and dmesg is the kernel's own log.
