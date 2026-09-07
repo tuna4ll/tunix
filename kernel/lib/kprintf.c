@@ -46,6 +46,23 @@ void klog_console(int enabled) {
 extern void terminal_print(const char *);
 extern int terminal_ready(void);
 extern void terminal_paint_lock_reset(void);
+struct terminal_screen;
+extern struct terminal_screen *terminal_screen_active(void);
+extern void terminal_set_sgr_sequence(struct terminal_screen *screen,
+                                      const unsigned *codes, unsigned count);
+
+/*
+ * Colour on the panic screen, and nowhere else in here.
+ *
+ * terminal_print() does not go through an escape parser -- that is on the tty
+ * write path, in tty.c -- so the attribute is set on the screen itself. Which
+ * is also why the serial log stays plain text: nothing is emitted to it.
+ * A NULL screen, which is what there is before the first terminal exists or
+ * while a graphics client owns the display, is ignored rather than guarded.
+ */
+static void panic_sgr(const unsigned *codes, unsigned count) {
+    terminal_set_sgr_sequence(terminal_screen_active(), codes, count);
+}
 
 static void emit_char(char c) {
     klog_store_char(c);
@@ -211,9 +228,19 @@ void panic(const char *msg) {
        one that just went wrong, and a panic that waits for it says nothing. */
     __atomic_clear(&log_lock, __ATOMIC_RELEASE);
     terminal_paint_lock_reset();
+    /* Whatever the last program left set, undone: a panic printed in some
+       half-finished attribute is a panic that looks like part of it. */
+    panic_sgr(NULL, 0);
     kprintf("PANIC: %s\n", msg);
+    /* Blue for the heading and nothing for the log under it. The log is what
+       has to be read, so it is left in the colour everything else is in. */
+    static const unsigned heading[] = {34U};
+    static const unsigned alarm[] = {1U, 31U};
+    panic_sgr(heading, 1U);
     terminal_print("\n\n--- kernel log ---\n");
+    panic_sgr(NULL, 0);
     klog_print_tail(PANIC_LOG_LINES);
+    panic_sgr(alarm, 2U);
     terminal_print("\n\n*** KERNEL PANIC ***\n");
     terminal_print(msg);
     while (1) __asm__ volatile("cli; hlt");
