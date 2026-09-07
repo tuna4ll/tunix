@@ -91,12 +91,12 @@ clean:
 distclean:
 	rm -rf $(BUILD)
 
+
 # --- the sysroot: Void Linux, installed by Void's own package manager.
 
 CACHE         ?= $(BUILD)/cache
 SYSROOT       ?= $(BUILD)/sysroot
 SYSROOT_STAMP := $(BUILD)/.sysroot
-
 VOID_MIRROR      ?= https://repo-default.voidlinux.org
 VOID_ROOTFS_DATE ?= 20250202
 # The glibc set, not the musl one: the ROOTFS tarball without -musl in its name
@@ -142,6 +142,17 @@ $(SYSROOT_STAMP): support/sysroot.sh $(BASE_FILES) $(SYSROOT_RECIPE) | $(BUILD)
 		support/sysroot.sh $(SYSROOT) $(CACHE)
 	@touch $@
 
+# Programs written by community
+.PHONY: comm_progs
+COMM_SRCS := $(wildcard community-softwares/*.c)
+COMM_BINS := $(patsubst community-softwares/%.c, $(SYSROOT)/usr/bin/%,$(COMM_SRCS))
+
+comm_progs: $(COMM_BINS)     
+$(SYSROOT)/usr/bin/%: community-softwares/%.c | $(SYSROOT_STAMP)
+	@mkdir -p $(SYSROOT)/usr/bin
+	$(CC) $< -o $@
+
+
 $(BUILD):
 	@mkdir -p $@
 
@@ -158,7 +169,7 @@ IMAGE_TABLE ?= gpt
 # Free space over what the tree needs; rebuild with `rm -f $(IMAGE)` after changing it.
 IMAGE_SLACK_MIB ?= 4096
 
-$(IMAGE): $(KERNEL) $(LIMINE_EXE) support/limine.conf support/image.sh $(SYSROOT_STAMP)
+$(IMAGE): $(KERNEL) $(LIMINE_EXE) support/limine.conf support/image.sh $(SYSROOT_STAMP) comm_progs
 	TABLE='$(IMAGE_TABLE)' ROOT_SLACK_MIB='$(IMAGE_SLACK_MIB)' support/image.sh $@ $(KERNEL) $(LIMINE_DIR) support/limine.conf $(SYSROOT)
 
 # --- running it -------------------------------------------------------------
