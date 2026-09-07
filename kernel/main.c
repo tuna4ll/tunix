@@ -168,6 +168,7 @@ void kmain(const struct boot_info *boot) {
             terminal_print(device->dev_name);
         }
         if (!found) terminal_print(" none");
+        terminal_print("\n");
         panic("root filesystem mount failed");
     }
     const struct block_device *root = block_root();
