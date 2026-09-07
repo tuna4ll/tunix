@@ -26,6 +26,89 @@ def glyph_repertoire() -> list[int]:
     return sorted(codepoints)
 
 
+# U+2580..U+259F, drawn rather than rasterised.
+#
+# These are the glyphs whose whole job is to tile: a column of full blocks has
+# to come out as one unbroken bar, and two cells side by side have to meet with
+# no seam. A TrueType outline cannot do that here. JetBrains Mono's full block
+# covers its em box, which at 13px inside an 18px cell leaves two rows of
+# background between one cell and the next -- so every vertical stroke drawn out
+# of them came out dashed.
+#
+# Each entry is the fraction of the cell to fill, as (left, top, right, bottom)
+# in eighths, or a single alpha for the three shades. Eighths rather than
+# pixels, so the rectangles land on the same boundaries whatever the cell is.
+EIGHTHS = 8
+BLOCK_RECTS = {
+    0x2580: (0, 0, 8, 4),   # upper half
+    0x2588: (0, 0, 8, 8),   # full
+    0x2590: (4, 0, 8, 8),   # right half
+    0x2594: (0, 0, 8, 1),   # upper one eighth
+    0x2595: (7, 0, 8, 8),   # right one eighth
+}
+# Lower one eighth up to lower seven eighths, and then left seven down to left one.
+BLOCK_RECTS.update({0x2581 + n: (0, 7 - n, 8, 8) for n in range(7)})
+BLOCK_RECTS.update({0x2589 + n: (0, 0, 7 - n, 8) for n in range(7)})
+# The shades, as an alpha over the whole cell rather than as a dither: the
+# console blends what it is given, so a flat alpha is both truer and cheaper.
+BLOCK_SHADES = {0x2591: 64, 0x2592: 128, 0x2593: 191}
+# The quadrants, each named by the corners it fills.
+UPPER_LEFT, UPPER_RIGHT, LOWER_LEFT, LOWER_RIGHT = range(4)
+BLOCK_QUADRANTS = {
+    0x2596: (LOWER_LEFT,),
+    0x2597: (LOWER_RIGHT,),
+    0x2598: (UPPER_LEFT,),
+    0x2599: (UPPER_LEFT, LOWER_LEFT, LOWER_RIGHT),
+    0x259A: (UPPER_LEFT, LOWER_RIGHT),
+    0x259B: (UPPER_LEFT, UPPER_RIGHT, LOWER_LEFT),
+    0x259C: (UPPER_LEFT, UPPER_RIGHT, LOWER_RIGHT),
+    0x259D: (UPPER_RIGHT,),
+    0x259E: (UPPER_RIGHT, LOWER_LEFT),
+    0x259F: (UPPER_RIGHT, LOWER_LEFT, LOWER_RIGHT),
+}
+QUADRANT_RECTS = {
+    UPPER_LEFT: (0, 0, 4, 4),
+    UPPER_RIGHT: (4, 0, 8, 4),
+    LOWER_LEFT: (0, 4, 4, 8),
+    LOWER_RIGHT: (4, 4, 8, 8),
+}
+
+
+def scale(value: int, size: int) -> int:
+    """An eighth boundary in pixels, rounded so that n and 8-n still add up."""
+    return (value * size + EIGHTHS // 2) // EIGHTHS
+
+
+def flatten(image) -> list[int]:
+    """The alpha bytes, row by row, under either Pillow's name for it."""
+    if hasattr(image, "get_flattened_data"):
+        return list(image.get_flattened_data())
+    return list(image.getdata())
+
+
+def draw_block(image, codepoint: int, width: int, height: int) -> bool:
+    """Fill in one of the block elements. False if this is not one."""
+    from PIL import ImageDraw
+
+    if codepoint in BLOCK_SHADES:
+        image.paste(BLOCK_SHADES[codepoint], (0, 0, width, height))
+        return True
+    rectangles = []
+    if codepoint in BLOCK_RECTS:
+        rectangles.append(BLOCK_RECTS[codepoint])
+    elif codepoint in BLOCK_QUADRANTS:
+        rectangles.extend(QUADRANT_RECTS[q] for q in BLOCK_QUADRANTS[codepoint])
+    else:
+        return False
+    draw = ImageDraw.Draw(image)
+    for left, top, right, bottom in rectangles:
+        box = (scale(left, width), scale(top, height),
+               scale(right, width) - 1, scale(bottom, height) - 1)
+        if box[2] >= box[0] and box[3] >= box[1]:
+            draw.rectangle(box, fill=255)
+    return True
+
+
 def write_wrapped_values(handle, values: list[str], indent: str = "    ", width: int = 96) -> None:
     line = indent
     for value in values:
@@ -59,6 +142,9 @@ def main() -> None:
     for codepoint in codepoints:
         character = chr(codepoint)
         image = Image.new("L", (args.width, args.height), 0)
+        if draw_block(image, codepoint, args.width, args.height):
+            bitmaps.extend(flatten(image))
+            continue
         draw = ImageDraw.Draw(image)
         left, top, right, bottom = draw.textbbox(
             (0, baseline), character, font=font, anchor="ls"
@@ -66,8 +152,7 @@ def main() -> None:
         glyph_width = right - left
         x = (args.width - glyph_width) // 2 - left
         draw.text((x, baseline), character, fill=255, font=font, anchor="ls")
-        pixels = image.get_flattened_data() if hasattr(image, "get_flattened_data") else image.getdata()
-        bitmaps.extend(pixels)
+        bitmaps.extend(flatten(image))
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", encoding="utf-8", newline="\n") as output:
