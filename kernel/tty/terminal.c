@@ -12,10 +12,17 @@
 #define MAX_CONSOLE_COLS 224
 #define MAX_CONSOLE_ROWS 80
 #define CELL_BG_EXPLICIT 0x01U
-/* The console has no wallpaper: every pixel a cell does not cover is this.
-   Keeping it a constant rather than a screen-sized array is what lets each
+/* What a cell with nothing said about it is drawn in, and what every pixel a
+   cell does not cover gets. Both come out of ansi_palette below rather than
+   being black and white beside it: the console, the boot menu that drew the
+   screen before it and the desktop that draws it afterwards are all the same
+   palette, and a console that started from plain black would be the one place
+   the machine changed its mind.
+
+   Keeping them constants rather than screen-sized arrays is what lets each
    virtual terminal cost only its cells. */
-#define CONSOLE_BACKGROUND 0x000000U
+#define CONSOLE_BACKGROUND 0x1A1B26U
+#define CONSOLE_FOREGROUND 0xC0CAF5U
 
 struct console_cell {
     uint32_t codepoint;
@@ -139,8 +146,8 @@ static int visible(const struct terminal_screen *screen) {
 }
 
 static void reset_attributes(struct terminal_screen *screen) {
-    screen->foreground = 0xD8DEE9U;
-    screen->background = 0x000000U;
+    screen->foreground = CONSOLE_FOREGROUND;
+    screen->background = CONSOLE_BACKGROUND;
     screen->background_explicit = 0;
     screen->bold = 0;
     screen->reverse = 0;
@@ -429,7 +436,9 @@ void terminal_put_codepoint(struct terminal_screen *screen, uint32_t codepoint) 
         uint8_t explicit_background = screen->background_explicit;
         if (screen->reverse) {
             uint32_t temporary = foreground;
-            foreground = explicit_background ? background : 0x000000U;
+            /* screen->background holds the effective colour whether or not
+               anything set it explicitly, so reversing is just a swap. */
+            foreground = background;
             background = temporary;
             explicit_background = 1;
         }
@@ -556,7 +565,7 @@ void terminal_set_sgr_sequence(struct terminal_screen *screen,
             screen->foreground = ansi_palette[code - 30U];
         else if (code >= 90U && code <= 97U)
             screen->foreground = ansi_palette[8U + code - 90U];
-        else if (code == 39U) screen->foreground = 0xD8DEE9U;
+        else if (code == 39U) screen->foreground = CONSOLE_FOREGROUND;
         else if (code >= 40U && code <= 47U) {
             screen->background = ansi_palette[code - 40U];
             screen->background_explicit = 1;
@@ -564,7 +573,7 @@ void terminal_set_sgr_sequence(struct terminal_screen *screen,
             screen->background = ansi_palette[8U + code - 100U];
             screen->background_explicit = 1;
         } else if (code == 49U) {
-            screen->background = 0x000000U;
+            screen->background = CONSOLE_BACKGROUND;
             screen->background_explicit = 0;
         } else if ((code == 38U || code == 48U) && i + 1U < count) {
             uint32_t color = 0;
