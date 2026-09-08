@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
+#include "../include/abi_gaps.h"
 #include "../include/ext2.h"
 #include "../include/heap.h"
 #include "../include/irq.h"
@@ -238,6 +239,46 @@ static int64_t proc_klock_write(struct vfs_node *node, uint64_t offset,
     const char *text = (const char *)input;
     if (size && text && text[0] == '0') klock_statistics_stop();
     else klock_statistics_start();
+    return (int64_t)size;
+}
+
+/* Report missing syscall use. */
+static int64_t proc_abi_gaps_read(struct vfs_node *node, uint64_t offset,
+                                  size_t size, void *output) {
+    (void)node;
+    struct text_buffer text = {{0}, 0};
+    int found = 0;
+    for (unsigned index = 0; index < ABI_GAP_SLOTS; index++) {
+        struct abi_gap gap;
+        if (abi_gaps_snapshot(index, &gap) != 0) continue;
+        found = 1;
+        text_string(&text, "syscall ");
+        text_unsigned(&text, gap.syscall_number);
+        text_string(&text, " count ");
+        text_unsigned(&text, gap.count);
+        text_string(&text, " last ");
+        text_string(&text, gap.last_name);
+        text_char(&text, '[');
+        text_unsigned(&text, gap.last_pid);
+        text_string(&text, "]\n");
+    }
+    uint64_t overflow = abi_gaps_overflow();
+    if (overflow) {
+        found = 1;
+        text_string(&text, "overflow ");
+        text_unsigned(&text, overflow);
+        text_char(&text, '\n');
+    }
+    if (!found) text_string(&text, "none\n");
+    return text_read(&text, offset, size, output);
+}
+
+/* Clear missing syscall use. */
+static int64_t proc_abi_gaps_write(struct vfs_node *node, uint64_t offset,
+                                   size_t size, const void *input) {
+    (void)node; (void)offset;
+    const char *text = (const char *)input;
+    if (size && text && text[0] == '0') abi_gaps_clear();
     return (int64_t)size;
 }
 
@@ -858,6 +899,11 @@ void procfs_init(void) {
     virtual_file(root, "uptime", proc_uptime_read, 0);
     virtual_file(root, "blockstat", proc_blockstat_read, 0);
     virtual_file(root, "inputlog", proc_inputlog_read, 0);
+    struct vfs_node *abi_gaps = virtual_file(root, "abi_gaps", proc_abi_gaps_read, 0);
+    if (abi_gaps) {
+        abi_gaps->mode = 0644;
+        abi_gaps->write = proc_abi_gaps_write;
+    }
     struct vfs_node *klock = virtual_file(root, "klock", proc_klock_read, 0);
     if (klock) {
         klock->mode = 0644;
