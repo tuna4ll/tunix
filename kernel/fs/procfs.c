@@ -12,6 +12,7 @@
 #include "../include/input.h"
 #include "../include/klock.h"
 #include "../include/procfs.h"
+#include "../include/random.h"
 #include "../include/uts.h"
 #include "../include/smp.h"
 #include "../include/time.h"
@@ -351,6 +352,36 @@ static int64_t proc_osrelease_read(struct vfs_node *node, uint64_t offset,
     (void)node;
     struct text_buffer text = {{0}, 0};
     text_string(&text, "0.1.0\n");
+    return text_read(&text, offset, size, output);
+}
+
+static char boot_id[37];
+
+/* Generate one UUID per boot. */
+static void create_boot_id(void) {
+    static const char hex[] = "0123456789abcdef";
+    uint8_t bytes[16];
+    random_get_bytes(bytes, sizeof(bytes));
+    bytes[6] = (uint8_t)((bytes[6] & 0x0FU) | 0x40U);
+    bytes[8] = (uint8_t)((bytes[8] & 0x3FU) | 0x80U);
+
+    size_t at = 0;
+    for (size_t index = 0; index < sizeof(bytes); index++) {
+        if (index == 4 || index == 6 || index == 8 || index == 10)
+            boot_id[at++] = '-';
+        boot_id[at++] = hex[bytes[index] >> 4];
+        boot_id[at++] = hex[bytes[index] & 0x0FU];
+    }
+    boot_id[at] = '\0';
+    memset(bytes, 0, sizeof(bytes));
+}
+
+static int64_t proc_boot_id_read(struct vfs_node *node, uint64_t offset,
+                                 size_t size, void *output) {
+    (void)node;
+    struct text_buffer text = {{0}, 0};
+    text_string(&text, boot_id);
+    text_char(&text, '\n');
     return text_read(&text, offset, size, output);
 }
 
@@ -869,6 +900,8 @@ void procfs_init(void) {
     struct vfs_node *random = vfs_mkdir_p("/proc/sys/kernel/random");
     if (random) {
         random->mode = 0555;
+        create_boot_id();
+        virtual_file(random, "boot_id", proc_boot_id_read, 0);
         knob(random, "poolsize", 256);
         knob(random, "entropy_avail", 256);
     }
