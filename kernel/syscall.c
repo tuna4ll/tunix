@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
+#include "include/abi_gaps.h"
 #include "include/cred.h"
 #include "include/file.h"
 #include "include/eventfd.h"
@@ -5778,6 +5779,7 @@ static int syscall_number_may_share(uint64_t number) {
 #define VERBOSE_SYSCALL_LIMIT 24U
 
 void syscall_dispatch(struct syscall_frame *frame) {
+    uint64_t syscall_number = frame->rax;
     klock_note(KLOCK_NOTE_SYSCALL | (uint32_t)frame->rax);
     /* The first syscall is the answer to one question and it is the question
        that matters here: whether userland ran at all. */
@@ -5807,10 +5809,12 @@ void syscall_dispatch(struct syscall_frame *frame) {
 
     kernel_lock();
     syscall_dispatch_locked(frame);
+    struct syscall_frame *resumed = frame;
     uint64_t stack_top = cpu_current()->kernel_rsp;
     if (stack_top) {
-        struct syscall_frame *resumed =
-            (struct syscall_frame *)(stack_top - sizeof(*frame));
+        resumed = (struct syscall_frame *)(stack_top - sizeof(*frame));
         if (resumed != frame) *resumed = *frame;
     }
+    if ((int64_t)resumed->rax == -(int64_t)ENOSYS)
+        abi_gaps_note(syscall_number);
 }
