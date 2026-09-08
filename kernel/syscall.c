@@ -1409,7 +1409,9 @@ static int64_t sys_connect(int fd, uint64_t user_address, uint64_t length) {
     if (!inet_value || !user_address || length < 2 || length > 32) return -EBADF;
     uint8_t address[32];
     if (copy_from_user(address, user_address, (size_t)length) != 0) return -EFAULT;
-    return inet_socket_connect(inet_value, address, (size_t)length);
+    struct process *process = process_current();
+    return inet_socket_connect(inet_value, address, (size_t)length,
+                               process->tgid, process->cred.euid);
 }
 
 static int64_t sys_shutdown(int fd, int how) {
@@ -1478,7 +1480,13 @@ static int64_t sys_accept(int fd, uint64_t user_address, uint64_t user_length, i
         inet_socket_unref(accepted);
         return -ENOMEM;
     }
-    return install_accepted(file, flags, &peer, peer_length, user_address, user_length);
+    int64_t accepted_fd = install_accepted(file, flags, &peer, peer_length,
+                                           user_address, user_length);
+    if (accepted_fd >= 0) {
+        struct process *process = process_current();
+        inet_socket_report_accept(accepted, process->tgid, process->cred.euid);
+    }
+    return accepted_fd;
 }
 
 /* accept(2) on a blocking socket waits; only a non-blocking one answers EAGAIN.

@@ -4,6 +4,7 @@
 #include "../include/kstring.h"
 #include "../include/time.h"
 #include "../include/net/inet_socket.h"
+#include "../include/eventfs.h"
 #include "../include/net/net.h"
 
 extern void kprintf(const char *fmt, ...);
@@ -151,6 +152,10 @@ struct inet_socket {
     uint32_t peer_address;
     uint16_t peer_port;
     int connected;
+    uint64_t event_pid;
+    uint32_t event_uid;
+    int event_open;
+    int event_close;
     int bound;
     int read_shutdown;
     int write_shutdown;
@@ -188,6 +193,28 @@ static int register_socket(struct inet_socket *socket) {
 static void unregister_socket(struct inet_socket *socket) {
     for (unsigned i = 0; i < MAX_INET_SOCKETS; i++)
         if (sockets[i] == socket) sockets[i] = NULL;
+}
+
+static const char *event_protocol(const struct inet_socket *socket) {
+    if (socket->type == TUNIX_SOCK_STREAM) return "tcp";
+    if (socket->type == TUNIX_SOCK_DGRAM) return "udp";
+    return "raw";
+}
+
+static void report_connect(struct inet_socket *socket) {
+    if (!socket || socket->event_open) return;
+    socket->event_open = 1;
+    eventfs_emit_network_connect(socket->event_uid, socket->event_pid,
+        event_protocol(socket), socket->local_address, socket->local_port,
+        socket->peer_address, socket->peer_port);
+}
+
+static void report_close(struct inet_socket *socket) {
+    if (!socket || !socket->event_open || socket->event_close) return;
+    socket->event_close = 1;
+    eventfs_emit_network_close(socket->event_uid, socket->event_pid,
+        event_protocol(socket), socket->local_address, socket->local_port,
+        socket->peer_address, socket->peer_port);
 }
 
 static uint16_t allocate_port(void) {
@@ -485,6 +512,7 @@ static void tcp_input(struct inet_socket *s, uint32_t seq, uint32_t ack, uint8_t
             tcp->snd_nxt = ack;
             tcp->state = TCP_ESTABLISHED;
             tcp->rto_deadline_ns = 0;
+            report_connect(s);
             tcp_send_ack(s);
         }
         return;
@@ -737,6 +765,7 @@ struct inet_socket *inet_socket_create(int domain, int type, int protocol) {
 void inet_socket_ref(struct inet_socket *socket) { if (socket) socket->refs++; }
 void inet_socket_unref(struct inet_socket *socket) {
     if (!socket || --socket->refs > 0) return;
+    report_close(socket);
     /* A TCP connection that is still open must finish its close handshake even
        though the last fd is gone. Send a FIN and keep the (orphaned) TCB in the
        socket table so the timer sweep can free it once it reaches CLOSED. */
@@ -820,11 +849,14 @@ struct inet_socket *inet_socket_accept(struct inet_socket *listener) {
     return NULL;
 }
 
-int inet_socket_connect(struct inet_socket *socket, const void *address, size_t length) {
+int inet_socket_connect(struct inet_socket *socket, const void *address, size_t length,
+                        uint64_t pid, uint32_t uid) {
     if (!socket || socket->domain != TUNIX_AF_INET || !address ||
         length < sizeof(struct tunix_sockaddr_in)) return -EINVAL;
     const struct tunix_sockaddr_in *in = (const struct tunix_sockaddr_in *)address;
     if (in->family != TUNIX_AF_INET) return -EAFNOSUPPORT;
+    socket->event_pid = pid;
+    socket->event_uid = uid;
     if (socket->type == TUNIX_SOCK_STREAM)
         return tcp_connect(socket, in->address, net_htons(in->port));
     if (!socket->local_port) socket->local_port = allocate_port();
@@ -832,7 +864,19 @@ int inet_socket_connect(struct inet_socket *socket, const void *address, size_t 
     socket->peer_address = in->address;
     socket->peer_port = net_htons(in->port);
     socket->connected = 1;
+    report_connect(socket);
     return 0;
+}
+
+void inet_socket_report_accept(struct inet_socket *socket, uint64_t pid,
+                               uint32_t uid) {
+    if (!socket || socket->event_open) return;
+    socket->event_pid = pid;
+    socket->event_uid = uid;
+    socket->event_open = 1;
+    eventfs_emit_network_accept(uid, pid, event_protocol(socket),
+        socket->local_address, socket->local_port, socket->peer_address,
+        socket->peer_port);
 }
 
 static int enqueue(struct inet_socket *socket, const void *data, size_t length,

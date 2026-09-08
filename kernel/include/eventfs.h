@@ -42,10 +42,13 @@ void eventfs_emit_device_attach(const char *type, const char *name);
 void eventfs_emit_device_remove(const char *type, const char *name);
 
 void eventfs_emit_network_connect(uint32_t uid, uint64_t pid, const char *proto,
-                                  const char *local, const char *remote);
+                                  uint32_t local_address, uint16_t local_port,
+                                  uint32_t remote_address, uint16_t remote_port);
 void eventfs_emit_network_accept(uint32_t uid, uint64_t pid, const char *proto,
-                                 const char *local, const char *remote);
+                                 uint32_t local_address, uint16_t local_port,
+                                 uint32_t remote_address, uint16_t remote_port);
 void eventfs_emit_network_close(uint32_t uid, uint64_t pid, const char *proto,
-                                const char *local, const char *remote);
+                                uint32_t local_address, uint16_t local_port,
+                                uint32_t remote_address, uint16_t remote_port);
 
 #endif

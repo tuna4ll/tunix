@@ -323,30 +323,49 @@ void eventfs_emit_device_remove(const char *type, const char *name) {
 }
 
 static void emit_network(const char *action, uint32_t uid, uint64_t pid,
-                         const char *proto, const char *local,
-                         const char *remote) {
+                         const char *proto, uint32_t local_address,
+                         uint16_t local_port, uint32_t remote_address,
+                         uint16_t remote_port) {
     struct event_builder builder = begin(action);
     builder_char(&builder, ' ');
     builder_uint(&builder, pid);
     builder_field(&builder, proto);
-    builder_field(&builder, local);
-    builder_field(&builder, remote);
+    builder_char(&builder, ' ');
+    for (unsigned shift = 0; shift < 32U; shift += 8U) {
+        if (shift) builder_char(&builder, '.');
+        builder_uint(&builder, (local_address >> shift) & 0xFFU);
+    }
+    builder_char(&builder, ':');
+    builder_uint(&builder, local_port);
+    builder_char(&builder, ' ');
+    for (unsigned shift = 0; shift < 32U; shift += 8U) {
+        if (shift) builder_char(&builder, '.');
+        builder_uint(&builder, (remote_address >> shift) & 0xFFU);
+    }
+    builder_char(&builder, ':');
+    builder_uint(&builder, remote_port);
     publish(EVENTFS_NETWORK, uid, 0, finish(&builder));
 }
 
 void eventfs_emit_network_connect(uint32_t uid, uint64_t pid, const char *proto,
-                                  const char *local, const char *remote) {
-    emit_network("connect", uid, pid, proto, local, remote);
+                                  uint32_t local_address, uint16_t local_port,
+                                  uint32_t remote_address, uint16_t remote_port) {
+    emit_network("connect", uid, pid, proto, local_address, local_port,
+                 remote_address, remote_port);
 }
 
 void eventfs_emit_network_accept(uint32_t uid, uint64_t pid, const char *proto,
-                                 const char *local, const char *remote) {
-    emit_network("accept", uid, pid, proto, local, remote);
+                                 uint32_t local_address, uint16_t local_port,
+                                 uint32_t remote_address, uint16_t remote_port) {
+    emit_network("accept", uid, pid, proto, local_address, local_port,
+                 remote_address, remote_port);
 }
 
 void eventfs_emit_network_close(uint32_t uid, uint64_t pid, const char *proto,
-                                const char *local, const char *remote) {
-    emit_network("close", uid, pid, proto, local, remote);
+                                uint32_t local_address, uint16_t local_port,
+                                uint32_t remote_address, uint16_t remote_port) {
+    emit_network("close", uid, pid, proto, local_address, local_port,
+                 remote_address, remote_port);
 }
 
 static int attach_stream(struct vfs_node *root, const char *name,
