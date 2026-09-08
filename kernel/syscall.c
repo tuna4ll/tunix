@@ -822,7 +822,8 @@ static int64_t sys_write(int fd, uint64_t user_buffer, size_t length) {
 
     if (buffer != stage) kfree(buffer);
     if (!completed && failure) return failure;
-    if (completed && file->kind == FILE_KIND_VFS && file->node &&
+    if (completed && eventfs_interested(EVENTFS_FILES, process->cred.euid, 0) &&
+        file->kind == FILE_KIND_VFS && file->node &&
         (file->node->flags & 0xFFU) == VFS_FILE) {
         char path[256];
         if (vfs_node_path(file->node, path, sizeof(path)) == 0)

@@ -27,6 +27,7 @@ struct eventfs_subscriber {
 struct event_builder {
     char *data;
     size_t length;
+    size_t capacity;
     int overflow;
 };
 
@@ -36,9 +37,8 @@ static int initialized;
 static char format_buffer[EVENTFS_MAX_EVENT];
 
 /* Kernel lock orders EventFS before process_wake_all's oplock. */
-
 static void builder_char(struct event_builder *builder, char value) {
-    if (builder->length >= EVENTFS_MAX_EVENT) {
+    if (builder->length >= builder->capacity) {
         builder->overflow = 1;
         return;
     }
@@ -142,9 +142,10 @@ static void publish(enum eventfs_channel channel, uint32_t uid,
     for (struct eventfs_subscriber *item = subscribers[channel]; item;
          item = item->next) {
         if (!may_receive(item, uid, system_event)) continue;
+        int was_ready = item->used || item->lost;
         if (!length || length > EVENTFS_MAX_EVENT) lose_event(item);
         else (void)queue_event(item, format_buffer, length);
-        process_wake_all(&item->wait_token);
+        if (!was_ready) process_wake_all(&item->wait_token);
     }
 }
 
@@ -154,7 +155,7 @@ static size_t finish(struct event_builder *builder) {
 }
 
 static struct event_builder begin(const char *action) {
-    struct event_builder builder = { format_buffer, 0, 0 };
+    struct event_builder builder = { format_buffer, 0, sizeof(format_buffer), 0 };
     builder_text(&builder, action);
     return builder;
 }
@@ -188,7 +189,7 @@ void eventfs_unsubscribe(struct eventfs_subscriber *subscriber) {
 }
 
 static size_t lost_record(char output[32], uint64_t lost) {
-    struct event_builder builder = { output, 0, 0 };
+    struct event_builder builder = { output, 0, 32, 0 };
     builder_text(&builder, "lost ");
     builder_uint(&builder, lost);
     builder_char(&builder, '\n');
@@ -198,6 +199,7 @@ static size_t lost_record(char output[32], uint64_t lost) {
 int64_t eventfs_read(struct eventfs_subscriber *subscriber, size_t size,
                      void *buffer) {
     if (!subscriber || !buffer) return -EAGAIN;
+    if (!size) return 0;
     uint8_t *out = buffer;
     size_t moved = 0;
     while (subscriber->used >= 2U) {
@@ -239,7 +241,18 @@ const void *eventfs_wait_channel(const struct eventfs_subscriber *subscriber) {
     return subscriber ? &subscriber->wait_token : NULL;
 }
 
+int eventfs_interested(enum eventfs_channel channel, uint32_t uid,
+                       int system_event) {
+    if (!initialized || channel <= 0 || channel >= EVENTFS_CHANNEL_COUNT)
+        return 0;
+    for (struct eventfs_subscriber *item = subscribers[channel]; item;
+         item = item->next)
+        if (may_receive(item, uid, system_event)) return 1;
+    return 0;
+}
+
 void eventfs_emit_process_exec(uint32_t uid, uint64_t pid, const char *name) {
+    if (!eventfs_interested(EVENTFS_PROCESS, uid, 0)) return;
     struct event_builder builder = begin("exec ");
     builder_uint(&builder, pid);
     builder_field(&builder, name);
@@ -247,6 +260,7 @@ void eventfs_emit_process_exec(uint32_t uid, uint64_t pid, const char *name) {
 }
 
 void eventfs_emit_process_fork(uint32_t uid, uint64_t parent, uint64_t child) {
+    if (!eventfs_interested(EVENTFS_PROCESS, uid, 0)) return;
     struct event_builder builder = begin("fork ");
     builder_uint(&builder, parent);
     builder_char(&builder, ' ');
@@ -255,6 +269,7 @@ void eventfs_emit_process_fork(uint32_t uid, uint64_t parent, uint64_t child) {
 }
 
 void eventfs_emit_process_exit(uint32_t uid, uint64_t pid, int status) {
+    if (!eventfs_interested(EVENTFS_PROCESS, uid, 0)) return;
     struct event_builder builder = begin("exit ");
     builder_uint(&builder, pid);
     builder_char(&builder, ' ');
@@ -263,6 +278,7 @@ void eventfs_emit_process_exit(uint32_t uid, uint64_t pid, int status) {
 }
 
 void eventfs_emit_process_signal(uint32_t uid, uint64_t pid, int signal_number) {
+    if (!eventfs_interested(EVENTFS_PROCESS, uid, 0)) return;
     struct event_builder builder = begin("signal ");
     builder_uint(&builder, pid);
     builder_char(&builder, ' ');
@@ -272,6 +288,7 @@ void eventfs_emit_process_signal(uint32_t uid, uint64_t pid, int signal_number) 
 
 void eventfs_emit_process_fault(uint32_t uid, uint64_t pid, const char *type,
                                 const char *name) {
+    if (!eventfs_interested(EVENTFS_PROCESS, uid, 0)) return;
     struct event_builder builder = begin("fault ");
     builder_uint(&builder, pid);
     builder_field(&builder, type);
@@ -281,6 +298,7 @@ void eventfs_emit_process_fault(uint32_t uid, uint64_t pid, const char *type,
 
 static void emit_file_one(const char *action, uint32_t uid, uint64_t pid,
                           const char *path) {
+    if (!eventfs_interested(EVENTFS_FILES, uid, 0)) return;
     struct event_builder builder = begin(action);
     builder_char(&builder, ' ');
     builder_uint(&builder, pid);
@@ -298,6 +316,7 @@ void eventfs_emit_file_write(uint32_t uid, uint64_t pid, const char *path) {
 
 void eventfs_emit_file_rename(uint32_t uid, uint64_t pid, const char *old_path,
                               const char *new_path) {
+    if (!eventfs_interested(EVENTFS_FILES, uid, 0)) return;
     struct event_builder builder = begin("rename ");
     builder_uint(&builder, pid);
     builder_field(&builder, old_path);
@@ -310,6 +329,7 @@ void eventfs_emit_file_remove(uint32_t uid, uint64_t pid, const char *path) {
 }
 
 static void emit_device(const char *action, const char *type, const char *name) {
+    if (!eventfs_interested(EVENTFS_DEVICES, 0, 1)) return;
     struct event_builder builder = begin(action);
     builder_field(&builder, type);
     builder_field(&builder, name);
@@ -328,6 +348,7 @@ static void emit_network(const char *action, uint32_t uid, uint64_t pid,
                          const char *proto, uint32_t local_address,
                          uint16_t local_port, uint32_t remote_address,
                          uint16_t remote_port) {
+    if (!eventfs_interested(EVENTFS_NETWORK, uid, 0)) return;
     struct event_builder builder = begin(action);
     builder_char(&builder, ' ');
     builder_uint(&builder, pid);

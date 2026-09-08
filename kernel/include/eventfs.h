@@ -17,6 +17,7 @@ enum eventfs_channel {
 
 struct eventfs_subscriber;
 
+/* Runtime APIs require Tunix's exclusive kernel lock. */
 void eventfs_init(void);
 struct eventfs_subscriber *eventfs_subscribe(enum eventfs_channel channel);
 void eventfs_unsubscribe(struct eventfs_subscriber *subscriber);
@@ -24,6 +25,8 @@ int64_t eventfs_read(struct eventfs_subscriber *subscriber, size_t size,
                      void *buffer);
 int eventfs_read_ready(const struct eventfs_subscriber *subscriber);
 const void *eventfs_wait_channel(const struct eventfs_subscriber *subscriber);
+int eventfs_interested(enum eventfs_channel channel, uint32_t uid,
+                       int system_event);
 
 void eventfs_emit_process_exec(uint32_t uid, uint64_t pid, const char *name);
 void eventfs_emit_process_fork(uint32_t uid, uint64_t parent, uint64_t child);

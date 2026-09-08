@@ -38,6 +38,23 @@ backslash become `\ `, `\t`, `\n`, `\r`, and `\\`. Other ASCII control bytes
 become `\xhh`, and an empty field becomes `\0`. A source newline therefore
 cannot inject another event record.
 
+## Current scope
+
+Process hooks cover exec, fork, exit, signal queueing, and user-mode faults.
+File hooks cover successful regular-file create, write, truncate-on-open,
+rename, and remove syscalls; page-cache and block writes do not create events.
+IPv4 TCP connect, accept, and close are covered, as are UDP connect and close.
+
+Block-device and partition registration emits `attach`. Tunix currently has no
+block or USB unregister/hot-remove path, so the `remove` producer API exists but
+has no fabricated call site. A future unregister path must emit before freeing
+its device metadata.
+
+All current producer paths are serialized by the exclusive kernel lock. A
+future subsystem allowed to publish from a shared-lock or lockless context must
+first add a per-channel lock or deferred publication rather than calling the
+current API directly.
+
 Run the queue and protocol unit tests from the repository root:
 
 ```sh

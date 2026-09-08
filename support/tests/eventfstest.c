@@ -88,6 +88,7 @@ static void test_open_and_independent_readers(void) {
     struct eventfs_subscriber *second = eventfs_subscribe(EVENTFS_PROCESS);
     assert(first && second);
     char output[64];
+    assert(eventfs_read(first, 0, output) == 0);
     assert(eventfs_read(first, sizeof(output), output) == -EAGAIN);
     eventfs_emit_process_exec(1000, 42, "bash");
     assert(eventfs_read_ready(first));
