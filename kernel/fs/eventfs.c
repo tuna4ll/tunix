@@ -35,6 +35,8 @@ static unsigned subscriber_count;
 static int initialized;
 static char format_buffer[EVENTFS_MAX_EVENT];
 
+/* Kernel lock orders EventFS before process_wake_all's oplock. */
+
 static void builder_char(struct event_builder *builder, char value) {
     if (builder->length >= EVENTFS_MAX_EVENT) {
         builder->overflow = 1;

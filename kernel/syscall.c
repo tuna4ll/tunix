@@ -2494,7 +2494,8 @@ static int64_t sys_fstatfs(int fd, uint64_t user_buf) {
     struct process *process = process_current();
     if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) return -EBADF;
     struct file *file = process->files->fds[fd];
-    if (file->kind != FILE_KIND_VFS || !file->node) return -EBADF;
+    if ((file->kind != FILE_KIND_VFS && file->kind != FILE_KIND_EVENTFS) ||
+        !file->node) return -EBADF;
     struct linux_statfs out;
     fill_statfs(file->node, &out);
     return copy_to_user(user_buf, &out, sizeof(out)) == 0 ? 0 : -EFAULT;
@@ -2535,7 +2536,7 @@ static int stat_from_file(struct file *file, struct linux_stat *stat) {
     if (file->node &&
         (file->kind == FILE_KIND_VFS || file->kind == FILE_KIND_PTY_MASTER ||
          file->kind == FILE_KIND_PTY_SLAVE || file->kind == FILE_KIND_INPUT ||
-         file->kind == FILE_KIND_FRAMEBUFFER)) {
+         file->kind == FILE_KIND_FRAMEBUFFER || file->kind == FILE_KIND_EVENTFS)) {
         fill_stat(file->node, stat);
         return 0;
     }
