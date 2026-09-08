@@ -4,6 +4,7 @@
 #include "include/cred.h"
 #include "include/file.h"
 #include "include/eventfd.h"
+#include "include/eventfs.h"
 #include "include/timerfd.h"
 #include "include/epoll.h"
 #include "include/inotify.h"
@@ -821,6 +822,13 @@ static int64_t sys_write(int fd, uint64_t user_buffer, size_t length) {
 
     if (buffer != stage) kfree(buffer);
     if (!completed && failure) return failure;
+    if (completed && eventfs_interested(EVENTFS_FILES, process->cred.euid, 0) &&
+        file->kind == FILE_KIND_VFS && file->node &&
+        (file->node->flags & 0xFFU) == VFS_FILE) {
+        char path[256];
+        if (vfs_node_path(file->node, path, sizeof(path)) == 0)
+            eventfs_emit_file_write(process->cred.euid, process->tgid, path);
+    }
     return (int64_t)completed;
 }
 
@@ -1095,6 +1103,7 @@ static int64_t open_at(int dirfd, uint64_t user_path, uint64_t flags, uint64_t m
     int path_status = copy_path_at(dirfd, user_path, path);
     if (path_status != 0) return path_status;
 
+    int created = 0;
     struct vfs_node *node = (flags & O_NOFOLLOW) ? vfs_lookup_nofollow(path) : vfs_lookup(path);
     if (!node && (flags & O_CREAT)) {
         if (flags & O_DIRECTORY) return -EINVAL;
@@ -1102,6 +1111,7 @@ static int64_t open_at(int dirfd, uint64_t user_path, uint64_t flags, uint64_t m
         if (permitted != 0) return permitted;
         node = vfs_create_file_node(path, mode_after_umask(mode));
         if (!node) return -ENOENT;
+        created = 1;
     } else if (!node) return -ENOENT;
     else if ((flags & O_CREAT) && (flags & O_EXCL)) return -EEXIST;
     else {
@@ -1124,6 +1134,12 @@ static int64_t open_at(int dirfd, uint64_t user_path, uint64_t flags, uint64_t m
         ((flags & O_ACCMODE) != O_RDONLY || (flags & O_TRUNC))) return -EROFS;
     if (!(flags & O_PATH) && (flags & O_TRUNC) && kind == VFS_FILE &&
         vfs_truncate(node, 0) != 0) return -EIO;
+
+    struct process *opener = process_current();
+    if (created)
+        eventfs_emit_file_create(opener->cred.euid, opener->tgid, path);
+    else if (!(flags & O_PATH) && (flags & O_TRUNC) && kind == VFS_FILE)
+        eventfs_emit_file_write(opener->cred.euid, opener->tgid, path);
 
     uint32_t status_flags = (uint32_t)(flags & ~O_CLOEXEC);
     struct file *file;
@@ -1394,7 +1410,9 @@ static int64_t sys_connect(int fd, uint64_t user_address, uint64_t length) {
     if (!inet_value || !user_address || length < 2 || length > 32) return -EBADF;
     uint8_t address[32];
     if (copy_from_user(address, user_address, (size_t)length) != 0) return -EFAULT;
-    return inet_socket_connect(inet_value, address, (size_t)length);
+    struct process *process = process_current();
+    return inet_socket_connect(inet_value, address, (size_t)length,
+                               process->tgid, process->cred.euid);
 }
 
 static int64_t sys_shutdown(int fd, int how) {
@@ -1463,7 +1481,13 @@ static int64_t sys_accept(int fd, uint64_t user_address, uint64_t user_length, i
         inet_socket_unref(accepted);
         return -ENOMEM;
     }
-    return install_accepted(file, flags, &peer, peer_length, user_address, user_length);
+    int64_t accepted_fd = install_accepted(file, flags, &peer, peer_length,
+                                           user_address, user_length);
+    if (accepted_fd >= 0) {
+        struct process *process = process_current();
+        inet_socket_report_accept(accepted, process->tgid, process->cred.euid);
+    }
+    return accepted_fd;
 }
 
 /* accept(2) on a blocking socket waits; only a non-blocking one answers EAGAIN.
@@ -2471,7 +2495,8 @@ static int64_t sys_fstatfs(int fd, uint64_t user_buf) {
     struct process *process = process_current();
     if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) return -EBADF;
     struct file *file = process->files->fds[fd];
-    if (file->kind != FILE_KIND_VFS || !file->node) return -EBADF;
+    if ((file->kind != FILE_KIND_VFS && file->kind != FILE_KIND_EVENTFS) ||
+        !file->node) return -EBADF;
     struct linux_statfs out;
     fill_statfs(file->node, &out);
     return copy_to_user(user_buf, &out, sizeof(out)) == 0 ? 0 : -EFAULT;
@@ -2512,7 +2537,7 @@ static int stat_from_file(struct file *file, struct linux_stat *stat) {
     if (file->node &&
         (file->kind == FILE_KIND_VFS || file->kind == FILE_KIND_PTY_MASTER ||
          file->kind == FILE_KIND_PTY_SLAVE || file->kind == FILE_KIND_INPUT ||
-         file->kind == FILE_KIND_FRAMEBUFFER)) {
+         file->kind == FILE_KIND_FRAMEBUFFER || file->kind == FILE_KIND_EVENTFS)) {
         fill_stat(file->node, stat);
         return 0;
     }
@@ -2722,7 +2747,10 @@ static int64_t sys_unlink_at(int dirfd, uint64_t user_path, int flags) {
     if ((flags & AT_REMOVEDIR) && node->children) return -ENOTEMPTY;
     int permitted = cred_may_remove(path, node);
     if (permitted != 0) return permitted;
-    return vfs_remove(path, (flags & AT_REMOVEDIR) != 0) == 0 ? 0 : -EIO;
+    if (vfs_remove(path, (flags & AT_REMOVEDIR) != 0) != 0) return -EIO;
+    struct process *process = process_current();
+    eventfs_emit_file_remove(process->cred.euid, process->tgid, path);
+    return 0;
 }
 
 static int64_t sys_rename_at(int old_dirfd, uint64_t user_old_path,
@@ -2743,7 +2771,11 @@ static int64_t sys_rename_at(int old_dirfd, uint64_t user_old_path,
     permitted = existing ? cred_may_remove(new_path, existing)
                          : cred_may_write_parent(new_path);
     if (permitted != 0) return permitted;
-    return vfs_rename(old_path, new_path) == 0 ? 0 : -EIO;
+    if (vfs_rename(old_path, new_path) != 0) return -EIO;
+    struct process *process = process_current();
+    eventfs_emit_file_rename(process->cred.euid, process->tgid,
+                             old_path, new_path);
+    return 0;
 }
 
 /*

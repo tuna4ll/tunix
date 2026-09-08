@@ -18,6 +18,7 @@ struct epoll_context;
 struct inotify_context;
 struct memfd_object;
 struct signalfd_context;
+struct eventfs_subscriber;
 
 #define FILE_KIND_VFS        1
 #define FILE_KIND_PIPE_READ  2
@@ -38,6 +39,7 @@ struct signalfd_context;
 /* A DRM buffer exported by PRIME. The descriptor is the buffer: it can be
    mapped, and it keeps the buffer alive after its handle is destroyed. */
 #define FILE_KIND_DMABUF      17
+#define FILE_KIND_EVENTFS     18
 
 struct file {
     /* Taken by shared-mode reads and writes, because the offset below is
@@ -60,6 +62,7 @@ struct file {
     struct inotify_context *inotify;
     struct memfd_object *memfd;
     struct signalfd_context *signalfd;
+    struct eventfs_subscriber *eventfs;
     /* PRIME export: which DRM buffer handle this descriptor stands for. */
     uint32_t dmabuf_handle;
     /* LOCK_SH or LOCK_EX while this open file description holds an advisory

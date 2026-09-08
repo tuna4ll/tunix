@@ -3,6 +3,7 @@
 #include "include/build_config.h"
 #include "include/cred.h"
 #include "include/elf.h"
+#include "include/eventfs.h"
 #include "include/file.h"
 #include "include/gdt.h"
 #include "include/heap.h"
@@ -522,6 +523,7 @@ struct process *process_create_from_path(const char *path) {
 
     enqueue(process);
     procfs_register_process(process);
+    eventfs_emit_process_exec(process->cred.euid, process->pid, process->name);
     /* init starts life in the foreground of the first terminal, which is what
        makes Ctrl-C typed before anything has logged in go somewhere. */
     if (process->pid == 1) tty_set_foreground_pgid(vt_tty(1U), (int)process->pgid);
@@ -1250,6 +1252,13 @@ int process_fault_from_interrupt(struct interrupt_frame *frame, int signal_numbe
     save_interrupt_context(&current->saved_frame, frame);
     struct syscall_frame resume = current->saved_frame;
 
+    const char *type = signal_number == SIGSEGV ? "segv" :
+                       signal_number == SIGILL ? "ill" :
+                       signal_number == SIGBUS ? "bus" :
+                       signal_number == SIGFPE ? "fpe" : "signal";
+    eventfs_emit_process_fault(current->cred.euid, current->pid, type,
+                               current->name);
+
     (void)process_send_signal((int64_t)current->pid, signal_number);
     /* Redirects to a handler if there is one, or terminates and switches
        away if there is not. */
@@ -1513,6 +1522,7 @@ void process_exit_from_syscall(struct syscall_frame *frame, int status) {
         kprintf("TUNIX: init exited, status %d\n", status);
         panic("init exited");
     }
+    eventfs_emit_process_exit(exiting->cred.euid, exiting->pid, status);
     exiting->exit_status = status;
     exiting->state = PROCESS_ZOMBIE;
     process_handle_robust_list(exiting);
@@ -1627,6 +1637,7 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame) {
 
     enqueue(child);
     procfs_register_process(child);
+    eventfs_emit_process_fork(parent->cred.euid, parent->pid, child->pid);
     KDEBUG("process: fork parent=%u child=%u\n", (unsigned)parent->pid, (unsigned)child->pid);
     return (int64_t)child->pid;
 }
@@ -2010,6 +2021,7 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
     wrmsr(IA32_FS_BASE, 0);
     if (old_memory) memory_unref(old_memory);
     else vmm_destroy_address_space(old_cr3);
+    eventfs_emit_process_exec(current->cred.euid, current->pid, current->name);
     KDEBUG("process: pid=%u exec %s\n", (unsigned)current->pid, path);
     return 0;
 }
@@ -2145,6 +2157,7 @@ int64_t process_waitid_from_syscall(int64_t pid_spec, uint64_t info_user,
 
 static void signal_one_process(struct process *target, int signal_number) {
     if (signal_number == 0) return;
+    eventfs_emit_process_signal(target->cred.euid, target->pid, signal_number);
     if (signal_number == SIGKILL && target->state == PROCESS_STOPPED)
         wake_to_ready(target);
     if (signal_number == SIGCONT && target->state == PROCESS_STOPPED) {
