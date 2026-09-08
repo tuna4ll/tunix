@@ -975,7 +975,8 @@ static void free_tree(struct vfs_node *node, unsigned depth) {
 
 static int mount_is_pseudo(const char *type) {
     return strcmp(type, "proc") == 0 || strcmp(type, "sysfs") == 0 ||
-           strcmp(type, "devtmpfs") == 0 || strcmp(type, "devfs") == 0;
+           strcmp(type, "devtmpfs") == 0 || strcmp(type, "devfs") == 0 ||
+           strcmp(type, "eventfs") == 0;
 }
 
 int vfs_mount(const char *source, const char *target, const char *type,

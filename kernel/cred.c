@@ -9,6 +9,7 @@
 #define ENOENT 2
 #define EACCES 13
 #define EINVAL 22
+#define EROFS 30
 
 #define MODE_SETUID 04000U
 #define MODE_SETGID 02000U
@@ -107,12 +108,13 @@ static struct vfs_node *parent_of(const char *path, char buffer[256]) {
 
 int cred_may_write_parent(const char *path) {
     const struct credentials *cred = cred_current();
-    if (!cred || cred->fsuid == 0) return 0;
     int status = cred_may_search(path);
     if (status != 0) return status;
     char buffer[256];
     struct vfs_node *parent = parent_of(path, buffer);
     if (!parent) return -ENOENT;
+    if (parent->flags & VFS_READONLY) return -EROFS;
+    if (!cred || cred->fsuid == 0) return 0;
     return cred_may(parent, CRED_WRITE | CRED_EXEC);
 }
 
