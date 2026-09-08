@@ -114,9 +114,7 @@ static int64_t proc_cpuinfo_read(struct vfs_node *node, uint64_t offset,
     cpu_model(model);
     uint64_t frequency = time_tsc_frequency();
 
-    /* One stanza per running processor. Everything but the number is the same
-       on all of them, and a reader that counts stanzas -- which is what
-       nproc, make -j and every thread pool do -- has to see them all. */
+    /* Emit one stanza per processor. */
     unsigned cpus = smp_cpu_count();
     for (unsigned index = 0; index < cpus; index++) {
         text_string(&text, "processor\t: "); text_unsigned(&text, index); text_char(&text, '\n');
@@ -142,8 +140,7 @@ static int64_t proc_meminfo_read(struct vfs_node *node, uint64_t offset,
                                  size_t size, void *output) {
     (void)node;
     struct text_buffer text = {{0}, 0};
-    /* Usable, not total: the pages between the two are the firmware's memory
-       hole, and reporting them made an idle machine claim a gigabyte in use. */
+    /* Report usable memory. */
     uint64_t total = pmm_usable_page_count() * 4ULL;
     uint64_t free = pmm_free_page_count() * 4ULL;
     uint64_t used = total >= free ? total - free : 0;
@@ -156,12 +153,7 @@ static int64_t proc_meminfo_read(struct vfs_node *node, uint64_t offset,
     text_string(&text, "SwapTotal:      0 kB\nSwapFree:       0 kB\n");
     text_string(&text, "Shmem:          0 kB\nSReclaimable:   0 kB\n");
 
-    /*
-     * The kernel's allocator, which is a second ceiling and the one that runs
-     * out first: file contents live in it. Reported as Slab because that is
-     * the field tools already understand, with the limit alongside -- without
-     * the limit the number says nothing, since it is not bounded by MemTotal.
-     */
+    /* Report kernel allocations as slab memory. */
     uint64_t heap_reserved = 0;
     uint64_t heap_allocated = 0;
     uint64_t heap_limit = 0;
@@ -172,8 +164,7 @@ static int64_t proc_meminfo_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
-/* What the disk cost, because a read reaching the medium stops every processor
-   for as long as the driver waits on it. */
+/* Report block device costs. */
 static int64_t proc_blockstat_read(struct vfs_node *node, uint64_t offset,
                                    size_t size, void *output) {
     (void)node;
@@ -192,8 +183,7 @@ static int64_t proc_blockstat_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
-/* What the keyboard actually produced, for a compositor that types a key more
-   than once: one line per event, oldest first. */
+/* Report recent input events. */
 static int64_t proc_inputlog_read(struct vfs_node *node, uint64_t offset,
                                   size_t size, void *output) {
     (void)node;
@@ -218,9 +208,7 @@ static int64_t proc_inputlog_read(struct vfs_node *node, uint64_t offset,
 
 static void text_hex32(struct text_buffer *text, uint32_t value);
 
-/* Who holds the kernel lock, for how long, and at worst how long: an input
-   event is only seen when the tick can take the lock, so a long hold is a key
-   that reaches its reader late. */
+/* Report kernel lock timings. */
 static int64_t proc_klock_read(struct vfs_node *node, uint64_t offset,
                                size_t size, void *output) {
     (void)node;
@@ -242,7 +230,7 @@ static int64_t proc_klock_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
-/* A zero stops the measurement; anything else starts a fresh one. */
+/* Toggle lock measurement. */
 static int64_t proc_klock_write(struct vfs_node *node, uint64_t offset,
                                 size_t size, const void *input) {
     (void)node; (void)offset;
@@ -266,8 +254,7 @@ static int64_t proc_uptime_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
-/* /proc/interrupts. Only the vectors drivers asked for, and one column,
-   because a vector is bound to one processor at a time. */
+/* Report registered interrupt vectors. */
 static int64_t proc_interrupts_read(struct vfs_node *node, uint64_t offset,
                                     size_t size, void *output) {
     (void)node;
@@ -302,10 +289,7 @@ static int64_t proc_cmdline_line_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
-/*
- * /proc/sys/kernel/hostname, and it has to be writable: Void's init sets the
- * machine's name by writing this file rather than by calling sethostname(2).
- */
+/* Expose the writable hostname. */
 static int64_t proc_hostname_read(struct vfs_node *node, uint64_t offset,
                                   size_t size, void *output) {
     (void)node;
@@ -323,8 +307,7 @@ static int64_t proc_hostname_write(struct vfs_node *node, uint64_t offset,
     return (int64_t)size;
 }
 
-/* The integer knobs under /proc/sys. None of them do anything; they exist so
-   that sysctl and the runit core services find a value to read. */
+/* Expose compatibility sysctl values. */
 static int64_t proc_knob_read(struct vfs_node *node, uint64_t offset,
                               size_t size, void *output) {
     struct text_buffer text = {{0}, 0};
@@ -409,10 +392,7 @@ static int64_t proc_stat_read(struct vfs_node *node, uint64_t offset,
     text_string(&text, "cpu  "); text_unsigned(&text, runtime_ticks);
     text_string(&text, " 0 0 "); text_unsigned(&text, idle_ticks);
     text_string(&text, " 0 0 0 0 0 0\n");
-    /* The aggregate line alone leaves per-CPU consumers (htop's CPU meter)
-       reading zeroes, so each processor gets a line. The kernel does not
-       account time per processor, so each gets an even share of the total
-       rather than a made-up one. */
+    /* Split aggregate time evenly across processors. */
     unsigned cpus = smp_cpu_count();
     for (unsigned index = 0; index < cpus; index++) {
         text_string(&text, "cpu"); text_unsigned(&text, index); text_char(&text, ' ');
@@ -598,10 +578,7 @@ static int64_t proc_status_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
-/* Linux /proc/<pid>/stat. Field numbers below follow proc(5); consumers such
-   as htop walk the fields positionally and reject a process outright if the
-   line runs short, so every field through (52) is emitted even when Tunix has
-   no meaningful value for it. */
+/* Emit all 52 Linux process stat fields. */
 static int64_t proc_pid_stat_read(struct vfs_node *node, uint64_t offset,
                                   size_t size, void *output) {
     struct process *process = process_find(node_pid(node));
@@ -632,8 +609,7 @@ static int64_t proc_pid_stat_read(struct vfs_node *node, uint64_t offset,
     text_unsigned(&text, start); text_char(&text, ' ');                 /* (22) starttime */
     text_unsigned(&text, rss_pages * 4096ULL); text_char(&text, ' ');   /* (23) vsize */
     text_unsigned(&text, rss_pages); text_char(&text, ' ');             /* (24) rss */
-    /* (25-38) rsslim, text/data/stack bounds, signal masks, wchan, swap counts.
-       Tunix does not track these; zero keeps the field count correct. */
+    /* Keep unsupported stat fields zeroed. */
     text_string(&text, "0 0 0 0 0 0 0 0 0 0 0 0 0 0 ");
     text_string(&text, "0 ");                                           /* (39) processor */
     text_string(&text, "0 0 ");                          /* (40-41) rt_priority, policy */
@@ -644,8 +620,7 @@ static int64_t proc_pid_stat_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
-/* Linux /proc/<pid>/statm: seven page counts. Tunix has no separate text/data
-   accounting, so resident pages stand in for the size and data fields. */
+/* Emit Linux process memory fields. */
 static int64_t proc_pid_statm_read(struct vfs_node *node, uint64_t offset,
                                    size_t size, void *output) {
     struct process *process = process_find(node_pid(node));
@@ -713,7 +688,7 @@ static size_t path_append_decimal(char *output, size_t at, uint64_t value) {
     return at;
 }
 
-/* "/proc/<pid>" followed by the optional suffix. */
+/* Build a process path. */
 static void decimal_path(uint64_t pid, const char *suffix, char output[PROC_PATH_MAX]) {
     size_t at = path_append_string(output, 0, "/proc/");
     at = path_append_decimal(output, at, pid);
@@ -721,8 +696,7 @@ static void decimal_path(uint64_t pid, const char *suffix, char output[PROC_PATH
     output[at] = '\0';
 }
 
-/* "/proc/<pid>/task/<pid>" followed by the optional suffix. Tunix has no real
-   threads, so a process is its own single task entry. */
+/* Build a process task path. */
 static void task_path(uint64_t pid, const char *suffix, char output[PROC_PATH_MAX]) {
     size_t at = path_append_string(output, 0, "/proc/");
     at = path_append_decimal(output, at, pid);
@@ -732,8 +706,7 @@ static void task_path(uint64_t pid, const char *suffix, char output[PROC_PATH_MA
     output[at] = '\0';
 }
 
-/* /proc/<pid>/fd, rebuilt on every search: ttyname(3) reads these links, and
-   su(1) refuses a caller whose terminal it cannot name. */
+/* Describe an open descriptor. */
 static void describe_file(const struct file *file, char *output, size_t capacity) {
     output[0] = '\0';
     if (!file) return;
@@ -763,7 +736,7 @@ static void describe_file(const struct file *file, char *output, size_t capacity
 }
 
 static void proc_fd_refresh(struct vfs_node *directory) {
-    /* Everything below walks the tree, and the tree walk comes back here. */
+    /* Prevent recursive refreshes. */
     static int busy;
     if (busy) return;
     busy = 1;
@@ -788,13 +761,45 @@ static void proc_fd_refresh(struct vfs_node *directory) {
     busy = 0;
 }
 
-/* /proc/self points at whoever is asking, so it is rewritten every time /proc
-   is searched rather than being a fixed link. */
+static struct vfs_node *direct_child(struct vfs_node *directory, const char *name) {
+    for (struct vfs_node *child = directory->children; child; child = child->next)
+        if (strcmp(child->name, name) == 0) return child;
+    return NULL;
+}
+
+static int set_link_target(struct vfs_node *link, const char *target) {
+    if (!link || !target || !target[0]) return -1;
+    size_t length = strlen(target);
+    if (length + 1 > link->capacity) {
+        void *data = kmalloc(length + 1);
+        if (!data) return -1;
+        kfree(link->data);
+        link->data = data;
+        link->capacity = length + 1;
+    }
+    memcpy(link->data, target, length + 1);
+    link->length = length;
+    return 0;
+}
+
+/* Refresh mutable process links. */
+static void proc_process_refresh(struct vfs_node *directory) {
+    struct process *process = process_find(node_pid(directory));
+    if (!process) return;
+
+    (void)set_link_target(direct_child(directory, "exe"), process->exe_path);
+
+    char path[256];
+    if (vfs_node_path(process->cwd, path, sizeof(path)) == 0)
+        (void)set_link_target(direct_child(directory, "cwd"), path);
+}
+
+/* Track the calling process links. */
 static struct vfs_node *self_link;
 static struct vfs_node *thread_self_link;
 
 static void point_at_caller(struct vfs_node *link, uint64_t pid) {
-    /* The placeholder sizes the buffer: 20 digits plus its terminator. */
+    /* Reuse the preallocated link buffer. */
     if (!link || !link->data || link->capacity < 21) return;
     char *target = (char *)link->data;
     size_t at = path_append_decimal(target, 0, pid);
@@ -813,8 +818,7 @@ void procfs_init(void) {
     if (!root) return;
     root->mode = 0555;
     vfs_mount_builtin("proc", "/proc", "proc", root);
-    /* The placeholder is only there to size the buffer the refresh writes into;
-       no pid is longer than the widest 64-bit decimal. */
+    /* Reserve room for any process id. */
     self_link = vfs_attach_symlink(root, "self", "18446744073709551615");
     thread_self_link = vfs_attach_symlink(root, "thread-self", "18446744073709551615");
     root->refresh = proc_root_refresh;
@@ -861,8 +865,7 @@ void procfs_init(void) {
         knob(yama, "ptrace_scope", 1);
     }
 
-    /* seedrng reads the pool size to decide how much entropy to save, and
-       says so on the console when it cannot. */
+    /* Expose entropy values for seedrng. */
     struct vfs_node *random = vfs_mkdir_p("/proc/sys/kernel/random");
     if (random) {
         random->mode = 0555;
@@ -910,7 +913,17 @@ void procfs_register_process(struct process *process) {
     directory->mode = 0555;
     directory->uid = process->cred.euid;
     directory->gid = process->cred.egid;
+    directory->data = (void *)(uintptr_t)process->pid;
     populate_process_files(directory, process->pid);
+
+    char cwd[256];
+    if (vfs_node_path(process->cwd, cwd, sizeof(cwd)) != 0) {
+        cwd[0] = '/';
+        cwd[1] = '\0';
+    }
+    (void)vfs_attach_symlink(directory, "exe", process->exe_path);
+    (void)vfs_attach_symlink(directory, "cwd", cwd);
+    (void)vfs_attach_symlink(directory, "root", "/");
 
     struct vfs_node *descriptors = vfs_find_child(directory, "fd");
     if (!descriptors) {
@@ -924,10 +937,9 @@ void procfs_register_process(struct process *process) {
             descriptors->refresh = proc_fd_refresh;
         }
     }
+    directory->refresh = proc_process_refresh;
 
-    /* Linux always exposes a per-thread view under task/<tid>/, and tools such
-       as htop read the main thread's stat from there rather than from
-       /proc/<pid>/stat. Mirror the process as its own single task. */
+    /* Mirror each process as its main task. */
     task_path(process->pid, NULL, path);
     struct vfs_node *task = vfs_mkdir_p(path);
     if (!task) return;
@@ -937,6 +949,9 @@ void procfs_register_process(struct process *process) {
 
 void procfs_unregister_process(uint64_t pid) {
     char path[PROC_PATH_MAX];
+    decimal_path(pid, NULL, path);
+    struct vfs_node *directory = vfs_lookup(path);
+    if (directory) directory->refresh = NULL;
     task_path(pid, "/status", path); (void)vfs_remove(path, 0);
     task_path(pid, "/stat", path); (void)vfs_remove(path, 0);
     task_path(pid, "/cmdline", path); (void)vfs_remove(path, 0);
@@ -949,6 +964,9 @@ void procfs_unregister_process(uint64_t pid) {
     decimal_path(pid, "/cmdline", path); (void)vfs_remove(path, 0);
     decimal_path(pid, "/statm", path); (void)vfs_remove(path, 0);
     decimal_path(pid, "/comm", path); (void)vfs_remove(path, 0);
+    decimal_path(pid, "/exe", path); (void)vfs_remove(path, 0);
+    decimal_path(pid, "/cwd", path); (void)vfs_remove(path, 0);
+    decimal_path(pid, "/root", path); (void)vfs_remove(path, 0);
     decimal_path(pid, "/fd", path);
     struct vfs_node *descriptors = vfs_lookup(path);
     if (descriptors) {
