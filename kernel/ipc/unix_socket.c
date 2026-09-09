@@ -25,15 +25,10 @@
 #define UNIX_ANCILLARY_MAX 8
 #define UNIX_RECORDS_MAX 64
 
-/* Message boundaries for SOCK_SEQPACKET, alongside the byte pipe: one length
-   per send, so a recv can hand back exactly one message. */
+/* SOCK_SEQPACKET preserves send boundaries. */
 struct unix_record_queue {
     uint32_t lengths[UNIX_RECORDS_MAX];
-    /* Who sent each one. SO_PEERCRED answers for the connection and is fixed
-       when it is made; SCM_CREDENTIALS answers for the message, and the two
-       stop agreeing the moment the peer forks -- which is the whole of how
-       udevd tells its workers apart, since the message they send it is empty
-       and the sender's pid is all it carries. */
+    /* Credentials belong to each record. */
     struct unix_credentials senders[UNIX_RECORDS_MAX];
     int head;
     int tail;
@@ -43,6 +38,7 @@ struct unix_record_queue {
 struct unix_ancillary {
     struct file *files[UNIX_RIGHTS_MAX];
     size_t file_count;
+    uint64_t stream_offset;
 };
 
 struct unix_ancillary_queue {
@@ -55,6 +51,10 @@ struct unix_ancillary_queue {
 struct unix_channel {
     struct pipe_buffer to_a;
     struct pipe_buffer to_b;
+    uint64_t to_a_read;
+    uint64_t to_a_written;
+    uint64_t to_b_read;
+    uint64_t to_b_written;
     struct unix_ancillary_queue ancillary_to_a;
     struct unix_ancillary_queue ancillary_to_b;
     struct unix_record_queue records_to_a;
@@ -81,7 +81,7 @@ struct unix_socket {
     int backlog;
     int passcred;
     struct unix_credentials credentials;
-    /* Filled by each read from the record it took. */
+    /* The latest record identifies its sender. */
     struct unix_credentials last_sender;
     char path[108];
     struct unix_channel *channel;
@@ -92,12 +92,7 @@ struct unix_socket {
     struct unix_socket *next_listener;
 };
 
-/* Every bound socket, in a list rather than a table. It used to be eight slots,
-   and a desktop session went past that without trying: the X server, both
-   message buses, the session manager's ICE socket, ssh-agent, gpg-agent and
-   xfconfd are already seven. The ninth listen() returned EAGAIN, which the
-   programs affected reported as "Resource temporarily unavailable" and then
-   gave up on. A socket is heap allocated anyway, so it can carry its own link. */
+/* Bound sockets share one linked registry. */
 static struct unix_socket *listener_list;
 
 static struct pipe_buffer *incoming(struct unix_socket *socket) {
@@ -109,6 +104,19 @@ static struct pipe_buffer *outgoing(struct unix_socket *socket) {
     if (!socket || !socket->channel) return NULL;
     return socket->side == 0 ? &socket->channel->to_b : &socket->channel->to_a;
 }
+
+static uint64_t *incoming_read_offset(struct unix_socket *socket) {
+    if (!socket || !socket->channel) return NULL;
+    return socket->side == 0 ? &socket->channel->to_a_read :
+                               &socket->channel->to_b_read;
+}
+
+static uint64_t *outgoing_write_offset(struct unix_socket *socket) {
+    if (!socket || !socket->channel) return NULL;
+    return socket->side == 0 ? &socket->channel->to_b_written :
+                               &socket->channel->to_a_written;
+}
+
 static struct unix_record_queue *incoming_records(struct unix_socket *socket) {
     if (!socket || !socket->channel) return NULL;
     return socket->side == 0 ? &socket->channel->records_to_a :
@@ -238,8 +246,7 @@ int unix_socket_get_name(struct unix_socket *socket, int peer,
     }
     memset(address, 0, sizeof(*address));
     address->family = TUNIX_AF_UNIX;
-    /* Abstract sockets are stored with the '\x01' marker (see copy_path); report
-     * them the Linux way -- a leading NUL followed by the name, no trailing NUL. */
+    /* Abstract names use a leading NUL outside the kernel. */
     if (path && path[0] == '\x01') {
         size_t name_length = strlen(path + 1);
         if (name_length > sizeof(address->path) - 1) name_length = sizeof(address->path) - 1;
@@ -331,12 +338,7 @@ static int copy_path(char destination[108], const struct tunix_sockaddr_un *addr
         address->family != TUNIX_AF_UNIX) return -EAFNOSUPPORT;
     size_t maximum = length - sizeof(address->family);
     if (maximum > sizeof(address->path)) maximum = sizeof(address->path);
-    /* Abstract socket: sun_path[0] == '\0' and the name follows, living in an
-     * in-kernel namespace rather than the filesystem. Xorg/Xlib (and D-Bus) bind
-     * their sockets this way. The registry is keyed by C string, so map the
-     * leading NUL to a reserved marker byte '\x01' that a real filesystem path
-     * can never begin with; get_name reverses it. The name is scanned up to the
-     * next NUL, which is how X and D-Bus form their abstract names. */
+    /* A marker makes abstract names usable as kernel strings. */
     int abstract = (address->path[0] == '\0');
     size_t start = abstract ? 1 : 0;
     size_t path_length = start;
@@ -400,7 +402,7 @@ int unix_socket_connect(struct unix_socket *socket, const struct tunix_sockaddr_
     if (!listener || listener->pending_count >= listener->backlog) return -ECONNREFUSED;
 
     struct unix_channel *channel = (struct unix_channel *)kmalloc(sizeof(*channel));
-    /* The accepted end speaks whatever the connecting end speaks. */
+    /* Both ends use the connecting socket type. */
     struct unix_socket *server = unix_socket_create(socket->seqpacket);
     if (!channel || !server) {
         if (channel) kfree(channel);
@@ -447,8 +449,7 @@ int64_t unix_socket_read(struct unix_socket *socket, size_t size, void *buffer) 
     if (!pipe) return -ENOTCONN;
     uint8_t *out = (uint8_t *)buffer;
 
-    /* One message per call, and what does not fit is dropped with it -- that
-       is what makes a seqpacket a seqpacket. */
+    /* A seqpacket read consumes one whole record. */
     if (socket->seqpacket) {
         struct unix_record_queue *records = incoming_records(socket);
         if (!records) return -ENOTCONN;
@@ -463,6 +464,8 @@ int64_t unix_socket_read(struct unix_socket *socket, size_t size, void *buffer) 
             pipe->read_pos = (pipe->read_pos + 1) % PIPE_CAPACITY;
         }
         pipe->count -= record;
+        uint64_t *read_offset = incoming_read_offset(socket);
+        if (read_offset) *read_offset += record;
         return (int64_t)deliver;
     }
 
@@ -473,6 +476,8 @@ int64_t unix_socket_read(struct unix_socket *socket, size_t size, void *buffer) 
         pipe->read_pos = (pipe->read_pos + 1) % PIPE_CAPACITY;
     }
     pipe->count -= amount;
+    uint64_t *read_offset = incoming_read_offset(socket);
+    if (read_offset) *read_offset += amount;
     return (int64_t)amount;
 }
 
@@ -483,7 +488,7 @@ int64_t unix_socket_write(struct unix_socket *socket, size_t size, const void *b
     size_t available = PIPE_CAPACITY - pipe->count;
     const uint8_t *in = (const uint8_t *)buffer;
 
-    /* All of the message or none of it, so the reader gets it back whole. */
+    /* Seqpacket writes are atomic. */
     if (socket->seqpacket) {
         struct unix_record_queue *records = outgoing_records(socket);
         if (!records) return -ENOTCONN;
@@ -502,6 +507,8 @@ int64_t unix_socket_write(struct unix_socket *socket, size_t size, const void *b
         sender->gid = self ? self->egid : 0U;
         records->tail = (records->tail + 1) % UNIX_RECORDS_MAX;
         records->count++;
+        uint64_t *write_offset = outgoing_write_offset(socket);
+        if (write_offset) *write_offset += size;
         return (int64_t)size;
     }
 
@@ -512,6 +519,8 @@ int64_t unix_socket_write(struct unix_socket *socket, size_t size, const void *b
         pipe->write_pos = (pipe->write_pos + 1) % PIPE_CAPACITY;
     }
     pipe->count += amount;
+    uint64_t *write_offset = outgoing_write_offset(socket);
+    if (write_offset) *write_offset += amount;
     return (int64_t)amount;
 }
 
@@ -521,12 +530,15 @@ int64_t unix_socket_send_with_rights(struct unix_socket *socket, size_t size,
     if (file_count > UNIX_RIGHTS_MAX) return -EINVAL;
     struct unix_ancillary_queue *queue = outgoing_ancillary(socket);
     if (file_count && (!queue || queue->count >= UNIX_ANCILLARY_MAX)) return -EAGAIN;
+    uint64_t *write_offset = outgoing_write_offset(socket);
+    uint64_t stream_offset = write_offset ? *write_offset : 0;
     int64_t result = unix_socket_write(socket, size, buffer);
     if (result < 0) return result;
     if (file_count) {
         struct unix_ancillary *message = &queue->entries[queue->tail];
         memset(message, 0, sizeof(*message));
         message->file_count = file_count;
+        message->stream_offset = stream_offset;
         for (size_t index = 0; index < file_count; index++) message->files[index] = files[index];
         queue->tail = (queue->tail + 1) % UNIX_ANCILLARY_MAX;
         queue->count++;
@@ -543,27 +555,31 @@ int64_t unix_socket_recv_with_rights(struct unix_socket *socket, size_t size,
     if (result <= 0) return result;
     struct unix_ancillary_queue *queue = incoming_ancillary(socket);
     if (!queue || queue->count == 0) return result;
-    struct unix_ancillary *message = &queue->entries[queue->head];
-    size_t amount = message->file_count < maximum_files ? message->file_count : maximum_files;
-    for (size_t index = 0; index < amount; index++) {
-        files[index] = message->files[index];
-        message->files[index] = NULL;
+    uint64_t *read_offset = incoming_read_offset(socket);
+    uint64_t consumed = read_offset ? *read_offset : 0;
+    while (queue->count > 0) {
+        struct unix_ancillary *message = &queue->entries[queue->head];
+        if (message->stream_offset >= consumed) break;
+        size_t room = maximum_files - *file_count;
+        size_t amount = message->file_count < room ? message->file_count : room;
+        for (size_t index = 0; index < amount; index++) {
+            files[*file_count + index] = message->files[index];
+            message->files[index] = NULL;
+        }
+        for (size_t index = amount; index < message->file_count; index++)
+            file_unref(message->files[index]);
+        *file_count += amount;
+        memset(message, 0, sizeof(*message));
+        queue->head = (queue->head + 1) % UNIX_ANCILLARY_MAX;
+        queue->count--;
     }
-    for (size_t index = amount; index < message->file_count; index++)
-        file_unref(message->files[index]);
-    *file_count = amount;
-    memset(message, 0, sizeof(*message));
-    queue->head = (queue->head + 1) % UNIX_ANCILLARY_MAX;
-    queue->count--;
     return result;
 }
 
 void unix_socket_last_sender(struct unix_socket *socket,
                              struct unix_credentials *out) {
     if (!out) return;
-    /* Before the first message on a record socket -- and always on a byte
-       stream, which carries no per-message sender -- the connection's answer
-       is the best there is. */
+    /* Stream sockets fall back to peer credentials. */
     if (socket && socket->last_sender.pid) { *out = socket->last_sender; return; }
     if (!socket || unix_socket_get_peer_credentials(socket, out) != 0)
         memset(out, 0, sizeof(*out));
