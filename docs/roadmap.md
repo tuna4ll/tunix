@@ -3,12 +3,11 @@
 What is worth doing next, in the order the system would notice. Not a wishlist:
 each item is something that is missing and that something real wants.
 
-## 1. A DHCP client
+## 1. Packet capture
 
-`/etc/rc.local` puts a static address on `eth0` because dhcpcd wants an
-`AF_PACKET` socket and the network stack has no concept of one. Packet sockets
-would also make `tcpdump` work, which is the tool this stack most wants when
-something goes wrong.
+`AF_PACKET` now carries DHCP traffic correctly and dhcpcd configures `eth0`.
+The next networking tool to exercise is `tcpdump`, including its BPF filters
+and packet metadata under sustained traffic.
 
 ## 2. The rest of Xorg's world, or a bigger Wayland one
 

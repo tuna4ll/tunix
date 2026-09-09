@@ -1,3 +1,5 @@
+/* IPv4 network stack. */
+
 #include <stddef.h>
 #include <stdint.h>
 #include "../include/kstring.h"
@@ -78,19 +80,8 @@ struct arp_entry {
     uint64_t updated_ns;
 };
 
-/*
- * Loopback.
- *
- * A packet addressed to 127.0.0.0/8 (or to our own address) never reaches the
- * adapter: it is queued here and handed back to the receive path by net_poll().
- * Delivering it inline instead would recurse -- handling a SYN sends a SYN-ACK,
- * which is another local packet, from inside the handler that is still running
- * -- and a queue is what breaks that cycle rather than bounding it.
- */
-/* The queue has to hold a full send window in each direction. A sender fills
-   the peer's window before waiting for an acknowledgement -- 16 segments at the
-   16 KiB window and 1 KiB MSS the socket layer uses -- so a shorter queue drops
-   what a wire would have carried, and every drop costs a retransmit timeout. */
+
+
 #define LOOPBACK_QUEUE 40
 #define LOOPBACK_BURST 128
 
@@ -144,8 +135,7 @@ int net_is_loopback(uint32_t address) {
     return (net_htonl(address) & NET_LOOPBACK_MASK) == NET_LOOPBACK_NETWORK;
 }
 
-/* Our own address is reachable without the wire too, and answering it over
-   loopback is what makes a server bound to it reachable from this machine. */
+
 static int address_is_local(uint32_t address) {
     return net_is_loopback(address) || (config.address && address == config.address);
 }
@@ -315,8 +305,7 @@ int net_send_udp(uint32_t source, uint16_t source_port, uint32_t destination,
     header->length = net_htons((uint16_t)(sizeof(*header) + length));
     header->checksum = 0;
     memcpy(packet + sizeof(*header), payload, length);
-    /* The pseudo-header has to carry the address net_send_ipv4 will stamp, not
-       the caller's hint, or a loopback packet fails its own checksum. */
+
     (void)source;
     header->checksum = net_htons(udp_checksum(net_source_for(destination), destination, packet,
                                               sizeof(*header) + length));
@@ -362,8 +351,7 @@ int net_send_tcp(uint32_t source, uint16_t source_port, uint32_t destination,
     header->window = net_htons(window);
     header->checksum = 0;
     if (length) memcpy(packet + sizeof(*header), payload, length);
-    /* net_send_ipv4 picks the IP source itself, so the pseudo-header must use
-       the same value regardless of the source hint. */
+
     (void)source;
     header->checksum = net_htons(tcp_checksum(net_source_for(destination), destination, packet,
                                               sizeof(*header) + length));
@@ -463,11 +451,6 @@ static void receive_frame(const uint8_t *frame, size_t length) {
 void net_init(void) {
     memset(&config, 0, sizeof(config));
     memset(arp_cache, 0, sizeof(arp_cache));
-    /* QEMU user networking defaults. udhcpc/ifconfig can replace these. */
-    config.address = net_htonl(0x0A00020FU);
-    config.netmask = net_htonl(0xFFFFFF00U);
-    config.gateway = net_htonl(0x0A000202U);
-    config.dns = net_htonl(0x0A000203U);
     adapter = ADAPTER_NONE;
     if (virtio_net_init() == 0) {
         adapter = ADAPTER_VIRTIO;
@@ -489,13 +472,7 @@ void net_init(void) {
     }
 }
 
-/*
- * Called once the interrupt controller is up, which is long after net_init():
- * the adapter is found early so a boot problem can be reported over the
- * network, and the IOAPIC that a line has to be routed through does not exist
- * yet at that point. Routing there fails, silently and permanently, which is
- * exactly what it did until this was split out.
- */
+
 void net_enable_interrupts(void) {
     if (!config.link_up) return;
     if (adapter == ADAPTER_VIRTIO) {
@@ -510,10 +487,7 @@ void net_enable_interrupts(void) {
                 rtl8139_interrupt_vector());
 }
 
-/* Hand queued local packets back to the receive path. Bounded rather than
-   drained to empty: handling one can queue the next (a SYN produces a SYN-ACK),
-   and a burst cap is what stops two sockets talking to each other from holding
-   the processor here. */
+
 static void loopback_drain(void) {
     static int draining;
     if (draining) return;
@@ -529,14 +503,12 @@ static void loopback_drain(void) {
 }
 
 void net_poll(void) {
-    /* Before the link check: loopback works on a machine with no adapter. */
+
     loopback_drain();
     if (!config.link_up) return;
     if (adapter == ADAPTER_VIRTIO) virtio_net_poll(receive_frame);
     else if (adapter == ADAPTER_RTL8139) rtl8139_poll(receive_frame);
-    /* Drive TCP retransmit/TIME_WAIT timers. Guarded so a segment sent from
-       inside the sweep (which may re-enter net_poll via cold-ARP resolution)
-       does not recurse into the timer sweep again. */
+
     static int timing;
     if (!timing) {
         timing = 1;
@@ -552,9 +524,7 @@ void net_set_dns(uint32_t value) { config.dns = value; }
 void net_set_interface_up(int up) { config.interface_up = up != 0; }
 uint64_t net_rx_packets(void) { return stack_rx; }
 uint64_t net_tx_packets(void) { return stack_tx; }
-/* Three ways to lose a frame, and /proc/net/dev asks for one number: the
-   stack refusing it, the loopback queue overflowing, the adapter's ring going
-   bad, and now the adapter's own queue filling because the stack fell behind. */
+
 uint64_t net_rx_dropped(void) {
     uint64_t adapter_drops = adapter == ADAPTER_VIRTIO
         ? virtio_net_rx_dropped()

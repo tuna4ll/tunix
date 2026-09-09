@@ -1,14 +1,7 @@
-# Enabled by symlinking /etc/sv/<name> into /etc/runit/runsvdir/default.
-# The list is here rather than as symlinks in the tree because a symlink does
-# not survive a checkout on every filesystem this repo gets cloned onto.
-#
-# Not enabled, and why: dhcpcd needs a packet socket, which the network stack
-# has no concept of. The address is set statically in rc.local instead.
-#
-# tty1 has no getty: weston takes the virtual terminal that is active when it
-# starts, and a login prompt sharing it would draw over the desktop.
+# Enabled runit services.
 agetty-tty2
 agetty-tty3
 agetty-tty4
 seatd
+dhcpcd
 weston

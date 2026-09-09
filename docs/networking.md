@@ -131,8 +131,7 @@ CPython's own socket module.
 
 ## Limits
 
-- One adapter, one address. No DHCP client: the address comes up as QEMU user
-  networking's default and `ip` can replace it.
+- One adapter and one IPv4 address, normally configured by dhcpcd.
 - No IPv6.
 - TCP has no MSS option, no window scaling, no selective acknowledgement, and
   no out-of-order reassembly — a segment arriving early is re-acknowledged and

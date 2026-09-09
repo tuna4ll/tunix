@@ -1,3 +1,5 @@
+/* Internet and packet sockets. */
+
 #include <stddef.h>
 #include <stdint.h>
 #include "../include/heap.h"
@@ -34,28 +36,18 @@ extern void kprintf(const char *fmt, ...);
 #define ECONNREFUSED 111
 #define EINPROGRESS 115
 
-/* TCP tuning. Rings are per-connection byte streams; MSS caps segment payload
-   to what net_send_tcp accepts. Timers use time_uptime_ns() deadlines.
 
-   TCP_RING is also the receive window we advertise, so it sets the bandwidth-
-   delay product: at the ~60 ms round trip to a public host, 8 KiB capped a bulk
-   download at ~130 KB/s. 16 KiB doubles that and still fits comfortably inside
-   the 32 KiB NIC RX ring (see rtl8139.c) once Ethernet/IP/TCP framing is added
-   -- the NIC ring must stay larger than a full window, because nothing drains
-   it while the process is off doing work between reads. */
 #define TCP_RING 16384U
 #define TCP_MSS 1024U
-/* Assumed peer segment size until a segment tells us otherwise; used only to
-   scale the window-update threshold below. */
-#define TCP_PEER_MSS_INIT 1460U
-#define TCP_RTO_INIT_NS   200000000ULL   /* 200 ms  */
-#define TCP_RTO_MAX_NS   4000000000ULL   /* 4 s     */
-#define TCP_MAX_RETRIES  8
-#define TCP_TIME_WAIT_NS 10000000000ULL  /* 10 s (shortened 2*MSL) */
-#define TCP_ORPHAN_NS    30000000000ULL  /* max lifetime of an orphaned TCB */
 
-/* A listener may hold this many connections the application has not taken yet,
-   whether still shaking hands or ready; listen()'s backlog caps it further. */
+#define TCP_PEER_MSS_INIT 1460U
+#define TCP_RTO_INIT_NS   200000000ULL
+#define TCP_RTO_MAX_NS   4000000000ULL
+#define TCP_MAX_RETRIES  8
+#define TCP_TIME_WAIT_NS 10000000000ULL
+#define TCP_ORPHAN_NS    30000000000ULL
+
+
 #define TCP_BACKLOG_MAX 16
 
 enum tcp_state {
@@ -73,26 +65,26 @@ enum tcp_state {
 
 struct tcp_control_block {
     int state;
-    uint32_t iss;                 /* initial send sequence            */
-    uint32_t snd_una;             /* oldest unacknowledged sequence   */
-    uint32_t snd_nxt;             /* next sequence to send            */
-    uint16_t snd_wnd;             /* peer's advertised window         */
-    uint32_t irs;                 /* initial receive sequence         */
-    uint32_t rcv_nxt;             /* next expected sequence           */
+    uint32_t iss;
+    uint32_t snd_una;
+    uint32_t snd_nxt;
+    uint16_t snd_wnd;
+    uint32_t irs;
+    uint32_t rcv_nxt;
     int fin_sent;
     int fin_acked;
     int peer_fin;
-    int pending_error;            /* negative errno, delivered once   */
-    uint8_t tx[TCP_RING];         /* unacked + unsent outbound bytes  */
-    size_t tx_len;                /* total buffered outbound bytes    */
-    size_t tx_sent;              /* sent-but-unacked prefix of tx    */
-    uint8_t rx[TCP_RING];         /* in-order received inbound bytes  */
+    int pending_error;
+    uint8_t tx[TCP_RING];
+    size_t tx_len;
+    size_t tx_sent;
+    uint8_t rx[TCP_RING];
     size_t rx_head;
     size_t rx_len;
-    uint16_t rcv_wnd_adv;         /* window our last segment advertised */
-    uint16_t peer_mss;            /* largest payload the peer has sent   */
+    uint16_t rcv_wnd_adv;
+    uint16_t peer_mss;
     uint64_t rto_ns;
-    uint64_t rto_deadline_ns;     /* 0 = retransmit timer disarmed    */
+    uint64_t rto_deadline_ns;
     unsigned retransmit_count;
     uint64_t time_wait_deadline_ns;
     uint64_t orphan_deadline_ns;
@@ -101,6 +93,7 @@ struct tcp_control_block {
 #define MSG_PEEK 0x02
 #define MSG_DONTWAIT 0x40
 #define SOL_SOCKET 1
+#define SOL_PACKET 263
 #define SO_ERROR 4
 #define SO_BROADCAST 6
 #define SO_RCVBUF 8
@@ -109,9 +102,11 @@ struct tcp_control_block {
 #define SO_SNDTIMEO 21
 #define SO_BINDTODEVICE 25
 #define SO_ATTACH_FILTER 26
+#define PACKET_AUXDATA 8
 #define IPPROTO_IP 0
 #define IP_HDRINCL 3
 #define IP_TTL 2
+#define IP_PKTINFO 8
 #define IP_RECVERR 11
 #define TCP_NODELAY 1
 
@@ -132,6 +127,7 @@ struct tcp_control_block {
 
 #define IFF_UP 0x0001
 #define IFF_BROADCAST 0x0002
+#define IFF_LOOPBACK 0x0008
 #define IFF_RUNNING 0x0040
 #define IFF_MULTICAST 0x1000
 
@@ -161,19 +157,17 @@ struct inet_socket {
     int write_shutdown;
     int broadcast;
     int header_included;
-    /* IP_RECVERR: the caller wants ICMP errors on this socket's error queue. */
+
     int report_errors;
     uint8_t ttl;
-    int orphan;                          /* fd closed but TCB still closing */
-    /* Listening sockets have no control block of their own: they hold a list
-       of the connections arriving on their port, each of which does. A
-       connection stays on that list until accept() takes it. */
+    int orphan;
+
     int listening;
     unsigned backlog;
-    struct inet_socket *pending;         /* head of the list, on a listener */
-    struct inet_socket *listener;        /* the listener it arrived on      */
-    struct inet_socket *sibling;         /* next connection on that list    */
-    struct tcp_control_block *tcp;       /* non-NULL only for SOCK_STREAM   */
+    struct inet_socket *pending;
+    struct inet_socket *listener;
+    struct inet_socket *sibling;
+    struct tcp_control_block *tcp;
     struct queued_packet queue[SOCKET_QUEUE];
     unsigned queue_head;
     unsigned queue_tail;
@@ -230,7 +224,7 @@ static uint16_t allocate_port(void) {
     return 0;
 }
 
-/* ------------------------------------------------------------------ TCP --- */
+
 
 static uint32_t tcp_iss_salt;
 
@@ -252,13 +246,11 @@ static void tcp_arm_rto(struct tcp_control_block *tcp) {
     tcp->rto_deadline_ns = time_uptime_ns() + tcp->rto_ns;
 }
 
-/* Emit one segment with the current receive window/ack. Sequence bookkeeping
-   is the caller's responsibility. */
+
 static void tcp_transmit(struct inet_socket *s, uint32_t seq, uint8_t flags,
                          const uint8_t *data, size_t length) {
     struct tcp_control_block *tcp = s->tcp;
-    /* Remember what the peer will believe our window to be. tcp_recv() compares
-       against this to decide when silence has become a stall. */
+
     tcp->rcv_wnd_adv = tcp_rx_window(tcp);
     net_send_tcp(s->local_address, s->local_port, s->peer_address, s->peer_port,
                  seq, tcp->rcv_nxt, flags, tcp->rcv_wnd_adv, data, length);
@@ -268,26 +260,7 @@ static void tcp_send_ack(struct inet_socket *s) {
     tcp_transmit(s, s->tcp->snd_nxt, TCP_ACK, NULL, 0);
 }
 
-/*
- * Announce a receive window that a read has reopened (RFC 1122 4.2.3.3).
- *
- * During a bulk download nothing else is transmitted: the peer streams, we ACK
- * from tcp_input(), and each of those ACKs advertises the space left *at that
- * moment*, which shrinks toward zero as the ring fills. Draining the ring from
- * tcp_recv() reopens it, but unless we say so the peer keeps believing the last,
- * tiny figure. A peer whose remaining window is under its own MSS will not send
- * a runt segment (silly-window avoidance); it parks on its persist timer, which
- * backs off to seconds. Observed against GitHub: the window stalled at ~1.1 KiB
- * and the transfer moved 1112 bytes every 5 s -- roughly 280 B/s -- until the
- * server gave up mid-pack, surfacing as "curl 56 ssl_read returned (-0x0000)"
- * (mbedTLS EOF) with a variable "N bytes of body are still expected".
- *
- * Announce when the reopened space is worth a segment to the peer: at least two
- * of its MSS, or half the ring. Comparing against rcv_wnd_adv (what the peer
- * actually believes, recorded by tcp_transmit) rather than a fixed threshold is
- * what makes this correct -- the previous rule tested the free space against our
- * own 1 KiB send MSS and so never fired at a 1112-byte window.
- */
+
 static void tcp_send_window_update(struct inet_socket *s) {
     struct tcp_control_block *tcp = s->tcp;
     if (tcp->state != TCP_ESTABLISHED && tcp->state != TCP_CLOSE_WAIT) return;
@@ -296,20 +269,19 @@ static void tcp_send_window_update(struct inet_socket *s) {
     size_t opened = window - tcp->rcv_wnd_adv;
     size_t threshold = 2U * (size_t)(tcp->peer_mss ? tcp->peer_mss : TCP_PEER_MSS_INIT);
     if (threshold > TCP_RING / 2U) threshold = TCP_RING / 2U;
-    /* The second test rescues the case the peer cannot escape on its own: it
-       believes it has less than a segment of room, so it will not send at all. */
+
     if (opened >= threshold ||
         (tcp->rcv_wnd_adv < (tcp->peer_mss ? tcp->peer_mss : TCP_PEER_MSS_INIT) &&
          window >= (size_t)(tcp->peer_mss ? tcp->peer_mss : TCP_PEER_MSS_INIT)))
         tcp_send_ack(s);
 }
 
-/* Push unsent data respecting the peer's advertised window and the MSS. */
+
 static void tcp_output(struct inet_socket *s) {
     struct tcp_control_block *tcp = s->tcp;
     if (tcp->state != TCP_ESTABLISHED && tcp->state != TCP_CLOSE_WAIT) return;
     while (tcp->tx_sent < tcp->tx_len) {
-        uint32_t window = tcp->snd_wnd ? tcp->snd_wnd : 1U; /* zero-window probe */
+        uint32_t window = tcp->snd_wnd ? tcp->snd_wnd : 1U;
         if (tcp->tx_sent >= window) break;
         size_t room = (size_t)window - tcp->tx_sent;
         size_t chunk = tcp->tx_len - tcp->tx_sent;
@@ -348,8 +320,7 @@ static void pending_detach(struct inet_socket *child) {
     child->sibling = NULL;
 }
 
-/* Tell the peer the connection is over. Used where there is no longer anything
-   that could answer it -- a connection nobody will ever accept. */
+
 static void tcp_reset_peer(struct inet_socket *s) {
     if (!s->tcp) return;
     net_send_tcp(s->local_address, s->local_port, s->peer_address, s->peer_port,
@@ -358,8 +329,7 @@ static void tcp_reset_peer(struct inet_socket *s) {
 
 static void tcp_free(struct inet_socket *socket) {
     pending_detach(socket);
-    /* Closing a listener takes every connection it was holding with it. The
-       list is cut loose first so each child's own detach has nothing to walk. */
+
     struct inet_socket *child = socket->pending;
     socket->pending = NULL;
     while (child) {
@@ -377,7 +347,7 @@ static void tcp_free(struct inet_socket *socket) {
     kfree(socket);
 }
 
-/* Queue and send our FIN, advancing toward the closing states. */
+
 static void tcp_begin_close(struct inet_socket *s) {
     struct tcp_control_block *tcp = s->tcp;
     if (!tcp || tcp->fin_sent) return;
@@ -398,7 +368,7 @@ static void tcp_begin_close(struct inet_socket *s) {
 static int tcp_connect(struct inet_socket *socket, uint32_t address, uint16_t port) {
     struct tcp_control_block *tcp = socket->tcp;
     if (tcp) {
-        /* Idempotent: re-entered by the blocking connect retry loop. */
+
         net_poll();
         if (tcp->pending_error) { int e = tcp->pending_error; tcp->pending_error = 0; return e; }
         if (tcp->state == TCP_ESTABLISHED || tcp->state >= TCP_FIN_WAIT_1) {
@@ -409,7 +379,7 @@ static int tcp_connect(struct inet_socket *socket, uint32_t address, uint16_t po
     }
     if (!address || !port) return -EINVAL;
     const struct net_config *config = net_get_config();
-    /* Loopback needs no adapter, so the link only gates what leaves the machine. */
+
     if (!net_is_loopback(address) && (!config->link_up || !config->interface_up))
         return -ENETDOWN;
     tcp = (struct tcp_control_block *)kmalloc(sizeof(*tcp));
@@ -418,16 +388,14 @@ static int tcp_connect(struct inet_socket *socket, uint32_t address, uint16_t po
     socket->tcp = tcp;
     if (!socket->local_port) socket->local_port = allocate_port();
     if (!socket->local_port) { socket->tcp = NULL; kfree(tcp); return -EADDRINUSE; }
-    /* The address the reply will be addressed to, which for a loopback peer is
-       not our adapter's: taking config->address here left the four-tuple
-       unable to match its own SYN-ACK. */
+
     if (!socket->local_address) socket->local_address = net_source_for(address);
     socket->peer_address = address;
     socket->peer_port = port;
     tcp->peer_mss = TCP_PEER_MSS_INIT;
     tcp->iss = tcp_generate_iss();
     tcp->snd_una = tcp->iss;
-    tcp->snd_nxt = tcp->iss + 1U;   /* SYN consumes one sequence number */
+    tcp->snd_nxt = tcp->iss + 1U;
     tcp->state = TCP_SYN_SENT;
     tcp_transmit(socket, tcp->iss, TCP_SYN, NULL, 0);
     tcp_arm_rto(tcp);
@@ -448,7 +416,7 @@ static void tcp_process_ack(struct inet_socket *s, uint32_t ack) {
     uint32_t data_acked = acked;
     if (tcp->fin_sent && ack == tcp->snd_nxt) {
         tcp->fin_acked = 1;
-        if (data_acked > 0) data_acked -= 1U;   /* FIN occupies one sequence */
+        if (data_acked > 0) data_acked -= 1U;
     }
     if (data_acked > tcp->tx_sent) data_acked = (uint32_t)tcp->tx_sent;
     if (data_acked > 0) {
@@ -463,7 +431,7 @@ static void tcp_process_ack(struct inet_socket *s, uint32_t ack) {
     else tcp_arm_rto(tcp);
 }
 
-/* Advance close-handshake states after processing an incoming segment. */
+
 static void tcp_advance_close(struct inet_socket *s) {
     struct tcp_control_block *tcp = s->tcp;
     switch (tcp->state) {
@@ -505,7 +473,7 @@ static void tcp_input(struct inet_socket *s, uint32_t seq, uint32_t ack, uint8_t
 
     if (tcp->state == TCP_SYN_SENT) {
         if ((flags & TCP_SYN) && (flags & TCP_ACK)) {
-            if (ack != tcp->iss + 1U) return;   /* stale/invalid, ignore */
+            if (ack != tcp->iss + 1U) return;
             tcp->irs = seq;
             tcp->rcv_nxt = seq + 1U;
             tcp->snd_una = ack;
@@ -518,11 +486,9 @@ static void tcp_input(struct inet_socket *s, uint32_t seq, uint32_t ack, uint8_t
         return;
     }
 
-    /* The third leg of an incoming handshake. Deliberately not a return: the
-       ACK that completes it may carry the client's first bytes, and dropping
-       them would make the connection lose its opening request. */
+
     if (tcp->state == TCP_SYN_RECEIVED) {
-        if (flags & TCP_SYN) {   /* our SYN-ACK was lost; say it again */
+        if (flags & TCP_SYN) {
             tcp_transmit(s, tcp->iss, TCP_SYN | TCP_ACK, NULL, 0);
             return;
         }
@@ -535,9 +501,7 @@ static void tcp_input(struct inet_socket *s, uint32_t seq, uint32_t ack, uint8_t
 
     if (flags & TCP_ACK) tcp_process_ack(s, ack);
 
-    /* We send no MSS option, so the peer picks its own segment size; learn it
-       from the wire rather than guess, since the window-update threshold and
-       the peer's own silly-window avoidance are both scaled by it. */
+
     if (length > tcp->peer_mss) tcp->peer_mss = (uint16_t)length;
 
     if (length > 0 && seq == tcp->rcv_nxt && !tcp->peer_fin) {
@@ -549,7 +513,7 @@ static void tcp_input(struct inet_socket *s, uint32_t seq, uint32_t ack, uint8_t
         tcp->rcv_nxt += (uint32_t)take;
         tcp_send_ack(s);
     } else if (length > 0) {
-        /* Out-of-order or already-received data: re-acknowledge. */
+
         tcp_send_ack(s);
     }
 
@@ -559,7 +523,7 @@ static void tcp_input(struct inet_socket *s, uint32_t seq, uint32_t ack, uint8_t
         tcp_send_ack(s);
     }
 
-    /* A fresh ACK may have opened the send window; flush any buffered data. */
+
     tcp_output(s);
     tcp_advance_close(s);
 }
@@ -569,7 +533,7 @@ static int64_t tcp_send(struct inet_socket *s, const void *data, size_t length) 
     if (!tcp) return -ENOTCONN;
     if (tcp->pending_error) { int e = tcp->pending_error; tcp->pending_error = 0; return e; }
     if (s->write_shutdown || tcp->fin_sent) return -EPIPE;
-    if (tcp->state == TCP_SYN_SENT) return -EAGAIN;   /* still connecting */
+    if (tcp->state == TCP_SYN_SENT) return -EAGAIN;
     if (tcp->state != TCP_ESTABLISHED && tcp->state != TCP_CLOSE_WAIT) return -ENOTCONN;
     if (!length) return 0;
     size_t space = TCP_RING - tcp->tx_len;
@@ -650,16 +614,12 @@ void inet_socket_tcp_timer_poll(void) {
             tcp_free(s);
             continue;
         }
-        /* A connection that failed or was reset before anyone accepted it has
-           no owner to notice, so nothing else would ever free it. */
+
         if (s->listener && tcp->state == TCP_CLOSED) tcp_free(s);
     }
 }
 
-/* A connection arriving on a listening socket gets its own socket immediately,
-   in SYN_RECEIVED, so the rest of the handshake is matched by the four-tuple
-   like any other connection. It becomes visible to accept() only once the
-   handshake finishes. */
+
 static struct inet_socket *tcp_open_child(struct inet_socket *listener, uint32_t source,
                                           uint16_t source_port, uint32_t destination,
                                           uint16_t destination_port, uint32_t seq,
@@ -668,7 +628,7 @@ static struct inet_socket *tcp_open_child(struct inet_socket *listener, uint32_t
     struct inet_socket *child = (struct inet_socket *)kmalloc(sizeof(*child));
     if (!child) return NULL;
     memset(child, 0, sizeof(*child));
-    child->refs = 1;                     /* held by the stack until accepted */
+    child->refs = 1;
     child->domain = TUNIX_AF_INET;
     child->type = TUNIX_SOCK_STREAM;
     child->protocol = listener->protocol;
@@ -690,7 +650,7 @@ static struct inet_socket *tcp_open_child(struct inet_socket *listener, uint32_t
     tcp->peer_mss = TCP_PEER_MSS_INIT;
     tcp->snd_wnd = window;
     tcp->irs = seq;
-    tcp->rcv_nxt = seq + 1U;             /* the SYN consumes one sequence */
+    tcp->rcv_nxt = seq + 1U;
     tcp->iss = tcp_generate_iss();
     tcp->snd_una = tcp->iss;
     tcp->snd_nxt = tcp->iss + 1U;
@@ -720,15 +680,14 @@ void inet_socket_receive_tcp(uint32_t source, uint16_t source_port, uint32_t des
             if (!s || !s->listening || s->type != TUNIX_SOCK_STREAM) continue;
             if (s->local_port != destination_port) continue;
             if (s->local_address && s->local_address != destination) continue;
-            /* A full backlog drops the SYN rather than refusing it, so the
-               peer retransmits into a queue that may have drained by then. */
+
             (void)tcp_open_child(s, source, source_port, destination,
                                  destination_port, seq, window);
             return;
         }
     }
 
-    /* Unmatched segment: reset the peer so it stops retransmitting. */
+
     if (!(flags & TCP_RST)) {
         uint32_t rst_seq = (flags & TCP_ACK) ? ack : 0U;
         uint32_t rst_ack = seq + (uint32_t)length + ((flags & (TCP_SYN | TCP_FIN)) ? 1U : 0U);
@@ -766,9 +725,7 @@ void inet_socket_ref(struct inet_socket *socket) { if (socket) socket->refs++; }
 void inet_socket_unref(struct inet_socket *socket) {
     if (!socket || --socket->refs > 0) return;
     report_close(socket);
-    /* A TCP connection that is still open must finish its close handshake even
-       though the last fd is gone. Send a FIN and keep the (orphaned) TCB in the
-       socket table so the timer sweep can free it once it reaches CLOSED. */
+
     if (socket->tcp && !socket->orphan && socket->tcp->state != TCP_CLOSED) {
         tcp_begin_close(socket);
         if (socket->tcp->state != TCP_CLOSED) {
@@ -806,7 +763,8 @@ int inet_socket_bind(struct inet_socket *socket, const void *address, size_t len
     if (socket->domain == TUNIX_AF_PACKET) {
         if (length < sizeof(struct tunix_sockaddr_ll)) return -EINVAL;
         const struct tunix_sockaddr_ll *ll = (const struct tunix_sockaddr_ll *)address;
-        if (ll->family != TUNIX_AF_PACKET || (ll->ifindex != 0 && ll->ifindex != 1))
+        if (ll->family != TUNIX_AF_PACKET ||
+            (ll->ifindex != 0 && ll->ifindex != NET_IFINDEX_ETH0))
             return -EADDRNOTAVAIL;
         if (ll->protocol) socket->protocol = ll->protocol;
         socket->bound = 1;
@@ -822,7 +780,7 @@ int inet_socket_is_listener(struct inet_socket *socket) {
 int inet_socket_listen(struct inet_socket *socket, int backlog) {
     if (!socket || socket->domain != TUNIX_AF_INET ||
         socket->type != TUNIX_SOCK_STREAM) return -EOPNOTSUPP;
-    if (socket->tcp) return -EINVAL;     /* already a connection of its own */
+    if (socket->tcp) return -EINVAL;
     if (!socket->local_port) {
         socket->local_port = allocate_port();
         if (!socket->local_port) return -EADDRINUSE;
@@ -833,14 +791,13 @@ int inet_socket_listen(struct inet_socket *socket, int backlog) {
     return 0;
 }
 
-/* Hand over the oldest connection whose handshake is done. The reference the
-   stack held on it goes with it, so the caller owns it from here. */
+
 struct inet_socket *inet_socket_accept(struct inet_socket *listener) {
     if (!listener || !listener->listening) return NULL;
     net_poll();
     for (struct inet_socket *s = listener->pending; s; s = s->sibling) {
         if (!s->tcp || s->tcp->state == TCP_SYN_RECEIVED) continue;
-        /* One that died before anyone took it is left for the timer sweep. */
+
         if (s->tcp->state == TCP_CLOSED) continue;
         pending_detach(s);
         s->connected = 1;
@@ -985,7 +942,7 @@ int inet_socket_getpeername(struct inet_socket *socket, void *address, size_t *l
     return 0;
 }
 
-/* One line per level and option, ever. */
+
 static void report_refused_option(const char *what, int level, int option) {
     static struct { int level; int option; } seen[16];
     static unsigned count;
@@ -1019,44 +976,18 @@ int inet_socket_setsockopt(struct inet_socket *socket, int level, int option,
             if (ttl < 1 || ttl > 255) return -EINVAL;
             socket->ttl = (uint8_t)ttl; return 0;
         }
-        /*
-         * Ask for ICMP errors on the socket's error queue. Nothing is ever put
-         * on that queue here -- there is no MSG_ERRQUEUE delivery -- so a
-         * caller that reads it is told there is nothing there, which is true.
-         *
-         * The option still has to be accepted. glibc's resolver sets it on
-         * every nameserver socket it opens and treats a refusal as fatal: it
-         * closes the socket and reports the lookup as failed. Refusing it made
-         * every name on the machine unresolvable without a single packet
-         * reaching the wire, which is what "Transient resolver failure" from
-         * xbps and "Could not resolve host" from curl were.
-         */
+
         if (option == IP_RECVERR && value && length >= sizeof(int)) {
             socket->report_errors = *(const int *)value != 0;
             return 0;
         }
+        if (option == IP_PKTINFO) return 0;
     }
-    /*
-     * Nagle is not implemented here: a segment goes out when the caller writes
-     * it, and small writes are never held back waiting for company. So the
-     * option describes what this stack already does, and accepting it is the
-     * truthful answer rather than a convenient one.
-     *
-     * Refusing it was not. libfetch sets it on every connection it opens and
-     * treats the refusal as fatal, which is why a 677 MB download died three
-     * quarters of the way through with `Operation not supported` -- the same
-     * shape of failure as IP_RECVERR above, and the second time an advisory
-     * option refused on principle broke something that had nothing to do with
-     * the principle.
-     */
-    if (level == IPPROTO_TCP && option == TCP_NODELAY) return 0;
 
-    /*
-     * And the next one names itself. Working out that the last two were
-     * IP_RECVERR and TCP_NODELAY took a boot each; the option number is free
-     * to print and it is the whole diagnosis. Once per level and option, so a
-     * program that asks in a loop does not bury the log.
-     */
+    if (level == IPPROTO_TCP && option == TCP_NODELAY) return 0;
+    if (level == SOL_PACKET && option == PACKET_AUXDATA) return 0;
+
+
     report_refused_option("setsockopt", level, option);
     return -EOPNOTSUPP;
 }
@@ -1066,8 +997,7 @@ int inet_socket_getsockopt(struct inet_socket *socket, int level, int option,
     if (!socket || !value || !length || *length < sizeof(int)) return -EINVAL;
     int result = 0;
     if (level == SOL_SOCKET && option == SO_ERROR) {
-        /* Report and clear a pending connection error (e.g. -ECONNREFUSED),
-           the way a non-blocking connect() result is collected. */
+
         if (socket->tcp && socket->tcp->pending_error) {
             result = -socket->tcp->pending_error;
             socket->tcp->pending_error = 0;
@@ -1076,7 +1006,7 @@ int inet_socket_getsockopt(struct inet_socket *socket, int level, int option,
     else if (level == SOL_SOCKET && option == SO_BROADCAST) result = socket->broadcast;
     else if (level == IPPROTO_IP && option == IP_TTL) result = socket->ttl;
     else if (level == IPPROTO_IP && option == IP_RECVERR) result = socket->report_errors;
-    /* Always on, because it is always true; see the note in setsockopt. */
+
     else if (level == IPPROTO_TCP && option == TCP_NODELAY) result = 1;
     else {
         report_refused_option("getsockopt", level, option);
@@ -1089,7 +1019,12 @@ int inet_socket_getsockopt(struct inet_socket *socket, int level, int option,
 
 static int ifname_valid(const uint8_t *argument) {
     return (!argument[0]) || (argument[0] == 'e' && argument[1] == 't' &&
-        argument[2] == 'h' && argument[3] == '0' && argument[4] == 0);
+        argument[2] == 'h' && argument[3] == '0' && argument[4] == 0) ||
+        (argument[0] == 'l' && argument[1] == 'o' && argument[2] == 0);
+}
+
+static int ifname_loopback(const uint8_t *argument) {
+    return argument[0] == 'l' && argument[1] == 'o' && argument[2] == 0;
 }
 
 static void set_sockaddr(uint8_t *where, uint32_t address) {
@@ -1115,9 +1050,7 @@ int net_interface_ioctl(unsigned long request, void *argument) {
         }
         return 0;
     }
-    /* Asked before the name is validated, because this is the one request
-       that has no name in it yet -- it carries the index and wants the name
-       back. */
+
     if (request == SIOCGIFNAME) {
         int index;
         memcpy(&index, arg + 16, sizeof(index));
@@ -1130,30 +1063,34 @@ int net_interface_ioctl(unsigned long request, void *argument) {
     }
     if (!ifname_valid(arg)) return -EADDRNOTAVAIL;
     if (!arg[0]) { arg[0]='e'; arg[1]='t'; arg[2]='h'; arg[3]='0'; arg[4]=0; }
+    int loopback = ifname_loopback(arg);
     switch (request) {
         case SIOCGIFFLAGS: {
-            int16_t flags = IFF_BROADCAST | IFF_MULTICAST;
+            int16_t flags = loopback ? IFF_UP | IFF_LOOPBACK | IFF_RUNNING
+                                     : IFF_BROADCAST | IFF_MULTICAST;
+            if (loopback) { memcpy(arg + 16, &flags, sizeof(flags)); return 0; }
             if (cfg->interface_up) flags |= IFF_UP;
             if (cfg->link_up) flags |= IFF_RUNNING;
             memcpy(arg + 16, &flags, sizeof(flags)); return 0;
         }
         case SIOCSIFFLAGS: {
+            if (loopback) return 0;
             int16_t flags; memcpy(&flags, arg + 16, sizeof(flags));
             net_set_interface_up((flags & IFF_UP) != 0); return 0;
         }
-        case SIOCGIFADDR: set_sockaddr(arg + 16, cfg->address); return 0;
-        case SIOCSIFADDR: { uint32_t value; memcpy(&value, arg + 20, 4); net_set_address(value); return 0; }
-        case SIOCGIFNETMASK: set_sockaddr(arg + 16, cfg->netmask); return 0;
-        case SIOCSIFNETMASK: { uint32_t value; memcpy(&value, arg + 20, 4); net_set_netmask(value); return 0; }
-        case SIOCGIFBRDADDR: set_sockaddr(arg + 16, cfg->address | ~cfg->netmask); return 0;
+        case SIOCGIFADDR: set_sockaddr(arg + 16, loopback ? net_htonl(0x7F000001U) : cfg->address); return 0;
+        case SIOCSIFADDR: { if (loopback) return 0; uint32_t value; memcpy(&value, arg + 20, 4); net_set_address(value); return 0; }
+        case SIOCGIFNETMASK: set_sockaddr(arg + 16, loopback ? net_htonl(0xFF000000U) : cfg->netmask); return 0;
+        case SIOCSIFNETMASK: { if (loopback) return 0; uint32_t value; memcpy(&value, arg + 20, 4); net_set_netmask(value); return 0; }
+        case SIOCGIFBRDADDR: set_sockaddr(arg + 16, loopback ? net_htonl(0x7FFFFFFFU) : cfg->address | ~cfg->netmask); return 0;
         case SIOCGIFHWADDR:
-            memset(arg + 16, 0, 16); arg[16] = 1; memcpy(arg + 18, cfg->mac, 6); return 0;
-        case SIOCGIFINDEX: { int index = NET_IFINDEX_ETH0; memcpy(arg + 16, &index, 4); return 0; }
-        case SIOCGIFMTU: { int mtu = 1500; memcpy(arg + 16, &mtu, 4); return 0; }
-        /* iproute2 asks for the transmit queue length before printing a
-           link, and treats the failure as worth a line on stderr. The
-           driver has no such queue to report, so answer with the length
-           Linux gives an ethernet device by default. */
+            memset(arg + 16, 0, 16);
+            if (loopback) { uint16_t type = 772; memcpy(arg + 16, &type, sizeof(type)); }
+            else { arg[16] = 1; memcpy(arg + 18, cfg->mac, 6); }
+            return 0;
+        case SIOCGIFINDEX: { int index = loopback ? NET_IFINDEX_LO : NET_IFINDEX_ETH0; memcpy(arg + 16, &index, 4); return 0; }
+        case SIOCGIFMTU: { int mtu = loopback ? 65536 : 1500; memcpy(arg + 16, &mtu, 4); return 0; }
+
         case SIOCGIFTXQLEN: { int txqlen = 1000; memcpy(arg + 16, &txqlen, 4); return 0; }
         default: return -ENOTTY;
     }
@@ -1162,8 +1099,7 @@ int net_interface_ioctl(unsigned long request, void *argument) {
 int inet_socket_read_ready(struct inet_socket *socket) {
     net_poll();
     if (!socket) return 0;
-    /* A listener is readable when it has a connection to hand over -- that is
-       what every poll-driven server waits on before calling accept. */
+
     if (socket->listening) {
         for (struct inet_socket *s = socket->pending; s; s = s->sibling)
             if (s->tcp && s->tcp->state != TCP_SYN_RECEIVED &&
@@ -1184,7 +1120,7 @@ int inet_socket_write_ready(struct inet_socket *socket) {
         struct tcp_control_block *tcp = socket->tcp;
         if (tcp->state == TCP_ESTABLISHED || tcp->state == TCP_CLOSE_WAIT)
             return tcp->tx_len < TCP_RING;
-        /* Report a failed/closed connection as writable so poll() unblocks. */
+
         return tcp->state == TCP_CLOSED || tcp->pending_error != 0;
     }
     return !socket->write_shutdown && cfg->link_up && cfg->interface_up;
@@ -1255,7 +1191,7 @@ void inet_socket_receive_ethernet(const uint8_t *frame, size_t length, uint16_t 
     memset(&address, 0, sizeof(address));
     address.family = TUNIX_AF_PACKET;
     address.protocol = net_htons(ethertype);
-    address.ifindex = 1;
+    address.ifindex = NET_IFINDEX_ETH0;
     address.hatype = 1;
     address.halen = 6;
     memcpy(address.address, frame + 6, 6);
@@ -1312,7 +1248,7 @@ void inet_socket_proc_raw(char *buffer, size_t capacity, size_t *length) {
     }
 }
 void inet_socket_proc_tcp(char *buffer, size_t capacity, size_t *length) {
-    /* Map our enum tcp_state to the Linux /proc/net/tcp state codes. */
+
     static const char *const codes[] = {
         "07", "02", "03", "01", "04", "05", "0B", "06", "08", "09"
     };
@@ -1329,8 +1265,7 @@ void inet_socket_proc_tcp(char *buffer, size_t capacity, size_t *length) {
         text_char(buffer, capacity, length, ':'); text_hex4(buffer, capacity, length, s->peer_port);
         text_char(buffer, capacity, length, ' ');
         int state = s->tcp ? s->tcp->state : -1;
-        /* 0A is Linux's TCP_LISTEN, which our own enum has no member for --
-           a listener is a socket without a control block, not a state. */
+
         text_string(buffer, capacity, length,
                     state < 0 ? "0A" : ((state <= 9) ? codes[state] : "07"));
         text_char(buffer, capacity, length, '\n');

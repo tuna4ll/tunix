@@ -47,11 +47,9 @@ bytes all along, and musl's layout hid it. Under glibc every program that called
 - **agetty** on the second, third and fourth virtual terminals. Not the first:
   weston takes whichever terminal is active when it starts.
 
-## What is not enabled, and why
+## Network service
 
-- **dhcpcd.** It needs a packet socket, which this network stack has no concept
-  of. `/etc/rc.local` configures the interface statically instead, with the
-  addresses QEMU's user-mode network hands out.
+- **dhcpcd.** It is enabled under runit and configures `eth0` from DHCP.
 
 ## The parts of the boot that still complain
 

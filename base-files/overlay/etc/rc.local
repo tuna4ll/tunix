@@ -1,10 +1,2 @@
 #!/bin/sh
-# Run by runit at the end of stage 1.
-#
-# The address is static because there is no DHCP client that works here yet:
-# dhcpcd wants a packet socket, and the kernel's network stack only offers
-# ioctls and netlink. These are the addresses QEMU's user-mode network hands
-# out, so a `-netdev user` machine comes up on the network with no other setup.
-ip link set eth0 up
-ip addr add 10.0.2.15/24 dev eth0
-ip route add default via 10.0.2.2
+# Network is managed by dhcpcd.
