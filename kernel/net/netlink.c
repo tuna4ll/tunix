@@ -1,16 +1,4 @@
-/* Minimal AF_NETLINK implementation for Tunix.
-
-   Scope: everything iproute2's `ip` and `ss` need to run against Tunix's
-   single-interface network model, and nothing more.  A netlink socket here is
-   a synchronous request/response message queue -- when userspace writes an
-   rtnetlink request we synthesize the whole reply (all NLMSG entries plus the
-   terminating NLMSG_DONE) into the socket's receive buffer, and subsequent
-   reads drain it a whole-message at a time.  There is no multicast, no async
-   notification, and no blocking: a dump is fully materialized before send()
-   returns, so the fd is immediately readable.
-
-   The interface/address/route data is projected from net_get_config(): a fixed
-   loopback plus the one eth0 the rtl8139 driver backs. */
+/* Minimal AF_NETLINK support. */
 
 #include <stddef.h>
 #include <stdint.h>
@@ -23,6 +11,7 @@
 
 
 #define EAGAIN 11
+#define ENOENT 2
 #define EINVAL 22
 #define EOPNOTSUPP 95
 #define ENODEV 19
@@ -30,7 +19,9 @@
 #define NL_MSG_PEEK 0x2
 #define NL_MSG_TRUNC 0x20
 
-/* ---- netlink / rtnetlink wire constants (kernel side) ------------------- */
+/* Netlink constants. */
+
+#define NETLINK_GENERIC 16
 
 #define NLMSG_NOOP 1
 #define NLMSG_ERROR 2
@@ -44,8 +35,10 @@
 #define RTM_NEWLINK 16
 #define RTM_GETLINK 18
 #define RTM_NEWADDR 20
+#define RTM_DELADDR 21
 #define RTM_GETADDR 22
 #define RTM_NEWROUTE 24
+#define RTM_DELROUTE 25
 #define RTM_GETROUTE 26
 
 #define IFLA_ADDRESS 1
@@ -73,6 +66,7 @@
 #define IFF_LOOPBACK 0x8
 #define IFF_RUNNING 0x40
 #define IFF_MULTICAST 0x1000
+#define IFF_LOWER_UP 0x10000
 
 #define NL_AF_UNSPEC 0
 #define NL_AF_INET 2
@@ -136,27 +130,10 @@ struct rtmsg {
 
 #define NLMSG_ALIGN(len) (((len) + 3U) & ~3U)
 
-/* ---- netlink socket object ---------------------------------------------- */
-
-/*
- * One reply, as one datagram.
- *
- * A netlink socket is message oriented: a read returns a whole datagram and
- * throws away whatever did not fit, and a dump arrives as a run of them ended
- * by NLMSG_DONE. Delivering a dump as a single flat buffer instead looks
- * equivalent -- the same bytes in the same order -- and is not, because a
- * reader is allowed to stop parsing partway through a datagram and come back
- * for the next one. fastfetch does exactly that: it takes the first default
- * route with a zero metric, breaks out of the message loop, and reads again
- * for the terminator. Flattened, the terminator was inside the datagram it
- * had already consumed, so that read waited for ever.
- */
+/* Netlink sockets queue datagrams. */
 struct netlink_datagram {
     struct netlink_datagram *next;
-    /* The address a read reports as the source, and the credentials a
-       recvmsg reports beside it. Both are per-datagram rather than per-socket
-       because one multicast socket carries messages from the kernel and from
-       udevd at once, and udev tells them apart by exactly these. */
+    /* Source metadata belongs to each datagram. */
     uint32_t source_portid;
     uint32_t source_groups;
     struct netlink_credentials source_credentials;
@@ -169,14 +146,13 @@ struct netlink_socket {
     int protocol;
     uint32_t portid;
     int bound;
-    /* Multicast groups as a mask, the way bind() asks for them: group N is
-       bit N-1. */
+    /* Multicast group mask. */
     uint32_t groups;
     int passcred;
     struct netlink_credentials last_credentials;
     struct netlink_datagram *rx_head;
     struct netlink_datagram *rx_tail;
-    /* Every open netlink socket, so a broadcast can find its listeners. */
+    /* Registry link. */
     struct netlink_socket *registry_next;
 };
 
@@ -185,7 +161,7 @@ static struct netlink_socket *netlink_registry = NULL;
 
 struct netlink_socket *netlink_socket_create(int protocol) {
     if (protocol != TUNIX_NETLINK_ROUTE && protocol != TUNIX_NETLINK_SOCK_DIAG &&
-        protocol != TUNIX_NETLINK_KOBJECT_UEVENT) return NULL;
+        protocol != TUNIX_NETLINK_KOBJECT_UEVENT && protocol != NETLINK_GENERIC) return NULL;
     struct netlink_socket *socket = (struct netlink_socket *)kmalloc(sizeof(*socket));
     if (!socket) return NULL;
     memset(socket, 0, sizeof(*socket));
@@ -224,8 +200,7 @@ int netlink_socket_bind(struct netlink_socket *socket, const void *address, size
     const struct tunix_sockaddr_nl *nl = (const struct tunix_sockaddr_nl *)address;
     if (nl && length >= sizeof(*nl) && nl->pid) socket->portid = nl->pid;
     else netlink_assign_portid(socket);
-    /* Asking for no group is the normal case and is not a subscription: a
-       request/response socket binds with a zero mask. */
+    /* Zero groups means no subscription. */
     if (nl && length >= sizeof(*nl)) socket->groups = nl->groups;
     socket->bound = 1;
     return 0;
@@ -258,7 +233,7 @@ int netlink_socket_getsockname(struct netlink_socket *socket, void *address, siz
     return 0;
 }
 
-/* ---- response builder --------------------------------------------------- */
+/* Response builder. */
 
 struct nl_builder {
     uint8_t *buf;
@@ -281,7 +256,7 @@ static struct nlmsghdr *nl_msg_begin(struct nl_builder *b, uint16_t type, uint16
     b->msg_start = b->len;
     struct nlmsghdr *header = (struct nlmsghdr *)(b->buf + b->len);
     memset(header, 0, sizeof(*header));
-    /* Never leave a zero length behind if the message is abandoned early. */
+    /* Keep partial headers parseable. */
     header->nlmsg_len = (uint32_t)(sizeof(*header) + family_length);
     header->nlmsg_type = type;
     header->nlmsg_flags = flags;
@@ -303,9 +278,7 @@ static void nl_attr(struct nl_builder *b, uint16_t type, const void *data, size_
     attr->rta_len = (uint16_t)total;
     attr->rta_type = type;
     if (length) memcpy(b->buf + b->len + sizeof(*attr), data, length);
-    /* Advance by the aligned size so nlmsg_len covers the padding; rta_len
-       itself stays unpadded, as on Linux. Readers step by
-       NETLINK_ALIGN(rta_len), so excluding it walks past the message end. */
+    /* Align attributes while preserving rta_len. */
     size_t padded = NLMSG_ALIGN(total);
     for (size_t pad = total; pad < padded; pad++) b->buf[b->len + pad] = 0;
     b->len += padded;
@@ -314,8 +287,7 @@ static void nl_attr(struct nl_builder *b, uint16_t type, const void *data, size_
 static void nl_msg_end(struct nl_builder *b, struct nlmsghdr *header) {
     if (!header) return;
     if (b->overflow) {
-        /* Drop the partial message; a header with an unset nlmsg_len makes
-           readers spin on it forever instead of erroring out. */
+        /* Drop partial messages. */
         b->len = b->msg_start;
         return;
     }
@@ -343,10 +315,10 @@ static void nl_put_error(struct nl_builder *b, uint32_t seq, uint32_t pid,
     nl_msg_end(b, header);
 }
 
-/* ---- interface projection ----------------------------------------------- */
+/* Interface projection. */
 
 static uint8_t netmask_prefix(uint32_t netmask_network_order) {
-    /* netmask bytes are in network order in memory; count the set bits. */
+    /* Count the network-order prefix bits. */
     uint8_t prefix = 0;
     const uint8_t *bytes = (const uint8_t *)&netmask_network_order;
     for (int i = 0; i < 4; i++) {
@@ -378,7 +350,7 @@ static void emit_link(struct nl_builder *b, uint32_t seq, uint32_t pid, uint16_t
     nl_msg_end(b, header);
 }
 
-/* The two interfaces this kernel has, in the order their indices run. */
+/* Kernel interface descriptions. */
 struct link_description {
     int index;
     const char *name;
@@ -403,7 +375,7 @@ static unsigned collect_links(struct link_description *links,
     const struct net_config *config = net_get_config();
     uint32_t flags = IFF_BROADCAST | IFF_MULTICAST;
     if (config->interface_up) flags |= IFF_UP;
-    if (config->link_up) flags |= IFF_RUNNING;
+    if (config->link_up) flags |= IFF_RUNNING | IFF_LOWER_UP;
     links[1].index = NETLINK_INDEX_ETH0;
     links[1].name = "eth0";
     links[1].arptype = ARPHRD_ETHER;
@@ -414,9 +386,7 @@ static unsigned collect_links(struct link_description *links,
     return 2;
 }
 
-/* The IFLA_IFNAME an "ip link show dev X" carries, or NULL. Attributes follow
-   the family header; each is padded to four bytes and rta_len covers the
-   header but not that padding, which is what the step below has to add. */
+/* Read IFLA_IFNAME from a request. */
 static const char *request_link_name(const struct nlmsghdr *request) {
     if (request->nlmsg_len < sizeof(*request) + sizeof(struct ifinfomsg)) return NULL;
     const uint8_t *base = (const uint8_t *)request;
@@ -432,14 +402,7 @@ static const char *request_link_name(const struct nlmsghdr *request) {
     return NULL;
 }
 
-/*
- * A dump answers with every interface and ends in NLMSG_DONE; a plain request
- * -- what `ip link show eth0` sends, and what getifaddrs() follows a dump
- * with -- asks about exactly one and is answered by exactly one message, with
- * neither NLM_F_MULTI nor a terminator. Answering the second kind as though
- * it were the first hands the caller the whole list, and iproute2 keeps the
- * first message of it: `ip link show eth0` printed lo.
- */
+/* Dump all links or answer one lookup. */
 static int dump_links(struct nl_builder *b, uint32_t seq, uint32_t pid,
                       const struct nlmsghdr *request) {
     struct link_description links[2];
@@ -490,8 +453,8 @@ static void emit_addr(struct nl_builder *b, uint32_t seq, uint32_t pid, int inde
 }
 
 static int dump_addrs(struct nl_builder *b, uint32_t seq, uint32_t pid) {
-    uint32_t loopback = net_htonl(0x7F000001U); /* 127.0.0.1 */
-    emit_addr(b, seq, pid, NETLINK_INDEX_LO, "lo", 8, 254 /* RT_SCOPE_HOST */, loopback);
+    uint32_t loopback = net_htonl(0x7F000001U);
+    emit_addr(b, seq, pid, NETLINK_INDEX_LO, "lo", 8, 254, loopback);
 
     const struct net_config *config = net_get_config();
     if (config->address) {
@@ -525,38 +488,78 @@ static void emit_route(struct nl_builder *b, uint32_t seq, uint32_t pid, uint8_t
 static int dump_routes(struct nl_builder *b, uint32_t seq, uint32_t pid) {
     const struct net_config *config = net_get_config();
     if (config->address && config->netmask) {
-        /* on-link subnet route: <network>/<prefix> dev eth0 proto kernel scope link */
+        /* Emit the connected route. */
         uint32_t network = config->address & config->netmask;
         emit_route(b, seq, pid, netmask_prefix(config->netmask), &network, NULL,
                    &config->address, NETLINK_INDEX_ETH0, RT_SCOPE_LINK, RTPROT_KERNEL);
     }
     if (config->gateway) {
-        /* default route via gateway */
+        /* Emit the default route. */
         emit_route(b, seq, pid, 0, NULL, &config->gateway, NULL,
                    NETLINK_INDEX_ETH0, RT_SCOPE_UNIVERSE, RTPROT_BOOT);
     }
     return 1;
 }
 
-/* ---- request dispatch --------------------------------------------------- */
+/* Dispatch netlink requests. */
 
-/*
- * `portid` is the socket's own, not the one in the request.
- *
- * A message from the kernel is addressed *to* a socket, so nlmsg_pid carries
- * the destination's port id -- the same number bind() assigned and
- * getsockname() reported. Echoing the request's field instead looks harmless,
- * because a program sending to the kernel leaves it zero, and the reply then
- * claims to be addressed to port zero.
- *
- * libnetlink drops any message whose nlmsg_pid is not its own port id, on the
- * grounds that it belongs to somebody else, and goes back to waiting for the
- * one it asked for. So `ip` read every byte of a perfectly well-formed answer,
- * discarded all of it, and blocked for ever on a reply that had already been
- * delivered -- and anything else built on libmnl or getifaddrs() did the same,
- * which is why fastfetch stopped at the line before its network module.
- */
-/* Returns whether the answer is a dump, and so still owes an NLMSG_DONE. */
+static const void *request_attr(const struct nlmsghdr *request, size_t header_length,
+                                uint16_t wanted, size_t *value_length) {
+    if (request->nlmsg_len < sizeof(*request) + header_length) return NULL;
+    const uint8_t *base = (const uint8_t *)request;
+    size_t offset = NLMSG_ALIGN(sizeof(*request) + header_length);
+    while (offset + sizeof(struct rtattr) <= request->nlmsg_len) {
+        const struct rtattr *attr = (const struct rtattr *)(base + offset);
+        if (attr->rta_len < sizeof(*attr) || offset + attr->rta_len > request->nlmsg_len)
+            break;
+        if (attr->rta_type == wanted) {
+            if (value_length) *value_length = attr->rta_len - sizeof(*attr);
+            return base + offset + sizeof(*attr);
+        }
+        offset += NLMSG_ALIGN(attr->rta_len);
+    }
+    return NULL;
+}
+
+static int handle_addr_change(const struct nlmsghdr *request) {
+    if (request->nlmsg_len < sizeof(*request) + sizeof(struct ifaddrmsg)) return -EINVAL;
+    const struct ifaddrmsg *address =
+        (const struct ifaddrmsg *)((const uint8_t *)request + sizeof(*request));
+    if (address->ifa_family != NL_AF_INET || address->ifa_index != NETLINK_INDEX_ETH0)
+        return -ENODEV;
+    size_t value_length = 0;
+    const uint32_t *value = request_attr(request, sizeof(*address), IFA_LOCAL, &value_length);
+    if (!value) value = request_attr(request, sizeof(*address), IFA_ADDRESS, &value_length);
+    if (request->nlmsg_type == RTM_DELADDR) {
+        net_set_address(0);
+        net_set_netmask(0);
+        return 0;
+    }
+    if (!value || value_length < sizeof(*value) || address->ifa_prefixlen > 32U)
+        return -EINVAL;
+    uint32_t mask = address->ifa_prefixlen
+        ? 0xFFFFFFFFU << (32U - address->ifa_prefixlen) : 0U;
+    net_set_address(*value);
+    net_set_netmask(net_htonl(mask));
+    return 0;
+}
+
+static int handle_route_change(const struct nlmsghdr *request) {
+    if (request->nlmsg_len < sizeof(*request) + sizeof(struct rtmsg)) return -EINVAL;
+    const struct rtmsg *route =
+        (const struct rtmsg *)((const uint8_t *)request + sizeof(*request));
+    if (route->rtm_family != NL_AF_INET) return -EINVAL;
+    size_t value_length = 0;
+    const uint32_t *gateway =
+        request_attr(request, sizeof(*route), RTA_GATEWAY, &value_length);
+    if (request->nlmsg_type == RTM_DELROUTE) {
+        if (route->rtm_dst_len == 0U) net_set_gateway(0);
+        return 0;
+    }
+    if (gateway && value_length >= sizeof(*gateway)) net_set_gateway(*gateway);
+    return 0;
+}
+
 static int handle_route_request(struct nl_builder *b, const struct nlmsghdr *request,
                                 uint32_t portid) {
     uint32_t seq = request->nlmsg_seq;
@@ -565,6 +568,14 @@ static int handle_route_request(struct nl_builder *b, const struct nlmsghdr *req
         case RTM_GETLINK: return dump_links(b, seq, pid, request);
         case RTM_GETADDR: return dump_addrs(b, seq, pid);
         case RTM_GETROUTE: return dump_routes(b, seq, pid);
+        case RTM_NEWADDR:
+        case RTM_DELADDR:
+            nl_put_error(b, seq, pid, request, handle_addr_change(request));
+            return 0;
+        case RTM_NEWROUTE:
+        case RTM_DELROUTE:
+            nl_put_error(b, seq, pid, request, handle_route_change(request));
+            return 0;
         default:
             if (request->nlmsg_flags & NLM_F_ACK)
                 nl_put_error(b, seq, pid, request, 0);
@@ -576,19 +587,21 @@ static int handle_route_request(struct nl_builder *b, const struct nlmsghdr *req
 
 static int handle_diag_request(struct nl_builder *b, const struct nlmsghdr *request,
                                uint32_t portid) {
-    /* ss issues SOCK_DIAG_BY_FAMILY dumps. We have no socket-table enumeration
-       wired in yet, so answer every dump with an empty result -- the
-       terminator alone, queued by the caller: ss then prints just its header
-       rather than failing on the socket. */
+    /* Return an empty socket dump. */
     (void)b;
     (void)request;
     (void)portid;
     return 1;
 }
 
-/* Queue one datagram from a given sender. Empty ones are not queued: a
-   zero-length read means end of stream to most callers, which is not what an
-   empty reply is. */
+static int handle_generic_request(struct nl_builder *b, const struct nlmsghdr *request,
+                                  uint32_t portid) {
+    /* Report unavailable generic families. */
+    nl_put_error(b, request->nlmsg_seq, portid, request, -ENOENT);
+    return 0;
+}
+
+/* Queue one nonempty datagram. */
 static int nl_rx_queue_from(struct netlink_socket *socket, const uint8_t *data,
                             size_t length, uint32_t source_portid,
                             uint32_t source_groups,
@@ -610,20 +623,12 @@ static int nl_rx_queue_from(struct netlink_socket *socket, const uint8_t *data,
     return 0;
 }
 
-/* A reply the kernel made to this socket's own request: no group, and the
-   kernel's port, which is zero. */
+/* Queue a kernel reply. */
 static int nl_rx_queue(struct netlink_socket *socket, const uint8_t *data, size_t length) {
     return nl_rx_queue_from(socket, data, length, 0, 0, NULL);
 }
 
-/*
- * Deliver to everything listening on a group of the uevent family.
- *
- * `groups` is the mask a sender addressed, which on Linux may name several at
- * once; a listener gets one copy if any bit it subscribed to is in it. The
- * sender never gets its own message back -- udevd both listens on group 1 and
- * sends on group 2, and would otherwise process its own output.
- */
+/* Multicast a uevent. */
 static void netlink_uevent_multicast(uint32_t groups, const void *data, size_t length,
                                      uint32_t source_portid,
                                      const struct netlink_credentials *credentials,
@@ -639,15 +644,7 @@ static void netlink_uevent_multicast(uint32_t groups, const void *data, size_t l
     }
 }
 
-/*
- * Deliver to one socket, named by the port it bound.
- *
- * This is how udevd hands an event to the worker that will run the rules for
- * it: the worker binds a socket, the parent keeps its address across the fork
- * and sends the device to that address alone. Dropping these left every worker
- * asleep in epoll_wait, the parent reporting that each one was "taking a long
- * time", and `udevadm settle` waiting out its two minutes at every boot.
- */
+/* Unicast a uevent. */
 static void netlink_uevent_unicast(uint32_t portid, const void *data, size_t length,
                                    uint32_t source_portid,
                                    const struct netlink_credentials *credentials,
@@ -665,7 +662,7 @@ static void netlink_uevent_unicast(uint32_t portid, const void *data, size_t len
 }
 
 void netlink_uevent_broadcast(const void *message, size_t length) {
-    /* From the kernel: port zero, uid zero, on the group udevd listens to. */
+    /* Broadcast as the kernel. */
     struct netlink_credentials kernel = {0, 0, 0};
     netlink_uevent_multicast(1U << (TUNIX_UEVENT_GROUP_KERNEL - 1), message, length,
                              0, &kernel, NULL);
@@ -679,12 +676,7 @@ int64_t netlink_socket_sendto(struct netlink_socket *socket, const void *data, s
     if (!socket) return -EINVAL;
     uint32_t portid = netlink_assign_portid(socket);
 
-    /*
-     * The uevent family has no requests to answer, but it carries two kinds of
-     * message of its own: udevd's re-announcement, addressed to a group, and
-     * the events it hands to its workers, addressed to one port. Anything
-     * addressed to neither is accepted in silence.
-     */
+    /* Route uevent datagrams. */
     if (socket->protocol == TUNIX_NETLINK_KOBJECT_UEVENT) {
         const struct tunix_sockaddr_nl *destination =
             (const struct tunix_sockaddr_nl *)address;
@@ -716,14 +708,15 @@ int64_t netlink_socket_sendto(struct netlink_socket *socket, const void *data, s
         const struct nlmsghdr *request = (const struct nlmsghdr *)(bytes + offset);
         if (request->nlmsg_len < sizeof(struct nlmsghdr) ||
             offset + request->nlmsg_len > length) break;
-        int dump = socket->protocol == TUNIX_NETLINK_ROUTE
-            ? handle_route_request(&builder, request, portid)
-            : handle_diag_request(&builder, request, portid);
+        int dump;
+        if (socket->protocol == TUNIX_NETLINK_ROUTE)
+            dump = handle_route_request(&builder, request, portid);
+        else if (socket->protocol == NETLINK_GENERIC)
+            dump = handle_generic_request(&builder, request, portid);
+        else
+            dump = handle_diag_request(&builder, request, portid);
 
-        /* The body first, then the terminator as a datagram of its own --
-           which is the whole point (see struct netlink_datagram): a reader
-           that stops partway through the body comes back for another read,
-           and on Linux that read is what hands it NLMSG_DONE. */
+        /* Queue dump terminators separately. */
         nl_rx_queue(socket, builder.buf, builder.len);
         builder.len = 0;
         builder.overflow = 0;
@@ -747,12 +740,7 @@ int64_t netlink_socket_recvfrom(struct netlink_socket *socket, void *data, size_
     if (!datagram) return -EAGAIN;
     size_t available = datagram->length;
 
-    /* One datagram per read, and a read that does not fit still consumes it:
-       that is what makes this a message socket rather than a stream. The
-       MSG_PEEK|MSG_TRUNC pair is how iproute2's libnetlink sizes the next
-       datagram -- a zero-length buffer that must report the full length
-       without consuming -- so a truncating read reports what was there and
-       only a non-peek read takes it off the queue. */
+    /* Preserve datagram read semantics. */
     size_t copy = available < length ? available : length;
     if (copy) memcpy(data, datagram->data, copy);
 
@@ -770,9 +758,7 @@ int64_t netlink_socket_recvfrom(struct netlink_socket *socket, void *data, size_
         struct tunix_sockaddr_nl nl;
         memset(&nl, 0, sizeof(nl));
         nl.family = TUNIX_AF_NETLINK;
-        /* udev decides whether to trust a message by these two: a kernel
-           announcement is group 1 from port 0, and anything claiming to be
-           one from a real port is discarded. */
+        /* Preserve source identity. */
         nl.pid = source_portid;
         nl.groups = source_groups;
         size_t addr_copy = *address_length < sizeof(nl) ? *address_length : sizeof(nl);

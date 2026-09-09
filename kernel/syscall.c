@@ -3716,6 +3716,23 @@ static void block_and_retry(struct syscall_frame *frame, uint64_t syscall_number
 
 static int64_t sys_readv_writev(int fd, uint64_t user_iov, int count, int write_mode) {
     if (count < 0 || count > 1024) return -EINVAL;
+    struct file *file = file_from_fd(fd);
+    if (write_mode && file && file->kind == FILE_KIND_INET_SOCKET && count <= 16) {
+        struct linux_msghdr message;
+        memset(&message, 0, sizeof(message));
+        message.iov = user_iov;
+        message.iov_length = (uint64_t)count;
+        uint8_t data[4096];
+        size_t length = 0;
+        int status = copy_message_iovecs(&message, data, sizeof(data), &length, 1);
+        if (status != -EMSGSIZE) {
+            if (status < 0) return status;
+            int64_t result = file_write(file, length, data);
+            if (result == -EPIPE)
+                (void)process_send_signal((int64_t)process_current()->pid, SIGPIPE);
+            return result;
+        }
+    }
     int64_t total = 0;
     for (int i = 0; i < count; i++) {
         struct linux_iovec iov;
