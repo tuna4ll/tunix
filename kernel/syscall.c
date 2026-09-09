@@ -265,8 +265,7 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define AT_SYMLINK_NOFOLLOW 0x100
 #define AT_EACCESS 0x200
 #define AT_EMPTY_PATH 0x1000
-/* Linux accepts and ignores this whenever there is nothing to automount, which
-   is always the case here. coreutils passes it on every fstatat. */
+
 #define AT_NO_AUTOMOUNT 0x800
 #define AT_REMOVEDIR 0x200
 #define AT_SYMLINK_FOLLOW 0x400
@@ -337,7 +336,7 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define MREMAP_MAYMOVE 1
 #define MAP_ANONYMOUS 0x20
 #define MAP_NORESERVE 0x4000
-/* Ceiling on what a read-only file mapping shares rather than copies. */
+
 #define SHARED_MAP_MAX_BYTES (256ULL * 1024 * 1024)
 #define MAP_FIXED_NOREPLACE 0x100000
 #define MS_ASYNC 1
@@ -359,7 +358,7 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define F_WRLCK 1
 #define F_UNLCK 2
 
-/* struct flock on x86_64. */
+
 struct linux_flock {
     int16_t type;
     int16_t whence;
@@ -379,6 +378,7 @@ struct linux_flock {
 #define CLONE_FS              0x00000200ULL
 #define CLONE_FILES           0x00000400ULL
 #define CLONE_SIGHAND         0x00000800ULL
+#define CLONE_PIDFD           0x00001000ULL
 #define CLONE_VFORK           0x00004000ULL
 #define CLONE_PARENT          0x00008000ULL
 #define CLONE_THREAD          0x00010000ULL
@@ -388,6 +388,8 @@ struct linux_flock {
 #define CLONE_CHILD_CLEARTID  0x00200000ULL
 #define CLONE_DETACHED        0x00400000ULL
 #define CLONE_CHILD_SETTID    0x01000000ULL
+#define CLONE_CLEAR_SIGHAND   (1ULL << 32)
+#define CLONE_INTO_CGROUP     (1ULL << 33)
 #define CLONE_FORK_METADATA_FLAGS \
     (CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID | CLONE_CHILD_SETTID)
 #define CLONE_FORK_REJECT_FLAGS \
@@ -488,29 +490,18 @@ struct linux_clone_args {
 
 #define FUTEX_WAIT 0
 #define FUTEX_WAKE 1
-/* The same two waits and wakes, but the waiter names a set of bits and a wake
-   only reaches the waiters it names. glibc issues every timed wait as one of
-   these -- and, since 2.31, every untimed one too -- so a kernel without them
-   makes any pthread condition variable abort with "the futex facility returned
-   an unexpected error code". The other difference is the timeout: a bitset
-   wait is given a deadline rather than a duration. */
+
 #define FUTEX_WAIT_BITSET 9
 #define FUTEX_WAKE_BITSET 10
 #define FUTEX_PRIVATE_FLAG 128
-/* Measure the deadline against the wall clock rather than against uptime. */
+
 #define FUTEX_CLOCK_REALTIME 256
 #define FUTEX_CMD_MASK 0x7F
 
 #define MAX_EXEC_ITEMS 64
-/* 256 was enough until a real login shell exported LS_COLORS, whose default
-   database renders to a few KiB and broke every execve() after it. Applies
-   only to storage in the kmalloc'd exec_arguments; Linux calls it
-   MAX_ARG_STRLEN. */
+
 #define MAX_EXEC_STRING 4096
-/* The "#!" line, read into local buffers rather than onto the heap, so this
-   one is spent out of the 32 KiB kernel stack with three live at once. At
-   MAX_EXEC_STRING it overran into the neighbouring heap block's header and
-   faulted arbitrarily far away. 256 is what Linux allows. */
+
 #define MAX_SHEBANG_LINE 256
 
 struct linux_timespec {
@@ -556,8 +547,7 @@ struct linux_stat {
     int64_t __glibc_reserved[3];
 };
 
-/* x86_64 layout: every field is 8 bytes, 120 bytes total. musl reads this
-   directly and derives statvfs from it. */
+
 struct linux_statfs {
     uint64_t f_type;
     uint64_t f_bsize;
@@ -616,8 +606,7 @@ struct linux_statx {
 typedef char linux_statx_size_check[(sizeof(struct linux_statx) == 256) ? 1 : -1];
 
 #define STATX_BASIC_STATS 0x7FFU
-/* AT_STATX_FORCE_SYNC | AT_STATX_DONT_SYNC: cache-coherency hints with nothing
-   to do here, so they are accepted and ignored. */
+
 #define AT_STATX_SYNC_TYPE 0x6000
 
 #define EXT2_SUPER_MAGIC 0xEF53U
@@ -652,7 +641,7 @@ struct linux_msghdr {
 
 _Static_assert(sizeof(struct linux_msghdr) == 56, "Linux x86_64 msghdr ABI mismatch");
 
-/* sendmmsg's array element: a message, and room for how much of it went. */
+
 struct linux_mmsghdr {
     struct linux_msghdr msg_hdr;
     uint32_t msg_len;
@@ -756,17 +745,10 @@ void syscall_init(void) {
     wrmsr(0xC0000084, 0x200ULL | 0x400ULL);
 }
 
-/* How much of a write(2) is staged in one go. Every call into file_write() is
-   one ext2 write-back with its superblock, descriptors and bitmaps, so what
-   matters is how many there are: at 4 KiB the metadata was 82% of the cost.
-   Matches ext2's run length, and comes from the heap because the stack is
-   16 KiB. */
+
 #define WRITE_STAGE_MAX (128U * 1024U)
 
-/* Only regular files get the large staging buffer. A pipe or a socket write is
-   allowed to come up short -- that is how O_NONBLOCK reports back pressure --
-   and the loop below stops when it does, so a bigger chunk there would turn one
-   full write into a short one. Nothing about those paths is slow anyway. */
+
 static int write_stages_large(const struct file *file) {
     return file && file->kind == FILE_KIND_VFS && file->node &&
            (file->node->flags & 0xFFU) == VFS_FILE;
@@ -790,9 +772,7 @@ static int64_t sys_write(int fd, uint64_t user_buffer, size_t length) {
 
     size_t completed = 0;
     int64_t failure = 0;
-    /* An empty write is not always nothing to do: on a message socket it sends
-       an empty datagram, which is exactly how udevd's workers report that they
-       have finished -- skipping it left every boot waiting out udevadm settle. */
+
     if (!length) {
         int64_t written = file_write(file, 0, buffer);
         if (written < 0) return written;
@@ -882,9 +862,7 @@ static int retry_io_wait(struct syscall_frame *frame, uint64_t syscall_number,
         clear_io_wait(waiting);
         return 0;
     }
-    /* A signal is only looked at on the way back to user mode, which a syscall
-       that rewinds and sleeps never reaches; see
-       process_signal_interrupts_wait(). */
+
     if (process_signal_interrupts_wait()) {
         clear_io_wait(waiting);
         frame->rax = (uint64_t)-(int64_t)EINTR;
@@ -894,10 +872,7 @@ static int retry_io_wait(struct syscall_frame *frame, uint64_t syscall_number,
     frame->user_rip -= 2U;
     frame->rax = syscall_number;
     waiting->syscall_rewound = 1;
-    /* Asleep rather than round the run queue again: this is poll(), select()
-       and the timed waits, and what they are waiting for cannot become true
-       while this processor is the one asking. The deadline above is re-tested
-       on every wake, so a timeout is still honoured to within a tick. */
+
     if (process_sleep_on(frame, process_io_wait_channel()) != 0)
         process_yield_from_syscall(frame);
     return 1;
@@ -1191,10 +1166,7 @@ static int64_t sys_pipe(uint64_t user_fds, int flags) {
     struct file *read_end;
     struct file *write_end;
     if (pipe_create(&read_end, &write_end) != 0) return -EMFILE;
-    /* The access mode is not decoration: fcntl(F_GETFL) is how a program asks
-       which way a descriptor goes, and with both ends reading back O_RDONLY
-       GLib decided a GIOChannel on the write end was not writable and refused
-       every write to it. That is what closed LightDM's greeter channel. */
+
     read_end->flags = (uint32_t)(flags & O_NONBLOCK) | O_RDONLY;
     write_end->flags = (uint32_t)(flags & O_NONBLOCK) | O_WRONLY;
     struct process *process = process_current();
@@ -1242,18 +1214,13 @@ static int64_t sys_socket(int domain, int type, int protocol) {
     if (type_flags & ~(SOCK_NONBLOCK | SOCK_CLOEXEC)) return -EINVAL;
     struct process *process = process_current();
     if (domain == TUNIX_AF_UNIX) {
-        /* SOCK_DGRAM shares the seqpacket implementation: both keep message
-           boundaries, and musl builds if_indextoname() out of an AF_UNIX
-           datagram socket used purely as a handle, so refusing it outright
-           was worse than the approximation. */
+
         if ((base_type != TUNIX_SOCK_STREAM && base_type != TUNIX_SOCK_SEQPACKET &&
              base_type != TUNIX_SOCK_DGRAM) || protocol != 0) return -EOPNOTSUPP;
         struct unix_socket *socket =
             unix_socket_create(base_type != TUNIX_SOCK_STREAM);
         if (!socket) return -ENOMEM;
-        /* The identity the peer will read back through SO_PEERCRED. D-Bus
-           authenticates with it: a client announces its uid over EXTERNAL and
-           the bus rejects it unless the socket agrees. */
+
         unix_socket_set_credentials(socket, process ? (int32_t)process->pid : 0,
                                     process ? process->cred.euid : 0,
                                     process ? process->cred.egid : 0);
@@ -1271,8 +1238,7 @@ static int64_t sys_socket(int domain, int type, int protocol) {
         return install_new_file(file, type_flags & SOCK_CLOEXEC);
     }
     if (domain == TUNIX_AF_NETLINK) {
-        /* Netlink is message-oriented (SOCK_RAW/SOCK_DGRAM); the protocol
-           argument selects the netlink family (NETLINK_ROUTE, SOCK_DIAG). */
+
         if (base_type != TUNIX_SOCK_RAW && base_type != TUNIX_SOCK_DGRAM) return -EPROTONOSUPPORT;
         struct netlink_socket *socket = netlink_socket_create(protocol);
         if (!socket) return -EPROTONOSUPPORT;
@@ -1289,9 +1255,7 @@ static int64_t sys_socketpair(int domain, int type, int protocol,
     int base_type = type & 0xF;
     int type_flags = type & ~0xF;
     if (type_flags & ~(SOCK_NONBLOCK | SOCK_CLOEXEC)) return -EINVAL;
-    /* A datagram pair as well as a stream one. Both ends are connected and
-       neither can lose a message, so it is the same object as a seqpacket pair
-       -- which is what a udev daemon asks for and used to be refused. */
+
     if (domain != TUNIX_AF_UNIX || protocol != 0 ||
         (base_type != TUNIX_SOCK_STREAM && base_type != TUNIX_SOCK_SEQPACKET &&
          base_type != TUNIX_SOCK_DGRAM))
@@ -1314,7 +1278,7 @@ static int64_t sys_socketpair(int domain, int type, int protocol,
         if (second_file) file_unref(second_file); else unix_socket_unref(second);
         return -ENOMEM;
     }
-    /* Both ends go both ways; same reason the pipe ends record theirs. */
+
     first_file->flags = (uint32_t)(type_flags & SOCK_NONBLOCK) | O_RDWR;
     second_file->flags = (uint32_t)(type_flags & SOCK_NONBLOCK) | O_RDWR;
     uint8_t fd_flags = (type_flags & SOCK_CLOEXEC) ? PROCESS_FD_CLOEXEC : 0;
@@ -1348,10 +1312,7 @@ static int64_t sys_bind(int fd, uint64_t user_address, uint64_t length) {
         struct tunix_sockaddr_un address;
         int status = copy_sockaddr_un(user_address, length, &address);
         if (status < 0) return status;
-        /* A name in the filesystem for every socket bound to a path, as Linux
-           gives one. The abstract namespace -- a leading NUL -- has no such
-           name and gets none. The node is refused if the path is taken, which
-           is why a daemon unlinks its socket before binding it. */
+
         int named = address.path[0] != 0;
         if (named && vfs_lookup_nofollow(address.path)) return -EADDRINUSE;
         status = unix_socket_bind(unix_value, &address, (size_t)length);
@@ -1406,8 +1367,7 @@ static int64_t sys_shutdown(int fd, int how) {
     return -ENOTSOCK;
 }
 
-/* Hand the finished socket to a descriptor. Shared by both address families,
-   which differ only in what the file wraps and what an address looks like. */
+
 static int64_t install_accepted(struct file *file, int flags,
                                 const void *address, size_t address_length,
                                 uint64_t user_address, uint64_t user_length) {
@@ -1418,8 +1378,7 @@ static int64_t install_accepted(struct file *file, int flags,
         file_unref(file);
         return -EMFILE;
     }
-    /* The peer address is written last: failing to copy it out must not undo
-       an accept that has already taken the connection off the queue. */
+
     if (user_address && user_length && address_length) {
         uint32_t capacity = 0;
         if (copy_from_user(&capacity, user_length, sizeof(capacity)) == 0) {
@@ -1466,9 +1425,7 @@ static int64_t sys_accept(int fd, uint64_t user_address, uint64_t user_length, i
     return install_accepted(file, flags, &peer, peer_length, user_address, user_length);
 }
 
-/* accept(2) on a blocking socket waits; only a non-blocking one answers EAGAIN.
-   It sleeps rather than yields, because a rewound syscall that yields stays
-   READY and takes the processor again for as long as nothing connects. */
+
 static void accept_or_block(struct syscall_frame *frame, uint64_t syscall_number,
                             int fd, uint64_t user_address, uint64_t user_length,
                             int flags) {
@@ -1485,10 +1442,7 @@ static void accept_or_block(struct syscall_frame *frame, uint64_t syscall_number
 
 static int64_t sys_sendto(int fd, uint64_t user_data, size_t length, int flags,
                           uint64_t user_address, uint64_t address_length) {
-    /* send()/sendto() on a unix socket: GLib's GDBus writes to the D-Bus session
-       bus this way, so a stream write has to work here as well as sendmsg. send()
-       carries no ancillary data; the destination address is ignored on a
-       connected socket. */
+
     struct unix_socket *unix_value = socket_from_fd(fd);
     if (unix_value) {
         (void)flags;
@@ -1504,8 +1458,7 @@ static int64_t sys_sendto(int fd, uint64_t user_data, size_t length, int flags,
         if (length > 4096U) return -EMSGSIZE;
         uint8_t request[4096];
         if (length && copy_from_user(request, user_data, length) != 0) return -EFAULT;
-        /* The destination decides who a uevent message reaches, so it has to
-           come along here as it does through sendmsg. */
+
         struct tunix_sockaddr_nl destination;
         int addressed = user_address && address_length >= sizeof(destination) &&
             copy_from_user(&destination, user_address, sizeof(destination)) == 0;
@@ -1530,10 +1483,7 @@ static int64_t sys_sendto(int fd, uint64_t user_data, size_t length, int flags,
 
 static int64_t sys_recvfrom(int fd, uint64_t user_data, size_t length, int flags,
                             uint64_t user_address, uint64_t user_address_length) {
-    /* recv()/recvfrom() on a unix socket: libxcb reads the X setup reply this way
-       (read_block -> recv), so a stream read has to work here, not just recvmsg.
-       recv() carries no ancillary data, so read plain bytes and leave any pending
-       SCM_RIGHTS in place for a later recvmsg. */
+
     struct unix_socket *unix_value = socket_from_fd(fd);
     if (unix_value) {
         (void)flags;
@@ -1698,9 +1648,7 @@ static int64_t sys_sendmsg(int fd, uint64_t user_message, int flags) {
 
     struct netlink_socket *netlink = netlink_socket_from_fd(fd);
     if (netlink) {
-        /* The destination matters here: udevd addresses its re-announcement to
-           a multicast group rather than to a port, and the group is in the
-           sockaddr rather than in the message. */
+
         struct tunix_sockaddr_nl destination;
         int addressed = message.name && message.name_length >= sizeof(destination) &&
             copy_from_user(&destination, message.name, sizeof(destination)) == 0;
@@ -1738,8 +1686,7 @@ static int scatter_message_data(const struct linux_msghdr *message,
     return 0;
 }
 
-/* SCM_CREDENTIALS for a netlink datagram. udev's monitor discards a message
-   without one, and any whose sender is not root. */
+
 static int write_netlink_control(struct linux_msghdr *message,
                                  struct netlink_socket *socket) {
     if (!netlink_socket_get_passcred(socket)) {
@@ -1854,13 +1801,10 @@ static int write_unix_control(struct linux_msghdr *message,
     return 0;
 }
 
-/* Several messages in one call, which is a loop around sendmsg: the saving is
-   the syscalls. glibc's resolver puts the A and the AAAA query in one
-   sendmmsg and does not fall back, so without it every dual-family lookup
-   failed without a packet reaching the wire. */
+
 static int64_t sys_sendmmsg(int fd, uint64_t user_vector, unsigned count, int flags) {
     if (!user_vector) return -EFAULT;
-    /* UIO_MAXIOV, the same ceiling Linux puts on it. */
+
     if (count > 1024U) count = 1024U;
 
     unsigned sent = 0;
@@ -1882,12 +1826,7 @@ static int64_t sys_recvmsg(int fd, uint64_t user_message, int flags) {
     if (copy_from_user(&message, user_message, sizeof(message)) != 0) return -EFAULT;
     if (message.iov_length > 16U) return -EINVAL;
 
-    /* Bounce buffer for a single datagram/stream read, kept small to stay well
-       within the 16 KiB kernel stack. A caller may legitimately offer more room
-       than we stage in one call -- musl's getaddrinfo() path (lookup_name.c
-       ABUF_SIZE) hands us a 4800-byte iovec even though the DNS reply is tiny --
-       so clamp the accepted capacity to the buffer instead of rejecting the
-       request with -EMSGSIZE; a datagram larger than this is simply truncated. */
+
     uint8_t data[4096];
 
     size_t capacity = 0;
@@ -2017,16 +1956,14 @@ static int64_t sys_setsockopt(int fd, int level, int option,
     }
     struct netlink_socket *netlink_option = netlink_socket_from_fd(fd);
     if (netlink_option) {
-        /* SO_PASSCRED is the one that means something: udev's monitor sets it
-           and then discards every message that arrives without a sender. */
+
         if (level == SOL_SOCKET && option == SO_PASSCRED && length >= sizeof(int32_t)) {
             int32_t enabled;
             if (copy_from_user(&enabled, user_value, sizeof(enabled)) != 0) return -EFAULT;
             netlink_socket_set_passcred(netlink_option, enabled != 0);
             return 0;
         }
-        /* iproute2 sets SO_SNDBUF/SO_RCVBUF and a few SOL_NETLINK options while
-           opening the socket; accept them so rtnl_open() does not bail out. */
+
         (void)user_value; (void)length;
         return 0;
     }
@@ -2074,8 +2011,7 @@ static int64_t sys_getsockopt(int fd, int level, int option,
         return -EOPNOTSUPP;
     }
     if (netlink_socket_from_fd(fd)) {
-        /* Report a plausible buffer size for any query so iproute2's socket
-           setup path never trips on an error. */
+
         (void)level; (void)option;
         int32_t value = 32768;
         if (supplied < sizeof(value)) return -EINVAL;
@@ -2098,18 +2034,14 @@ static int64_t sys_ftruncate(int fd, uint64_t length) {
     struct process *process = process_current();
     if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) return -EBADF;
     struct file *file = process->files->fds[fd];
-    /* This is how a memfd gets its size: a Wayland client creates one and
-       immediately ftruncates it to the buffer size before mapping it. */
+
     if (file->kind == FILE_KIND_MEMFD)
         return memfd_truncate(file->memfd, length) == 0 ? 0 : -ENOMEM;
     if (file->kind != FILE_KIND_VFS || !file->node) return -EINVAL;
     return vfs_truncate(file->node, length) == 0 ? 0 : -EIO;
 }
 
-/* fallocate(2), enough of it to reserve space: musl implements
-   posix_fallocate() with it, and Wayland clients allocate their shm buffers
-   that way. Only mode 0; punching and collapsing describe extents neither
-   memfd nor ext2 models here. */
+
 static int64_t sys_fallocate(int fd, int mode, uint64_t offset, uint64_t length) {
     struct process *process = process_current();
     if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) return -EBADF;
@@ -2121,7 +2053,7 @@ static int64_t sys_fallocate(int fd, int mode, uint64_t offset, uint64_t length)
     uint64_t needed = offset + length;
 
     if (file->kind == FILE_KIND_MEMFD) {
-        /* Growing only: fallocate never shrinks. */
+
         if (needed <= memfd_size(file->memfd)) return 0;
         return memfd_truncate(file->memfd, needed) == 0 ? 0 : -ENOSPC;
     }
@@ -2132,10 +2064,8 @@ static int64_t sys_fallocate(int fd, int mode, uint64_t offset, uint64_t length)
     return -ENODEV;
 }
 
-/* Resolves the descriptor and takes the lock; the blocking retry lives in the
-   dispatcher, where the syscall frame is available to rewind. */
-/* access(2) judges with the real ids, faccessat(AT_EACCESS) with the effective
-   ones; the file checks always read fsuid/fsgid, so swap them for the former. */
+
+
 static int64_t sys_faccess_at(int dirfd, uint64_t user_path, int mode, int flags) {
     if (flags & ~(AT_EACCESS | AT_SYMLINK_NOFOLLOW)) return -EINVAL;
     if (mode & ~7) return -EINVAL;
@@ -2209,10 +2139,7 @@ static int64_t sys_flock(int fd, int operation) {
     return file_flock(process->files->fds[fd], operation);
 }
 
-/* POSIX advisory locks, as fcntl(F_SETLK) asks for them -- SQLite needs them
-   and flock(2) is a different lock space. The range is ignored and the whole
-   file locked, which can only refuse a lock that should have been granted,
-   never the reverse; a process never conflicts with itself. */
+
 static int64_t vfs_posix_lock(struct vfs_node *node, int type, uint64_t pid) {
     if (type == F_UNLCK) {
         if (node->posix_lock_pid == pid) {
@@ -2238,7 +2165,7 @@ static int64_t sys_fcntl_lock(int fd, int command, uint64_t user_lock) {
     if (copy_from_user(&lock, user_lock, sizeof(lock)) != 0) return -EFAULT;
 
     if (command == F_GETLK) {
-        /* Only a holder that is somebody else is a conflict worth reporting. */
+
         if (file->node->posix_lock_pid && file->node->posix_lock_pid != process->tgid) {
             lock.type = file->node->posix_lock_write ? F_WRLCK : F_RDLCK;
             lock.pid = (int32_t)file->node->posix_lock_pid;
@@ -2247,7 +2174,7 @@ static int64_t sys_fcntl_lock(int fd, int command, uint64_t user_lock) {
         }
         return copy_to_user(user_lock, &lock, sizeof(lock)) == 0 ? 0 : -EFAULT;
     }
-    /* The thread group, not the thread: POSIX locks belong to the process. */
+
     return vfs_posix_lock(file->node, lock.type, process->tgid);
 }
 
@@ -2259,8 +2186,7 @@ static int64_t sys_fsync(int fd) {
     if (file->kind != FILE_KIND_VFS || !file->node) return -EINVAL;
     uint32_t node_type = file->node->flags & 0xFFU;
     if (node_type == VFS_FILE || node_type == VFS_DIRECTORY || node_type == VFS_BLOCKDEVICE) {
-        /* What a mapping stored is part of the file, and fsync is where a
-           program that wrote it that way expects it to become durable. */
+
         vfs_flush_mapped(file->node);
         if (ext2fs_owns(file->node) && ext2fs_fsync_node(file->node) != 0) return -EIO;
         return 0;
@@ -2271,14 +2197,10 @@ static int64_t sys_fsync(int fd) {
 static int64_t sys_ioctl(int fd, unsigned long request, uint64_t user_argument) {
     struct process *process = process_current();
     if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) return -EBADF;
-    /* An ioctl request is 32 bits, and libc declares ioctl() as taking an int,
-       so every _IOR arrives sign-extended. Truncate as Linux does, or every
-       comparison below misses and the caller is told ENOTTY. */
+
     request &= 0xFFFFFFFFUL;
     struct file *file = process->files->fds[fd];
-    /* FIONBIO is the other way to say O_NONBLOCK and belongs to the descriptor,
-       so it is answered before anything interprets the argument -- on an inet
-       socket it used to fall through to the interface ioctls. */
+
     if (request == FIONBIO) {
         int32_t enabled;
         if (!user_argument ||
@@ -2296,7 +2218,7 @@ static int64_t sys_ioctl(int fd, unsigned long request, uint64_t user_argument) 
         struct linux_ifreq ifreq;
         memset(&ifreq, 0, sizeof(ifreq));
         memcpy(ifreq.name, "eth0", 5);
-        ifreq.value[0] = 2; /* AF_INET in sockaddr.sa_family */
+        ifreq.value[0] = 2;
         const struct net_config *config = net_get_config();
         memcpy(ifreq.value + 4, &config->address, sizeof(config->address));
 
@@ -2314,9 +2236,7 @@ static int64_t sys_ioctl(int fd, unsigned long request, uint64_t user_argument) 
         return pty_ioctl(file->pty, file->kind == FILE_KIND_PTY_MASTER,
                          request, user_argument);
     if (file->kind == FILE_KIND_INPUT && file->node) {
-        /* Tunix's own EVIOCGINFO is answered by the node; everything in the
-           'E' group is evdev and needs the reader, because EVIOCSCLOCKID and
-           EVIOCGRAB belong to the descriptor rather than the device. */
+
         if (((request >> 8) & 0xFFU) == (unsigned)'E')
             return input_reader_ioctl(file->input_reader,
                                       (unsigned)(uintptr_t)file->node->data,
@@ -2328,9 +2248,7 @@ static int64_t sys_ioctl(int fd, unsigned long request, uint64_t user_argument) 
     }
     if (file->kind == FILE_KIND_FRAMEBUFFER)
         return framebuffer_file_ioctl(file, request, user_argument);
-    /* The SIOCGIF* ioctls are a property of the machine's interfaces, not of
-       the socket they arrive on, and Linux answers them on any socket: musl
-       implements if_indextoname() by asking an AF_UNIX one. */
+
     if (file->kind == FILE_KIND_SOCKET && (request & 0xFF00U) == 0x8900U) {
         uint8_t argument[40];
         if (!user_argument || copy_from_user(argument, user_argument, sizeof(argument)) != 0)
@@ -2352,9 +2270,7 @@ static int64_t sys_ioctl(int fd, unsigned long request, uint64_t user_argument) 
         return file->node->file_ioctl(file, request, user_argument);
     if (file->node->ioctl) return file->node->ioctl(file->node, request, user_argument);
 
-    /* A character device that is not a terminal: every real one carries
-       vt_node_ioctl and was answered above. Saying so is what makes isatty()
-       tell the truth about /dev/null. */
+
     return -ENOTTY;
 }
 
@@ -2374,17 +2290,16 @@ static void fill_stat(struct vfs_node *node, struct linux_stat *stat) {
                     (kind == VFS_SYMLINK ? 0120000U :
                     (kind == VFS_PIPE ? 0010000U :
                     (kind == VFS_SOCKET ? 0140000U : 0100000U)))));
-    /* 07777, not 0777: the setuid, setgid and sticky bits are part of the mode
-       and a caller that cannot see them cannot tell su from any other program. */
+
     stat->st_mode = type | (node->mode & 07777U);
     if (kind == VFS_CHARDEVICE || kind == VFS_BLOCKDEVICE) {
-        /* Linux's encoding: 20 bits of minor split around 12 bits of major. */
+
         uint64_t major = node->dev_major;
         uint64_t minor = node->dev_minor;
         stat->st_rdev = ((major & 0xFFFULL) << 8) | (minor & 0xFFULL) |
                         ((major & ~0xFFFULL) << 32) | ((minor & ~0xFFULL) << 12);
     }
-    /* ext2 rev 0 has no sub-second field, so the nanosecond parts stay zero. */
+
     stat->st_atim.tv_sec = (int64_t)node->atime;
     stat->st_mtim.tv_sec = (int64_t)node->mtime;
     stat->st_ctim.tv_sec = (int64_t)node->ctime;
@@ -2401,26 +2316,21 @@ static int64_t stat_path(int dirfd, uint64_t user_path, uint64_t user_stat, int 
     return copy_to_user(user_stat, &stat, sizeof(stat)) == 0 ? 0 : -EFAULT;
 }
 
-/*
- * Tunix has one VFS tree rather than real mounts, so the filesystem a node
- * belongs to is derived from the tree: the volatile top-level directories
- * (/tmp, /run, /var/tmp, /dev, /proc) are RAM-only, everything else lives on
- * the ext2 root. Walk up to the nearest volatile ancestor to classify.
- */
+
 static void fill_statfs(struct vfs_node *node, struct linux_statfs *out) {
     memset(out, 0, sizeof(*out));
-    /* The VFS name field caps a component at 127 characters plus the NUL. */
+
     out->f_namelen = sizeof(node->name) - 1;
 
     struct vfs_node *volatile_root = NULL;
     for (struct vfs_node *walk = node; walk; walk = walk->parent) {
         if (walk->flags & VFS_VOLATILE) volatile_root = walk;
-        /* vfs_root is its own parent (vfs_init), so stop rather than spin. */
+
         if (walk->parent == walk) break;
     }
 
     if (volatile_root) {
-        /* No per-filesystem quota exists, so report the RAM these share. */
+
         out->f_type = strcmp(volatile_root->name, "proc") == 0
                           ? PROC_SUPER_MAGIC : TMPFS_MAGIC;
         out->f_bsize = PMM_PAGE_SIZE;
@@ -2447,7 +2357,7 @@ static void fill_statfs(struct vfs_node *node, struct linux_statfs *out) {
         return;
     }
 
-    /* Running from the initramfs, before any ext2 root is mounted. */
+
     out->f_type = TMPFS_MAGIC;
     out->f_bsize = PMM_PAGE_SIZE;
     out->f_frsize = PMM_PAGE_SIZE;
@@ -2477,23 +2387,18 @@ static int64_t sys_fstatfs(int fd, uint64_t user_buf) {
     return copy_to_user(user_buf, &out, sizeof(out)) == 0 ? 0 : -EFAULT;
 }
 
-/*
- * Pipes and sockets have no VFS node, but fstat still has to describe them.
- * Reporting EBADF for a perfectly good descriptor is what made `cat file | wc`
- * fail: cat fstats its stdout to size its copy buffer, and grep fstats its
- * stdin. Linux answers with S_IFIFO / S_IFSOCK, so do the same.
- */
+
 static int fill_stat_nodeless(struct file *file, struct linux_stat *stat) {
     uint32_t type;
     switch (file->kind) {
         case FILE_KIND_PIPE_READ:
         case FILE_KIND_PIPE_WRITE:
-            type = 0010000U; /* S_IFIFO */
+            type = 0010000U;
             break;
         case FILE_KIND_SOCKET:
         case FILE_KIND_INET_SOCKET:
         case FILE_KIND_NETLINK_SOCKET:
-            type = 0140000U; /* S_IFSOCK */
+            type = 0140000U;
             break;
         default:
             return -1;
@@ -2502,7 +2407,7 @@ static int fill_stat_nodeless(struct file *file, struct linux_stat *stat) {
     stat->st_mode = type | 0600U;
     stat->st_nlink = 1;
     stat->st_blksize = 4096;
-    /* No inode namespace for these, so give each open a stable unique value. */
+
     stat->st_ino = (uint64_t)(uintptr_t)file;
     return 0;
 }
@@ -2527,11 +2432,7 @@ static int64_t sys_fstat(int fd, uint64_t user_stat) {
     return copy_to_user(user_stat, &stat, sizeof(stat)) == 0 ? 0 : -EFAULT;
 }
 
-/*
- * STATX_BTIME is deliberately left out of the reported mask rather than
- * answered with a zero: callers test the mask before trusting a birth time,
- * and ext2 rev 0 has no field to store one in.
- */
+
 static void fill_statx(const struct linux_stat *basic_in, struct linux_statx *out) {
     struct linux_stat basic = *basic_in;
 
@@ -2548,7 +2449,7 @@ static void fill_statx(const struct linux_stat *basic_in, struct linux_statx *ou
     out->stx_atime.tv_sec = basic.st_atim.tv_sec;
     out->stx_mtime.tv_sec = basic.st_mtim.tv_sec;
     out->stx_ctime.tv_sec = basic.st_ctim.tv_sec;
-    /* statx splits what stat packs into one field. */
+
     out->stx_rdev_major = (uint32_t)(((basic.st_rdev >> 8) & 0xFFFU) |
                                      ((basic.st_rdev >> 32) & ~0xFFFU));
     out->stx_rdev_minor = (uint32_t)((basic.st_rdev & 0xFFU) |
@@ -2557,7 +2458,7 @@ static void fill_statx(const struct linux_stat *basic_in, struct linux_statx *ou
 
 static int64_t sys_statx(int dirfd, uint64_t user_path, int flags,
                          uint32_t mask, uint64_t user_buf) {
-    (void)mask; /* Everything we can answer is cheap, so nothing is skipped. */
+    (void)mask;
     if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH | AT_NO_AUTOMOUNT |
                   AT_STATX_SYNC_TYPE))
         return -EINVAL;
@@ -2644,8 +2545,7 @@ static int64_t sys_getcwd(uint64_t user_buffer, size_t size) {
     return copy_to_user(user_buffer, path, length) == 0 ? (int64_t)user_buffer : -EFAULT;
 }
 
-/* Reference the new directory before releasing the old one: they can be the
-   same node, and dropping the last reference first would free it. */
+
 static void set_cwd(struct process *process, struct vfs_node *node) {
     struct vfs_node *previous = process->cwd;
     vfs_node_ref(node);
@@ -2746,12 +2646,7 @@ static int64_t sys_rename_at(int old_dirfd, uint64_t user_old_path,
     return vfs_rename(old_path, new_path) == 0 ? 0 : -EIO;
 }
 
-/*
- * link(2). The name being created is an entry in a directory, so the write
- * permission that matters is on that directory rather than on the file: a file
- * nobody may write can still be given another name by whoever owns the
- * directory it is going into, which is how package managers unpack.
- */
+
 static int64_t sys_link_at(int old_dirfd, uint64_t user_old_path,
                            int new_dirfd, uint64_t user_new_path, int flags) {
     if (flags & ~AT_SYMLINK_FOLLOW) return -EINVAL;
@@ -2764,8 +2659,7 @@ static int64_t sys_link_at(int old_dirfd, uint64_t user_old_path,
     struct vfs_node *node = (flags & AT_SYMLINK_FOLLOW) ? vfs_lookup(old_path)
                                                         : vfs_lookup_nofollow(old_path);
     if (!node) return -ENOENT;
-    /* Linking a directory would let a tree contain itself, and nothing in the
-       kernel walks a cycle safely. */
+
     if ((node->flags & 0xFFU) == VFS_DIRECTORY) return -EPERM;
     if (node->flags & VFS_READONLY) return -EROFS;
     if (vfs_lookup_nofollow(new_path)) return -EEXIST;
@@ -2774,14 +2668,10 @@ static int64_t sys_link_at(int old_dirfd, uint64_t user_old_path,
     return vfs_link(node, new_path) == 0 ? 0 : -EIO;
 }
 
-/*
- * mount(2). Only root may change what the filesystem tree looks like, since a
- * mount is visible to every process on the machine -- there are no mount
- * namespaces here to confine it to the caller.
- */
+
 static int64_t sys_mount(uint64_t user_source, uint64_t user_target,
                          uint64_t user_type, uint64_t flags, uint64_t user_data) {
-    (void)user_data;                     /* no filesystem takes options yet */
+    (void)user_data;
     const struct credentials *cred = cred_current();
     if (cred && cred->euid != 0) return -EPERM;
     if (flags > 0xFFFFFFFFULL) return -EINVAL;
@@ -2798,8 +2688,7 @@ static int64_t sys_mount(uint64_t user_source, uint64_t user_target,
                      user_type ? type : "", (uint32_t)flags);
 }
 
-/* umount2(2). The flags Linux takes are all about how hard to try when the
-   filesystem is busy, and nothing here can be busy in that sense. */
+
 static int64_t sys_umount2(uint64_t user_target, int flags) {
     (void)flags;
     const struct credentials *cred = cred_current();
@@ -2809,9 +2698,7 @@ static int64_t sys_umount2(uint64_t user_target, int flags) {
     return vfs_umount(target);
 }
 
-/* mknod(2), for the one file type it can make: a FIFO. Device nodes are
-   refused rather than faked, because /dev is built from the devices actually
-   found and a node made here would name a driver that is not behind it. */
+
 static int64_t sys_mknodat(int dirfd, uint64_t user_path, uint32_t mode,
                            uint64_t device) {
     (void)device;
@@ -2842,8 +2729,7 @@ static int64_t sys_symlink_at(uint64_t user_target, int new_dirfd,
     return vfs_create_symlink(link_path, target, 0) ? 0 : -EIO;
 }
 
-/* Only the owner and root may change a mode; a non-root owner also loses the
-   set-group-ID bit when the file's group is not one of theirs. */
+
 static int64_t change_mode(struct vfs_node *node, uint32_t mode) {
     if (node->flags & VFS_READONLY) return -EROFS;
     const struct credentials *cred = cred_current();
@@ -2856,12 +2742,7 @@ static int64_t change_mode(struct vfs_node *node, uint32_t mode) {
     return 0;
 }
 
-/*
- * chown proper. Changing the owner is root-only; the owner may hand the file to
- * one of their own groups. Either way a successful change strips the setuid and
- * setgid bits off an executable, which is what stops a privileged binary from
- * being handed over intact.
- */
+
 static int64_t change_owner(struct vfs_node *node, uint32_t uid, uint32_t gid) {
     if (node->flags & VFS_READONLY) return -EROFS;
     if (uid == CRED_UNCHANGED && gid == CRED_UNCHANGED) return 0;
@@ -2931,9 +2812,7 @@ static int64_t sys_utimens_at(int dirfd, uint64_t user_path, uint64_t user_times
 
     struct vfs_node *node = NULL;
     if (!user_path) {
-        /* Both musl and glibc implement futimens(fd, times) as
-           utimensat(fd, NULL, times, 0), so a NULL path means "operate on
-           dirfd itself" rather than being a bad pointer. */
+
         struct process *process = process_current();
         if (!process || dirfd < 0 || dirfd >= PROCESS_MAX_FDS || !process->files->fds[dirfd])
             return -EBADF;
@@ -2949,13 +2828,11 @@ static int64_t sys_utimens_at(int dirfd, uint64_t user_path, uint64_t user_times
         if (!node) return -ENOENT;
     }
     if (node->flags & VFS_READONLY) return -EROFS;
-    /* Setting explicit times needs ownership; "set both to now" only needs
-       write permission. */
+
     if (!cred_owns(node) && (user_times || cred_may(node, CRED_WRITE) != 0))
         return -EPERM;
 
-    /* A NULL times array means "both to now"; musl also folds an explicit
-       UTIME_NOW/UTIME_NOW pair into that form before issuing the syscall. */
+
     if (!user_times) {
         vfs_stamp_times(node, VFS_TIME_ATIME | VFS_TIME_MTIME | VFS_TIME_CTIME);
         vfs_notify_meta_changed(node);
@@ -2973,7 +2850,7 @@ static int64_t sys_utimens_at(int dirfd, uint64_t user_path, uint64_t user_times
         if (index == 0) node->atime = value;
         else node->mtime = value;
     }
-    /* Changing the times is itself a metadata change. */
+
     node->ctime = now;
     vfs_notify_meta_changed(node);
     return 0;
@@ -2993,28 +2870,21 @@ static int map_zero_pages(struct process *process, uint64_t start, uint64_t end,
     return 0;
 }
 
-/* Map a memfd's pages into the address space: these already exist and belong
-   to someone else, so each takes a reference and PAGE_SHARED keeps fork from
-   turning them copy-on-write. */
-/* Map a memfd's pages into a process. MAP_SHARED puts two processes on the
-   same physical pages; MAP_PRIVATE maps them read-only and copy-on-write, so
-   a reader pays for a copy only if it writes -- which is how weston's keymap
-   reaches its clients. */
+
+
 static int map_shared_object(struct process *process, uint64_t start,
                              uint64_t end, struct memfd_object *object,
                              uint64_t file_offset, uint64_t flags, int private) {
     uint64_t extra = PAGE_SHARED;
     if (private) {
-        /* Read-only either way; PAGE_COW only when the mapping is writable, so
-           that a write to a PROT_READ mapping still faults as it should. */
+
         extra = (flags & PAGE_WRITE) ? PAGE_COW : 0;
         flags &= ~PAGE_WRITE;
     }
     for (uint64_t address = start; address < end; address += 4096) {
         uint64_t index = (file_offset + (address - start)) / 4096ULL;
         uint64_t physical = memfd_page(object, index);
-        /* Past the end of the object: Linux would fault with SIGBUS on access.
-           Leaving the page unmapped gets the same observable behaviour. */
+
         if (!physical) continue;
         if (vmm_translate(process->cr3, address, NULL, NULL) == 0) continue;
         if (pmm_page_ref(physical) != 0) return -1;
@@ -3028,11 +2898,9 @@ static int map_shared_object(struct process *process, uint64_t start,
 }
 
 static void unmap_pages(struct process *process, uint64_t start, uint64_t end) {
-    /* Forget any mapping record here first: the table must never describe
-       pages that are no longer mapped. */
+
     process_unmap_area(start, end);
-    /* One shootdown for the range rather than one per page: see
-       vmm_flush_batch_begin(). */
+
     vmm_flush_batch_begin();
     for (uint64_t address = start; address < end; address += 4096) {
         uint64_t physical;
@@ -3065,9 +2933,7 @@ static int64_t sys_brk(uint64_t requested) {
     return (int64_t)requested;
 }
 
-/* Both have to be asked: the map knows ranges owned but not yet resident, the
-   page tables know what was mapped before the map existed. The map first, so
-   an occupied range costs no page-table walk. */
+
 static int mapping_range_free(struct process *process, uint64_t base, uint64_t length) {
     if (!process || !length || base >= USER_ADDRESS_LIMIT ||
         length > USER_ADDRESS_LIMIT - base) return 0;
@@ -3078,8 +2944,7 @@ static int mapping_range_free(struct process *process, uint64_t base, uint64_t l
     return 1;
 }
 
-/* The map proposes a gap; mapping_range_free() confirms nothing older is
-   sitting in it, and the search moves past the gap if something is. */
+
 static int find_mapping_range(struct process *process, uint64_t start,
                               uint64_t length, uint64_t *base_out) {
     uint64_t base = align_up(start, 4096);
@@ -3096,8 +2961,7 @@ static int find_mapping_range(struct process *process, uint64_t start,
     return -1;
 }
 
-/* Private pages for [start, end) of a file mapping: the bytes the file still
-   has are copied in, everything past its end reads as zero. */
+
 static int copy_file_tail(struct process *process, struct file *file,
                           uint64_t base, uint64_t start, uint64_t end,
                           uint64_t offset, uint64_t page_flags, int prot) {
@@ -3176,9 +3040,7 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
     if (!(flags & MAP_ANONYMOUS)) {
         if (fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) return -EBADF;
         file = process->files->fds[fd];
-        /* A shared memfd mapping is the one case where two processes really do
-           end up on the same physical pages, so it bypasses the copy-the-file
-           path below entirely. */
+
         if (file->kind == FILE_KIND_MEMFD) {
             if (map_shared_object(process, base, base + length, file->memfd,
                                   offset, page_flags,
@@ -3186,9 +3048,7 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
                 unmap_pages(process, base, base + length);
                 return -ENOMEM;
             }
-            /* Remember what backs this range so mremap() can grow it later.
-               Failing to record only costs the ability to grow, so the mapping
-               itself still stands. */
+
             (void)process_map_area(base, base + length, page_flags, 0,
                                    file, offset);
             if (advance_mmap_base) {
@@ -3197,7 +3057,7 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
             }
             return (int64_t)base;
         }
-        /* A PRIME descriptor is the buffer itself, so it maps without a node. */
+
         if (file->kind == FILE_KIND_DMABUF) {
             if (!(flags & MAP_SHARED)) return -EINVAL;
             int64_t status = drm_dmabuf_mmap(file, process->cr3, base, length,
@@ -3213,10 +3073,7 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
             !file->node) return -ENODEV;
         if (file->node->mmap) {
             if (!(flags & MAP_SHARED)) return -EINVAL;
-            /* A device mapping is the device's memory, not the process's, so
-               PAGE_SHARED stops fork turning it copy-on-write: weston forks
-               its shell clients while holding DRM buffers mapped, and without
-               this every frame after went into a private copy. */
+
             int64_t status = file->node->mmap(file->node, file, process->cr3,
                                               base, length, offset,
                                               page_flags | PAGE_SHARED);
@@ -3229,12 +3086,7 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
         }
     }
 
-    /*
-     * Private anonymous memory is handed out as address space and paid for a
-     * page at a time as it is touched. JSC reserves 8 GiB of cage up front and
-     * the webkit web process asks for 84 MiB of arena it barely uses;
-     * committing either eagerly is what used to run the machine out of memory.
-     */
+
     if (!file && !(flags & MAP_SHARED)) {
         unmap_pages(process, base, base + length);
         if (process_map_area(base, base + length,
@@ -3248,15 +3100,8 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
         return (int64_t)base;
     }
 
-    /* A read-only private file mapping is how every shared library is loaded,
-       and a copy per process is what put webkit over the memory ceiling. Map
-       the cached copy, referenced and copy-on-write. Only whole pages inside
-       the file can be shared: the last page has to read as zeros past the end,
-       so it and everything after get private pages. */
-    /* MAP_SHARED is the same without the copy-on-write, so a write is one every
-       reader sees. It used to fall through to the generic path and discard
-       every write silently. The descriptor must have been opened for writing,
-       as Linux requires; durability still takes an fsync. */
+
+
     int share_private = (flags & MAP_PRIVATE) && !(prot & PROT_WRITE);
     int share_shared = (flags & MAP_SHARED) &&
                        (!(prot & PROT_WRITE) ||
@@ -3284,9 +3129,7 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
                               (uint64_t)file->node->data + offset + mapped,
                               &physical, NULL) != 0) break;
             physical &= ~0xFFFULL;
-            /* The heap's own hold on this frame is not counted, so claim it
-               here too: that reference is what keeps the cached copy alive
-               once the last mapping of it goes away. */
+
             if (pmm_page_refcount(physical) == 0 && pmm_page_ref(physical) != 0) break;
             if (pmm_page_ref(physical) != 0) break;
             if (vmm_map_page_in(process->cr3, base + mapped, physical,
@@ -3298,10 +3141,7 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
         }
 
         if (mapped == shareable) {
-            /* Recorded like any other mapping, which is what holds the node's
-               contents: the area's VM_FILE_PAGES reference is dropped when the
-               range is unmapped or the process goes, and the cache becomes
-               reclaimable again once the last one has left. */
+
             if (process_map_area(base, base + length, page_flags, VM_FILE_PAGES,
                                  file, offset) != 0) {
                 unmap_pages(process, base, base + mapped);
@@ -3319,15 +3159,12 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
             }
             return (int64_t)base;
         }
-        /* Partial run: drop it and copy the whole mapping the ordinary way. */
+
         unmap_pages(process, base, base + mapped);
     }
 
     uint64_t allocation_flags = file ? (page_flags | PAGE_WRITE) : page_flags;
-    /* MAP_SHARED|MAP_ANONYMOUS has to survive fork as shared memory rather than
-       being copied per process, which is what PAGE_SHARED tells the clone to
-       do. Without a file behind it there is nothing to share with beyond the
-       processes that inherit the mapping. */
+
     if ((flags & MAP_SHARED) && (flags & MAP_ANONYMOUS)) allocation_flags |= PAGE_SHARED;
     if (map_zero_pages(process, base, base + length, allocation_flags) != 0) {
         unmap_pages(process, base, base + length);
@@ -3354,8 +3191,7 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
             copied += (uint64_t)amount;
             if ((size_t)amount < chunk) break;
         }
-        /* The process has its own copy now; the disk can hold the other one.
-           Without this every mapped library is resident twice. */
+
         if (file->kind == FILE_KIND_VFS) vfs_release_data(file->node);
     }
     if (file && !(prot & PROT_WRITE)) {
@@ -3381,8 +3217,7 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
     return (int64_t)base;
 }
 
-/* A store through a shared file mapping is one the filesystem never sees, so
-   this is the only point at which a program can ask for it to be written. */
+
 static int64_t sys_msync(uint64_t address, uint64_t length, int flags) {
     struct process *process = process_current();
     if (!process || (address & 0xFFFULL)) return -EINVAL;
@@ -3409,11 +3244,7 @@ static int64_t sys_shmget(int32_t key, uint64_t size, int flags) {
     return sysvshm_get(key, size, flags, (uint32_t)process_current_pid());
 }
 
-/*
- * shmat(2). The segment's pages are mapped exactly the way a shared memfd is,
- * and the area records the segment's file so that the reference counting which
- * already survives fork and exit is what decides when the memory goes away.
- */
+
 static int64_t sys_shmat(int id, uint64_t address, int flags) {
     struct process *process = process_current();
     if (!process) return -EINVAL;
@@ -3459,7 +3290,7 @@ static int64_t sys_shmat(int id, uint64_t address, int flags) {
         file_unref(file);
         return -ENOMEM;
     }
-    /* process_map_area took its own reference; this one has done its job. */
+
     file_unref(file);
 
     if (advance_mmap_base) {
@@ -3476,13 +3307,13 @@ static int64_t sys_shmdt(uint64_t address) {
     struct vm_area *area = process_find_area(address);
     if (!area || area->start != address) return -EINVAL;
     unmap_pages(process, area->start, area->end);
-    /* That may have been the last attachment to a segment already removed. */
+
     sysvshm_reap();
     return 0;
 }
 
 static int64_t sys_shmctl(int id, int command, uint64_t user_buffer) {
-    /* IPC_64 selects the 64-bit structures, which are the only ones here. */
+
     command &= ~IPC_64;
     switch (command) {
         case IPC_RMID:
@@ -3506,33 +3337,22 @@ static int64_t sys_shmctl(int id, int command, uint64_t user_buffer) {
     }
 }
 
-/* mremap(2), enough of it for a growing shm pool: libwayland resizes a client's
-   pool this way with no fallback. Growing a file mapping means covering more
-   of the backing object, which is what the mapping table is for; an anonymous
-   one grows in place and refuses to move. */
-/*
- * Growing or shrinking a mapping in place, and moving it when it cannot grow.
- * `backing` is the object behind the mapping, already referenced by the caller:
- * unmap_pages() frees the area it came from, and with it that area's reference,
- * so the pointer would otherwise go stale halfway through.
- */
+
+
 static int64_t mremap_backed(struct process *process, uint64_t address,
                              uint64_t old_length, uint64_t new_length,
                              int flags, struct file *backing,
                              uint64_t backing_offset, uint32_t kind) {
     if (new_length < old_length) {
         unmap_pages(process, address + new_length, address + old_length);
-        /* The kind travels with the record. A mapping that shares the file's
-           cached pages holds a claim on them through its area, and rewriting
-           the record without it would let the cache be dropped from under a
-           mapping that is still there. */
+
         if (backing)
             (void)process_map_area(address, address + new_length, PAGE_WRITE,
                                    kind, backing, backing_offset);
         return (int64_t)address;
     }
 
-    /* Growing. Try in place first, which keeps every existing pointer valid. */
+
     uint64_t tail = address + old_length;
     uint64_t extra = new_length - old_length;
     if (mapping_range_free(process, tail, extra)) {
@@ -3544,7 +3364,7 @@ static int64_t mremap_backed(struct process *process, uint64_t address,
         } else if (!backing) {
             ok = map_zero_pages(process, tail, tail + extra, PAGE_WRITE) == 0;
         } else {
-            ok = 0; /* a file mapping we cannot extend */
+            ok = 0;
         }
         if (ok) {
             if (backing)
@@ -3556,8 +3376,7 @@ static int64_t mremap_backed(struct process *process, uint64_t address,
     }
 
     if (!(flags & MREMAP_MAYMOVE)) return -ENOMEM;
-    /* Moving is only possible when we know what backs the mapping, because the
-       new location is populated from the object rather than by copying pages. */
+
     if (!backing || backing->kind != FILE_KIND_MEMFD) return -ENOMEM;
 
     uint64_t destination;
@@ -3572,8 +3391,7 @@ static int64_t mremap_backed(struct process *process, uint64_t address,
         return -ENOMEM;
     }
 
-    /* The old range's pages are the object's, and the new mapping took its own
-       references, so release the old ones normally. */
+
     unmap_pages(process, address, address + old_length);
     (void)process_map_area(destination, destination + new_length, PAGE_WRITE,
                            kind, backing, backing_offset);
@@ -3589,7 +3407,7 @@ static int64_t sys_mremap(uint64_t address, uint64_t old_length,
     if (!process) return -EINVAL;
     if (address & 0xFFFULL) return -EINVAL;
     if (!new_length) return -EINVAL;
-    /* MREMAP_FIXED, which is the only use for new_address, is not supported. */
+
     if (flags & ~MREMAP_MAYMOVE) return -EINVAL;
     (void)new_address;
 
@@ -3605,8 +3423,7 @@ static int64_t sys_mremap(uint64_t address, uint64_t old_length,
     struct file *backing = area ? area->file : NULL;
     uint64_t backing_offset = area ? area->offset : 0;
     uint32_t kind = area ? area->kind : 0;
-    /* Held across the whole operation: the area this came from is freed by the
-       first unmap, and its reference goes with it. */
+
     if (backing) file_ref(backing);
     int64_t result = mremap_backed(process, address, old_length, new_length,
                                    flags, backing, backing_offset, kind);
@@ -3621,8 +3438,7 @@ static int64_t sys_mprotect(uint64_t address, uint64_t length, int prot) {
     uint64_t flags = PAGE_USER | PAGE_PRESENT;
     if (prot & PROT_WRITE) flags |= PAGE_WRITE;
     if (nx_enabled && !(prot & PROT_EXEC)) flags |= PAGE_NX;
-    /* Uncommitted pages have no entry to protect; record the new flags on the
-       map so they get them when a fault commits them. */
+
     process_protect_area(address, address + length, flags | PAGE_PRESENT);
     int reserved = !process_area_range_free(address, address + length);
     int failed = 0;
@@ -3636,10 +3452,7 @@ static int64_t sys_mprotect(uint64_t address, uint64_t length, int prot) {
         }
         uint64_t effective_flags = flags | (old_flags & (PAGE_DEVICE | PAGE_SHARED));
         if (nx_enabled && (old_flags & PAGE_DEVICE)) effective_flags |= PAGE_NX;
-        /* A copy-on-write page must not be handed write permission here: it is
-           still shared with whoever forked it. Keep it read-only and marked,
-           so the next store faults and gets a private copy. Dropping write
-           permission instead clears the marker. */
+
         if (old_flags & PAGE_COW) {
             if (prot & PROT_WRITE) effective_flags = (effective_flags & ~PAGE_WRITE) | PAGE_COW;
         }
@@ -3849,15 +3662,10 @@ static int64_t sys_sigprocmask(int how, uint64_t user_set, uint64_t user_old_set
     return 0;
 }
 
-/*
- * Rewind the syscall so it re-runs and re-tests its condition, then block.
- * Sleeping requires a wakeup source for this file kind; without one the only
- * option is to spin, which is why the yield is a fallback rather than the rule.
- */
+
 static void block_and_retry(struct syscall_frame *frame, uint64_t syscall_number,
                             struct file *file, int writing) {
-    /* Answer rather than sleep when a signal is waiting: a rewound syscall goes
-       back to sleep without ever reaching the code that delivers one. */
+
     if (process_signal_interrupts_wait()) {
         frame->rax = (uint64_t)-(int64_t)EINTR;
         return;
@@ -3866,9 +3674,7 @@ static void block_and_retry(struct syscall_frame *frame, uint64_t syscall_number
     frame->rax = syscall_number;
     struct process *process = process_current();
     if (process) process->syscall_rewound = 1;
-    /* The queue belonging to the object when it has one -- a pipe, a terminal
-       -- and the general one when it does not, which is every socket.
-       Yielding instead is what made a blocking read on a socket a spin. */
+
     const void *channel = writing ? file_write_wait_channel(file)
                                   : file_read_wait_channel(file);
     if (!channel) channel = process_io_wait_channel();
@@ -3890,12 +3696,7 @@ static int64_t sys_readv_writev(int fd, uint64_t user_iov, int count, int write_
     return total;
 }
 
-/*
- * The machine's name, which uname(2) used to answer with a constant. The first
- * thing runit does on the way up is read /etc/hostname and call sethostname(2),
- * so a kernel that cannot be told its own name reports the wrong one to
- * everything that asks for the rest of the boot.
- */
+
 static int64_t set_machine_name(int domain, uint64_t user_name, uint64_t length) {
     const struct credentials *cred = cred_current();
     if (cred && cred->euid != 0) return -EPERM;
@@ -3910,11 +3711,7 @@ static int64_t set_machine_name(int domain, uint64_t user_name, uint64_t length)
     return 0;
 }
 
-/*
- * sysinfo(2) and times(2), which everything that reports on the machine wants:
- * free(1), uptime(1), top(1) and fastfetch all go through one or the other, and
- * a missing one is not a degraded answer but a tool that prints an error.
- */
+
 
 #define CLOCK_TICKS_PER_SECOND 100ULL
 #define NANOSECONDS_PER_TICK (1000000000ULL / CLOCK_TICKS_PER_SECOND)
@@ -3949,9 +3746,7 @@ static int64_t sys_sysinfo(uint64_t user_buffer) {
     struct linux_sysinfo value;
     memset(&value, 0, sizeof(value));
     value.uptime = (int64_t)(time_uptime_ns() / 1000000000ULL);
-    /* There is no load average to report: the scheduler keeps no history, and
-       inventing one would be worse than the zero every reader already
-       tolerates. */
+
     value.totalram = pmm_usable_page_count() * PMM_PAGE_SIZE;
     value.freeram = pmm_free_page_count() * PMM_PAGE_SIZE;
     value.procs = (uint16_t)process_count();
@@ -3959,11 +3754,7 @@ static int64_t sys_sysinfo(uint64_t user_buffer) {
     return copy_to_user(user_buffer, &value, sizeof(value)) == 0 ? 0 : -EFAULT;
 }
 
-/*
- * All of a process's time is charged as user time. Splitting it would mean
- * timing the syscall path itself, and the scheduler only accounts for how long
- * a process was on a processor at all -- see process_account_runtime().
- */
+
 static int64_t sys_times(uint64_t user_buffer) {
     if (user_buffer) {
         struct linux_tms value;
@@ -3976,8 +3767,7 @@ static int64_t sys_times(uint64_t user_buffer) {
     return (int64_t)(time_uptime_ns() / NANOSECONDS_PER_TICK);
 }
 
-/* getrusage(2). Only the time is real; the page-fault and context-switch
-   counters are not kept anywhere. */
+
 static int64_t sys_getrusage(uint64_t user_buffer) {
     struct { int64_t seconds; int64_t microseconds; } utime = {0, 0};
     uint8_t value[144];
@@ -3993,12 +3783,7 @@ static int64_t sys_getrusage(uint64_t user_buffer) {
     return copy_to_user(user_buffer, value, sizeof(value)) == 0 ? 0 : -EFAULT;
 }
 
-/* syslog(2), which is how dmesg reads the log: it asks for this before it
-   falls back to anything, so a kernel that keeps a log and publishes
-   /dev/kmsg still answered "Function not implemented". Reading destructively
-   is not modelled -- the ring is one nothing else consumes -- so READ and
-   READ_CLEAR answer what READ_ALL does, and CLEAR is accepted and does
-   nothing. */
+
 #define SYSLOG_ACTION_CLOSE 0
 #define SYSLOG_ACTION_OPEN 1
 #define SYSLOG_ACTION_READ 2
@@ -4028,8 +3813,7 @@ static int64_t sys_syslog(int action, uint64_t user_buffer, int length) {
         if (length < 0 || !user_buffer) return -EINVAL;
         size_t held = klog_size();
         size_t want = (size_t)length;
-        /* The tail, as Linux gives it: a buffer smaller than the log gets the
-           most recent bytes rather than the oldest. */
+
         uint64_t offset = held > want ? held - want : 0;
         if (want > held - offset) want = held - offset;
         static char staging[1024];
@@ -4119,9 +3903,7 @@ static int64_t sys_getrandom(uint64_t user_buffer, size_t length, unsigned flags
     return (int64_t)completed;
 }
 
-/* The set of processors a task may run on, which is all of them. nproc asks
-   this before it looks at /proc/cpuinfo, and the return is the number of bytes
-   written rather than zero. */
+
 static int64_t sys_sched_getaffinity(uint64_t tid, size_t size, uint64_t user_mask) {
     if (!user_mask) return -EFAULT;
     if (size < sizeof(uint64_t) || (size & (sizeof(uint64_t) - 1))) return -EINVAL;
@@ -4208,9 +3990,7 @@ static int64_t sys_sigaltstack(struct syscall_frame *frame, uint64_t user_stack,
     return 0;
 }
 
-/* Linux capabilities. Nothing is stored: privilege here is euid, so capget()
-   synthesizes its answer and capset() only has to agree. The version
-   negotiation is mirrored because libcap always tries it first. */
+
 #define LINUX_CAPABILITY_VERSION_3 0x20080522U
 
 struct cap_user_header {
@@ -4261,10 +4041,7 @@ static int64_t sys_capset(uint64_t user_header, uint64_t user_data) {
     if (header.pid && (!process || (uint64_t)header.pid != process->pid)) return -EPERM;
     if (!user_data) return 0;
 
-    /* A process cannot hold a capability its euid does not already grant it
-     * in this model, so the only real question is whether the caller is
-     * trying to claim one it lacks -- which is exactly what capget() above
-     * would have reported as an empty set. */
+
     return cred_is_root() ? 0 : -EPERM;
 }
 
@@ -4338,9 +4115,7 @@ static int64_t sys_prctl(int option, uint64_t arg2, uint64_t arg3,
             return process->keep_capabilities;
         case PR_SET_KEEPCAPS:
             if (arg2 > 1) return -EINVAL;
-            /* Keep the permitted capability set across a change of uid. There
-               are none here, but the flag is a promise about a later setuid
-               rather than an action, and it is the first thing ping asks for. */
+
             process->keep_capabilities = (int)arg2;
             return 0;
         case PR_GET_SECUREBITS:
@@ -4387,9 +4162,7 @@ static int64_t sys_get_robust_list(int pid, uint64_t user_head_pointer,
 #define RLIMIT_NOFILE 7
 static int64_t sys_prlimit(uint64_t resource, uint64_t user_old_limit) {
     if (!user_old_limit) return 0;
-    /* Report the real fd ceiling for NOFILE: an infinite value makes musl's
-     * sysconf(_SC_OPEN_MAX) return -1, which trips Xtrans's fd-range guard and
-     * blocks the X server from opening its listening sockets. */
+
     uint64_t lim = (resource == RLIMIT_NOFILE) ? PROCESS_MAX_FDS : UINT64_MAX;
     struct linux_rlimit value = {lim, lim};
     return copy_to_user(user_old_limit, &value, sizeof(value)) == 0 ? 0 : -EFAULT;
@@ -4399,6 +4172,17 @@ static int64_t sys_clone_fork_compat(struct syscall_frame *frame,
                                      uint64_t flags, uint64_t child_stack,
                                      uint64_t parent_tid_user, uint64_t child_tid_user,
                                      uint64_t tls) {
+    struct process *parent = process_current();
+    if (!parent) return -EINVAL;
+    if ((flags & CLONE_PARENT_SETTID) &&
+        (!parent_tid_user || !vmm_user_range_valid(parent->cr3, parent_tid_user,
+                                                    sizeof(uint32_t), 1)))
+        return -EFAULT;
+    if ((flags & CLONE_CHILD_SETTID) &&
+        (!child_tid_user || !vmm_user_range_valid(parent->cr3, child_tid_user,
+                                                   sizeof(uint32_t), 1)))
+        return -EFAULT;
+
     uint64_t exit_signal = flags & 0xFFULL;
     uint64_t thread_allowed = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND |
                               CLONE_THREAD | CLONE_SYSVSEM | CLONE_SETTLS | CLONE_DETACHED |
@@ -4411,9 +4195,7 @@ static int64_t sys_clone_fork_compat(struct syscall_frame *frame,
                                                  parent_tid_user, child_tid_user, flags);
     }
 
-    /* posix_spawn. The child gets a copy of the address space rather than
-       sharing it, which is enough: the helper reports down a pipe the parent
-       is already waiting on. */
+
     if ((flags & CLONE_VFORK) && (flags & CLONE_VM) && child_stack) {
         uint64_t vfork_allowed = CLONE_VM | CLONE_VFORK | CLONE_FS | CLONE_FILES |
                                  CLONE_SIGHAND | CLONE_SYSVSEM | CLONE_SETTLS |
@@ -4429,7 +4211,7 @@ static int64_t sys_clone_fork_compat(struct syscall_frame *frame,
     }
 
     uint64_t unsupported = flags & ~(0xFFULL | CLONE_FORK_METADATA_FLAGS);
-    if (child_stack != 0 || unsupported != 0 || (flags & CLONE_FORK_REJECT_FLAGS) != 0) {
+    if (unsupported != 0 || (flags & CLONE_FORK_REJECT_FLAGS) != 0) {
         KDEBUG("syscall: clone unsupported flags=0x%llx stack=0x%llx\n",
                 (unsigned long long)flags, (unsigned long long)child_stack);
         return -ENOSYS;
@@ -4446,6 +4228,7 @@ static int64_t sys_clone_fork_compat(struct syscall_frame *frame,
 
     struct process *child = process_find((uint64_t)pid);
     if (!child) return -ESRCH;
+    if (child_stack) child->saved_frame.user_rsp = child_stack;
     if ((flags & CLONE_CHILD_SETTID) && child_tid_user) {
         if (vmm_copy_to_space(child->cr3, child_tid_user, &tid, sizeof(tid)) != 0)
             return -EFAULT;
@@ -4456,16 +4239,43 @@ static int64_t sys_clone_fork_compat(struct syscall_frame *frame,
     return pid;
 }
 
+/* Reset caught signals in the child. */
+static void clone3_clear_signal_handlers(uint64_t child_pid) {
+    struct process *child = process_find(child_pid);
+    if (!child) return;
+    for (unsigned signal = 0; signal < TUNIX_NSIG; signal++) {
+        if (child->signal_actions[signal].handler != SIG_IGN)
+            memset(&child->signal_actions[signal], 0,
+                   sizeof(child->signal_actions[signal]));
+    }
+}
+
 static int64_t sys_clone3_fork_compat(struct syscall_frame *frame,
                                       uint64_t user_args, size_t size) {
     struct linux_clone_args args;
-    if (size < 64 || size > sizeof(args)) return -EINVAL;
+    if (size < 64) return -EINVAL;
+    if (size > sizeof(args)) return -E2BIG;
     memset(&args, 0, sizeof(args));
     if (copy_from_user(&args, user_args, size) != 0) return -EFAULT;
-    if (args.pidfd || args.set_tid || args.set_tid_size || args.cgroup)
+    if ((args.flags & 0xFFULL) || args.exit_signal > TUNIX_NSIG ||
+        (args.flags & CLONE_DETACHED) ||
+        ((args.flags & CLONE_CLEAR_SIGHAND) && (args.flags & CLONE_SIGHAND)))
+        return -EINVAL;
+    if ((!args.stack && args.stack_size) || (args.stack && !args.stack_size) ||
+        args.stack >= USER_ADDRESS_LIMIT ||
+        args.stack_size > USER_ADDRESS_LIMIT - args.stack)
+        return -EINVAL;
+    if ((args.flags & CLONE_PIDFD) || args.set_tid_size ||
+        (args.flags & CLONE_INTO_CGROUP))
         return -ENOSYS;
-    uint64_t flags = args.flags | (args.exit_signal & 0xFFULL);
-    return sys_clone_fork_compat(frame, flags, args.stack_size ? args.stack + args.stack_size : args.stack, args.parent_tid, args.child_tid, args.tls);
+
+    uint64_t child_stack = args.stack ? args.stack + args.stack_size : 0;
+    uint64_t flags = (args.flags & ~CLONE_CLEAR_SIGHAND) | args.exit_signal;
+    int64_t pid = sys_clone_fork_compat(frame, flags, child_stack,
+                                        args.parent_tid, args.child_tid, args.tls);
+    if (pid > 0 && (args.flags & CLONE_CLEAR_SIGHAND))
+        clone3_clear_signal_handlers((uint64_t)pid);
+    return pid;
 }
 
 
@@ -4502,10 +4312,7 @@ static int64_t sys_eventfd(uint64_t initial_value, int flags, int legacy) {
     return install_new_file(file, flags & EFD_CLOEXEC);
 }
 
-/* memfd_create(2); the name only shows up in /proc on Linux. MFD_ALLOW_SEALING
-   has to be real: Mesa asks for F_SEAL_SHRINK before handing a buffer to a
-   compositor and gives up when the request fails, which is how every OpenGL
-   client failed to open a window. */
+
 static int64_t sys_memfd_create(uint64_t user_name, uint32_t flags) {
     if (flags & ~(uint32_t)(MFD_CLOEXEC | MFD_ALLOW_SEALING)) return -EINVAL;
     char name[256];
@@ -4522,9 +4329,7 @@ static int64_t sys_memfd_create(uint64_t user_name, uint32_t flags) {
     return install_new_file(file, flags & MFD_CLOEXEC);
 }
 
-/* signalfd4(2). `fd` of -1 creates one; anything else re-arms the mask on an
-   existing descriptor. The caller is expected to have blocked these signals
-   first, exactly as on Linux. */
+
 static int64_t sys_signalfd(int fd, uint64_t user_mask, uint64_t mask_size,
                             int flags) {
     struct process *process = process_current();
@@ -4631,8 +4436,7 @@ static int64_t sys_epoll_ctl(int epoll_fd, int operation, int target_fd,
 static int64_t sys_epoll_wait_once(int epoll_fd, uint64_t user_events,
                                    int maximum, int commit_empty) {
     if (!user_events || maximum <= 0) return -EINVAL;
-    /* Clamp to our on-stack batch rather than rejecting: epoll_wait may return
-     * fewer than maxevents, and the caller loops.  Xorg's ospoll asks for 256. */
+
     if (maximum > 128) maximum = 128;
     struct file *file = file_from_fd(epoll_fd);
     if (!file || file->kind != FILE_KIND_EPOLL) return -EBADF;
@@ -4674,9 +4478,7 @@ static int64_t sys_inotify_rm_watch(int fd, int descriptor) {
     return inotify_remove_watch(file->inotify, descriptor);
 }
 
-/* How much of the machine the file cache may hold: a sixteenth of RAM, floored
-   and capped. The bound used to be the heap's own ceiling, so on a machine
-   with room the cache grew until something else could not allocate. */
+
 static uint64_t file_cache_budget(void) {
     static uint64_t budget;
     if (budget) return budget;
@@ -4686,9 +4488,7 @@ static uint64_t file_cache_budget(void) {
     return budget;
 }
 
-/* reboot(2). The magic numbers are not decoration: two constants and a command
-   mean a wild syscall with plausible arguments cannot take the machine away
-   by accident. */
+
 #define LINUX_REBOOT_MAGIC1 0xFEE1DEADU
 #define LINUX_REBOOT_MAGIC2 0x28121969U
 #define LINUX_REBOOT_MAGIC2A 0x05121996U
@@ -4710,8 +4510,7 @@ static int64_t sys_reboot(uint32_t magic1, uint32_t magic2, uint32_t command) {
         return -EINVAL;
 
     switch (command) {
-        /* These return, and are the reason this is not simply noreturn: an init
-           that turns the power button over to itself carries on running. */
+
         case LINUX_REBOOT_CMD_CAD_ON:  power_set_button_handled(1); return 0;
         case LINUX_REBOOT_CMD_CAD_OFF: power_set_button_handled(0); return 0;
         case LINUX_REBOOT_CMD_RESTART:   power_restart();
@@ -4725,10 +4524,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
     if (!frame) return;
     process_account_runtime();
     process_reap_deferred();
-    /* File contents live in the heap. Entering a syscall is the one moment when
-       no kernel path is holding a pointer into a file's buffer, so it is the
-       only safe place to drop them. The budget is the ordinary bound; the heap
-       running out is the emergency behind it, and takes everything. */
+
     vfs_trim_cache(file_cache_budget());
     if (heap_under_pressure()) vfs_reclaim_file_data(vfs_root);
     struct process *caller = process_current();
@@ -4786,11 +4582,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             frame->rax = (uint64_t)sys_mremap(frame->rdi, frame->rsi, frame->rdx,
                                               (int)frame->r10, frame->r8);
             break;
-        /* Advisory hints. write(2) reaches the disk as it happens and a read is
-           served from the cache either way, so there is nothing to prefetch or
-           drop. 0 rather than ENOSYS because these are public libc wrappers and
-           a stale errno leaks into later checks; both are defined as
-           best-effort, so a no-op conforms. */
+
         case SYS_MADVISE: frame->rax = 0; break;
         case SYS_FADVISE64: frame->rax = 0; break;
         case SYS_MSYNC:
@@ -4818,17 +4610,13 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             int fd = (int)frame->rdi;
             int64_t result = sys_ioctl(fd, (unsigned long)frame->rsi, frame->rdx);
             struct file *file = file_from_fd(fd);
-            /* An ioctl that moves data can run out of room, and on a blocking
-               descriptor it has to wait rather than fail: alsa-lib treats an
-               EAGAIN from WRITEI_FRAMES as a hard error. Only devices with a
-               write-readiness hook can block this way. */
+
             if (result == -EAGAIN && file && !(file->flags & O_NONBLOCK) &&
                 file->kind == FILE_KIND_VFS && file->node &&
                 file->node->write_ready) {
                 block_and_retry(frame, SYS_IOCTL, file, 1);
             } else if (result == -EAGAIN && (unsigned long)frame->rsi == VT_WAITACTIVE) {
-                /* VT_WAITACTIVE: sleep until the program holding the display
-                   releases it, rather than let the caller spin. */
+
                 if (process_signal_interrupts_wait()) {
                     frame->rax = (uint64_t)-(int64_t)EINTR;
                     break;
@@ -4868,8 +4656,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             }
             break;
         }
-        /* preadv/pwritev, as pread/pwrite are done a few lines above: move the
-           offset, run the vectored call, put it back. */
+
         case SYS_PREADV:
         case SYS_PWRITEV: {
             struct process *process = process_current();
@@ -4891,9 +4678,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             int writing = syscall_number == SYS_WRITEV;
             int fd = (int)frame->rdi;
             int64_t result = sys_readv_writev(fd, frame->rsi, (int)frame->rdx, writing);
-            /* readv/writev block exactly like read/write; coreutils reaches a
-               pipe through these, so leaving them unblocking surfaced EAGAIN
-               to userspace as "Resource temporarily unavailable". */
+
             struct file *file = file_from_fd(fd);
             if (result == -EAGAIN && file && !(file->flags & O_NONBLOCK))
                 block_and_retry(frame, syscall_number, file, writing);
@@ -5005,7 +4790,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         }
         case SYS_GETITIMER: {
             struct process *process = process_current();
-            if ((int)frame->rdi != 0 /* ITIMER_REAL */) {
+            if ((int)frame->rdi != 0 ) {
                 frame->rax = (uint64_t)-(int64_t)EINVAL;
                 break;
             }
@@ -5030,7 +4815,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         }
         case SYS_SETITIMER: {
             struct process *process = process_current();
-            if ((int)frame->rdi != 0 /* ITIMER_REAL */) {
+            if ((int)frame->rdi != 0 ) {
                 frame->rax = (uint64_t)-(int64_t)EINVAL;
                 break;
             }
@@ -5113,9 +4898,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             int64_t result = sys_connect(fd, frame->rsi, frame->rdx);
             struct process *process = process_current();
             struct file *file = process && fd >= 0 && fd < PROCESS_MAX_FDS ? process->files->fds[fd] : NULL;
-            /* A TCP connect() is asynchronous: it returns -EINPROGRESS while the
-               handshake is in flight. Block by re-issuing the syscall (each retry
-               pumps net_poll) unless the socket is non-blocking. */
+
             if (result == -EINPROGRESS && file && file->kind == FILE_KIND_INET_SOCKET &&
                 !(file->flags & O_NONBLOCK)) {
                 block_and_retry(frame, SYS_CONNECT, file, 1);
@@ -5195,15 +4978,14 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             break;
         }
         case SYS_WAITID: {
-            /* idtype/id translated to wait4's pid convention; frame->r8 is the
-             * struct rusage pointer, accepted and ignored exactly like wait4's. */
+
             int idtype = (int)frame->rdi;
             int64_t id = (int64_t)frame->rsi;
             int options = (int)frame->r10;
             int64_t pid_spec;
-            if (idtype == 0) pid_spec = -1;                     /* P_ALL */
-            else if (idtype == 1 && id > 0) pid_spec = id;      /* P_PID */
-            else if (idtype == 2 && id > 0) pid_spec = -id;     /* P_PGID */
+            if (idtype == 0) pid_spec = -1;
+            else if (idtype == 1 && id > 0) pid_spec = id;
+            else if (idtype == 2 && id > 0) pid_spec = -id;
             else { frame->rax = (uint64_t)-(int64_t)EINVAL; break; }
             if ((options & ~(WNOHANG | WEXITED | WSTOPPED | WCONTINUED)) ||
                 !(options & (WEXITED | WSTOPPED | WCONTINUED))) {
@@ -5222,8 +5004,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             break;
         }
         case SYS_KILL: frame->rax = (uint64_t)process_send_signal_checked((int64_t)frame->rdi, (int)frame->rsi); break;
-        /* Single-threaded here: a tid is a pid, so tkill(tid,sig) is kill(pid,sig).
-         * musl's raise()/abort() route through tkill. */
+
         case SYS_TKILL: frame->rax = (uint64_t)process_send_signal_checked((int64_t)frame->rdi, (int)frame->rsi); break;
         case SYS_TGKILL: frame->rax = (uint64_t)process_send_signal_checked((int64_t)frame->rsi, (int)frame->rdx); break;
         case SYS_UNAME: frame->rax = (uint64_t)sys_uname(frame->rdi); break;
@@ -5256,13 +5037,10 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
                     frame->rax = 0;
                 }
             } else if (command == F_GETLK || command == F_SETLK || command == F_SETLKW) {
-                /* F_SETLKW would wait; with whole-file granularity and a
-                   single contending process there is nothing to wait for, so
-                   it is answered like F_SETLK. */
+
                 frame->rax = (uint64_t)sys_fcntl_lock(fd, command, frame->rdx);
             } else if (command == F_ADD_SEALS || command == F_GET_SEALS) {
-                /* Only a memfd has seals; every other kind answers EINVAL,
-                   which is how a caller asks whether this one can be sealed. */
+
                 struct file *file = process->files->fds[fd];
                 if (file->kind != FILE_KIND_MEMFD) {
                     frame->rax = (uint64_t)-(int64_t)EINVAL;
@@ -5297,10 +5075,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         case SYS_FLOCK: {
             int operation = (int)frame->rsi;
             int64_t result = sys_flock((int)frame->rdi, operation);
-            /* Without LOCK_NB a contended lock waits instead of failing. The
-               retry rewinds the syscall and yields, so the process re-attempts
-               it after other work runs -- there is no per-lock wait queue, and
-               a lock this coarse is not worth one. */
+
             if (result == -EAGAIN && !(operation & FILE_LOCK_NB)) {
                 if (!retry_io_wait(frame, SYS_FLOCK, -1))
                     frame->rax = (uint64_t)result;
@@ -5317,7 +5092,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             frame->rax = (uint64_t)sys_fallocate((int)frame->rdi, (int)frame->rsi,
                                                  frame->rdx, frame->r10);
             break;
-        /* The legacy signalfd takes no flags; signalfd4 is what libc calls. */
+
         case SYS_SIGNALFD:
             frame->rax = (uint64_t)sys_signalfd((int)frame->rdi, frame->rsi,
                                                 frame->rdx, 0);
@@ -5355,10 +5130,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         case SYS_UMASK: frame->rax = process_set_umask((uint32_t)frame->rdi); break;
         case SYS_GETTIMEOFDAY: frame->rax = (uint64_t)sys_gettimeofday(frame->rdi); break;
         case SYS_GETRLIMIT: frame->rax = (uint64_t)sys_prlimit(frame->rdi, frame->rsi); break;
-        /* Nice selects a weight in the ordinary band, and getpriority reports
-           20 - nice so a negative one is not mistaken for an error --
-           pam_limits aborts the session on a failure here. PRIO_PROCESS is the
-           only `which` the scheduler knows. */
+
         case SYS_GETPRIORITY: {
             int nice = 0;
             frame->rax = process_get_nice(frame->rdi == 0 ? frame->rsi : 0, &nice) == 0
@@ -5372,9 +5144,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             break;
         }
         case SYS_GETRUSAGE: frame->rax = (uint64_t)sys_getrusage(frame->rsi); break;
-        /* Scheduling policy, which a thread may now actually have: what it buys
-           is being taken off the runnable list first. A thread id, not a
-           process id -- pthread_setschedparam passes one. */
+
         case SYS_SCHED_GETSCHEDULER: {
             int policy = 0;
             int result = process_get_scheduler(frame->rdi, &policy, NULL);
@@ -5401,8 +5171,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
                     frame->rax = (uint64_t)-(int64_t)EFAULT;
                     break;
                 }
-                /* The policy stays what it was; only the number inside it
-                   moves, which is what sched_setparam means. */
+
                 int policy = PROCESS_SCHED_OTHER;
                 int result = process_get_scheduler(frame->rdi, &policy, NULL);
                 if (result == 0)
@@ -5421,9 +5190,8 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
                              ? 0 : (uint64_t)-(int64_t)EFAULT;
             break;
         }
-        /* Both zero, which is what Linux answers for SCHED_OTHER. */
-        /* The range a policy's priority may take. Zero for the ordinary band
-           and 1..99 for the real-time ones, as everywhere else. */
+
+
         case SYS_SCHED_GET_PRIORITY_MAX:
             frame->rax = (frame->rdi == PROCESS_SCHED_FIFO ||
                           frame->rdi == PROCESS_SCHED_RR)
@@ -5449,12 +5217,10 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             else frame->rax = 0;
             break;
         }
-        /* Every processor takes the kernel lock to run a syscall, so a syscall
-           returning is already the barrier this asks for. */
+
         case SYS_MEMBARRIER: frame->rax = 0; break;
         case SYS_SYSINFO: frame->rax = (uint64_t)sys_sysinfo(frame->rdi); break;
-        /* time(2). glibc calls it rather than clock_gettime when it only wants
-           whole seconds, which procps does once per row it prints. */
+
         case SYS_TIME: {
             int64_t seconds = (int64_t)time_epoch_seconds();
             if (frame->rdi && copy_to_user(frame->rdi, &seconds, sizeof(seconds)) != 0)
@@ -5516,14 +5282,13 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             int operation = (int)frame->rsi;
             int command = operation & FUTEX_CMD_MASK;
             int bitset_form = command == FUTEX_WAIT_BITSET || command == FUTEX_WAKE_BITSET;
-            /* val3 carries the bitset; the plain commands mean all of it. */
+
             uint32_t bitset = bitset_form ? (uint32_t)frame->r9 : FUTEX_BITSET_MATCH_ANY;
             if (!bitset) {
                 frame->rax = (uint64_t)-(int64_t)EINVAL;
                 break;
             }
-            /* A private futex is one the caller promises nothing outside this
-               process can see, so it keeps the cheaper name. */
+
             int shared = !(operation & FUTEX_PRIVATE_FLAG);
             if (command == FUTEX_WAKE || command == FUTEX_WAKE_BITSET) {
                 frame->rax = (uint64_t)process_futex_wake(frame->rdi, (int)frame->rdx,
@@ -5542,9 +5307,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
                     }
                     timeout_ns = timeout.tv_sec > (INT64_MAX - timeout.tv_nsec) / 1000000000LL ?
                         INT64_MAX : timeout.tv_sec * 1000000000LL + timeout.tv_nsec;
-                    /* A bitset wait names the moment to give up rather than
-                       how long to wait, against whichever clock the operation
-                       chose. Turn it into the duration the wait wants. */
+
                     if (command == FUTEX_WAIT_BITSET) {
                         uint64_t now = (operation & FUTEX_CLOCK_REALTIME)
                             ? time_realtime_ns() : time_uptime_ns();
@@ -5699,12 +5462,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             else {
                 if (last >= PROCESS_MAX_FDS) last = PROCESS_MAX_FDS - 1;
                 if (flags & CLOSE_RANGE_CLOEXEC) {
-                    /* Mark the range close-on-exec rather than closing it now.
-                       glib/VTE's between-fork-and-exec spawn code calls
-                       close_range(3, ~0, CLOSE_RANGE_CLOEXEC) expecting its
-                       error-report pipe to stay open until the child execs;
-                       closing it here made every terminal spawn look like an
-                       instant child exit. */
+
                     for (uint64_t fd = first; fd <= last; fd++)
                         if (process->files->fds[fd])
                             process_set_fd_flags(process, (int)fd, PROCESS_FD_CLOEXEC);
@@ -5717,9 +5475,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             break;
         }
         default:
-            /* Gated behind TUNIX_DEBUG_LOGS so an unimplemented syscall never
-             * bleeds onto the user's terminal in normal use. kprintf has no
-             * length modifiers (no %llu); syscall numbers are small, so %u. */
+
             KDEBUG("syscall: ENOSYS pid=%u nr=%u\n",
                     (unsigned)process_current_pid(), (unsigned)syscall_number);
             frame->rax = (uint64_t)-(int64_t)ENOSYS;
@@ -5729,17 +5485,10 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
     if (!skip_signal_delivery) process_prepare_user_return(frame);
 }
 
-/* The frame arrived on the kernel stack of the process that made the call, and
-   a blocking syscall gives its processor away -- so that stack may already
-   belong to somebody else, whose first syscall writes over these bytes. It is
-   moved onto the stack of whoever is running here now. The lock cannot be
-   dropped from here: this function's return address is on that stack. */
+
 _Static_assert(sizeof(struct syscall_frame) == 144, "syscall_entry.S assumes 144");
 
-/* Which files a read or a write may move bytes through without excluding the
-   rest of the kernel: everything it touches must be private to the process or
-   behind a lock of its own. Inferring it from a null `data` pointer was wrong
-   -- device id zero is the keyboard -- so devfs says so by hand now. */
+
 static int file_may_share(const struct file *file) {
     if (!file) return 0;
     if (file->kind == FILE_KIND_PIPE_READ || file->kind == FILE_KIND_PIPE_WRITE)
@@ -5749,8 +5498,7 @@ static int file_may_share(const struct file *file) {
     return file->node->stateless != 0;
 }
 
-/* A read or a write attempted without excluding anyone. 0 when it could not be
-   finished that way, and the caller starts again holding the lock. */
+
 static int syscall_try_shared(struct syscall_frame *frame) {
     uint64_t number = frame->rax;
     int fd = (int)frame->rdi;
@@ -5763,15 +5511,14 @@ static int syscall_try_shared(struct syscall_frame *frame) {
         ? sys_read(fd, frame->rsi, (size_t)frame->rdx)
         : sys_write(fd, frame->rsi, (size_t)frame->rdx);
 
-    /* Would have blocked: leave it to the exclusive path, which can sleep. */
+
     if (result == -EAGAIN && !(file->flags & O_NONBLOCK)) return 0;
 
     frame->rax = (uint64_t)result;
     return 1;
 }
 
-/* Cheap enough to ask before any lock is held, because it reads nothing but
-   the number the process passed in a register. */
+
 static int syscall_number_may_share(uint64_t number) {
     return number == SYS_READ || number == SYS_WRITE;
 }
@@ -5781,8 +5528,7 @@ static int syscall_number_may_share(uint64_t number) {
 void syscall_dispatch(struct syscall_frame *frame) {
     uint64_t syscall_number = frame->rax;
     klock_note(KLOCK_NOTE_SYSCALL | (uint32_t)frame->rax);
-    /* The first syscall is the answer to one question and it is the question
-       that matters here: whether userland ran at all. */
+
     if (boot_verbose()) {
         static unsigned traced;
         if (traced < VERBOSE_SYSCALL_LIMIT) {
@@ -5795,7 +5541,7 @@ void syscall_dispatch(struct syscall_frame *frame) {
     if (syscall_number_may_share(frame->rax)) {
         kernel_lock_shared();
         if (syscall_try_shared(frame)) {
-            /* The entry stub releases whichever mode is held. */
+
             uint64_t top = cpu_current()->kernel_rsp;
             if (top) {
                 struct syscall_frame *resumed =
