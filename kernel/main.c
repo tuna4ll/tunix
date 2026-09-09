@@ -13,6 +13,7 @@
 #include "include/klock.h"
 #include "include/input.h"
 #include "include/ehci.h"
+#include "include/eventfs.h"
 #include "include/idt.h"
 #include "include/net/net.h"
 #include "include/pmm.h"
@@ -202,6 +203,7 @@ void kmain(const struct boot_info *boot) {
 #endif
 
     process_init();
+    eventfs_init();
     procfs_init();
     syscall_init();
     /* init= names the first program, so a machine that will not finish booting

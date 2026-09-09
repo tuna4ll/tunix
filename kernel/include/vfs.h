@@ -26,6 +26,7 @@
 #define VFS_HARDLINK    0x10000U
 /* A filesystem is mounted over this directory; `mounted` is its root. */
 #define VFS_MOUNTPOINT  0x20000U
+#define VFS_EVENTSTREAM 0x40000U
 
 /* Mount flags, with Linux's numbers because userspace passes Linux's. */
 #define VFS_MS_RDONLY   0x0001U

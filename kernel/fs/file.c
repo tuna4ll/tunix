@@ -13,6 +13,7 @@ extern uint64_t process_current_pid(void);
 #include "../include/drm.h"
 #include "../include/framebuffer.h"
 #include "../include/eventfd.h"
+#include "../include/eventfs.h"
 #include "../include/timerfd.h"
 #include "../include/epoll.h"
 #include "../include/inotify.h"
@@ -62,6 +63,16 @@ struct file *file_open_node(struct vfs_node *node, uint32_t flags) {
         file->pipe = node->fifo;
         if (write_end) node->fifo->writers++;
         else node->fifo->readers++;
+        return file;
+    }
+    if (node->flags & VFS_EVENTSTREAM) {
+        file->eventfs = eventfs_subscribe((enum eventfs_channel)(uintptr_t)node->data);
+        if (!file->eventfs) {
+            vfs_node_unref(node);
+            kfree(file);
+            return NULL;
+        }
+        file->kind = FILE_KIND_EVENTFS;
         return file;
     }
     if (node->flags & VFS_FRAMEBUFFER) {
@@ -200,6 +211,8 @@ struct file *file_create_pty_endpoint(struct pty_pair *pty, int master,
 }
 
 const void *file_read_wait_channel(struct file *file) {
+    if (file && file->kind == FILE_KIND_EVENTFS)
+        return eventfs_wait_channel(file->eventfs);
     if (file && file->kind == FILE_KIND_PIPE_READ && file->pipe)
         return &file->pipe->data_wait;
     /* A virtual terminal, which the keyboard wakes, so a login prompt is
@@ -311,6 +324,8 @@ void file_unref(struct file *file) {
         memfd_destroy(file->memfd);
     if (file->kind == FILE_KIND_SIGNALFD && file->signalfd)
         signalfd_destroy(file->signalfd);
+    if (file->kind == FILE_KIND_EVENTFS && file->eventfs)
+        eventfs_unsubscribe(file->eventfs);
     if (file->kind == FILE_KIND_DMABUF)
         drm_buffer_put(file->dmabuf_handle);
     if (file->kind == FILE_KIND_SOCKET && file->socket)
@@ -365,6 +380,8 @@ static int64_t file_read_locked(struct file *file, size_t size, void *buffer) {
         return inotify_read(file->inotify, size, buffer);
     if (file->kind == FILE_KIND_SIGNALFD)
         return signalfd_read(file->signalfd, size, buffer);
+    if (file->kind == FILE_KIND_EVENTFS)
+        return eventfs_read(file->eventfs, size, buffer);
     /* A memfd carries a file offset like a regular file, so that reading it
        without mapping it behaves the way any other descriptor would. */
     if (file->kind == FILE_KIND_MEMFD) {
@@ -461,6 +478,8 @@ uint32_t file_poll_events_nested(struct file *file, uint32_t requested,
         if (epoll_read_ready(file->epoll, depth)) events |= pollin;
     } else if (file->kind == FILE_KIND_INOTIFY) {
         if (inotify_read_ready(file->inotify)) events |= pollin;
+    } else if (file->kind == FILE_KIND_EVENTFS) {
+        if (eventfs_read_ready(file->eventfs)) events |= pollin;
     } else if (file->kind == FILE_KIND_VFS && file->node) {
         if (file->node->read_ready ? file->node->read_ready(file->node) :
             ((file->node->flags & 0xFFU) != VFS_CHARDEVICE)) events |= pollin;

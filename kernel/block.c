@@ -3,6 +3,7 @@
 #include "include/ahci.h"
 #include "include/ata.h"
 #include "include/block.h"
+#include "include/eventfs.h"
 #include "include/kstring.h"
 #include "include/nvme.h"
 #include "include/partition.h"
@@ -76,6 +77,7 @@ int block_register(const struct block_device *device) {
     entry->dev_name[3] = '\0';
     disk_count++;
     announce(device_count);
+    eventfs_emit_device_attach("block", entry->dev_name);
     return device_count++;
 }
 
@@ -105,6 +107,7 @@ int block_register_partition(int parent, int number, uint64_t start,
     entry->flush = partition_flush;
     entry->context = context;
     announce(device_count);
+    eventfs_emit_device_attach("block", entry->dev_name);
     return device_count++;
 }
 
