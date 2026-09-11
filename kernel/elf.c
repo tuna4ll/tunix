@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "include/elf.h"
+#include "include/heap.h"
 #include "include/kstring.h"
 #include "include/pmm.h"
 #include "include/process.h"
@@ -18,13 +19,11 @@
 #define PT_INTERP 3
 #define PF_X 1
 #define PF_W 2
-/* USER_STACK_TOP / USER_STACK_INITIAL_PAGES come from vmm.h, shared with the
-   page-fault handler that grows the stack past the initial mapping. */
 #define MAIN_PIE_BASE 0x0000550000000000ULL
 #define INTERP_BASE 0x00007F0000000000ULL
 #define DEFAULT_MMAP_BASE 0x0000600000000000ULL
-#define MAX_ARGC 64
-#define MAX_ENVC 64
+#define MAX_ARGC 512
+#define MAX_ENVC 512
 #define MAX_INTERP_PATH 256
 
 #define AT_NULL 0
@@ -302,12 +301,6 @@ static int load_image(struct process *process, struct vfs_node *file,
     loaded->phdr = program_header_virtual(header, programs, load_bias);
     loaded->image_start = minimum + load_bias;
     loaded->image_end = maximum + load_bias;
-    /*
-     * AT_PHDR is mandatory for dynamically linked main programs, but older
-     * Tunix static binaries were linked with a script that did not place the
-     * ELF/program headers in a PT_LOAD segment.  Accept those binaries here;
-     * elf_load_process() performs the stricter check after PT_INTERP is known.
-     */
     if (loaded->entry < 0x10000ULL ||
         loaded->entry >= USER_ADDRESS_LIMIT ||
         vmm_translate(process->cr3, loaded->entry, NULL, NULL) != 0) return -1;
@@ -347,22 +340,12 @@ static int push_u64(struct process *process, uint64_t *sp, uint64_t value) {
     return push_bytes(process, sp, &value, sizeof(value));
 }
 
-static int build_initial_stack(struct process *process,
+static int place_initial_stack(struct process *process,
                                const struct loaded_elf *main_image,
                                uint64_t interpreter_base,
-                               const char *const argv[], const char *const envp[]) {
-    uint64_t argv_addresses[MAX_ARGC];
-    uint64_t env_addresses[MAX_ENVC];
-    size_t argc = 0, envc = 0;
-    while (argv && argv[argc]) {
-        if (argc >= MAX_ARGC) return -1;
-        argc++;
-    }
-    while (envp && envp[envc]) {
-        if (envc >= MAX_ENVC) return -1;
-        envc++;
-    }
-
+                               const char *const argv[], const char *const envp[],
+                               size_t argc, size_t envc,
+                               uint64_t *argv_addresses, uint64_t *env_addresses) {
     uint64_t sp = USER_STACK_TOP;
     static const char platform[] = "x86_64";
     uint8_t random_bytes[16];
@@ -427,6 +410,28 @@ static int build_initial_stack(struct process *process,
     return 0;
 }
 
+static int build_initial_stack(struct process *process,
+                               const struct loaded_elf *main_image,
+                               uint64_t interpreter_base,
+                               const char *const argv[], const char *const envp[]) {
+    size_t argc = 0, envc = 0;
+    while (argv && argv[argc]) {
+        if (argc >= MAX_ARGC) return -1;
+        argc++;
+    }
+    while (envp && envp[envc]) {
+        if (envc >= MAX_ENVC) return -1;
+        envc++;
+    }
+
+    uint64_t *addresses = (uint64_t *)kmalloc((MAX_ARGC + MAX_ENVC) * sizeof(uint64_t));
+    if (!addresses) return -1;
+    int status = place_initial_stack(process, main_image, interpreter_base, argv, envp,
+                                     argc, envc, addresses, addresses + MAX_ARGC);
+    kfree(addresses);
+    return status;
+}
+
 int elf_load_process(struct process *process, struct vfs_node *file,
                      const char *const argv[], const char *const envp[]) {
     if (!process || !file || (file->flags & 0xFFU) != VFS_FILE ||
@@ -444,7 +449,6 @@ int elf_load_process(struct process *process, struct vfs_node *file,
                                          main_image.header, main_image.programs,
                                          interp_path);
     if (interp_status < 0) return -1;
-    /* musl's dynamic linker consumes AT_PHDR for the main executable. */
     if (interp_status > 0 && !main_image.phdr) return -1;
 
     struct loaded_elf interpreter;
@@ -463,7 +467,6 @@ int elf_load_process(struct process *process, struct vfs_node *file,
         interpreter_base = interpreter.load_bias;
     }
 
-    /* Only the initial window; deeper pages arrive via process_grow_user_stack. */
     uint64_t stack_bottom = USER_STACK_TOP - USER_STACK_INITIAL_PAGES * 4096ULL;
     for (uint64_t address = stack_bottom; address < USER_STACK_TOP; address += 4096) {
         uint64_t physical = (uint64_t)pmm_alloc_page();
