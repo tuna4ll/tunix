@@ -162,6 +162,18 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define SYS_CHDIR 80
 #define SYS_FCHDIR 81
 #define SYS_CHROOT 161
+#define SYS_SETXATTR 188
+#define SYS_LSETXATTR 189
+#define SYS_FSETXATTR 190
+#define SYS_GETXATTR 191
+#define SYS_LGETXATTR 192
+#define SYS_FGETXATTR 193
+#define SYS_LISTXATTR 194
+#define SYS_LLISTXATTR 195
+#define SYS_FLISTXATTR 196
+#define SYS_REMOVEXATTR 197
+#define SYS_LREMOVEXATTR 198
+#define SYS_FREMOVEXATTR 199
 #define SYS_RENAME 82
 #define SYS_MKDIR 83
 #define SYS_RMDIR 84
@@ -484,6 +496,7 @@ struct linux_clone_args {
 #define ENOTEMPTY 39
 #define ELOOP 40
 #define EOPNOTSUPP 95
+#define ENODATA 61
 #define ENOSPC 28
 #define EFBIG 27
 #define ENAMETOOLONG 36
@@ -2756,6 +2769,20 @@ static int64_t sys_getcwd(uint64_t user_buffer, size_t size) {
     size_t length = strlen(visible) + 1;
     if (length > size) return -ERANGE;
     return copy_to_user(user_buffer, visible, length) == 0 ? (int64_t)length : -EFAULT;
+}
+
+static int64_t xattr_target_exists(uint64_t user_path, int follow) {
+    char path[256];
+    int status = copy_path_at(AT_FDCWD, user_path, path);
+    if (status != 0) return status;
+    struct vfs_node *node = follow ? vfs_lookup(path) : vfs_lookup_nofollow(path);
+    return node ? 0 : -ENOENT;
+}
+
+static int64_t xattr_descriptor_exists(int fd) {
+    struct process *process = process_current();
+    if (!process || !process->files || fd < 0 || fd >= PROCESS_MAX_FDS) return -EBADF;
+    return process->files->fds[fd] ? 0 : -EBADF;
 }
 
 static int64_t sys_chroot(uint64_t user_path) {
@@ -5379,6 +5406,41 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         case SYS_CHDIR: frame->rax = (uint64_t)sys_chdir(frame->rdi); break;
         case SYS_FCHDIR: frame->rax = (uint64_t)sys_fchdir((int)frame->rdi); break;
         case SYS_CHROOT: frame->rax = (uint64_t)sys_chroot(frame->rdi); break;
+        case SYS_SETXATTR:
+        case SYS_LSETXATTR: {
+            int64_t status = xattr_target_exists(frame->rdi, syscall_number == SYS_SETXATTR);
+            frame->rax = (uint64_t)(status != 0 ? status : -(int64_t)EOPNOTSUPP);
+            break;
+        }
+        case SYS_FSETXATTR: {
+            int64_t status = xattr_descriptor_exists((int)frame->rdi);
+            frame->rax = (uint64_t)(status != 0 ? status : -(int64_t)EOPNOTSUPP);
+            break;
+        }
+        case SYS_GETXATTR:
+        case SYS_LGETXATTR:
+        case SYS_REMOVEXATTR:
+        case SYS_LREMOVEXATTR: {
+            int follow = syscall_number == SYS_GETXATTR || syscall_number == SYS_REMOVEXATTR;
+            int64_t status = xattr_target_exists(frame->rdi, follow);
+            frame->rax = (uint64_t)(status != 0 ? status : -(int64_t)ENODATA);
+            break;
+        }
+        case SYS_FGETXATTR:
+        case SYS_FREMOVEXATTR: {
+            int64_t status = xattr_descriptor_exists((int)frame->rdi);
+            frame->rax = (uint64_t)(status != 0 ? status : -(int64_t)ENODATA);
+            break;
+        }
+        case SYS_LISTXATTR:
+        case SYS_LLISTXATTR: {
+            int64_t status = xattr_target_exists(frame->rdi, syscall_number == SYS_LISTXATTR);
+            frame->rax = (uint64_t)status;
+            break;
+        }
+        case SYS_FLISTXATTR:
+            frame->rax = (uint64_t)xattr_descriptor_exists((int)frame->rdi);
+            break;
         case SYS_RENAME: frame->rax = (uint64_t)sys_rename_at(AT_FDCWD, frame->rdi, AT_FDCWD, frame->rsi, 0); break;
         case SYS_MKDIR: frame->rax = (uint64_t)sys_mkdir_at(AT_FDCWD, frame->rdi, frame->rsi); break;
         case SYS_RMDIR: frame->rax = (uint64_t)sys_unlink_at(AT_FDCWD, frame->rdi, AT_REMOVEDIR); break;
