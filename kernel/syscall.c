@@ -5120,7 +5120,8 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             else if (idtype == 1 && id > 0) pid_spec = id;
             else if (idtype == 2 && id > 0) pid_spec = -id;
             else { frame->rax = (uint64_t)-(int64_t)EINVAL; break; }
-            if ((options & ~(WNOHANG | WEXITED | WSTOPPED | WCONTINUED)) ||
+            options &= ~(WNOTHREAD | WALLCHILDREN | WCLONE);
+            if ((options & ~(WNOHANG | WNOWAIT | WEXITED | WSTOPPED | WCONTINUED)) ||
                 !(options & (WEXITED | WSTOPPED | WCONTINUED))) {
                 frame->rax = (uint64_t)-(int64_t)EINVAL;
                 break;

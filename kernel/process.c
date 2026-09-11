@@ -1995,7 +1995,7 @@ int64_t process_waitid_from_syscall(int64_t pid_spec, uint64_t info_user,
                     }
                     if (vmm_copy_to_space(parent->cr3, info_user, &info,
                                           sizeof(info)) != 0) return -EFAULT;
-                    mark_dead(item);
+                    if (!(options & WNOWAIT)) mark_dead(item);
                     return 0;
                 }
                 if ((options & WSTOPPED) && item->state == PROCESS_STOPPED &&
@@ -2006,7 +2006,7 @@ int64_t process_waitid_from_syscall(int64_t pid_spec, uint64_t info_user,
                     info.si_status = item->stop_signal & 0xFF;
                     if (vmm_copy_to_space(parent->cr3, info_user, &info,
                                           sizeof(info)) != 0) return -EFAULT;
-                    item->stop_reported = 1;
+                    if (!(options & WNOWAIT)) item->stop_reported = 1;
                     return 0;
                 }
                 if ((options & WCONTINUED) && item->continued_pending) {
@@ -2016,7 +2016,7 @@ int64_t process_waitid_from_syscall(int64_t pid_spec, uint64_t info_user,
                     info.si_status = SIGCONT;
                     if (vmm_copy_to_space(parent->cr3, info_user, &info,
                                           sizeof(info)) != 0) return -EFAULT;
-                    item->continued_pending = 0;
+                    if (!(options & WNOWAIT)) item->continued_pending = 0;
                     return 0;
                 }
             }
