@@ -148,6 +148,7 @@ struct process {
     uint64_t signal_saved_mask;
     int in_signal;
     struct syscall_frame signal_saved_frame;
+    uint64_t signal_context_address;
     struct tunix_sigaction signal_actions[TUNIX_NSIG];
 
     struct process *next;

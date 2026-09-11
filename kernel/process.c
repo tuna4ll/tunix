@@ -2138,9 +2138,19 @@ int64_t process_setsid(void) {
     return (int64_t)current->sid;
 }
 
+static void read_user_context(struct syscall_frame *frame, const uint8_t *context);
+
 int process_sigreturn(struct syscall_frame *frame) {
     if (!current || !frame || !current->in_signal) return -EINVAL;
     *frame = current->signal_saved_frame;
+    if (current->signal_context_address) {
+        uint8_t context[SIGNAL_CONTEXT_SIZE];
+        if (vmm_copy_from_space(current->cr3, context,
+                                current->signal_context_address,
+                                SIGNAL_CONTEXT_SIZE) == 0)
+            read_user_context(frame, context);
+    }
+    current->signal_context_address = 0;
     current->signal_blocked = current->signal_saved_mask;
     current->in_signal = 0;
     return 0;
@@ -2172,6 +2182,69 @@ int process_signal_interrupts_wait(void) {
         !signal_would_act(current, next_pending_signal(current))) return 0;
     current->syscall_rewound = 0;
     return 1;
+}
+
+static void mcontext_put(uint8_t *context, unsigned slot, uint64_t value) {
+    memcpy(context + UCONTEXT_MCONTEXT_OFFSET + slot * 8U, &value, sizeof(value));
+}
+
+static uint64_t mcontext_get(const uint8_t *context, unsigned slot) {
+    uint64_t value;
+    memcpy(&value, context + UCONTEXT_MCONTEXT_OFFSET + slot * 8U, sizeof(value));
+    return value;
+}
+
+static void fill_user_context(uint8_t *context, const struct syscall_frame *frame,
+                              uint64_t blocked) {
+    mcontext_put(context, MCONTEXT_R8, frame->r8);
+    mcontext_put(context, MCONTEXT_R9, frame->r9);
+    mcontext_put(context, MCONTEXT_R10, frame->r10);
+    mcontext_put(context, MCONTEXT_R11, frame->r11);
+    mcontext_put(context, MCONTEXT_R12, frame->r12);
+    mcontext_put(context, MCONTEXT_R13, frame->r13);
+    mcontext_put(context, MCONTEXT_R14, frame->r14);
+    mcontext_put(context, MCONTEXT_R15, frame->r15);
+    mcontext_put(context, MCONTEXT_RDI, frame->rdi);
+    mcontext_put(context, MCONTEXT_RSI, frame->rsi);
+    mcontext_put(context, MCONTEXT_RBP, frame->rbp);
+    mcontext_put(context, MCONTEXT_RBX, frame->rbx);
+    mcontext_put(context, MCONTEXT_RDX, frame->rdx);
+    mcontext_put(context, MCONTEXT_RAX, frame->rax);
+    mcontext_put(context, MCONTEXT_RCX, frame->rcx);
+    mcontext_put(context, MCONTEXT_RSP, frame->user_rsp);
+    mcontext_put(context, MCONTEXT_RIP, frame->user_rip);
+    mcontext_put(context, MCONTEXT_EFLAGS, frame->user_rflags);
+    memcpy(context + UCONTEXT_SIGMASK_OFFSET, &blocked, sizeof(blocked));
+    uint64_t stack_pointer = current ? current->signal_stack_pointer : 0;
+    uint64_t stack_size = current ? current->signal_stack_size : 0;
+    uint32_t stack_flags = current ? (uint32_t)current->signal_stack_flags : SS_DISABLE;
+    memcpy(context + UCONTEXT_STACK_OFFSET, &stack_pointer, sizeof(stack_pointer));
+    memcpy(context + UCONTEXT_STACK_OFFSET + 8, &stack_flags, sizeof(stack_flags));
+    memcpy(context + UCONTEXT_STACK_OFFSET + 16, &stack_size, sizeof(stack_size));
+}
+
+static void read_user_context(struct syscall_frame *frame, const uint8_t *context) {
+    frame->r8 = mcontext_get(context, MCONTEXT_R8);
+    frame->r9 = mcontext_get(context, MCONTEXT_R9);
+    frame->r10 = mcontext_get(context, MCONTEXT_R10);
+    frame->r11 = mcontext_get(context, MCONTEXT_R11);
+    frame->r12 = mcontext_get(context, MCONTEXT_R12);
+    frame->r13 = mcontext_get(context, MCONTEXT_R13);
+    frame->r14 = mcontext_get(context, MCONTEXT_R14);
+    frame->r15 = mcontext_get(context, MCONTEXT_R15);
+    frame->rdi = mcontext_get(context, MCONTEXT_RDI);
+    frame->rsi = mcontext_get(context, MCONTEXT_RSI);
+    frame->rbp = mcontext_get(context, MCONTEXT_RBP);
+    frame->rbx = mcontext_get(context, MCONTEXT_RBX);
+    frame->rdx = mcontext_get(context, MCONTEXT_RDX);
+    frame->rax = mcontext_get(context, MCONTEXT_RAX);
+    frame->rcx = mcontext_get(context, MCONTEXT_RCX);
+    uint64_t rsp = mcontext_get(context, MCONTEXT_RSP);
+    uint64_t rip = mcontext_get(context, MCONTEXT_RIP);
+    if (rsp && rsp < USER_ADDRESS_LIMIT) frame->user_rsp = rsp;
+    if (rip && rip < USER_ADDRESS_LIMIT) frame->user_rip = rip;
+    uint64_t flags = mcontext_get(context, MCONTEXT_EFLAGS);
+    frame->user_rflags = (flags & ~(uint64_t)0x200D5UL & 0x3F7FD5UL) | 0x202UL;
 }
 
 static int on_signal_stack(const struct process *process, uint64_t user_rsp) {
@@ -2240,11 +2313,12 @@ void process_prepare_user_return(struct syscall_frame *frame) {
     uint64_t siginfo_address = 0;
     uint64_t context_address = 0;
     if (action->flags & SA_SIGINFO) {
-        uint8_t zeros[SIGNAL_CONTEXT_SIZE];
-        memset(zeros, 0, sizeof(zeros));
+        uint8_t context[SIGNAL_CONTEXT_SIZE];
+        memset(context, 0, sizeof(context));
+        fill_user_context(context, frame, current->signal_blocked);
         area -= SIGNAL_CONTEXT_SIZE;
         context_address = area;
-        if (vmm_copy_to_space(current->cr3, context_address, zeros, SIGNAL_CONTEXT_SIZE) != 0) {
+        if (vmm_copy_to_space(current->cr3, context_address, context, SIGNAL_CONTEXT_SIZE) != 0) {
             process_exit_from_signal(frame, SIGSEGV);
             return;
         }
@@ -2275,6 +2349,7 @@ void process_prepare_user_return(struct syscall_frame *frame) {
         return;
     }
     current->signal_saved_frame = *frame;
+    current->signal_context_address = context_address;
     current->signal_saved_mask = current->signal_blocked;
     current->signal_blocked |= action->mask | bit;
     current->in_signal = 1;
