@@ -26,8 +26,6 @@ static int process_wake_all_locked(const void *channel);
 #include "include/vfs.h"
 #include "include/vmm.h"
 
-/* 32 KiB of kernel stack, because overflowing it resets the machine with
-   nothing printed. */
 #define KERNEL_STACK_SIZE (32 * 1024)
 #define ECHILD 10
 #define EINTR 4
@@ -51,10 +49,8 @@ static int process_wake_all_locked(const void *channel);
 #define NICE_0_WEIGHT 1024ULL
 #define TICK_NS (1000000000ULL / TIMER_FREQUENCY_HZ)
 #define SCHED_TARGET_LATENCY_NS (SCHED_TARGET_LATENCY_TICKS * TICK_NS)
-/* A sample longer than a second measured two clocks that disagree, so it is dropped. */
 #define SCHED_MAX_SAMPLE_NS 1000000000ULL
 
-/* Linux's well-tested geometric nice scale, rounded to integer weights. */
 static const uint32_t nice_weights[40] = {
     88761, 71755, 56483, 46273, 36291, 29154, 23254, 18705, 14949, 11916,
      9548,  7620,  6100,  4904,  3906,  3121,  2501,  1991,  1586,  1277,
@@ -70,8 +66,6 @@ static uint64_t process_weight(const struct process *process) {
 }
 
 extern void process_enter_user(uint64_t entry, uint64_t user_stack, uint64_t cr3) __attribute__((noreturn));
-/* Park on the idle stack; the first releases the kernel lock, the
-   second never held it. */
 extern void cpu_enter_idle(uint64_t idle_stack_top) __attribute__((noreturn));
 extern void cpu_idle_park(uint64_t idle_stack_top) __attribute__((noreturn));
 extern void kprintf(const char *fmt, ...);
@@ -85,11 +79,8 @@ extern void panic(const char *msg) __attribute__((noreturn));
 
 static struct process *queue;
 static uint64_t next_pid = 1;
-/* Whether anything is waiting to be reaped, so the entry path can look at one
-   word instead of walking the queue on every syscall. */
 static int reap_pending;
 
-/* The running process, per processor, as a macro so the GS load cannot be hoisted. */
 #define current (cpu_current()->current)
 
 static void signal_one_process(struct process *target, int signal_number);
@@ -98,7 +89,6 @@ static struct process_memory *memory_create(uint64_t cr3, uint64_t brk_start,
                                             uint64_t brk_end, uint64_t mmap_base) {
     struct process_memory *memory = (struct process_memory *)kmalloc(sizeof(*memory));
     if (!memory) return NULL;
-    /* Zero first: the mapping table must start empty, not full of stack junk. */
     memset(memory, 0, sizeof(*memory));
     memory->cr3 = cr3;
     memory->refs = 1;
@@ -125,8 +115,6 @@ static void memory_unref(struct process_memory *memory) {
     kfree(memory);
 }
 
-/* fork gives the child its own space, so the mapping records are copied
-   and referenced again. */
 static void memory_copy_mappings(struct process_memory *destination,
                                  const struct process_memory *source) {
     if (!destination || !source) return;
@@ -146,7 +134,6 @@ static inline void wrmsr(uint32_t msr, uint64_t value) {
     uint32_t high = (uint32_t)(value >> 32);
     __asm__ volatile("wrmsr" : : "c"(msr), "a"(low), "d"(high));
 }
-
 
 static void set_process_cmdline(struct process *process, const char *path,
                                 const char *const argv[]) {
@@ -192,9 +179,6 @@ static void enqueue(struct process *process) {
     process->next = queue;
 }
 
-
-/* --- the process dump ----------------------------------------------------- */
-
 static const char *state_name(int state) {
     switch (state) {
         case PROCESS_READY:   return "ready";
@@ -206,7 +190,6 @@ static const char *state_name(int state) {
     }
 }
 
-/* The mapped object a user address falls in, for a process that is not the running one. */
 static const char *object_at(const struct process *process, uint64_t address,
                              uint64_t *offset_out) {
     *offset_out = address;
@@ -221,7 +204,6 @@ static const char *object_at(const struct process *process, uint64_t address,
     return "?";
 }
 
-/* Every process, what it is doing, and the user address where it stopped doing it. */
 void process_dump_wakes(void);
 static void futex_note(char kind, uint64_t address, int woken, int maximum, unsigned value);
 
@@ -315,8 +297,6 @@ static struct file_table *file_table_create(void) {
     return table;
 }
 
-/* fork gives the child its own table holding new references to the same open
-   files, so descriptors diverge from here while file offsets stay shared. */
 static struct file_table *file_table_clone(const struct file_table *source) {
     struct file_table *table = file_table_create();
     if (!table || !source) return table;
@@ -330,8 +310,6 @@ static struct file_table *file_table_clone(const struct file_table *source) {
     return table;
 }
 
-/* Drop this process's reference to its descriptor table, where the files close
-   only when the last thread sharing it lets go. */
 static void process_release_files(struct process *process) {
     if (!process || !process->files) return;
     struct file_table *table = process->files;
@@ -348,7 +326,6 @@ static void process_release_files(struct process *process) {
     kfree(table);
 }
 
-/* Defined with the scheduler, below, but needed by process creation above it. */
 static void fpu_save(struct process *process);
 static void fpu_init_state(struct process *process);
 
@@ -386,10 +363,6 @@ static void destroy_process_resources(struct process *process) {
     KDEBUG("process: reaped pid=%u\n", (unsigned)pid);
 }
 
-/* Called at the top of every syscall, so the cost of finding nothing to do is
-   the cost of every syscall: it used to walk the queue twice each time, which
-   measured 321 ns for getpid on an empty machine and 1349 ns with 193
-   processes on it. */
 void process_reap_deferred(void) {
     if (!reap_pending) return;
 
@@ -402,8 +375,6 @@ void process_reap_deferred(void) {
         struct process *victim = NULL;
         do {
             if (item->state == PROCESS_DEAD) {
-                /* Dead but loaded on this processor, so somebody is still
-                   standing on its stack. */
                 if (item == current) skipped = 1;
                 else { victim = item; break; }
             }
@@ -415,8 +386,6 @@ void process_reap_deferred(void) {
         if (victim->next == victim) {
             queue = NULL;
         } else {
-            /* The head has no predecessor until the ring is walked for one, and
-               only the head ever needs it. */
             if (!previous) {
                 previous = queue;
                 while (previous->next != queue) previous = previous->next;
@@ -438,6 +407,22 @@ static void install_console(struct process *process) {
     process->files->fds[1] = console;
     file_ref(console);
     process->files->fds[2] = console;
+}
+
+/* /proc/<pid>/exe names the file that is running, not the name it was started
+   under. A program reached through a symlink finds its own installation
+   directory by reading that link, so the invocation path is the wrong answer:
+   Firefox, whose /usr/bin entry is a symlink into /usr/lib/firefox, looked for
+   dependentlibs.list beside /usr/bin/firefox, did not find it, and reported
+   "Couldn't load XPCOM." vfs_lookup() has already followed the symlink, so the
+   node it returned is the one to name. */
+static void set_exe_path(struct process *process, struct vfs_node *file,
+                         const char *path) {
+    if (file && vfs_node_path(file, process->exe_path,
+                              sizeof(process->exe_path)) == 0)
+        return;
+    strncpy(process->exe_path, path, sizeof(process->exe_path) - 1);
+    process->exe_path[sizeof(process->exe_path) - 1] = '\0';
 }
 
 struct process *process_create_from_path(const char *path) {
@@ -472,7 +457,7 @@ struct process *process_create_from_path(const char *path) {
     process->cwd = vfs_root;
     vfs_node_ref(process->cwd);
     strncpy(process->name, file->name, sizeof(process->name) - 1);
-    strncpy(process->exe_path, path, sizeof(process->exe_path) - 1);
+    set_exe_path(process, file, path);
     process->cr3 = vmm_create_address_space();
     if (!process->cr3) {
         kprintf("process: address-space creation failed for %s\n", path);
@@ -524,8 +509,6 @@ struct process *process_create_from_path(const char *path) {
     enqueue(process);
     procfs_register_process(process);
     eventfs_emit_process_exec(process->cred.euid, process->pid, process->name);
-    /* init starts life in the foreground of the first terminal, which is what
-       makes Ctrl-C typed before anything has logged in go somewhere. */
     if (process->pid == 1) tty_set_foreground_pgid(vt_tty(1U), (int)process->pgid);
     KDEBUG("process: pid=%u path=%s entry=%p cr3=%p\n",
             (unsigned)process->pid, path, (void *)process->entry, (void *)process->cr3);
@@ -556,7 +539,6 @@ uint32_t process_set_umask(uint32_t mask) {
     return old;
 }
 
-/* READY and not RUNNING, because RUNNING means a processor has it loaded right now. */
 static int allowed_on_this_cpu(const struct process *process) {
     if (!process) return 0;
     uint64_t mask = process->affinity_mask ? process->affinity_mask : ~0ULL;
@@ -567,11 +549,8 @@ static int runnable(const struct process *process) {
     return process && process->state == PROCESS_READY && allowed_on_this_cpu(process);
 }
 
-/* The virtual runtime the runnable set has reached, which only goes forward. */
 static uint64_t minimum_virtual_runtime;
 
-/* Where a sleeper is placed on waking, or it comes back with the credit
-   of everything it missed. */
 static void place_waking_task(struct process *process) {
     if (!process || process->rt_priority) return;
     uint64_t credit = SCHED_TARGET_LATENCY_NS / 2;
@@ -579,8 +558,6 @@ static void place_waking_task(struct process *process) {
     if (process->virtual_runtime_ns < floor) process->virtual_runtime_ns = floor;
 }
 
-/* Runnable again after being off the queue, which is the transition that needs placing. */
-/* Finished, and the reaper has something to do. */
 static void mark_dead(struct process *process) {
     if (!process) return;
     process->state = PROCESS_DEAD;
@@ -639,7 +616,6 @@ static void wake_expired_futex_waiters(void) {
     } while (item != queue);
 }
 
-/* Who runs next: the highest priority anything runnable has, round robin among equals. */
 static int higher_priority_waiting(const struct process *than) {
     if (!queue || !than) return 0;
     struct process *walk = queue;
@@ -655,7 +631,6 @@ static int ordinary_should_preempt(const struct process *running) {
     if (!queue || !running || running->rt_priority) return 0;
     struct process *walk = queue;
     do {
-        /* Signed, so the comparison survives a virtual runtime going round. */
         if (walk != running && runnable(walk) && !walk->rt_priority &&
             (int64_t)(walk->virtual_runtime_ns + SCHED_WAKEUP_GRANULARITY_NS -
                       running->virtual_runtime_ns) < 0)
@@ -704,8 +679,6 @@ static struct process *next_runnable(struct process *after) {
     struct process *start = candidate;
     if (best == 0) {
         struct process *selected = NULL;
-        /* The floor is taken over RUNNING as well as READY, or on four processors
-           it runs away. */
         uint64_t lowest = 0;
         int have_lowest = 0;
         do {
@@ -732,7 +705,6 @@ static struct process *next_runnable(struct process *after) {
     return NULL;
 }
 
-/* A thread's own scheduling, where SCHED_FIFO is accepted and scheduled as SCHED_RR. */
 static struct process *scheduling_target(uint64_t tid) {
     if (!tid) return current;
     return process_find(tid);
@@ -814,27 +786,18 @@ static void fpu_restore(struct process *process) {
     if (process) __asm__ volatile("fxrstor64 (%0)" : : "r"(process->fpu_state) : "memory");
 }
 
-/* The register state a process starts with, built by hand so the live
-   registers are untouched. */
 static void fpu_init_state(struct process *process) {
     if (!process) return;
     memset(process->fpu_state, 0, sizeof(process->fpu_state));
-    /* FCW, with every exception masked at extended precision, rounding to
-       nearest. */
     process->fpu_state[0] = 0x7F;
     process->fpu_state[1] = 0x03;
-    /* MXCSR at offset 24, likewise with every exception masked. */
     process->fpu_state[24] = 0x80;
     process->fpu_state[25] = 0x1F;
-    /* MXCSR_MASK at offset 28, holding the value every CPU since the PIII
-       reports. */
     process->fpu_state[28] = 0xFF;
     process->fpu_state[29] = 0xFF;
 }
 
 static void activate_process(struct process *process) {
-    /* The outgoing process's registers have to be put away before the incoming
-       one's are loaded, and `current` is still the outgoing process here. */
     if (current && current != process) fpu_save(current);
     current = process;
     if (!process->time_slice_ticks)
@@ -845,8 +808,6 @@ static void activate_process(struct process *process) {
     process->state = PROCESS_RUNNING;
     set_kernel_stack(process->kernel_stack_top);
     syscall_set_kernel_stack(process->kernel_stack_top);
-    /* Only when it is a different one, because writing CR3 throws away every
-       cached translation. */
     if (cpu_current()->address_space != process->cr3) {
         vmm_activate(process->cr3);
         cpu_current()->address_space = process->cr3;
@@ -910,7 +871,6 @@ static int switch_to_next(struct syscall_frame *frame, struct process *after) {
     return 0;
 }
 
-/* Nothing left to run, so the processor parks and its next tick brings it work. */
 static void go_idle(void) __attribute__((noreturn));
 static void go_idle(void) {
     klock_note(KLOCK_NOTE_IDLE);
@@ -920,28 +880,20 @@ static void go_idle(void) {
     }
     vmm_activate(vmm_kernel_cr3());
     cpu_current()->address_space = 0;
-    /* Both kernel-stack pointers name a process that may be reaped at any moment. */
     set_kernel_stack(cpu_current()->idle_stack_top);
     syscall_set_kernel_stack(cpu_current()->idle_stack_top);
     cpu_enter_idle(cpu_current()->idle_stack_top);
 }
 
-/* Park, and let the ordinary path start the first process. Entering user mode
-   here at the ELF entry restarted a program another processor had already
-   begun, which is one syscall call happening twice; the tick starts whatever
-   is ready from the saved frame, fresh or not. */
 void process_start_first(void) {
     klock_note(KLOCK_NOTE_FIRST_RUN);
     kernel_lock();
     go_idle();
 }
 
-/* Every processor but the first arrives here, with nothing to run yet. */
 void process_run_idle(void) {
     cpu_idle_park(cpu_current()->idle_stack_top);
 }
-
-/* Map one more stack page, so walking past the initial mapping grows the stack. */
 
 static struct vm_area **area_list(void) {
     return current && current->memory ? &current->memory->areas : NULL;
@@ -962,10 +914,6 @@ static struct vm_area *area_alloc(uint64_t start, uint64_t end,
     if (file) file_ref(file);
     if ((kind & VM_FILE_PAGES) && file) {
         vfs_map_ref(file->node);
-        /* A file-pages area is writable only when it is MAP_SHARED: the private
-           kind is mapped read-only and faults a copy in. So the page flags are
-           enough to tell a mapping that can store into the file from one that
-           cannot. */
         if (page_flags & PAGE_WRITE)
             vfs_map_write_ref(file->node, offset, end - start);
     }
@@ -974,10 +922,7 @@ static struct vm_area *area_alloc(uint64_t start, uint64_t end,
 
 static void area_free(struct vm_area *area) {
     if (!area) return;
-    /* Before the file reference and not after, because dropping the last one
-       can free the descriptor the node is reached through. */
     if ((area->kind & VM_FILE_PAGES) && area->file) {
-        /* Before the cache reference, so the contents are still there to write. */
         if (area->page_flags & PAGE_WRITE) vfs_map_write_unref(area->file->node);
         vfs_map_unref(area->file->node);
     }
@@ -985,8 +930,6 @@ static void area_free(struct vm_area *area) {
     kfree(area);
 }
 
-/* Splitting keeps the offset pointing at the same place in the backing object,
-   which is the whole reason the offset is recorded. */
 static struct vm_area *area_split_at(struct vm_area *area, uint64_t cut) {
     struct vm_area *tail = area_alloc(cut, area->end, area->page_flags,
                                       area->kind, area->file,
@@ -998,8 +941,6 @@ static struct vm_area *area_split_at(struct vm_area *area, uint64_t cut) {
     return tail;
 }
 
-/* Insert keeping the list sorted and non-overlapping, the caller having
-   already cleared whatever used to live in the range. */
 static void area_insert(struct vm_area **list, struct vm_area *area) {
     struct vm_area **link = list;
     while (*link && (*link)->start < area->start) link = &(*link)->next;
@@ -1018,7 +959,6 @@ int process_map_area(uint64_t start, uint64_t end, uint64_t page_flags,
     return 0;
 }
 
-/* Remove a range from the map, splitting the area it falls inside. */
 void process_unmap_area(uint64_t start, uint64_t end) {
     struct vm_area **list = area_list();
     if (!list || start >= end) return;
@@ -1051,8 +991,6 @@ void process_unmap_area(uint64_t start, uint64_t end) {
     }
 }
 
-/* mprotect over part of an area splits it, so the new permissions apply to
-   exactly the range asked for. */
 void process_protect_area(uint64_t start, uint64_t end, uint64_t page_flags) {
     struct vm_area **list = area_list();
     if (!list || start >= end) return;
@@ -1064,8 +1002,6 @@ void process_protect_area(uint64_t start, uint64_t end, uint64_t page_flags) {
             link = &area->next;
             continue;
         }
-        /* Trim what lies outside the range rather than stepping over it, which
-           changed nothing at all. */
         if (area->start < start || area->end > end) {
             uint64_t cut = area->start < start ? start : end;
             if (!area_split_at(area, cut)) {
@@ -1088,7 +1024,6 @@ int process_area_range_free(uint64_t start, uint64_t end) {
     return 1;
 }
 
-/* Walk the gaps between areas rather than probing address by address. */
 int process_find_free_range(uint64_t start, uint64_t length, uint64_t *base_out) {
     struct vm_area **list = area_list();
     if (!list || !length || !base_out) return -1;
@@ -1104,8 +1039,6 @@ int process_find_free_range(uint64_t start, uint64_t length, uint64_t *base_out)
     return 0;
 }
 
-/* msync(2). Says whether the range held a mapping at all, because a range that
-   holds none is an error rather than a sync of nothing. */
 int process_sync_file_areas(uint64_t start, uint64_t end) {
     struct vm_area **list = area_list();
     if (!list) return 0;
@@ -1131,10 +1064,6 @@ struct vm_area *process_find_area(uint64_t address) {
     return NULL;
 }
 
-/* What to do when a page cannot be had. Cheapest first: the file cache is
-   replaceable and costs a re-read, and only when it has nothing left does the
-   largest process have to die -- rather than whoever touched a page next
-   getting SIGSEGV with nothing reclaimed. 1 when it is worth trying again. */
 static int reclaim_or_kill(void) {
     if (vfs_reclaim_file_data(vfs_root)) return 1;
 
@@ -1156,12 +1085,9 @@ static int reclaim_or_kill(void) {
             (unsigned)victim->pid, victim->name,
             (unsigned)(worst / 256U));
     (void)process_send_signal((int64_t)victim->pid, SIGKILL);
-    /* The pages come back as the victim is torn down, not here, so the caller
-       still fails this one allocation. */
     return 0;
 }
 
-/* One page of anonymous memory, with the out-of-memory answer behind it. */
 static uint64_t alloc_user_page(void) {
     uint64_t physical = (uint64_t)pmm_alloc_page();
     if (!physical && reclaim_or_kill()) physical = (uint64_t)pmm_alloc_page();
@@ -1173,7 +1099,6 @@ int process_commit_area(uint64_t fault_address) {
     uint64_t page = fault_address & ~4095ULL;
     struct vm_area *area = process_find_area(page);
     if (!area || !(area->kind & VM_ANONYMOUS)) return 0;
-    /* Mapped already, so another thread committed it between the fault and the handler. */
     if (vmm_translate(current->cr3, page, NULL, NULL) == 0) return 1;
 
     uint64_t physical = alloc_user_page();
@@ -1221,8 +1146,6 @@ int process_grow_user_stack(uint64_t fault_address) {
     uint64_t page = fault_address & ~4095ULL;
     uint64_t existing_physical = 0;
     uint64_t existing_flags = 0;
-    /* Same race as process_commit_area: a sibling thread on another processor
-       grew the stack between this fault and its handler. */
     if (vmm_translate(current->cr3, page, &existing_physical, &existing_flags) == 0)
         return 1;
 
@@ -1237,13 +1160,11 @@ int process_grow_user_stack(uint64_t fault_address) {
     return 1;
 }
 
-/* First write to a page fork shared, which is made private and the instruction retried. */
 int process_handle_cow_fault(uint64_t fault_address) {
     if (!current || current->state != PROCESS_RUNNING || !current->cr3) return 0;
     return vmm_handle_cow_fault(current->cr3, fault_address & ~4095ULL) == 0;
 }
 
-/* A user-mode exception is the program's fault, so it dies rather than the machine. */
 int process_fault_from_interrupt(struct interrupt_frame *frame, int signal_number) {
     if (!frame || (frame->cs & 3U) != 3U || !current ||
         current->state != PROCESS_RUNNING) return 0;
@@ -1260,8 +1181,6 @@ int process_fault_from_interrupt(struct interrupt_frame *frame, int signal_numbe
                                current->name);
 
     (void)process_send_signal((int64_t)current->pid, signal_number);
-    /* Redirects to a handler if there is one, or terminates and switches
-       away if there is not. */
     process_prepare_user_return(&resume);
     if (!current || current->state != PROCESS_RUNNING) return 1;
     current->saved_frame = resume;
@@ -1269,7 +1188,6 @@ int process_fault_from_interrupt(struct interrupt_frame *frame, int signal_numbe
     return 1;
 }
 
-/* A tick in the idle loop, whose frame can be replaced because long mode pushes SS:RSP. */
 static void resume_from_idle(struct interrupt_frame *frame) {
     struct process *next = next_runnable(NULL);
     if (!next) return;
@@ -1294,7 +1212,6 @@ void process_timer_interrupt(struct interrupt_frame *frame) {
 
     struct syscall_frame resume = current->saved_frame;
     if (current->time_slice_ticks) current->time_slice_ticks--;
-    /* Without this a thread that wakes with a claim waits out a whole quantum. */
     if (!current->time_slice_ticks || higher_priority_waiting(current) ||
         ordinary_should_preempt(current) || !allowed_on_this_cpu(current)) {
         struct process *preempted = current;
@@ -1306,8 +1223,6 @@ void process_timer_interrupt(struct interrupt_frame *frame) {
             activate_process(next);
         } else {
             if (!allowed_on_this_cpu(preempted)) go_idle();
-            /* Before the state changes, because the slice is divided among the tasks
-               that are READY. */
             preempted->time_slice_ticks = preempted->rt_priority
                                            ? PROCESS_DEFAULT_QUANTUM_TICKS
                                            : ordinary_slice_ticks(preempted);
@@ -1316,7 +1231,6 @@ void process_timer_interrupt(struct interrupt_frame *frame) {
         }
     }
 
-    /* Timer return is also a safe point for signals sent to CPU-bound tasks. */
     process_prepare_user_return(&resume);
     if (!current || current->state != PROCESS_RUNNING) return;
     current->saved_frame = resume;
@@ -1476,10 +1390,6 @@ static void process_handle_robust_list(struct process *process) {
     process->robust_list_length = 0;
 }
 
-/* Hand this process's children to init, the only thing left that can wait for
-   them. A parent of 0 is one no process has, so child_matches() matched nothing
-   and an orphan's zombie could never be reaped: measured, fifty of a hundred
-   stayed in the queue for good. */
 static void notify_children_of_parent_death(struct process *parent) {
     if (!parent || !queue) return;
     struct process *item = queue;
@@ -1491,24 +1401,18 @@ static void notify_children_of_parent_death(struct process *parent) {
         int signal_number = child->pdeath_signal;
         child->ppid = 1;
         if (signal_number > 0) signal_one_process(child, signal_number);
-        /* Already gone, so init has to be told now: nothing else will say so
-           again, and mark_dead() may take the child out of the queue. */
         if (child->state == PROCESS_ZOMBIE) notify_parent_of_exit(child);
     } while (item != queue);
 }
 
-/* Defined with exit_group, which wants the same teardown. */
 static void terminate_sibling_threads(int status);
 
 static void process_exit_from_signal(struct syscall_frame *frame, int signal_number) {
-    /* Before the teardown, while the frame still describes where it died. */
     if (current && current->pid == 1)
         kprintf("TUNIX: init killed by signal %d at rip %p rsp %p\n",
                 signal_number, (void *)(frame ? frame->user_rip : 0),
                 (void *)(frame ? frame->user_rsp : 0));
     if (current) current->termination_signal = signal_number;
-    /* The signal was aimed at the process, so taking one thread down leaves
-       its files open. */
     terminate_sibling_threads(128 + signal_number);
     if (current) current->is_thread = 0;
     process_exit_from_syscall(frame, 128 + signal_number);
@@ -1517,7 +1421,6 @@ static void process_exit_from_signal(struct syscall_frame *frame, int signal_num
 void process_exit_from_syscall(struct syscall_frame *frame, int status) {
     if (!current || !frame) panic("process: exit without current process");
     struct process *exiting = current;
-    /* Init leaving is the end of the machine, and from outside it looks like a hang. */
     if (!exiting->is_thread && exiting->pid == 1) {
         kprintf("TUNIX: init exited, status %d\n", status);
         panic("init exited");
@@ -1535,11 +1438,8 @@ void process_exit_from_syscall(struct syscall_frame *frame, int status) {
         (void)process_futex_wake(clear_address, 1, FUTEX_BITSET_MATCH_ANY, 1);
     }
     process_release_files(exiting);
-    /* A terminal has to be let go here, or the display stays owed to a
-       program that has gone. */
     if (!exiting->is_thread)
         vt_process_exited(exiting->pid,
-                          /* Only the leader's exit ends the session. */
                           exiting->sid == exiting->pid ? exiting->sid : 0);
     if (exiting->is_thread) mark_dead(exiting);
     else notify_parent_of_exit(exiting);
@@ -1562,13 +1462,10 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame) {
     child->sid = parent->sid;
     child->state = PROCESS_READY;
     child->cwd = parent->cwd;
-    /* Counted like the fds, so the child keeps the directory alive on its own. */
     vfs_node_ref(child->cwd);
     child->controlling_pty = parent->controlling_pty;
     child->umask = parent->umask;
     child->cred = parent->cred;
-    /* Scheduling is inherited, as it is on Linux: a thread the mixer starts
-       has the same claim on the processor its parent had. */
     child->policy = parent->policy;
     child->rt_priority = parent->rt_priority;
     child->nice = parent->nice;
@@ -1598,11 +1495,7 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame) {
         kfree(child);
         return -EINVAL;
     }
-    /* Shared file mappings are inherited with the pages, so the records that
-       describe them have to come along. */
     memory_copy_mappings(child->memory, parent->memory);
-    /* The child continues with the parent's floating-point state, saved
-       before it is copied. */
     fpu_save(parent);
     memcpy(child->fpu_state, parent->fpu_state, sizeof(child->fpu_state));
     child->entry = parent->entry;
@@ -1642,7 +1535,6 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame) {
     return (int64_t)child->pid;
 }
 
-
 int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
                                           uint64_t child_stack, uint64_t tls,
                                           uint64_t parent_tid_user,
@@ -1669,8 +1561,6 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
     child->controlling_pty = parent->controlling_pty;
     child->umask = parent->umask;
     child->cred = parent->cred;
-    /* Scheduling is inherited, as it is on Linux: a thread the mixer starts
-       has the same claim on the processor its parent had. */
     child->policy = parent->policy;
     child->rt_priority = parent->rt_priority;
     child->nice = parent->nice;
@@ -1686,8 +1576,6 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
     child->memory = parent->memory;
     memory_ref(child->memory);
     sync_memory_view(child);
-    /* A new thread starts with the creating thread's floating-point state, for
-       the same reason fork does. */
     fpu_save(parent);
     memcpy(child->fpu_state, parent->fpu_state, sizeof(child->fpu_state));
     child->entry = parent->entry;
@@ -1708,8 +1596,6 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
     child->signal_blocked = parent->signal_blocked;
     memcpy(child->signal_actions, parent->signal_actions, sizeof(child->signal_actions));
 
-    /* CLONE_FILES shares one table, so an fd any thread opens is visible to
-       every sibling. */
     child->files = parent->files;
     child->files->refs++;
 
@@ -1741,11 +1627,6 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
     return (int64_t)child->pid;
 }
 
-/* The name a futex answers to. A word on a page two processes share has to be
-   found from either of them, and the virtual address is not that name -- it is
-   whatever each mapping happened to land on. The physical page plus the offset
-   into it is. 0 for private memory, where the old name is the right one and
-   nothing outside can reach the word anyway. */
 static uint64_t futex_shared_key(uint64_t address) {
     if (!current || !current->cr3) return 0;
     uint64_t physical = 0, flags = 0;
@@ -1778,8 +1659,6 @@ int64_t process_futex_wait(struct syscall_frame *frame, uint64_t address,
     futex_note('W', address, 0, 0, expected);
     waiting->futex_wait_deadline_ns = timeout_ns < 0 ? UINT64_MAX :
         time_uptime_ns() + (uint64_t)timeout_ns;
-    /* EAGAIN here is a true answer: a futex whose value moved is re-read and
-       tried again. */
     if (switch_to_next(frame, waiting) != 0) {
         waiting->state = PROCESS_RUNNING;
         waiting->futex_wait_active = 0;
@@ -1798,22 +1677,17 @@ int process_sleep_on(struct syscall_frame *frame, const void *channel) {
     waiting->state = PROCESS_BLOCKED;
     waiting->wait_channel = channel;
     if (switch_to_next(frame, waiting) != 0) {
-        /* Nothing else to run, so park rather than spin; the tick re-tests every
-           sleeper. */
         go_idle();
     }
     return 0;
 }
 
-/* The address is the channel; the object is never read. */
 static const char io_wait_token;
 
 const void *process_io_wait_channel(void) { return &io_wait_token; }
 
 int process_wake_io(void) { return process_wake_all(&io_wait_token); }
 
-/* Guarded, because a shared-mode pipe read wakes whoever was waiting for space
-   and that walks the queue every other processor may also be walking. */
 int process_wake_all(const void *channel) {
     oplock_enter();
     int woken = process_wake_all_locked(channel);
@@ -1826,8 +1700,6 @@ static int process_wake_all_locked(const void *channel) {
     int woken = 0;
     struct process *item = queue;
     do {
-        /* A wakeup on one channel may have made a poll() ready, and the poller
-           cannot know which. */
         if (item->state == PROCESS_BLOCKED &&
             (item->wait_channel == channel || item->wait_channel == &io_wait_token)) {
             item->wait_channel = NULL;
@@ -1845,8 +1717,6 @@ static struct wake_record wake_ring[WAKE_RING];
 static unsigned wake_ring_next;
 
 static void futex_note(char kind, uint64_t address, int woken, int maximum, unsigned value) {
-    /* A thread that cannot sleep re-enters the wait forever, and recording each
-       attempt would push everything else out of the ring. */
     unsigned last = (wake_ring_next + WAKE_RING - 1U) % WAKE_RING;
     if (wake_ring[last].address == address && wake_ring[last].kind == kind &&
         wake_ring[last].pid == (current ? (int)current->pid : 0) &&
@@ -1878,8 +1748,6 @@ int process_futex_wake(uint64_t address, int maximum, uint32_t bitset, int share
     int woken = 0;
     struct process *item = queue;
     do {
-        /* Either name will do: the shared one reaches a waiter in another
-           address space, the old one every waiter in this one. */
         int named = (key && item->futex_wait_key == key) ||
                     (item->memory == current->memory &&
                      item->futex_wait_address == address);
@@ -1900,8 +1768,6 @@ int process_futex_wake(uint64_t address, int maximum, uint32_t bitset, int share
     return woken;
 }
 
-/* End every other thread of the group, but tell a running one to leave
-   rather than tear it down. */
 void process_set_sigaction(int signal_number,
                            const struct tunix_sigaction *action) {
     if (!current || signal_number < 1 || signal_number > TUNIX_NSIG) return;
@@ -1979,7 +1845,6 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
     current->tgid = current->pid;
     current->is_thread = 0;
     current->entry = image.entry;
-    /* A new program must not inherit the old one's floating-point registers. */
     fpu_init_state(current);
     fpu_restore(current);
     current->user_stack_top = image.user_stack_top;
@@ -1993,12 +1858,10 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
     current->robust_list_head = 0;
     current->robust_list_length = 0;
     cred_apply_exec(&current->cred, credential_source, current->no_new_privs);
-    /* A program that gained privileges must not be inspectable by the identity
-       that started it. */
     current->dumpable = (current->cred.euid == current->cred.uid &&
                          current->cred.egid == current->cred.gid);
     strncpy(current->name, file->name, sizeof(current->name) - 1);
-    strncpy(current->exe_path, path, sizeof(current->exe_path) - 1);
+    set_exe_path(current, file, path);
     set_process_cmdline(current, path, argv);
     for (int sig = 0; sig < TUNIX_NSIG; sig++) {
         if (current->signal_actions[sig].handler != SIG_IGN) memset(&current->signal_actions[sig], 0, sizeof(current->signal_actions[sig]));
@@ -2015,8 +1878,6 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
     frame->user_rsp = current->user_stack_top;
     frame->user_rflags = 0x202;
     vmm_activate(new_cr3);
-    /* The record of which space is loaded decides who is told when a mapping
-       in it changes. */
     cpu_current()->address_space = new_cr3;
     wrmsr(IA32_FS_BASE, 0);
     if (old_memory) memory_unref(old_memory);
@@ -2068,13 +1929,10 @@ int64_t process_waitpid_from_syscall(struct syscall_frame *frame, int64_t pid,
     parent->wait_pid = pid;
     parent->wait_status_user = status_user;
     parent->wait_options = options;
-    /* Nothing to run here is not nothing to run, so ECHILD would be a lie and
-       this parks instead. */
     if (switch_to_next(frame, parent) != 0) go_idle();
     return 0;
 }
 
-/* waitid(2), which a service manager needs and wait4 alone leaves it blind without. */
 struct waitid_siginfo {
     int32_t si_signo;
     int32_t si_errno;
@@ -2146,8 +2004,6 @@ int64_t process_waitid_from_syscall(int64_t pid_spec, uint64_t info_user,
     }
     if (!has_child) return -ECHILD;
     if (options & WNOHANG) {
-        /* waitid(2) says si_pid and si_signo are set to zero, and the whole
-           record is zeroed, which satisfies both the letter and dasynq. */
         if (vmm_copy_to_space(parent->cr3, info_user, &info, sizeof(info)) != 0)
             return -EFAULT;
         return 0;
@@ -2175,8 +2031,6 @@ static void signal_one_process(struct process *target, int signal_number) {
         target->futex_wait_address = 0;
         target->futex_wait_key = 0;
         target->futex_wait_deadline_ns = 0;
-        /* Do not stamp -EINTR over a rewound syscall, whose saved rax holds the
-           syscall number. */
         if (!target->syscall_rewound)
             target->saved_frame.rax = (uint64_t)-(int64_t)EINTR;
         target->wait4_active = 0;
@@ -2188,7 +2042,6 @@ static void signal_one_process(struct process *target, int signal_number) {
     }
 }
 
-/* An unprivileged sender may only signal processes of its own identity. */
 static int may_signal(const struct process *target) {
     const struct credentials *sender = &current->cred;
     if (sender->euid == 0) return 1;
@@ -2196,7 +2049,6 @@ static int may_signal(const struct process *target) {
            sender->euid == target->cred.uid || sender->euid == target->cred.suid;
 }
 
-/* Remember who a kill(2) came from, so the handler's siginfo can say. */
 static void record_sender(struct process *target, int signal_number) {
     if (signal_number < 1 || signal_number > TUNIX_NSIG) return;
     target->signal_user_sent |= signal_bit(signal_number);
@@ -2206,8 +2058,6 @@ static void record_sender(struct process *target, int signal_number) {
 
 static int send_signal(int64_t pid, int signal_number, int checked) {
     if (signal_number < 0 || signal_number > TUNIX_NSIG) return -EINVAL;
-    /* A kill(2) is judged against the caller, but a signal the kernel sends
-       has no caller at all. */
     if ((checked || pid == 0) && !current) return -EINVAL;
     if (pid > 0) {
         struct process *target = process_find((uint64_t)pid);
@@ -2285,9 +2135,6 @@ static int next_pending_signal(struct process *process) {
     return 0;
 }
 
-/* Whether delivering this signal would do anything, which is not the same as
-   its being pending: an ignored one, and SIGCHLD or SIGCONT left at the
-   default, are noticed and dropped. */
 static int signal_would_act(const struct process *process, int signal_number) {
     if (!process || !signal_number) return 0;
     if (signal_number == SIGKILL || signal_number == SIGSTOP) return 1;
@@ -2298,15 +2145,10 @@ static int signal_would_act(const struct process *process, int signal_number) {
     return 1;
 }
 
-/* Whether a syscall about to block should return instead. A signal is only
-   looked at on the way back to user mode, which a syscall that rewinds and
-   sleeps never reaches. */
 int process_signal_interrupts_wait(void) {
     if (!current || current->in_signal) return 0;
     if (!current->group_exit_pending &&
         !signal_would_act(current, next_pending_signal(current))) return 0;
-    /* The caller answers EINTR without having rewound, so the return path must
-       not put the two bytes back for a rewind that did not happen. */
     current->syscall_rewound = 0;
     return 1;
 }
@@ -2321,8 +2163,6 @@ static int on_signal_stack(const struct process *process, uint64_t user_rsp) {
 
 void process_prepare_user_return(struct syscall_frame *frame) {
     if (!current || !frame || current->state != PROCESS_RUNNING) return;
-    /* Before signals and regardless of in_signal, because the group is already
-       gone and there is nothing left for a handler to run on. */
     if (current->group_exit_pending) {
         current->group_exit_pending = 0;
         process_exit_from_syscall(frame, current->exit_status);
@@ -2346,8 +2186,6 @@ void process_prepare_user_return(struct syscall_frame *frame) {
         current->state = PROCESS_STOPPED;
         current->stop_reported = notify_parent_of_job_change(
             current, WUNTRACED, ((signal_number & 0xFF) << 8) | 0x7F);
-        /* Same as wait4: park the processor rather than keep running a process
-           told to stop. */
         if (switch_to_next(frame, current) != 0) go_idle();
         return;
     }
@@ -2360,8 +2198,6 @@ void process_prepare_user_return(struct syscall_frame *frame) {
         return;
     }
 
-    /* A rewound frame must observe the signal, unless the handler asked for
-       SA_RESTART. */
     if (current->syscall_rewound) {
         current->syscall_rewound = 0;
         if (!(action->flags & SA_RESTART)) {
@@ -2379,8 +2215,6 @@ void process_prepare_user_return(struct syscall_frame *frame) {
         !on_signal_stack(current, frame->user_rsp)) {
         stack_top = current->signal_stack_pointer + current->signal_stack_size;
     }
-    /* SA_SIGINFO handlers dereference their second argument, so both
-       structures are built. */
     uint64_t area = stack_top & ~15ULL;
     uint64_t siginfo_address = 0;
     uint64_t context_address = 0;
@@ -2398,8 +2232,6 @@ void process_prepare_user_return(struct syscall_frame *frame) {
         info[0] = signal_number;
         int from_user = (current->signal_user_sent & bit) != 0;
         info[2] = from_user ? SI_USER : SI_KERNEL;
-        /* si_pid and si_uid, which a handler that has to tell its children apart
-           cannot do without. */
         if (from_user) {
             info[4] = (int32_t)current->signal_sender_pid[signal_number - 1];
             info[5] = (int32_t)current->signal_sender_uid[signal_number - 1];
@@ -2462,8 +2294,6 @@ void process_account_runtime(void) {
 uint64_t process_runtime_ns(const struct process *process) {
     if (!process) return 0;
     uint64_t runtime = process->runtime_ns;
-    /* RUNNING now means loaded on some processor rather than necessarily this
-       one, and the slice in flight counts wherever it is being spent. */
     if (process->state == PROCESS_RUNNING && process->last_scheduled_ns) {
         uint64_t now = time_uptime_ns();
         if (now >= process->last_scheduled_ns) runtime += now - process->last_scheduled_ns;
