@@ -3135,6 +3135,20 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
         offset < file->node->length && vfs_fault_in(file->node) == 0 &&
         file->node->data && vfs_align_data(file->node) == 0) {
         uint64_t shareable = (file->node->length - offset) & ~0xFFFULL;
+        /* The page the file ends in belongs to a shared mapping as well.
+           Rounding it away instead leaves the tail to copy_file_tail(), which
+           gives the caller a private copy -- so a file shorter than a page was
+           never shared at all, and two processes mapping it MAP_SHARED each
+           wrote into their own. That is how Firefox's shared string map came
+           back empty: the parent filled its copy, the read-only mapping saw
+           the untouched file, and MOZ_RELEASE_ASSERT on the header's magic
+           killed the browser before it drew a window. The page is only handed
+           over when the node's own buffer covers it -- vfs_align_data() gives
+           small files a 64 KiB page-aligned one, zeroed past the end, which is
+           what Linux shows beyond EOF too. */
+        if ((flags & MAP_SHARED) &&
+            align_up(file->node->length, 4096) <= file->node->capacity)
+            shareable = align_up(file->node->length - offset, 4096);
         if (shareable > length) shareable = length;
         uint64_t shared_flags = PAGE_USER | PAGE_PRESENT | PAGE_FILEBACKED;
         if (flags & MAP_SHARED) {
