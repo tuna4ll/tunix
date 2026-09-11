@@ -1,14 +1,6 @@
 #!/bin/sh
-# Weston, as the ordinary user rather than as root.
-#
-# It gets the display and the input devices from seatd instead of opening them
-# itself, which is why the account only has to be in the _seatd group -- and in
-# audio, because /dev/snd is 0660 root:audio and chpst below hands the session
-# exactly the groups it is named, not the ones /etc/group would give a login.
 exec 2>&1
 
-# Wait for the socket, not for the service: seatd is reported up as soon as it
-# is running, and weston exits immediately if it connects a moment too early.
 sv start seatd >/dev/null || exit 1
 attempt=0
 while [ ! -S /run/seatd.sock ]; do
@@ -17,32 +9,14 @@ while [ ! -S /run/seatd.sock ]; do
 	sleep 0.5
 done
 
-# A home directory, because a session without one is not a session: fontconfig
-# has nowhere to put its cache, says so, and every client weston starts dies on
-# it -- which weston answers by starting them again.
 export HOME=/home/tunix
 export USER=tunix
 export LOGNAME=tunix
 export XDG_RUNTIME_DIR=/run/user/1000
 export XDG_CONFIG_DIRS=/etc/xdg
 export XDG_SESSION_TYPE=wayland
-# The account's own shell. weston-terminal takes $SHELL and falls back to
-# /bin/sh when it is unset, so without this line the session's terminal was
-# dash -- not the bash /etc/passwd gives the user, and none of ~/.bashrc.
+export XDG_CURRENT_DESKTOP=Weston
 export SHELL=/bin/bash
-# How this session renders, which every client inherits.
-#
-# It depends on what is behind the card, and the kernel says which in the
-# uevent. Where the card is a virtio-gpu whose host granted virgl, mesa finds
-# a real driver on /dev/dri/card0 by itself and the only wrong thing to do is
-# tell it otherwise -- forcing the rasteriser here would leave a working GPU
-# idle and put every triangle back on the processor.
-#
-# Where it is not, there is no render node at all: a client's mesa finds no
-# driver, falls back to Zink -- OpenGL on top of Vulkan -- and dies for want
-# of a Vulkan driver, without ever trying the software rasteriser sitting
-# right there. Naming llvmpipe is what sends it to the same renderer weston
-# is already using.
 if grep -qs '^DRIVER=virtio_gpu$' /sys/devices/card0/uevent; then
 	unset LIBGL_ALWAYS_SOFTWARE
 	unset GALLIUM_DRIVER
@@ -50,13 +24,16 @@ else
 	export LIBGL_ALWAYS_SOFTWARE=1
 	export GALLIUM_DRIVER=llvmpipe
 fi
-# And which platform an EGL display is being asked for. A client that names it
-# itself does not need this -- weston-simple-egl works without it -- but one
-# that calls the old eglGetDisplay() leaves Mesa to guess, and the guess is
-# wrong here: there is no X server to fall back to and no DISPLAY to hint with.
-# SDL, and so every SDL game, is in the second group. Without this line
-# SuperTuxKart tried four times to make a window and quit; with it, it starts.
 export EGL_PLATFORM=wayland
+
+export MOZ_ENABLE_WAYLAND=1
+export MOZ_DISABLE_CONTENT_SANDBOX=1
+export MOZ_DISABLE_GMP_SANDBOX=1
+export MOZ_DISABLE_RDD_SANDBOX=1
+export MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1
+export MOZ_DISABLE_UTILITY_SANDBOX=1
+export MOZ_ACCELERATED=0
+
 install -d -m 0700 -o tunix -g tunix "$XDG_RUNTIME_DIR"
 
 cd "$HOME" || exit 1

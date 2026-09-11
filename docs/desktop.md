@@ -23,6 +23,7 @@ Ctrl+Alt+F2 leaves the desktop for a text console and Ctrl+Alt+F1 comes back.
 | `xkeyboard-config` | the keymaps libxkbcommon compiles |
 | `dejavu-fonts-ttf` | something for the panel and the terminal to draw with |
 | `xcursor-vanilla-dmz` | a cursor theme that has the drag-and-drop shapes |
+| `firefox` | the browser the session opens with |
 
 `eudev` is already in the base set; it is what finds the devices.
 
@@ -42,7 +43,8 @@ terminal was dash and none of the account's `~/.bashrc` ever ran -- on an image
 whose `/etc/passwd` gives that account bash.
 
 `base-files/overlay/etc/xdg/weston/weston.ini` chooses the DRM backend, the
-cursor theme and the terminal font. Weston's own output goes to
+cursor theme and the terminal font, and its `[autolaunch]` section is what
+opens Firefox as the compositor comes up. Weston's own output goes to
 `/var/log/weston/` rather than to the console it is drawing over.
 
 Terminal 1 has no `agetty`: weston takes whichever terminal is active when it
@@ -113,12 +115,55 @@ Two things had to be fixed for that to work:
 
 - **A display manager.** The session is one user's, started by runit, with no
   greeter in front of it.
-- **XWayland.** Nothing in the image is an X client.
 - **Hardware acceleration by default.** `make run-virgl` gives the session the
   host's GPU through virgl; every other target leaves it on llvmpipe, because
   the host having a usable GL stack is a property of the machine rather than of
   Tunix.
 - **A second output.** DRM reports one CRTC and one connector.
+
+## Firefox
+
+![Firefox on Tunix](../screenshots/firefox.png)
+
+The session opens with Firefox already on screen. `[autolaunch]` in
+`weston.ini` starts it as the compositor comes up, there is a launcher for it
+on the panel, and the weston service exports `MOZ_ENABLE_WAYLAND=1` so it takes
+the Wayland path rather than falling back to XWayland.
+
+Getting it to draw a window took five kernel fixes, and every one of them was a
+gap a browser is simply the first program to walk into:
+
+- **`/proc/<pid>/exe` named the path the program was started under.** Firefox
+  is `/usr/bin/firefox`, a symlink into `/usr/lib/firefox`, and it finds its own
+  installation directory by reading that link -- so it looked for
+  `dependentlibs.list` in `/usr/bin`, did not find it, and said
+  `Couldn't load XPCOM.` It now names the file that is running.
+- **`FIONREAD` answered `ENOTTY`.** Firefox proxies its own Wayland connection
+  and asks the socket how much is waiting; an error there reads as a broken
+  connection, and the browser reported `we don't have any display` on a session
+  whose compositor was running.
+- **There was no `/proc/<pid>/maps`.** glibc's `pthread_getattr_np()` reads it
+  to find where the main thread's stack begins, `nsThread::InitCommon()` turns
+  the failure into a release assertion, and Firefox died before it opened a
+  window. `RLIMIT_STACK` is a real number now for the same reason.
+- **A shared mapping of a file shorter than a page was quietly private.** The
+  last partial page was rounded away and copied instead of shared, so the
+  parent filled its own copy of the shared preference map and the read-only
+  mapping saw an untouched file.
+- **`arch_prctl(ARCH_SET_GS)` was refused.** Firefox's wasm2c sandboxes reach
+  their guest memory through `GS`, and the runtime aborts the process when the
+  call fails.
+
+A zombie also used to keep its address space until its parent collected it,
+which is not what Linux does and not what a browser can live with: Firefox left
+a couple of hundred unreaped children behind, the kernel's address-space table
+filled, and the next `fork()` failed -- which its fork server answers by
+crashing.
+
+**Content processes are still a gap.** The browser starts, draws, and its
+interface works -- tabs, the address bar, the menus. The processes that render
+pages leave with `Exiting due to channel error`, so the content area stays
+blank. What is wrong is under the IPC channel, not above it.
 
 ## OpenGL, and the two things it needed
 
