@@ -793,23 +793,76 @@ int process_get_affinity(uint64_t tid, uint64_t *mask) {
     return 0;
 }
 
+static uint8_t *fpu_area(struct process *process) {
+    return (uint8_t *)(((uintptr_t)process->fpu_state + 63U) & ~(uintptr_t)63U);
+}
+
+static uint64_t fpu_xstate_mask;
+static uint32_t fpu_xstate_size;
+
+void process_enable_extended_fpu(void) {
+    uint32_t a, b, c, d;
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1), "c"(0));
+    if (!(c & (1U << 26))) return;
+
+    uint64_t cr4;
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    cr4 |= 1ULL << 18;
+    __asm__ volatile("mov %0, %%cr4" : : "r"(cr4));
+
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(13U), "c"(0));
+    uint64_t wanted = ((uint64_t)a) & 0x7ULL;
+    if (!(wanted & 0x3ULL)) return;
+    wanted |= 0x3ULL;
+
+    __asm__ volatile("xsetbv" : : "a"((uint32_t)wanted), "d"(0U), "c"(0U));
+
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(13U), "c"(0));
+    if (b > PROCESS_FPU_STATE_SIZE) {
+        cr4 &= ~(1ULL << 18);
+        __asm__ volatile("mov %0, %%cr4" : : "r"(cr4));
+        return;
+    }
+    fpu_xstate_size = b;
+    fpu_xstate_mask = wanted;
+}
+
 static void fpu_save(struct process *process) {
-    if (process) __asm__ volatile("fxsave64 (%0)" : : "r"(process->fpu_state) : "memory");
+    if (!process) return;
+    uint8_t *area = fpu_area(process);
+    if (fpu_xstate_mask)
+        __asm__ volatile("xsave64 (%0)" : : "r"(area),
+                         "a"((uint32_t)fpu_xstate_mask),
+                         "d"((uint32_t)(fpu_xstate_mask >> 32)) : "memory");
+    else
+        __asm__ volatile("fxsave64 (%0)" : : "r"(area) : "memory");
 }
 
 static void fpu_restore(struct process *process) {
-    if (process) __asm__ volatile("fxrstor64 (%0)" : : "r"(process->fpu_state) : "memory");
+    if (!process) return;
+    uint8_t *area = fpu_area(process);
+    if (fpu_xstate_mask)
+        __asm__ volatile("xrstor64 (%0)" : : "r"(area),
+                         "a"((uint32_t)fpu_xstate_mask),
+                         "d"((uint32_t)(fpu_xstate_mask >> 32)) : "memory");
+    else
+        __asm__ volatile("fxrstor64 (%0)" : : "r"(area) : "memory");
 }
 
 static void fpu_init_state(struct process *process) {
     if (!process) return;
-    memset(process->fpu_state, 0, sizeof(process->fpu_state));
-    process->fpu_state[0] = 0x7F;
-    process->fpu_state[1] = 0x03;
-    process->fpu_state[24] = 0x80;
-    process->fpu_state[25] = 0x1F;
-    process->fpu_state[28] = 0xFF;
-    process->fpu_state[29] = 0xFF;
+    uint8_t *area = fpu_area(process);
+    memset(area, 0, PROCESS_FPU_STATE_SIZE);
+    area[0] = 0x7F;
+    area[1] = 0x03;
+    area[24] = 0x80;
+    area[25] = 0x1F;
+    area[28] = 0xFF;
+    area[29] = 0xFF;
+}
+
+static void fpu_copy(struct process *destination, struct process *source) {
+    memcpy(fpu_area(destination), fpu_area(source), PROCESS_FPU_STATE_SIZE);
 }
 
 static void activate_process(struct process *process) {
@@ -1110,13 +1163,10 @@ static uint64_t alloc_user_page(void) {
     return physical;
 }
 
-int process_commit_area(uint64_t fault_address) {
-    if (!current || current->state != PROCESS_RUNNING || !current->cr3) return 0;
-    uint64_t page = fault_address & ~4095ULL;
-    struct vm_area *area = process_find_area(page);
-    if (!area || !(area->kind & VM_ANONYMOUS)) return 0;
-    if (vmm_translate(current->cr3, page, NULL, NULL) == 0) return 1;
+#define COMMIT_AHEAD_PAGES 16ULL
 
+static int commit_one(struct vm_area *area, uint64_t page) {
+    if (vmm_translate(current->cr3, page, NULL, NULL) == 0) return 1;
     uint64_t physical = alloc_user_page();
     if (!physical) return 0;
     memset(vmm_phys_to_virt(physical), 0, 4096);
@@ -1124,6 +1174,20 @@ int process_commit_area(uint64_t fault_address) {
         pmm_free_page((void *)physical);
         return 0;
     }
+    return 1;
+}
+
+int process_commit_area(uint64_t fault_address) {
+    if (!current || current->state != PROCESS_RUNNING || !current->cr3) return 0;
+    uint64_t page = fault_address & ~4095ULL;
+    struct vm_area *area = process_find_area(page);
+    if (!area || !(area->kind & VM_ANONYMOUS)) return 0;
+    if (!commit_one(area, page)) return 0;
+
+    uint64_t ahead = page + 4096ULL;
+    uint64_t limit = page + COMMIT_AHEAD_PAGES * 4096ULL;
+    if (limit > area->end) limit = area->end;
+    while (ahead < limit && commit_one(area, ahead)) ahead += 4096ULL;
     return 1;
 }
 
@@ -1520,7 +1584,7 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame) {
     }
     memory_copy_mappings(child->memory, parent->memory);
     fpu_save(parent);
-    memcpy(child->fpu_state, parent->fpu_state, sizeof(child->fpu_state));
+    fpu_copy(child, parent);
     child->entry = parent->entry;
     child->user_stack_top = parent->user_stack_top;
     child->brk_start = parent_brk_start;
@@ -1601,7 +1665,7 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
     memory_ref(child->memory);
     sync_memory_view(child);
     fpu_save(parent);
-    memcpy(child->fpu_state, parent->fpu_state, sizeof(child->fpu_state));
+    fpu_copy(child, parent);
     child->entry = parent->entry;
     child->user_stack_top = child_stack;
     child->fs_base = (flags & 0x00080000ULL) ? tls : parent->fs_base;
