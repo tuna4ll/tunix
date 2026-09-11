@@ -1181,6 +1181,12 @@ int process_handle_cow_fault(uint64_t fault_address) {
     return vmm_handle_cow_fault(current->cr3, fault_address & ~4095ULL) == 0;
 }
 
+int process_signal_has_handler(int signal_number) {
+    if (!current || signal_number < 1 || signal_number > TUNIX_NSIG) return 0;
+    uint64_t handler = current->signal_actions[signal_number - 1].handler;
+    return handler != SIG_DFL && handler != SIG_IGN;
+}
+
 int process_fault_from_interrupt(struct interrupt_frame *frame, int signal_number) {
     if (!frame || (frame->cs & 3U) != 3U || !current ||
         current->state != PROCESS_RUNNING) return 0;

@@ -193,6 +193,7 @@ int process_sync_file_areas(uint64_t start, uint64_t end);
 
 int process_grow_user_stack(uint64_t fault_address);
 int process_handle_cow_fault(uint64_t fault_address);
+int process_signal_has_handler(int signal_number);
 int process_fault_from_interrupt(struct interrupt_frame *frame, int signal_number);
 void process_run_child_first_from_syscall(struct syscall_frame *frame, uint64_t child_pid);
 void process_reap_deferred(void);

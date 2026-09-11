@@ -192,6 +192,30 @@ was a limit this kernel had invented for itself:
 With those closed the browser renders pages, fetches them over TLS, and its tabs
 stay up.
 
+## Signals a program means to catch
+
+![Discord on Tunix](../screenshots/discord.png)
+
+A site that runs WebAssembly -- Discord's login page is one -- crashed the tab
+on a kernel that had everything above working. SpiderMonkey compiles a wasm trap
+to `ud2` and catches the `SIGILL` it raises, reading the faulting address out of
+the `ucontext_t` it is handed and writing a new one back to say where to resume.
+
+The kernel used to hand a handler a `ucontext_t` of zeros, and `sigreturn`
+restored the registers from its own copy and ignored the structure entirely. So
+the handler saw an instruction pointer of zero, recognised no trap site, put the
+default action back and returned -- and the second time the instruction ran, the
+process died of `SIGILL` with nothing printed. It is filled in now, in the
+layout glibc's `mcontext_t.gregs[]` describes, and `sigreturn` takes the
+registers back out of it, so a handler can resume wherever it likes.
+
+Two smaller things went with it. `waitid` refused `WNOWAIT`, which is how
+Firefox looks at a child's exit status without collecting it, so the browser
+could not tell an orderly exit from a crash. And a fault the program has a
+handler for is no longer reported: the kernel used to print a register dump and
+a stack trace for every trap a JIT takes on purpose, which is both noise and,
+on a serial console, slow.
+
 ## OpenGL, and the two things it needed
 
 ![SuperTuxKart on Tunix](../screenshots/supertuxkart.png)
