@@ -216,6 +216,41 @@ handler for is no longer reported: the kernel used to print a register dump and
 a stack trace for every trap a JIT takes on purpose, which is both noise and,
 on a serial console, slow.
 
+## What makes it slow, and what did not
+
+The desktop renders on the processor, so it is worth knowing where the time
+actually goes. Three things were measured rather than guessed:
+
+**The disk is not involved.** A full restart of weston and Firefox -- 106
+seconds of it -- did not read a single sector: `/proc/blockstat` was unchanged
+end to end. Every file a running system touches is already in the kernel's own
+cache, because ext2 loads a file whole the first time it is opened. Startup is
+processor and memory work from beginning to end.
+
+**The processor was rendering with half its registers.** Mesa reported
+`llvmpipe (LLVM 21.1.7, 128 bits)` on a machine whose processor does 256. It
+had no choice: `fxsave64` saves x87 and the low half of each `xmm` and nothing
+else, so a kernel built on it cannot let a process use `ymm` at all -- a thread
+preempted inside an AVX loop would come back with the upper halves belonging to
+whoever ran in between. `CR4.OSXSAVE` was therefore left clear, every library
+that asks the processor what it can do saw no AVX, and llvmpipe rasterised the
+whole desktop two lanes at a time. With `xsave` carrying the state the same
+line reads `256 bits`, and glibc picks its AVX2 `memcpy`: 8 GiB through `dd`
+went from 4.0 GB/s to 4.6 GB/s.
+
+**Loading a page is mostly the network.** Once the caches are warm, the same
+page takes the same time whatever the kernel does, because it is waiting on
+discord.com rather than on this machine.
+
+What is left, and what to attack next, is the kernel lock. Only `read` and
+`write` on a pipe run shared; every socket message, every `poll`, every futex
+and every page fault takes it exclusively, so the browser's ten processes
+serialise through one lock however many processors the machine has. The two
+changes that helped here both helped by taking it less often: anonymous memory
+is committed sixteen pages at a time instead of one, and a socket buffer holds
+64 KiB instead of 4, so one IPC message is one trip into the kernel rather than
+sixteen.
+
 ## OpenGL, and the two things it needed
 
 ![SuperTuxKart on Tunix](../screenshots/supertuxkart.png)
