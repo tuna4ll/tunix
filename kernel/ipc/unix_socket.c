@@ -21,8 +21,8 @@
 #define EMSGSIZE 90
 
 #define UNIX_PENDING_MAX 8
-#define UNIX_RIGHTS_MAX 8
-#define UNIX_ANCILLARY_MAX 8
+#define UNIX_RIGHTS_MAX UNIX_MAX_RIGHTS
+#define UNIX_ANCILLARY_MAX 16
 #define UNIX_RECORDS_MAX 64
 
 struct unix_record_queue {
@@ -630,6 +630,10 @@ int unix_socket_shutdown(struct unix_socket *socket, int how) {
         else socket->channel->b_write_shutdown = 1;
     }
     return 0;
+}
+
+int unix_socket_is_seqpacket(struct unix_socket *socket) {
+    return socket && socket->seqpacket;
 }
 
 int unix_socket_is_listener(struct unix_socket *socket) {

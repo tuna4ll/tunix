@@ -13,6 +13,8 @@ struct unix_credentials {
     uint32_t gid;
 };
 
+#define UNIX_MAX_RIGHTS 64
+
 #define TUNIX_AF_UNIX 1
 #define TUNIX_SOCK_STREAM 1
 #define TUNIX_SOCK_SEQPACKET 5
@@ -51,11 +53,10 @@ void unix_socket_last_sender(struct unix_socket *socket,
                              struct unix_credentials *out);
 
 int unix_socket_read_ready(struct unix_socket *socket);
-/* How much a read would hand over right now, which is what FIONREAD answers:
-   every queued byte on a stream, and the first message on a seqpacket. */
 size_t unix_socket_read_available(struct unix_socket *socket);
 int unix_socket_write_ready(struct unix_socket *socket);
 int unix_socket_peer_closed(struct unix_socket *socket);
+int unix_socket_is_seqpacket(struct unix_socket *socket);
 int unix_socket_is_listener(struct unix_socket *socket);
 int unix_socket_shutdown(struct unix_socket *socket, int how);
 
