@@ -38,6 +38,9 @@ static int process_wake_all_locked(const void *channel);
 #define ETIMEDOUT 110
 #define SIGSEGV 11
 #define IA32_FS_BASE 0xC0000100U
+/* The user's GS base lives here while the kernel runs: GS itself holds the
+   per-cpu block, and the entry and exit stubs swapgs the two. */
+#define IA32_KERNEL_GS_BASE 0xC0000102U
 #define FUTEX_OWNER_DIED 0x40000000U
 #define FUTEX_TID_MASK 0x3fffffffU
 #define ROBUST_LIST_LIMIT 2048U
@@ -813,6 +816,7 @@ static void activate_process(struct process *process) {
         cpu_current()->address_space = process->cr3;
     }
     wrmsr(IA32_FS_BASE, process->fs_base);
+    wrmsr(IA32_KERNEL_GS_BASE, process->gs_base);
     fpu_restore(process);
 }
 
@@ -1504,6 +1508,7 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame) {
     child->brk_end = parent_brk_end;
     child->mmap_base = parent_mmap_base;
     child->fs_base = parent->fs_base;
+    child->gs_base = parent->gs_base;
     child->start_time_ns = time_uptime_ns();
     child->runtime_ns = 0;
     child->last_scheduled_ns = 0;
@@ -1581,6 +1586,7 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
     child->entry = parent->entry;
     child->user_stack_top = child_stack;
     child->fs_base = (flags & 0x00080000ULL) ? tls : parent->fs_base;
+    child->gs_base = parent->gs_base;
     child->start_time_ns = time_uptime_ns();
     child->cmdline_length = parent->cmdline_length;
     memcpy(child->cmdline, parent->cmdline, sizeof(child->cmdline));
@@ -1852,6 +1858,7 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
     current->brk_end = image.brk_end;
     current->mmap_base = image.mmap_base;
     current->fs_base = 0;
+    current->gs_base = 0;
     current->signal_stack_pointer = 0;
     current->signal_stack_size = 0;
     current->signal_stack_flags = SS_DISABLE;
@@ -1880,6 +1887,7 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
     vmm_activate(new_cr3);
     cpu_current()->address_space = new_cr3;
     wrmsr(IA32_FS_BASE, 0);
+    wrmsr(IA32_KERNEL_GS_BASE, 0);
     if (old_memory) memory_unref(old_memory);
     else vmm_destroy_address_space(old_cr3);
     eventfs_emit_process_exec(current->cred.euid, current->pid, current->name);
@@ -2273,6 +2281,20 @@ void process_set_fs_base(uint64_t value) {
 
 uint64_t process_get_fs_base(void) {
     return current ? current->fs_base : 0;
+}
+
+/* ARCH_SET_GS, which nothing needed until a browser arrived: Firefox's wasm2c
+   sandboxes address their guest memory through GS, and the runtime aborts the
+   whole process when arch_prctl refuses -- "wasm_rt_syscall_set_segue_base
+   error: Invalid argument", and no window. */
+void process_set_gs_base(uint64_t value) {
+    if (!current) return;
+    current->gs_base = value;
+    wrmsr(IA32_KERNEL_GS_BASE, value);
+}
+
+uint64_t process_get_gs_base(void) {
+    return current ? current->gs_base : 0;
 }
 
 void process_account_runtime(void) {

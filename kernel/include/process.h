@@ -109,6 +109,7 @@ struct process {
     uint64_t brk_end;
     uint64_t mmap_base;
     uint64_t fs_base;
+    uint64_t gs_base;
     uint64_t clear_child_tid_user;
     uint64_t robust_list_head;
     uint64_t robust_list_length;
@@ -327,6 +328,8 @@ uint32_t process_get_umask(void);
 uint32_t process_set_umask(uint32_t mask);
 void process_set_fs_base(uint64_t value);
 uint64_t process_get_fs_base(void);
+void process_set_gs_base(uint64_t value);
+uint64_t process_get_gs_base(void);
 void process_account_runtime(void);
 uint64_t process_runtime_ns(const struct process *process);
 uint64_t process_count(void);

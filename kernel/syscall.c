@@ -411,8 +411,10 @@ struct linux_clone_args {
     uint64_t cgroup;
 };
 
+#define ARCH_SET_GS 0x1001
 #define ARCH_SET_FS 0x1002
 #define ARCH_GET_FS 0x1003
+#define ARCH_GET_GS 0x1004
 
 #define PR_SET_PDEATHSIG 1
 #define PR_GET_PDEATHSIG 2
@@ -3961,6 +3963,15 @@ static int64_t sys_arch_prctl(int code, uint64_t address) {
     }
     if (code == ARCH_GET_FS) {
         uint64_t value = process_get_fs_base();
+        return copy_to_user(address, &value, sizeof(value)) == 0 ? 0 : -EFAULT;
+    }
+    if (code == ARCH_SET_GS) {
+        if (address >= USER_ADDRESS_LIMIT) return -EINVAL;
+        process_set_gs_base(address);
+        return 0;
+    }
+    if (code == ARCH_GET_GS) {
+        uint64_t value = process_get_gs_base();
         return copy_to_user(address, &value, sizeof(value)) == 0 ? 0 : -EFAULT;
     }
     return -EINVAL;
