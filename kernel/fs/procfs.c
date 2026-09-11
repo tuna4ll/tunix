@@ -700,9 +700,6 @@ static void text_hex64_lower(struct text_buffer *text, uint64_t value) {
     for (; shift >= 0; shift -= 4) text_char(text, digits[(value >> shift) & 15ULL]);
 }
 
-/* One line of /proc/<pid>/maps, in the layout every reader of that file
-   expects: the range, the permissions, the offset into whatever backs it, a
-   device and an inode, and the name. */
 static void maps_line(struct text_buffer *text, uint64_t start, uint64_t end,
                       uint64_t page_flags, uint64_t offset, const char *name) {
     text_hex64_lower(text, start);
@@ -723,13 +720,6 @@ static void maps_line(struct text_buffer *text, uint64_t start, uint64_t end,
     text_char(text, '\n');
 }
 
-/* The address space as a file, because a program cannot ask about its own
-   mappings any other way. glibc's pthread_getattr_np() reads this to find
-   where the main thread's stack begins and ends, and a missing file is an
-   error it hands straight back: nsThread::InitCommon() turns that into
-   MOZ_RELEASE_ASSERT(!res) and Firefox dies before it opens a window.
-   The ranges are produced a line at a time against the offset asked for, so
-   the answer is not limited to one buffer -- a browser has hundreds. */
 static int64_t proc_pid_maps_read(struct vfs_node *node, uint64_t offset,
                                   size_t size, void *output) {
     struct process *process = process_find(node_pid(node));

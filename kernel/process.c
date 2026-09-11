@@ -38,8 +38,6 @@ static int process_wake_all_locked(const void *channel);
 #define ETIMEDOUT 110
 #define SIGSEGV 11
 #define IA32_FS_BASE 0xC0000100U
-/* The user's GS base lives here while the kernel runs: GS itself holds the
-   per-cpu block, and the entry and exit stubs swapgs the two. */
 #define IA32_KERNEL_GS_BASE 0xC0000102U
 #define FUTEX_OWNER_DIED 0x40000000U
 #define FUTEX_TID_MASK 0x3fffffffU
@@ -83,8 +81,6 @@ extern void panic(const char *msg) __attribute__((noreturn));
 static struct process *queue;
 static uint64_t next_pid = 1;
 static int reap_pending;
-/* Set when a process becomes a zombie still holding its address space, so the
-   scan below only walks the queue when there is something to release. */
 static int zombie_memory_pending;
 
 #define current (cpu_current()->current)
@@ -369,17 +365,6 @@ static void destroy_process_resources(struct process *process) {
     KDEBUG("process: reaped pid=%u\n", (unsigned)pid);
 }
 
-/* A zombie is an exit status and nothing else. Linux tears the address space
-   down at exit() and leaves only the status for the parent to collect; keeping
-   it until wait() made every unreaped child hold a page-table tree and, with
-   it, one of the MAX_ADDRESS_SPACES slots. Firefox left a couple of hundred
-   zombies behind, the registry filled, and the next fork() failed -- which the
-   browser's fork server answers with MOZ_CRASH("failed to fork"), so no page
-   ever got a content process to render it.
-
-   It is released from here rather than from exit() because at exit the dying
-   process's page tables are still the ones CR3 points at; by the time another
-   process reaches a syscall, the switch has loaded its own. */
 static void release_zombie_memory(void) {
     if (!queue) return;
     int skipped = 0;
@@ -446,13 +431,6 @@ static void install_console(struct process *process) {
     process->files->fds[2] = console;
 }
 
-/* /proc/<pid>/exe names the file that is running, not the name it was started
-   under. A program reached through a symlink finds its own installation
-   directory by reading that link, so the invocation path is the wrong answer:
-   Firefox, whose /usr/bin entry is a symlink into /usr/lib/firefox, looked for
-   dependentlibs.list beside /usr/bin/firefox, did not find it, and reported
-   "Couldn't load XPCOM." vfs_lookup() has already followed the symlink, so the
-   node it returned is the one to name. */
 static void set_exe_path(struct process *process, struct vfs_node *file,
                          const char *path) {
     if (file && vfs_node_path(file, process->exe_path,
@@ -2318,10 +2296,6 @@ uint64_t process_get_fs_base(void) {
     return current ? current->fs_base : 0;
 }
 
-/* ARCH_SET_GS, which nothing needed until a browser arrived: Firefox's wasm2c
-   sandboxes address their guest memory through GS, and the runtime aborts the
-   whole process when arch_prctl refuses -- "wasm_rt_syscall_set_segue_base
-   error: Invalid argument", and no window. */
 void process_set_gs_base(uint64_t value) {
     if (!current) return;
     current->gs_base = value;

@@ -120,6 +120,7 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define SYS_RECVFROM 45
 #define SYS_SENDMSG 46
 #define SYS_RECVMSG 47
+#define SYS_RECVMMSG 299
 #define SYS_SENDMMSG 307
 #define SYS_SHUTDOWN 48
 #define SYS_BIND 49
@@ -294,6 +295,10 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define O_SYNC 04010000
 
 #define MSG_DONTWAIT 0x40
+#define MSG_WAITFORONE 0x10000
+#define UIO_MAXIOV 1024
+#define SO_SNDBUF 7
+#define SO_RCVBUF 8
 #define MSG_CTRUNC 0x08
 #define MSG_CMSG_CLOEXEC 0x40000000
 #define SOCK_NONBLOCK O_NONBLOCK
@@ -323,6 +328,8 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define IN_CLOEXEC O_CLOEXEC
 #define MFD_CLOEXEC 0x0001U
 #define MFD_ALLOW_SEALING 0x0002U
+#define MFD_NOEXEC_SEAL 0x0008U
+#define MFD_EXEC 0x0010U
 #define SIOCGIFCONF 0x8912U
 
 #define SEEK_SET 0
@@ -1062,6 +1069,48 @@ static uint32_t mode_after_umask(uint64_t mode) {
     return ((uint32_t)mode & 07777U) & ~process_get_umask();
 }
 
+static int64_t reopen_own_descriptor(const char *path, uint64_t flags) {
+    struct process *process = process_current();
+    if (!process || !process->files) return -1;
+
+    const char *rest = NULL;
+    if (strncmp(path, "/proc/self/fd/", 14) == 0) rest = path + 14;
+    else if (strncmp(path, "/proc/thread-self/fd/", 21) == 0) rest = path + 21;
+    else if (strncmp(path, "/proc/", 6) == 0) {
+        const char *digits = path + 6;
+        uint64_t pid = 0;
+        while (*digits >= '0' && *digits <= '9') pid = pid * 10 + (uint64_t)(*digits++ - '0');
+        if (digits == path + 6 || strncmp(digits, "/fd/", 4) != 0) return -1;
+        if (pid != process->pid && pid != process->tgid) return -1;
+        rest = digits + 4;
+    }
+    if (!rest || !*rest) return -1;
+
+    int fd = 0;
+    for (const char *at = rest; *at; at++) {
+        if (*at < '0' || *at > '9') return -1;
+        fd = fd * 10 + (*at - '0');
+        if (fd >= PROCESS_MAX_FDS) return -1;
+    }
+    struct file *source = process->files->fds[fd];
+    if (!source || source->kind != FILE_KIND_MEMFD) return -1;
+
+    memfd_ref(source->memfd);
+    struct file *file = file_create_memfd(source->memfd,
+                                          (uint32_t)(flags & ~O_CLOEXEC));
+    if (!file) {
+        memfd_destroy(source->memfd);
+        return -ENOMEM;
+    }
+    int installed = process_install_file_flags(process, file, 0,
+        (flags & O_CLOEXEC) ? PROCESS_FD_CLOEXEC : 0);
+    if (installed < 0) {
+        file_unref(file);
+        return -EMFILE;
+    }
+    return installed;
+}
+
 static int64_t open_at(int dirfd, uint64_t user_path, uint64_t flags, uint64_t mode) {
     uint64_t supported = O_ACCMODE | O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC |
                          O_APPEND | O_NONBLOCK | O_DSYNC | O_ASYNC | O_DIRECT |
@@ -1074,6 +1123,9 @@ static int64_t open_at(int dirfd, uint64_t user_path, uint64_t flags, uint64_t m
     char path[256];
     int path_status = copy_path_at(dirfd, user_path, path);
     if (path_status != 0) return path_status;
+
+    int64_t reopened = reopen_own_descriptor(path, flags);
+    if (reopened != -1) return reopened;
 
     int created = 0;
     struct vfs_node *node = (flags & O_NOFOLLOW) ? vfs_lookup_nofollow(path) : vfs_lookup(path);
@@ -1564,21 +1616,28 @@ static int64_t sys_recvfrom(int fd, uint64_t user_data, size_t length, int flags
 }
 
 static int copy_message_iovecs(const struct linux_msghdr *message, uint8_t *buffer,
-                               size_t capacity, size_t *total, int from_user) {
-    if (!message || !buffer || !total || message->iov_length > 16U) return -EINVAL;
+                               size_t capacity, size_t *total, int from_user,
+                               int partial) {
+    if (!message || !buffer || !total) return -EINVAL;
+    if (message->iov_length > UIO_MAXIOV) return -EMSGSIZE;
     size_t completed = 0;
     for (uint64_t index = 0; index < message->iov_length; index++) {
         struct linux_iovec iov;
         if (copy_from_user(&iov, message->iov + index * sizeof(iov), sizeof(iov)) != 0)
             return -EFAULT;
-        if (iov.length > capacity - completed) return -EMSGSIZE;
-        if (iov.length) {
+        size_t amount = (size_t)iov.length;
+        if (amount > capacity - completed) {
+            if (!partial) return -EMSGSIZE;
+            amount = capacity - completed;
+        }
+        if (amount) {
             int status = from_user
-                ? copy_from_user(buffer + completed, iov.base, (size_t)iov.length)
-                : copy_to_user(iov.base, buffer + completed, (size_t)iov.length);
+                ? copy_from_user(buffer + completed, iov.base, amount)
+                : copy_to_user(iov.base, buffer + completed, amount);
             if (status != 0) return -EFAULT;
         }
-        completed += (size_t)iov.length;
+        completed += amount;
+        if (amount < (size_t)iov.length) break;
     }
     *total = completed;
     return 0;
@@ -1611,7 +1670,7 @@ static int collect_scm_rights(const struct linux_msghdr *message,
                 return -EINVAL;
             }
             size_t amount = payload / sizeof(int32_t);
-            if (amount > 8U - *file_count) {
+            if (amount > UNIX_MAX_RIGHTS - *file_count) {
                 release_file_array(files, *file_count);
                 return -EMSGSIZE;
             }
@@ -1643,15 +1702,18 @@ static int64_t sys_sendmsg(int fd, uint64_t user_message, int flags) {
     if (!user_message) return -EFAULT;
     struct linux_msghdr message;
     if (copy_from_user(&message, user_message, sizeof(message)) != 0) return -EFAULT;
+    struct unix_socket *unix_value = socket_from_fd(fd);
+    struct inet_socket *stream_socket = unix_value ? NULL : inet_socket_from_fd(fd);
+    int partial = (unix_value && !unix_socket_is_seqpacket(unix_value)) ||
+                  stream_socket != NULL;
     uint8_t data[4096];
     size_t length = 0;
-    int status = copy_message_iovecs(&message, data, sizeof(data), &length, 1);
+    int status = copy_message_iovecs(&message, data, sizeof(data), &length, 1, partial);
     if (status < 0) return status;
 
-    struct unix_socket *unix_value = socket_from_fd(fd);
     if (unix_value) {
         if (message.name) return -EISDIR;
-        struct file *files[8] = {0};
+        struct file *files[UNIX_MAX_RIGHTS] = {0};
         size_t file_count = 0;
         status = collect_scm_rights(&message, files, &file_count);
         if (status < 0) return status;
@@ -1676,8 +1738,7 @@ static int64_t sys_sendmsg(int fd, uint64_t user_message, int flags) {
                                      addressed ? sizeof(destination) : 0U);
     }
 
-    struct inet_socket *socket = inet_socket_from_fd(fd);
-    if (!socket) return -EBADF;
+    if (!stream_socket) return -EBADF;
     uint8_t address[32];
     const void *address_pointer = NULL;
     if (message.name) {
@@ -1685,7 +1746,7 @@ static int64_t sys_sendmsg(int fd, uint64_t user_message, int flags) {
         if (copy_from_user(address, message.name, message.name_length) != 0) return -EFAULT;
         address_pointer = address;
     }
-    return inet_socket_sendto(socket, data, length, flags, address_pointer,
+    return inet_socket_sendto(stream_socket, data, length, flags, address_pointer,
                               message.name ? message.name_length : 0U);
 }
 
@@ -1755,7 +1816,7 @@ static int write_unix_control(struct linux_msghdr *message,
         return 0;
     }
 
-    int installed[8];
+    int installed[UNIX_MAX_RIGHTS];
     size_t installed_count = 0;
     for (size_t index = 0; index < file_count; index++) {
         int descriptor = process_install_file_flags(process_current(), files[index], 0,
@@ -1819,6 +1880,27 @@ static int write_unix_control(struct linux_msghdr *message,
     return 0;
 }
 
+static int64_t sys_recvmsg(int fd, uint64_t user_message, int flags);
+
+static int64_t sys_recvmmsg(int fd, uint64_t user_vector, unsigned count, int flags) {
+    if (!user_vector) return -EFAULT;
+    if (count > 1024U) count = 1024U;
+
+    unsigned received = 0;
+    for (; received < count; received++) {
+        uint64_t element = user_vector + (uint64_t)received * sizeof(struct linux_mmsghdr);
+        int64_t result = sys_recvmsg(fd, element,
+                                     received ? (flags | MSG_DONTWAIT) : flags);
+        if (result < 0) return received ? (int64_t)received : result;
+        uint32_t length = (uint32_t)result;
+        if (copy_to_user(element + offsetof(struct linux_mmsghdr, msg_len),
+                         &length, sizeof(length)) != 0)
+            return received ? (int64_t)received : -EFAULT;
+        if (flags & MSG_WAITFORONE) flags |= MSG_DONTWAIT;
+    }
+    return (int64_t)received;
+}
+
 static int64_t sys_sendmmsg(int fd, uint64_t user_vector, unsigned count, int flags) {
     if (!user_vector) return -EFAULT;
 
@@ -1841,7 +1923,7 @@ static int64_t sys_recvmsg(int fd, uint64_t user_message, int flags) {
     if (!user_message) return -EFAULT;
     struct linux_msghdr message;
     if (copy_from_user(&message, user_message, sizeof(message)) != 0) return -EFAULT;
-    if (message.iov_length > 16U) return -EINVAL;
+    if (message.iov_length > UIO_MAXIOV) return -EMSGSIZE;
 
     uint8_t data[4096];
 
@@ -1858,10 +1940,10 @@ static int64_t sys_recvmsg(int fd, uint64_t user_message, int flags) {
     }
     struct unix_socket *unix_value = socket_from_fd(fd);
     if (unix_value) {
-        struct file *files[8] = {0};
+        struct file *files[UNIX_MAX_RIGHTS] = {0};
         size_t file_count = 0;
         int64_t result = unix_socket_recv_with_rights(unix_value, capacity, data,
-                                                       files, 8, &file_count);
+                                                       files, UNIX_MAX_RIGHTS, &file_count);
         if (result < 0) return result;
         if (scatter_message_data(&message, data, (size_t)result) != 0) {
             release_file_array(files, file_count);
@@ -1999,10 +2081,13 @@ static int64_t sys_getsockopt(int fd, int level, int option,
     struct unix_socket *unix_value = socket_from_fd(fd);
     if (unix_value) {
         if (level != SOL_SOCKET) return -EOPNOTSUPP;
-        if (option == SO_TYPE || option == SO_ERROR || option == SO_ACCEPTCONN) {
+        if (option == SO_TYPE || option == SO_ERROR || option == SO_ACCEPTCONN ||
+            option == SO_SNDBUF || option == SO_RCVBUF) {
             if (supplied < sizeof(int32_t)) return -EINVAL;
-            int32_t value = option == SO_TYPE ? TUNIX_SOCK_STREAM :
-                (option == SO_ACCEPTCONN ? unix_socket_is_listener(unix_value) : 0);
+            int32_t value = option == SO_TYPE ? (unix_socket_is_seqpacket(unix_value)
+                                                 ? TUNIX_SOCK_SEQPACKET : TUNIX_SOCK_STREAM) :
+                (option == SO_ACCEPTCONN ? unix_socket_is_listener(unix_value) :
+                 ((option == SO_SNDBUF || option == SO_RCVBUF) ? (int32_t)PIPE_CAPACITY : 0));
             if (copy_to_user(user_value, &value, sizeof(value)) != 0) return -EFAULT;
             uint32_t length = sizeof(value);
             return copy_to_user(user_length, &length, sizeof(length)) == 0 ? 0 : -EFAULT;
@@ -2221,11 +2306,6 @@ static int64_t sys_ioctl(int fd, unsigned long request, uint64_t user_argument) 
         else file->flags &= ~(uint32_t)O_NONBLOCK;
         return 0;
     }
-    /* How many bytes a read would hand over without blocking. Answering ENOTTY
-       instead is not a harmless gap: Firefox's Wayland proxy asks it of the
-       socket it is forwarding, takes the error for a broken connection, and
-       tears the display down -- "we don't have any display" on a session whose
-       compositor is running. */
     if (request == FIONREAD) {
         if (!user_argument) return -EFAULT;
         int32_t available = 0;
@@ -2424,6 +2504,7 @@ static int64_t sys_fstatfs(int fd, uint64_t user_buf) {
 
 static int fill_stat_nodeless(struct file *file, struct linux_stat *stat) {
     uint32_t type;
+    uint64_t size = 0;
     switch (file->kind) {
         case FILE_KIND_PIPE_READ:
         case FILE_KIND_PIPE_WRITE:
@@ -2434,6 +2515,10 @@ static int fill_stat_nodeless(struct file *file, struct linux_stat *stat) {
         case FILE_KIND_NETLINK_SOCKET:
             type = 0140000U;
             break;
+        case FILE_KIND_MEMFD:
+            type = 0100000U;
+            size = memfd_size(file->memfd);
+            break;
         default:
             return -1;
     }
@@ -2441,6 +2526,8 @@ static int fill_stat_nodeless(struct file *file, struct linux_stat *stat) {
     stat->st_mode = type | 0600U;
     stat->st_nlink = 1;
     stat->st_blksize = 4096;
+    stat->st_size = (int64_t)size;
+    stat->st_blocks = (int64_t)((size + 511U) / 512U);
 
     stat->st_ino = (uint64_t)(uintptr_t)file;
     return 0;
@@ -3135,17 +3222,6 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
         offset < file->node->length && vfs_fault_in(file->node) == 0 &&
         file->node->data && vfs_align_data(file->node) == 0) {
         uint64_t shareable = (file->node->length - offset) & ~0xFFFULL;
-        /* The page the file ends in belongs to a shared mapping as well.
-           Rounding it away instead leaves the tail to copy_file_tail(), which
-           gives the caller a private copy -- so a file shorter than a page was
-           never shared at all, and two processes mapping it MAP_SHARED each
-           wrote into their own. That is how Firefox's shared string map came
-           back empty: the parent filled its copy, the read-only mapping saw
-           the untouched file, and MOZ_RELEASE_ASSERT on the header's magic
-           killed the browser before it drew a window. The page is only handed
-           over when the node's own buffer covers it -- vfs_align_data() gives
-           small files a 64 KiB page-aligned one, zeroed past the end, which is
-           what Linux shows beyond EOF too. */
         if ((flags & MAP_SHARED) &&
             align_up(file->node->length, 4096) <= file->node->capacity)
             shareable = align_up(file->node->length - offset, 4096);
@@ -3722,7 +3798,7 @@ static int64_t sys_readv_writev(int fd, uint64_t user_iov, int count, int write_
         message.iov_length = (uint64_t)count;
         uint8_t data[4096];
         size_t length = 0;
-        int status = copy_message_iovecs(&message, data, sizeof(data), &length, 1);
+        int status = copy_message_iovecs(&message, data, sizeof(data), &length, 1, 0);
         if (status != -EMSGSIZE) {
             if (status < 0) return status;
             int64_t result = file_write(file, length, data);
@@ -4211,9 +4287,6 @@ static int64_t sys_get_robust_list(int pid, uint64_t user_head_pointer,
 static int64_t sys_prlimit(uint64_t resource, uint64_t user_old_limit) {
     if (!user_old_limit) return 0;
 
-    /* The stack limit is a real number here, not "no limit": glibc sizes the
-       main thread's stack from it once /proc/self/maps has told it where that
-       stack ends, and RLIM_INFINITY there makes the subtraction wrap. */
     uint64_t lim = resource == RLIMIT_NOFILE ? PROCESS_MAX_FDS
                  : resource == RLIMIT_STACK ? USER_STACK_MAX_PAGES * 4096ULL
                  : UINT64_MAX;
@@ -4363,7 +4436,8 @@ static int64_t sys_eventfd(uint64_t initial_value, int flags, int legacy) {
 }
 
 static int64_t sys_memfd_create(uint64_t user_name, uint32_t flags) {
-    if (flags & ~(uint32_t)(MFD_CLOEXEC | MFD_ALLOW_SEALING)) return -EINVAL;
+    if (flags & ~(uint32_t)(MFD_CLOEXEC | MFD_ALLOW_SEALING | MFD_NOEXEC_SEAL |
+                            MFD_EXEC)) return -EINVAL;
     char name[256];
     if (copy_string_from_user(name, sizeof(name), user_name) < 0) return -EFAULT;
 
@@ -4972,6 +5046,19 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         }
         case SYS_SENDMSG: frame->rax = (uint64_t)sys_sendmsg((int)frame->rdi, frame->rsi, (int)frame->rdx); break;
         case SYS_SENDMMSG: frame->rax = (uint64_t)sys_sendmmsg((int)frame->rdi, frame->rsi, (unsigned)frame->rdx, (int)frame->r10); break;
+        case SYS_RECVMMSG: {
+            int fd = (int)frame->rdi;
+            int flags = (int)frame->r10;
+            int64_t result = sys_recvmmsg(fd, frame->rsi, (unsigned)frame->rdx, flags);
+            struct process *process = process_current();
+            struct file *file = process && fd >= 0 && fd < PROCESS_MAX_FDS ? process->files->fds[fd] : NULL;
+            if (result == -EAGAIN && file && !(file->flags & O_NONBLOCK) && !(flags & MSG_DONTWAIT)) {
+                block_and_retry(frame, SYS_RECVMMSG, file, 0);
+            } else {
+                frame->rax = (uint64_t)result;
+            }
+            break;
+        }
         case SYS_RECVMSG: {
             int fd = (int)frame->rdi;
             int flags = (int)frame->rdx;

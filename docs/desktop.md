@@ -131,7 +131,8 @@ on the panel, and the weston service exports `MOZ_ENABLE_WAYLAND=1` so it takes
 the Wayland path rather than falling back to XWayland.
 
 Getting it to draw a window took five kernel fixes, and every one of them was a
-gap a browser is simply the first program to walk into:
+gap a browser is simply the first program to walk into. Getting it to draw a
+*page* took seven more; those are in the section after this one.
 
 - **`/proc/<pid>/exe` named the path the program was started under.** Firefox
   is `/usr/bin/firefox`, a symlink into `/usr/lib/firefox`, and it finds its own
@@ -160,10 +161,36 @@ a couple of hundred unreaped children behind, the kernel's address-space table
 filled, and the next `fork()` failed -- which its fork server answers by
 crashing.
 
-**Content processes are still a gap.** The browser starts, draws, and its
-interface works -- tabs, the address bar, the menus. The processes that render
-pages leave with `Exiting due to channel error`, so the content area stays
-blank. What is wrong is under the IPC channel, not above it.
+## What the content processes needed
+
+Getting a window open is not getting a page drawn. Every process that renders
+one used to die at startup with `Exiting due to channel error`, and each reason
+was a limit this kernel had invented for itself:
+
+- **`sendmsg` refused anything longer than its staging buffer.** A stream has no
+  message boundaries, so a send that does not fit is a short send; answering
+  `EMSGSIZE` is not something a socket may do, and the IPC channel read it as a
+  dead peer.
+- **`sendmsg` took sixteen iovecs.** Linux takes a thousand and Chromium's
+  channel writes with far more than sixteen, so the first real message came back
+  `EINVAL` -- `pipe error: Invalid argument`, and the child left.
+- **`SCM_RIGHTS` carried eight descriptors.** Firefox hands thirteen over in one
+  message when it starts a child. Linux allows 253.
+- **`fstat` on a memfd answered `EBADF`,** so the size check on every shared
+  buffer failed and the receiver rejected it as *not safe to map*.
+- **A memfd could not be reopened through `/proc/self/fd`,** which is how Firefox
+  decides whether memfds are usable at all. Failing it sent every shared buffer
+  to `/dev/shm` instead, where the seals it then asked for cannot exist.
+- **`recvmmsg` was not implemented,** and glibc's resolver collects the A and the
+  AAAA answer with one call.
+- **`getpeername` answered `ENOTCONN` on a live connection,** because a socket
+  was only marked connected if the program called `connect()` a second time. A
+  non-blocking connect does not: it waits for the socket to become writable and
+  then asks who the peer is. NSPR does exactly that, so every load failed on a
+  machine where `curl` was fetching the same page.
+
+With those closed the browser renders pages, fetches them over TLS, and its tabs
+stay up.
 
 ## OpenGL, and the two things it needed
 
