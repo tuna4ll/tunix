@@ -2729,7 +2729,7 @@ static int64_t sys_getcwd(uint64_t user_buffer, size_t size) {
     if (vfs_node_path(process->cwd, path, sizeof(path)) != 0) return -EINVAL;
     size_t length = strlen(path) + 1;
     if (length > size) return -ERANGE;
-    return copy_to_user(user_buffer, path, length) == 0 ? (int64_t)user_buffer : -EFAULT;
+    return copy_to_user(user_buffer, path, length) == 0 ? (int64_t)length : -EFAULT;
 }
 
 static void set_cwd(struct process *process, struct vfs_node *node) {

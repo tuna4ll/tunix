@@ -85,12 +85,15 @@ VOID_INSTALL ?= base-files bash coreutils util-linux findutils diffutils \
 	grep sed gawk tar gzip xz procps-ng psmisc iproute2 iputils file less \
 	which ncurses shadow sudo runit runit-void tzdata ca-certificates \
 	e2fsprogs kbd nano htop curl fastfetch \
-	$(VOID_INSTALL_GRAPHICAL) $(VOID_INSTALL_BROWSER) $(VOID_INSTALL_GAMES)
+	$(VOID_INSTALL_GRAPHICAL) $(VOID_INSTALL_BROWSER) $(VOID_INSTALL_GAMES) \
+	$(VOID_INSTALL_TOOLCHAIN)
 
 VOID_INSTALL_GRAPHICAL ?= weston mesa-dri xorg-server-xwayland xkeyboard-config dejavu-fonts-ttf \
 	seatd xcursor-vanilla-dmz
 
 VOID_INSTALL_BROWSER ?= firefox
+
+VOID_INSTALL_TOOLCHAIN ?= gcc make python3 python3-Pillow git binutils
 
 VOID_INSTALL_GAMES ?= supertuxkart
 
