@@ -83,6 +83,9 @@ extern void panic(const char *msg) __attribute__((noreturn));
 static struct process *queue;
 static uint64_t next_pid = 1;
 static int reap_pending;
+/* Set when a process becomes a zombie still holding its address space, so the
+   scan below only walks the queue when there is something to release. */
+static int zombie_memory_pending;
 
 #define current (cpu_current()->current)
 
@@ -366,7 +369,38 @@ static void destroy_process_resources(struct process *process) {
     KDEBUG("process: reaped pid=%u\n", (unsigned)pid);
 }
 
+/* A zombie is an exit status and nothing else. Linux tears the address space
+   down at exit() and leaves only the status for the parent to collect; keeping
+   it until wait() made every unreaped child hold a page-table tree and, with
+   it, one of the MAX_ADDRESS_SPACES slots. Firefox left a couple of hundred
+   zombies behind, the registry filled, and the next fork() failed -- which the
+   browser's fork server answers with MOZ_CRASH("failed to fork"), so no page
+   ever got a content process to render it.
+
+   It is released from here rather than from exit() because at exit the dying
+   process's page tables are still the ones CR3 points at; by the time another
+   process reaches a syscall, the switch has loaded its own. */
+static void release_zombie_memory(void) {
+    if (!queue) return;
+    int skipped = 0;
+    struct process *item = queue;
+    do {
+        if (item->state == PROCESS_ZOMBIE && item->memory) {
+            if (item == current) {
+                skipped = 1;
+            } else {
+                memory_unref(item->memory);
+                item->memory = NULL;
+                item->cr3 = 0;
+            }
+        }
+        item = item->next;
+    } while (item != queue);
+    zombie_memory_pending = skipped;
+}
+
 void process_reap_deferred(void) {
+    if (zombie_memory_pending) release_zombie_memory();
     if (!reap_pending) return;
 
     int skipped = 0;
@@ -1432,6 +1466,7 @@ void process_exit_from_syscall(struct syscall_frame *frame, int status) {
     eventfs_emit_process_exit(exiting->cred.euid, exiting->pid, status);
     exiting->exit_status = status;
     exiting->state = PROCESS_ZOMBIE;
+    if (exiting->memory) zombie_memory_pending = 1;
     process_handle_robust_list(exiting);
     notify_children_of_parent_death(exiting);
     if (exiting->clear_child_tid_user) {
