@@ -1180,7 +1180,7 @@ static int64_t open_at(int dirfd, uint64_t user_path, uint64_t flags, uint64_t m
                          O_LARGEFILE | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC | O_NOATIME |
                          O_PATH | O_SYNC;
     if ((flags & O_TMPFILE) == O_TMPFILE) return -EOPNOTSUPP;
-    if (flags & ~supported) return -EINVAL;
+    flags &= supported;
     if ((flags & O_PATH) && (flags & (O_CREAT | O_EXCL | O_TRUNC))) return -EINVAL;
 
     char path[256];
