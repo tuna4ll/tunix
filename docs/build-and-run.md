@@ -271,6 +271,11 @@ not build the image: that installs a Void sysroot with xbps, most of a gigabyte
 over the network from a mirror this repository does not control, and a build
 that fails when somebody else is having a bad day teaches people to ignore it.
 
+## Building it inside itself
+
+The image ships a toolchain, and the kernel builds under it. See
+[Self-Hosting](self-hosting.md).
+
 ## Cleaning
 
 ```sh

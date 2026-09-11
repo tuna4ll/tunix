@@ -509,9 +509,11 @@ struct linux_clone_args {
 #define FUTEX_CLOCK_REALTIME 256
 #define FUTEX_CMD_MASK 0x7F
 
-#define MAX_EXEC_ITEMS 64
+#define MAX_EXEC_ITEMS 512
 
 #define MAX_EXEC_STRING 4096
+
+#define EXEC_STRING_POOL (256U * 1024U)
 
 #define MAX_SHEBANG_LINE 256
 
@@ -711,8 +713,8 @@ struct linux_winsize {
 };
 
 struct exec_arguments {
-    char argv_storage[MAX_EXEC_ITEMS][MAX_EXEC_STRING];
-    char env_storage[MAX_EXEC_ITEMS][MAX_EXEC_STRING];
+    char pool[EXEC_STRING_POOL];
+    size_t used;
     const char *argv[MAX_EXEC_ITEMS + 1];
     const char *envp[MAX_EXEC_ITEMS + 1];
 };
@@ -937,6 +939,28 @@ static int64_t read_timespec_timeout_ns(uint64_t user_timeout) {
     uint64_t value = (uint64_t)timeout.tv_sec * 1000000000ULL +
                      (uint64_t)timeout.tv_nsec;
     return value > (uint64_t)INT64_MAX ? INT64_MAX : (int64_t)value;
+}
+
+struct linux_sigset_argument {
+    uint64_t set;
+    uint64_t size;
+};
+
+static void apply_wait_signal_mask(uint64_t user_argument) {
+    if (!user_argument) return;
+    struct linux_sigset_argument argument;
+    if (copy_from_user(&argument, user_argument, sizeof(argument)) != 0) return;
+    if (!argument.set || argument.size != sizeof(uint64_t)) return;
+    uint64_t mask;
+    if (copy_from_user(&mask, argument.set, sizeof(mask)) != 0) return;
+    process_swap_signal_mask(mask);
+}
+
+static void apply_wait_signal_set(uint64_t user_set, uint64_t size) {
+    if (!user_set || size != sizeof(uint64_t)) return;
+    uint64_t mask;
+    if (copy_from_user(&mask, user_set, sizeof(mask)) != 0) return;
+    process_swap_signal_mask(mask);
 }
 
 static int64_t read_timeval_timeout_ns(uint64_t user_timeout) {
@@ -2705,7 +2729,7 @@ static int64_t sys_getcwd(uint64_t user_buffer, size_t size) {
     if (vfs_node_path(process->cwd, path, sizeof(path)) != 0) return -EINVAL;
     size_t length = strlen(path) + 1;
     if (length > size) return -ERANGE;
-    return copy_to_user(user_buffer, path, length) == 0 ? (int64_t)user_buffer : -EFAULT;
+    return copy_to_user(user_buffer, path, length) == 0 ? (int64_t)length : -EFAULT;
 }
 
 static void set_cwd(struct process *process, struct vfs_node *node) {
@@ -3615,7 +3639,17 @@ static int64_t sys_mprotect(uint64_t address, uint64_t length, int prot) {
     return failed ? -ENOMEM : 0;
 }
 
-static int copy_exec_vector(uint64_t user_vector, char storage[MAX_EXEC_ITEMS][MAX_EXEC_STRING],
+static char *exec_pool_add(struct exec_arguments *arguments, const char *text) {
+    size_t length = strlen(text);
+    if (arguments->used + length + 1 > sizeof(arguments->pool)) return NULL;
+    char *slot = arguments->pool + arguments->used;
+    memcpy(slot, text, length);
+    slot[length] = '\0';
+    arguments->used += length + 1;
+    return slot;
+}
+
+static int copy_exec_vector(struct exec_arguments *arguments, uint64_t user_vector,
                             const char *pointers[MAX_EXEC_ITEMS + 1]) {
     if (!user_vector) {
         pointers[0] = NULL;
@@ -3628,8 +3662,13 @@ static int copy_exec_vector(uint64_t user_vector, char storage[MAX_EXEC_ITEMS][M
             pointers[index] = NULL;
             return index;
         }
-        if (copy_string_from_user(storage[index], MAX_EXEC_STRING, user_string) < 0) return -EFAULT;
-        pointers[index] = storage[index];
+        size_t room = sizeof(arguments->pool) - arguments->used;
+        if (room > MAX_EXEC_STRING) room = MAX_EXEC_STRING;
+        if (room == 0) return -E2BIG;
+        char *slot = arguments->pool + arguments->used;
+        if (copy_string_from_user(slot, room, user_string) < 0) return -EFAULT;
+        arguments->used += strlen(slot) + 1;
+        pointers[index] = slot;
     }
     return -E2BIG;
 }
@@ -3673,27 +3712,21 @@ static int rewrite_script_arguments(struct exec_arguments *arguments, int argc,
     int new_argc = prefix + original_tail;
     if (new_argc > MAX_EXEC_ITEMS) return -E2BIG;
 
-    for (int index = original_tail - 1; index >= 0; index--) {
-        int source = index + 1;
-        int destination = prefix + index;
-        strncpy(arguments->argv_storage[destination], arguments->argv_storage[source],
-                MAX_EXEC_STRING - 1);
-        arguments->argv_storage[destination][MAX_EXEC_STRING - 1] = '\0';
-    }
+    const char *interpreter_slot = exec_pool_add(arguments, interpreter);
+    const char *optional_slot = has_optional ? exec_pool_add(arguments, optional_argument) : NULL;
+    const char *script_slot = exec_pool_add(arguments, script_path);
+    if (!interpreter_slot || (has_optional && !optional_slot) || !script_slot) return -E2BIG;
 
-    strncpy(arguments->argv_storage[0], interpreter, MAX_EXEC_STRING - 1);
-    arguments->argv_storage[0][MAX_EXEC_STRING - 1] = '\0';
+    for (int index = original_tail - 1; index >= 0; index--)
+        arguments->argv[prefix + index] = arguments->argv[index + 1];
+
+    arguments->argv[0] = interpreter_slot;
     int script_index = 1;
     if (has_optional) {
-        strncpy(arguments->argv_storage[1], optional_argument, MAX_EXEC_STRING - 1);
-        arguments->argv_storage[1][MAX_EXEC_STRING - 1] = '\0';
+        arguments->argv[1] = optional_slot;
         script_index = 2;
     }
-    strncpy(arguments->argv_storage[script_index], script_path, MAX_EXEC_STRING - 1);
-    arguments->argv_storage[script_index][MAX_EXEC_STRING - 1] = '\0';
-
-    for (int index = 0; index < new_argc; index++)
-        arguments->argv[index] = arguments->argv_storage[index];
+    arguments->argv[script_index] = script_slot;
     arguments->argv[new_argc] = NULL;
     return new_argc;
 }
@@ -3705,24 +3738,30 @@ static int64_t sys_execve(struct syscall_frame *frame, uint64_t user_path, uint6
     struct exec_arguments *arguments = (struct exec_arguments *)kmalloc(sizeof(*arguments));
     if (!arguments) return -ENOMEM;
     memset(arguments, 0, sizeof(*arguments));
-    int argc = copy_exec_vector(user_argv, arguments->argv_storage, arguments->argv);
-    int envc = copy_exec_vector(user_envp, arguments->env_storage, arguments->envp);
+    int argc = copy_exec_vector(arguments, user_argv, arguments->argv);
+    int envc = copy_exec_vector(arguments, user_envp, arguments->envp);
     if (argc < 0 || envc < 0) {
         kfree(arguments);
         return argc < 0 ? argc : envc;
     }
     if (argc == 0) {
-        strncpy(arguments->argv_storage[0], path, MAX_EXEC_STRING - 1);
-        arguments->argv[0] = arguments->argv_storage[0];
+        arguments->argv[0] = exec_pool_add(arguments, path);
         arguments->argv[1] = NULL;
+        if (!arguments->argv[0]) {
+            kfree(arguments);
+            return -E2BIG;
+        }
         argc = 1;
     }
     if (envc == 0) {
         const char *defaults[] = {"PATH=/usr/bin:/usr/sbin:/bin:/sbin", "HOME=/", "TERM=tunix", "USER=root", NULL};
         for (int i = 0; defaults[i]; i++) {
-            strncpy(arguments->env_storage[i], defaults[i], MAX_EXEC_STRING - 1);
-            arguments->envp[i] = arguments->env_storage[i];
+            arguments->envp[i] = exec_pool_add(arguments, defaults[i]);
             arguments->envp[i + 1] = NULL;
+            if (!arguments->envp[i]) {
+                kfree(arguments);
+                return -E2BIG;
+            }
         }
     }
 
@@ -4856,17 +4895,23 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             int64_t timeout_ns = read_timespec_timeout_ns(frame->r8);
             if (timeout_ns < -1) {
                 clear_io_wait(process_current());
+                process_restore_signal_mask();
                 frame->rax = (uint64_t)timeout_ns;
                 break;
             }
+            apply_wait_signal_mask(frame->r9);
             int64_t result = sys_select_once((int)frame->rdi, frame->rsi, frame->rdx,
                                              frame->r10, timeout_ns == 0);
             if (result != 0 || timeout_ns == 0) {
                 clear_io_wait(process_current());
+                process_restore_signal_mask();
                 frame->rax = (uint64_t)result;
             } else if (!retry_io_wait(frame, SYS_PSELECT6, timeout_ns)) {
+                process_restore_signal_mask();
                 frame->rax = (uint64_t)sys_select_once((int)frame->rdi, frame->rsi,
                                                        frame->rdx, frame->r10, 1);
+            } else if (!process_current()->syscall_rewound) {
+                process_restore_signal_mask();
             }
             break;
         }
@@ -4874,15 +4919,21 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             int64_t timeout_ns = read_timespec_timeout_ns(frame->rdx);
             if (timeout_ns < -1) {
                 clear_io_wait(process_current());
+                process_restore_signal_mask();
                 frame->rax = (uint64_t)timeout_ns;
                 break;
             }
+            apply_wait_signal_set(frame->r10, frame->r8);
             int64_t result = sys_poll_once(frame->rdi, frame->rsi, timeout_ns == 0);
             if (result != 0 || timeout_ns == 0) {
                 clear_io_wait(process_current());
+                process_restore_signal_mask();
                 frame->rax = (uint64_t)result;
             } else if (!retry_io_wait(frame, SYS_PPOLL, timeout_ns)) {
+                process_restore_signal_mask();
                 frame->rax = (uint64_t)sys_poll_once(frame->rdi, frame->rsi, 1);
+            } else if (!process_current()->syscall_rewound) {
+                process_restore_signal_mask();
             }
             break;
         }

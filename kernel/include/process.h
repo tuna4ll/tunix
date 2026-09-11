@@ -148,6 +148,8 @@ struct process {
     uint32_t signal_sender_uid[TUNIX_NSIG];
     uint64_t signal_blocked;
     uint64_t signal_saved_mask;
+    uint64_t signal_wait_mask_saved;
+    int signal_wait_mask_active;
     int in_signal;
     struct syscall_frame signal_saved_frame;
     uint64_t signal_context_address;
@@ -228,6 +230,8 @@ int64_t process_setsid(void);
 void process_prepare_user_return(struct syscall_frame *frame);
 
 int process_signal_interrupts_wait(void);
+void process_swap_signal_mask(uint64_t mask);
+void process_restore_signal_mask(void);
 int process_sigreturn(struct syscall_frame *frame);
 #define FUTEX_BITSET_MATCH_ANY 0xFFFFFFFFU
 

@@ -145,6 +145,7 @@ struct inet_socket {
     uint32_t peer_address;
     uint16_t peer_port;
     int connected;
+    int connect_reported;
     uint64_t event_pid;
     uint32_t event_uid;
     int event_open;
@@ -362,7 +363,8 @@ static int tcp_connect(struct inet_socket *socket, uint32_t address, uint16_t po
         net_poll();
         if (tcp->pending_error) { int e = tcp->pending_error; tcp->pending_error = 0; return e; }
         if (tcp->state == TCP_ESTABLISHED || tcp->state >= TCP_FIN_WAIT_1) {
-            if (!socket->connected) { socket->connected = 1; return 0; }
+            socket->connected = 1;
+            if (!socket->connect_reported) { socket->connect_reported = 1; return 0; }
             return -EISCONN;
         }
         return -EINPROGRESS;
@@ -487,6 +489,7 @@ static void tcp_input(struct inet_socket *s, uint32_t seq, uint32_t ack, uint8_t
         tcp->state = TCP_ESTABLISHED;
         tcp->rto_deadline_ns = 0;
         s->connected = 1;
+        s->connect_reported = 1;
     }
 
     if (flags & TCP_ACK) tcp_process_ack(s, ack);
@@ -786,6 +789,7 @@ struct inet_socket *inet_socket_accept(struct inet_socket *listener) {
         if (s->tcp->state == TCP_CLOSED) continue;
         pending_detach(s);
         s->connected = 1;
+        s->connect_reported = 1;
         return s;
     }
     return NULL;

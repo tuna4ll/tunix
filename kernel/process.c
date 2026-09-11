@@ -12,6 +12,7 @@
 #include "include/oplock.h"
 
 static int process_wake_all_locked(const void *channel);
+static int signal_would_act(const struct process *process, int signal_number);
 #include "include/kstring.h"
 #include "include/percpu.h"
 #include "include/pmm.h"
@@ -1377,6 +1378,12 @@ static int store_job_status(struct process *parent, int status, uint64_t status_
     return vmm_copy_to_space(parent->cr3, status_user, &status, sizeof(status));
 }
 
+static int signal_reaches_waiter(const struct process *target, int signal_number) {
+    if (!target || target->state != PROCESS_BLOCKED) return 0;
+    if (target->signal_blocked & signal_bit(signal_number)) return 0;
+    return signal_would_act(target, signal_number);
+}
+
 static void notify_parent_of_exit(struct process *child) {
     struct process *parent = find_parent(child);
     if (!parent) {
@@ -1395,6 +1402,8 @@ static void notify_parent_of_exit(struct process *child) {
         parent->wait_options = 0;
         wake_to_ready(parent);
         mark_dead(child);
+    } else if (!parent->wait4_active && signal_reaches_waiter(parent, SIGCHLD)) {
+        wake_to_ready(parent);
     }
 }
 
@@ -2117,7 +2126,9 @@ static void signal_one_process(struct process *target, int signal_number) {
             target->continued_pending = 0;
     }
     target->signal_pending |= signal_bit(signal_number);
-    if (target->state == PROCESS_BLOCKED && signal_number != SIGCHLD) {
+    if (target->state == PROCESS_BLOCKED &&
+        (signal_number != SIGCHLD ||
+         (!target->wait4_active && signal_reaches_waiter(target, SIGCHLD)))) {
         target->futex_wait_active = 0;
         target->futex_wait_address = 0;
         target->futex_wait_key = 0;
@@ -2244,6 +2255,21 @@ static int signal_would_act(const struct process *process, int signal_number) {
     if (action->handler == SIG_DFL &&
         (signal_number == SIGCHLD || signal_number == SIGCONT)) return 0;
     return 1;
+}
+
+void process_swap_signal_mask(uint64_t mask) {
+    if (!current) return;
+    if (!current->signal_wait_mask_active) {
+        current->signal_wait_mask_saved = current->signal_blocked;
+        current->signal_wait_mask_active = 1;
+    }
+    current->signal_blocked = mask & ~(signal_bit(SIGKILL) | signal_bit(SIGSTOP));
+}
+
+void process_restore_signal_mask(void) {
+    if (!current || !current->signal_wait_mask_active) return;
+    current->signal_blocked = current->signal_wait_mask_saved;
+    current->signal_wait_mask_active = 0;
 }
 
 int process_signal_interrupts_wait(void) {
