@@ -352,13 +352,13 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define F_ADD_SEALS 1033
 #define F_GET_SEALS 1034
 #define FIONBIO 0x5421UL
+#define FIONREAD 0x541BUL
 #define F_GETLK 5
 #define F_SETLK 6
 #define F_SETLKW 7
 #define F_RDLCK 0
 #define F_WRLCK 1
 #define F_UNLCK 2
-
 
 struct linux_flock {
     int16_t type;
@@ -442,7 +442,6 @@ struct linux_clone_args {
 #define PR_CAP_AMBIENT_RAISE 2
 #define PR_CAP_AMBIENT_LOWER 3
 #define PR_CAP_AMBIENT_CLEAR_ALL 4
-
 
 #define EPERM 1
 #define E2BIG 7
@@ -548,7 +547,6 @@ struct linux_stat {
     int64_t __glibc_reserved[3];
 };
 
-
 struct linux_statfs {
     uint64_t f_type;
     uint64_t f_bsize;
@@ -641,7 +639,6 @@ struct linux_msghdr {
 };
 
 _Static_assert(sizeof(struct linux_msghdr) == 56, "Linux x86_64 msghdr ABI mismatch");
-
 
 struct linux_mmsghdr {
     struct linux_msghdr msg_hdr;
@@ -746,9 +743,7 @@ void syscall_init(void) {
     wrmsr(0xC0000084, 0x200ULL | 0x400ULL);
 }
 
-
 #define WRITE_STAGE_MAX (128U * 1024U)
-
 
 static int write_stages_large(const struct file *file) {
     return file && file->kind == FILE_KIND_VFS && file->node &&
@@ -1385,7 +1380,6 @@ static int64_t sys_shutdown(int fd, int how) {
     return -ENOTSOCK;
 }
 
-
 static int64_t install_accepted(struct file *file, int flags,
                                 const void *address, size_t address_length,
                                 uint64_t user_address, uint64_t user_length) {
@@ -1448,7 +1442,6 @@ static int64_t sys_accept(int fd, uint64_t user_address, uint64_t user_length, i
     }
     return accepted_fd;
 }
-
 
 static void accept_or_block(struct syscall_frame *frame, uint64_t syscall_number,
                             int fd, uint64_t user_address, uint64_t user_length,
@@ -1710,7 +1703,6 @@ static int scatter_message_data(const struct linux_msghdr *message,
     return 0;
 }
 
-
 static int write_netlink_control(struct linux_msghdr *message,
                                  struct netlink_socket *socket) {
     if (!netlink_socket_get_passcred(socket)) {
@@ -1825,7 +1817,6 @@ static int write_unix_control(struct linux_msghdr *message,
     return 0;
 }
 
-
 static int64_t sys_sendmmsg(int fd, uint64_t user_vector, unsigned count, int flags) {
     if (!user_vector) return -EFAULT;
 
@@ -1849,7 +1840,6 @@ static int64_t sys_recvmsg(int fd, uint64_t user_message, int flags) {
     struct linux_msghdr message;
     if (copy_from_user(&message, user_message, sizeof(message)) != 0) return -EFAULT;
     if (message.iov_length > 16U) return -EINVAL;
-
 
     uint8_t data[4096];
 
@@ -2065,7 +2055,6 @@ static int64_t sys_ftruncate(int fd, uint64_t length) {
     return vfs_truncate(file->node, length) == 0 ? 0 : -EIO;
 }
 
-
 static int64_t sys_fallocate(int fd, int mode, uint64_t offset, uint64_t length) {
     struct process *process = process_current();
     if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) return -EBADF;
@@ -2087,8 +2076,6 @@ static int64_t sys_fallocate(int fd, int mode, uint64_t offset, uint64_t length)
     }
     return -ENODEV;
 }
-
-
 
 static int64_t sys_faccess_at(int dirfd, uint64_t user_path, int mode, int flags) {
     if (flags & ~(AT_EACCESS | AT_SYMLINK_NOFOLLOW)) return -EINVAL;
@@ -2163,7 +2150,6 @@ static int64_t sys_flock(int fd, int operation) {
     return file_flock(process->files->fds[fd], operation);
 }
 
-
 static int64_t vfs_posix_lock(struct vfs_node *node, int type, uint64_t pid) {
     if (type == F_UNLCK) {
         if (node->posix_lock_pid == pid) {
@@ -2233,6 +2219,31 @@ static int64_t sys_ioctl(int fd, unsigned long request, uint64_t user_argument) 
         else file->flags &= ~(uint32_t)O_NONBLOCK;
         return 0;
     }
+    /* How many bytes a read would hand over without blocking. Answering ENOTTY
+       instead is not a harmless gap: Firefox's Wayland proxy asks it of the
+       socket it is forwarding, takes the error for a broken connection, and
+       tears the display down -- "we don't have any display" on a session whose
+       compositor is running. */
+    if (request == FIONREAD) {
+        if (!user_argument) return -EFAULT;
+        int32_t available = 0;
+        switch (file->kind) {
+        case FILE_KIND_SOCKET:
+            available = (int32_t)unix_socket_read_available(file->socket);
+            break;
+        case FILE_KIND_PIPE_READ:
+            available = file->pipe ? (int32_t)file->pipe->count : 0;
+            break;
+        case FILE_KIND_VFS:
+            if (!file->node || (file->node->flags & 0xFFU) != VFS_FILE) return -ENOTTY;
+            available = file->node->length > file->offset
+                ? (int32_t)(file->node->length - file->offset) : 0;
+            break;
+        default:
+            return -ENOTTY;
+        }
+        return copy_to_user(user_argument, &available, sizeof(available)) == 0 ? 0 : -EFAULT;
+    }
     if (file->kind == FILE_KIND_INET_SOCKET && request == SIOCGIFCONF) {
         if (!user_argument) return -EFAULT;
         struct linux_ifconf ifconf;
@@ -2294,7 +2305,6 @@ static int64_t sys_ioctl(int fd, unsigned long request, uint64_t user_argument) 
         return file->node->file_ioctl(file, request, user_argument);
     if (file->node->ioctl) return file->node->ioctl(file->node, request, user_argument);
 
-
     return -ENOTTY;
 }
 
@@ -2340,7 +2350,6 @@ static int64_t stat_path(int dirfd, uint64_t user_path, uint64_t user_stat, int 
     return copy_to_user(user_stat, &stat, sizeof(stat)) == 0 ? 0 : -EFAULT;
 }
 
-
 static void fill_statfs(struct vfs_node *node, struct linux_statfs *out) {
     memset(out, 0, sizeof(*out));
 
@@ -2381,7 +2390,6 @@ static void fill_statfs(struct vfs_node *node, struct linux_statfs *out) {
         return;
     }
 
-
     out->f_type = TMPFS_MAGIC;
     out->f_bsize = PMM_PAGE_SIZE;
     out->f_frsize = PMM_PAGE_SIZE;
@@ -2411,7 +2419,6 @@ static int64_t sys_fstatfs(int fd, uint64_t user_buf) {
     fill_statfs(file->node, &out);
     return copy_to_user(user_buf, &out, sizeof(out)) == 0 ? 0 : -EFAULT;
 }
-
 
 static int fill_stat_nodeless(struct file *file, struct linux_stat *stat) {
     uint32_t type;
@@ -2456,7 +2463,6 @@ static int64_t sys_fstat(int fd, uint64_t user_stat) {
     if (stat_from_file(process->files->fds[fd], &stat) != 0) return -EBADF;
     return copy_to_user(user_stat, &stat, sizeof(stat)) == 0 ? 0 : -EFAULT;
 }
-
 
 static void fill_statx(const struct linux_stat *basic_in, struct linux_statx *out) {
     struct linux_stat basic = *basic_in;
@@ -2570,7 +2576,6 @@ static int64_t sys_getcwd(uint64_t user_buffer, size_t size) {
     return copy_to_user(user_buffer, path, length) == 0 ? (int64_t)user_buffer : -EFAULT;
 }
 
-
 static void set_cwd(struct process *process, struct vfs_node *node) {
     struct vfs_node *previous = process->cwd;
     vfs_node_ref(node);
@@ -2678,7 +2683,6 @@ static int64_t sys_rename_at(int old_dirfd, uint64_t user_old_path,
     return 0;
 }
 
-
 static int64_t sys_link_at(int old_dirfd, uint64_t user_old_path,
                            int new_dirfd, uint64_t user_new_path, int flags) {
     if (flags & ~AT_SYMLINK_FOLLOW) return -EINVAL;
@@ -2700,7 +2704,6 @@ static int64_t sys_link_at(int old_dirfd, uint64_t user_old_path,
     return vfs_link(node, new_path) == 0 ? 0 : -EIO;
 }
 
-
 static int64_t sys_mount(uint64_t user_source, uint64_t user_target,
                          uint64_t user_type, uint64_t flags, uint64_t user_data) {
     (void)user_data;
@@ -2720,7 +2723,6 @@ static int64_t sys_mount(uint64_t user_source, uint64_t user_target,
                      user_type ? type : "", (uint32_t)flags);
 }
 
-
 static int64_t sys_umount2(uint64_t user_target, int flags) {
     (void)flags;
     const struct credentials *cred = cred_current();
@@ -2729,7 +2731,6 @@ static int64_t sys_umount2(uint64_t user_target, int flags) {
     if (copy_string_from_user(target, sizeof(target), user_target) < 0) return -EFAULT;
     return vfs_umount(target);
 }
-
 
 static int64_t sys_mknodat(int dirfd, uint64_t user_path, uint32_t mode,
                            uint64_t device) {
@@ -2761,7 +2762,6 @@ static int64_t sys_symlink_at(uint64_t user_target, int new_dirfd,
     return vfs_create_symlink(link_path, target, 0) ? 0 : -EIO;
 }
 
-
 static int64_t change_mode(struct vfs_node *node, uint32_t mode) {
     if (node->flags & VFS_READONLY) return -EROFS;
     const struct credentials *cred = cred_current();
@@ -2773,7 +2773,6 @@ static int64_t change_mode(struct vfs_node *node, uint32_t mode) {
     vfs_notify_meta_changed(node);
     return 0;
 }
-
 
 static int64_t change_owner(struct vfs_node *node, uint32_t uid, uint32_t gid) {
     if (node->flags & VFS_READONLY) return -EROFS;
@@ -2864,7 +2863,6 @@ static int64_t sys_utimens_at(int dirfd, uint64_t user_path, uint64_t user_times
     if (!cred_owns(node) && (user_times || cred_may(node, CRED_WRITE) != 0))
         return -EPERM;
 
-
     if (!user_times) {
         vfs_stamp_times(node, VFS_TIME_ATIME | VFS_TIME_MTIME | VFS_TIME_CTIME);
         vfs_notify_meta_changed(node);
@@ -2901,8 +2899,6 @@ static int map_zero_pages(struct process *process, uint64_t start, uint64_t end,
     }
     return 0;
 }
-
-
 
 static int map_shared_object(struct process *process, uint64_t start,
                              uint64_t end, struct memfd_object *object,
@@ -2946,7 +2942,6 @@ static void unmap_pages(struct process *process, uint64_t start, uint64_t end) {
     vmm_flush_batch_end();
 }
 
-
 static int64_t sys_brk(uint64_t requested) {
     struct process *process = process_current();
     if (!process) return -EINVAL;
@@ -2965,7 +2960,6 @@ static int64_t sys_brk(uint64_t requested) {
     return (int64_t)requested;
 }
 
-
 static int mapping_range_free(struct process *process, uint64_t base, uint64_t length) {
     if (!process || !length || base >= USER_ADDRESS_LIMIT ||
         length > USER_ADDRESS_LIMIT - base) return 0;
@@ -2975,7 +2969,6 @@ static int mapping_range_free(struct process *process, uint64_t base, uint64_t l
     }
     return 1;
 }
-
 
 static int find_mapping_range(struct process *process, uint64_t start,
                               uint64_t length, uint64_t *base_out) {
@@ -2992,7 +2985,6 @@ static int find_mapping_range(struct process *process, uint64_t start,
     }
     return -1;
 }
-
 
 static int copy_file_tail(struct process *process, struct file *file,
                           uint64_t base, uint64_t start, uint64_t end,
@@ -3118,7 +3110,6 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
         }
     }
 
-
     if (!file && !(flags & MAP_SHARED)) {
         unmap_pages(process, base, base + length);
         if (process_map_area(base, base + length,
@@ -3131,8 +3122,6 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
         }
         return (int64_t)base;
     }
-
-
 
     int share_private = (flags & MAP_PRIVATE) && !(prot & PROT_WRITE);
     int share_shared = (flags & MAP_SHARED) &&
@@ -3249,7 +3238,6 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
     return (int64_t)base;
 }
 
-
 static int64_t sys_msync(uint64_t address, uint64_t length, int flags) {
     struct process *process = process_current();
     if (!process || (address & 0xFFFULL)) return -EINVAL;
@@ -3275,7 +3263,6 @@ static int64_t sys_munmap(uint64_t address, uint64_t length) {
 static int64_t sys_shmget(int32_t key, uint64_t size, int flags) {
     return sysvshm_get(key, size, flags, (uint32_t)process_current_pid());
 }
-
 
 static int64_t sys_shmat(int id, uint64_t address, int flags) {
     struct process *process = process_current();
@@ -3369,8 +3356,6 @@ static int64_t sys_shmctl(int id, int command, uint64_t user_buffer) {
     }
 }
 
-
-
 static int64_t mremap_backed(struct process *process, uint64_t address,
                              uint64_t old_length, uint64_t new_length,
                              int flags, struct file *backing,
@@ -3383,7 +3368,6 @@ static int64_t mremap_backed(struct process *process, uint64_t address,
                                    kind, backing, backing_offset);
         return (int64_t)address;
     }
-
 
     uint64_t tail = address + old_length;
     uint64_t extra = new_length - old_length;
@@ -3422,7 +3406,6 @@ static int64_t mremap_backed(struct process *process, uint64_t address,
         unmap_pages(process, destination, destination + new_length);
         return -ENOMEM;
     }
-
 
     unmap_pages(process, address, address + old_length);
     (void)process_map_area(destination, destination + new_length, PAGE_WRITE,
@@ -3694,7 +3677,6 @@ static int64_t sys_sigprocmask(int how, uint64_t user_set, uint64_t user_old_set
     return 0;
 }
 
-
 static void block_and_retry(struct syscall_frame *frame, uint64_t syscall_number,
                             struct file *file, int writing) {
 
@@ -3745,7 +3727,6 @@ static int64_t sys_readv_writev(int fd, uint64_t user_iov, int count, int write_
     return total;
 }
 
-
 static int64_t set_machine_name(int domain, uint64_t user_name, uint64_t length) {
     const struct credentials *cred = cred_current();
     if (cred && cred->euid != 0) return -EPERM;
@@ -3759,8 +3740,6 @@ static int64_t set_machine_name(int domain, uint64_t user_name, uint64_t length)
     else uts_set_hostname(value, (size_t)length);
     return 0;
 }
-
-
 
 #define CLOCK_TICKS_PER_SECOND 100ULL
 #define NANOSECONDS_PER_TICK (1000000000ULL / CLOCK_TICKS_PER_SECOND)
@@ -3803,7 +3782,6 @@ static int64_t sys_sysinfo(uint64_t user_buffer) {
     return copy_to_user(user_buffer, &value, sizeof(value)) == 0 ? 0 : -EFAULT;
 }
 
-
 static int64_t sys_times(uint64_t user_buffer) {
     if (user_buffer) {
         struct linux_tms value;
@@ -3815,7 +3793,6 @@ static int64_t sys_times(uint64_t user_buffer) {
     }
     return (int64_t)(time_uptime_ns() / NANOSECONDS_PER_TICK);
 }
-
 
 static int64_t sys_getrusage(uint64_t user_buffer) {
     struct { int64_t seconds; int64_t microseconds; } utime = {0, 0};
@@ -3831,7 +3808,6 @@ static int64_t sys_getrusage(uint64_t user_buffer) {
     memcpy(value, &utime, sizeof(utime));
     return copy_to_user(user_buffer, value, sizeof(value)) == 0 ? 0 : -EFAULT;
 }
-
 
 #define SYSLOG_ACTION_CLOSE 0
 #define SYSLOG_ACTION_OPEN 1
@@ -3952,7 +3928,6 @@ static int64_t sys_getrandom(uint64_t user_buffer, size_t length, unsigned flags
     return (int64_t)completed;
 }
 
-
 static int64_t sys_sched_getaffinity(uint64_t tid, size_t size, uint64_t user_mask) {
     if (!user_mask) return -EFAULT;
     if (size < sizeof(uint64_t) || (size & (sizeof(uint64_t) - 1))) return -EINVAL;
@@ -4039,7 +4014,6 @@ static int64_t sys_sigaltstack(struct syscall_frame *frame, uint64_t user_stack,
     return 0;
 }
 
-
 #define LINUX_CAPABILITY_VERSION_3 0x20080522U
 
 struct cap_user_header {
@@ -4089,7 +4063,6 @@ static int64_t sys_capset(uint64_t user_header, uint64_t user_data) {
     struct process *process = process_current();
     if (header.pid && (!process || (uint64_t)header.pid != process->pid)) return -EPERM;
     if (!user_data) return 0;
-
 
     return cred_is_root() ? 0 : -EPERM;
 }
@@ -4244,7 +4217,6 @@ static int64_t sys_clone_fork_compat(struct syscall_frame *frame,
                                                  parent_tid_user, child_tid_user, flags);
     }
 
-
     if ((flags & CLONE_VFORK) && (flags & CLONE_VM) && child_stack) {
         uint64_t vfork_allowed = CLONE_VM | CLONE_VFORK | CLONE_FS | CLONE_FILES |
                                  CLONE_SIGHAND | CLONE_SYSVSEM | CLONE_SETTLS |
@@ -4288,7 +4260,6 @@ static int64_t sys_clone_fork_compat(struct syscall_frame *frame,
     return pid;
 }
 
-/* Reset caught signals in the child. */
 static void clone3_clear_signal_handlers(uint64_t child_pid) {
     struct process *child = process_find(child_pid);
     if (!child) return;
@@ -4327,7 +4298,6 @@ static int64_t sys_clone3_fork_compat(struct syscall_frame *frame,
     return pid;
 }
 
-
 static struct file *file_from_fd(int fd) {
     struct process *process = process_current();
     if (!process || fd < 0 || fd >= PROCESS_MAX_FDS) return NULL;
@@ -4361,7 +4331,6 @@ static int64_t sys_eventfd(uint64_t initial_value, int flags, int legacy) {
     return install_new_file(file, flags & EFD_CLOEXEC);
 }
 
-
 static int64_t sys_memfd_create(uint64_t user_name, uint32_t flags) {
     if (flags & ~(uint32_t)(MFD_CLOEXEC | MFD_ALLOW_SEALING)) return -EINVAL;
     char name[256];
@@ -4377,7 +4346,6 @@ static int64_t sys_memfd_create(uint64_t user_name, uint32_t flags) {
     }
     return install_new_file(file, flags & MFD_CLOEXEC);
 }
-
 
 static int64_t sys_signalfd(int fd, uint64_t user_mask, uint64_t mask_size,
                             int flags) {
@@ -4527,7 +4495,6 @@ static int64_t sys_inotify_rm_watch(int fd, int descriptor) {
     return inotify_remove_watch(file->inotify, descriptor);
 }
 
-
 static uint64_t file_cache_budget(void) {
     static uint64_t budget;
     if (budget) return budget;
@@ -4536,7 +4503,6 @@ static uint64_t file_cache_budget(void) {
     if (budget > 128ULL * 1024 * 1024) budget = 128ULL * 1024 * 1024;
     return budget;
 }
-
 
 #define LINUX_REBOOT_MAGIC1 0xFEE1DEADU
 #define LINUX_REBOOT_MAGIC2 0x28121969U
@@ -5240,7 +5206,6 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             break;
         }
 
-
         case SYS_SCHED_GET_PRIORITY_MAX:
             frame->rax = (frame->rdi == PROCESS_SCHED_FIFO ||
                           frame->rdi == PROCESS_SCHED_RR)
@@ -5534,9 +5499,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
     if (!skip_signal_delivery) process_prepare_user_return(frame);
 }
 
-
 _Static_assert(sizeof(struct syscall_frame) == 144, "syscall_entry.S assumes 144");
-
 
 static int file_may_share(const struct file *file) {
     if (!file) return 0;
@@ -5546,7 +5509,6 @@ static int file_may_share(const struct file *file) {
     if ((file->node->flags & 0xFFU) != VFS_CHARDEVICE) return 0;
     return file->node->stateless != 0;
 }
-
 
 static int syscall_try_shared(struct syscall_frame *frame) {
     uint64_t number = frame->rax;
@@ -5560,13 +5522,11 @@ static int syscall_try_shared(struct syscall_frame *frame) {
         ? sys_read(fd, frame->rsi, (size_t)frame->rdx)
         : sys_write(fd, frame->rsi, (size_t)frame->rdx);
 
-
     if (result == -EAGAIN && !(file->flags & O_NONBLOCK)) return 0;
 
     frame->rax = (uint64_t)result;
     return 1;
 }
-
 
 static int syscall_number_may_share(uint64_t number) {
     return number == SYS_READ || number == SYS_WRITE;
