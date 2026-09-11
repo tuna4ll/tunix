@@ -6,28 +6,17 @@
 #include "../include/pmm.h"
 #include "../include/vmm.h"
 
-/*
- * See include/memfd.h for what this is for. The implementation is deliberately
- * plain: a growable array of physical page addresses, one reference held per
- * page. There is no swapping, no sparse representation and no sealing -- a
- * Wayland client sizes its buffer once and keeps it.
- */
-
-/* A cap so a stray ftruncate cannot eat the machine. 256 MiB is far above any
-   wl_shm buffer (a 4K screen at 32bpp is 33 MiB) and far below total RAM. */
 #define MEMFD_MAX_BYTES (256ULL * 1024ULL * 1024ULL)
 #define MEMFD_PAGE_SIZE 4096ULL
 
 struct memfd_object {
-    uint64_t size;      /* logical length, as set by ftruncate */
-    /* Sealing, as F_ADD_SEALS applies it. `sealable` is what
-       MFD_ALLOW_SEALING asked for; without it the file refuses every seal,
-       which is what Linux does and what a caller checks for. */
+    int refs;
+    uint64_t size;
     uint32_t seals;
     int sealable;
-    uint64_t count;     /* pages actually allocated */
-    uint64_t capacity;  /* entries available in `pages` */
-    uint64_t *pages;    /* physical addresses */
+    uint64_t count;
+    uint64_t capacity;
+    uint64_t *pages;
 };
 
 static uint64_t pages_for(uint64_t size) {
@@ -38,13 +27,20 @@ struct memfd_object *memfd_create_object(void) {
     struct memfd_object *object = (struct memfd_object *)kmalloc(sizeof(*object));
     if (!object) return NULL;
     memset(object, 0, sizeof(*object));
+    object->refs = 1;
     return object;
+}
+
+void memfd_ref(struct memfd_object *object) {
+    if (object) object->refs++;
 }
 
 void memfd_destroy(struct memfd_object *object) {
     if (!object) return;
-    /* Drops this object's reference to each page; any page still mapped
-       somewhere survives on the mapping's own reference. */
+    if (object->refs > 1) {
+        object->refs--;
+        return;
+    }
     for (uint64_t index = 0; index < object->count; index++) {
         if (object->pages[index]) pmm_free_page((void *)object->pages[index]);
     }
@@ -60,17 +56,10 @@ uint32_t memfd_seals(const struct memfd_object *object) {
     return object ? object->seals : 0;
 }
 
-/*
- * Add seals, with the refusals Linux makes.
- *
- * Returns 0, or the negative errno a caller expects: -EINVAL when the file was
- * not created sealable or the bits are not seals, -EPERM once F_SEAL_SEAL has
- * been set and the set is closed.
- */
 int memfd_add_seals(struct memfd_object *object, uint32_t seals) {
-    if (!object || !object->sealable) return -22;          /* EINVAL */
+    if (!object || !object->sealable) return -22;
     if (seals & ~(uint32_t)MEMFD_SEAL_ALL) return -22;
-    if (object->seals & MEMFD_SEAL_SEAL) return -1;        /* EPERM */
+    if (object->seals & MEMFD_SEAL_SEAL) return -1;
     object->seals |= seals;
     return 0;
 }
@@ -84,8 +73,6 @@ uint64_t memfd_page(const struct memfd_object *object, uint64_t index) {
     return object->pages[index];
 }
 
-/* The page array only ever grows; shrinking the object frees pages but keeps
-   the (small) array, so a buffer that is resized repeatedly does not churn. */
 static int reserve_pages(struct memfd_object *object, uint64_t needed) {
     if (needed <= object->capacity) return 0;
     uint64_t capacity = object->capacity ? object->capacity : 16ULL;
@@ -105,10 +92,6 @@ static int reserve_pages(struct memfd_object *object, uint64_t needed) {
 int memfd_truncate(struct memfd_object *object, uint64_t size) {
     if (!object) return -1;
     if (size > MEMFD_MAX_BYTES) return -1;
-    /* The two seals that mean what they say here. A shrink-sealed file is the
-       promise Mesa wants before it hands a buffer to the compositor: the pages
-       under the mapping cannot be taken away while the other side is reading
-       them. */
     if (size < object->size && (object->seals & MEMFD_SEAL_SHRINK)) return -1;
     if (size > object->size && (object->seals & MEMFD_SEAL_GROW)) return -1;
 
@@ -118,8 +101,6 @@ int memfd_truncate(struct memfd_object *object, uint64_t size) {
         while (object->count < wanted) {
             uint64_t physical = (uint64_t)pmm_alloc_page();
             if (!physical) return -1;
-            /* Zeroed like any fresh anonymous memory: the consumer of a
-               freshly sized buffer must not see another process's leftovers. */
             memset(vmm_phys_to_virt(physical), 0, MEMFD_PAGE_SIZE);
             object->pages[object->count++] = physical;
         }
@@ -134,11 +115,6 @@ int memfd_truncate(struct memfd_object *object, uint64_t size) {
     return 0;
 }
 
-/*
- * read/write exist so the descriptor behaves like a file for anything that is
- * not mapping it. Wayland itself only ever ftruncates and mmaps, but a
- * descriptor that returns EINVAL to read() is a trap for everything else.
- */
 static int64_t transfer(struct memfd_object *object, uint64_t offset,
                         size_t length, void *out, const void *in) {
     if (!object || offset >= object->size) return 0;

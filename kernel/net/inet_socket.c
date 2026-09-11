@@ -1,4 +1,3 @@
-/* Internet and packet sockets. */
 
 #include <stddef.h>
 #include <stdint.h>
@@ -36,7 +35,6 @@ extern void kprintf(const char *fmt, ...);
 #define ECONNREFUSED 111
 #define EINPROGRESS 115
 
-
 #define TCP_RING 16384U
 #define TCP_MSS 1024U
 
@@ -46,7 +44,6 @@ extern void kprintf(const char *fmt, ...);
 #define TCP_MAX_RETRIES  8
 #define TCP_TIME_WAIT_NS 10000000000ULL
 #define TCP_ORPHAN_NS    30000000000ULL
-
 
 #define TCP_BACKLOG_MAX 16
 
@@ -224,8 +221,6 @@ static uint16_t allocate_port(void) {
     return 0;
 }
 
-
-
 static uint32_t tcp_iss_salt;
 
 static int seq_le(uint32_t a, uint32_t b) { return (int32_t)(a - b) <= 0; }
@@ -246,7 +241,6 @@ static void tcp_arm_rto(struct tcp_control_block *tcp) {
     tcp->rto_deadline_ns = time_uptime_ns() + tcp->rto_ns;
 }
 
-
 static void tcp_transmit(struct inet_socket *s, uint32_t seq, uint8_t flags,
                          const uint8_t *data, size_t length) {
     struct tcp_control_block *tcp = s->tcp;
@@ -259,7 +253,6 @@ static void tcp_transmit(struct inet_socket *s, uint32_t seq, uint8_t flags,
 static void tcp_send_ack(struct inet_socket *s) {
     tcp_transmit(s, s->tcp->snd_nxt, TCP_ACK, NULL, 0);
 }
-
 
 static void tcp_send_window_update(struct inet_socket *s) {
     struct tcp_control_block *tcp = s->tcp;
@@ -275,7 +268,6 @@ static void tcp_send_window_update(struct inet_socket *s) {
          window >= (size_t)(tcp->peer_mss ? tcp->peer_mss : TCP_PEER_MSS_INIT)))
         tcp_send_ack(s);
 }
-
 
 static void tcp_output(struct inet_socket *s) {
     struct tcp_control_block *tcp = s->tcp;
@@ -320,7 +312,6 @@ static void pending_detach(struct inet_socket *child) {
     child->sibling = NULL;
 }
 
-
 static void tcp_reset_peer(struct inet_socket *s) {
     if (!s->tcp) return;
     net_send_tcp(s->local_address, s->local_port, s->peer_address, s->peer_port,
@@ -346,7 +337,6 @@ static void tcp_free(struct inet_socket *socket) {
     if (socket->tcp) kfree(socket->tcp);
     kfree(socket);
 }
-
 
 static void tcp_begin_close(struct inet_socket *s) {
     struct tcp_control_block *tcp = s->tcp;
@@ -431,7 +421,6 @@ static void tcp_process_ack(struct inet_socket *s, uint32_t ack) {
     else tcp_arm_rto(tcp);
 }
 
-
 static void tcp_advance_close(struct inet_socket *s) {
     struct tcp_control_block *tcp = s->tcp;
     switch (tcp->state) {
@@ -480,12 +469,12 @@ static void tcp_input(struct inet_socket *s, uint32_t seq, uint32_t ack, uint8_t
             tcp->snd_nxt = ack;
             tcp->state = TCP_ESTABLISHED;
             tcp->rto_deadline_ns = 0;
+            s->connected = 1;
             report_connect(s);
             tcp_send_ack(s);
         }
         return;
     }
-
 
     if (tcp->state == TCP_SYN_RECEIVED) {
         if (flags & TCP_SYN) {
@@ -497,10 +486,10 @@ static void tcp_input(struct inet_socket *s, uint32_t seq, uint32_t ack, uint8_t
         tcp->snd_nxt = ack;
         tcp->state = TCP_ESTABLISHED;
         tcp->rto_deadline_ns = 0;
+        s->connected = 1;
     }
 
     if (flags & TCP_ACK) tcp_process_ack(s, ack);
-
 
     if (length > tcp->peer_mss) tcp->peer_mss = (uint16_t)length;
 
@@ -522,7 +511,6 @@ static void tcp_input(struct inet_socket *s, uint32_t seq, uint32_t ack, uint8_t
         tcp->peer_fin = 1;
         tcp_send_ack(s);
     }
-
 
     tcp_output(s);
     tcp_advance_close(s);
@@ -619,7 +607,6 @@ void inet_socket_tcp_timer_poll(void) {
     }
 }
 
-
 static struct inet_socket *tcp_open_child(struct inet_socket *listener, uint32_t source,
                                           uint16_t source_port, uint32_t destination,
                                           uint16_t destination_port, uint32_t seq,
@@ -686,7 +673,6 @@ void inet_socket_receive_tcp(uint32_t source, uint16_t source_port, uint32_t des
             return;
         }
     }
-
 
     if (!(flags & TCP_RST)) {
         uint32_t rst_seq = (flags & TCP_ACK) ? ack : 0U;
@@ -790,7 +776,6 @@ int inet_socket_listen(struct inet_socket *socket, int backlog) {
     socket->listening = 1;
     return 0;
 }
-
 
 struct inet_socket *inet_socket_accept(struct inet_socket *listener) {
     if (!listener || !listener->listening) return NULL;
@@ -942,7 +927,6 @@ int inet_socket_getpeername(struct inet_socket *socket, void *address, size_t *l
     return 0;
 }
 
-
 static void report_refused_option(const char *what, int level, int option) {
     static struct { int level; int option; } seen[16];
     static unsigned count;
@@ -986,7 +970,6 @@ int inet_socket_setsockopt(struct inet_socket *socket, int level, int option,
 
     if (level == IPPROTO_TCP && option == TCP_NODELAY) return 0;
     if (level == SOL_PACKET && option == PACKET_AUXDATA) return 0;
-
 
     report_refused_option("setsockopt", level, option);
     return -EOPNOTSUPP;

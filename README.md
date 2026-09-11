@@ -17,7 +17,8 @@ scheduling across every processor the firmware describes, ELF and a dynamic
 linker, signals, and a Linux-compatible syscall table.
 
 On top of it, runit as PID 1 with udevd and agetty, Void's bash, coreutils,
-sudo, curl and htop, and a Weston desktop that gets the display through seatd.
+sudo, curl and htop, and a Weston desktop that gets the display through seatd
+and opens with Firefox on it.
 
 Underneath: a block layer over IDE, AHCI, NVMe and USB storage, with GPT and MBR
 partitions and a read-write ext2 root that `mkfs.ext2` made; IPv4 with both ends
@@ -37,7 +38,8 @@ The first build downloads a Void rootfs and about 600 MiB of packages. The
 sysroot has to be built as root, on a filesystem that can hold ownership and the
 setuid bit. See [Build and Run](docs/build-and-run.md) if yours cannot.
 
-It boots into Weston. Ctrl+Alt+F2 leaves it for a text console, where you can
+It boots into Weston with Firefox already open. Ctrl+Alt+F2 leaves it for a
+text console, where you can
 log in as `tunix` / `tunix` or `root` / `tunix`, and Ctrl+Alt+F1 goes back.
 
 | The boot menu | A text console |

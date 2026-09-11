@@ -13,10 +13,10 @@ struct unix_credentials {
     uint32_t gid;
 };
 
+#define UNIX_MAX_RIGHTS 64
+
 #define TUNIX_AF_UNIX 1
 #define TUNIX_SOCK_STREAM 1
-/* Connection-oriented like a stream, but each send is one message a single
-   recv returns whole. WebKit's UI/web process IPC is built on it. */
 #define TUNIX_SOCK_SEQPACKET 5
 
 struct tunix_sockaddr_un {
@@ -49,14 +49,14 @@ int64_t unix_socket_send_with_rights(struct unix_socket *socket, size_t size,
 int64_t unix_socket_recv_with_rights(struct unix_socket *socket, size_t size,
                                      void *buffer, struct file **files,
                                      size_t maximum_files, size_t *file_count);
-/* The credentials of the process that sent the message the last read handed
-   over, which is what SCM_CREDENTIALS reports. */
 void unix_socket_last_sender(struct unix_socket *socket,
                              struct unix_credentials *out);
 
 int unix_socket_read_ready(struct unix_socket *socket);
+size_t unix_socket_read_available(struct unix_socket *socket);
 int unix_socket_write_ready(struct unix_socket *socket);
 int unix_socket_peer_closed(struct unix_socket *socket);
+int unix_socket_is_seqpacket(struct unix_socket *socket);
 int unix_socket_is_listener(struct unix_socket *socket);
 int unix_socket_shutdown(struct unix_socket *socket, int how);
 

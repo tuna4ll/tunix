@@ -21,14 +21,12 @@
 #define EMSGSIZE 90
 
 #define UNIX_PENDING_MAX 8
-#define UNIX_RIGHTS_MAX 8
-#define UNIX_ANCILLARY_MAX 8
+#define UNIX_RIGHTS_MAX UNIX_MAX_RIGHTS
+#define UNIX_ANCILLARY_MAX 16
 #define UNIX_RECORDS_MAX 64
 
-/* Preserve SOCK_SEQPACKET message boundaries. */
 struct unix_record_queue {
     uint32_t lengths[UNIX_RECORDS_MAX];
-    /* Keep credentials with each record. */
     struct unix_credentials senders[UNIX_RECORDS_MAX];
     int head;
     int tail;
@@ -77,7 +75,6 @@ struct unix_socket {
     int backlog;
     int passcred;
     struct unix_credentials credentials;
-    /* Remember the last record sender. */
     struct unix_credentials last_sender;
     char path[108];
     struct unix_channel *channel;
@@ -88,7 +85,6 @@ struct unix_socket {
     struct unix_socket *next_listener;
 };
 
-/* Track every bound socket. */
 static struct unix_socket *listener_list;
 
 static struct pipe_buffer *incoming(struct unix_socket *socket) {
@@ -176,7 +172,6 @@ static size_t ancillary_read_limit(const struct unix_ancillary_queue *queue,
     return boundary < requested ? boundary : requested;
 }
 
-
 static int peer_open(struct unix_socket *socket) {
     if (!socket || !socket->channel) return 0;
     return socket->side == 0 ? socket->channel->b_open : socket->channel->a_open;
@@ -263,7 +258,6 @@ int unix_socket_get_name(struct unix_socket *socket, int peer,
     }
     memset(address, 0, sizeof(*address));
     address->family = TUNIX_AF_UNIX;
-    /* Restore Linux abstract socket names. */
     if (path && path[0] == '\x01') {
         size_t name_length = strlen(path + 1);
         if (name_length > sizeof(address->path) - 1) name_length = sizeof(address->path) - 1;
@@ -286,7 +280,6 @@ void unix_socket_set_passcred(struct unix_socket *socket, int enabled) {
 int unix_socket_get_passcred(struct unix_socket *socket) {
     return socket && socket->passcred;
 }
-
 
 int unix_socket_pair(struct unix_socket **first, struct unix_socket **second,
                      int seqpacket) {
@@ -360,7 +353,6 @@ static int copy_path(char destination[108], const struct tunix_sockaddr_un *addr
         address->family != TUNIX_AF_UNIX) return -EAFNOSUPPORT;
     size_t maximum = length - sizeof(address->family);
     if (maximum > sizeof(address->path)) maximum = sizeof(address->path);
-    /* Encode Linux abstract socket names. */
     int abstract = (address->path[0] == '\0');
     size_t start = abstract ? 1 : 0;
     size_t path_length = start;
@@ -424,7 +416,6 @@ int unix_socket_connect(struct unix_socket *socket, const struct tunix_sockaddr_
     if (!listener || listener->pending_count >= listener->backlog) return -ECONNREFUSED;
 
     struct unix_channel *channel = (struct unix_channel *)kmalloc(sizeof(*channel));
-    /* Match the connecting socket type. */
     struct unix_socket *server = unix_socket_create(socket->seqpacket);
     if (!channel || !server) {
         if (channel) kfree(channel);
@@ -473,7 +464,6 @@ static int64_t unix_socket_read_data(struct unix_socket *socket, size_t size,
     if (!pipe) return -ENOTCONN;
     uint8_t *out = (uint8_t *)buffer;
 
-    /* Consume one complete seqpacket record. */
     if (socket->seqpacket) {
         struct unix_record_queue *records = incoming_records(socket);
         if (!records) return -ENOTCONN;
@@ -517,7 +507,6 @@ int64_t unix_socket_write(struct unix_socket *socket, size_t size, const void *b
     size_t available = PIPE_CAPACITY - pipe->count;
     const uint8_t *in = (const uint8_t *)buffer;
 
-    /* Write each seqpacket record atomically. */
     if (socket->seqpacket) {
         struct unix_record_queue *records = outgoing_records(socket);
         if (!records) return -ENOTCONN;
@@ -588,7 +577,6 @@ int64_t unix_socket_recv_with_rights(struct unix_socket *socket, size_t size,
 void unix_socket_last_sender(struct unix_socket *socket,
                              struct unix_credentials *out) {
     if (!out) return;
-    /* Fall back to connection credentials. */
     if (socket && socket->last_sender.pid) { *out = socket->last_sender; return; }
     if (!socket || unix_socket_get_peer_credentials(socket, out) != 0)
         memset(out, 0, sizeof(*out));
@@ -604,6 +592,18 @@ int unix_socket_read_ready(struct unix_socket *socket) {
         return (records && records->count > 0) || !peer_write_open(socket);
     }
     return incoming(socket)->count > 0 || !peer_write_open(socket);
+}
+
+size_t unix_socket_read_available(struct unix_socket *socket) {
+    if (!socket || socket->listening || !socket->connected || !socket->channel)
+        return 0;
+    if (socket->seqpacket) {
+        struct unix_record_queue *records = incoming_records(socket);
+        if (!records || records->count <= 0) return 0;
+        return records->lengths[records->head];
+    }
+    struct pipe_buffer *queue = incoming(socket);
+    return queue ? queue->count : 0;
 }
 
 int unix_socket_write_ready(struct unix_socket *socket) {
@@ -630,6 +630,10 @@ int unix_socket_shutdown(struct unix_socket *socket, int how) {
         else socket->channel->b_write_shutdown = 1;
     }
     return 0;
+}
+
+int unix_socket_is_seqpacket(struct unix_socket *socket) {
+    return socket && socket->seqpacket;
 }
 
 int unix_socket_is_listener(struct unix_socket *socket) {

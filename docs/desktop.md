@@ -23,6 +23,7 @@ Ctrl+Alt+F2 leaves the desktop for a text console and Ctrl+Alt+F1 comes back.
 | `xkeyboard-config` | the keymaps libxkbcommon compiles |
 | `dejavu-fonts-ttf` | something for the panel and the terminal to draw with |
 | `xcursor-vanilla-dmz` | a cursor theme that has the drag-and-drop shapes |
+| `firefox` | the browser the session opens with |
 
 `eudev` is already in the base set; it is what finds the devices.
 
@@ -42,7 +43,8 @@ terminal was dash and none of the account's `~/.bashrc` ever ran -- on an image
 whose `/etc/passwd` gives that account bash.
 
 `base-files/overlay/etc/xdg/weston/weston.ini` chooses the DRM backend, the
-cursor theme and the terminal font. Weston's own output goes to
+cursor theme and the terminal font, and its `[autolaunch]` section is what
+opens Firefox as the compositor comes up. Weston's own output goes to
 `/var/log/weston/` rather than to the console it is drawing over.
 
 Terminal 1 has no `agetty`: weston takes whichever terminal is active when it
@@ -113,12 +115,82 @@ Two things had to be fixed for that to work:
 
 - **A display manager.** The session is one user's, started by runit, with no
   greeter in front of it.
-- **XWayland.** Nothing in the image is an X client.
 - **Hardware acceleration by default.** `make run-virgl` gives the session the
   host's GPU through virgl; every other target leaves it on llvmpipe, because
   the host having a usable GL stack is a property of the machine rather than of
   Tunix.
 - **A second output.** DRM reports one CRTC and one connector.
+
+## Firefox
+
+![Firefox on Tunix](../screenshots/firefox.png)
+
+The session opens with Firefox already on screen. `[autolaunch]` in
+`weston.ini` starts it as the compositor comes up, there is a launcher for it
+on the panel, and the weston service exports `MOZ_ENABLE_WAYLAND=1` so it takes
+the Wayland path rather than falling back to XWayland.
+
+Getting it to draw a window took five kernel fixes, and every one of them was a
+gap a browser is simply the first program to walk into. Getting it to draw a
+*page* took seven more; those are in the section after this one.
+
+- **`/proc/<pid>/exe` named the path the program was started under.** Firefox
+  is `/usr/bin/firefox`, a symlink into `/usr/lib/firefox`, and it finds its own
+  installation directory by reading that link -- so it looked for
+  `dependentlibs.list` in `/usr/bin`, did not find it, and said
+  `Couldn't load XPCOM.` It now names the file that is running.
+- **`FIONREAD` answered `ENOTTY`.** Firefox proxies its own Wayland connection
+  and asks the socket how much is waiting; an error there reads as a broken
+  connection, and the browser reported `we don't have any display` on a session
+  whose compositor was running.
+- **There was no `/proc/<pid>/maps`.** glibc's `pthread_getattr_np()` reads it
+  to find where the main thread's stack begins, `nsThread::InitCommon()` turns
+  the failure into a release assertion, and Firefox died before it opened a
+  window. `RLIMIT_STACK` is a real number now for the same reason.
+- **A shared mapping of a file shorter than a page was quietly private.** The
+  last partial page was rounded away and copied instead of shared, so the
+  parent filled its own copy of the shared preference map and the read-only
+  mapping saw an untouched file.
+- **`arch_prctl(ARCH_SET_GS)` was refused.** Firefox's wasm2c sandboxes reach
+  their guest memory through `GS`, and the runtime aborts the process when the
+  call fails.
+
+A zombie also used to keep its address space until its parent collected it,
+which is not what Linux does and not what a browser can live with: Firefox left
+a couple of hundred unreaped children behind, the kernel's address-space table
+filled, and the next `fork()` failed -- which its fork server answers by
+crashing.
+
+## What the content processes needed
+
+Getting a window open is not getting a page drawn. Every process that renders
+one used to die at startup with `Exiting due to channel error`, and each reason
+was a limit this kernel had invented for itself:
+
+- **`sendmsg` refused anything longer than its staging buffer.** A stream has no
+  message boundaries, so a send that does not fit is a short send; answering
+  `EMSGSIZE` is not something a socket may do, and the IPC channel read it as a
+  dead peer.
+- **`sendmsg` took sixteen iovecs.** Linux takes a thousand and Chromium's
+  channel writes with far more than sixteen, so the first real message came back
+  `EINVAL` -- `pipe error: Invalid argument`, and the child left.
+- **`SCM_RIGHTS` carried eight descriptors.** Firefox hands thirteen over in one
+  message when it starts a child. Linux allows 253.
+- **`fstat` on a memfd answered `EBADF`,** so the size check on every shared
+  buffer failed and the receiver rejected it as *not safe to map*.
+- **A memfd could not be reopened through `/proc/self/fd`,** which is how Firefox
+  decides whether memfds are usable at all. Failing it sent every shared buffer
+  to `/dev/shm` instead, where the seals it then asked for cannot exist.
+- **`recvmmsg` was not implemented,** and glibc's resolver collects the A and the
+  AAAA answer with one call.
+- **`getpeername` answered `ENOTCONN` on a live connection,** because a socket
+  was only marked connected if the program called `connect()` a second time. A
+  non-blocking connect does not: it waits for the socket to become writable and
+  then asks who the peer is. NSPR does exactly that, so every load failed on a
+  machine where `curl` was fetching the same page.
+
+With those closed the browser renders pages, fetches them over TLS, and its tabs
+stay up.
 
 ## OpenGL, and the two things it needed
 
