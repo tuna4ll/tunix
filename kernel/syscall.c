@@ -4181,11 +4181,17 @@ static int64_t sys_get_robust_list(int pid, uint64_t user_head_pointer,
     return copy_to_user(user_length_pointer, &length, sizeof(length)) == 0 ? 0 : -EFAULT;
 }
 
+#define RLIMIT_STACK 3
 #define RLIMIT_NOFILE 7
 static int64_t sys_prlimit(uint64_t resource, uint64_t user_old_limit) {
     if (!user_old_limit) return 0;
 
-    uint64_t lim = (resource == RLIMIT_NOFILE) ? PROCESS_MAX_FDS : UINT64_MAX;
+    /* The stack limit is a real number here, not "no limit": glibc sizes the
+       main thread's stack from it once /proc/self/maps has told it where that
+       stack ends, and RLIM_INFINITY there makes the subtraction wrap. */
+    uint64_t lim = resource == RLIMIT_NOFILE ? PROCESS_MAX_FDS
+                 : resource == RLIMIT_STACK ? USER_STACK_MAX_PAGES * 4096ULL
+                 : UINT64_MAX;
     struct linux_rlimit value = {lim, lim};
     return copy_to_user(user_old_limit, &value, sizeof(value)) == 0 ? 0 : -EFAULT;
 }

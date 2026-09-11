@@ -116,7 +116,6 @@ static int64_t proc_cpuinfo_read(struct vfs_node *node, uint64_t offset,
     cpu_model(model);
     uint64_t frequency = time_tsc_frequency();
 
-    /* Emit one stanza per processor. */
     unsigned cpus = smp_cpu_count();
     for (unsigned index = 0; index < cpus; index++) {
         text_string(&text, "processor\t: "); text_unsigned(&text, index); text_char(&text, '\n');
@@ -142,7 +141,6 @@ static int64_t proc_meminfo_read(struct vfs_node *node, uint64_t offset,
                                  size_t size, void *output) {
     (void)node;
     struct text_buffer text = {{0}, 0};
-    /* Report usable memory. */
     uint64_t total = pmm_usable_page_count() * 4ULL;
     uint64_t free = pmm_free_page_count() * 4ULL;
     uint64_t used = total >= free ? total - free : 0;
@@ -155,7 +153,6 @@ static int64_t proc_meminfo_read(struct vfs_node *node, uint64_t offset,
     text_string(&text, "SwapTotal:      0 kB\nSwapFree:       0 kB\n");
     text_string(&text, "Shmem:          0 kB\nSReclaimable:   0 kB\n");
 
-    /* Report kernel allocations as slab memory. */
     uint64_t heap_reserved = 0;
     uint64_t heap_allocated = 0;
     uint64_t heap_limit = 0;
@@ -166,7 +163,6 @@ static int64_t proc_meminfo_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
-/* Report block device costs. */
 static int64_t proc_blockstat_read(struct vfs_node *node, uint64_t offset,
                                    size_t size, void *output) {
     (void)node;
@@ -185,7 +181,6 @@ static int64_t proc_blockstat_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
-/* Report recent input events. */
 static int64_t proc_inputlog_read(struct vfs_node *node, uint64_t offset,
                                   size_t size, void *output) {
     (void)node;
@@ -210,7 +205,6 @@ static int64_t proc_inputlog_read(struct vfs_node *node, uint64_t offset,
 
 static void text_hex32(struct text_buffer *text, uint32_t value);
 
-/* Report kernel lock timings. */
 static int64_t proc_klock_read(struct vfs_node *node, uint64_t offset,
                                size_t size, void *output) {
     (void)node;
@@ -232,7 +226,6 @@ static int64_t proc_klock_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
-/* Toggle lock measurement. */
 static int64_t proc_klock_write(struct vfs_node *node, uint64_t offset,
                                 size_t size, const void *input) {
     (void)node; (void)offset;
@@ -242,7 +235,6 @@ static int64_t proc_klock_write(struct vfs_node *node, uint64_t offset,
     return (int64_t)size;
 }
 
-/* Report missing syscall use. */
 static int64_t proc_abi_gaps_read(struct vfs_node *node, uint64_t offset,
                                   size_t size, void *output) {
     (void)node;
@@ -273,7 +265,6 @@ static int64_t proc_abi_gaps_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
-/* Clear missing syscall use. */
 static int64_t proc_abi_gaps_write(struct vfs_node *node, uint64_t offset,
                                    size_t size, const void *input) {
     (void)node; (void)offset;
@@ -296,7 +287,6 @@ static int64_t proc_uptime_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
-/* Report registered interrupt vectors. */
 static int64_t proc_interrupts_read(struct vfs_node *node, uint64_t offset,
                                     size_t size, void *output) {
     (void)node;
@@ -331,7 +321,6 @@ static int64_t proc_cmdline_line_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
-/* Expose the writable hostname. */
 static int64_t proc_hostname_read(struct vfs_node *node, uint64_t offset,
                                   size_t size, void *output) {
     (void)node;
@@ -349,7 +338,6 @@ static int64_t proc_hostname_write(struct vfs_node *node, uint64_t offset,
     return (int64_t)size;
 }
 
-/* Expose compatibility sysctl values. */
 static int64_t proc_knob_read(struct vfs_node *node, uint64_t offset,
                               size_t size, void *output) {
     struct text_buffer text = {{0}, 0};
@@ -398,7 +386,6 @@ static int64_t proc_osrelease_read(struct vfs_node *node, uint64_t offset,
 
 static char boot_id[37];
 
-/* Generate one UUID per boot. */
 static void create_boot_id(void) {
     static const char hex[] = "0123456789abcdef";
     uint8_t bytes[16];
@@ -464,7 +451,6 @@ static int64_t proc_stat_read(struct vfs_node *node, uint64_t offset,
     text_string(&text, "cpu  "); text_unsigned(&text, runtime_ticks);
     text_string(&text, " 0 0 "); text_unsigned(&text, idle_ticks);
     text_string(&text, " 0 0 0 0 0 0\n");
-    /* Split aggregate time evenly across processors. */
     unsigned cpus = smp_cpu_count();
     for (unsigned index = 0; index < cpus; index++) {
         text_string(&text, "cpu"); text_unsigned(&text, index); text_char(&text, ' ');
@@ -650,7 +636,6 @@ static int64_t proc_status_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
-/* Emit all 52 Linux process stat fields. */
 static int64_t proc_pid_stat_read(struct vfs_node *node, uint64_t offset,
                                   size_t size, void *output) {
     struct process *process = process_find(node_pid(node));
@@ -660,39 +645,37 @@ static int64_t proc_pid_stat_read(struct vfs_node *node, uint64_t offset,
     uint64_t ticks = process_runtime_ns(process) / 10000000ULL;
     uint64_t start = process->start_time_ns / 10000000ULL;
 
-    text_unsigned(&text, process->pid);                                 /* (1) pid */
+    text_unsigned(&text, process->pid);
     text_string(&text, " ("); text_string(&text, process->name);
-    text_string(&text, ") ");                                           /* (2) comm */
-    text_char(&text, state_code(process)); text_char(&text, ' ');       /* (3) state */
-    text_unsigned(&text, process->ppid); text_char(&text, ' ');         /* (4) ppid */
-    text_unsigned(&text, process->pgid); text_char(&text, ' ');         /* (5) pgrp */
-    text_unsigned(&text, process->sid); text_char(&text, ' ');          /* (6) session */
-    text_string(&text, "0 ");                                           /* (7) tty_nr */
-    text_signed(&text, -1); text_char(&text, ' ');                      /* (8) tpgid */
-    text_string(&text, "0 ");                                           /* (9) flags */
-    text_string(&text, "0 0 0 0 ");                     /* (10-13) min/maj faults */
-    text_unsigned(&text, ticks); text_char(&text, ' ');                 /* (14) utime */
-    text_string(&text, "0 ");                                           /* (15) stime */
-    text_string(&text, "0 0 ");                                  /* (16-17) c[us]time */
-    text_string(&text, "20 ");                                          /* (18) priority */
-    text_string(&text, "0 ");                                           /* (19) nice */
-    text_string(&text, "1 ");                                           /* (20) num_threads */
-    text_string(&text, "0 ");                                           /* (21) itrealvalue */
-    text_unsigned(&text, start); text_char(&text, ' ');                 /* (22) starttime */
-    text_unsigned(&text, rss_pages * 4096ULL); text_char(&text, ' ');   /* (23) vsize */
-    text_unsigned(&text, rss_pages); text_char(&text, ' ');             /* (24) rss */
-    /* Keep unsupported stat fields zeroed. */
+    text_string(&text, ") ");
+    text_char(&text, state_code(process)); text_char(&text, ' ');
+    text_unsigned(&text, process->ppid); text_char(&text, ' ');
+    text_unsigned(&text, process->pgid); text_char(&text, ' ');
+    text_unsigned(&text, process->sid); text_char(&text, ' ');
+    text_string(&text, "0 ");
+    text_signed(&text, -1); text_char(&text, ' ');
+    text_string(&text, "0 ");
+    text_string(&text, "0 0 0 0 ");
+    text_unsigned(&text, ticks); text_char(&text, ' ');
+    text_string(&text, "0 ");
+    text_string(&text, "0 0 ");
+    text_string(&text, "20 ");
+    text_string(&text, "0 ");
+    text_string(&text, "1 ");
+    text_string(&text, "0 ");
+    text_unsigned(&text, start); text_char(&text, ' ');
+    text_unsigned(&text, rss_pages * 4096ULL); text_char(&text, ' ');
+    text_unsigned(&text, rss_pages); text_char(&text, ' ');
     text_string(&text, "0 0 0 0 0 0 0 0 0 0 0 0 0 0 ");
-    text_string(&text, "0 ");                                           /* (39) processor */
-    text_string(&text, "0 0 ");                          /* (40-41) rt_priority, policy */
-    text_string(&text, "0 0 0 ");            /* (42-44) blkio, guest times */
-    text_string(&text, "0 0 0 0 0 0 0 ");        /* (45-51) start/end data, brk, args, env */
-    text_string(&text, "0");                                            /* (52) exit_code */
+    text_string(&text, "0 ");
+    text_string(&text, "0 0 ");
+    text_string(&text, "0 0 0 ");
+    text_string(&text, "0 0 0 0 0 0 0 ");
+    text_string(&text, "0");
     text_char(&text, '\n');
     return text_read(&text, offset, size, output);
 }
 
-/* Emit Linux process memory fields. */
 static int64_t proc_pid_statm_read(struct vfs_node *node, uint64_t offset,
                                    size_t size, void *output) {
     struct process *process = process_find(node_pid(node));
@@ -700,14 +683,94 @@ static int64_t proc_pid_statm_read(struct vfs_node *node, uint64_t offset,
     struct text_buffer text = {{0}, 0};
     uint64_t pages = vmm_count_user_pages(process->cr3);
 
-    text_unsigned(&text, pages); text_char(&text, ' ');   /* size */
-    text_unsigned(&text, pages); text_char(&text, ' ');   /* resident */
-    text_string(&text, "0 ");                             /* shared */
-    text_string(&text, "0 ");                             /* text */
-    text_string(&text, "0 ");                             /* lib */
-    text_unsigned(&text, pages); text_char(&text, ' ');   /* data */
-    text_string(&text, "0\n");                            /* dt */
+    text_unsigned(&text, pages); text_char(&text, ' ');
+    text_unsigned(&text, pages); text_char(&text, ' ');
+    text_string(&text, "0 ");
+    text_string(&text, "0 ");
+    text_string(&text, "0 ");
+    text_unsigned(&text, pages); text_char(&text, ' ');
+    text_string(&text, "0\n");
     return text_read(&text, offset, size, output);
+}
+
+static void text_hex64_lower(struct text_buffer *text, uint64_t value) {
+    static const char digits[] = "0123456789abcdef";
+    int shift = 60;
+    while (shift > 0 && !((value >> shift) & 15ULL)) shift -= 4;
+    for (; shift >= 0; shift -= 4) text_char(text, digits[(value >> shift) & 15ULL]);
+}
+
+/* One line of /proc/<pid>/maps, in the layout every reader of that file
+   expects: the range, the permissions, the offset into whatever backs it, a
+   device and an inode, and the name. */
+static void maps_line(struct text_buffer *text, uint64_t start, uint64_t end,
+                      uint64_t page_flags, uint64_t offset, const char *name) {
+    text_hex64_lower(text, start);
+    text_char(text, '-');
+    text_hex64_lower(text, end);
+    text_char(text, ' ');
+    text_char(text, 'r');
+    text_char(text, (page_flags & PAGE_WRITE) ? 'w' : '-');
+    text_char(text, (page_flags & PAGE_NX) ? '-' : 'x');
+    text_char(text, (page_flags & PAGE_SHARED) ? 's' : 'p');
+    text_char(text, ' ');
+    text_hex64_lower(text, offset);
+    text_string(text, " 00:00 0");
+    if (name) {
+        text_string(text, "                         ");
+        text_string(text, name);
+    }
+    text_char(text, '\n');
+}
+
+/* The address space as a file, because a program cannot ask about its own
+   mappings any other way. glibc's pthread_getattr_np() reads this to find
+   where the main thread's stack begins and ends, and a missing file is an
+   error it hands straight back: nsThread::InitCommon() turns that into
+   MOZ_RELEASE_ASSERT(!res) and Firefox dies before it opens a window.
+   The ranges are produced a line at a time against the offset asked for, so
+   the answer is not limited to one buffer -- a browser has hundreds. */
+static int64_t proc_pid_maps_read(struct vfs_node *node, uint64_t offset,
+                                  size_t size, void *output) {
+    struct process *process = process_find(node_pid(node));
+    if (!process || !process->memory) return 0;
+
+    uint8_t *out = (uint8_t *)output;
+    size_t produced = 0;
+    uint64_t position = 0;
+
+    struct vm_area heap = {process->memory->brk_start, process->memory->brk_end,
+                           PAGE_WRITE | PAGE_NX, VM_ANONYMOUS, NULL, 0, NULL};
+    struct vm_area stack = {USER_STACK_LIMIT, USER_STACK_TOP,
+                            PAGE_WRITE | PAGE_NX, VM_ANONYMOUS, NULL, 0, NULL};
+
+    for (int step = 0; step < 3 && produced < size; step++) {
+        struct vm_area *area = step == 0 ? (heap.end > heap.start ? &heap : NULL)
+                             : step == 1 ? process->memory->areas
+                             : &stack;
+        for (; area && produced < size; area = step == 1 ? area->next : NULL) {
+            struct text_buffer line = {{0}, 0};
+            char path[256];
+            const char *name = step == 0 ? "[heap]" : step == 2 ? "[stack]" : NULL;
+            if (step == 1 && area->file && area->file->node &&
+                vfs_node_path(area->file->node, path, sizeof(path)) == 0)
+                name = path;
+            maps_line(&line, area->start, area->end, area->page_flags,
+                      area->offset, name);
+
+            if (position + line.length <= offset) {
+                position += line.length;
+                continue;
+            }
+            size_t from = offset > position ? (size_t)(offset - position) : 0;
+            size_t available = line.length - from;
+            if (available > size - produced) available = size - produced;
+            memcpy(out + produced, line.data + from, available);
+            produced += available;
+            position += line.length;
+        }
+    }
+    return (int64_t)produced;
 }
 
 static int64_t proc_pid_comm_read(struct vfs_node *node, uint64_t offset,
@@ -760,7 +823,6 @@ static size_t path_append_decimal(char *output, size_t at, uint64_t value) {
     return at;
 }
 
-/* Build a process path. */
 static void decimal_path(uint64_t pid, const char *suffix, char output[PROC_PATH_MAX]) {
     size_t at = path_append_string(output, 0, "/proc/");
     at = path_append_decimal(output, at, pid);
@@ -768,7 +830,6 @@ static void decimal_path(uint64_t pid, const char *suffix, char output[PROC_PATH
     output[at] = '\0';
 }
 
-/* Build a process task path. */
 static void task_path(uint64_t pid, const char *suffix, char output[PROC_PATH_MAX]) {
     size_t at = path_append_string(output, 0, "/proc/");
     at = path_append_decimal(output, at, pid);
@@ -778,7 +839,6 @@ static void task_path(uint64_t pid, const char *suffix, char output[PROC_PATH_MA
     output[at] = '\0';
 }
 
-/* Describe an open descriptor. */
 static void describe_file(const struct file *file, char *output, size_t capacity) {
     output[0] = '\0';
     if (!file) return;
@@ -808,7 +868,6 @@ static void describe_file(const struct file *file, char *output, size_t capacity
 }
 
 static void proc_fd_refresh(struct vfs_node *directory) {
-    /* Prevent recursive refreshes. */
     static int busy;
     if (busy) return;
     busy = 1;
@@ -854,7 +913,6 @@ static int set_link_target(struct vfs_node *link, const char *target) {
     return 0;
 }
 
-/* Refresh mutable process links. */
 static void proc_process_refresh(struct vfs_node *directory) {
     struct process *process = process_find(node_pid(directory));
     if (!process) return;
@@ -866,12 +924,10 @@ static void proc_process_refresh(struct vfs_node *directory) {
         (void)set_link_target(direct_child(directory, "cwd"), path);
 }
 
-/* Track the calling process links. */
 static struct vfs_node *self_link;
 static struct vfs_node *thread_self_link;
 
 static void point_at_caller(struct vfs_node *link, uint64_t pid) {
-    /* Reuse the preallocated link buffer. */
     if (!link || !link->data || link->capacity < 21) return;
     char *target = (char *)link->data;
     size_t at = path_append_decimal(target, 0, pid);
@@ -890,7 +946,6 @@ void procfs_init(void) {
     if (!root) return;
     root->mode = 0555;
     vfs_mount_builtin("proc", "/proc", "proc", root);
-    /* Reserve room for any process id. */
     self_link = vfs_attach_symlink(root, "self", "18446744073709551615");
     thread_self_link = vfs_attach_symlink(root, "thread-self", "18446744073709551615");
     root->refresh = proc_root_refresh;
@@ -942,7 +997,6 @@ void procfs_init(void) {
         knob(yama, "ptrace_scope", 1);
     }
 
-    /* Expose entropy values for seedrng. */
     struct vfs_node *random = vfs_mkdir_p("/proc/sys/kernel/random");
     if (random) {
         random->mode = 0555;
@@ -981,6 +1035,7 @@ static void populate_process_files(struct vfs_node *directory, uint64_t pid) {
     if (!vfs_find_child(directory, "cmdline")) virtual_file(directory, "cmdline", proc_cmdline_read, pid);
     if (!vfs_find_child(directory, "statm")) virtual_file(directory, "statm", proc_pid_statm_read, pid);
     if (!vfs_find_child(directory, "comm")) virtual_file(directory, "comm", proc_pid_comm_read, pid);
+    if (!vfs_find_child(directory, "maps")) virtual_file(directory, "maps", proc_pid_maps_read, pid);
 }
 
 void procfs_register_process(struct process *process) {
@@ -1018,7 +1073,6 @@ void procfs_register_process(struct process *process) {
     }
     directory->refresh = proc_process_refresh;
 
-    /* Mirror each process as its main task. */
     task_path(process->pid, NULL, path);
     struct vfs_node *task = vfs_mkdir_p(path);
     if (!task) return;
@@ -1035,6 +1089,7 @@ void procfs_unregister_process(uint64_t pid) {
     task_path(pid, "/stat", path); (void)vfs_remove(path, 0);
     task_path(pid, "/cmdline", path); (void)vfs_remove(path, 0);
     task_path(pid, "/statm", path); (void)vfs_remove(path, 0);
+    task_path(pid, "/maps", path); (void)vfs_remove(path, 0);
     task_path(pid, "/comm", path); (void)vfs_remove(path, 0);
     task_path(pid, NULL, path); (void)vfs_remove(path, 1);
     decimal_path(pid, "/task", path); (void)vfs_remove(path, 1);
@@ -1042,6 +1097,7 @@ void procfs_unregister_process(uint64_t pid) {
     decimal_path(pid, "/stat", path); (void)vfs_remove(path, 0);
     decimal_path(pid, "/cmdline", path); (void)vfs_remove(path, 0);
     decimal_path(pid, "/statm", path); (void)vfs_remove(path, 0);
+    decimal_path(pid, "/maps", path); (void)vfs_remove(path, 0);
     decimal_path(pid, "/comm", path); (void)vfs_remove(path, 0);
     decimal_path(pid, "/exe", path); (void)vfs_remove(path, 0);
     decimal_path(pid, "/cwd", path); (void)vfs_remove(path, 0);
