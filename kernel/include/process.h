@@ -58,6 +58,8 @@ struct file_table {
     uint8_t fd_flags[PROCESS_MAX_FDS];
 };
 
+#define PROCESS_FPU_STATE_SIZE 2560
+
 struct process {
     uint64_t pid;
     uint64_t tgid;
@@ -82,7 +84,7 @@ struct process {
     uint64_t user_stack_top;
     uint64_t kernel_stack_base;
     uint64_t kernel_stack_top;
-    uint8_t fpu_state[512] __attribute__((aligned(16)));
+    uint8_t fpu_state[PROCESS_FPU_STATE_SIZE + 64];
     uint64_t brk_start;
     uint64_t brk_end;
     uint64_t mmap_base;
@@ -148,6 +150,7 @@ struct process {
     uint64_t signal_saved_mask;
     int in_signal;
     struct syscall_frame signal_saved_frame;
+    uint64_t signal_context_address;
     struct tunix_sigaction signal_actions[TUNIX_NSIG];
 
     struct process *next;
@@ -192,6 +195,8 @@ int process_sync_file_areas(uint64_t start, uint64_t end);
 
 int process_grow_user_stack(uint64_t fault_address);
 int process_handle_cow_fault(uint64_t fault_address);
+void process_enable_extended_fpu(void);
+int process_signal_has_handler(int signal_number);
 int process_fault_from_interrupt(struct interrupt_frame *frame, int signal_number);
 void process_run_child_first_from_syscall(struct syscall_frame *frame, uint64_t child_pid);
 void process_reap_deferred(void);

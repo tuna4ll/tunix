@@ -793,23 +793,76 @@ int process_get_affinity(uint64_t tid, uint64_t *mask) {
     return 0;
 }
 
+static uint8_t *fpu_area(struct process *process) {
+    return (uint8_t *)(((uintptr_t)process->fpu_state + 63U) & ~(uintptr_t)63U);
+}
+
+static uint64_t fpu_xstate_mask;
+static uint32_t fpu_xstate_size;
+
+void process_enable_extended_fpu(void) {
+    uint32_t a, b, c, d;
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1), "c"(0));
+    if (!(c & (1U << 26))) return;
+
+    uint64_t cr4;
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    cr4 |= 1ULL << 18;
+    __asm__ volatile("mov %0, %%cr4" : : "r"(cr4));
+
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(13U), "c"(0));
+    uint64_t wanted = ((uint64_t)a) & 0x7ULL;
+    if (!(wanted & 0x3ULL)) return;
+    wanted |= 0x3ULL;
+
+    __asm__ volatile("xsetbv" : : "a"((uint32_t)wanted), "d"(0U), "c"(0U));
+
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(13U), "c"(0));
+    if (b > PROCESS_FPU_STATE_SIZE) {
+        cr4 &= ~(1ULL << 18);
+        __asm__ volatile("mov %0, %%cr4" : : "r"(cr4));
+        return;
+    }
+    fpu_xstate_size = b;
+    fpu_xstate_mask = wanted;
+}
+
 static void fpu_save(struct process *process) {
-    if (process) __asm__ volatile("fxsave64 (%0)" : : "r"(process->fpu_state) : "memory");
+    if (!process) return;
+    uint8_t *area = fpu_area(process);
+    if (fpu_xstate_mask)
+        __asm__ volatile("xsave64 (%0)" : : "r"(area),
+                         "a"((uint32_t)fpu_xstate_mask),
+                         "d"((uint32_t)(fpu_xstate_mask >> 32)) : "memory");
+    else
+        __asm__ volatile("fxsave64 (%0)" : : "r"(area) : "memory");
 }
 
 static void fpu_restore(struct process *process) {
-    if (process) __asm__ volatile("fxrstor64 (%0)" : : "r"(process->fpu_state) : "memory");
+    if (!process) return;
+    uint8_t *area = fpu_area(process);
+    if (fpu_xstate_mask)
+        __asm__ volatile("xrstor64 (%0)" : : "r"(area),
+                         "a"((uint32_t)fpu_xstate_mask),
+                         "d"((uint32_t)(fpu_xstate_mask >> 32)) : "memory");
+    else
+        __asm__ volatile("fxrstor64 (%0)" : : "r"(area) : "memory");
 }
 
 static void fpu_init_state(struct process *process) {
     if (!process) return;
-    memset(process->fpu_state, 0, sizeof(process->fpu_state));
-    process->fpu_state[0] = 0x7F;
-    process->fpu_state[1] = 0x03;
-    process->fpu_state[24] = 0x80;
-    process->fpu_state[25] = 0x1F;
-    process->fpu_state[28] = 0xFF;
-    process->fpu_state[29] = 0xFF;
+    uint8_t *area = fpu_area(process);
+    memset(area, 0, PROCESS_FPU_STATE_SIZE);
+    area[0] = 0x7F;
+    area[1] = 0x03;
+    area[24] = 0x80;
+    area[25] = 0x1F;
+    area[28] = 0xFF;
+    area[29] = 0xFF;
+}
+
+static void fpu_copy(struct process *destination, struct process *source) {
+    memcpy(fpu_area(destination), fpu_area(source), PROCESS_FPU_STATE_SIZE);
 }
 
 static void activate_process(struct process *process) {
@@ -1110,13 +1163,10 @@ static uint64_t alloc_user_page(void) {
     return physical;
 }
 
-int process_commit_area(uint64_t fault_address) {
-    if (!current || current->state != PROCESS_RUNNING || !current->cr3) return 0;
-    uint64_t page = fault_address & ~4095ULL;
-    struct vm_area *area = process_find_area(page);
-    if (!area || !(area->kind & VM_ANONYMOUS)) return 0;
-    if (vmm_translate(current->cr3, page, NULL, NULL) == 0) return 1;
+#define COMMIT_AHEAD_PAGES 16ULL
 
+static int commit_one(struct vm_area *area, uint64_t page) {
+    if (vmm_translate(current->cr3, page, NULL, NULL) == 0) return 1;
     uint64_t physical = alloc_user_page();
     if (!physical) return 0;
     memset(vmm_phys_to_virt(physical), 0, 4096);
@@ -1124,6 +1174,20 @@ int process_commit_area(uint64_t fault_address) {
         pmm_free_page((void *)physical);
         return 0;
     }
+    return 1;
+}
+
+int process_commit_area(uint64_t fault_address) {
+    if (!current || current->state != PROCESS_RUNNING || !current->cr3) return 0;
+    uint64_t page = fault_address & ~4095ULL;
+    struct vm_area *area = process_find_area(page);
+    if (!area || !(area->kind & VM_ANONYMOUS)) return 0;
+    if (!commit_one(area, page)) return 0;
+
+    uint64_t ahead = page + 4096ULL;
+    uint64_t limit = page + COMMIT_AHEAD_PAGES * 4096ULL;
+    if (limit > area->end) limit = area->end;
+    while (ahead < limit && commit_one(area, ahead)) ahead += 4096ULL;
     return 1;
 }
 
@@ -1179,6 +1243,12 @@ int process_grow_user_stack(uint64_t fault_address) {
 int process_handle_cow_fault(uint64_t fault_address) {
     if (!current || current->state != PROCESS_RUNNING || !current->cr3) return 0;
     return vmm_handle_cow_fault(current->cr3, fault_address & ~4095ULL) == 0;
+}
+
+int process_signal_has_handler(int signal_number) {
+    if (!current || signal_number < 1 || signal_number > TUNIX_NSIG) return 0;
+    uint64_t handler = current->signal_actions[signal_number - 1].handler;
+    return handler != SIG_DFL && handler != SIG_IGN;
 }
 
 int process_fault_from_interrupt(struct interrupt_frame *frame, int signal_number) {
@@ -1514,7 +1584,7 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame) {
     }
     memory_copy_mappings(child->memory, parent->memory);
     fpu_save(parent);
-    memcpy(child->fpu_state, parent->fpu_state, sizeof(child->fpu_state));
+    fpu_copy(child, parent);
     child->entry = parent->entry;
     child->user_stack_top = parent->user_stack_top;
     child->brk_start = parent_brk_start;
@@ -1595,7 +1665,7 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
     memory_ref(child->memory);
     sync_memory_view(child);
     fpu_save(parent);
-    memcpy(child->fpu_state, parent->fpu_state, sizeof(child->fpu_state));
+    fpu_copy(child, parent);
     child->entry = parent->entry;
     child->user_stack_top = child_stack;
     child->fs_base = (flags & 0x00080000ULL) ? tls : parent->fs_base;
@@ -1995,7 +2065,7 @@ int64_t process_waitid_from_syscall(int64_t pid_spec, uint64_t info_user,
                     }
                     if (vmm_copy_to_space(parent->cr3, info_user, &info,
                                           sizeof(info)) != 0) return -EFAULT;
-                    mark_dead(item);
+                    if (!(options & WNOWAIT)) mark_dead(item);
                     return 0;
                 }
                 if ((options & WSTOPPED) && item->state == PROCESS_STOPPED &&
@@ -2006,7 +2076,7 @@ int64_t process_waitid_from_syscall(int64_t pid_spec, uint64_t info_user,
                     info.si_status = item->stop_signal & 0xFF;
                     if (vmm_copy_to_space(parent->cr3, info_user, &info,
                                           sizeof(info)) != 0) return -EFAULT;
-                    item->stop_reported = 1;
+                    if (!(options & WNOWAIT)) item->stop_reported = 1;
                     return 0;
                 }
                 if ((options & WCONTINUED) && item->continued_pending) {
@@ -2016,7 +2086,7 @@ int64_t process_waitid_from_syscall(int64_t pid_spec, uint64_t info_user,
                     info.si_status = SIGCONT;
                     if (vmm_copy_to_space(parent->cr3, info_user, &info,
                                           sizeof(info)) != 0) return -EFAULT;
-                    item->continued_pending = 0;
+                    if (!(options & WNOWAIT)) item->continued_pending = 0;
                     return 0;
                 }
             }
@@ -2138,9 +2208,19 @@ int64_t process_setsid(void) {
     return (int64_t)current->sid;
 }
 
+static void read_user_context(struct syscall_frame *frame, const uint8_t *context);
+
 int process_sigreturn(struct syscall_frame *frame) {
     if (!current || !frame || !current->in_signal) return -EINVAL;
     *frame = current->signal_saved_frame;
+    if (current->signal_context_address) {
+        uint8_t context[SIGNAL_CONTEXT_SIZE];
+        if (vmm_copy_from_space(current->cr3, context,
+                                current->signal_context_address,
+                                SIGNAL_CONTEXT_SIZE) == 0)
+            read_user_context(frame, context);
+    }
+    current->signal_context_address = 0;
     current->signal_blocked = current->signal_saved_mask;
     current->in_signal = 0;
     return 0;
@@ -2172,6 +2252,69 @@ int process_signal_interrupts_wait(void) {
         !signal_would_act(current, next_pending_signal(current))) return 0;
     current->syscall_rewound = 0;
     return 1;
+}
+
+static void mcontext_put(uint8_t *context, unsigned slot, uint64_t value) {
+    memcpy(context + UCONTEXT_MCONTEXT_OFFSET + slot * 8U, &value, sizeof(value));
+}
+
+static uint64_t mcontext_get(const uint8_t *context, unsigned slot) {
+    uint64_t value;
+    memcpy(&value, context + UCONTEXT_MCONTEXT_OFFSET + slot * 8U, sizeof(value));
+    return value;
+}
+
+static void fill_user_context(uint8_t *context, const struct syscall_frame *frame,
+                              uint64_t blocked) {
+    mcontext_put(context, MCONTEXT_R8, frame->r8);
+    mcontext_put(context, MCONTEXT_R9, frame->r9);
+    mcontext_put(context, MCONTEXT_R10, frame->r10);
+    mcontext_put(context, MCONTEXT_R11, frame->r11);
+    mcontext_put(context, MCONTEXT_R12, frame->r12);
+    mcontext_put(context, MCONTEXT_R13, frame->r13);
+    mcontext_put(context, MCONTEXT_R14, frame->r14);
+    mcontext_put(context, MCONTEXT_R15, frame->r15);
+    mcontext_put(context, MCONTEXT_RDI, frame->rdi);
+    mcontext_put(context, MCONTEXT_RSI, frame->rsi);
+    mcontext_put(context, MCONTEXT_RBP, frame->rbp);
+    mcontext_put(context, MCONTEXT_RBX, frame->rbx);
+    mcontext_put(context, MCONTEXT_RDX, frame->rdx);
+    mcontext_put(context, MCONTEXT_RAX, frame->rax);
+    mcontext_put(context, MCONTEXT_RCX, frame->rcx);
+    mcontext_put(context, MCONTEXT_RSP, frame->user_rsp);
+    mcontext_put(context, MCONTEXT_RIP, frame->user_rip);
+    mcontext_put(context, MCONTEXT_EFLAGS, frame->user_rflags);
+    memcpy(context + UCONTEXT_SIGMASK_OFFSET, &blocked, sizeof(blocked));
+    uint64_t stack_pointer = current ? current->signal_stack_pointer : 0;
+    uint64_t stack_size = current ? current->signal_stack_size : 0;
+    uint32_t stack_flags = current ? (uint32_t)current->signal_stack_flags : SS_DISABLE;
+    memcpy(context + UCONTEXT_STACK_OFFSET, &stack_pointer, sizeof(stack_pointer));
+    memcpy(context + UCONTEXT_STACK_OFFSET + 8, &stack_flags, sizeof(stack_flags));
+    memcpy(context + UCONTEXT_STACK_OFFSET + 16, &stack_size, sizeof(stack_size));
+}
+
+static void read_user_context(struct syscall_frame *frame, const uint8_t *context) {
+    frame->r8 = mcontext_get(context, MCONTEXT_R8);
+    frame->r9 = mcontext_get(context, MCONTEXT_R9);
+    frame->r10 = mcontext_get(context, MCONTEXT_R10);
+    frame->r11 = mcontext_get(context, MCONTEXT_R11);
+    frame->r12 = mcontext_get(context, MCONTEXT_R12);
+    frame->r13 = mcontext_get(context, MCONTEXT_R13);
+    frame->r14 = mcontext_get(context, MCONTEXT_R14);
+    frame->r15 = mcontext_get(context, MCONTEXT_R15);
+    frame->rdi = mcontext_get(context, MCONTEXT_RDI);
+    frame->rsi = mcontext_get(context, MCONTEXT_RSI);
+    frame->rbp = mcontext_get(context, MCONTEXT_RBP);
+    frame->rbx = mcontext_get(context, MCONTEXT_RBX);
+    frame->rdx = mcontext_get(context, MCONTEXT_RDX);
+    frame->rax = mcontext_get(context, MCONTEXT_RAX);
+    frame->rcx = mcontext_get(context, MCONTEXT_RCX);
+    uint64_t rsp = mcontext_get(context, MCONTEXT_RSP);
+    uint64_t rip = mcontext_get(context, MCONTEXT_RIP);
+    if (rsp && rsp < USER_ADDRESS_LIMIT) frame->user_rsp = rsp;
+    if (rip && rip < USER_ADDRESS_LIMIT) frame->user_rip = rip;
+    uint64_t flags = mcontext_get(context, MCONTEXT_EFLAGS);
+    frame->user_rflags = (flags & ~(uint64_t)0x200D5UL & 0x3F7FD5UL) | 0x202UL;
 }
 
 static int on_signal_stack(const struct process *process, uint64_t user_rsp) {
@@ -2240,11 +2383,12 @@ void process_prepare_user_return(struct syscall_frame *frame) {
     uint64_t siginfo_address = 0;
     uint64_t context_address = 0;
     if (action->flags & SA_SIGINFO) {
-        uint8_t zeros[SIGNAL_CONTEXT_SIZE];
-        memset(zeros, 0, sizeof(zeros));
+        uint8_t context[SIGNAL_CONTEXT_SIZE];
+        memset(context, 0, sizeof(context));
+        fill_user_context(context, frame, current->signal_blocked);
         area -= SIGNAL_CONTEXT_SIZE;
         context_address = area;
-        if (vmm_copy_to_space(current->cr3, context_address, zeros, SIGNAL_CONTEXT_SIZE) != 0) {
+        if (vmm_copy_to_space(current->cr3, context_address, context, SIGNAL_CONTEXT_SIZE) != 0) {
             process_exit_from_signal(frame, SIGSEGV);
             return;
         }
@@ -2275,6 +2419,7 @@ void process_prepare_user_return(struct syscall_frame *frame) {
         return;
     }
     current->signal_saved_frame = *frame;
+    current->signal_context_address = context_address;
     current->signal_saved_mask = current->signal_blocked;
     current->signal_blocked |= action->mask | bit;
     current->in_signal = 1;

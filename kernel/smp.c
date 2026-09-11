@@ -1,5 +1,3 @@
-/* Bringing up the processors the firmware described: an INIT, two startup
-   IPIs, and one at a time. */
 #include <stddef.h>
 #include <stdint.h>
 
@@ -25,8 +23,6 @@ extern uint8_t smp_trampoline_start[];
 extern uint8_t smp_trampoline_end[];
 extern uint8_t smp_trampoline_data[];
 
-/* Must match TRAMPOLINE_BASE in trampoline.S, which has that address compiled
-   into its own jumps. */
 #define TRAMPOLINE_PHYSICAL 0x8000ULL
 #define TRAMPOLINE_PAGE ((uint8_t)(TRAMPOLINE_PHYSICAL >> 12))
 
@@ -38,8 +34,6 @@ extern uint8_t smp_trampoline_data[];
 #define STARTUP_TIMEOUT_MS 200ULL
 #define INIT_SETTLE_MS 10ULL
 #define STARTUP_SETTLE_US 200ULL
-/* Long enough that a busy processor always answers and short enough that one
-   which never will does not take the machine with it. */
 #define FLUSH_TIMEOUT_NS (2ULL * 1000ULL * 1000ULL * 1000ULL)
 
 static unsigned online_cpus = 1;
@@ -59,7 +53,6 @@ void smp_service_flush(void) {
     __atomic_store_n(&self->flush_pending, 0, __ATOMIC_RELEASE);
 }
 
-/* What the interrupt itself runs, kept short and lock-free on purpose. */
 void smp_flush_interrupt(void) {
     apic_send_eoi();
     smp_service_flush();
@@ -70,8 +63,6 @@ void smp_flush_address_space(uint64_t cr3) {
 
     unsigned self = cpu_current()->index;
     int asked = 0;
-    /* Which processors are looking at this space cannot change while the
-       caller holds the lock. */
     for (unsigned index = 0; index < SMP_MAX_CPUS; index++) {
         struct cpu *cpu = percpu_slot(index);
         if (index == self || !cpu->online || cpu->address_space != cr3) continue;
@@ -84,8 +75,6 @@ void smp_flush_address_space(uint64_t cr3) {
     for (unsigned index = 0; index < SMP_MAX_CPUS; index++) {
         struct cpu *cpu = percpu_slot(index);
         if (index == self || !cpu->online) continue;
-        /* Bounded, because stale translations on one processor beat a machine
-           that stopped. */
         uint64_t deadline = time_uptime_ns() + FLUSH_TIMEOUT_NS;
         while (__atomic_load_n(&cpu->flush_pending, __ATOMIC_ACQUIRE)) {
             if (time_uptime_ns() >= deadline) {
@@ -115,8 +104,6 @@ static void write_parameter(unsigned offset, uint64_t value) {
 
 static int trampoline_page_added;
 
-/* The trampoline's page mapped to itself, and only when the loader's
-   identity map is gone. */
 static int map_trampoline_page(void) {
     uint64_t cr3 = vmm_kernel_cr3();
     uint64_t physical = 0;
@@ -136,20 +123,12 @@ static void unmap_trampoline_page(void) {
     trampoline_page_added = 0;
 }
 
-/* Runs on the new processor, on its own idle stack, with the kernel's page
-   tables already loaded by the trampoline. */
 void smp_ap_entry(uint64_t index) {
-    /* First, so the window the starter brackets it with is as tight as the
-       bring-up allows. */
     time_mark_processor((unsigned)index);
     gdt_init_cpu((unsigned)index);
     idt_activate();
-    /* Per-processor, and the framebuffer is mapped through a slot it defines:
-       a processor without it writes the screen through the cache while another
-       writes it write-combining. */
+    process_enable_extended_fpu();
     vmm_configure_processor();
-    /* The syscall entry MSRs are per-processor, and one that skipped this would
-       take its first syscall as an invalid opcode. */
     syscall_init();
     apic_enable_local();
     percpu_slot((unsigned)index)->apic_id = apic_local_id();
@@ -167,8 +146,6 @@ static int start_processor(unsigned index, uint32_t apic_id) {
     write_parameter(DATA_ENTRY, (uint64_t)smp_ap_entry);
     write_parameter(DATA_INDEX, index);
 
-    /* Read before the processor is woken and again once it answers, so the
-       reading it takes for itself falls inside a window this one knows. */
     uint64_t before = time_uptime_ns();
     apic_send_init(apic_id);
     wait_ns(INIT_SETTLE_MS * 1000000ULL);
@@ -187,8 +164,6 @@ void smp_init(void) {
     percpu_mark_online(0);
     percpu_slot(0)->apic_id = apic_local_id();
 
-    /* nosmp keeps the machine on one processor, so the other processors
-       stop being suspects. */
     if (boot_command_line_flag("nosmp")) {
         kprintf("SMP: one processor, nosmp\n");
         return;
@@ -206,8 +181,6 @@ void smp_init(void) {
         return;
     }
 
-    /* Held end to end, because a processor already up is running processes
-       on these page tables. */
     kernel_lock();
     if (map_trampoline_page() != 0) {
         kernel_unlock();
@@ -225,22 +198,14 @@ void smp_init(void) {
             kprintf("SMP: apic %u did not come up\n", (unsigned)machine->cpus[i].apic_id);
             missing++;
         }
-        /* The slot is spent either way, or two processors end up running on one
-           stack. */
         index++;
     }
 
-    /* The page stays mapped when something did not check in, for a processor
-       still inside it. */
     if (!missing) unmap_trampoline_page();
     online_cpus = percpu_online_count();
     kernel_unlock();
-    /* After the unlock, so that stopping here rather than at the next line
-       means something. */
     kprintf("SMP: %u of %u processors running\n", online_cpus,
             (unsigned)machine->cpu_count);
-    /* Only with more than one, because two readings on different processors
-       are not one clock. */
     if (online_cpus > 1 && !time_tsc_is_invariant())
         kprintf("SMP: the TSC is not invariant; timing may drift between processors\n");
 }

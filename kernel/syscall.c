@@ -296,6 +296,8 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 
 #define MSG_DONTWAIT 0x40
 #define MSG_WAITFORONE 0x10000
+#define SOCKET_MESSAGE_STAGE 4096
+#define SOCKET_MESSAGE_MAX PIPE_CAPACITY
 #define UIO_MAXIOV 1024
 #define SO_SNDBUF 7
 #define SO_RCVBUF 8
@@ -755,7 +757,10 @@ void syscall_init(void) {
 #define WRITE_STAGE_MAX (128U * 1024U)
 
 static int write_stages_large(const struct file *file) {
-    return file && file->kind == FILE_KIND_VFS && file->node &&
+    if (!file) return 0;
+    if (file->kind == FILE_KIND_SOCKET || file->kind == FILE_KIND_PIPE_WRITE)
+        return 1;
+    return file->kind == FILE_KIND_VFS && file->node &&
            (file->node->flags & 0xFFU) == VFS_FILE;
 }
 
@@ -1698,6 +1703,18 @@ static int collect_scm_rights(const struct linux_msghdr *message,
     return 0;
 }
 
+static size_t message_total_length(const struct linux_msghdr *message) {
+    size_t total = 0;
+    for (uint64_t index = 0; index < message->iov_length && index < UIO_MAXIOV; index++) {
+        struct linux_iovec iov;
+        if (copy_from_user(&iov, message->iov + index * sizeof(iov), sizeof(iov)) != 0)
+            return total;
+        total += (size_t)iov.length;
+        if (total > SOCKET_MESSAGE_MAX) return SOCKET_MESSAGE_MAX;
+    }
+    return total;
+}
+
 static int64_t sys_sendmsg(int fd, uint64_t user_message, int flags) {
     if (!user_message) return -EFAULT;
     struct linux_msghdr message;
@@ -1706,30 +1723,48 @@ static int64_t sys_sendmsg(int fd, uint64_t user_message, int flags) {
     struct inet_socket *stream_socket = unix_value ? NULL : inet_socket_from_fd(fd);
     int partial = (unix_value && !unix_socket_is_seqpacket(unix_value)) ||
                   stream_socket != NULL;
-    uint8_t data[4096];
+    uint8_t stage[SOCKET_MESSAGE_STAGE];
+    uint8_t *data = stage;
+    size_t capacity = sizeof(stage);
+    if (unix_value) {
+        size_t wanted = message_total_length(&message);
+        if (wanted > capacity) {
+            if (wanted > SOCKET_MESSAGE_MAX) wanted = SOCKET_MESSAGE_MAX;
+            uint8_t *large = (uint8_t *)kmalloc(wanted);
+            if (large) { data = large; capacity = wanted; }
+        }
+    }
     size_t length = 0;
-    int status = copy_message_iovecs(&message, data, sizeof(data), &length, 1, partial);
-    if (status < 0) return status;
+    int status = copy_message_iovecs(&message, data, capacity, &length, 1, partial);
+    if (status < 0) {
+        if (data != stage) kfree(data);
+        return status;
+    }
 
     if (unix_value) {
         if (message.name) return -EISDIR;
         struct file *files[UNIX_MAX_RIGHTS] = {0};
         size_t file_count = 0;
         status = collect_scm_rights(&message, files, &file_count);
-        if (status < 0) return status;
+        if (status < 0) {
+            if (data != stage) kfree(data);
+            return status;
+        }
         if (file_count && length == 0) {
             release_file_array(files, file_count);
+            if (data != stage) kfree(data);
             return -EINVAL;
         }
         int64_t result = unix_socket_send_with_rights(unix_value, length, data,
                                                        files, file_count);
         if (result < 0) release_file_array(files, file_count);
+        if (data != stage) kfree(data);
         return result;
     }
 
     struct netlink_socket *netlink = netlink_socket_from_fd(fd);
     if (netlink) {
-
+        if (data != stage) { kfree(data); data = stage; }
         struct tunix_sockaddr_nl destination;
         int addressed = message.name && message.name_length >= sizeof(destination) &&
             copy_from_user(&destination, message.name, sizeof(destination)) == 0;
@@ -1738,7 +1773,10 @@ static int64_t sys_sendmsg(int fd, uint64_t user_message, int flags) {
                                      addressed ? sizeof(destination) : 0U);
     }
 
-    if (!stream_socket) return -EBADF;
+    if (!stream_socket) {
+        if (data != stage) kfree(data);
+        return -EBADF;
+    }
     uint8_t address[32];
     const void *address_pointer = NULL;
     if (message.name) {
@@ -1746,8 +1784,11 @@ static int64_t sys_sendmsg(int fd, uint64_t user_message, int flags) {
         if (copy_from_user(address, message.name, message.name_length) != 0) return -EFAULT;
         address_pointer = address;
     }
-    return inet_socket_sendto(stream_socket, data, length, flags, address_pointer,
-                              message.name ? message.name_length : 0U);
+    int64_t sent = inet_socket_sendto(stream_socket, data, length, flags,
+                                      address_pointer,
+                                      message.name ? message.name_length : 0U);
+    if (data != stage) kfree(data);
+    return sent;
 }
 
 static int scatter_message_data(const struct linux_msghdr *message,
@@ -1925,30 +1966,32 @@ static int64_t sys_recvmsg(int fd, uint64_t user_message, int flags) {
     if (copy_from_user(&message, user_message, sizeof(message)) != 0) return -EFAULT;
     if (message.iov_length > UIO_MAXIOV) return -EMSGSIZE;
 
-    uint8_t data[4096];
+    uint8_t stage[SOCKET_MESSAGE_STAGE];
+    uint8_t *data = stage;
+    size_t room = sizeof(stage);
 
-    size_t capacity = 0;
-    for (uint64_t index = 0; index < message.iov_length; index++) {
-        struct linux_iovec iov;
-        if (copy_from_user(&iov, message.iov + index * sizeof(iov), sizeof(iov)) != 0)
-            return -EFAULT;
-        if (iov.length >= sizeof(data) - capacity) {
-            capacity = sizeof(data);
-            break;
-        }
-        capacity += (size_t)iov.length;
-    }
+    size_t capacity = message_total_length(&message);
     struct unix_socket *unix_value = socket_from_fd(fd);
+    if (unix_value && capacity > room) {
+        uint8_t *large = (uint8_t *)kmalloc(capacity);
+        if (large) { data = large; room = capacity; }
+    }
+    if (capacity > room) capacity = room;
     if (unix_value) {
         struct file *files[UNIX_MAX_RIGHTS] = {0};
         size_t file_count = 0;
         int64_t result = unix_socket_recv_with_rights(unix_value, capacity, data,
                                                        files, UNIX_MAX_RIGHTS, &file_count);
-        if (result < 0) return result;
+        if (result < 0) {
+            if (data != stage) kfree(data);
+            return result;
+        }
         if (scatter_message_data(&message, data, (size_t)result) != 0) {
             release_file_array(files, file_count);
+            if (data != stage) kfree(data);
             return -EFAULT;
         }
+        if (data != stage) { kfree(data); data = stage; }
         message.name_length = 0;
         message.flags = 0;
         int status = write_unix_control(&message, unix_value, files, file_count, flags);
@@ -5120,7 +5163,8 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             else if (idtype == 1 && id > 0) pid_spec = id;
             else if (idtype == 2 && id > 0) pid_spec = -id;
             else { frame->rax = (uint64_t)-(int64_t)EINVAL; break; }
-            if ((options & ~(WNOHANG | WEXITED | WSTOPPED | WCONTINUED)) ||
+            options &= ~(WNOTHREAD | WALLCHILDREN | WCLONE);
+            if ((options & ~(WNOHANG | WNOWAIT | WEXITED | WSTOPPED | WCONTINUED)) ||
                 !(options & (WEXITED | WSTOPPED | WCONTINUED))) {
                 frame->rax = (uint64_t)-(int64_t)EINVAL;
                 break;
