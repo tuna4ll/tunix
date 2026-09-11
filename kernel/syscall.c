@@ -941,6 +941,28 @@ static int64_t read_timespec_timeout_ns(uint64_t user_timeout) {
     return value > (uint64_t)INT64_MAX ? INT64_MAX : (int64_t)value;
 }
 
+struct linux_sigset_argument {
+    uint64_t set;
+    uint64_t size;
+};
+
+static void apply_wait_signal_mask(uint64_t user_argument) {
+    if (!user_argument) return;
+    struct linux_sigset_argument argument;
+    if (copy_from_user(&argument, user_argument, sizeof(argument)) != 0) return;
+    if (!argument.set || argument.size != sizeof(uint64_t)) return;
+    uint64_t mask;
+    if (copy_from_user(&mask, argument.set, sizeof(mask)) != 0) return;
+    process_swap_signal_mask(mask);
+}
+
+static void apply_wait_signal_set(uint64_t user_set, uint64_t size) {
+    if (!user_set || size != sizeof(uint64_t)) return;
+    uint64_t mask;
+    if (copy_from_user(&mask, user_set, sizeof(mask)) != 0) return;
+    process_swap_signal_mask(mask);
+}
+
 static int64_t read_timeval_timeout_ns(uint64_t user_timeout) {
     if (!user_timeout) return -1;
     struct linux_timeval timeout;
@@ -4873,17 +4895,23 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             int64_t timeout_ns = read_timespec_timeout_ns(frame->r8);
             if (timeout_ns < -1) {
                 clear_io_wait(process_current());
+                process_restore_signal_mask();
                 frame->rax = (uint64_t)timeout_ns;
                 break;
             }
+            apply_wait_signal_mask(frame->r9);
             int64_t result = sys_select_once((int)frame->rdi, frame->rsi, frame->rdx,
                                              frame->r10, timeout_ns == 0);
             if (result != 0 || timeout_ns == 0) {
                 clear_io_wait(process_current());
+                process_restore_signal_mask();
                 frame->rax = (uint64_t)result;
             } else if (!retry_io_wait(frame, SYS_PSELECT6, timeout_ns)) {
+                process_restore_signal_mask();
                 frame->rax = (uint64_t)sys_select_once((int)frame->rdi, frame->rsi,
                                                        frame->rdx, frame->r10, 1);
+            } else if (!process_current()->syscall_rewound) {
+                process_restore_signal_mask();
             }
             break;
         }
@@ -4891,15 +4919,21 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             int64_t timeout_ns = read_timespec_timeout_ns(frame->rdx);
             if (timeout_ns < -1) {
                 clear_io_wait(process_current());
+                process_restore_signal_mask();
                 frame->rax = (uint64_t)timeout_ns;
                 break;
             }
+            apply_wait_signal_set(frame->r10, frame->r8);
             int64_t result = sys_poll_once(frame->rdi, frame->rsi, timeout_ns == 0);
             if (result != 0 || timeout_ns == 0) {
                 clear_io_wait(process_current());
+                process_restore_signal_mask();
                 frame->rax = (uint64_t)result;
             } else if (!retry_io_wait(frame, SYS_PPOLL, timeout_ns)) {
+                process_restore_signal_mask();
                 frame->rax = (uint64_t)sys_poll_once(frame->rdi, frame->rsi, 1);
+            } else if (!process_current()->syscall_rewound) {
+                process_restore_signal_mask();
             }
             break;
         }
