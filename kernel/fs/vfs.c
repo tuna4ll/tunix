@@ -7,6 +7,7 @@
 #include "../include/time.h"
 #include "../include/fatfs.h"
 #include "../include/pipe.h"
+#include "../include/process.h"
 #include "../include/vfs.h"
 
 extern void kprintf(const char *fmt, ...);
@@ -326,7 +327,7 @@ static struct vfs_node *lookup_internal(const char *path, int follow_final, unsi
         cursor = next_component(cursor, component);
         if (!component[0] || strcmp(component, ".") == 0) continue;
         if (strcmp(component, "..") == 0) {
-            current = current->parent ? current->parent : current;
+            if (current != process_get_root() && current->parent) current = current->parent;
             continue;
         }
 
@@ -340,6 +341,16 @@ static struct vfs_node *lookup_internal(const char *path, int follow_final, unsi
             size_t at = 0;
             resolved[0] = '\0';
             if (target[0] == '/') {
+                struct vfs_node *root = process_get_root();
+                if (root && root != vfs_root) {
+                    char root_path[VFS_PATH_MAX];
+                    if (vfs_node_path(root, root_path, sizeof(root_path)) != 0) return NULL;
+                    size_t root_length = strlen(root_path);
+                    while (root_length > 1 && root_path[root_length - 1] == '/')
+                        root_path[--root_length] = '\0';
+                    if (root_length > 1 &&
+                        append_text(resolved, sizeof(resolved), &at, root_path) != 0) return NULL;
+                }
                 if (append_text(resolved, sizeof(resolved), &at, target) != 0) return NULL;
             } else {
                 char parent_path[VFS_PATH_MAX];

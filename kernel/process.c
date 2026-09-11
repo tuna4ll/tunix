@@ -349,6 +349,8 @@ static void destroy_process_resources(struct process *process) {
     procfs_unregister_process(process->pid);
     vfs_node_unref(process->cwd);
     process->cwd = NULL;
+    vfs_node_unref(process->root);
+    process->root = NULL;
     if (process->memory) {
         memory_unref(process->memory);
         process->memory = NULL;
@@ -472,6 +474,7 @@ struct process *process_create_from_path(const char *path) {
     }
     process->cwd = vfs_root;
     vfs_node_ref(process->cwd);
+    process->root = NULL;
     strncpy(process->name, file->name, sizeof(process->name) - 1);
     set_exe_path(process, file, path);
     process->cr3 = vmm_create_address_space();
@@ -1559,6 +1562,8 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame) {
     child->state = PROCESS_READY;
     child->cwd = parent->cwd;
     vfs_node_ref(child->cwd);
+    child->root = parent->root;
+    vfs_node_ref(child->root);
     child->controlling_pty = parent->controlling_pty;
     child->umask = parent->umask;
     child->cred = parent->cred;
@@ -1655,6 +1660,8 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
     child->is_thread = 1;
     child->cwd = parent->cwd;
     vfs_node_ref(child->cwd);
+    child->root = parent->root;
+    vfs_node_ref(child->root);
     child->controlling_pty = parent->controlling_pty;
     child->umask = parent->umask;
     child->cred = parent->cred;
@@ -1925,6 +1932,7 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
     struct process image;
     memset(&image, 0, sizeof(image));
     image.cr3 = new_cr3;
+    image.root = current->root;
     if (elf_load_process(&image, file, argv, envp) != 0) {
         vmm_destroy_address_space(new_cr3);
         return -1;
@@ -2255,6 +2263,19 @@ static int signal_would_act(const struct process *process, int signal_number) {
     if (action->handler == SIG_DFL &&
         (signal_number == SIGCHLD || signal_number == SIGCONT)) return 0;
     return 1;
+}
+
+struct vfs_node *process_get_root(void) {
+    if (current && current->root) return current->root;
+    return vfs_root;
+}
+
+void process_set_root(struct vfs_node *node) {
+    if (!current) return;
+    struct vfs_node *previous = current->root;
+    vfs_node_ref(node);
+    current->root = node;
+    vfs_node_unref(previous);
 }
 
 void process_swap_signal_mask(uint64_t mask) {

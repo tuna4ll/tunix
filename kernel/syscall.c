@@ -161,6 +161,7 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define SYS_GETCWD 79
 #define SYS_CHDIR 80
 #define SYS_FCHDIR 81
+#define SYS_CHROOT 161
 #define SYS_RENAME 82
 #define SYS_MKDIR 83
 #define SYS_RMDIR 84
@@ -1026,12 +1027,31 @@ static int64_t sys_select_once(int nfds, uint64_t user_read, uint64_t user_write
     return ready;
 }
 
+static size_t process_root_prefix(char buffer[256]) {
+    struct vfs_node *root = process_get_root();
+    buffer[0] = '/';
+    buffer[1] = '\0';
+    if (!root || root == vfs_root) return 1;
+    if (vfs_node_path(root, buffer, 256) != 0 || !buffer[0]) {
+        buffer[0] = '/';
+        buffer[1] = '\0';
+        return 1;
+    }
+    size_t length = strlen(buffer);
+    while (length > 1 && buffer[length - 1] == '/') buffer[--length] = '\0';
+    return length;
+}
+
 static int normalize_path(struct vfs_node *base, const char *input, char output[256]) {
     if (!input || !input[0]) return -ENOENT;
     char combined[512];
+    char prefix[256];
+    size_t floor = process_root_prefix(prefix);
     size_t at = 0;
     if (input[0] == '/') {
-        combined[at++] = '/';
+        memcpy(combined, prefix, floor);
+        at = floor;
+        if (combined[at - 1] != '/') combined[at++] = '/';
     } else {
         char base_path[256];
         if (vfs_node_path(base ? base : vfs_root, base_path, sizeof(base_path)) != 0) return -EINVAL;
@@ -1060,9 +1080,9 @@ static int normalize_path(struct vfs_node *base, const char *input, char output[
         component[length] = '\0';
         if (strcmp(component, ".") == 0) continue;
         if (strcmp(component, "..") == 0) {
-            if (out > 1) {
+            if (out > floor) {
                 if (output[out - 1] == '/') out--;
-                while (out > 1 && output[out - 1] != '/') out--;
+                while (out > floor && output[out - 1] != '/') out--;
             }
             continue;
         }
@@ -1072,6 +1092,7 @@ static int normalize_path(struct vfs_node *base, const char *input, char output[
         out += length;
     }
     if (out > 1 && output[out - 1] == '/') out--;
+    if (out < floor) out = floor;
     output[out] = '\0';
     return 0;
 }
@@ -2727,9 +2748,34 @@ static int64_t sys_getcwd(uint64_t user_buffer, size_t size) {
     if (!process || !user_buffer || size == 0) return -EINVAL;
     char path[256];
     if (vfs_node_path(process->cwd, path, sizeof(path)) != 0) return -EINVAL;
-    size_t length = strlen(path) + 1;
+    char prefix[256];
+    size_t floor = process_root_prefix(prefix);
+    const char *visible = path;
+    if (floor > 1 && strncmp(path, prefix, floor) == 0)
+        visible = path[floor] ? path + floor : "/";
+    size_t length = strlen(visible) + 1;
     if (length > size) return -ERANGE;
-    return copy_to_user(user_buffer, path, length) == 0 ? (int64_t)length : -EFAULT;
+    return copy_to_user(user_buffer, visible, length) == 0 ? (int64_t)length : -EFAULT;
+}
+
+static int64_t sys_chroot(uint64_t user_path) {
+    struct process *process = process_current();
+    if (!process) return -EINVAL;
+    if (process->cred.euid != 0) return -EPERM;
+    char path[256];
+    int status = copy_path_at(AT_FDCWD, user_path, path);
+    if (status != 0) return status;
+    struct vfs_node *node = vfs_lookup(path);
+    if (!node) return -ENOENT;
+    if ((node->flags & 0xFFU) != VFS_DIRECTORY) return -ENOTDIR;
+    int permitted = cred_may_path(path, node, CRED_EXEC);
+    if (permitted != 0) return permitted;
+    process_set_root(node);
+    struct vfs_node *previous = process->cwd;
+    vfs_node_ref(node);
+    process->cwd = node;
+    vfs_node_unref(previous);
+    return 0;
 }
 
 static void set_cwd(struct process *process, struct vfs_node *node) {
@@ -5332,6 +5378,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         case SYS_GETCWD: frame->rax = (uint64_t)sys_getcwd(frame->rdi, (size_t)frame->rsi); break;
         case SYS_CHDIR: frame->rax = (uint64_t)sys_chdir(frame->rdi); break;
         case SYS_FCHDIR: frame->rax = (uint64_t)sys_fchdir((int)frame->rdi); break;
+        case SYS_CHROOT: frame->rax = (uint64_t)sys_chroot(frame->rdi); break;
         case SYS_RENAME: frame->rax = (uint64_t)sys_rename_at(AT_FDCWD, frame->rdi, AT_FDCWD, frame->rsi, 0); break;
         case SYS_MKDIR: frame->rax = (uint64_t)sys_mkdir_at(AT_FDCWD, frame->rdi, frame->rsi); break;
         case SYS_RMDIR: frame->rax = (uint64_t)sys_unlink_at(AT_FDCWD, frame->rdi, AT_REMOVEDIR); break;

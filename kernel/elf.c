@@ -432,6 +432,22 @@ static int build_initial_stack(struct process *process,
     return status;
 }
 
+static struct vfs_node *lookup_under_root(const struct process *process,
+                                          const char *path) {
+    if (!process || !process->root) return vfs_lookup(path);
+    char prefix[256];
+    if (vfs_node_path(process->root, prefix, sizeof(prefix)) != 0) return NULL;
+    size_t length = strlen(prefix);
+    while (length > 1 && prefix[length - 1] == '/') prefix[--length] = '\0';
+    if (length <= 1) return vfs_lookup(path);
+    char full[MAX_INTERP_PATH + 256];
+    size_t tail = strlen(path);
+    if (length + tail + 1 > sizeof(full)) return NULL;
+    memcpy(full, prefix, length);
+    memcpy(full + length, path, tail + 1);
+    return vfs_lookup(full);
+}
+
 int elf_load_process(struct process *process, struct vfs_node *file,
                      const char *const argv[], const char *const envp[]) {
     if (!process || !file || (file->flags & 0xFFU) != VFS_FILE ||
@@ -456,7 +472,7 @@ int elf_load_process(struct process *process, struct vfs_node *file,
     uint64_t initial_entry = main_image.entry;
     uint64_t interpreter_base = 0;
     if (interp_status > 0) {
-        struct vfs_node *interp_file = vfs_lookup(interp_path);
+        struct vfs_node *interp_file = lookup_under_root(process, interp_path);
         if (!interp_file || load_image(process, interp_file, INTERP_BASE, &interpreter) != 0 ||
             interpreter.header->type != ET_DYN) return -1;
         char nested_path[MAX_INTERP_PATH];
