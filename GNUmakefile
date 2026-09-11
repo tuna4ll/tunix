@@ -93,7 +93,7 @@ VOID_INSTALL_GRAPHICAL ?= weston mesa-dri xorg-server-xwayland xkeyboard-config 
 
 VOID_INSTALL_BROWSER ?= firefox
 
-VOID_INSTALL_TOOLCHAIN ?= gcc make python3 python3-Pillow git binutils
+VOID_INSTALL_TOOLCHAIN ?= gcc make python3 python3-Pillow git binutils mtools
 
 VOID_INSTALL_GAMES ?= supertuxkart
 
