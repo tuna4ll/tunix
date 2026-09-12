@@ -3,6 +3,7 @@
 #include "../include/block.h"
 #include "../include/build_config.h"
 #include "../include/ext2.h"
+#include "../include/ext3.h"
 #include "../include/heap.h"
 #include "../include/kstring.h"
 #include "../include/random.h"
@@ -42,6 +43,7 @@ extern void kprintf(const char *fmt, ...);
 
 #define EXT2_FEATURE_COMPAT_HAS_JOURNAL 0x0004U
 #define EXT2_FEATURE_INCOMPAT_FILETYPE 0x0002U
+#define EXT2_FEATURE_INCOMPAT_RECOVER 0x0004U
 #define EXT2_FEATURE_RO_COMPAT_SPARSE_SUPER 0x0001U
 #define EXT2_FEATURE_RO_COMPAT_LARGE_FILE 0x0002U
 #define EXT2_RO_COMPAT_READABLE (EXT2_FEATURE_RO_COMPAT_SPARSE_SUPER | \
@@ -85,7 +87,14 @@ struct ext2_superblock {
     char s_volume_name[16];
     char s_last_mounted[64];
     uint32_t s_algorithm_usage_bitmap;
-    uint8_t s_reserved[820];
+    uint8_t s_prealloc_blocks;
+    uint8_t s_prealloc_dir_blocks;
+    uint16_t s_reserved_gdt_blocks;
+    uint8_t s_journal_uuid[16];
+    uint32_t s_journal_inum;
+    uint32_t s_journal_dev;
+    uint32_t s_last_orphan;
+    uint8_t s_reserved[788];
 } __attribute__((packed));
 
 struct ext2_group_desc {
@@ -200,10 +209,16 @@ static int write_blocks(uint32_t block, uint32_t count, const void *data) {
 }
 
 static int read_block(uint32_t block, void *out) {
+    if (ext3_journal_peek(block, out) == 0) return 0;
     return read_blocks(block, 1, out);
 }
 
 static int write_block(uint32_t block, const void *data) {
+    return write_blocks(block, 1, data);
+}
+
+static int meta_write(uint32_t block, const void *data) {
+    if (ext3_journal_active()) return ext3_journal_stage(block, data);
     return write_blocks(block, 1, data);
 }
 
@@ -228,7 +243,7 @@ static struct block_cache *const all_caches[] = {
 
 static int cache_flush_one(struct block_cache *cache) {
     if (cache->block && cache->dirty &&
-        write_block(cache->block, cache->data) != 0) return -1;
+        meta_write(cache->block, cache->data) != 0) return -1;
     cache->dirty = 0;
     return 0;
 }
@@ -277,17 +292,28 @@ static int write_gd_table(uint32_t first_block) {
         if (count > EXT2_GD_PER_BLOCK) count = EXT2_GD_PER_BLOCK;
         memset(meta_buf, 0, sizeof(meta_buf));
         memcpy(meta_buf, &gds[start], count * sizeof(struct ext2_group_desc));
-        if (write_block(first_block + index, meta_buf) != 0) return -1;
+        if (meta_write(first_block + index, meta_buf) != 0) return -1;
     }
     return 0;
 }
 
-static int flush_meta(void) {
-    if (cache_flush_all() != 0) return -1;
+static int write_superblock_direct(void) {
     memset(meta_buf, 0, sizeof(meta_buf));
     memcpy(meta_buf + 1024, &sb, sizeof(sb));
-    if (write_block(0, meta_buf) != 0) return -1;
-    return write_gd_table(first_data_block + 1U);
+    return write_blocks(0, 1, meta_buf);
+}
+
+static int flush_meta(void) {
+    if (cache_flush_all() != 0) return -1;
+    int journalled = ext3_journal_active();
+    if (journalled) sb.s_feature_incompat |= EXT2_FEATURE_INCOMPAT_RECOVER;
+    memset(meta_buf, 0, sizeof(meta_buf));
+    memcpy(meta_buf + 1024, &sb, sizeof(sb));
+    if (meta_write(0, meta_buf) != 0) return -1;
+    if (write_gd_table(first_data_block + 1U) != 0) return -1;
+    if (!journalled) return 0;
+    if (ext3_journal_commit() != 0) return -1;
+    return 0;
 }
 
 static int64_t bitmap_scan(const uint8_t *bits, uint32_t start, uint32_t max_bits) {
@@ -1379,6 +1405,66 @@ int ext2fs_fsync_node(struct vfs_node *node) {
     return block_flush();
 }
 
+static struct ext2_inode journal_inode;
+
+static int journal_read_block(uint32_t block, void *out) {
+    return read_blocks(block, 1, out);
+}
+
+static int journal_write_block(uint32_t block, const void *data) {
+    return write_blocks(block, 1, data);
+}
+
+static int journal_map_block(uint32_t file_block, uint32_t *disk_block) {
+    int dirty = 0;
+    int64_t block = inode_bmap(&journal_inode, file_block, 0, &dirty);
+    if (block <= 0) return -1;
+    *disk_block = (uint32_t)block;
+    return 0;
+}
+
+static int journal_flush_device(void) {
+    return block_flush();
+}
+
+static int journal_mark_recovery(int needs_recovery) {
+    if (needs_recovery) sb.s_feature_incompat |= EXT2_FEATURE_INCOMPAT_RECOVER;
+    else sb.s_feature_incompat &= ~EXT2_FEATURE_INCOMPAT_RECOVER;
+    return write_superblock_direct();
+}
+
+static const struct ext3_journal_ops journal_ops = {
+    journal_read_block, journal_write_block, journal_map_block,
+    journal_flush_device, journal_mark_recovery,
+};
+
+static int journal_start_up(void) {
+    ext3_journal_detach();
+    if (!(sb.s_feature_compat & EXT2_FEATURE_COMPAT_HAS_JOURNAL)) {
+        return (sb.s_feature_incompat & EXT2_FEATURE_INCOMPAT_RECOVER) ? -1 : 0;
+    }
+    if (!sb.s_journal_inum || inode_read(sb.s_journal_inum, &journal_inode) != 0)
+        return -1;
+    if (ext3_journal_attach(&journal_ops) != 0) return -1;
+    if (ext3_journal_recover() != 0) return -1;
+    if (read_blocks(0, 1, meta_buf) != 0) return -1;
+    memcpy(&sb, meta_buf + 1024, sizeof(sb));
+    if (sb.s_feature_incompat & EXT2_FEATURE_INCOMPAT_RECOVER) {
+        sb.s_feature_incompat &= ~EXT2_FEATURE_INCOMPAT_RECOVER;
+        if (write_superblock_direct() != 0) return -1;
+    }
+    kprintf("EXT3: journal ready, %u blocks\n", (unsigned)ext3_journal_length());
+    return 0;
+}
+
+int ext2fs_shutdown(void) {
+    if (!ext2_mounted_flag) return 0;
+    if (ext3_journal_active() && ext3_journal_commit() != 0) return -1;
+    sb.s_feature_incompat &= ~EXT2_FEATURE_INCOMPAT_RECOVER;
+    if (write_superblock_direct() != 0) return -1;
+    return block_flush();
+}
+
 int ext2fs_journalled(void) {
     return ext2_mounted_flag &&
            (sb.s_feature_compat & EXT2_FEATURE_COMPAT_HAS_JOURNAL) != 0;
@@ -1408,7 +1494,8 @@ static int superblock_usable(uint32_t usable_blocks) {
         sb.s_inodes_per_group > EXT2_GROUP_MAX_BITS ||
         sb.s_inodes_per_group % EXT2_INODES_PER_BLOCK ||
         sb.s_blocks_count > usable_blocks ||
-        (sb.s_feature_incompat & ~EXT2_FEATURE_INCOMPAT_FILETYPE) ||
+        (sb.s_feature_incompat & ~(EXT2_FEATURE_INCOMPAT_FILETYPE |
+                                   EXT2_FEATURE_INCOMPAT_RECOVER)) ||
         (sb.s_feature_ro_compat & ~EXT2_RO_COMPAT_READABLE))
         return 0;
 
@@ -1507,6 +1594,21 @@ int ext2fs_mount_root(uint32_t region_lba) {
         if (gds[group].bg_block_bitmap >= sb.s_blocks_count ||
             gds[group].bg_inode_bitmap >= sb.s_blocks_count ||
             table_end > sb.s_blocks_count) return -1;
+    }
+
+    if (journal_start_up() != 0) return -1;
+
+    cache_reset_all();
+    if (read_blocks(0, 1, meta_buf) != 0) return -1;
+    memcpy(&sb, meta_buf + 1024, sizeof(sb));
+    if (!superblock_usable(usable_blocks)) return -1;
+    adopt_geometry();
+    for (uint32_t index = 0; index < gd_blocks; index++) {
+        if (read_blocks(first_data_block + 1U + index, 1, meta_buf) != 0) return -1;
+        uint32_t start = index * EXT2_GD_PER_BLOCK;
+        uint32_t count = group_count - start;
+        if (count > EXT2_GD_PER_BLOCK) count = EXT2_GD_PER_BLOCK;
+        memcpy(&gds[start], meta_buf, count * sizeof(struct ext2_group_desc));
     }
 
     ext2_root = vfs_root;

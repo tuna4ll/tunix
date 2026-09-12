@@ -17,15 +17,16 @@ scheduling across every processor the firmware describes, ELF and a dynamic
 linker, signals, and a Linux-compatible syscall table.
 
 On top of it, runit as PID 1 with udevd and agetty, Void's bash, coreutils,
-sudo, curl and htop, and a Weston desktop that gets the display through seatd
-and opens with Firefox on it.
+sudo, curl and htop, and a Weston desktop that gets the display through seatd,
+with Firefox a click away on the panel.
 
 Underneath: a block layer over IDE, AHCI, NVMe and USB storage, with GPT and MBR
-partitions and a read-write ext3 root that `mkfs.ext3` made; IPv4 with both ends
-of TCP over RTL8139; a framebuffer console with eight virtual terminals on
-Ctrl+Alt+F1..F8; Intel HD Audio behind ALSA; xHCI keyboard and mouse; and real
-users, permissions and setuid. The virtio-gpu driver scans the display out where
-it lies, and `make run-virgl` renders on the host's own GPU through virgl.
+partitions and a read-write ext3 root whose journal the kernel writes and
+replays; IPv4 with both ends of TCP over RTL8139; a framebuffer console with
+eight virtual terminals on Ctrl+Alt+F1..F8; Intel HD Audio behind ALSA; xHCI
+keyboard and mouse; and real users, permissions and setuid. The virtio-gpu
+driver scans the display out where it lies, and `make run-virgl` renders on the
+host's own GPU through virgl.
 
 ## Quick start
 

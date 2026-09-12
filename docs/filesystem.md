@@ -50,27 +50,78 @@ checksum makes e2fsck complain about a filesystem that is otherwise fine.
 
 ## The journal
 
-`has_journal` is what makes this ext3 rather than ext2, and it is a
-*compatible* feature: the format says in so many words that a driver which does
-not understand it may still mount the filesystem and write to it. Tunix takes
-that offer. It reads and writes the filesystem exactly as it did before and
-never touches the journal, which mke2fs leaves empty and which therefore stays
-empty.
+`kernel/fs/ext3.c` is the journal, and it is the thing that makes this ext3
+rather than ext2 with a spare file in it. It writes the log that `mkfs.ext3`
+laid down, and it replays one it finds.
 
-The safety is in the other half of the bargain. When a journal holds
-transactions that have not been applied, ext3 says so with `needs_recovery` --
-an *incompatible* feature. A driver that cannot replay a journal must refuse
-the filesystem, and this one does, because the incompatible mask allows nothing
-but `filetype`:
+The format is JBD, the same log ext3 and ext4 use on Linux, and every field in
+it is big-endian. A transaction is a descriptor block naming the filesystem
+blocks it carries, then those blocks, then a commit block. All three carry the
+magic `0xC03B3998` and the transaction's sequence number, and the journal
+superblock says where the oldest live transaction starts and what sequence to
+expect there. That is the whole protocol; there is nothing else to agree on,
+which is why a log this kernel wrote is one e2fsck reads.
+
+### What a mutation costs now
+
+Every metadata write goes to the log first. `meta_write()` no longer reaches
+the disk: it stages the block, and `flush_meta()` -- which already ran at the
+end of every create, unlink and rename -- commits the staged blocks as one
+transaction:
+
+1. descriptor, blocks, commit block, then a device flush
+2. `needs_recovery` set in the filesystem superblock, the journal superblock
+   pointed at the transaction, flush
+3. the blocks written where they actually belong, flush
+4. the journal emptied, `needs_recovery` cleared, flush
+
+Step 3 is the only part that existed before. The rest is the price, and it is
+a real price: the same metadata is written twice and there are four cache
+flushes where there used to be none. A shell loop creating and deleting files
+manages about a hundred and forty mutations a second.
+
+What it buys is that there is no moment when the disk holds half of a change.
+Crash before step 2 and the transaction never happened; crash during step 3 --
+the window that used to be the dangerous one -- and the next mount finds a
+committed transaction the disk has not caught up with, and applies it.
+
+Because the log is checkpointed at the end of every transaction rather than
+left to fill, only one transaction is ever live, and it always starts at the
+first log block. A 64 MiB journal is far more than this needs; it is the size
+mke2fs chose and there is no reason to argue with it.
+
+### Replay
+
+`ext3_journal_recover()` runs before the tree is read, because replaying
+changes the inodes and directory blocks the tree is built from. It walks the
+log twice: once to find where it ends and to collect revoked blocks, once to
+write the blocks of every transaction that has a commit block. A descriptor
+without a commit after it is a transaction that was interrupted, and it is
+where the replay stops.
+
+Two details of the format matter and are handled. A block whose first four
+bytes happen to be the journal's own magic is written to the log with those
+bytes zeroed and an `ESCAPE` flag on its tag, and put back on the way out. And
+a revoke block cancels a replay for the blocks it names, which is how a journal
+written by Linux avoids restoring a metadata block that has since been freed
+and reused for file data.
 
 ```
-PANIC: root filesystem mount failed
+EXT3: replaying the journal from transaction 6581
 ```
 
-So Tunix will not write over work it cannot finish. That case arises only if
-something else -- a Linux host with the image mounted read-write -- stops
-without unmounting; Tunix never writes the journal, so it never leaves one to
-replay. Run `e2fsck` on the image and the journal is clean.
+That line is from a real crash: `kill -9` on the emulator in the middle of the
+churn, chosen by repetition until one landed between the commit and the
+checkpoint. Linux's own `e2fsck -fn` on that image said it was skipping journal
+recovery because it had been asked not to write; Tunix booted, replayed, and
+`e2fsck` afterwards found nothing wrong.
+
+### What is refused
+
+Any JBD feature the code does not implement -- checksums, 64-bit block numbers,
+asynchronous commit, fast commit -- stops the mount rather than being ignored,
+the same rule the filesystem superblock's incompatible features get. `mkfs.ext3`
+sets none of them.
 
 The image is a plain ext3 filesystem, so it mounts on Linux:
 
@@ -102,8 +153,11 @@ GPT so that one disk boots either firmware.
 
 ## What is not here
 
-- **No journalling.** The filesystem has a journal and the kernel leaves it
-  alone; a write is not replayable, it is just a write.
+- **Metadata only.** File contents are not journalled, which is what `ext3`
+  calls `data=ordered` -- except that the ordering is not enforced either, so a
+  file's blocks may reach the disk after the metadata that points at them.
+- **One transaction at a time.** The log is checkpointed immediately rather
+  than batched, so mutations do not amortise.
 - **No extents, no 64-bit block numbers.** 16 GiB is the ceiling.
 - **No `dir_index`.** A directory is a linear scan.
 - **`fsck` on the running root** is not something to do; the fstab entry has

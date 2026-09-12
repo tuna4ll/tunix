@@ -25,5 +25,6 @@ int ext2fs_owns(struct vfs_node *node);
 int ext2fs_fsync_node(struct vfs_node *node);
 int ext2fs_sync(void);
 int ext2fs_journalled(void);
+int ext2fs_shutdown(void);
 
 #endif
