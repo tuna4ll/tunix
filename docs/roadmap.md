@@ -27,9 +27,9 @@ answer the check properly is a decision that has been deferred by accident.
 
 ext3 with no extents and a 16 GiB ceiling is enough for a root and not much
 else. ext4 read support is the next step: it makes the disks Linux writes
-readable here. The journal is done -- `kernel/fs/ext3.c` writes and replays
-it -- but it covers metadata only, and it checkpoints every transaction
-instead of batching, which costs more than it needs to.
+readable here. The journal is done -- `kernel/fs/ext3.c` writes and replays it,
+contents as well as metadata -- but it checkpoints every transaction instead of
+batching, which costs more than it needs to.
 
 ## 5. Sound, verified again
 

@@ -196,10 +196,21 @@ static void restore_times(struct vfs_node *node, const struct ext2_inode *inode)
     node->ctime = inode->i_ctime;
 }
 
-static int read_blocks(uint32_t block, uint32_t count, void *out) {
+static int read_blocks_raw(uint32_t block, uint32_t count, void *out) {
     uint32_t lba = ext2_region_lba + block * EXT2_SECTORS_PER_BLOCK;
     uint32_t sectors = count * EXT2_SECTORS_PER_BLOCK;
     return block_read(lba, sectors, out);
+}
+
+static int read_blocks(uint32_t block, uint32_t count, void *out) {
+    if (!ext3_journal_staged()) return read_blocks_raw(block, count, out);
+    uint8_t *bytes = (uint8_t *)out;
+    for (uint32_t index = 0; index < count; index++) {
+        uint8_t *slot = bytes + (size_t)index * EXT2_BLOCK_SIZE;
+        if (ext3_journal_peek(block + index, slot) == 0) continue;
+        if (read_blocks_raw(block + index, 1, slot) != 0) return -1;
+    }
+    return 0;
 }
 
 static int write_blocks(uint32_t block, uint32_t count, const void *data) {
@@ -210,7 +221,7 @@ static int write_blocks(uint32_t block, uint32_t count, const void *data) {
 
 static int read_block(uint32_t block, void *out) {
     if (ext3_journal_peek(block, out) == 0) return 0;
-    return read_blocks(block, 1, out);
+    return read_blocks_raw(block, 1, out);
 }
 
 static int write_block(uint32_t block, const void *data) {
@@ -737,7 +748,16 @@ struct run_writer {
 
 static int run_flush(struct run_writer *run) {
     if (!run->count) return 0;
-    int status = write_blocks(run->start_block, run->count, bulk_buf);
+    int status = 0;
+    if (ext3_journal_active()) {
+        for (uint32_t index = 0; index < run->count; index++) {
+            status = ext3_journal_stage(run->start_block + index,
+                                        bulk_buf + (size_t)index * EXT2_BLOCK_SIZE);
+            if (status != 0) break;
+        }
+    } else {
+        status = write_blocks(run->start_block, run->count, bulk_buf);
+    }
     run->count = 0;
     return status;
 }
@@ -1408,7 +1428,7 @@ int ext2fs_fsync_node(struct vfs_node *node) {
 static struct ext2_inode journal_inode;
 
 static int journal_read_block(uint32_t block, void *out) {
-    return read_blocks(block, 1, out);
+    return read_blocks_raw(block, 1, out);
 }
 
 static int journal_write_block(uint32_t block, const void *data) {
@@ -1423,6 +1443,10 @@ static int journal_map_block(uint32_t file_block, uint32_t *disk_block) {
     return 0;
 }
 
+static int journal_write_run(uint32_t block, uint32_t count, const void *data) {
+    return write_blocks(block, count, data);
+}
+
 static int journal_flush_device(void) {
     return block_flush();
 }
@@ -1435,7 +1459,7 @@ static int journal_mark_recovery(int needs_recovery) {
 
 static const struct ext3_journal_ops journal_ops = {
     journal_read_block, journal_write_block, journal_map_block,
-    journal_flush_device, journal_mark_recovery,
+    journal_flush_device, journal_mark_recovery, journal_write_run,
 };
 
 static int journal_start_up(void) {

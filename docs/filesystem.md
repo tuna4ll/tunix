@@ -64,10 +64,11 @@ which is why a log this kernel wrote is one e2fsck reads.
 
 ### What a mutation costs now
 
-Every metadata write goes to the log first. `meta_write()` no longer reaches
-the disk: it stages the block, and `flush_meta()` -- which already ran at the
-end of every create, unlink and rename -- commits the staged blocks as one
-transaction:
+Every write goes to the log first, file contents included -- what ext3 calls
+`data=journal`. Metadata goes through `meta_write()` and a file's blocks go
+through `run_flush()`, and neither reaches the disk directly any more: they
+stage the block, and `flush_meta()` -- which already ran at the end of every
+create, unlink and rename -- commits whatever is staged as one transaction:
 
 1. descriptor, blocks, commit block, then a device flush
 2. `needs_recovery` set in the filesystem superblock, the journal superblock
@@ -75,15 +76,23 @@ transaction:
 3. the blocks written where they actually belong, flush
 4. the journal emptied, `needs_recovery` cleared, flush
 
-Step 3 is the only part that existed before. The rest is the price, and it is
-a real price: the same metadata is written twice and there are four cache
-flushes where there used to be none. A shell loop creating and deleting files
-manages about a hundred and forty mutations a second.
+Step 3 is the only part that existed before. The rest is the price: everything
+is written twice, and there are four cache flushes where there used to be none.
 
-What it buys is that there is no moment when the disk holds half of a change.
-Crash before step 2 and the transaction never happened; crash during step 3 --
-the window that used to be the dangerous one -- and the next mount finds a
-committed transaction the disk has not caught up with, and applies it.
+The staging area is 256 blocks, so a transaction carries up to a megabyte, and
+both halves of the doubled write go out in runs rather than a block at a time.
+The blocks of a file are usually consecutive on the disk and always consecutive
+in the log, so a megabyte of file contents is a handful of calls at each end.
+Writing 64 MiB took 2.9 seconds with the contents journalled against 2.9
+without -- but that is an emulated disk with the host's page cache behind it,
+and the second write is exactly the kind of cost such a cache hides. Do not
+read it as free.
+
+What it buys is that there is no moment when the disk holds half of a change,
+and that now covers what is *in* the file as well as where it is. Crash before
+step 2 and the transaction never happened; crash during step 3 -- the window
+that used to be the dangerous one -- and the next mount finds a committed
+transaction the disk has not caught up with, and applies it.
 
 Because the log is checkpointed at the end of every transaction rather than
 left to fill, only one transaction is ever live, and it always starts at the
@@ -115,6 +124,17 @@ churn, chosen by repetition until one landed between the commit and the
 checkpoint. Linux's own `e2fsck -fn` on that image said it was skipping journal
 recovery because it had been asked not to write; Tunix booted, replayed, and
 `e2fsck` afterwards found nothing wrong.
+
+The same done over a `dd` loop catches a transaction with a file in it. Reading
+the descriptor block off the disk of one such crash:
+
+```
+descriptor magic 0xc03b3998 type 1 sequence 4656
+the transaction carries 37 blocks
+EXT3: replaying the journal from transaction 4656
+```
+
+Thirty-seven blocks, most of them the contents of the file being written.
 
 ### What is refused
 
@@ -153,11 +173,13 @@ GPT so that one disk boots either firmware.
 
 ## What is not here
 
-- **Metadata only.** File contents are not journalled, which is what `ext3`
-  calls `data=ordered` -- except that the ordering is not enforced either, so a
-  file's blocks may reach the disk after the metadata that points at them.
 - **One transaction at a time.** The log is checkpointed immediately rather
-  than batched, so mutations do not amortise.
+  than batched, so a write does not amortise against the one after it.
+- **No revoke blocks are written.** They are understood on the way in, which is
+  what matters for replaying a log Linux left behind, but this kernel frees a
+  metadata block and reuses it without recording that the old contents must not
+  come back. Nothing here reuses a block within one transaction, which is the
+  case that would need it.
 - **No extents, no 64-bit block numbers.** 16 GiB is the ceiling.
 - **No `dir_index`.** A directory is a linear scan.
 - **`fsck` on the running root** is not something to do; the fstab entry has
