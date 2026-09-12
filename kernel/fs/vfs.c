@@ -21,8 +21,6 @@ struct vfs_node *vfs_root;
 static uint64_t next_inode = 1;
 static const struct vfs_persist_ops *persist_ops;
 
-/* The root's filesystem, and separately the node's own directory, so a mount
-   elsewhere is told about children created inside it too. */
 #define PERSIST(op, ...) \
     do { if (persist_ops && persist_ops->op) persist_ops->op(__VA_ARGS__); } while (0)
 
@@ -48,11 +46,8 @@ void vfs_notify_meta_changed(struct vfs_node *node) {
     PERSIST(meta_changed, node);
 }
 
-/* Bytes of file content in the heap that the disk could hand back. Counted
-   rather than measured: the budget is consulted on every syscall. */
 static uint64_t cached_bytes;
 
-/* Whether this node's contents are the kind the disk can replace. */
 static int cacheable(const struct vfs_node *node) {
     return node && (node->flags & 0xFFU) == VFS_FILE && node->disk_inode &&
            node->data && (node->flags & VFS_OWNED_DATA);
@@ -69,14 +64,11 @@ static void cache_discharge(const struct vfs_node *node) {
 
 uint64_t vfs_cached_bytes(void) { return cached_bytes; }
 
-/* Mount restores only the tree's shape; the first read, write, exec or mmap
-   of a file comes through here to pull its contents off the disk. */
 int vfs_fault_in(struct vfs_node *node) {
     if (!node) return -1;
     if (!(node->flags & VFS_LAZY_DATA)) return 0;
     if (!persist_ops || !persist_ops->fetch) return -1;
     if (persist_ops->fetch(node) != 0) return -1;
-    /* the fetch owes us length bytes; everything below dereferences them */
     if (!node->data && node->length) return -1;
     node->flags &= ~VFS_LAZY_DATA;
     cache_charge(node);
@@ -105,8 +97,6 @@ void vfs_map_write_ref(struct vfs_node *node, uint64_t offset, uint64_t length) 
     if (end > node->map_dirty_end) node->map_dirty_end = end;
 }
 
-/* The span is cleared before the write and not after, so a filesystem that
-   reads the node back on the way out cannot come round again. */
 void vfs_flush_mapped(struct vfs_node *node) {
     if (!node || !node->map_dirty_end || !node->data) return;
     uint64_t start = node->map_dirty_start;
@@ -125,14 +115,10 @@ void vfs_map_write_unref(struct vfs_node *node) {
     if (--node->shared_writers == 0) vfs_flush_mapped(node);
 }
 
-/* mmap copies the whole file into the process; keeping the kernel's copy as
-   well doubles the cost of every shared library on the image. */
 void vfs_release_data(struct vfs_node *node) {
     if (!cacheable(node)) return;
     if (node->mapped_refs) return;
     if (!persist_ops || !persist_ops->fetch) return;
-    /* The cache is the only copy of what a mapping stored. Dropping it before
-       the disk has the bytes is how the store is lost. */
     vfs_flush_mapped(node);
     cache_discharge(node);
     kfree(node->data);
@@ -141,16 +127,10 @@ void vfs_release_data(struct vfs_node *node) {
     node->flags = (node->flags & ~VFS_OWNED_DATA) | VFS_LAZY_DATA;
 }
 
-/* Drop every file body the disk can hand back, and say how many bytes that
-   returned to the heap. Only a cache is being dropped: what was written is on
-   the medium and vfs_fault_in() reads it again. */
 static uint64_t reclaim_below(struct vfs_node *node, uint32_t newer_than) {
     if (!node || node->link_target) return 0;
 
     uint64_t reclaimed = 0;
-    /* Touched means written as well as read: a write leaves atime alone, so
-       consulting only atime made the file being written the coldest in the
-       tree and dropped it between every byte. */
     uint32_t touched = node->atime > node->mtime ? node->atime : node->mtime;
     if ((node->flags & 0xFFU) == VFS_FILE && touched < newer_than) {
         uint64_t held = node->capacity;
@@ -168,15 +148,7 @@ uint64_t vfs_reclaim_file_data(struct vfs_node *node) {
     return reclaim_below(node, 0xFFFFFFFFU);
 }
 
-
-/* Hold the cache to its budget. Called at every syscall entry, so the common
-   case is one comparison; when it fires it widens the age window until the
-   cache fits. */
 void vfs_trim_cache(uint64_t budget) {
-    /* When a pass cannot get under the budget -- everything left is mapped, or
-       was touched a moment ago -- retrying on the next syscall would walk the
-       whole tree for nothing, over and over. Wait until the cache has grown
-       appreciably again before spending another walk on it. */
     static uint64_t retry_above;
 
     if (!budget || cached_bytes <= budget || cached_bytes < retry_above) return;
@@ -194,10 +166,6 @@ void vfs_trim_cache(uint64_t budget) {
     retry_above = cached_bytes + budget / 8;
 }
 
-/* Mapped data is being read through some process's page tables; releasing it
-   would pull the pages out from under that mapping, so it is left alone. The
-   node is going away either way, which is why this is the one place the count
-   can be non-zero and the memory still has to be given up on. */
 static void free_node_data(struct vfs_node *node) {
     if (!node || !node->data || !(node->flags & VFS_OWNED_DATA)) return;
     if (node->mapped_refs) return;
@@ -251,8 +219,6 @@ struct vfs_node *vfs_find_entry(struct vfs_node *directory, const char *name) {
     return NULL;
 }
 
-/* Step onto whatever is mounted over a directory. A loop rather than one hop
-   because a mount can be made over a directory that is itself a mount root. */
 static struct vfs_node *cross_mounts(struct vfs_node *node) {
     unsigned depth = 0;
     while (node && node->mounted && depth++ < VFS_MOUNT_MAX_DEPTH)
@@ -260,10 +226,6 @@ static struct vfs_node *cross_mounts(struct vfs_node *node) {
     return node;
 }
 
-/* Resolving here is what keeps hard links and mounts out of the rest of the
-   kernel: every path walk goes through this, so a second name reaches the same
-   node as the first, a mounted directory reaches the mounted tree, and nothing
-   downstream has to know which it was reached by. */
 struct vfs_node *vfs_find_child(struct vfs_node *directory, const char *name) {
     struct vfs_node *node = vfs_find_entry(directory, name);
     if (node && node->link_target) node = node->link_target;
@@ -433,21 +395,15 @@ static int split_parent(const char *path, char parent[256], char name[128]) {
 }
 
 static int64_t memory_read(struct vfs_node *node, uint64_t offset, size_t size, void *buffer) {
-    /* length first: a read at EOF must not fault the file in. */
     if (!node || !buffer || offset >= node->length) return 0;
     if (vfs_fault_in(node) != 0) return -1;
     uint64_t available = node->length - offset;
     if ((uint64_t)size > available) size = (size_t)available;
     memcpy(buffer, (const uint8_t *)node->data + offset, size);
-    /* A read is a use, and the reclaimer decides by how long ago a file was
-       touched. The in-memory stamp only, so it stays free. */
     if (size) vfs_stamp_times(node, VFS_TIME_ATIME);
     return (int64_t)size;
 }
 
-/* Put a file's cached contents on a page boundary, because mmap can only hand
-   the pages themselves over when they start on one and the heap aligns only
-   allocations of 64 KiB and up. */
 #define VFS_PAGE_ALIGN_MIN (64ULL * 1024ULL)
 
 int vfs_align_data(struct vfs_node *node) {
@@ -473,9 +429,6 @@ int vfs_align_data(struct vfs_node *node) {
     return 0;
 }
 
-/* Where doubling stops paying for itself. Growing holds both buffers at once,
-   so past this size the step is fixed and the peak is the file plus one step
-   rather than half the file again. */
 #define VFS_GROW_LINEAR_ABOVE (32ULL * 1024ULL * 1024ULL)
 #define VFS_GROW_STEP (32ULL * 1024ULL * 1024ULL)
 
@@ -494,17 +447,11 @@ static int ensure_capacity(struct vfs_node *node, uint64_t required) {
     }
     uint8_t *new_data = (uint8_t *)kmalloc((size_t)capacity);
     if (!new_data) {
-        /* Before giving up: most of the heap is other files' contents and the
-           disk has those. The cutoff is the current second, so the file being
-           grown is not dropped by its own rescue. */
         uint32_t now = (uint32_t)time_epoch_seconds();
         if (reclaim_below(vfs_root, now))
             new_data = (uint8_t *)kmalloc((size_t)capacity);
     }
     if (!new_data) {
-        /* The one failure that has to name its numbers. A file that cannot
-           grow reports an I/O error to the program writing it, which is a
-           description of a full heap so misleading that it cost a day. */
         static unsigned reported;
         if (reported < 4U) {
             uint64_t reserved = 0, allocated = 0, limit = 0;
@@ -531,7 +478,6 @@ static int ensure_capacity(struct vfs_node *node, uint64_t required) {
 static int64_t memory_write(struct vfs_node *node, uint64_t offset, size_t size, const void *buffer) {
     if (!node || !buffer || (node->flags & VFS_READONLY)) return -1;
     if ((uint64_t)size > UINT64_MAX - offset) return -1;
-    /* a partial write still has to keep the bytes it does not cover */
     if (vfs_fault_in(node) != 0) return -1;
     uint64_t end = offset + size;
     if (ensure_capacity(node, end) != 0) return -1;
@@ -657,8 +603,6 @@ struct vfs_node *vfs_create_symlink(const char *path, const char *target,
     return node;
 }
 
-/* mkfifo(3), which runsv is built out of. Volatile: a FIFO carries nothing
-   across a reboot, so it never reaches the disk. */
 struct vfs_node *vfs_create_fifo(const char *path, uint32_t mode) {
     char parent_path[256];
     char name[128];
@@ -680,9 +624,6 @@ struct vfs_node *vfs_create_fifo(const char *path, uint32_t mode) {
     return node;
 }
 
-/* The name bind(2) gives a unix socket. Nothing is read from it -- connect(2)
-   finds the listener in the socket layer -- but the path has to be there for
-   the usual "wait for the daemon's socket" test. Volatile, like a FIFO. */
 struct vfs_node *vfs_create_socket_node(const char *path, uint32_t mode) {
     char parent_path[256];
     char name[128];
@@ -730,7 +671,6 @@ struct vfs_node *vfs_attach_link(struct vfs_node *parent, const char *name,
     uint32_t kind = target->flags & 0xFFU;
     if (kind == VFS_DIRECTORY) return NULL;
 
-    /* The kind is copied so readdir can answer without following the link. */
     struct vfs_node *link = vfs_alloc_node(name, kind | VFS_HARDLINK);
     if (!link) return NULL;
     link->link_target = target;
@@ -739,7 +679,6 @@ struct vfs_node *vfs_attach_link(struct vfs_node *parent, const char *name,
         return NULL;
     }
     target->links++;
-    /* The reference is what lets the contents outlive their own name. */
     vfs_node_ref(target);
     return link;
 }
@@ -772,13 +711,8 @@ int64_t vfs_readlink(struct vfs_node *node, void *buffer, size_t size) {
     return (int64_t)length;
 }
 
-/* Called with the node already detached. It can still be somebody's working
-   directory, so it is marked orphaned and the last unref frees it. */
 static void destroy_node(struct vfs_node *node) {
     if (!node) return;
-    /* A hard link owns nothing but its name, so it goes on its own. Dropping
-       the last name of a node that has already lost its own is what finally
-       releases the contents -- and what tells the filesystem to free them. */
     if (node->link_target) {
         struct vfs_node *target = node->link_target;
         node->link_target = NULL;
@@ -809,7 +743,6 @@ void vfs_node_ref(struct vfs_node *node) {
 void vfs_node_unref(struct vfs_node *node) {
     if (!node || !node->refs) return;
     if (--node->refs) return;
-    /* Still linked into the tree: the parent owns it, nothing to do. */
     if (!(node->flags & VFS_ORPHANED)) return;
     free_node_data(node);
     kfree(node);
@@ -853,8 +786,6 @@ int vfs_remove(const char *path, int remove_directory) {
         if (kind != VFS_DIRECTORY || node->children) return -1;
     } else if (kind == VFS_DIRECTORY) return -1;
     inotify_notify(parent, TUNIX_IN_DELETE, name, 0);
-    /* Only the last name takes the contents with it; watchers of a file that
-       still has another name have not seen it deleted. */
     if (body->links <= 1) {
         inotify_notify(body, TUNIX_IN_DELETE_SELF, NULL, 0);
         inotify_invalidate(body);
@@ -913,10 +844,6 @@ int vfs_rename(const char *old_path, const char *new_path) {
     return 0;
 }
 
-/* --- mounts -------------------------------------------------------------- */
-
-/* Errno values, so a mount failure can say which one it was. Kept here rather
-   than taken from the syscall layer, which the VFS does not include. */
 #define VFS_EPERM   1
 #define VFS_ENOENT  2
 #define VFS_ENOMEM 12
@@ -940,9 +867,6 @@ static struct vfs_mount *mount_at(const char *target) {
     return NULL;
 }
 
-/* Appended, so /proc/mounts reads in the order the system came up -- except
-   the root, which goes first however late it is declared, because that is
-   where every reader of the file expects to find it. */
 static void mount_insert(struct vfs_mount *entry) {
     if (strcmp(entry->target, "/") == 0) {
         entry->next = mount_table;
@@ -967,9 +891,6 @@ void vfs_mount_builtin(const char *source, const char *target, const char *type,
     mount_insert(entry);
 }
 
-/* Tear down a tree nobody can reach any more. Nodes a process still holds --
-   its working directory, say -- are orphaned by destroy_node rather than
-   freed under it, exactly as an unlink would leave them. */
 static void free_tree(struct vfs_node *node, unsigned depth) {
     if (!node || depth > VFS_TREE_MAX_DEPTH) return;
     struct vfs_node *child = node->children;
@@ -1002,8 +923,6 @@ int vfs_mount(const char *source, const char *target, const char *type,
         existing->flags = flags & ~VFS_MS_REMOUNT;
         return 0;
     }
-    /* Mounting a second filesystem over the first would give two entries the
-       same target, and then umount could not say which it meant. */
     if (existing) return -VFS_EBUSY;
 
     struct vfs_node *at = vfs_lookup(target);
@@ -1022,9 +941,6 @@ int vfs_mount(const char *source, const char *target, const char *type,
         if ((root->flags & 0xFFU) != VFS_DIRECTORY) return -VFS_ENOTDIR;
         if (root == at) return -VFS_EBUSY;
     } else if (strcmp(type, "tmpfs") == 0 || strcmp(type, "ramfs") == 0) {
-        /* A fresh, empty tree. Volatile so the ext2 driver never writes any of
-           it to the disk, which is what makes it a tmpfs rather than a
-           directory that happens to be empty. */
         root = vfs_alloc_node(at->name, VFS_DIRECTORY | VFS_VOLATILE);
         if (!root) return -VFS_ENOMEM;
         root->mode = at->mode;
@@ -1033,19 +949,12 @@ int vfs_mount(const char *source, const char *target, const char *type,
         owns_root = 1;
     } else if (strcmp(type, "vfat") == 0 || strcmp(type, "fat") == 0 ||
                strcmp(type, "msdos") == 0) {
-        /* The one filesystem here that reads a device. Its tree is built now,
-           in full, because FAT directories are small and a lookup that had to
-           re-read the medium would pay for it on every path walk. */
         int status = fatfs_mount(source, at->name, &root);
         if (status != 0) return status;
         owns_root = 1;
     } else if (mount_is_pseudo(type)) {
-        /* These trees are built by their own drivers at boot and cannot be
-           made a second time; mounting one is only meaningful where it
-           already is, which the table above has already answered. */
         return -VFS_EBUSY;
     } else {
-        /* ext2 and everything else: no driver here can open a device. */
         return -VFS_ENODEV;
     }
 
@@ -1063,9 +972,6 @@ int vfs_mount(const char *source, const char *target, const char *type,
     entry->root = root;
     entry->owns_root = owns_root;
 
-    /* The mounted root stands in for the mountpoint, so it takes the
-       mountpoint's name and its *parent* -- which is what makes `..` leave the
-       mount and vfs_node_path spell the path the caller walked. */
     if (owns_root) {
         root->parent = at->parent;
         strncpy(root->name, at->name, sizeof(root->name) - 1);
@@ -1086,15 +992,12 @@ int vfs_umount(const char *target) {
         entry = entry->next;
     }
     if (!entry) return -VFS_EINVAL;
-    /* The trees the system booted with have no mountpoint to restore. */
     if (!entry->mountpoint) return -VFS_EPERM;
 
     entry->mountpoint->mounted = NULL;
     entry->mountpoint->flags &= ~VFS_MOUNTPOINT;
     if (previous) previous->next = entry->next;
     else mount_table = entry->next;
-    /* A FAT tree carries per-node state the VFS knows nothing about, so its
-       driver gets to let go before the nodes themselves are freed. */
     fatfs_unmount(entry->root);
     if (entry->owns_root) free_tree(entry->root, 0);
     kfree(entry);
@@ -1110,8 +1013,6 @@ int vfs_truncate(struct vfs_node *node, uint64_t length) {
         inotify_notify(node, TUNIX_IN_MODIFY, NULL, 0);
         return 0;
     }
-    /* Truncating to nothing discards the contents, so drop the promise
-       instead of paying to fulfil it. */
     if (!length) node->flags &= ~VFS_LAZY_DATA;
     else if (vfs_fault_in(node) != 0) return -1;
     if (ensure_capacity(node, length) != 0) return -1;
@@ -1141,8 +1042,6 @@ int vfs_readdir(struct vfs_node *directory, uint64_t index, struct dirent *out) 
     if (!node) return 0;
     memset(out, 0, sizeof(*out));
     strncpy(out->name, node->name, sizeof(out->name) - 1);
-    /* Two names for one file have to report one inode, or nothing looking for
-       hard links -- tar, cp -l, du -- can pair them up. */
     out->ino = node->link_target ? node->link_target->inode : node->inode;
     out->type = node->flags & 0xFFU;
     return 1;

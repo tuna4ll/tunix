@@ -23,22 +23,38 @@ asks for, and nothing else:
 | `make` | the build itself |
 | `python3`, `python3-Pillow` | `support/terminal-font.py` rasterises the console font |
 | `git` | the clone, and the Limine checkout the build makes for itself |
+| `mtools` | the FAT filesystem the bootloader is read from |
 
 The kernel takes its boot protocol header from Limine, and the header and the
 bootloader that reads it have to be the same version, so `make kernel` clones
 `build/limine` before it compiles anything. That and the clone of Tunix are the
 two things the build needs a network for.
 
-`make image` is a different matter and does not run here. It installs a Void
-sysroot with xbps and partitions a disk, and Tunix has neither xbps nor the
-loop devices `support/image.sh` wants.
+`make all` goes further and builds the disk image too: the Void sysroot with
+xbps, an ext2 root, a FAT ESP, a GPT table, and Limine written into it. Nothing
+in that needs a loop device -- every filesystem is built inside a plain file --
+so the whole thing runs on Tunix as it stands:
+
+```sh
+make all VOID_INSTALL_BROWSER= VOID_INSTALL_GAMES= VOID_INSTALL_TOOLCHAIN= \
+	IMAGE_SLACK_MIB=64
+```
+
+The trimming is not a limitation of the build but of the room it has to work
+in. A file's contents live in the kernel's heap while anything holds it open,
+so the image being written is in memory as well as on disk, and so is the root
+filesystem it is copied from. With the browser, the game and the compiler left
+out, the artifact is about 790 MiB and the whole build fits in a 6 GiB machine
+with a couple of gigabytes of disk to spare. Ask for the full package set and
+it will run out of one or the other.
 
 ## What had to work first
 
-Four things stood between a toolchain in the image and a kernel out of it.
-Every one of them was a place where Tunix answered a system call in a way Linux
-does not, and every one of them had been sitting there unnoticed because
-nothing else in the userland asked.
+Ten things stood between a toolchain in the image and an image out of it. Every
+one of them was a place where Tunix answered a system call in a way Linux does
+not, and every one had been sitting there unnoticed because nothing else in the
+userland asked. The first four are what `make kernel` needed; the rest are what
+`make all` needed on top.
 
 ### getcwd returns a length
 
@@ -110,6 +126,70 @@ that came up fast enough, the call that should have returned success returned
 Whether the socket is connected and whether `connect` has said so are now two
 different facts.
 
+### A package manager needs a root of its own
+
+xbps installs into a directory rather than onto the running system, and the
+scripts a package carries have to run as if that directory were `/`. It does
+that the way everything does: `fork`, `chroot`, `chdir("/")`, `exec`. Tunix had
+no `chroot` at all, so every package that runs a script failed with `Function
+not implemented` and the transaction was abandoned.
+
+A process now carries its own root alongside its working directory. An absolute
+path is resolved from it, `..` stops there rather than climbing out, `getcwd`
+reports the path as the process sees it, and a symbolic link whose target is
+absolute lands inside rather than outside. Two places had to be told separately:
+`execve` builds the new image in a scratch structure that did not carry the
+root, so the interpreter of a dynamically linked program was still being found
+outside -- which is how a 2025 `ld.so` came to load a 2024 `libc.so.6` and say
+
+```
+/bin/sh: symbol lookup error: /usr/lib64/libc.so.6: undefined symbol: __nptl_change_stack_perm
+```
+
+### A script is told the name it was called by
+
+Void's install scripts say why they are careful about this:
+
+> Note that paths must be relative to CWD, to avoid calling host commands if
+> /bin/sh (dash) is not installed and it's not possible to chroot(2).
+
+So the script runs `./usr/libexec/xbps-triggers/system-accounts`, the kernel
+sees a `#!` line, and hands the path to the interpreter. Tunix handed over the
+path it had resolved -- absolute, and correct only from outside the chroot --
+where Linux hands over the string the caller passed. The interpreter could not
+open a file that, from where it stood, did not exist, so no package ever
+created its system users. The image built that way had no `_seatd` group, and
+without the group there is no seat daemon and no desktop.
+
+### Unknown open flags are ignored, not refused
+
+`dd` asks for `oflag=seek_bytes`, which is not a kernel flag at all: it is a
+private bit in coreutils that happens to travel to `open` along with the real
+ones. Linux ignores bits it does not know. Tunix rejected the call, so writing
+the two filesystems into the disk image failed with `Invalid argument` on a file
+it had just created.
+
+### Extended attributes answer for a filesystem that has none
+
+`mke2fs -d` copies each file's extended attributes into the image it is
+building, and asks for them with `llistxattr`. `Function not implemented` is
+fatal to it. The Tunix filesystem has no extended attributes, so the honest
+answer is an empty list, `ENODATA` for a read and `EOPNOTSUPP` for a write --
+all of which it takes in its stride.
+
+### The filesystem revision is now written down
+
+`support/image.sh` already pins the block size, the inode size and the exact
+feature set, because the kernel's ext2 driver reads one format and no other.
+It did not pin the revision, and the mke2fs in the image defaults it
+differently from the one on a modern host:
+
+```
+Filesystem features not supported with revision 0 filesystems
+```
+
+`-r 1` says what the other flags already implied.
+
 ## Doing it twice
 
 A kernel built inside Tunix boots into the desktop, Firefox and all. Put that
@@ -122,6 +202,23 @@ That is the whole claim. The first generation only shows the toolchain runs;
 the second shows it runs the same way the host's did, because a kernel that
 compiled itself wrong would not hash the same as the one that compiled it.
 
-Building inside a kernel from before these four fixes does not get that far. It
+Building inside a kernel from before these fixes does not get that far. It
 stops where `make -j4` stopped in the first place, with three compilers exited
 and nobody left awake to reap them.
+
+## The image it builds
+
+`make all` inside Tunix ends the way it does anywhere else:
+
+```
+Limine BIOS stages installed successfully!
+:: build/tunix.img ready, gpt (789M)
+```
+
+Copy that file out and boot it, and it comes up on its own -- Limine, the
+kernel it just compiled, runit, udev, the seat daemon, and the session:
+
+![The desktop of an image Tunix built](../screenshots/self-host-image.png)
+
+The wallpaper is the point. Nothing in that picture was made by the machine
+this file is being read on.
