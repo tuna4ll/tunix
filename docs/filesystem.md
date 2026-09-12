@@ -1,13 +1,13 @@
-# The root filesystem (ext2)
+# The root filesystem (ext3)
 
-The root is a real ext2 filesystem on the second partition of the boot disk.
+The root is a real ext3 filesystem on the second partition of the boot disk.
 The kernel mounts it at boot and writes through to it: reads, `mmap` and `exec`
 are served from RAM, every mutation reaches the disk as it happens, and what
 you edit is still there next boot.
 
 ## Where it comes from
 
-`mkfs.ext2 -d` on the build host, from the Void sysroot. That is a change: the
+`mkfs.ext3 -d` on the build host, from the Void sysroot. That is a change: the
 kernel used to make the filesystem itself, formatting a region of the disk on
 first boot and seeding it from an initramfs. Both are gone -- there is no
 initramfs, and there is no format code in the kernel.
@@ -30,12 +30,16 @@ read:
 - a group whose bitmap would not fit in one block
 - any incompatible feature but `filetype` -- extents and 64-bit block numbers
   above all
+- any read-only-compatible feature but `sparse_super` and `large_file`. The
+  name says what the rule is: a driver that does not understand one of these
+  may still read the filesystem, but must not write to it. This one writes, so
+  it refuses instead of quietly corrupting.
 
 Which is why `support/image.sh` makes the filesystem with an explicit feature
-set rather than mke2fs's defaults:
+set and an explicit revision rather than mke2fs's defaults:
 
 ```sh
-mkfs.ext2 -b 4096 -I 128 \
+mkfs.ext3 -r 1 -b 4096 -I 128 \
     -O ^resize_inode,^dir_index,^ext_attr,^metadata_csum,^64bit,^huge_file,^dir_nlink,^extra_isize
 ```
 
@@ -44,7 +48,102 @@ into a hashed directory without maintaining the tree would corrupt it for Linux.
 `metadata_csum` is off for the same reason: a write that does not update the
 checksum makes e2fsck complain about a filesystem that is otherwise fine.
 
-The image is a plain ext2 filesystem, so it mounts on Linux:
+## The journal
+
+`kernel/fs/ext3.c` is the journal, and it is the thing that makes this ext3
+rather than ext2 with a spare file in it. It writes the log that `mkfs.ext3`
+laid down, and it replays one it finds.
+
+The format is JBD, the same log ext3 and ext4 use on Linux, and every field in
+it is big-endian. A transaction is a descriptor block naming the filesystem
+blocks it carries, then those blocks, then a commit block. All three carry the
+magic `0xC03B3998` and the transaction's sequence number, and the journal
+superblock says where the oldest live transaction starts and what sequence to
+expect there. That is the whole protocol; there is nothing else to agree on,
+which is why a log this kernel wrote is one e2fsck reads.
+
+### What a mutation costs now
+
+Every write goes to the log first, file contents included -- what ext3 calls
+`data=journal`. Metadata goes through `meta_write()` and a file's blocks go
+through `run_flush()`, and neither reaches the disk directly any more: they
+stage the block, and `flush_meta()` -- which already ran at the end of every
+create, unlink and rename -- commits whatever is staged as one transaction:
+
+1. descriptor, blocks, commit block, then a device flush
+2. `needs_recovery` set in the filesystem superblock, the journal superblock
+   pointed at the transaction, flush
+3. the blocks written where they actually belong, flush
+4. the journal emptied, `needs_recovery` cleared, flush
+
+Step 3 is the only part that existed before. The rest is the price: everything
+is written twice, and there are four cache flushes where there used to be none.
+
+The staging area is 256 blocks, so a transaction carries up to a megabyte, and
+both halves of the doubled write go out in runs rather than a block at a time.
+The blocks of a file are usually consecutive on the disk and always consecutive
+in the log, so a megabyte of file contents is a handful of calls at each end.
+Writing 64 MiB took 2.9 seconds with the contents journalled against 2.9
+without -- but that is an emulated disk with the host's page cache behind it,
+and the second write is exactly the kind of cost such a cache hides. Do not
+read it as free.
+
+What it buys is that there is no moment when the disk holds half of a change,
+and that now covers what is *in* the file as well as where it is. Crash before
+step 2 and the transaction never happened; crash during step 3 -- the window
+that used to be the dangerous one -- and the next mount finds a committed
+transaction the disk has not caught up with, and applies it.
+
+Because the log is checkpointed at the end of every transaction rather than
+left to fill, only one transaction is ever live, and it always starts at the
+first log block. A 64 MiB journal is far more than this needs; it is the size
+mke2fs chose and there is no reason to argue with it.
+
+### Replay
+
+`ext3_journal_recover()` runs before the tree is read, because replaying
+changes the inodes and directory blocks the tree is built from. It walks the
+log twice: once to find where it ends and to collect revoked blocks, once to
+write the blocks of every transaction that has a commit block. A descriptor
+without a commit after it is a transaction that was interrupted, and it is
+where the replay stops.
+
+Two details of the format matter and are handled. A block whose first four
+bytes happen to be the journal's own magic is written to the log with those
+bytes zeroed and an `ESCAPE` flag on its tag, and put back on the way out. And
+a revoke block cancels a replay for the blocks it names, which is how a journal
+written by Linux avoids restoring a metadata block that has since been freed
+and reused for file data.
+
+```
+EXT3: replaying the journal from transaction 6581
+```
+
+That line is from a real crash: `kill -9` on the emulator in the middle of the
+churn, chosen by repetition until one landed between the commit and the
+checkpoint. Linux's own `e2fsck -fn` on that image said it was skipping journal
+recovery because it had been asked not to write; Tunix booted, replayed, and
+`e2fsck` afterwards found nothing wrong.
+
+The same done over a `dd` loop catches a transaction with a file in it. Reading
+the descriptor block off the disk of one such crash:
+
+```
+descriptor magic 0xc03b3998 type 1 sequence 4656
+the transaction carries 37 blocks
+EXT3: replaying the journal from transaction 4656
+```
+
+Thirty-seven blocks, most of them the contents of the file being written.
+
+### What is refused
+
+Any JBD feature the code does not implement -- checksums, 64-bit block numbers,
+asynchronous commit, fast commit -- stops the mount rather than being ignored,
+the same rule the filesystem superblock's incompatible features get. `mkfs.ext3`
+sets none of them.
+
+The image is a plain ext3 filesystem, so it mounts on Linux:
 
 ```sh
 sudo mount -o loop,offset=$((133120*512)) build/tunix.img /mnt
@@ -74,7 +173,13 @@ GPT so that one disk boots either firmware.
 
 ## What is not here
 
-- **No journal.** ext2, not ext3.
+- **One transaction at a time.** The log is checkpointed immediately rather
+  than batched, so a write does not amortise against the one after it.
+- **No revoke blocks are written.** They are understood on the way in, which is
+  what matters for replaying a log Linux left behind, but this kernel frees a
+  metadata block and reuses it without recording that the old contents must not
+  come back. Nothing here reuses a block within one transaction, which is the
+  case that would need it.
 - **No extents, no 64-bit block numbers.** 16 GiB is the ceiling.
 - **No `dir_index`.** A directory is a linear scan.
 - **`fsck` on the running root** is not something to do; the fstab entry has

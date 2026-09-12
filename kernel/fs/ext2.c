@@ -3,6 +3,7 @@
 #include "../include/block.h"
 #include "../include/build_config.h"
 #include "../include/ext2.h"
+#include "../include/ext3.h"
 #include "../include/heap.h"
 #include "../include/kstring.h"
 #include "../include/random.h"
@@ -17,29 +18,17 @@ extern void kprintf(const char *fmt, ...);
 #define KDEBUG(...) do { } while (0)
 #endif
 
-/* ext2 backing the whole root filesystem: the disk is authoritative, the VFS
-   tree is the cache, and every mutation is mirrored through the persistence
-   hooks. VFS_VOLATILE trees stay in RAM. */
-
 #define EXT2_BLOCK_SIZE 4096U
 #define EXT2_SECTORS_PER_BLOCK (EXT2_BLOCK_SIZE / 512U)
 #define EXT2_MAGIC 0xEF53U
-/* One bitmap is one block, so neither the blocks nor the inodes of a group can
-   number more than 8 * block_size. The real figures come from the superblock;
-   this is the ceiling they are checked against. */
 #define EXT2_GROUP_MAX_BITS (8U * EXT2_BLOCK_SIZE)
 #define EXT2_INODE_SIZE 128U
 #define EXT2_INODES_PER_BLOCK (EXT2_BLOCK_SIZE / EXT2_INODE_SIZE)
 #define EXT2_ROOT_INO 2U
 #define EXT2_FIRST_INO 11U
 
-/* 128 groups is 16 GiB, far past anything the ATA driver's 28-bit LBA
-   addressing reaches; the descriptor array it implies is 4 KiB of BSS. */
 #define EXT2_MAX_GROUPS 128U
-/* 32 is sizeof(struct ext2_group_desc), spelled out because the struct is not
-   declared yet here; ext2_group_desc_size_check below asserts it. */
 #define EXT2_GD_PER_BLOCK (EXT2_BLOCK_SIZE / 32U)
-
 
 #define EXT2_POINTERS_PER_BLOCK (EXT2_BLOCK_SIZE / 4U)
 #define EXT2_DIRECT_BLOCKS 12U
@@ -52,7 +41,13 @@ extern void kprintf(const char *fmt, ...);
 #define EXT2_FT_DIR 2U
 #define EXT2_FT_SYMLINK 7U
 
+#define EXT2_FEATURE_COMPAT_HAS_JOURNAL 0x0004U
 #define EXT2_FEATURE_INCOMPAT_FILETYPE 0x0002U
+#define EXT2_FEATURE_INCOMPAT_RECOVER 0x0004U
+#define EXT2_FEATURE_RO_COMPAT_SPARSE_SUPER 0x0001U
+#define EXT2_FEATURE_RO_COMPAT_LARGE_FILE 0x0002U
+#define EXT2_RO_COMPAT_READABLE (EXT2_FEATURE_RO_COMPAT_SPARSE_SUPER | \
+                                 EXT2_FEATURE_RO_COMPAT_LARGE_FILE)
 #define EXT2_MAX_DEPTH 64U
 #define EXT2_RUN_BLOCKS 32U
 
@@ -92,7 +87,14 @@ struct ext2_superblock {
     char s_volume_name[16];
     char s_last_mounted[64];
     uint32_t s_algorithm_usage_bitmap;
-    uint8_t s_reserved[820];
+    uint8_t s_prealloc_blocks;
+    uint8_t s_prealloc_dir_blocks;
+    uint16_t s_reserved_gdt_blocks;
+    uint8_t s_journal_uuid[16];
+    uint32_t s_journal_inum;
+    uint32_t s_journal_dev;
+    uint32_t s_last_orphan;
+    uint8_t s_reserved[788];
 } __attribute__((packed));
 
 struct ext2_group_desc {
@@ -146,13 +148,9 @@ static struct vfs_node *ext2_root;
 static struct ext2_superblock sb;
 static struct ext2_group_desc gds[EXT2_MAX_GROUPS];
 static uint32_t group_count;
-/* The geometry the mounted superblock describes; see adopt_geometry(). */
 static uint32_t first_data_block;
 static uint32_t blocks_per_group;
 static uint32_t inodes_per_group;
-/* Length of the group descriptor table in blocks. One block covers 128 groups,
-   so this is 1 for every size the ATA driver can address, but the layout is
-   computed rather than assumed. */
 static uint32_t gd_blocks;
 
 static uint8_t meta_buf[EXT2_BLOCK_SIZE];
@@ -160,11 +158,6 @@ static uint8_t data_buf[EXT2_BLOCK_SIZE];
 static uint8_t walk_buf[EXT2_BLOCK_SIZE];
 static uint8_t walk_buf2[EXT2_BLOCK_SIZE];
 static uint8_t bulk_buf[EXT2_RUN_BLOCKS * EXT2_BLOCK_SIZE];
-
-/* --- group layout ------------------------------------------------------- */
-
-/* Where a group's metadata is, read from the descriptor rather than computed:
-   mke2fs writes the image and its layout is not ours to predict. */
 
 static uint32_t gd_blocks_for(uint32_t groups) {
     return (groups + EXT2_GD_PER_BLOCK - 1U) / EXT2_GD_PER_BLOCK;
@@ -174,8 +167,6 @@ static uint32_t group_first_block(uint32_t group) {
     return first_data_block + group * blocks_per_group;
 }
 
-/* The last group is short whenever the filesystem does not end on a group
-   boundary; everything that walks a bitmap has to respect that. */
 static uint32_t group_block_count(uint32_t group) {
     uint32_t first = group_first_block(group);
     if (first >= sb.s_blocks_count) return 0;
@@ -199,20 +190,27 @@ static uint32_t epoch32(void) {
     return (uint32_t)time_epoch_seconds();
 }
 
-/* The on-disk inode has carried timestamps all along; this is the half that
-   was missing, so a restored tree reports the times it was saved with. */
 static void restore_times(struct vfs_node *node, const struct ext2_inode *inode) {
     node->atime = inode->i_atime;
     node->mtime = inode->i_mtime;
     node->ctime = inode->i_ctime;
 }
 
-/* --- block layer -------------------------------------------------------- */
-
-static int read_blocks(uint32_t block, uint32_t count, void *out) {
+static int read_blocks_raw(uint32_t block, uint32_t count, void *out) {
     uint32_t lba = ext2_region_lba + block * EXT2_SECTORS_PER_BLOCK;
     uint32_t sectors = count * EXT2_SECTORS_PER_BLOCK;
     return block_read(lba, sectors, out);
+}
+
+static int read_blocks(uint32_t block, uint32_t count, void *out) {
+    if (!ext3_journal_staged()) return read_blocks_raw(block, count, out);
+    uint8_t *bytes = (uint8_t *)out;
+    for (uint32_t index = 0; index < count; index++) {
+        uint8_t *slot = bytes + (size_t)index * EXT2_BLOCK_SIZE;
+        if (ext3_journal_peek(block + index, slot) == 0) continue;
+        if (read_blocks_raw(block + index, 1, slot) != 0) return -1;
+    }
+    return 0;
 }
 
 static int write_blocks(uint32_t block, uint32_t count, const void *data) {
@@ -222,18 +220,21 @@ static int write_blocks(uint32_t block, uint32_t count, const void *data) {
 }
 
 static int read_block(uint32_t block, void *out) {
-    return read_blocks(block, 1, out);
+    if (ext3_journal_peek(block, out) == 0) return 0;
+    return read_blocks_raw(block, 1, out);
 }
 
 static int write_block(uint32_t block, const void *data) {
     return write_blocks(block, 1, data);
 }
 
-
-/* --- single-block write-back caches -------------------------------------- */
+static int meta_write(uint32_t block, const void *data) {
+    if (ext3_journal_active()) return ext3_journal_stage(block, data);
+    return write_blocks(block, 1, data);
+}
 
 struct block_cache {
-    uint32_t block; /* 0 = empty; block 0 is the superblock, never cached */
+    uint32_t block;
     int dirty;
     uint8_t data[EXT2_BLOCK_SIZE];
 };
@@ -253,7 +254,7 @@ static struct block_cache *const all_caches[] = {
 
 static int cache_flush_one(struct block_cache *cache) {
     if (cache->block && cache->dirty &&
-        write_block(cache->block, cache->data) != 0) return -1;
+        meta_write(cache->block, cache->data) != 0) return -1;
     cache->dirty = 0;
     return 0;
 }
@@ -269,7 +270,6 @@ static uint8_t *cache_get(struct block_cache *cache, uint32_t block) {
     return cache->data;
 }
 
-/* Claim the cache for a freshly allocated block without reading the disk. */
 static uint8_t *cache_put_new(struct block_cache *cache, uint32_t block) {
     if (cache_flush_one(cache) != 0) return NULL;
     memset(cache->data, 0, sizeof(cache->data));
@@ -296,8 +296,6 @@ static void cache_reset_all(void) {
         cache_invalidate(all_caches[index]);
 }
 
-/* Write the descriptor table starting at `first_block`, which is the primary
-   copy in group 0 and a backup in any other group. */
 static int write_gd_table(uint32_t first_block) {
     for (uint32_t index = 0; index < gd_blocks; index++) {
         uint32_t start = index * EXT2_GD_PER_BLOCK;
@@ -305,23 +303,30 @@ static int write_gd_table(uint32_t first_block) {
         if (count > EXT2_GD_PER_BLOCK) count = EXT2_GD_PER_BLOCK;
         memset(meta_buf, 0, sizeof(meta_buf));
         memcpy(meta_buf, &gds[start], count * sizeof(struct ext2_group_desc));
-        if (write_block(first_block + index, meta_buf) != 0) return -1;
+        if (meta_write(first_block + index, meta_buf) != 0) return -1;
     }
     return 0;
 }
 
-static int flush_meta(void) {
-    if (cache_flush_all() != 0) return -1;
+static int write_superblock_direct(void) {
     memset(meta_buf, 0, sizeof(meta_buf));
     memcpy(meta_buf + 1024, &sb, sizeof(sb));
-    if (write_block(0, meta_buf) != 0) return -1;
-    return write_gd_table(first_data_block + 1U);
+    return write_blocks(0, 1, meta_buf);
 }
 
-/* --- bitmaps ------------------------------------------------------------ */
+static int flush_meta(void) {
+    if (cache_flush_all() != 0) return -1;
+    int journalled = ext3_journal_active();
+    if (journalled) sb.s_feature_incompat |= EXT2_FEATURE_INCOMPAT_RECOVER;
+    memset(meta_buf, 0, sizeof(meta_buf));
+    memcpy(meta_buf + 1024, &sb, sizeof(sb));
+    if (meta_write(0, meta_buf) != 0) return -1;
+    if (write_gd_table(first_data_block + 1U) != 0) return -1;
+    if (!journalled) return 0;
+    if (ext3_journal_commit() != 0) return -1;
+    return 0;
+}
 
-/* A free bit at or after `start`, wrapping once. A word at a time, because a
-   bit-by-bit walk touches memory once per bit on every allocation. */
 static int64_t bitmap_scan(const uint8_t *bits, uint32_t start, uint32_t max_bits) {
     const uint32_t *words = (const uint32_t *)bits;
     if (start >= max_bits) start = 0;
@@ -330,7 +335,6 @@ static int64_t bitmap_scan(const uint8_t *bits, uint32_t start, uint32_t max_bit
         uint32_t end = pass ? start : max_bits;
         while (bit < end) {
             uint32_t index = bit >> 5;
-            /* the bits before the cursor are not ours to take on this pass */
             uint32_t word = words[index] | ((1U << (bit & 31U)) - 1U);
             if (word == 0xFFFFFFFFU) {
                 bit = (index + 1U) << 5;
@@ -363,13 +367,10 @@ static void bitmap_release(struct block_cache *cache, uint32_t bitmap_block,
     cache->dirty = 1;
 }
 
-/* Allocation resumes where the last one left off, so a growing file gets
-   consecutive blocks and run_append() can fill a whole transfer. */
 static uint32_t block_cursor_group;
 static uint32_t block_cursor_bit;
 
 static uint32_t alloc_block(void) {
-    /* a format or a mount can leave the cursor pointing past the last group */
     if (block_cursor_group >= group_count) block_cursor_group = block_cursor_bit = 0;
     for (uint32_t index = 0; index < group_count; index++) {
         uint32_t group = block_cursor_group + index;
@@ -434,17 +435,11 @@ static void free_inode(uint32_t ino, int is_directory) {
         gds[group].bg_used_dirs_count--;
 }
 
-/* e2fsck checks bg_used_dirs_count per group in its pass 5, so the counter has
-   to be bumped in the group that actually owns the inode. */
 static void inode_group_dirs_inc(uint32_t ino) {
     if (!ino || ino > sb.s_inodes_count) return;
     gds[(ino - 1U) / inodes_per_group].bg_used_dirs_count++;
 }
 
-/* --- inode table -------------------------------------------------------- */
-
-/* Inode numbers are global but the tables are per-group, so an inode has to be
-   resolved to its group before it can be located within that group's table. */
 static uint32_t inode_table_block(uint32_t ino, uint32_t *offset) {
     uint32_t index = ino - 1U;
     uint32_t group = index / inodes_per_group;
@@ -480,8 +475,6 @@ static void inode_links_adjust(uint32_t ino, int delta) {
     inode_write(ino, &inode);
 }
 
-/* --- block mapping ------------------------------------------------------ */
-
 static uint32_t map_slot_fetch(struct block_cache *cache, uint32_t map_block,
                                uint32_t slot, int alloc, int *error) {
     uint8_t *data = cache_get(cache, map_block);
@@ -496,11 +489,6 @@ static uint32_t map_slot_fetch(struct block_cache *cache, uint32_t map_block,
     return value;
 }
 
-/*
- * Map a file block to a disk block. Returns the disk block, 0 for a hole
- * (when alloc is 0), or -1 on error. *inode_dirty is set when the inode
- * itself changed.
- */
 static int64_t inode_bmap(struct ext2_inode *inode, uint32_t file_block,
                           int alloc, int *inode_dirty) {
     int error = 0;
@@ -589,7 +577,6 @@ static void release_map_block(uint32_t map_block) {
 }
 
 static void inode_release_blocks(struct ext2_inode *inode) {
-    /* raw walks below read from disk, so dirty cached maps must land first */
     cache_flush_all();
     for (uint32_t index = 0; index < EXT2_DIRECT_BLOCKS; index++) {
         if (inode->i_block[index]) free_block(inode->i_block[index]);
@@ -606,7 +593,6 @@ static void inode_release_blocks(struct ext2_inode *inode) {
     }
     memset(inode->i_block, 0, sizeof(inode->i_block));
     inode->i_blocks = 0;
-    /* the freed blocks may be reused with new roles; drop stale copies */
     cache_invalidate(&cache_map);
     cache_invalidate(&cache_map2);
     cache_invalidate(&cache_dir);
@@ -616,8 +602,6 @@ static int inode_is_fast_symlink(const struct ext2_inode *inode) {
     return (inode->i_mode & 0xF000U) == EXT2_S_IFLNK &&
            inode->i_size < 60U && inode->i_blocks == 0;
 }
-
-/* --- directory entries -------------------------------------------------- */
 
 static uint8_t dirent_type_for(const struct vfs_node *node) {
     uint32_t kind = node->flags & 0xFFU;
@@ -757,8 +741,6 @@ static int dir_write_initial_block(uint32_t block, uint32_t dir_ino,
     return 0;
 }
 
-/* --- file content ------------------------------------------------------- */
-
 struct run_writer {
     uint32_t start_block;
     uint32_t count;
@@ -766,7 +748,16 @@ struct run_writer {
 
 static int run_flush(struct run_writer *run) {
     if (!run->count) return 0;
-    int status = write_blocks(run->start_block, run->count, bulk_buf);
+    int status = 0;
+    if (ext3_journal_active()) {
+        for (uint32_t index = 0; index < run->count; index++) {
+            status = ext3_journal_stage(run->start_block + index,
+                                        bulk_buf + (size_t)index * EXT2_BLOCK_SIZE);
+            if (status != 0) break;
+        }
+    } else {
+        status = write_blocks(run->start_block, run->count, bulk_buf);
+    }
     run->count = 0;
     return status;
 }
@@ -782,10 +773,8 @@ static int run_append(struct run_writer *run, uint32_t block, const void *data) 
     return 0;
 }
 
-/* Which step gave up, because "it failed" is not a thing anybody can act on. */
 static const char *failed_stage = "?";
 
-/* Returns -1 on error, 1 when blocks were allocated, 0 otherwise. */
 static int file_write_range(uint32_t ino, struct vfs_node *node,
                             uint64_t offset, uint64_t size) {
     struct ext2_inode inode;
@@ -795,7 +784,6 @@ static int file_write_range(uint32_t ino, struct vfs_node *node,
 
     uint64_t end = offset + size;
     if (end > node->length) end = node->length;
-    /* a node that never faulted in still matches what is on the disk */
     if (size && end > offset && !(node->flags & VFS_LAZY_DATA)) {
         uint32_t first = (uint32_t)(offset / EXT2_BLOCK_SIZE);
         uint32_t last = (uint32_t)((end - 1U) / EXT2_BLOCK_SIZE);
@@ -830,36 +818,18 @@ static int file_write_range(uint32_t ino, struct vfs_node *node,
     return allocated;
 }
 
-/* --- persistence event handlers ----------------------------------------- */
-
 static int ext2_tracks(const struct vfs_node *node) {
     return ext2_mounted_flag && !ext2_loading && node && node->disk_inode;
 }
 
-/*
- * Whether a node belongs to one of the RAM-only trees. The flag sits on the
- * directory at the top -- /tmp, /sys and the rest -- and everything below it
- * inherits: asking only about the node itself let a file created in /tmp be
- * written to the disk, and the root filled up with logs a reboot should have
- * taken away.
- */
 static int under_volatile(const struct vfs_node *node) {
     for (const struct vfs_node *walk = node; walk; walk = walk->parent) {
         if (walk->flags & VFS_VOLATILE) return 1;
-        /* vfs_root is its own parent, so stop rather than spin. */
         if (walk->parent == walk) break;
     }
     return 0;
 }
 
-/* Returns 0 on success, 1 for intentionally skipped nodes, -1 on error. */
-/*
- * One line a person can act on: which step, and what the filesystem still has.
- *
- * A medium that will not take a write fails every write, so this is bounded --
- * the log the failure produced was twenty identical lines naming neither the
- * step that gave up nor whether the disk had simply filled.
- */
 #define FAILURE_REPORT_LIMIT 8U
 
 static void report_failure(const char *what, const char *name) {
@@ -876,8 +846,6 @@ static int create_one(struct vfs_node *node) {
     if (!node->parent || !node->parent->disk_inode || node->disk_inode) return -1;
     uint32_t kind = node->flags & 0xFFU;
     if (under_volatile(node)) return 1;
-    /* A name for a file elsewhere in the tree; the walk comes back for it once
-       every inode exists, since the file it names may not yet. */
     if (node->link_target) return 1;
     if (kind != VFS_FILE && kind != VFS_DIRECTORY && kind != VFS_SYMLINK)
         return 1;
@@ -891,8 +859,6 @@ static int create_one(struct vfs_node *node) {
     memset(&inode, 0, sizeof(inode));
     inode.i_uid = (uint16_t)node->uid;
     inode.i_gid = (uint16_t)node->gid;
-    /* Persist the times the node already carries, so what stat reported before
-       the flush is what comes back after a reboot. */
     inode.i_atime = node->atime;
     inode.i_ctime = node->ctime;
     inode.i_mtime = node->mtime;
@@ -901,9 +867,6 @@ static int create_one(struct vfs_node *node) {
         failed_stage = "directory block";
         uint32_t block = alloc_block();
         if (!block || dir_write_initial_block(block, ino, parent_ino) != 0) {
-            /* The block was taken before the write that failed, and nothing
-               else knows about it yet: leaving it allocated loses a block per
-               attempt on a medium that fails every attempt. */
             if (block) free_block(block);
             free_inode(ino, 0);
             return -1;
@@ -965,7 +928,6 @@ static int create_one(struct vfs_node *node) {
     return 0;
 }
 
-/* Give an inode that already exists a further directory entry. */
 static int link_one(struct vfs_node *link) {
     struct vfs_node *target = link->link_target;
     if (!link->parent || !link->parent->disk_inode || !target ||
@@ -976,8 +938,6 @@ static int link_one(struct vfs_node *link) {
     return 0;
 }
 
-/* Take one name off an inode that has others. The inode, its blocks and its
-   contents all stay: what is being removed is the entry, not the file. */
 static int unlink_one(struct vfs_node *body, uint32_t parent_ino,
                       const char *name) {
     if (!body || !body->disk_inode) return -1;
@@ -1022,8 +982,6 @@ static void persist_subtree(struct vfs_node *node, unsigned depth) {
         persist_subtree(child, depth + 1U);
 }
 
-/* The second pass of a subtree flush: every inode exists by now, so a name
-   standing for one can be written whichever order the walk reached them in. */
 static void persist_links(struct vfs_node *node, unsigned depth) {
     if (depth > EXT2_MAX_DEPTH) return;
     for (struct vfs_node *child = node->children; child; child = child->next) {
@@ -1043,7 +1001,6 @@ static void unpersist_subtree(struct vfs_node *node, uint32_t parent_ino,
         return;
     }
     if (!node->disk_inode || depth > EXT2_MAX_DEPTH) return;
-    /* Other names still reach these blocks, so only the entry may go. */
     if (node->links > 1) {
         unlink_one(node, parent_ino, name);
         return;
@@ -1052,7 +1009,6 @@ static void unpersist_subtree(struct vfs_node *node, uint32_t parent_ino,
         for (struct vfs_node *child = node->children; child; child = child->next)
             unpersist_subtree(child, node->disk_inode, child->name, depth + 1U);
     } else {
-        /* the blocks are about to go, so the contents have to come in now */
         vfs_fault_in(node);
     }
     remove_one(node, parent_ino, name);
@@ -1068,9 +1024,6 @@ static void ext2_event_created(struct vfs_node *node) {
         flush_meta();
 }
 
-/* The node handed over is the entry being removed, which for a hard link owns
-   no inode of its own -- so what to do is decided by how many names the file
-   has left, not by which of them this is. */
 static void ext2_event_removed(struct vfs_node *node) {
     if (!ext2_mounted_flag || ext2_loading || !node || !node->parent ||
         !node->parent->disk_inode) return;
@@ -1085,15 +1038,12 @@ static void ext2_event_removed(struct vfs_node *node) {
 
 static void ext2_event_linked(struct vfs_node *link) {
     if (!ext2_mounted_flag || ext2_loading || !link || !link->link_target) return;
-    /* Nothing to write when either end is not on the disk in the first place,
-       as under /tmp: the link lives in memory with the file it names. */
     if (!ext2_tracks(link->link_target) || !link->parent ||
         !link->parent->disk_inode) return;
     if (link_one(link) != 0) kprintf("EXT2: cannot link %s\n", link->name);
     else flush_meta();
 }
 
-/* The file has lost the last of its names, having outlived its own. */
 static void ext2_event_released(struct vfs_node *node) {
     if (!ext2_tracks(node)) return;
     uint32_t ino = node->disk_inode;
@@ -1114,8 +1064,6 @@ static void ext2_event_moved(struct vfs_node *node, struct vfs_node *old_parent,
     uint32_t old_parent_ino = old_parent ? old_parent->disk_inode : 0;
     uint32_t new_parent_ino = node->parent ? node->parent->disk_inode : 0;
 
-    /* Renaming a hard link moves an entry between directories: the count only
-       changes when one end of the move is not on the disk. */
     if (node->link_target) {
         struct vfs_node *target = node->link_target;
         if (!ext2_tracks(target)) return;
@@ -1201,9 +1149,6 @@ static const struct vfs_persist_ops ext2_persist_ops = {
     .fetch = ext2_fetch_data,
 };
 
-
-/* --- mount / load ------------------------------------------------------- */
-
 static void *load_file_data(struct ext2_inode *inode) {
     uint32_t size = inode->i_size;
     if (!size) return NULL;
@@ -1211,8 +1156,6 @@ static void *load_file_data(struct ext2_inode *inode) {
     if (!data) return NULL;
     uint32_t block_count = (size + EXT2_BLOCK_SIZE - 1U) / EXT2_BLOCK_SIZE;
 
-    /* gather contiguous disk blocks and read them in single DMA runs;
-       heap pages cannot be DMA targets, so bounce through bulk_buf */
     uint32_t run_first_file = 0;
     uint32_t run_start = 0;
     uint32_t run_count = 0;
@@ -1259,7 +1202,6 @@ static void *load_file_data(struct ext2_inode *inode) {
     return data;
 }
 
-/* vfs_fault_in() lands here the first time a restored file is touched. */
 static int ext2_fetch_data(struct vfs_node *node) {
     if (!ext2_mounted_flag || !node || !node->disk_inode) return -1;
     struct ext2_inode inode;
@@ -1293,13 +1235,6 @@ static int load_symlink_target(struct ext2_inode *inode, char **out) {
     return 0;
 }
 
-/*
- * Inodes met more than once while the tree is being read back. A second entry
- * for an inode is the second name of one file, not a second file, and loading
- * it as its own node would give the two names separate contents. Only inodes
- * the disk says have several names are tracked, so an ordinary tree pays for
- * nothing.
- */
 struct link_seen {
     uint32_t ino;
     struct vfs_node *node;
@@ -1327,7 +1262,6 @@ static void links_seen_insert(struct link_seen *table, uint32_t capacity,
 }
 
 static int links_seen_add(uint32_t ino, struct vfs_node *node) {
-    /* Grown at half full: linear probing falls apart past that. */
     if ((links_seen_count + 1U) * 2U > links_seen_capacity) {
         uint32_t capacity = links_seen_capacity ? links_seen_capacity * 2U : 64U;
         struct link_seen *table =
@@ -1423,7 +1357,6 @@ static int load_directory(uint32_t dir_ino, struct vfs_node *dir_node,
                     continue;
                 }
                 node->length = child.i_size;
-                /* contents stay on disk until something asks for them */
                 if (child.i_size) node->flags |= VFS_LAZY_DATA;
                 node->mode = child.i_mode & 07777U;
                 node->uid = child.i_uid;
@@ -1464,8 +1397,6 @@ fail:
     return -1;
 }
 
-/* --- public API --------------------------------------------------------- */
-
 int ext2fs_mounted(void) {
     return ext2_mounted_flag;
 }
@@ -1494,15 +1425,81 @@ int ext2fs_fsync_node(struct vfs_node *node) {
     return block_flush();
 }
 
+static struct ext2_inode journal_inode;
+
+static int journal_read_block(uint32_t block, void *out) {
+    return read_blocks_raw(block, 1, out);
+}
+
+static int journal_write_block(uint32_t block, const void *data) {
+    return write_blocks(block, 1, data);
+}
+
+static int journal_map_block(uint32_t file_block, uint32_t *disk_block) {
+    int dirty = 0;
+    int64_t block = inode_bmap(&journal_inode, file_block, 0, &dirty);
+    if (block <= 0) return -1;
+    *disk_block = (uint32_t)block;
+    return 0;
+}
+
+static int journal_write_run(uint32_t block, uint32_t count, const void *data) {
+    return write_blocks(block, count, data);
+}
+
+static int journal_flush_device(void) {
+    return block_flush();
+}
+
+static int journal_mark_recovery(int needs_recovery) {
+    if (needs_recovery) sb.s_feature_incompat |= EXT2_FEATURE_INCOMPAT_RECOVER;
+    else sb.s_feature_incompat &= ~EXT2_FEATURE_INCOMPAT_RECOVER;
+    return write_superblock_direct();
+}
+
+static const struct ext3_journal_ops journal_ops = {
+    journal_read_block, journal_write_block, journal_map_block,
+    journal_flush_device, journal_mark_recovery, journal_write_run,
+};
+
+static int journal_start_up(void) {
+    ext3_journal_detach();
+    if (!(sb.s_feature_compat & EXT2_FEATURE_COMPAT_HAS_JOURNAL)) {
+        return (sb.s_feature_incompat & EXT2_FEATURE_INCOMPAT_RECOVER) ? -1 : 0;
+    }
+    if (!sb.s_journal_inum || inode_read(sb.s_journal_inum, &journal_inode) != 0)
+        return -1;
+    if (ext3_journal_attach(&journal_ops) != 0) return -1;
+    if (ext3_journal_recover() != 0) return -1;
+    if (read_blocks(0, 1, meta_buf) != 0) return -1;
+    memcpy(&sb, meta_buf + 1024, sizeof(sb));
+    if (sb.s_feature_incompat & EXT2_FEATURE_INCOMPAT_RECOVER) {
+        sb.s_feature_incompat &= ~EXT2_FEATURE_INCOMPAT_RECOVER;
+        if (write_superblock_direct() != 0) return -1;
+    }
+    kprintf("EXT3: journal ready, %u blocks\n", (unsigned)ext3_journal_length());
+    return 0;
+}
+
+int ext2fs_shutdown(void) {
+    if (!ext2_mounted_flag) return 0;
+    if (ext3_journal_active() && ext3_journal_commit() != 0) return -1;
+    sb.s_feature_incompat &= ~EXT2_FEATURE_INCOMPAT_RECOVER;
+    if (write_superblock_direct() != 0) return -1;
+    return block_flush();
+}
+
+int ext2fs_journalled(void) {
+    return ext2_mounted_flag &&
+           (sb.s_feature_compat & EXT2_FEATURE_COMPAT_HAS_JOURNAL) != 0;
+}
+
 int ext2fs_sync(void) {
     if (!ext2_mounted_flag) return 0;
     if (flush_meta() != 0) return -1;
     return block_flush();
 }
 
-/* How many blocks the device can hold past the start of the filesystem. The
-   superblock says how many it actually uses; this is only the ceiling that
-   claim is checked against. */
 static uint32_t region_usable_blocks(uint32_t region_lba) {
     uint32_t disk_sectors = (uint32_t)block_sectors();
     if (!disk_sectors || region_lba >= disk_sectors) return 0;
@@ -1512,8 +1509,6 @@ static uint32_t region_usable_blocks(uint32_t region_lba) {
     return blocks;
 }
 
-/* What this driver can mount: 4 KiB blocks, 128-byte inodes, a bitmap that
-   fits one block, and no incompatible feature but filetype. */
 static int superblock_usable(uint32_t usable_blocks) {
     if (sb.s_magic != EXT2_MAGIC || sb.s_rev_level != 1 ||
         sb.s_log_block_size != 2 || sb.s_inode_size != EXT2_INODE_SIZE ||
@@ -1523,7 +1518,9 @@ static int superblock_usable(uint32_t usable_blocks) {
         sb.s_inodes_per_group > EXT2_GROUP_MAX_BITS ||
         sb.s_inodes_per_group % EXT2_INODES_PER_BLOCK ||
         sb.s_blocks_count > usable_blocks ||
-        (sb.s_feature_incompat & ~EXT2_FEATURE_INCOMPAT_FILETYPE))
+        (sb.s_feature_incompat & ~(EXT2_FEATURE_INCOMPAT_FILETYPE |
+                                   EXT2_FEATURE_INCOMPAT_RECOVER)) ||
+        (sb.s_feature_ro_compat & ~EXT2_RO_COMPAT_READABLE))
         return 0;
 
     uint32_t groups = (sb.s_blocks_count - sb.s_first_data_block +
@@ -1533,8 +1530,6 @@ static int superblock_usable(uint32_t usable_blocks) {
     return 1;
 }
 
-/* Adopt the geometry the superblock describes. Only call this once
-   superblock_usable() has accepted it. */
 static void adopt_geometry(void) {
     first_data_block = sb.s_first_data_block;
     blocks_per_group = sb.s_blocks_per_group;
@@ -1544,10 +1539,6 @@ static void adopt_geometry(void) {
     gd_blocks = gd_blocks_for(group_count);
 }
 
-/*
- * Directories that behave like Linux tmpfs mounts: they exist in RAM on
- * every boot but nothing below them is ever written to disk.
- */
 static const struct {
     const char *path;
     uint32_t mode;
@@ -1567,8 +1558,6 @@ static void mark_volatile_dirs(void) {
             node->mode = ext2_volatile_dirs[index].mode;
         }
         node->flags |= VFS_VOLATILE;
-        /* /dev, /proc and /sys are declared by the drivers that build them,
-           which have not run yet. */
         if (strcmp(ext2_volatile_dirs[index].path, "/dev") != 0 &&
             strcmp(ext2_volatile_dirs[index].path, "/proc") != 0 &&
             strcmp(ext2_volatile_dirs[index].path, "/sys") != 0)
@@ -1576,11 +1565,6 @@ static void mark_volatile_dirs(void) {
     }
 }
 
-/*
- * Early check (before the memory managers are up) whether the disk holds a
- * fully seeded root filesystem. When it does, the initramfs is not needed
- * at all.
- */
 int ext2fs_probe(uint32_t region_lba) {
     uint32_t usable_blocks = region_usable_blocks(region_lba);
     if (!usable_blocks) return -1;
@@ -1590,8 +1574,6 @@ int ext2fs_probe(uint32_t region_lba) {
     return superblock_usable(usable_blocks) ? 0 : -1;
 }
 
-/* The disk whose ext2 superblock carries this label, or -1: a name like
-   /dev/sda2 is a position in the probe order and moves between machines. */
 int ext2fs_find_label(const char *label) {
     if (!label || !*label) return -1;
     int count = block_device_count();
@@ -1602,7 +1584,6 @@ int ext2fs_find_label(const char *label) {
         if (block_device_read_bytes(device, 1024, sizeof probe, &probe) != 0)
             continue;
         if (probe.s_magic != EXT2_MAGIC) continue;
-        /* s_volume_name is not terminated when the label fills it. */
         size_t length = 0;
         while (length < sizeof probe.s_volume_name && probe.s_volume_name[length])
             length++;
@@ -1631,15 +1612,27 @@ int ext2fs_mount_root(uint32_t region_lba) {
         if (count > EXT2_GD_PER_BLOCK) count = EXT2_GD_PER_BLOCK;
         memcpy(&gds[start], meta_buf, count * sizeof(struct ext2_group_desc));
     }
-    /* The descriptors are the layout now, so what is left to check is that
-       each one points inside the filesystem: a bitmap block past the end
-       would be read straight off whatever follows the partition. */
     for (uint32_t group = 0; group < group_count; group++) {
         uint32_t table_end = gds[group].bg_inode_table +
                              inodes_per_group / EXT2_INODES_PER_BLOCK;
         if (gds[group].bg_block_bitmap >= sb.s_blocks_count ||
             gds[group].bg_inode_bitmap >= sb.s_blocks_count ||
             table_end > sb.s_blocks_count) return -1;
+    }
+
+    if (journal_start_up() != 0) return -1;
+
+    cache_reset_all();
+    if (read_blocks(0, 1, meta_buf) != 0) return -1;
+    memcpy(&sb, meta_buf + 1024, sizeof(sb));
+    if (!superblock_usable(usable_blocks)) return -1;
+    adopt_geometry();
+    for (uint32_t index = 0; index < gd_blocks; index++) {
+        if (read_blocks(first_data_block + 1U + index, 1, meta_buf) != 0) return -1;
+        uint32_t start = index * EXT2_GD_PER_BLOCK;
+        uint32_t count = group_count - start;
+        if (count > EXT2_GD_PER_BLOCK) count = EXT2_GD_PER_BLOCK;
+        memcpy(&gds[start], meta_buf, count * sizeof(struct ext2_group_desc));
     }
 
     ext2_root = vfs_root;
@@ -1666,4 +1659,3 @@ int ext2fs_mount_root(uint32_t region_lba) {
            (unsigned)sb.s_blocks_count);
     return 0;
 }
-

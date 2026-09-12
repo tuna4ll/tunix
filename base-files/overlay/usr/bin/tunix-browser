@@ -1,3 +1,0 @@
-#!/bin/sh
-[ -x /usr/bin/firefox ] || exit 0
-exec /usr/bin/firefox "$@"

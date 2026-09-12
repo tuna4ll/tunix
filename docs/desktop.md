@@ -43,9 +43,10 @@ terminal was dash and none of the account's `~/.bashrc` ever ran -- on an image
 whose `/etc/passwd` gives that account bash.
 
 `base-files/overlay/etc/xdg/weston/weston.ini` chooses the DRM backend, the
-cursor theme and the terminal font, and its `[autolaunch]` section is what
-opens Firefox as the compositor comes up. Weston's own output goes to
-`/var/log/weston/` rather than to the console it is drawing over.
+cursor theme and the terminal font, and lists what the panel launches. Nothing
+starts on its own: the session comes up to an empty desktop and waits. Weston's
+own output goes to `/var/log/weston/` rather than to the console it is drawing
+over.
 
 Terminal 1 has no `agetty`: weston takes whichever terminal is active when it
 starts, and a login prompt sharing it would draw into the same cells.
@@ -125,10 +126,12 @@ Two things had to be fixed for that to work:
 
 ![Firefox on Tunix](../screenshots/firefox.png)
 
-The session opens with Firefox already on screen. `[autolaunch]` in
-`weston.ini` starts it as the compositor comes up, there is a launcher for it
-on the panel, and the weston service exports `MOZ_ENABLE_WAYLAND=1` so it takes
-the Wayland path rather than falling back to XWayland.
+Firefox is on the panel, second from the left. It used to open by itself, from
+an `[autolaunch]` line in `weston.ini`; it no longer does, because a session
+that spends its first half-minute starting a browser nobody asked for is a
+session you wait on. The weston service still exports `MOZ_ENABLE_WAYLAND=1`,
+so when you do start it, it takes the Wayland path rather than falling back to
+XWayland.
 
 Getting it to draw a window took five kernel fixes, and every one of them was a
 gap a browser is simply the first program to walk into. Getting it to draw a
@@ -224,7 +227,7 @@ actually goes. Three things were measured rather than guessed:
 **The disk is not involved.** A full restart of weston and Firefox -- 106
 seconds of it -- did not read a single sector: `/proc/blockstat` was unchanged
 end to end. Every file a running system touches is already in the kernel's own
-cache, because ext2 loads a file whole the first time it is opened. Startup is
+cache, because the ext2 driver loads a file whole the first time it is opened. Startup is
 processor and memory work from beginning to end.
 
 **The processor was rendering with half its registers.** Mesa reported

@@ -1,7 +1,7 @@
 # The userland
 
 Everything above the kernel is Void Linux, installed by Void's own package
-manager into a directory on the build host and written into the image as an ext2
+manager into a directory on the build host and written into the image as an ext3
 filesystem. Tunix builds no userland of its own.
 
 It used to. There were about 130 ports, each a build script driving somebody
