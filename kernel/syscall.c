@@ -3806,6 +3806,8 @@ static int rewrite_script_arguments(struct exec_arguments *arguments, int argc,
 
 static int64_t sys_execve(struct syscall_frame *frame, uint64_t user_path, uint64_t user_argv, uint64_t user_envp) {
     char path[256];
+    char given[256];
+    if (copy_string_from_user(given, sizeof(given), user_path) < 0) return -EFAULT;
     int status = copy_path_at(AT_FDCWD, user_path, path);
     if (status != 0) return status;
     struct exec_arguments *arguments = (struct exec_arguments *)kmalloc(sizeof(*arguments));
@@ -3865,24 +3867,29 @@ static int64_t sys_execve(struct syscall_frame *frame, uint64_t user_path, uint6
         return script;
     }
     if (script > 0) {
-        struct vfs_node *interpreter_file = vfs_lookup(interpreter);
+        char interpreter_path[256];
+        if (normalize_path(NULL, interpreter, interpreter_path) != 0) {
+            kfree(arguments);
+            return -ENOENT;
+        }
+        struct vfs_node *interpreter_file = vfs_lookup(interpreter_path);
         if (!interpreter_file || (interpreter_file->flags & 0xFFU) != VFS_FILE ||
             (interpreter_file->mode & 0111U) == 0) {
             kfree(arguments);
             return -ENOENT;
         }
-        permitted = cred_may_path(interpreter, interpreter_file, CRED_EXEC);
+        permitted = cred_may_path(interpreter_path, interpreter_file, CRED_EXEC);
         if (permitted != 0) {
             kfree(arguments);
             return permitted;
         }
-        int rewritten = rewrite_script_arguments(arguments, argc, path, interpreter,
+        int rewritten = rewrite_script_arguments(arguments, argc, given, interpreter,
                                                  optional_argument);
         if (rewritten < 0) {
             kfree(arguments);
             return rewritten;
         }
-        int64_t result = process_exec_from_syscall(frame, interpreter,
+        int64_t result = process_exec_from_syscall(frame, interpreter_path,
                                                    arguments->argv, arguments->envp, NULL);
         kfree(arguments);
         return result == -1 ? -ENOEXEC : result;
