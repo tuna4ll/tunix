@@ -84,7 +84,7 @@ VOID_ROOTFS_DATE ?= 20250202
 VOID_INSTALL ?= base-files bash coreutils util-linux findutils diffutils \
 	grep sed gawk tar gzip xz procps-ng psmisc iproute2 iputils file less \
 	which ncurses shadow sudo runit runit-void tzdata ca-certificates \
-	e2fsprogs kbd nano htop curl fastfetch \
+	e2fsprogs kbd nano htop curl fastfetch pciutils \
 	$(VOID_INSTALL_GRAPHICAL) $(VOID_INSTALL_BROWSER) $(VOID_INSTALL_GAMES) \
 	$(VOID_INSTALL_TOOLCHAIN)
 
