@@ -161,6 +161,19 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define SYS_GETCWD 79
 #define SYS_CHDIR 80
 #define SYS_FCHDIR 81
+#define SYS_CHROOT 161
+#define SYS_SETXATTR 188
+#define SYS_LSETXATTR 189
+#define SYS_FSETXATTR 190
+#define SYS_GETXATTR 191
+#define SYS_LGETXATTR 192
+#define SYS_FGETXATTR 193
+#define SYS_LISTXATTR 194
+#define SYS_LLISTXATTR 195
+#define SYS_FLISTXATTR 196
+#define SYS_REMOVEXATTR 197
+#define SYS_LREMOVEXATTR 198
+#define SYS_FREMOVEXATTR 199
 #define SYS_RENAME 82
 #define SYS_MKDIR 83
 #define SYS_RMDIR 84
@@ -483,6 +496,7 @@ struct linux_clone_args {
 #define ENOTEMPTY 39
 #define ELOOP 40
 #define EOPNOTSUPP 95
+#define ENODATA 61
 #define ENOSPC 28
 #define EFBIG 27
 #define ENAMETOOLONG 36
@@ -1026,12 +1040,31 @@ static int64_t sys_select_once(int nfds, uint64_t user_read, uint64_t user_write
     return ready;
 }
 
+static size_t process_root_prefix(char buffer[256]) {
+    struct vfs_node *root = process_get_root();
+    buffer[0] = '/';
+    buffer[1] = '\0';
+    if (!root || root == vfs_root) return 1;
+    if (vfs_node_path(root, buffer, 256) != 0 || !buffer[0]) {
+        buffer[0] = '/';
+        buffer[1] = '\0';
+        return 1;
+    }
+    size_t length = strlen(buffer);
+    while (length > 1 && buffer[length - 1] == '/') buffer[--length] = '\0';
+    return length;
+}
+
 static int normalize_path(struct vfs_node *base, const char *input, char output[256]) {
     if (!input || !input[0]) return -ENOENT;
     char combined[512];
+    char prefix[256];
+    size_t floor = process_root_prefix(prefix);
     size_t at = 0;
     if (input[0] == '/') {
-        combined[at++] = '/';
+        memcpy(combined, prefix, floor);
+        at = floor;
+        if (combined[at - 1] != '/') combined[at++] = '/';
     } else {
         char base_path[256];
         if (vfs_node_path(base ? base : vfs_root, base_path, sizeof(base_path)) != 0) return -EINVAL;
@@ -1060,9 +1093,9 @@ static int normalize_path(struct vfs_node *base, const char *input, char output[
         component[length] = '\0';
         if (strcmp(component, ".") == 0) continue;
         if (strcmp(component, "..") == 0) {
-            if (out > 1) {
+            if (out > floor) {
                 if (output[out - 1] == '/') out--;
-                while (out > 1 && output[out - 1] != '/') out--;
+                while (out > floor && output[out - 1] != '/') out--;
             }
             continue;
         }
@@ -1072,6 +1105,7 @@ static int normalize_path(struct vfs_node *base, const char *input, char output[
         out += length;
     }
     if (out > 1 && output[out - 1] == '/') out--;
+    if (out < floor) out = floor;
     output[out] = '\0';
     return 0;
 }
@@ -1146,7 +1180,7 @@ static int64_t open_at(int dirfd, uint64_t user_path, uint64_t flags, uint64_t m
                          O_LARGEFILE | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC | O_NOATIME |
                          O_PATH | O_SYNC;
     if ((flags & O_TMPFILE) == O_TMPFILE) return -EOPNOTSUPP;
-    if (flags & ~supported) return -EINVAL;
+    flags &= supported;
     if ((flags & O_PATH) && (flags & (O_CREAT | O_EXCL | O_TRUNC))) return -EINVAL;
 
     char path[256];
@@ -2727,9 +2761,48 @@ static int64_t sys_getcwd(uint64_t user_buffer, size_t size) {
     if (!process || !user_buffer || size == 0) return -EINVAL;
     char path[256];
     if (vfs_node_path(process->cwd, path, sizeof(path)) != 0) return -EINVAL;
-    size_t length = strlen(path) + 1;
+    char prefix[256];
+    size_t floor = process_root_prefix(prefix);
+    const char *visible = path;
+    if (floor > 1 && strncmp(path, prefix, floor) == 0)
+        visible = path[floor] ? path + floor : "/";
+    size_t length = strlen(visible) + 1;
     if (length > size) return -ERANGE;
-    return copy_to_user(user_buffer, path, length) == 0 ? (int64_t)length : -EFAULT;
+    return copy_to_user(user_buffer, visible, length) == 0 ? (int64_t)length : -EFAULT;
+}
+
+static int64_t xattr_target_exists(uint64_t user_path, int follow) {
+    char path[256];
+    int status = copy_path_at(AT_FDCWD, user_path, path);
+    if (status != 0) return status;
+    struct vfs_node *node = follow ? vfs_lookup(path) : vfs_lookup_nofollow(path);
+    return node ? 0 : -ENOENT;
+}
+
+static int64_t xattr_descriptor_exists(int fd) {
+    struct process *process = process_current();
+    if (!process || !process->files || fd < 0 || fd >= PROCESS_MAX_FDS) return -EBADF;
+    return process->files->fds[fd] ? 0 : -EBADF;
+}
+
+static int64_t sys_chroot(uint64_t user_path) {
+    struct process *process = process_current();
+    if (!process) return -EINVAL;
+    if (process->cred.euid != 0) return -EPERM;
+    char path[256];
+    int status = copy_path_at(AT_FDCWD, user_path, path);
+    if (status != 0) return status;
+    struct vfs_node *node = vfs_lookup(path);
+    if (!node) return -ENOENT;
+    if ((node->flags & 0xFFU) != VFS_DIRECTORY) return -ENOTDIR;
+    int permitted = cred_may_path(path, node, CRED_EXEC);
+    if (permitted != 0) return permitted;
+    process_set_root(node);
+    struct vfs_node *previous = process->cwd;
+    vfs_node_ref(node);
+    process->cwd = node;
+    vfs_node_unref(previous);
+    return 0;
 }
 
 static void set_cwd(struct process *process, struct vfs_node *node) {
@@ -3733,6 +3806,8 @@ static int rewrite_script_arguments(struct exec_arguments *arguments, int argc,
 
 static int64_t sys_execve(struct syscall_frame *frame, uint64_t user_path, uint64_t user_argv, uint64_t user_envp) {
     char path[256];
+    char given[256];
+    if (copy_string_from_user(given, sizeof(given), user_path) < 0) return -EFAULT;
     int status = copy_path_at(AT_FDCWD, user_path, path);
     if (status != 0) return status;
     struct exec_arguments *arguments = (struct exec_arguments *)kmalloc(sizeof(*arguments));
@@ -3792,24 +3867,29 @@ static int64_t sys_execve(struct syscall_frame *frame, uint64_t user_path, uint6
         return script;
     }
     if (script > 0) {
-        struct vfs_node *interpreter_file = vfs_lookup(interpreter);
+        char interpreter_path[256];
+        if (normalize_path(NULL, interpreter, interpreter_path) != 0) {
+            kfree(arguments);
+            return -ENOENT;
+        }
+        struct vfs_node *interpreter_file = vfs_lookup(interpreter_path);
         if (!interpreter_file || (interpreter_file->flags & 0xFFU) != VFS_FILE ||
             (interpreter_file->mode & 0111U) == 0) {
             kfree(arguments);
             return -ENOENT;
         }
-        permitted = cred_may_path(interpreter, interpreter_file, CRED_EXEC);
+        permitted = cred_may_path(interpreter_path, interpreter_file, CRED_EXEC);
         if (permitted != 0) {
             kfree(arguments);
             return permitted;
         }
-        int rewritten = rewrite_script_arguments(arguments, argc, path, interpreter,
+        int rewritten = rewrite_script_arguments(arguments, argc, given, interpreter,
                                                  optional_argument);
         if (rewritten < 0) {
             kfree(arguments);
             return rewritten;
         }
-        int64_t result = process_exec_from_syscall(frame, interpreter,
+        int64_t result = process_exec_from_syscall(frame, interpreter_path,
                                                    arguments->argv, arguments->envp, NULL);
         kfree(arguments);
         return result == -1 ? -ENOEXEC : result;
@@ -5332,6 +5412,42 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         case SYS_GETCWD: frame->rax = (uint64_t)sys_getcwd(frame->rdi, (size_t)frame->rsi); break;
         case SYS_CHDIR: frame->rax = (uint64_t)sys_chdir(frame->rdi); break;
         case SYS_FCHDIR: frame->rax = (uint64_t)sys_fchdir((int)frame->rdi); break;
+        case SYS_CHROOT: frame->rax = (uint64_t)sys_chroot(frame->rdi); break;
+        case SYS_SETXATTR:
+        case SYS_LSETXATTR: {
+            int64_t status = xattr_target_exists(frame->rdi, syscall_number == SYS_SETXATTR);
+            frame->rax = (uint64_t)(status != 0 ? status : -(int64_t)EOPNOTSUPP);
+            break;
+        }
+        case SYS_FSETXATTR: {
+            int64_t status = xattr_descriptor_exists((int)frame->rdi);
+            frame->rax = (uint64_t)(status != 0 ? status : -(int64_t)EOPNOTSUPP);
+            break;
+        }
+        case SYS_GETXATTR:
+        case SYS_LGETXATTR:
+        case SYS_REMOVEXATTR:
+        case SYS_LREMOVEXATTR: {
+            int follow = syscall_number == SYS_GETXATTR || syscall_number == SYS_REMOVEXATTR;
+            int64_t status = xattr_target_exists(frame->rdi, follow);
+            frame->rax = (uint64_t)(status != 0 ? status : -(int64_t)ENODATA);
+            break;
+        }
+        case SYS_FGETXATTR:
+        case SYS_FREMOVEXATTR: {
+            int64_t status = xattr_descriptor_exists((int)frame->rdi);
+            frame->rax = (uint64_t)(status != 0 ? status : -(int64_t)ENODATA);
+            break;
+        }
+        case SYS_LISTXATTR:
+        case SYS_LLISTXATTR: {
+            int64_t status = xattr_target_exists(frame->rdi, syscall_number == SYS_LISTXATTR);
+            frame->rax = (uint64_t)status;
+            break;
+        }
+        case SYS_FLISTXATTR:
+            frame->rax = (uint64_t)xattr_descriptor_exists((int)frame->rdi);
+            break;
         case SYS_RENAME: frame->rax = (uint64_t)sys_rename_at(AT_FDCWD, frame->rdi, AT_FDCWD, frame->rsi, 0); break;
         case SYS_MKDIR: frame->rax = (uint64_t)sys_mkdir_at(AT_FDCWD, frame->rdi, frame->rsi); break;
         case SYS_RMDIR: frame->rax = (uint64_t)sys_unlink_at(AT_FDCWD, frame->rdi, AT_REMOVEDIR); break;

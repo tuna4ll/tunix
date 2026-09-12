@@ -116,6 +116,7 @@ struct process {
     char cmdline[512];
     uint64_t cmdline_length;
     struct vfs_node *cwd;
+    struct vfs_node *root;
     struct pty_pair *controlling_pty;
     struct syscall_frame saved_frame;
     struct file_table *files;
@@ -230,6 +231,8 @@ int64_t process_setsid(void);
 void process_prepare_user_return(struct syscall_frame *frame);
 
 int process_signal_interrupts_wait(void);
+struct vfs_node *process_get_root(void);
+void process_set_root(struct vfs_node *node);
 void process_swap_signal_mask(uint64_t mask);
 void process_restore_signal_mask(void);
 int process_sigreturn(struct syscall_frame *frame);
