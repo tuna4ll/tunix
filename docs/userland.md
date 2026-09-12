@@ -75,6 +75,47 @@ to look at.
 `tunix` is in `wheel`, so `sudo` works, and in `_seatd`, which is how the
 session reaches the display.
 
+## lspci
+
+`pciutils` is installed, and `lspci` lists what the machine actually has:
+
+```
+00:00.0 Host bridge: Intel Corporation 82G33/G31/P35/P31 Express DRAM Controller
+00:01.0 Ethernet controller: Red Hat, Inc. Virtio 1.0 network device (rev 01)
+00:02.0 Audio device: Intel Corporation 82801FB/FBM/FR/FW/FRW (ICH6 Family) High Definition Audio Controller (rev 01)
+00:03.0 VGA compatible controller: Red Hat, Inc. Virtio 1.0 GPU (rev 01)
+00:1f.0 ISA bridge: Intel Corporation 82801IB (ICH9) LPC Interface Controller (rev 02)
+00:1f.2 SATA controller: Intel Corporation 82801IR/IO/IH (ICH9R/DO/DH) 6 port SATA Controller [AHCI mode] (rev 02)
+00:1f.3 SMBus: Intel Corporation 82801I (ICH9 Family) SMBus Controller (rev 02)
+```
+
+Installing the package was not enough. pciutils reaches the bus four ways and
+the first three are all kernel interfaces; with none of them present it gives
+up on the fourth, which needs port access it does not have:
+
+```
+pcilib: Cannot open /proc/bus/pci
+lspci: Cannot find any working access method.
+```
+
+So `sysfs_init()` now walks the bus with `pci_for_each_device()` and publishes
+`/sys/bus/pci/devices/0000:BB:SS.F` for each device it finds, holding `config`
+-- the whole 256 bytes -- and `vendor`, `device`, `class`, `irq` and
+`resource`. Every name in the listing above is pciutils reading the ids out of
+`config` and looking them up in its own database; the kernel supplies no names
+at all.
+
+`lspci -v` works too, and prints the capability list and the interrupt from the
+same 256 bytes. Two things it cannot print:
+
+- **Region sizes.** Finding the size of a BAR means writing all ones to it and
+  reading back what sticks, and `sysfs_init()` runs after the drivers are
+  already using those devices. `resource` names where each region starts and
+  leaves the length at zero rather than disturbing a live card.
+- **Which driver is bound.** `lspci: Unable to load libkmod resources: error -2`
+  is lspci looking for a module database. This kernel has no modules, so there
+  is nothing to map a device to. It is a line on stderr and nothing else.
+
 ## fastfetch
 
 `fastfetch` is configured for the `tunix` account in
