@@ -142,7 +142,8 @@ void kmain(const struct boot_info *boot) {
     const struct block_device *root = block_root();
     char source[5 + BLOCK_NAME_BYTES] = "/dev/";
     if (root) memcpy(source + 5, root->dev_name, sizeof root->dev_name);
-    vfs_mount_builtin(root ? source : "none", "/", "ext2", vfs_root);
+    vfs_mount_builtin(root ? source : "none", "/",
+                      ext2fs_journalled() ? "ext3" : "ext2", vfs_root);
 #if TUNIX_BOOT_TIMINGS
     boot_log_stage("root filesystem mount", &stage_started);
 #endif

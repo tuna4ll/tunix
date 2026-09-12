@@ -16,7 +16,7 @@ Only the kernel. Everything above it is a Void Linux package:
 | --- | --- | --- |
 | Kernel | `make kernel` | `kernel/` compiled to `build/kernel.elf` |
 | Sysroot | `make sysroot` | `support/sysroot.sh` unpacks Void's ROOTFS tarball, installs `VOID_INSTALL` into it with xbps, and lays `base-files/` over the result |
-| Image | `make image` | `support/image.sh` makes a GPT disk with an ESP and an ext2 root, and installs Limine into both |
+| Image | `make image` | `support/image.sh` makes a GPT disk with an ESP and an ext3 root, and installs Limine into both |
 
 Limine itself is cloned into `build/limine` on the first build: the header the
 kernel builds its requests from and the bootloader that reads them have to be

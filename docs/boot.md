@@ -25,7 +25,7 @@ loader and the session. `interface_resolution` is named as well as the entries'
 | Partition | Contents |
 | --- | --- |
 | `sda1`, 64 MiB, FAT32, EFI system | `EFI/BOOT/BOOTX64.EFI`, `boot/limine/limine-bios.sys`, `boot/limine/limine.conf`, `boot/kernel.elf` |
-| `sda2`, ext2 | the root filesystem |
+| `sda2`, ext3 | the root filesystem |
 
 The two firmwares take different paths into the same partition:
 

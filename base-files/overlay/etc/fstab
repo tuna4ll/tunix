@@ -1,7 +1,1 @@
-# The kernel mounts the root itself, from the root= it was given, and brings up
-# /proc, /sys, /dev and /run before init runs. This is here so that mount(8) and
-# df(1) have something to say about the root, not because anything reads it to
-# decide what to mount.
-# Pass 0 on the root: runit's core services run fsck over everything with a
-# non-zero pass, and the root is already mounted read-write by then.
-/dev/sda2  /      ext2   rw,relatime  0 0
+/dev/sda2  /      ext3   rw,relatime  0 0

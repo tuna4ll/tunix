@@ -1,13 +1,13 @@
-# The root filesystem (ext2)
+# The root filesystem (ext3)
 
-The root is a real ext2 filesystem on the second partition of the boot disk.
+The root is a real ext3 filesystem on the second partition of the boot disk.
 The kernel mounts it at boot and writes through to it: reads, `mmap` and `exec`
 are served from RAM, every mutation reaches the disk as it happens, and what
 you edit is still there next boot.
 
 ## Where it comes from
 
-`mkfs.ext2 -d` on the build host, from the Void sysroot. That is a change: the
+`mkfs.ext3 -d` on the build host, from the Void sysroot. That is a change: the
 kernel used to make the filesystem itself, formatting a region of the disk on
 first boot and seeding it from an initramfs. Both are gone -- there is no
 initramfs, and there is no format code in the kernel.
@@ -30,12 +30,16 @@ read:
 - a group whose bitmap would not fit in one block
 - any incompatible feature but `filetype` -- extents and 64-bit block numbers
   above all
+- any read-only-compatible feature but `sparse_super` and `large_file`. The
+  name says what the rule is: a driver that does not understand one of these
+  may still read the filesystem, but must not write to it. This one writes, so
+  it refuses instead of quietly corrupting.
 
 Which is why `support/image.sh` makes the filesystem with an explicit feature
-set rather than mke2fs's defaults:
+set and an explicit revision rather than mke2fs's defaults:
 
 ```sh
-mkfs.ext2 -b 4096 -I 128 \
+mkfs.ext3 -r 1 -b 4096 -I 128 \
     -O ^resize_inode,^dir_index,^ext_attr,^metadata_csum,^64bit,^huge_file,^dir_nlink,^extra_isize
 ```
 
@@ -44,7 +48,31 @@ into a hashed directory without maintaining the tree would corrupt it for Linux.
 `metadata_csum` is off for the same reason: a write that does not update the
 checksum makes e2fsck complain about a filesystem that is otherwise fine.
 
-The image is a plain ext2 filesystem, so it mounts on Linux:
+## The journal
+
+`has_journal` is what makes this ext3 rather than ext2, and it is a
+*compatible* feature: the format says in so many words that a driver which does
+not understand it may still mount the filesystem and write to it. Tunix takes
+that offer. It reads and writes the filesystem exactly as it did before and
+never touches the journal, which mke2fs leaves empty and which therefore stays
+empty.
+
+The safety is in the other half of the bargain. When a journal holds
+transactions that have not been applied, ext3 says so with `needs_recovery` --
+an *incompatible* feature. A driver that cannot replay a journal must refuse
+the filesystem, and this one does, because the incompatible mask allows nothing
+but `filetype`:
+
+```
+PANIC: root filesystem mount failed
+```
+
+So Tunix will not write over work it cannot finish. That case arises only if
+something else -- a Linux host with the image mounted read-write -- stops
+without unmounting; Tunix never writes the journal, so it never leaves one to
+replay. Run `e2fsck` on the image and the journal is clean.
+
+The image is a plain ext3 filesystem, so it mounts on Linux:
 
 ```sh
 sudo mount -o loop,offset=$((133120*512)) build/tunix.img /mnt
@@ -74,7 +102,8 @@ GPT so that one disk boots either firmware.
 
 ## What is not here
 
-- **No journal.** ext2, not ext3.
+- **No journalling.** The filesystem has a journal and the kernel leaves it
+  alone; a write is not replayable, it is just a write.
 - **No extents, no 64-bit block numbers.** 16 GiB is the ceiling.
 - **No `dir_index`.** A directory is a linear scan.
 - **`fsck` on the running root** is not something to do; the fstab entry has

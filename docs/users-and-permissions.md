@@ -92,7 +92,7 @@ terminal it cannot name.
 
 ## How the image gets its permissions
 
-From the sysroot, unchanged: `mkfs.ext2 -d` copies each file's mode and owner
+From the sysroot, unchanged: `mkfs.ext3 -d` copies each file's mode and owner
 into the filesystem it builds. There used to be a table of them applied to the
 finished archive, because the tree was staged on a Windows drive that reports
 everything as 0777 root:root -- `support/sysroot.sh` now refuses to build there

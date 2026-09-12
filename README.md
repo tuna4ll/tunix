@@ -21,7 +21,7 @@ sudo, curl and htop, and a Weston desktop that gets the display through seatd
 and opens with Firefox on it.
 
 Underneath: a block layer over IDE, AHCI, NVMe and USB storage, with GPT and MBR
-partitions and a read-write ext2 root that `mkfs.ext2` made; IPv4 with both ends
+partitions and a read-write ext3 root that `mkfs.ext3` made; IPv4 with both ends
 of TCP over RTL8139; a framebuffer console with eight virtual terminals on
 Ctrl+Alt+F1..F8; Intel HD Audio behind ALSA; xHCI keyboard and mouse; and real
 users, permissions and setuid. The virtio-gpu driver scans the display out where

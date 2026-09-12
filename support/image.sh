@@ -39,7 +39,7 @@ mcopy -s -i "$WORK/esp.img" "$WORK/esp-root"/* ::
 ROOT_MIB=$(( $(du -sm "$SYSROOT" | cut -f1) + ROOT_SLACK_MIB ))
 echo ":: building a ${ROOT_MIB} MiB root filesystem"
 truncate -s "${ROOT_MIB}M" "$WORK/root.img"
-mkfs.ext2 -q -r 1 -b 4096 -I 128 -m 1 -L tunix-root \
+mkfs.ext3 -q -r 1 -b 4096 -I 128 -m 1 -L tunix-root \
 	-O ^resize_inode,^dir_index,^ext_attr,^metadata_csum,^64bit,^huge_file,^dir_nlink,^extra_isize \
 	-d "$SYSROOT" "$WORK/root.img"
 e2fsck -fp "$WORK/root.img" >/dev/null || [ $? -lt 4 ]

@@ -32,7 +32,7 @@ temporary filesystem.
 `/proc/mounts` is the real table, root first:
 
 ```
-/dev/sda / ext2 rw 0 0
+/dev/sda / ext3 rw 0 0
 tmpfs /tmp tmpfs rw 0 0
 tmpfs /var/tmp tmpfs rw 0 0
 tmpfs /run tmpfs rw 0 0
@@ -72,7 +72,7 @@ readable through a second path while leaving the original alone.
 
 - **No block-device filesystem can be mounted.** `ext2.c` keeps its superblock,
   group descriptors, caches and persistence hooks in file-scope globals, and
-  `vfs_persist_ops` has no per-mount context, so exactly one ext2 volume can
+  `vfs_persist_ops` has no per-mount context, so exactly one such volume can
   exist — the root. Mounting a second disk means making that driver
   multi-instance first.
 - Only one filesystem per mountpoint: mounting over an existing mount is

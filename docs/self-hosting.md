@@ -31,7 +31,7 @@ bootloader that reads it have to be the same version, so `make kernel` clones
 two things the build needs a network for.
 
 `make all` goes further and builds the disk image too: the Void sysroot with
-xbps, an ext2 root, a FAT ESP, a GPT table, and Limine written into it. Nothing
+xbps, an ext3 root, a FAT ESP, a GPT table, and Limine written into it. Nothing
 in that needs a loop device -- every filesystem is built inside a plain file --
 so the whole thing runs on Tunix as it stands:
 

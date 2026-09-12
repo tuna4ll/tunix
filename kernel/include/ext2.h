@@ -14,10 +14,8 @@ struct ext2_fs_stats {
     uint64_t free_inodes;
 };
 
-/* 0 on success, -1 when no ext2 root is mounted. */
 int ext2fs_stats(struct ext2_fs_stats *out);
 
-/* The block device index whose ext2 label matches, or -1. See ext2.c. */
 int ext2fs_find_label(const char *label);
 
 int ext2fs_probe(uint32_t region_lba);
@@ -26,5 +24,6 @@ int ext2fs_mounted(void);
 int ext2fs_owns(struct vfs_node *node);
 int ext2fs_fsync_node(struct vfs_node *node);
 int ext2fs_sync(void);
+int ext2fs_journalled(void);
 
 #endif
