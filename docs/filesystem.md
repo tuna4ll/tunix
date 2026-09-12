@@ -182,30 +182,61 @@ GPT so that one disk boots either firmware.
   case that would need it.
 - **No extents, no 64-bit block numbers.** 16 GiB is the ceiling.
 - **No `dir_index`.** A directory is a linear scan.
+- **The cache is not bounded in advance.** It grows until an allocation fails
+  and only then drops clean pages, so a long write leaves the machine near
+  full even though nothing is lost.
 - **`fsck` on the running root** is not something to do; the fstab entry has
   pass 0 for exactly that reason.
 
-## A big file grows by a step, not by doubling
+## The page cache
 
-A file lives in one contiguous kernel allocation. Growing it means holding the
-old buffer and the new one at once while the contents are copied, so doubling
-makes the peak one and a half times the file.
+A file's contents are not one buffer any more. They are 4 KiB pages, each its
+own physical frame from the page allocator, held in a per-file array with a
+dirty bit each.
 
-That is affordable until it is not. A write crossing 512 MiB asked for a
-gigabyte while still holding half of one -- 1.5 GiB of a 2 GiB heap with a
-compositor already in it. The allocation failed, the write failed with it, and
-what the program saw was an I/O error:
+That is what `kernel/fs/vfs.c` now does and it changes four things.
+
+**A file no longer has to fit in the heap.** It used to live in a single
+contiguous allocation, so the ceiling was the largest run the heap could hand
+out, and growing it meant holding the old copy and the new one at once while
+the bytes were copied. A write crossing 512 MiB asked for a gigabyte while
+still holding half of one, failed, and the program saw an I/O error:
 
 ```
 supertuxkart-data-1.5_1.x86_64.xbps.part   537001984 bytes
 ERROR: [trans] failed to download ...: Input/output error
 ```
 
-537001984 is 512 MiB and one 128 KiB staging chunk: the first write past the
-boundary.
+A 2.6 GiB file now writes on a 3 GiB machine, survives a reboot and reads back
+with the checksum it was written with.
 
-Above 32 MiB the buffer grows by a fixed 32 MiB step instead. The peak becomes
-the file plus one step rather than half the file again, and the slack left at
-the end is bounded by the step rather than by the file. It does not make the
-underlying arrangement right -- a file still has to fit in the heap, contiguously
--- but it moves the ceiling from two thirds of the heap to nearly all of it.
+**Only what is touched is read.** Opening a file used to pull all of it off the
+disk. A page is fetched by `ext2_fetch_page()` when something reads or writes
+it, and a hole reads as zeros without touching the medium at all. `truncate -s
+2G` costs nothing: the file is two gigabytes long and holds no pages.
+
+**Only what changed is written.** `file_write_range()` walks the pages of the
+range and writes the ones whose dirty bit is set, then clears it. Before, every
+write-back rewrote the whole file.
+
+**Memory comes back a page at a time.** `vfs_drop_clean_pages()` frees the
+pages of a file that are clean, because the disk can hand them back. A dirty
+page stays until it has been written. The cache fills memory as a cache should
+and gives it up when an allocation would otherwise fail.
+
+### What the pages cost
+
+An array of pointers and a bitmap, one entry per page: about two megabytes of
+pointers for a gigabyte of file. The array doubles as the file grows, and that
+copy is of the pointers, not of the contents.
+
+`mmap` got simpler rather than harder. A shared mapping used to need the whole
+file moved onto a page boundary first -- `vfs_align_data()`, now gone -- because
+the heap does not align what it hands out. A page from the page allocator is a
+physical frame already, so mapping one into a process is a page-table entry and
+nothing else.
+
+The ELF loader no longer reads through a flat pointer either. It reads the
+header and program headers into a small buffer and copies each segment through
+`vfs_read()`, which means starting a program touches the pages of the segments
+it actually loads.

@@ -598,6 +598,48 @@ static void inode_release_blocks(struct ext2_inode *inode) {
     cache_invalidate(&cache_dir);
 }
 
+static void inode_truncate_blocks(struct ext2_inode *inode, uint64_t keep) {
+    if (!keep) {
+        inode_release_blocks(inode);
+        return;
+    }
+    cache_flush_all();
+    uint64_t mapped = (uint64_t)EXT2_DIRECT_BLOCKS + EXT2_POINTERS_PER_BLOCK +
+                      (uint64_t)EXT2_POINTERS_PER_BLOCK * EXT2_POINTERS_PER_BLOCK;
+    for (uint64_t index = keep; index < mapped; index++) {
+        int dirty = 0;
+        int64_t block = inode_bmap(inode, (uint32_t)index, 0, &dirty);
+        if (block <= 0) continue;
+        free_block((uint32_t)block);
+        if (index < EXT2_DIRECT_BLOCKS) {
+            inode->i_block[index] = 0;
+        } else if (index < (uint64_t)EXT2_DIRECT_BLOCKS + EXT2_POINTERS_PER_BLOCK) {
+            uint32_t slot = (uint32_t)(index - EXT2_DIRECT_BLOCKS);
+            uint32_t *entries = (uint32_t *)cache_get(&cache_map, inode->i_block[12]);
+            if (entries) {
+                entries[slot] = 0;
+                cache_map.dirty = 1;
+            }
+        } else {
+            uint64_t at = index - EXT2_DIRECT_BLOCKS - EXT2_POINTERS_PER_BLOCK;
+            uint32_t outer = (uint32_t)(at / EXT2_POINTERS_PER_BLOCK);
+            uint32_t inner = (uint32_t)(at % EXT2_POINTERS_PER_BLOCK);
+            uint32_t *level1 = (uint32_t *)cache_get(&cache_map, inode->i_block[13]);
+            if (!level1 || !level1[outer]) continue;
+            uint32_t *leaf = (uint32_t *)cache_get(&cache_map2, level1[outer]);
+            if (leaf) {
+                leaf[inner] = 0;
+                cache_map2.dirty = 1;
+            }
+        }
+        if (inode->i_blocks >= EXT2_SECTORS_PER_BLOCK)
+            inode->i_blocks -= EXT2_SECTORS_PER_BLOCK;
+    }
+    cache_flush_all();
+    cache_invalidate(&cache_map);
+    cache_invalidate(&cache_map2);
+}
+
 static int inode_is_fast_symlink(const struct ext2_inode *inode) {
     return (inode->i_mode & 0xF000U) == EXT2_S_IFLNK &&
            inode->i_size < 60U && inode->i_blocks == 0;
@@ -784,25 +826,27 @@ static int file_write_range(uint32_t ino, struct vfs_node *node,
 
     uint64_t end = offset + size;
     if (end > node->length) end = node->length;
-    if (size && end > offset && !(node->flags & VFS_LAZY_DATA)) {
-        uint32_t first = (uint32_t)(offset / EXT2_BLOCK_SIZE);
-        uint32_t last = (uint32_t)((end - 1U) / EXT2_BLOCK_SIZE);
+    if (size && end > offset) {
+        uint64_t first = offset / EXT2_BLOCK_SIZE;
+        uint64_t last = (end - 1U) / EXT2_BLOCK_SIZE;
         struct run_writer run = {0, 0};
-        for (uint32_t file_block = first; file_block <= last; file_block++) {
+        for (uint64_t index = first; index <= last; index++) {
+            const uint8_t *page = (const uint8_t *)vfs_page_peek(node, index);
+            if (!page || !vfs_page_is_dirty(node, index)) continue;
             int dirty = 0;
-            int64_t block = inode_bmap(&inode, file_block, 1, &dirty);
+            int64_t block = inode_bmap(&inode, (uint32_t)index, 1, &dirty);
             failed_stage = "block map";
             if (block <= 0) return -1;
             if (dirty) allocated = 1;
-            uint64_t start = (uint64_t)file_block * EXT2_BLOCK_SIZE;
+            uint64_t start = index * EXT2_BLOCK_SIZE;
             uint64_t available = node->length > start ? node->length - start : 0;
             uint32_t chunk = available > EXT2_BLOCK_SIZE ?
                              EXT2_BLOCK_SIZE : (uint32_t)available;
             memset(data_buf, 0, sizeof(data_buf));
-            if (chunk && node->data)
-                memcpy(data_buf, (const uint8_t *)node->data + start, chunk);
+            if (chunk) memcpy(data_buf, page, chunk);
             failed_stage = "data write";
             if (run_append(&run, (uint32_t)block, data_buf) != 0) return -1;
+            vfs_page_clear_dirty(node, index);
         }
         failed_stage = "data write";
         if (run_flush(&run) != 0) return -1;
@@ -1114,8 +1158,10 @@ static void ext2_event_truncated(struct vfs_node *node) {
     if (!ext2_tracks(node) || (node->flags & 0xFFU) != VFS_FILE) return;
     struct ext2_inode inode;
     if (inode_read(node->disk_inode, &inode) != 0) return;
-    inode_release_blocks(&inode);
-    inode.i_size = 0;
+    uint64_t keep = (node->length + EXT2_BLOCK_SIZE - 1U) / EXT2_BLOCK_SIZE;
+    inode_truncate_blocks(&inode, keep);
+    inode.i_size = node->length > 0xFFFFFFFFULL ? 0xFFFFFFFFU
+                                                : (uint32_t)node->length;
     inode.i_ctime = node->ctime;
     inode.i_mtime = node->mtime;
     if (inode_write(node->disk_inode, &inode) != 0) return;
@@ -1136,6 +1182,7 @@ static void ext2_event_meta_changed(struct vfs_node *node) {
 }
 
 static int ext2_fetch_data(struct vfs_node *node);
+static int ext2_fetch_page(struct vfs_node *node, uint64_t index, void *out);
 
 static const struct vfs_persist_ops ext2_persist_ops = {
     .created = ext2_event_created,
@@ -1147,71 +1194,26 @@ static const struct vfs_persist_ops ext2_persist_ops = {
     .linked = ext2_event_linked,
     .released = ext2_event_released,
     .fetch = ext2_fetch_data,
+    .fetch_page = ext2_fetch_page,
 };
 
-static void *load_file_data(struct ext2_inode *inode) {
-    uint32_t size = inode->i_size;
-    if (!size) return NULL;
-    uint8_t *data = (uint8_t *)kmalloc(size);
-    if (!data) return NULL;
-    uint32_t block_count = (size + EXT2_BLOCK_SIZE - 1U) / EXT2_BLOCK_SIZE;
-
-    uint32_t run_first_file = 0;
-    uint32_t run_start = 0;
-    uint32_t run_count = 0;
-    for (uint32_t file_block = 0; file_block <= block_count; file_block++) {
-        int64_t block = 0;
-        if (file_block < block_count) {
-            int dirty = 0;
-            block = inode_bmap(inode, file_block, 0, &dirty);
-            if (block < 0) {
-                kfree(data);
-                return NULL;
-            }
-        }
-        int extends = run_count && block &&
-                      (uint32_t)block == run_start + run_count &&
-                      run_count < EXT2_RUN_BLOCKS;
-        if (run_count && !extends) {
-            if (read_blocks(run_start, run_count, bulk_buf) != 0) {
-                kfree(data);
-                return NULL;
-            }
-            for (uint32_t at = 0; at < run_count; at++) {
-                uint32_t start = (run_first_file + at) * EXT2_BLOCK_SIZE;
-                uint32_t chunk = size - start > EXT2_BLOCK_SIZE ?
-                                 EXT2_BLOCK_SIZE : size - start;
-                memcpy(data + start, bulk_buf + (size_t)at * EXT2_BLOCK_SIZE, chunk);
-            }
-            run_count = 0;
-        }
-        if (file_block == block_count) break;
-        if (!block) {
-            uint32_t start = file_block * EXT2_BLOCK_SIZE;
-            uint32_t chunk = size - start > EXT2_BLOCK_SIZE ?
-                             EXT2_BLOCK_SIZE : size - start;
-            memset(data + start, 0, chunk);
-            continue;
-        }
-        if (!run_count) {
-            run_first_file = file_block;
-            run_start = (uint32_t)block;
-        }
-        run_count++;
-    }
-    return data;
+static int ext2_fetch_data(struct vfs_node *node) {
+    (void)node;
+    return 0;
 }
 
-static int ext2_fetch_data(struct vfs_node *node) {
-    if (!ext2_mounted_flag || !node || !node->disk_inode) return -1;
+static int ext2_fetch_page(struct vfs_node *node, uint64_t index, void *out) {
+    if (!ext2_mounted_flag || !node || !node->disk_inode || !out) return -1;
     struct ext2_inode inode;
     if (inode_read(node->disk_inode, &inode) != 0) return -1;
-    void *data = load_file_data(&inode);
-    if (!data) return inode.i_size ? -1 : 0;
-    node->data = data;
-    node->capacity = inode.i_size;
-    node->flags |= VFS_OWNED_DATA;
-    return 0;
+    int dirty = 0;
+    int64_t block = inode_bmap(&inode, (uint32_t)index, 0, &dirty);
+    if (block < 0) return -1;
+    if (block == 0) {
+        memset(out, 0, EXT2_BLOCK_SIZE);
+        return 0;
+    }
+    return read_block((uint32_t)block, out);
 }
 
 static int load_symlink_target(struct ext2_inode *inode, char **out) {

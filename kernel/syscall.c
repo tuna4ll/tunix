@@ -3359,12 +3359,8 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
     if (file && file->kind == FILE_KIND_VFS && file->node &&
         (file->node->flags & 0xFFU) == VFS_FILE && (share_private || share_shared) &&
         file->node->length <= SHARED_MAP_MAX_BYTES &&
-        offset < file->node->length && vfs_fault_in(file->node) == 0 &&
-        file->node->data && vfs_align_data(file->node) == 0) {
-        uint64_t shareable = (file->node->length - offset) & ~0xFFFULL;
-        if ((flags & MAP_SHARED) &&
-            align_up(file->node->length, 4096) <= file->node->capacity)
-            shareable = align_up(file->node->length - offset, 4096);
+        offset < file->node->length && (offset & 0xFFFULL) == 0) {
+        uint64_t shareable = align_up(file->node->length - offset, 4096);
         if (shareable > length) shareable = length;
         uint64_t shared_flags = PAGE_USER | PAGE_PRESENT | PAGE_FILEBACKED;
         if (flags & MAP_SHARED) {
@@ -3377,10 +3373,9 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
 
         uint64_t mapped = 0;
         while (mapped < shareable) {
-            uint64_t physical;
-            if (vmm_translate(vmm_kernel_cr3(),
-                              (uint64_t)file->node->data + offset + mapped,
-                              &physical, NULL) != 0) break;
+            uint64_t physical = vfs_page_physical(file->node,
+                                                  (offset + mapped) / 4096ULL);
+            if (!physical) break;
             physical &= ~0xFFFULL;
 
             if (pmm_page_refcount(physical) == 0 && pmm_page_ref(physical) != 0) break;

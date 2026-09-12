@@ -2,6 +2,8 @@
 #include <stdint.h>
 #include "../include/cred.h"
 #include "../include/heap.h"
+#include "../include/pmm.h"
+#include "../include/vmm.h"
 #include "../include/inotify.h"
 #include "../include/kstring.h"
 #include "../include/time.h"
@@ -48,30 +50,20 @@ void vfs_notify_meta_changed(struct vfs_node *node) {
 
 static uint64_t cached_bytes;
 
+static void page_free_one(struct vfs_page_map *map, uint64_t index);
+static void page_map_free(struct vfs_node *node);
+static uint64_t reclaim_below(struct vfs_node *node, uint32_t newer_than);
+
 static int cacheable(const struct vfs_node *node) {
     return node && (node->flags & 0xFFU) == VFS_FILE && node->disk_inode &&
-           node->data && (node->flags & VFS_OWNED_DATA);
-}
-
-static void cache_charge(const struct vfs_node *node) {
-    if (cacheable(node)) cached_bytes += node->capacity;
-}
-
-static void cache_discharge(const struct vfs_node *node) {
-    if (!cacheable(node)) return;
-    cached_bytes -= cached_bytes >= node->capacity ? node->capacity : cached_bytes;
+           node->pages && node->pages->resident;
 }
 
 uint64_t vfs_cached_bytes(void) { return cached_bytes; }
 
 int vfs_fault_in(struct vfs_node *node) {
     if (!node) return -1;
-    if (!(node->flags & VFS_LAZY_DATA)) return 0;
-    if (!persist_ops || !persist_ops->fetch) return -1;
-    if (persist_ops->fetch(node) != 0) return -1;
-    if (!node->data && node->length) return -1;
     node->flags &= ~VFS_LAZY_DATA;
-    cache_charge(node);
     return 0;
 }
 
@@ -98,13 +90,18 @@ void vfs_map_write_ref(struct vfs_node *node, uint64_t offset, uint64_t length) 
 }
 
 void vfs_flush_mapped(struct vfs_node *node) {
-    if (!node || !node->map_dirty_end || !node->data) return;
+    if (!node || !node->map_dirty_end) return;
     uint64_t start = node->map_dirty_start;
     uint64_t end = node->map_dirty_end;
     node->map_dirty_start = 0;
     node->map_dirty_end = 0;
     if (end > node->length) end = node->length;
     if (start >= end) return;
+    for (uint64_t index = start / VFS_PAGE_SIZE;
+         index <= (end - 1ULL) / VFS_PAGE_SIZE; index++) {
+        if (vfs_page_peek(node, index) && node->pages)
+            node->pages->dirty[index / 64ULL] |= 1ULL << (index % 64ULL);
+    }
     vfs_stamp_times(node, VFS_TIME_MTIME | VFS_TIME_CTIME);
     inotify_notify(node, TUNIX_IN_MODIFY, NULL, 0);
     PERSIST(written, node, start, end - start);
@@ -115,16 +112,23 @@ void vfs_map_write_unref(struct vfs_node *node) {
     if (--node->shared_writers == 0) vfs_flush_mapped(node);
 }
 
+uint64_t vfs_drop_clean_pages(struct vfs_node *node) {
+    if (!cacheable(node) || node->mapped_refs) return 0;
+    if (!persist_ops || !persist_ops->fetch_page) return 0;
+    struct vfs_page_map *map = node->pages;
+    uint64_t dropped = 0;
+    for (uint64_t index = 0; index < map->count; index++) {
+        if (!map->page[index] || vfs_page_is_dirty(node, index)) continue;
+        page_free_one(map, index);
+        cached_bytes -= cached_bytes >= VFS_PAGE_SIZE ? VFS_PAGE_SIZE : cached_bytes;
+        dropped += VFS_PAGE_SIZE;
+    }
+    return dropped;
+}
+
 void vfs_release_data(struct vfs_node *node) {
-    if (!cacheable(node)) return;
-    if (node->mapped_refs) return;
-    if (!persist_ops || !persist_ops->fetch) return;
     vfs_flush_mapped(node);
-    cache_discharge(node);
-    kfree(node->data);
-    node->data = NULL;
-    node->capacity = 0;
-    node->flags = (node->flags & ~VFS_OWNED_DATA) | VFS_LAZY_DATA;
+    (void)vfs_drop_clean_pages(node);
 }
 
 static uint64_t reclaim_below(struct vfs_node *node, uint32_t newer_than) {
@@ -132,11 +136,8 @@ static uint64_t reclaim_below(struct vfs_node *node, uint32_t newer_than) {
 
     uint64_t reclaimed = 0;
     uint32_t touched = node->atime > node->mtime ? node->atime : node->mtime;
-    if ((node->flags & 0xFFU) == VFS_FILE && touched < newer_than) {
-        uint64_t held = node->capacity;
-        vfs_release_data(node);
-        if (!node->data) reclaimed += held;
-    }
+    if ((node->flags & 0xFFU) == VFS_FILE && touched < newer_than)
+        reclaimed += vfs_drop_clean_pages(node);
 
     for (struct vfs_node *child = node->children; child; child = child->next)
         reclaimed += reclaim_below(child, newer_than);
@@ -167,9 +168,13 @@ void vfs_trim_cache(uint64_t budget) {
 }
 
 static void free_node_data(struct vfs_node *node) {
-    if (!node || !node->data || !(node->flags & VFS_OWNED_DATA)) return;
-    if (node->mapped_refs) return;
-    cache_discharge(node);
+    if (!node || node->mapped_refs) return;
+    if (node->pages) {
+        uint64_t held = node->disk_inode ? node->pages->resident * VFS_PAGE_SIZE : 0;
+        page_map_free(node);
+        cached_bytes -= cached_bytes >= held ? held : cached_bytes;
+    }
+    if (!node->data || !(node->flags & VFS_OWNED_DATA)) return;
     kfree(node->data);
 }
 
@@ -394,94 +399,180 @@ static int split_parent(const char *path, char parent[256], char name[128]) {
     return 0;
 }
 
+static uint64_t pages_for(uint64_t length) {
+    return (length + VFS_PAGE_SIZE - 1ULL) / VFS_PAGE_SIZE;
+}
+
+static void page_free_one(struct vfs_page_map *map, uint64_t index) {
+    if (!map->page[index]) return;
+    uint64_t physical = vmm_virt_to_phys_direct(map->page[index]);
+    map->page[index] = NULL;
+    map->dirty[index / 64ULL] &= ~(1ULL << (index % 64ULL));
+    if (map->resident) map->resident--;
+    if (physical) pmm_free_page((void *)physical);
+}
+
+static void page_map_free(struct vfs_node *node) {
+    struct vfs_page_map *map = node->pages;
+    if (!map) return;
+    for (uint64_t index = 0; index < map->count; index++) page_free_one(map, index);
+    kfree(map->page);
+    kfree(map->dirty);
+    kfree(map);
+    node->pages = NULL;
+}
+
+static struct vfs_page_map *page_map_grow(struct vfs_node *node, uint64_t needed) {
+    struct vfs_page_map *map = node->pages;
+    if (!map) {
+        map = (struct vfs_page_map *)kmalloc(sizeof(*map));
+        if (!map) return NULL;
+        memset(map, 0, sizeof(*map));
+        node->pages = map;
+    }
+    if (needed <= map->count) return map;
+
+    uint64_t count = map->count ? map->count : 8ULL;
+    while (count < needed) {
+        if (count > UINT64_MAX / 2ULL) return NULL;
+        count *= 2ULL;
+    }
+    uint64_t words = (count + 63ULL) / 64ULL;
+    uint8_t **page = (uint8_t **)kmalloc((size_t)(count * sizeof(uint8_t *)));
+    uint64_t *dirty = (uint64_t *)kmalloc((size_t)(words * sizeof(uint64_t)));
+    if (!page || !dirty) {
+        kfree(page);
+        kfree(dirty);
+        return NULL;
+    }
+    memset(page, 0, (size_t)(count * sizeof(uint8_t *)));
+    memset(dirty, 0, (size_t)(words * sizeof(uint64_t)));
+    if (map->count) {
+        memcpy(page, map->page, (size_t)(map->count * sizeof(uint8_t *)));
+        memcpy(dirty, map->dirty,
+               (size_t)(((map->count + 63ULL) / 64ULL) * sizeof(uint64_t)));
+        kfree(map->page);
+        kfree(map->dirty);
+    }
+    map->page = page;
+    map->dirty = dirty;
+    map->count = count;
+    return map;
+}
+
+static uint8_t *page_allocate(struct vfs_node *node, struct vfs_page_map *map,
+                              uint64_t index) {
+    void *physical = pmm_alloc_page();
+    if (!physical) {
+        if (reclaim_below(vfs_root, (uint32_t)time_epoch_seconds()))
+            physical = pmm_alloc_page();
+    }
+    if (!physical) return NULL;
+    uint8_t *page = (uint8_t *)vmm_phys_to_virt((uint64_t)physical);
+    memset(page, 0, (size_t)VFS_PAGE_SIZE);
+    map->page[index] = page;
+    map->resident++;
+    if (node->disk_inode) cached_bytes += VFS_PAGE_SIZE;
+    return page;
+}
+
+void *vfs_page(struct vfs_node *node, uint64_t index, int for_write) {
+    if (!node) return NULL;
+    if (!for_write) {
+        uint64_t span = pages_for(node->length);
+        if (index >= span) return NULL;
+    }
+    struct vfs_page_map *map = page_map_grow(node, index + 1ULL);
+    if (!map) return NULL;
+    if (!map->page[index]) {
+        if (!page_allocate(node, map, index)) return NULL;
+        if (node->disk_inode && persist_ops && persist_ops->fetch_page &&
+            index < pages_for(node->length)) {
+            if (persist_ops->fetch_page(node, index, map->page[index]) != 0) {
+                page_free_one(map, index);
+                return NULL;
+            }
+        }
+    }
+    if (for_write) map->dirty[index / 64ULL] |= 1ULL << (index % 64ULL);
+    return map->page[index];
+}
+
+void *vfs_page_peek(struct vfs_node *node, uint64_t index) {
+    if (!node || !node->pages || index >= node->pages->count) return NULL;
+    return node->pages->page[index];
+}
+
+uint64_t vfs_page_physical(struct vfs_node *node, uint64_t index) {
+    void *page = vfs_page(node, index, 0);
+    if (!page) return 0;
+    return vmm_virt_to_phys_direct(page);
+}
+
+int vfs_page_is_dirty(struct vfs_node *node, uint64_t index) {
+    if (!node || !node->pages || index >= node->pages->count) return 0;
+    return (node->pages->dirty[index / 64ULL] >> (index % 64ULL)) & 1ULL;
+}
+
+void vfs_page_clear_dirty(struct vfs_node *node, uint64_t index) {
+    if (!node || !node->pages || index >= node->pages->count) return;
+    node->pages->dirty[index / 64ULL] &= ~(1ULL << (index % 64ULL));
+}
+
+uint64_t vfs_page_span(struct vfs_node *node) {
+    if (!node) return 0;
+    uint64_t span = pages_for(node->length);
+    if (node->pages && node->pages->count > span) span = node->pages->count;
+    return span;
+}
+
 static int64_t memory_read(struct vfs_node *node, uint64_t offset, size_t size, void *buffer) {
     if (!node || !buffer || offset >= node->length) return 0;
-    if (vfs_fault_in(node) != 0) return -1;
     uint64_t available = node->length - offset;
     if ((uint64_t)size > available) size = (size_t)available;
-    memcpy(buffer, (const uint8_t *)node->data + offset, size);
+
+    uint8_t *out = (uint8_t *)buffer;
+    uint64_t at = offset;
+    uint64_t left = size;
+    while (left) {
+        uint64_t index = at / VFS_PAGE_SIZE;
+        uint64_t within = at % VFS_PAGE_SIZE;
+        uint64_t chunk = VFS_PAGE_SIZE - within;
+        if (chunk > left) chunk = left;
+        const uint8_t *page = (const uint8_t *)vfs_page(node, index, 0);
+        if (!page) return (int64_t)(size - left);
+        memcpy(out, page + within, (size_t)chunk);
+        out += chunk;
+        at += chunk;
+        left -= chunk;
+    }
     if (size) vfs_stamp_times(node, VFS_TIME_ATIME);
     return (int64_t)size;
-}
-
-#define VFS_PAGE_ALIGN_MIN (64ULL * 1024ULL)
-
-int vfs_align_data(struct vfs_node *node) {
-    if (!node || !node->data) return -1;
-    if ((((uint64_t)node->data) & 0xFFFULL) == 0) return 0;
-    if (!(node->flags & VFS_OWNED_DATA)) return -1;
-
-    uint64_t capacity = node->capacity > VFS_PAGE_ALIGN_MIN ? node->capacity
-                                                            : VFS_PAGE_ALIGN_MIN;
-    uint8_t *aligned = (uint8_t *)kmalloc((size_t)capacity);
-    if (!aligned) return -1;
-    if ((((uint64_t)aligned) & 0xFFFULL) != 0) {
-        kfree(aligned);
-        return -1;
-    }
-    memset(aligned, 0, (size_t)capacity);
-    if (node->length) memcpy(aligned, node->data, (size_t)node->length);
-    free_node_data(node);
-    node->data = aligned;
-    node->capacity = capacity;
-    node->flags |= VFS_OWNED_DATA;
-    cache_charge(node);
-    return 0;
-}
-
-#define VFS_GROW_LINEAR_ABOVE (32ULL * 1024ULL * 1024ULL)
-#define VFS_GROW_STEP (32ULL * 1024ULL * 1024ULL)
-
-static int ensure_capacity(struct vfs_node *node, uint64_t required) {
-    if (required <= node->capacity) return 0;
-    if (node->flags & VFS_READONLY) return -1;
-    uint64_t capacity = node->capacity ? node->capacity : 64;
-    while (capacity < required && capacity < VFS_GROW_LINEAR_ABOVE) {
-        if (capacity > UINT64_MAX / 2) return -1;
-        capacity *= 2;
-    }
-    if (capacity < required) {
-        uint64_t steps = (required - capacity + VFS_GROW_STEP - 1U) / VFS_GROW_STEP;
-        if (steps > (UINT64_MAX - capacity) / VFS_GROW_STEP) return -1;
-        capacity += steps * VFS_GROW_STEP;
-    }
-    uint8_t *new_data = (uint8_t *)kmalloc((size_t)capacity);
-    if (!new_data) {
-        uint32_t now = (uint32_t)time_epoch_seconds();
-        if (reclaim_below(vfs_root, now))
-            new_data = (uint8_t *)kmalloc((size_t)capacity);
-    }
-    if (!new_data) {
-        static unsigned reported;
-        if (reported < 4U) {
-            uint64_t reserved = 0, allocated = 0, limit = 0;
-            heap_stats(&reserved, &allocated, &limit);
-            reported++;
-            kprintf("VFS: %s cannot grow to %u KiB: heap %u used, %u reserved, %u MiB ceiling\n",
-                    node->name, (unsigned)(capacity / 1024U),
-                    (unsigned)(allocated / (1024U * 1024U)),
-                    (unsigned)(reserved / (1024U * 1024U)),
-                    (unsigned)(limit / (1024U * 1024U)));
-        }
-        return -1;
-    }
-    memset(new_data, 0, (size_t)capacity);
-    if (node->data && node->length) memcpy(new_data, node->data, (size_t)node->length);
-    free_node_data(node);
-    node->data = new_data;
-    node->capacity = capacity;
-    node->flags |= VFS_OWNED_DATA;
-    cache_charge(node);
-    return 0;
 }
 
 static int64_t memory_write(struct vfs_node *node, uint64_t offset, size_t size, const void *buffer) {
     if (!node || !buffer || (node->flags & VFS_READONLY)) return -1;
     if ((uint64_t)size > UINT64_MAX - offset) return -1;
-    if (vfs_fault_in(node) != 0) return -1;
     uint64_t end = offset + size;
-    if (ensure_capacity(node, end) != 0) return -1;
-    memcpy((uint8_t *)node->data + offset, buffer, size);
+
+    const uint8_t *in = (const uint8_t *)buffer;
+    uint64_t at = offset;
+    uint64_t left = size;
+    while (left) {
+        uint64_t index = at / VFS_PAGE_SIZE;
+        uint64_t within = at % VFS_PAGE_SIZE;
+        uint64_t chunk = VFS_PAGE_SIZE - within;
+        if (chunk > left) chunk = left;
+        uint8_t *page = (uint8_t *)vfs_page(node, index, 1);
+        if (!page) {
+            if (at > node->length) node->length = at;
+            return at > offset ? (int64_t)(at - offset) : -1;
+        }
+        memcpy(page + within, in, (size_t)chunk);
+        in += chunk;
+        at += chunk;
+        left -= chunk;
+    }
     if (end > node->length) node->length = end;
     if (size) {
         vfs_stamp_times(node, VFS_TIME_MTIME | VFS_TIME_CTIME);
@@ -507,14 +598,26 @@ struct vfs_node *vfs_create_file(const char *path, const void *data,
 
     struct vfs_node *node = vfs_alloc_node(name, VFS_FILE | flags);
     if (!node) return NULL;
-    node->length = length;
-    node->capacity = length;
-    if (length && copy_data) {
-        node->data = kmalloc((size_t)length);
-        if (!node->data) { kfree(node); return NULL; }
-        memcpy(node->data, data, (size_t)length);
-        node->flags |= VFS_OWNED_DATA;
-    } else node->data = (void *)data;
+    node->length = 0;
+    node->capacity = 0;
+    if (length) {
+        uint64_t stored = 0;
+        while (stored < length) {
+            uint64_t index = stored / VFS_PAGE_SIZE;
+            uint64_t chunk = VFS_PAGE_SIZE;
+            if (chunk > length - stored) chunk = length - stored;
+            uint8_t *page = (uint8_t *)vfs_page(node, index, 1);
+            if (!page) {
+                free_node_data(node);
+                kfree(node);
+                return NULL;
+            }
+            memcpy(page, (const uint8_t *)data + stored, (size_t)chunk);
+            stored += chunk;
+        }
+        node->length = length;
+    }
+    (void)copy_data;
     node->read = memory_read;
     if (!(flags & VFS_READONLY)) node->write = memory_write;
     if (vfs_attach(parent, node) != 0) {
@@ -1013,10 +1116,22 @@ int vfs_truncate(struct vfs_node *node, uint64_t length) {
         inotify_notify(node, TUNIX_IN_MODIFY, NULL, 0);
         return 0;
     }
-    if (!length) node->flags &= ~VFS_LAZY_DATA;
-    else if (vfs_fault_in(node) != 0) return -1;
-    if (ensure_capacity(node, length) != 0) return -1;
-    if (length > node->length) memset((uint8_t *)node->data + node->length, 0, (size_t)(length - node->length));
+    if (length < node->length && node->pages) {
+        uint64_t keep = (length + VFS_PAGE_SIZE - 1ULL) / VFS_PAGE_SIZE;
+        for (uint64_t index = keep; index < node->pages->count; index++) {
+            if (node->pages->page[index]) {
+                page_free_one(node->pages, index);
+                if (node->disk_inode)
+                    cached_bytes -= cached_bytes >= VFS_PAGE_SIZE ? VFS_PAGE_SIZE : cached_bytes;
+            }
+        }
+        if (length % VFS_PAGE_SIZE) {
+            uint8_t *tail = (uint8_t *)vfs_page_peek(node, length / VFS_PAGE_SIZE);
+            if (tail) memset(tail + length % VFS_PAGE_SIZE, 0,
+                             (size_t)(VFS_PAGE_SIZE - length % VFS_PAGE_SIZE));
+        }
+    }
+    node->flags &= ~VFS_LAZY_DATA;
     node->length = length;
     vfs_stamp_times(node, VFS_TIME_MTIME | VFS_TIME_CTIME);
     inotify_notify(node, TUNIX_IN_MODIFY, NULL, 0);
