@@ -75,6 +75,7 @@ struct elf64_program_header {
 } __attribute__((packed));
 
 struct loaded_elf {
+    uint8_t *headers;
     const struct elf64_header *header;
     const struct elf64_program_header *programs;
     uint64_t load_bias;
@@ -196,7 +197,7 @@ static int map_segment_pages(struct process *process,
     return 0;
 }
 
-static int copy_segment(struct process *process, const uint8_t *image,
+static int copy_segment(struct process *process, struct vfs_node *file,
                         const struct elf64_program_header *program,
                         uint64_t load_bias) {
     uint64_t remaining = program->filesz;
@@ -207,7 +208,8 @@ static int copy_segment(struct process *process, const uint8_t *image,
         if (vmm_translate(process->cr3, destination, &physical, NULL) != 0) return -1;
         uint64_t chunk = 4096 - (destination & 0xFFFULL);
         if (chunk > remaining) chunk = remaining;
-        memcpy(vmm_phys_to_virt(physical), image + source_offset, (size_t)chunk);
+        if (vfs_read(file, source_offset, (size_t)chunk,
+                     vmm_phys_to_virt(physical)) != (int64_t)chunk) return -1;
         destination += chunk;
         source_offset += chunk;
         remaining -= chunk;
@@ -269,14 +271,26 @@ static uint64_t program_header_virtual(const struct elf64_header *header,
     return 0;
 }
 
-static int load_image(struct process *process, struct vfs_node *file,
-                      uint64_t preferred_base, struct loaded_elf *loaded) {
-    if (!process || !file || !loaded ||
-        (file->flags & 0xFFU) != VFS_FILE ||
-        vfs_fault_in(file) != 0 || !file->data) return -1;
-    const uint8_t *image = (const uint8_t *)file->data;
+static uint8_t *read_headers(struct vfs_node *file) {
+    struct elf64_header probe;
+    if (file->length < sizeof(probe)) return NULL;
+    if (vfs_read(file, 0, sizeof(probe), &probe) != (int64_t)sizeof(probe)) return NULL;
+    if (!valid_header(&probe, file->length)) return NULL;
+    uint64_t span = probe.phoff + (uint64_t)probe.phnum * probe.phentsize;
+    if (span > file->length || span > 64ULL * 1024ULL) return NULL;
+    uint8_t *headers = (uint8_t *)kmalloc((size_t)span);
+    if (!headers) return NULL;
+    if (vfs_read(file, 0, (size_t)span, headers) != (int64_t)span) {
+        kfree(headers);
+        return NULL;
+    }
+    return headers;
+}
+
+static int load_image_locked(struct process *process, struct vfs_node *file,
+                             uint64_t preferred_base, struct loaded_elf *loaded,
+                             uint8_t *image) {
     const struct elf64_header *header = (const struct elf64_header *)image;
-    if (!valid_header(header, file->length)) return -1;
     const struct elf64_program_header *programs =
         (const struct elf64_program_header *)(image + header->phoff);
 
@@ -291,7 +305,7 @@ static int load_image(struct process *process, struct vfs_node *file,
     }
     for (uint16_t i = 0; i < header->phnum; i++) {
         if (programs[i].type == PT_LOAD &&
-            copy_segment(process, image, &programs[i], load_bias) != 0) return -1;
+            copy_segment(process, file, &programs[i], load_bias) != 0) return -1;
     }
 
     loaded->header = header;
@@ -307,7 +321,22 @@ static int load_image(struct process *process, struct vfs_node *file,
     return protect_image_pages(process, loaded);
 }
 
-static int interpreter_path(const uint8_t *image,
+static int load_image(struct process *process, struct vfs_node *file,
+                      uint64_t preferred_base, struct loaded_elf *loaded) {
+    if (!process || !file || !loaded ||
+        (file->flags & 0xFFU) != VFS_FILE) return -1;
+    uint8_t *image = read_headers(file);
+    if (!image) return -1;
+    loaded->headers = image;
+    if (load_image_locked(process, file, preferred_base, loaded, image) != 0) {
+        kfree(image);
+        loaded->headers = NULL;
+        return -1;
+    }
+    return 0;
+}
+
+static int interpreter_path(struct vfs_node *file,
                             const struct elf64_header *header,
                             const struct elf64_program_header *programs,
                             char path[MAX_INTERP_PATH]) {
@@ -322,9 +351,9 @@ static int interpreter_path(const uint8_t *image,
         return 0;
     }
     if (interp->filesz < 2 || interp->filesz > MAX_INTERP_PATH) return -1;
-    const uint8_t *source = image + interp->offset;
-    if (source[interp->filesz - 1] != '\0') return -1;
-    memcpy(path, source, (size_t)interp->filesz);
+    if (vfs_read(file, interp->offset, (size_t)interp->filesz, path) !=
+        (int64_t)interp->filesz) return -1;
+    if (path[interp->filesz - 1] != '\0') return -1;
     if (path[0] != '/' || strlen(path) + 1 != interp->filesz) return -1;
     return 1;
 }
@@ -450,22 +479,21 @@ static struct vfs_node *lookup_under_root(const struct process *process,
 
 int elf_load_process(struct process *process, struct vfs_node *file,
                      const char *const argv[], const char *const envp[]) {
-    if (!process || !file || (file->flags & 0xFFU) != VFS_FILE ||
-        vfs_fault_in(file) != 0 || !file->data) return -1;
-
+    if (!process || !file || (file->flags & 0xFFU) != VFS_FILE) return -1;
     if (file->length < sizeof(struct elf64_header)) return -1;
+
+    struct elf64_header probe;
+    if (vfs_read(file, 0, sizeof(probe), &probe) != (int64_t)sizeof(probe)) return -1;
     struct loaded_elf main_image;
     memset(&main_image, 0, sizeof(main_image));
-    const struct elf64_header *main_header = (const struct elf64_header *)file->data;
-    uint64_t main_base = main_header->type == ET_DYN ? MAIN_PIE_BASE : 0;
+    uint64_t main_base = probe.type == ET_DYN ? MAIN_PIE_BASE : 0;
     if (load_image(process, file, main_base, &main_image) != 0) return -1;
 
     char interp_path[MAX_INTERP_PATH];
-    int interp_status = interpreter_path((const uint8_t *)file->data,
-                                         main_image.header, main_image.programs,
-                                         interp_path);
-    if (interp_status < 0) return -1;
-    if (interp_status > 0 && !main_image.phdr) return -1;
+    int interp_status = interpreter_path(file, main_image.header,
+                                         main_image.programs, interp_path);
+    if (interp_status < 0) { kfree(main_image.headers); return -1; }
+    if (interp_status > 0 && !main_image.phdr) { kfree(main_image.headers); return -1; }
 
     struct loaded_elf interpreter;
     memset(&interpreter, 0, sizeof(interpreter));
@@ -474,24 +502,28 @@ int elf_load_process(struct process *process, struct vfs_node *file,
     if (interp_status > 0) {
         struct vfs_node *interp_file = lookup_under_root(process, interp_path);
         if (!interp_file || load_image(process, interp_file, INTERP_BASE, &interpreter) != 0 ||
-            interpreter.header->type != ET_DYN) return -1;
+            interpreter.header->type != ET_DYN) { kfree(main_image.headers); return -1; }
         char nested_path[MAX_INTERP_PATH];
-        if (interpreter_path((const uint8_t *)interp_file->data,
-                             interpreter.header, interpreter.programs,
-                             nested_path) != 0) return -1;
+        if (interpreter_path(interp_file, interpreter.header, interpreter.programs,
+                             nested_path) != 0) {
+            kfree(main_image.headers);
+            kfree(interpreter.headers);
+            return -1;
+        }
         initial_entry = interpreter.entry;
         interpreter_base = interpreter.load_bias;
     }
 
+    int status = -1;
     uint64_t stack_bottom = USER_STACK_TOP - USER_STACK_INITIAL_PAGES * 4096ULL;
     for (uint64_t address = stack_bottom; address < USER_STACK_TOP; address += 4096) {
         uint64_t physical = (uint64_t)pmm_alloc_page();
-        if (!physical) return -1;
+        if (!physical) goto done;
         memset(vmm_phys_to_virt(physical), 0, 4096);
         if (vmm_map_page_in(process->cr3, address, physical,
                             PAGE_PRESENT | PAGE_WRITE | PAGE_USER) != 0) {
             pmm_free_page((void *)physical);
-            return -1;
+            goto done;
         }
     }
 
@@ -499,7 +531,11 @@ int elf_load_process(struct process *process, struct vfs_node *file,
     process->brk_start = align_up(main_image.image_end, 4096);
     process->brk_end = process->brk_start;
     process->mmap_base = DEFAULT_MMAP_BASE;
-    if (build_initial_stack(process, &main_image, interpreter_base, argv, envp) != 0)
-        return -1;
-    return 0;
+    if (build_initial_stack(process, &main_image, interpreter_base, argv, envp) == 0)
+        status = 0;
+
+done:
+    kfree(main_image.headers);
+    kfree(interpreter.headers);
+    return status;
 }

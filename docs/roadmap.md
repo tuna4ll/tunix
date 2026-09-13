@@ -23,7 +23,16 @@ since the ports tree went.
 amount of software checks. Deciding whether to implement a hierarchy or to
 answer the check properly is a decision that has been deferred by accident.
 
-## 4. A second filesystem worth writing to
+## 4. A cache that knows its own budget
+
+File contents are 4 KiB pages now, fetched and written back one at a time, so a
+file no longer has to fit in memory. What is missing is a ceiling: the cache
+grows until an allocation fails and only then drops clean pages. A budget
+checked as pages are taken, rather than a rescue when one cannot be, is the
+next step -- and the one after it is swap, which would give a dirty page
+somewhere to go.
+
+## 5. A second filesystem worth writing to
 
 ext3 with no extents and a 16 GiB ceiling is enough for a root and not much
 else. ext4 read support is the next step: it makes the disks Linux writes
@@ -31,14 +40,14 @@ readable here. The journal is done -- `kernel/fs/ext3.c` writes and replays it,
 contents as well as metadata -- but it checkpoints every transaction instead of
 batching, which costs more than it needs to.
 
-## 5. Sound, verified again
+## 6. Sound, verified again
 
 The driver works and was last exercised by programs built against the kernel's
 own libc, which no longer exist. Void's `alsa-utils` is one package and would
 say whether the ioctl surface is right by Linux's standards rather than by ours.
 Input no longer needs this: libinput drives both evdev nodes under weston.
 
-## 6. Hotplug that means something
+## 7. Hotplug that means something
 
 Uevents are sent and udevd acts on them, but every device this kernel has
 exists from boot and is announced once. Nothing appears or disappears later, so

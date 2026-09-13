@@ -253,6 +253,19 @@ instead. The `SMP:` line is printed after the bring-up releases the kernel
 lock, so a machine that stops on it rather than after it is one where a
 processor took that lock and did not give it back.
 
+## How little memory it needs
+
+`make run` gives the machine 4 GiB, which is comfortable rather than required.
+The desktop comes up in 512 MiB:
+
+```
+PMM: 499 MiB usable of 499 MiB installed, ceiling 8192 MiB
+```
+
+Below that the kernel still boots but the session has nowhere to work. Anything
+from 512 MiB up is worth trying; `make run QEMU_MEMORY=1G` is a reasonable
+small configuration.
+
 ## What CI builds
 
 ```sh

@@ -84,8 +84,31 @@ gigabyte of RAM. 8 GiB needs 4.25 MiB of the 8 MiB reserved there. Raising one
 without the other overruns the reserve silently, which is why the two constants
 are commented against each other.
 
-The structures are sized from the memory map at boot, not from the limit, so a
-machine with 2 GiB pays for 2 GiB.
+The structures span every address the firmware describes, not just the part of
+it that is RAM, and that is deliberate. They used to stop at the top of the
+highest usable region, which broke a machine with exactly 2 GiB:
+
+```
+PMM: 2035 MiB usable of 2035 MiB installed, ceiling 8192 MiB
+PANIC: VMM: invalid boot CR3
+```
+
+Limine leaves its own page tables at 2046 MiB on every machine, in a region it
+reports as reclaimable rather than usable. With 3 GiB or more the usable regions
+run past that address, so the page is inside the tracked range and marked in use
+like every other non-usable page. With exactly 2 GiB the usable memory *ends*
+at 2046 MiB, the page falls outside the range, and `pmm_page_is_allocated`
+answers what it answers for any address it does not track: no. `vmm_init` reads
+that as a corrupt CR3 and stops.
+
+The direct map had the same hole from the same cause -- it is built up to
+`pmm_managed_limit()` -- so the page the kernel was about to walk was not
+mapped either.
+
+So `highest` is now the top of the last region of any kind, and only the
+counters that report how much RAM there is stay usable-only. The cost is
+bookkeeping for the whole 8 GiB on every machine, which is 4.25 MiB of a
+reserve the linker script already sets aside in full.
 
 `pmm_init` reports all of this on the console rather than behind the debug flag:
 
