@@ -6,6 +6,9 @@ extern char kernel_start[];
 extern char user_elf_start[];
 extern char user_elf_end[];
 
+static const void *init_image;          // /sbin/init off the disk, when there is one
+static uint64_t init_length;
+
 static const char *current_el_name(void) {
     switch ((sysreg_read("CurrentEL") >> 2) & 3) {
     case 1: return "EL1";
@@ -90,19 +93,22 @@ static void user_task(void *argument) {
     uint64_t space = vmm_create_space();
     uint64_t stack_pa = (uint64_t)pmm_alloc_page();
     uint64_t stack_va = 0x0000000000500000UL;
-    uint64_t length = (uint64_t)(user_elf_end - user_elf_start);
+    const void *image = init_image ? init_image : (const void *)user_elf_start;
+    uint64_t length = init_image ? init_length
+                                 : (uint64_t)(user_elf_end - user_elf_start);
+    const char *source = init_image ? "/sbin/init" : "the built-in image";
     uint64_t entry = 0;
 
     if (!space || !stack_pa ||
-        elf_load_image(space, user_elf_start, length, &entry) != 0 ||
+        elf_load_image(space, image, length, &entry) != 0 ||
         vmm_map(space, stack_va, stack_pa, VMM_USER | VMM_WRITE) != 0) {
-        kprintf("usermode: could not load the %lu byte ELF\n", length);
+        kprintf("usermode: could not load %s (%lu bytes)\n", source, length);
         return;
     }
 
     sched_set_space(space);
-    kprintf("[task %d] loaded a %lu byte ELF, entering EL0 at %p\n",
-            sched_current_id(), length, (void *)entry);
+    kprintf("[task %d] loaded %s (%lu bytes), entering EL0 at %p\n",
+            sched_current_id(), source, length, (void *)entry);
     aarch64_enter_user(entry, stack_va + 4096);
     kprintf("[task %d] back at EL1\n", sched_current_id());
 }
@@ -155,13 +161,25 @@ void aarch64_main(uint64_t dtb_phys) {
     if (blk == 0) {
         kprintf("virtio-blk: %lu sectors (%lu MiB)\n", virtio_blk_capacity(),
                 (virtio_blk_capacity() * 512) >> 20);
-        static uint8_t sector[512];
-        if (virtio_blk_read(0, sector) == 0)
-            kprintf("virtio-blk: sector 0 reads %x %x %x %x %x %x %x %x\n",
-                    sector[0], sector[1], sector[2], sector[3],
-                    sector[4], sector[5], sector[6], sector[7]);
-        else
-            kprintf("virtio-blk: reading sector 0 failed\n");
+        int mount = ext2_mount();
+        if (mount != 0) {
+            kprintf("ext2: no filesystem on the disk (%d)\n", mount);
+        } else {
+            uint32_t ino = 0, size = 0;
+            if (ext2_lookup_path("/sbin/init", &ino, &size) != 0) {
+                kprintf("ext2: mounted, but /sbin/init is missing\n");
+            } else {
+                void *image = kmalloc(size);
+                uint32_t got = 0;
+                if (image && ext2_read_file(ino, image, size, &got) == 0) {
+                    init_image = image;
+                    init_length = got;
+                    kprintf("ext2: read /sbin/init from inode %u, %u bytes\n", ino, got);
+                } else {
+                    kprintf("ext2: could not read /sbin/init\n");
+                }
+            }
+        }
     } else if (blk != -1) {
         kprintf("virtio-blk: initialisation failed (%d)\n", blk);
     }

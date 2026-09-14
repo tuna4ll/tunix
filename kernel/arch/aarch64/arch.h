@@ -113,6 +113,10 @@ int virtio_blk_init(void);
 uint64_t virtio_blk_capacity(void);
 int virtio_blk_read(uint64_t sector, void *out);
 
+int ext2_mount(void);
+int ext2_lookup_path(const char *path, uint32_t *ino_out, uint32_t *size_out);
+int ext2_read_file(uint32_t ino, void *out, uint32_t limit, uint32_t *size_out);
+
 extern uint64_t *current_resume;
 void aarch64_context_switch(uint64_t *save_sp, uint64_t new_sp);
 void sched_init(void);
