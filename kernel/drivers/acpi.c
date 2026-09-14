@@ -379,6 +379,7 @@ static void settle(uint64_t nanoseconds) {
     while (time_uptime_ns() < deadline) cpu_relax();
 }
 
+#if defined(__x86_64__)
 int acpi_enable(void) {
     if (!acpi_power_info()) return -1;
     if (inw((uint16_t)power.pm1a_control) & PM1_SCI_ENABLED) return 0;
@@ -398,7 +399,13 @@ int acpi_enable(void) {
     }
     return 0;
 }
+#else
+int acpi_enable(void) {
+    return -1;
+}
+#endif
 
+#if defined(__x86_64__)
 void acpi_power_off(void) {
     if (!acpi_power_info() || !power.sleep_known) return;
     (void)acpi_enable();
@@ -411,12 +418,18 @@ void acpi_power_off(void) {
 
     settle(ACPI_SETTLE_NS);
 }
+#else
+void acpi_power_off(void) {
+}
+#endif
 
 void acpi_reset(void) {
     const struct acpi_power *info = acpi_power_info();
     if (info && info->reset_supported) {
         if (info->reset_space == GAS_SPACE_IO) {
+#if defined(__x86_64__)
             outb((uint16_t)info->reset_address, info->reset_value);
+#endif
         } else {
             volatile uint8_t *reg =
                 (volatile uint8_t *)map_physical(info->reset_address, 1);
@@ -425,20 +438,25 @@ void acpi_reset(void) {
         settle(ACPI_SETTLE_NS);
     }
 
+#if defined(__x86_64__)
     for (unsigned spin = 0; spin < 100000U && (inb(0x64) & 0x02U); spin++) io_wait();
     outb(0x64, 0xFE);
     settle(ACPI_SETTLE_NS);
 
     struct { uint16_t limit; uint64_t base; } __attribute__((packed)) empty = { 0, 0 };
     __asm__ volatile("lidt %0; int3" : : "m"(empty));
+#endif
     cpu_halt_forever();
 }
 
+#if defined(__x86_64__)
 static uint16_t event_enable_port(uint32_t event_block) {
     if (!event_block || power.event_bytes < 2U) return 0;
     return (uint16_t)(event_block + power.event_bytes / 2U);
 }
+#endif
 
+#if defined(__x86_64__)
 void acpi_power_button_enable(unsigned vector) {
     if (!acpi_power_info() || !power.pm1a_event) return;
     if (acpi_enable() != 0) {
@@ -465,7 +483,13 @@ void acpi_power_button_enable(unsigned vector) {
     }
     kprintf("ACPI: power button on sci %u\n", (unsigned)power.sci_interrupt);
 }
+#else
+void acpi_power_button_enable(unsigned vector) {
+    (void)vector;
+}
+#endif
 
+#if defined(__x86_64__)
 int acpi_sci_interrupt(void) {
     if (!power_known || !power.pm1a_event) return 0;
 
@@ -480,3 +504,8 @@ int acpi_sci_interrupt(void) {
     }
     return pressed;
 }
+#else
+int acpi_sci_interrupt(void) {
+    return 0;
+}
+#endif
