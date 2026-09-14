@@ -27,8 +27,10 @@ void aarch64_irq_handler(void) {
     if (intid == TIMER_PPI_INTID) {
         timer_tick();
         gic_eoi(intid);
-        if ((timer_ticks() % 100) == 0)
-            kprintf("[aarch64] tick %lu (%lu s)\n", timer_ticks(), timer_ticks() / 100);
+        if ((timer_ticks() % 200) == 0)
+            kprintf("[aarch64] alive at %lu s, task %d running, heap %lu KiB free\n",
+                    timer_ticks() / 100, sched_current_id(), heap_free_bytes() >> 10);
+        sched_tick();                   // preempt whoever was running
         return;
     }
     if (intid < 1020) gic_eoi(intid);
@@ -71,7 +73,19 @@ static void address_space_selftest(void) {
             pmm_free_pages() - before);
 }
 
-static void usermode_selftest(void) {
+static void worker_task(void *argument) {
+    uint64_t id = (uint64_t)argument;
+    for (int round = 0; round < 3; round++) {
+        kprintf("[task %lu] round %d at tick %lu\n", id, round, timer_ticks());
+        uint64_t until = timer_ticks() + 15 + id * 5;
+        while (timer_ticks() < until) {         // preemption moves us aside here
+        }
+    }
+    kprintf("[task %lu] finished\n", id);
+}
+
+static void user_task(void *argument) {
+    (void)argument;
     uint64_t space = vmm_create_space();
     uint64_t stack_pa = (uint64_t)pmm_alloc_page();
     uint64_t code_va = 0x0000000000401000UL;
@@ -85,10 +99,10 @@ static void usermode_selftest(void) {
         return;
     }
 
-    vmm_switch_space(space);
-    kprintf("usermode: entering EL0 at %p\n", (void *)code_va);
+    sched_set_space(space);
+    kprintf("[task %d] entering EL0 at %p\n", sched_current_id(), (void *)code_va);
     aarch64_enter_user(code_va, stack_va + 4096);
-    kprintf("usermode: back at EL1, %s\n", current_el_name());
+    kprintf("[task %d] back at EL1\n", sched_current_id());
 }
 
 void aarch64_main(uint64_t dtb_phys) {
@@ -131,7 +145,6 @@ void aarch64_main(uint64_t dtb_phys) {
             corrupt ? "FAILED" : "OK", heap_after == heap_before ? "fully" : "partly");
 
     address_space_selftest();
-    usermode_selftest();
 
     gic_init();
     kprintf("GICv3 initialised\n");
@@ -139,8 +152,13 @@ void aarch64_main(uint64_t dtb_phys) {
     timer_init();
     kprintf("generic timer armed at 100 Hz, enabling IRQs\n");
 
+    sched_init();
+    sched_create("worker-1", worker_task, (void *)1);
+    sched_create("worker-2", worker_task, (void *)2);
+    sched_create("usertest", user_task, NULL);
+    kprintf("scheduler: 3 tasks queued behind the idle task\n");
+
     __asm__ volatile("msr daifclr, #2" ::: "memory");   // unmask IRQ
 
-    kprintf("running; waiting for timer interrupts...\n");
     for (;;) __asm__ volatile("wfi");
 }

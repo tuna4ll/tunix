@@ -8,8 +8,8 @@ its own build target.
 ## What works
 
 On QEMU's `virt` machine (GICv3, Cortex-A72) the kernel boots into the high half,
-sets up memory management, runs a task at EL0, and reaches a timer-driven idle
-loop:
+sets up memory management, and runs preemptively scheduled tasks — one of which
+drops to EL0 and makes syscalls:
 
 ```
 === Tunix aarch64 ===
@@ -20,15 +20,26 @@ heap: 16383 KiB, alloc/free stress OK, reclaimed fully
 address spaces: identity map dropped, TTBR0 = 0x4105d000
 VMM: VA 0x400000 reads aaaa in A and bbbb in B, isolation OK
 VMM: destroying a space reclaimed 4 page-table frames
-usermode: entering EL0 at 0x401000
-hello from EL0, through svc
-[aarch64] EL0 task exited with status 7
-usermode: back at EL1, EL1
 GICv3 initialised
 generic timer armed at 100 Hz, enabling IRQs
-running; waiting for timer interrupts...
-[aarch64] tick 100 (1 s)
+scheduler: 3 tasks queued behind the idle task
+[task 1] round 0 at tick 1
+[task 2] round 0 at tick 2
+[task 3] entering EL0 at 0x401000
+hello from EL0, through svc
+[aarch64] EL0 task exited with status 7
+[task 3] back at EL1
+[task 1] round 1 at tick 22
+[task 2] round 1 at tick 29
+[task 1] round 2 at tick 43
+[task 2] round 2 at tick 56
+[task 1] finished
+[task 2] finished
+[aarch64] alive at 2 s, task 0 running, heap 16383 KiB free
 ```
+
+The interleaved rounds are the timer preempting the workers; the heap returning
+to its initial figure is the finished tasks' kernel stacks being reclaimed.
 
 Bring-up covers, in order:
 
@@ -54,12 +65,12 @@ Bring-up covers, in order:
    base, total RAM and the CPU count out of the DTB, read through the direct map.
 5. **Exceptions** (`exceptions.S`). A 16-entry `VBAR_EL1` vector table. Entry
    saves `x0`–`x30` plus `ELR_EL1`, `SPSR_EL1` and `SP_EL0`, which is what makes
-   returning to EL0 (and taking interrupts while there) safe.
+   returning to EL0 — and taking interrupts while there — safe.
 6. **Interrupts** (`gic.c`). GICv3: distributor + redistributor wake, the timer
    PPI enabled as Group 1, and the CPU interface (`ICC_SRE/PMR/IGRPEN1_EL1`)
    brought up.
 7. **Timer** (`timer.c`). The architected generic timer at 100 Hz, acknowledged
-   and re-armed from the IRQ handler.
+   and re-armed from the IRQ handler; it also drives preemption.
 8. **Console** (`uart.c`). A PL011 driver with a small `kprintf`. MMIO goes
    through `phys_to_virt`, so the same driver works before and after the MMU.
 9. **Physical memory** (`pmm.c`). A frame bitmap over the DTB-reported RAM, with
@@ -72,20 +83,25 @@ Bring-up covers, in order:
 11. **Kernel heap** (`heap.c`). A first-fit `kmalloc`/`kfree` with block splitting
     and free-run coalescing over a 16 MiB arena reserved from the PMM.
 12. **User address spaces** (`vmm.c`). `vmm_create_space`/`vmm_switch_space`/
-    `vmm_destroy_space` give each future process a private `TTBR0` root while the
-    kernel stays in `TTBR1`. Installing the first one is what retires the boot
-    identity map — the kernel keeps running purely out of the high half, which is
-    the proof that the split is real. The self-test maps one VA to two different
-    frames in two spaces and confirms each space reads back its own data.
+    `vmm_destroy_space` give each process a private `TTBR0` root while the kernel
+    stays in `TTBR1`. Installing the first one is what retires the boot identity
+    map — the kernel keeps running purely out of the high half, which is the proof
+    that the split is real. The self-test maps one VA to two different frames in
+    two spaces and confirms each space reads back its own data.
 13. **EL0 and syscalls** (`usermode.S`, `syscall.c`). `aarch64_enter_user` sets
     `SP_EL0`/`ELR_EL1`/`SPSR_EL1` and `eret`s to EL0; `aarch64_leave_user`
     restores the saved kernel stack so entering user mode looks like an ordinary
-    call that returns. `SVC` from EL0 is recognised by exception class `0x15` and
-    dispatched with the Linux AArch64 convention (`x8` = number, `x0`–`x5` =
-    arguments, result in `x0`). `write`, `exit` and `exit_group` are implemented;
-    anything else returns `-ENOSYS`. A small position-independent blob in the
-    kernel image is mapped user-executable into a fresh address space and run as
-    the self-test.
+    call that returns. The save slot lives in the task, so an EL0 task that is
+    preempted still returns to its own kernel context. `SVC` from EL0 is
+    recognised by exception class `0x15` and dispatched with the Linux AArch64
+    convention (`x8` = number, `x0`–`x5` = arguments, result in `x0`). `write`,
+    `exit` and `exit_group` are implemented; anything else returns `-ENOSYS`.
+14. **Tasks and preemption** (`sched.c`, `switch.S`). Each task gets a 16 KiB
+    kernel stack and a saved-`SP` context of the callee-saved registers; the boot
+    path becomes the idle task. `aarch64_context_switch` swaps stacks, and the
+    timer IRQ calls into the round-robin scheduler, so tasks are preempted rather
+    than cooperative. A finished task is marked done and its stack is freed by the
+    next scheduler pass, once nothing is standing on it.
 
 ## Building and running
 
@@ -100,19 +116,19 @@ x86-64 build (`make`, `make kernel`) is untouched — its source glob prunes
 
 ## What is next
 
-There is a kernel and a way into user mode, but not yet processes or a userland.
-The ladder from here:
+There is a kernel with memory management, user mode and preemptive tasks, but no
+userland yet. The ladder from here:
 
-- **Processes & scheduling** — a task struct, kernel stacks, a context switch,
-  and preemption driven by the timer IRQ that already fires.
 - **ELF loading** — map a real static AArch64 binary's segments into a fresh
   address space instead of the built-in blob.
-- **Storage & console** — virtio-mmio block and console, then ext2 on top.
-- **Userland** — an AArch64 Void glibc rootfs, init, and a shell. This needs the
-  syscall surface to grow from three calls to the couple of hundred glibc
-  expects, which is why the next item matters most.
+- **Storage & console** — virtio-mmio block and console, then ext2 on top, so
+  binaries can come off a disk.
+- **The syscall surface** — three calls is enough for a test blob; glibc expects
+  a couple of hundred. This is the bulk of the remaining work before any real
+  program runs.
+- **Userland** — an AArch64 Void glibc rootfs, init, and a shell.
 - **Wiring the portable core** — the arch-neutral subsystems (vfs, ext2/3,
-  scheduler logic, the module loader core minus relocations) plug in behind a
+  scheduler policy, the module loader core minus relocations) plug in behind a
   small arch interface. Note `syscall_dispatch` currently takes a
   `struct syscall_frame` named after x86-64 registers, so converging the two
   architectures means giving that frame an arch-neutral shape.

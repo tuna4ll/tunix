@@ -96,4 +96,14 @@ void aarch64_enter_user(uint64_t entry, uint64_t user_sp);
 void aarch64_leave_user(void);
 void aarch64_syscall_handler(struct trap_frame *frame);
 
+extern uint64_t *current_resume;
+void aarch64_context_switch(uint64_t *save_sp, uint64_t new_sp);
+void sched_init(void);
+int sched_create(const char *name, void (*entry)(void *), void *argument);
+void sched_yield(void);
+void sched_exit(void);
+void sched_tick(void);
+void sched_set_space(uint64_t root_pa);
+int sched_current_id(void);
+
 #endif
