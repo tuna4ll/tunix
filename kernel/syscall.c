@@ -50,12 +50,14 @@ extern void kprintf(const char *fmt, ...);
 #define KDEBUG(...) do { } while (0)
 #endif
 
+#if defined(__x86_64__)
 _Static_assert(sizeof(struct syscall_frame) == 144, "syscall frame/assembly ABI mismatch");
 _Static_assert(offsetof(struct syscall_frame, rax) == 96, "syscall frame rax offset mismatch");
 _Static_assert(offsetof(struct syscall_frame, rcx) == 104, "syscall frame rcx offset mismatch");
 _Static_assert(offsetof(struct syscall_frame, r11) == 112, "syscall frame r11 offset mismatch");
 _Static_assert(offsetof(struct syscall_frame, user_rip) == 120, "syscall frame rip offset mismatch");
 _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame rsp offset mismatch");
+#endif
 
 #define USER_BRK_LIMIT 0x00005F0000000000ULL
 
@@ -733,9 +735,19 @@ struct exec_arguments {
     const char *envp[MAX_EXEC_ITEMS + 1];
 };
 
-extern void syscall_entry(void);
-
+/* Whether the processor can mark a page no-execute: x86-64 detects it at
+   startup, AArch64 always has one. */
 static int nx_enabled;
+
+static inline uint64_t align_up(uint64_t value, uint64_t alignment) {
+    return (value + alignment - 1) & ~(alignment - 1);
+}
+
+/* Installing the SYSCALL instruction is x86-64 setup, not dispatch: the
+   AArch64 side reaches this file through its own vector table instead. */
+#if defined(__x86_64__)
+
+extern void syscall_entry(void);
 
 static inline void wrmsr(uint32_t msr, uint64_t value) {
     uint32_t low = (uint32_t)value;
@@ -747,10 +759,6 @@ static inline uint64_t rdmsr(uint32_t msr) {
     uint32_t low, high;
     __asm__ volatile("rdmsr" : "=a"(low), "=d"(high) : "c"(msr));
     return ((uint64_t)high << 32) | low;
-}
-
-static inline uint64_t align_up(uint64_t value, uint64_t alignment) {
-    return (value + alignment - 1) & ~(alignment - 1);
 }
 
 void syscall_init(void) {
@@ -769,6 +777,14 @@ void syscall_init(void) {
     wrmsr(0xC0000082, (uint64_t)syscall_entry);
     wrmsr(0xC0000084, 0x200ULL | 0x400ULL);
 }
+
+#else
+
+void syscall_init(void) {
+    nx_enabled = 1;
+}
+
+#endif
 
 #define WRITE_STAGE_MAX (128U * 1024U)
 
@@ -902,7 +918,7 @@ static int retry_io_wait(struct syscall_frame *frame, uint64_t syscall_number,
         return 1;
     }
 
-    frame->user_rip -= 2U;
+    SYSCALL_REWIND(frame);
     SYSCALL_RET(frame) = syscall_number;
     waiting->syscall_rewound = 1;
 
@@ -3933,7 +3949,7 @@ static void block_and_retry(struct syscall_frame *frame, uint64_t syscall_number
         SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINTR;
         return;
     }
-    frame->user_rip -= 2U;
+    SYSCALL_REWIND(frame);
     SYSCALL_RET(frame) = syscall_number;
     struct process *process = process_current();
     if (process) process->syscall_rewound = 1;
@@ -4236,7 +4252,7 @@ static int64_t sys_sigaltstack(struct syscall_frame *frame, uint64_t user_stack,
                                uint64_t user_old_stack) {
     struct process *process = process_current();
     if (!process || !frame) return -EINVAL;
-    int on_stack = signal_stack_active(process, frame->user_rsp);
+    int on_stack = signal_stack_active(process, SYSCALL_USER_SP(frame));
 
     if (user_old_stack) {
         struct linux_sigaltstack old_stack;
@@ -4488,7 +4504,7 @@ static int64_t sys_clone_fork_compat(struct syscall_frame *frame,
         if (vfork_pid <= 0) return vfork_pid;
         struct process *spawned = process_find((uint64_t)vfork_pid);
         if (!spawned) return -ESRCH;
-        spawned->saved_frame.user_rsp = child_stack;
+        SYSCALL_USER_SP(&spawned->saved_frame) = child_stack;
         return vfork_pid;
     }
 
@@ -4510,7 +4526,7 @@ static int64_t sys_clone_fork_compat(struct syscall_frame *frame,
 
     struct process *child = process_find((uint64_t)pid);
     if (!child) return -ESRCH;
-    if (child_stack) child->saved_frame.user_rsp = child_stack;
+    if (child_stack) SYSCALL_USER_SP(&child->saved_frame) = child_stack;
     if ((flags & CLONE_CHILD_SETTID) && child_tid_user) {
         if (vmm_copy_to_space(child->cr3, child_tid_user, &tid, sizeof(tid)) != 0)
             return -EFAULT;
@@ -4898,7 +4914,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
                     SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINTR;
                     break;
                 }
-                frame->user_rip -= 2U;
+                SYSCALL_REWIND(frame);
                 SYSCALL_RET(frame) = SYS_IOCTL;
                 struct process *waiter = process_current();
                 if (waiter) waiter->syscall_rewound = 1;
@@ -5823,7 +5839,9 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
     if (!skip_signal_delivery) process_prepare_user_return(frame);
 }
 
+#if defined(__x86_64__)
 _Static_assert(sizeof(struct syscall_frame) == 144, "syscall_entry.S assumes 144");
+#endif
 
 static int file_may_share(const struct file *file) {
     if (!file) return 0;

@@ -5,6 +5,8 @@
 
 #include "syscall_abi.h"
 
+#if defined(__x86_64__)
+
 struct syscall_frame {
     uint64_t r15;
     uint64_t r14;
@@ -37,6 +39,25 @@ _Static_assert(__builtin_offsetof(struct syscall_frame, r11) == 112, "entry writ
 _Static_assert(__builtin_offsetof(struct syscall_frame, user_rip) == 120, "entry writes rip at 120");
 _Static_assert(__builtin_offsetof(struct syscall_frame, user_rflags) == 128, "entry writes rflags at 128");
 _Static_assert(__builtin_offsetof(struct syscall_frame, user_rsp) == 136, "entry writes rsp at 136");
+
+#elif defined(__aarch64__)
+
+/* The same frame the AArch64 vector table saves: x0-x30 and the state needed
+   to return to EL0.  exceptions.S fills it at these offsets. */
+struct syscall_frame {
+    uint64_t x[31];
+    uint64_t elr;
+    uint64_t spsr;
+    uint64_t sp_el0;
+    uint64_t reserved[2];
+};
+
+_Static_assert(sizeof(struct syscall_frame) == 288, "exceptions.S subtracts 288");
+_Static_assert(__builtin_offsetof(struct syscall_frame, elr) == 248, "entry writes elr at 248");
+_Static_assert(__builtin_offsetof(struct syscall_frame, spsr) == 256, "entry writes spsr at 256");
+_Static_assert(__builtin_offsetof(struct syscall_frame, sp_el0) == 264, "entry writes sp_el0 at 264");
+
+#endif
 
 void syscall_init(void);
 void syscall_set_kernel_stack(uint64_t stack_top);

@@ -206,22 +206,37 @@ in its own address space. What it still cannot be is a real program:
   scheduler policy, the module loader core minus relocations) plug in behind a
   small arch interface.
 
-  The first piece of that interface is in place: `kernel/include/syscall_abi.h`
-  defines `SYSCALL_NR`, `SYSCALL_ARG0`–`SYSCALL_ARG5` and `SYSCALL_RET`, and
-  `kernel/syscall.c` now reaches the register file only through them, so the
-  5900-line dispatcher no longer names an x86-64 register. Each architecture
-  supplies the mapping — x86-64 in that header, AArch64 in
-  `kernel/arch/aarch64/arch.h` over `struct trap_frame`. They cannot share one
-  accessor for the number and the result, because AArch64 takes the number in
-  `x8` and returns in `x0` while x86-64 uses `rax` for both. `struct
-  syscall_frame`'s layout is now pinned with static assertions against the
-  offsets `syscall_entry.S` writes by hand.
+  The first piece of that interface is in place. `kernel/include/syscall_abi.h`
+  defines `SYSCALL_NR`, `SYSCALL_ARG0`–`SYSCALL_ARG5`, `SYSCALL_RET`,
+  `SYSCALL_USER_SP` and `SYSCALL_REWIND`, with a mapping per architecture, and
+  `kernel/syscall.c` reaches the register file only through them — the
+  5900-line dispatcher no longer names a machine register anywhere. The number
+  and the result need separate accessors because AArch64 takes the number in
+  `x8` and returns in `x0` where x86-64 uses `rax` for both; `SYSCALL_REWIND`
+  exists because backing up over the trap instruction to restart a call means
+  two bytes on x86-64 (`syscall`) and four on AArch64 (`svc #0`). `struct
+  syscall_frame` is now selected per architecture in `syscall.h`, each variant
+  pinned by static assertions against the offsets its entry assembly writes by
+  hand. The x86-only parts of that file — installing `syscall_entry` through
+  the EFER/STAR/LSTAR MSRs — sit behind an architecture guard rather than in
+  the dispatch path.
 
-  What still needs an arch-neutral shape: `kernel/elf.c`'s `elf_load_process`
-  is written against `struct process` and the VFS, and `process.c` builds child
-  frames and saves interrupt context by register name. The loaders in this port
-  are deliberately the same algorithms over a buffer, so they can fold into the
-  shared core once the VFS exists.
+  Every step of that migration was checked by rebuilding the x86-64 kernel and
+  comparing it byte for byte with the kernel from before the change: the
+  accessors expand to the same struct members, so `kernel.elf` is bit-identical
+  and the refactor is provably a no-op on the architecture that already works.
+
+  Where the portable core stands against the AArch64 compiler today: 56 of its
+  74 files build clean, including `vfs.c`, `ext2.c`, `ext3.c`, `file.c`,
+  `elf.c`, `heap.c`, `pmm.c`, `block.c`, all of `ipc/`, `net/` and `tty/`, and
+  now `syscall.c`. Of the 18 that do not, nine are x86 device drivers reaching
+  for port I/O — a concept AArch64 does not have, so `io.h` is now guarded to
+  x86-64 and those drivers simply are not built there. Six more stop at a
+  single instruction each (`rep stosb` in `memset`, `rdtsc`, `wrmsr`, `cpuid`)
+  and one wants a generated font header. The real work is `process.c`, which
+  saves the register file, builds child frames and lays out signal contexts by
+  register name; much of that is irreducibly architectural and belongs under
+  `kernel/arch/` rather than behind an accessor.
 - **Module loader** — `R_AARCH64_*` relocations and an AArch64 module area.
 
 ### A note on SMP
