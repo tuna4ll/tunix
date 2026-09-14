@@ -20,6 +20,9 @@ heap: 16383 KiB, alloc/free stress OK, reclaimed fully
 address spaces: identity map dropped, TTBR0 = 0x4105d000
 VMM: VA 0x400000 reads aaaa in A and bbbb in B, isolation OK
 VMM: destroying a space reclaimed 4 page-table frames
+virtio-mmio slot 31: block (id 2, version 1, irq 79)
+virtio-blk: 32768 sectors (16 MiB)
+virtio-blk: sector 0 reads 54 55 4e 49 58 42 4c 4b
 GICv3 initialised
 generic timer armed at 100 Hz, enabling IRQs
 scheduler: 3 tasks queued behind the idle task
@@ -108,6 +111,23 @@ Bring-up covers, in order:
     left zeroed for `.bss`, and the pages are mapped with the permissions the
     segment asks for. Until there is a filesystem, the binary is built from
     `support/aarch64/hello.S` and carried in the kernel image with `.incbin`.
+16. **virtio-mmio and virtio-blk** (`virtio.c`). QEMU's `virt` lays 32 virtio-mmio
+    slots end to end at `0x0A000000`, SPI 16 upwards, and fills them from the top;
+    the probe walks them and reports what is plugged in. The block driver then
+    takes the device through the legacy (version 1) handshake — status bits,
+    feature selection, guest page size, a split virtqueue published through the
+    single page-frame-number register — and reads a sector with the usual
+    three-descriptor chain (header, data, status), polling the used ring rather
+    than taking the interrupt. The self-test reports the capacity and the first
+    bytes of sector 0, which match the signature written into the disk image.
+
+    Boot it with a disk attached:
+
+    ```sh
+    qemu-system-aarch64 -M virt,gic-version=3 -cpu cortex-a72 -m 1024M -nographic \
+        -kernel build/kernel-aarch64.img \
+        -drive file=disk.img,if=none,id=d0,format=raw -device virtio-blk-device,drive=d0
+    ```
 
 ## Building and running
 
@@ -132,8 +152,11 @@ loader, but no userland yet. The ladder from here:
 - **The syscall surface** — three calls is enough for a test binary; glibc needs
   a couple of hundred (`openat`, `mmap`, `brk`, `clone`, `futex`, `ioctl`, …).
   This is the bulk of the remaining work before any real program runs.
-- **Storage & console** — virtio-mmio block and console, then ext2 on top, so
-  binaries can come off a disk instead of being baked into the kernel.
+- **Storage & console** — block reads work; writes, virtio-console and then ext2
+  on top are what let binaries come off a disk instead of being baked into the
+  kernel. Completion is polled today, so hooking the device's SPI into the GIC
+  (`GICD_ISENABLER`/`GICD_IROUTER`, which the PPI path does not touch yet) comes
+  with the first driver that cannot busy-wait.
 - **Userland** — an AArch64 Void glibc rootfs, init, and a shell.
 - **Wiring the portable core** — the arch-neutral subsystems (vfs, ext2/3,
   scheduler policy, the module loader core minus relocations) plug in behind a

@@ -62,6 +62,26 @@ void *pmm_alloc_page(void) {
     return NULL;
 }
 
+void *pmm_alloc_pages(unsigned count) {
+    if (!count) return NULL;
+    for (uint64_t first = 0; first + count <= frame_count; first++) {
+        uint64_t run = 0;
+        while (run < count && !is_used(first + run)) run++;
+        if (run < count) {
+            first += run;                       // skip past the blocking frame
+            continue;
+        }
+        for (uint64_t i = 0; i < count; i++) {
+            mark_used(first + i);
+            free_frames--;
+            uint64_t *page = (uint64_t *)phys_to_virt(base_pa + (first + i) * PAGE_SIZE);
+            for (int word = 0; word < 512; word++) page[word] = 0;
+        }
+        return (void *)(base_pa + first * PAGE_SIZE);
+    }
+    return NULL;
+}
+
 void pmm_free_page(void *pa) {
     uint64_t frame = ((uint64_t)pa - base_pa) / PAGE_SIZE;
     if (frame < frame_count && is_used(frame)) {

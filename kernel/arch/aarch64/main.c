@@ -148,6 +148,24 @@ void aarch64_main(uint64_t dtb_phys) {
 
     address_space_selftest();
 
+    if (virtio_mmio_probe() == 0)
+        kprintf("virtio-mmio: no devices attached\n");
+
+    int blk = virtio_blk_init();
+    if (blk == 0) {
+        kprintf("virtio-blk: %lu sectors (%lu MiB)\n", virtio_blk_capacity(),
+                (virtio_blk_capacity() * 512) >> 20);
+        static uint8_t sector[512];
+        if (virtio_blk_read(0, sector) == 0)
+            kprintf("virtio-blk: sector 0 reads %x %x %x %x %x %x %x %x\n",
+                    sector[0], sector[1], sector[2], sector[3],
+                    sector[4], sector[5], sector[6], sector[7]);
+        else
+            kprintf("virtio-blk: reading sector 0 failed\n");
+    } else if (blk != -1) {
+        kprintf("virtio-blk: initialisation failed (%d)\n", blk);
+    }
+
     gic_init();
     kprintf("GICv3 initialised\n");
 
