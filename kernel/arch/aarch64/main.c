@@ -1,12 +1,13 @@
 #include <stdint.h>
 
 #include "arch.h"
+#include "../../include/cpu.h"
 
 extern char kernel_start[];
 extern char user_elf_start[];
 extern char user_elf_end[];
 
-static const void *init_image;          // /sbin/init off the disk, when there is one
+static const void *init_image;
 static uint64_t init_length;
 
 #define USER_STACK_PAGES 4U
@@ -36,7 +37,7 @@ void aarch64_irq_handler(void) {
         if ((timer_ticks() % 200) == 0)
             kprintf("[aarch64] alive at %lu s, task %d running, heap %lu KiB free\n",
                     timer_ticks() / 100, sched_current_id(), heap_free_bytes() >> 10);
-        sched_tick();                   // preempt whoever was running
+        sched_tick();
         return;
     }
     if (intid < 1020) gic_eoi(intid);
@@ -56,7 +57,6 @@ static void address_space_selftest(void) {
         return;
     }
 
-    // Leaving the boot identity map behind: TTBR0 is user memory from now on.
     vmm_switch_space(space_a);
     kprintf("address spaces: identity map dropped, TTBR0 = %p\n",
             (void *)sysreg_read("ttbr0_el1"));
@@ -84,7 +84,7 @@ static void worker_task(void *argument) {
     for (int round = 0; round < 3; round++) {
         kprintf("[task %lu] round %d at tick %lu\n", id, round, timer_ticks());
         uint64_t until = timer_ticks() + 15 + id * 5;
-        while (timer_ticks() < until) {         // preemption moves us aside here
+        while (timer_ticks() < until) {
         }
     }
     kprintf("[task %lu] finished\n", id);
@@ -137,6 +137,12 @@ void aarch64_main(uint64_t dtb_phys) {
     kprintf("\n=== Tunix aarch64 ===\n");
     kprintf("running at %s, kernel at %p (higher half)\n", current_el_name(),
             (void *)kernel_start);
+
+    struct cpu_identity identity;
+    cpu_identify(&identity);
+    kprintf("cpu: %s %s, part %x revision %u\n", identity.vendor,
+            identity.model[0] ? identity.model : "(unlisted part)",
+            identity.model_number, identity.stepping);
 
     uint64_t ram_base = KERNEL_PHYS_BASE, ram = 0;
     uint32_t cpus = 0;
@@ -215,7 +221,7 @@ void aarch64_main(uint64_t dtb_phys) {
     sched_create("usertest", user_task, NULL);
     kprintf("scheduler: 3 tasks queued behind the idle task\n");
 
-    __asm__ volatile("msr daifclr, #2" ::: "memory");   // unmask IRQ
+    __asm__ volatile("msr daifclr, #2" ::: "memory");
 
     for (;;) __asm__ volatile("wfi");
 }

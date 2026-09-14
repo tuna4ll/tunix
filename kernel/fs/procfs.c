@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "../include/abi_gaps.h"
+#include "../include/cpu.h"
 #include "../include/ext2.h"
 #include "../include/heap.h"
 #include "../include/irq.h"
@@ -66,54 +67,14 @@ static int64_t text_read(const struct text_buffer *text, uint64_t offset,
     return (int64_t)size;
 }
 
-static void cpuid(uint32_t leaf, uint32_t subleaf,
-                  uint32_t *a, uint32_t *b, uint32_t *c, uint32_t *d) {
-    __asm__ volatile("cpuid"
-                     : "=a"(*a), "=b"(*b), "=c"(*c), "=d"(*d)
-                     : "a"(leaf), "c"(subleaf));
-}
-
-static void cpu_vendor(char output[13]) {
-    uint32_t a, b, c, d;
-    cpuid(0, 0, &a, &b, &c, &d);
-    (void)a;
-    memcpy(output + 0, &b, 4);
-    memcpy(output + 4, &d, 4);
-    memcpy(output + 8, &c, 4);
-    output[12] = '\0';
-}
-
-static void cpu_model(char output[49]) {
-    uint32_t a, b, c, d;
-    cpuid(0x80000000U, 0, &a, &b, &c, &d);
-    if (a < 0x80000004U) {
-        strncpy(output, "x86_64 processor", 49);
-        return;
-    }
-    uint32_t *words = (uint32_t *)(void *)output;
-    for (uint32_t leaf = 0; leaf < 3; leaf++) {
-        cpuid(0x80000002U + leaf, 0, &a, &b, &c, &d);
-        words[leaf * 4 + 0] = a;
-        words[leaf * 4 + 1] = b;
-        words[leaf * 4 + 2] = c;
-        words[leaf * 4 + 3] = d;
-    }
-    output[48] = '\0';
-    size_t begin = 0;
-    while (output[begin] == ' ') begin++;
-    if (begin) memmove(output, output + begin, strlen(output + begin) + 1);
-    size_t length = strlen(output);
-    while (length && output[length - 1] == ' ') output[--length] = '\0';
-}
-
 static int64_t proc_cpuinfo_read(struct vfs_node *node, uint64_t offset,
                                  size_t size, void *output) {
     (void)node;
     struct text_buffer text = {{0}, 0};
-    char vendor[13];
-    char model[49];
-    cpu_vendor(vendor);
-    cpu_model(model);
+    struct cpu_identity identity;
+    cpu_identify(&identity);
+    const char *vendor = identity.vendor;
+    const char *model = identity.model[0] ? identity.model : "unknown processor";
     uint64_t frequency = time_tsc_frequency();
 
     unsigned cpus = smp_cpu_count();
@@ -131,7 +92,9 @@ static int64_t proc_cpuinfo_read(struct vfs_node *node, uint64_t offset,
         text_char(&text, '\n');
         text_string(&text, "cpu cores\t: "); text_unsigned(&text, cpus); text_char(&text, '\n');
         text_string(&text, "address sizes\t: 48 bits virtual\n");
+#if defined(__x86_64__)
         text_string(&text, "flags\t\t: fpu tsc msr pae apic mtrr cmov pat mmx fxsr sse sse2 syscall nx lm\n");
+#endif
         text_char(&text, '\n');
     }
     return text_read(&text, offset, size, output);

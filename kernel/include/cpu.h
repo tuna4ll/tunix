@@ -44,6 +44,13 @@ static inline uint64_t cpu_counter_ordered(void) {
     return ((uint64_t)high << 32) | low;
 }
 
+static inline void cpu_cpuid(uint32_t leaf, uint32_t subleaf,
+                             uint32_t *a, uint32_t *b, uint32_t *c, uint32_t *d) {
+    __asm__ volatile("cpuid"
+                     : "=a"(*a), "=b"(*b), "=c"(*c), "=d"(*d)
+                     : "a"(leaf), "c"(subleaf));
+}
+
 #elif defined(__aarch64__)
 
 static inline void cpu_relax(void) {
@@ -87,5 +94,15 @@ static inline uint64_t cpu_counter_ordered(void) {
 #else
 #error "no processor primitives for this architecture"
 #endif
+
+struct cpu_identity {
+    char vendor[13];
+    char model[49];
+    uint32_t family;
+    uint32_t model_number;
+    uint32_t stepping;
+};
+
+void cpu_identify(struct cpu_identity *out);
 
 #endif
