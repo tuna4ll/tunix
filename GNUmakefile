@@ -29,7 +29,7 @@ KERNEL_CFLAGS := -std=gnu11 -Wall -Wextra -Werror -ffreestanding \
 KERNEL_LDFLAGS := -nostdlib -no-pie -Wl,-T,kernel/arch/x86_64/linker.ld \
 	-Wl,--gc-sections -Wl,--build-id=none -Wl,-z,max-page-size=0x1000
 
-KERNEL_SOURCES := $(shell find kernel -name '*.c' -o -name '*.S')
+KERNEL_SOURCES := $(shell find kernel -path kernel/arch/aarch64 -prune -o \( -name '*.c' -o -name '*.S' \) -print)
 KERNEL_OBJECTS := $(KERNEL_SOURCES:%=$(BUILD)/%.o)
 KERNEL_DEPS    := $(KERNEL_OBJECTS:.o=.d)
 
@@ -224,3 +224,39 @@ soundtest: $(KERNEL) $(LIMINE_EXE)
 TEST ?= schedbench
 testimage: $(KERNEL) $(LIMINE_EXE)
 	BOOT=0 IMAGE_TABLE='$(IMAGE_TABLE)' support/tests/$(TEST).sh $(SCHEDBENCH_CPUS) $(KERNEL)
+
+# --- aarch64 port (QEMU virt bring-up) -------------------------------------
+AARCH64_CC     ?= aarch64-linux-gnu-gcc
+AARCH64_OBJCOPY ?= aarch64-linux-gnu-objcopy
+AARCH64_CFLAGS := -std=gnu11 -Wall -Wextra -Werror -ffreestanding \
+	-fno-stack-protector -fno-pic -fno-pie -fno-builtin \
+	-fno-asynchronous-unwind-tables -fno-unwind-tables \
+	-mgeneral-regs-only -mstrict-align -march=armv8-a \
+	-Ikernel/arch/aarch64
+AARCH64_LDFLAGS := -nostdlib -Wl,-T,kernel/arch/aarch64/linker.ld -Wl,--build-id=none
+AARCH64_SRC := $(shell find kernel/arch/aarch64 -name '*.c' -o -name '*.S' 2>/dev/null)
+AARCH64_OBJ := $(AARCH64_SRC:%=$(BUILD)/aarch64/%.o)
+AARCH64_KERNEL := $(BUILD)/kernel-aarch64.elf
+AARCH64_IMAGE  := $(BUILD)/kernel-aarch64.img
+
+.PHONY: aarch64 run-aarch64
+aarch64: $(AARCH64_IMAGE)
+
+$(AARCH64_KERNEL): $(AARCH64_OBJ) kernel/arch/aarch64/linker.ld
+	$(AARCH64_CC) $(AARCH64_LDFLAGS) $(AARCH64_OBJ) -o $@
+
+$(AARCH64_IMAGE): $(AARCH64_KERNEL)
+	$(AARCH64_OBJCOPY) -O binary $< $@
+
+$(BUILD)/aarch64/%.c.o: %.c
+	@mkdir -p $(dir $@)
+	$(AARCH64_CC) $(AARCH64_CFLAGS) -c $< -o $@
+
+$(BUILD)/aarch64/%.S.o: %.S
+	@mkdir -p $(dir $@)
+	$(AARCH64_CC) $(AARCH64_CFLAGS) -c $< -o $@
+
+QEMU_AARCH64 ?= qemu-system-aarch64
+run-aarch64: $(AARCH64_IMAGE)
+	$(QEMU_AARCH64) -M virt,gic-version=3 -cpu cortex-a72 -smp $(QEMU_SMP) \
+		-m 512M -nographic -no-reboot -kernel $(AARCH64_IMAGE)
