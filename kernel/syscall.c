@@ -898,12 +898,12 @@ static int retry_io_wait(struct syscall_frame *frame, uint64_t syscall_number,
 
     if (process_signal_interrupts_wait()) {
         clear_io_wait(waiting);
-        frame->rax = (uint64_t)-(int64_t)EINTR;
+        SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINTR;
         return 1;
     }
 
     frame->user_rip -= 2U;
-    frame->rax = syscall_number;
+    SYSCALL_RET(frame) = syscall_number;
     waiting->syscall_rewound = 1;
 
     if (process_sleep_on(frame, process_io_wait_channel()) != 0)
@@ -1571,7 +1571,7 @@ static void accept_or_block(struct syscall_frame *frame, uint64_t syscall_number
         block_and_retry(frame, syscall_number, file, 0);
         return;
     }
-    frame->rax = (uint64_t)result;
+    SYSCALL_RET(frame) = (uint64_t)result;
 }
 
 static int64_t sys_sendto(int fd, uint64_t user_data, size_t length, int flags,
@@ -3930,11 +3930,11 @@ static void block_and_retry(struct syscall_frame *frame, uint64_t syscall_number
                             struct file *file, int writing) {
 
     if (process_signal_interrupts_wait()) {
-        frame->rax = (uint64_t)-(int64_t)EINTR;
+        SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINTR;
         return;
     }
     frame->user_rip -= 2U;
-    frame->rax = syscall_number;
+    SYSCALL_RET(frame) = syscall_number;
     struct process *process = process_current();
     if (process) process->syscall_rewound = 1;
 
@@ -4805,7 +4805,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
     vfs_trim_cache(file_cache_budget());
     if (heap_under_pressure()) vfs_reclaim_file_data(vfs_root);
     struct process *caller = process_current();
-    uint64_t syscall_number = frame->rax;
+    uint64_t syscall_number = SYSCALL_NR(frame);
     if (caller) caller->syscall_rewound = 0;
     if (caller && caller->io_wait_active && caller->io_wait_syscall != syscall_number)
         clear_io_wait(caller);
@@ -4813,122 +4813,122 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
 
     switch (syscall_number) {
         case SYS_READ: {
-            int fd = (int)frame->rdi;
-            int64_t result = sys_read(fd, frame->rsi, (size_t)frame->rdx);
+            int fd = (int)SYSCALL_ARG0(frame);
+            int64_t result = sys_read(fd, SYSCALL_ARG1(frame), (size_t)SYSCALL_ARG2(frame));
             struct process *process = process_current();
             struct file *file = process && fd >= 0 && fd < PROCESS_MAX_FDS ? process->files->fds[fd] : NULL;
             if (result == -EAGAIN && file && !(file->flags & O_NONBLOCK)) {
                 block_and_retry(frame, SYS_READ, file, 0);
             } else {
-                frame->rax = (uint64_t)result;
+                SYSCALL_RET(frame) = (uint64_t)result;
             }
             break;
         }
         case SYS_WRITE: {
-            int fd = (int)frame->rdi;
-            int64_t result = sys_write(fd, frame->rsi, (size_t)frame->rdx);
+            int fd = (int)SYSCALL_ARG0(frame);
+            int64_t result = sys_write(fd, SYSCALL_ARG1(frame), (size_t)SYSCALL_ARG2(frame));
             struct file *file = file_from_fd(fd);
             if (result == -EAGAIN && file && !(file->flags & O_NONBLOCK)) {
                 block_and_retry(frame, SYS_WRITE, file, 1);
             } else {
-                frame->rax = (uint64_t)result;
+                SYSCALL_RET(frame) = (uint64_t)result;
             }
             break;
         }
-        case SYS_OPEN: frame->rax = (uint64_t)open_at(AT_FDCWD, frame->rdi, frame->rsi, frame->rdx); break;
-        case SYS_CLOSE: frame->rax = (uint64_t)sys_close((int)frame->rdi); break;
+        case SYS_OPEN: SYSCALL_RET(frame) = (uint64_t)open_at(AT_FDCWD, SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame)); break;
+        case SYS_CLOSE: SYSCALL_RET(frame) = (uint64_t)sys_close((int)SYSCALL_ARG0(frame)); break;
         case SYS_POLL: {
-            int timeout_ms = (int)frame->rdx;
+            int timeout_ms = (int)SYSCALL_ARG2(frame);
             int64_t timeout_ns = timeout_ms_to_ns(timeout_ms);
-            int64_t result = sys_poll_once(frame->rdi, frame->rsi, timeout_ms == 0);
+            int64_t result = sys_poll_once(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), timeout_ms == 0);
             if (result != 0 || timeout_ms == 0) {
                 clear_io_wait(process_current());
-                frame->rax = (uint64_t)result;
+                SYSCALL_RET(frame) = (uint64_t)result;
             } else if (!retry_io_wait(frame, SYS_POLL, timeout_ns)) {
-                frame->rax = (uint64_t)sys_poll_once(frame->rdi, frame->rsi, 1);
+                SYSCALL_RET(frame) = (uint64_t)sys_poll_once(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), 1);
             }
             break;
         }
-        case SYS_STAT: frame->rax = (uint64_t)stat_path(AT_FDCWD, frame->rdi, frame->rsi, 1); break;
-        case SYS_LSTAT: frame->rax = (uint64_t)stat_path(AT_FDCWD, frame->rdi, frame->rsi, 0); break;
-        case SYS_FSTAT: frame->rax = (uint64_t)sys_fstat((int)frame->rdi, frame->rsi); break;
-        case SYS_LSEEK: frame->rax = (uint64_t)sys_lseek((int)frame->rdi, (int64_t)frame->rsi, (int)frame->rdx); break;
-        case SYS_MMAP: frame->rax = (uint64_t)sys_mmap(frame->rdi, frame->rsi, (int)frame->rdx, (int)frame->r10, (int)frame->r8, frame->r9); break;
-        case SYS_MPROTECT: frame->rax = (uint64_t)sys_mprotect(frame->rdi, frame->rsi, (int)frame->rdx); break;
+        case SYS_STAT: SYSCALL_RET(frame) = (uint64_t)stat_path(AT_FDCWD, SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), 1); break;
+        case SYS_LSTAT: SYSCALL_RET(frame) = (uint64_t)stat_path(AT_FDCWD, SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), 0); break;
+        case SYS_FSTAT: SYSCALL_RET(frame) = (uint64_t)sys_fstat((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame)); break;
+        case SYS_LSEEK: SYSCALL_RET(frame) = (uint64_t)sys_lseek((int)SYSCALL_ARG0(frame), (int64_t)SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame)); break;
+        case SYS_MMAP: SYSCALL_RET(frame) = (uint64_t)sys_mmap(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame), (int)SYSCALL_ARG3(frame), (int)SYSCALL_ARG4(frame), SYSCALL_ARG5(frame)); break;
+        case SYS_MPROTECT: SYSCALL_RET(frame) = (uint64_t)sys_mprotect(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame)); break;
         case SYS_MREMAP:
-            frame->rax = (uint64_t)sys_mremap(frame->rdi, frame->rsi, frame->rdx,
-                                              (int)frame->r10, frame->r8);
+            SYSCALL_RET(frame) = (uint64_t)sys_mremap(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame),
+                                              (int)SYSCALL_ARG3(frame), SYSCALL_ARG4(frame));
             break;
 
-        case SYS_MADVISE: frame->rax = 0; break;
-        case SYS_FADVISE64: frame->rax = 0; break;
+        case SYS_MADVISE: SYSCALL_RET(frame) = 0; break;
+        case SYS_FADVISE64: SYSCALL_RET(frame) = 0; break;
         case SYS_MSYNC:
-            frame->rax = (uint64_t)sys_msync(frame->rdi, frame->rsi, (int)frame->rdx);
+            SYSCALL_RET(frame) = (uint64_t)sys_msync(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame));
             break;
-        case SYS_MUNMAP: frame->rax = (uint64_t)sys_munmap(frame->rdi, frame->rsi); break;
+        case SYS_MUNMAP: SYSCALL_RET(frame) = (uint64_t)sys_munmap(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame)); break;
         case SYS_SHMGET:
-            frame->rax = (uint64_t)sys_shmget((int32_t)frame->rdi, frame->rsi, (int)frame->rdx);
+            SYSCALL_RET(frame) = (uint64_t)sys_shmget((int32_t)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame));
             break;
         case SYS_SHMAT:
-            frame->rax = (uint64_t)sys_shmat((int)frame->rdi, frame->rsi, (int)frame->rdx);
+            SYSCALL_RET(frame) = (uint64_t)sys_shmat((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame));
             break;
-        case SYS_SHMDT: frame->rax = (uint64_t)sys_shmdt(frame->rdi); break;
+        case SYS_SHMDT: SYSCALL_RET(frame) = (uint64_t)sys_shmdt(SYSCALL_ARG0(frame)); break;
         case SYS_SHMCTL:
-            frame->rax = (uint64_t)sys_shmctl((int)frame->rdi, (int)frame->rsi, frame->rdx);
+            SYSCALL_RET(frame) = (uint64_t)sys_shmctl((int)SYSCALL_ARG0(frame), (int)SYSCALL_ARG1(frame), SYSCALL_ARG2(frame));
             break;
-        case SYS_BRK: frame->rax = (uint64_t)sys_brk(frame->rdi); break;
-        case SYS_RT_SIGACTION: frame->rax = (uint64_t)sys_sigaction((int)frame->rdi, frame->rsi, frame->rdx, frame->r10); break;
-        case SYS_RT_SIGPROCMASK: frame->rax = (uint64_t)sys_sigprocmask((int)frame->rdi, frame->rsi, frame->rdx, frame->r10); break;
+        case SYS_BRK: SYSCALL_RET(frame) = (uint64_t)sys_brk(SYSCALL_ARG0(frame)); break;
+        case SYS_RT_SIGACTION: SYSCALL_RET(frame) = (uint64_t)sys_sigaction((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame), SYSCALL_ARG3(frame)); break;
+        case SYS_RT_SIGPROCMASK: SYSCALL_RET(frame) = (uint64_t)sys_sigprocmask((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame), SYSCALL_ARG3(frame)); break;
         case SYS_RT_SIGRETURN:
-            if (process_sigreturn(frame) != 0) frame->rax = (uint64_t)-(int64_t)EINVAL;
+            if (process_sigreturn(frame) != 0) SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINVAL;
             skip_signal_delivery = 1;
             break;
         case SYS_IOCTL: {
-            int fd = (int)frame->rdi;
-            int64_t result = sys_ioctl(fd, (unsigned long)frame->rsi, frame->rdx);
+            int fd = (int)SYSCALL_ARG0(frame);
+            int64_t result = sys_ioctl(fd, (unsigned long)SYSCALL_ARG1(frame), SYSCALL_ARG2(frame));
             struct file *file = file_from_fd(fd);
 
             if (result == -EAGAIN && file && !(file->flags & O_NONBLOCK) &&
                 file->kind == FILE_KIND_VFS && file->node &&
                 file->node->write_ready) {
                 block_and_retry(frame, SYS_IOCTL, file, 1);
-            } else if (result == -EAGAIN && (unsigned long)frame->rsi == VT_WAITACTIVE) {
+            } else if (result == -EAGAIN && (unsigned long)SYSCALL_ARG1(frame) == VT_WAITACTIVE) {
 
                 if (process_signal_interrupts_wait()) {
-                    frame->rax = (uint64_t)-(int64_t)EINTR;
+                    SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINTR;
                     break;
                 }
                 frame->user_rip -= 2U;
-                frame->rax = SYS_IOCTL;
+                SYSCALL_RET(frame) = SYS_IOCTL;
                 struct process *waiter = process_current();
                 if (waiter) waiter->syscall_rewound = 1;
                 if (process_sleep_on(frame, vt_switch_wait_channel()) != 0)
                     process_yield_from_syscall(frame);
             } else {
-                frame->rax = (uint64_t)result;
+                SYSCALL_RET(frame) = (uint64_t)result;
             }
             break;
         }
         case SYS_PREAD64: {
             struct process *process = process_current();
-            int fd = (int)frame->rdi;
-            if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd] || process->files->fds[fd]->kind != FILE_KIND_VFS) frame->rax = (uint64_t)-(int64_t)EBADF;
+            int fd = (int)SYSCALL_ARG0(frame);
+            if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd] || process->files->fds[fd]->kind != FILE_KIND_VFS) SYSCALL_RET(frame) = (uint64_t)-(int64_t)EBADF;
             else {
                 uint64_t saved = process->files->fds[fd]->offset;
-                process->files->fds[fd]->offset = frame->r10;
-                frame->rax = (uint64_t)sys_read(fd, frame->rsi, (size_t)frame->rdx);
+                process->files->fds[fd]->offset = SYSCALL_ARG3(frame);
+                SYSCALL_RET(frame) = (uint64_t)sys_read(fd, SYSCALL_ARG1(frame), (size_t)SYSCALL_ARG2(frame));
                 process->files->fds[fd]->offset = saved;
             }
             break;
         }
         case SYS_PWRITE64: {
             struct process *process = process_current();
-            int fd = (int)frame->rdi;
-            if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd] || process->files->fds[fd]->kind != FILE_KIND_VFS) frame->rax = (uint64_t)-(int64_t)EBADF;
+            int fd = (int)SYSCALL_ARG0(frame);
+            if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd] || process->files->fds[fd]->kind != FILE_KIND_VFS) SYSCALL_RET(frame) = (uint64_t)-(int64_t)EBADF;
             else {
                 uint64_t saved = process->files->fds[fd]->offset;
-                process->files->fds[fd]->offset = frame->r10;
-                frame->rax = (uint64_t)sys_write(fd, frame->rsi, (size_t)frame->rdx);
+                process->files->fds[fd]->offset = SYSCALL_ARG3(frame);
+                SYSCALL_RET(frame) = (uint64_t)sys_write(fd, SYSCALL_ARG1(frame), (size_t)SYSCALL_ARG2(frame));
                 process->files->fds[fd]->offset = saved;
             }
             break;
@@ -4937,15 +4937,15 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         case SYS_PREADV:
         case SYS_PWRITEV: {
             struct process *process = process_current();
-            int fd = (int)frame->rdi;
+            int fd = (int)SYSCALL_ARG0(frame);
             int writing = syscall_number == SYS_PWRITEV;
             if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd] ||
                 process->files->fds[fd]->kind != FILE_KIND_VFS)
-                frame->rax = (uint64_t)-(int64_t)EBADF;
+                SYSCALL_RET(frame) = (uint64_t)-(int64_t)EBADF;
             else {
                 uint64_t saved = process->files->fds[fd]->offset;
-                process->files->fds[fd]->offset = frame->r10;
-                frame->rax = (uint64_t)sys_readv_writev(fd, frame->rsi, (int)frame->rdx, writing);
+                process->files->fds[fd]->offset = SYSCALL_ARG3(frame);
+                SYSCALL_RET(frame) = (uint64_t)sys_readv_writev(fd, SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame), writing);
                 process->files->fds[fd]->offset = saved;
             }
             break;
@@ -4953,97 +4953,97 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         case SYS_READV:
         case SYS_WRITEV: {
             int writing = syscall_number == SYS_WRITEV;
-            int fd = (int)frame->rdi;
-            int64_t result = sys_readv_writev(fd, frame->rsi, (int)frame->rdx, writing);
+            int fd = (int)SYSCALL_ARG0(frame);
+            int64_t result = sys_readv_writev(fd, SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame), writing);
 
             struct file *file = file_from_fd(fd);
             if (result == -EAGAIN && file && !(file->flags & O_NONBLOCK))
                 block_and_retry(frame, syscall_number, file, writing);
             else
-                frame->rax = (uint64_t)result;
+                SYSCALL_RET(frame) = (uint64_t)result;
             break;
         }
         case SYS_ACCESS:
-            frame->rax = (uint64_t)sys_faccess_at(AT_FDCWD, frame->rdi, (int)frame->rsi, 0);
+            SYSCALL_RET(frame) = (uint64_t)sys_faccess_at(AT_FDCWD, SYSCALL_ARG0(frame), (int)SYSCALL_ARG1(frame), 0);
             break;
         case SYS_PSELECT6: {
-            int64_t timeout_ns = read_timespec_timeout_ns(frame->r8);
+            int64_t timeout_ns = read_timespec_timeout_ns(SYSCALL_ARG4(frame));
             if (timeout_ns < -1) {
                 clear_io_wait(process_current());
                 process_restore_signal_mask();
-                frame->rax = (uint64_t)timeout_ns;
+                SYSCALL_RET(frame) = (uint64_t)timeout_ns;
                 break;
             }
-            apply_wait_signal_mask(frame->r9);
-            int64_t result = sys_select_once((int)frame->rdi, frame->rsi, frame->rdx,
-                                             frame->r10, timeout_ns == 0);
+            apply_wait_signal_mask(SYSCALL_ARG5(frame));
+            int64_t result = sys_select_once((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame),
+                                             SYSCALL_ARG3(frame), timeout_ns == 0);
             if (result != 0 || timeout_ns == 0) {
                 clear_io_wait(process_current());
                 process_restore_signal_mask();
-                frame->rax = (uint64_t)result;
+                SYSCALL_RET(frame) = (uint64_t)result;
             } else if (!retry_io_wait(frame, SYS_PSELECT6, timeout_ns)) {
                 process_restore_signal_mask();
-                frame->rax = (uint64_t)sys_select_once((int)frame->rdi, frame->rsi,
-                                                       frame->rdx, frame->r10, 1);
+                SYSCALL_RET(frame) = (uint64_t)sys_select_once((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame),
+                                                       SYSCALL_ARG2(frame), SYSCALL_ARG3(frame), 1);
             } else if (!process_current()->syscall_rewound) {
                 process_restore_signal_mask();
             }
             break;
         }
         case SYS_PPOLL: {
-            int64_t timeout_ns = read_timespec_timeout_ns(frame->rdx);
+            int64_t timeout_ns = read_timespec_timeout_ns(SYSCALL_ARG2(frame));
             if (timeout_ns < -1) {
                 clear_io_wait(process_current());
                 process_restore_signal_mask();
-                frame->rax = (uint64_t)timeout_ns;
+                SYSCALL_RET(frame) = (uint64_t)timeout_ns;
                 break;
             }
-            apply_wait_signal_set(frame->r10, frame->r8);
-            int64_t result = sys_poll_once(frame->rdi, frame->rsi, timeout_ns == 0);
+            apply_wait_signal_set(SYSCALL_ARG3(frame), SYSCALL_ARG4(frame));
+            int64_t result = sys_poll_once(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), timeout_ns == 0);
             if (result != 0 || timeout_ns == 0) {
                 clear_io_wait(process_current());
                 process_restore_signal_mask();
-                frame->rax = (uint64_t)result;
+                SYSCALL_RET(frame) = (uint64_t)result;
             } else if (!retry_io_wait(frame, SYS_PPOLL, timeout_ns)) {
                 process_restore_signal_mask();
-                frame->rax = (uint64_t)sys_poll_once(frame->rdi, frame->rsi, 1);
+                SYSCALL_RET(frame) = (uint64_t)sys_poll_once(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), 1);
             } else if (!process_current()->syscall_rewound) {
                 process_restore_signal_mask();
             }
             break;
         }
         case SYS_FACCESSAT:
-            frame->rax = (uint64_t)sys_faccess_at((int)frame->rdi, frame->rsi,
-                                                  (int)frame->rdx, 0);
+            SYSCALL_RET(frame) = (uint64_t)sys_faccess_at((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame),
+                                                  (int)SYSCALL_ARG2(frame), 0);
             break;
-        case SYS_PIPE: frame->rax = (uint64_t)sys_pipe(frame->rdi, 0); break;
+        case SYS_PIPE: SYSCALL_RET(frame) = (uint64_t)sys_pipe(SYSCALL_ARG0(frame), 0); break;
         case SYS_SELECT: {
-            int64_t timeout_ns = read_timeval_timeout_ns(frame->r8);
+            int64_t timeout_ns = read_timeval_timeout_ns(SYSCALL_ARG4(frame));
             if (timeout_ns < -1) {
                 clear_io_wait(process_current());
-                frame->rax = (uint64_t)timeout_ns;
+                SYSCALL_RET(frame) = (uint64_t)timeout_ns;
                 break;
             }
-            int64_t result = sys_select_once((int)frame->rdi, frame->rsi, frame->rdx,
-                                             frame->r10, timeout_ns == 0);
+            int64_t result = sys_select_once((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame),
+                                             SYSCALL_ARG3(frame), timeout_ns == 0);
             if (result != 0 || timeout_ns == 0) {
                 clear_io_wait(process_current());
-                frame->rax = (uint64_t)result;
+                SYSCALL_RET(frame) = (uint64_t)result;
             } else if (!retry_io_wait(frame, SYS_SELECT, timeout_ns)) {
-                frame->rax = (uint64_t)sys_select_once((int)frame->rdi, frame->rsi,
-                                                       frame->rdx, frame->r10, 1);
+                SYSCALL_RET(frame) = (uint64_t)sys_select_once((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame),
+                                                       SYSCALL_ARG2(frame), SYSCALL_ARG3(frame), 1);
             }
             break;
         }
-        case SYS_SCHED_YIELD: frame->rax = 0; process_yield_from_syscall(frame); break;
+        case SYS_SCHED_YIELD: SYSCALL_RET(frame) = 0; process_yield_from_syscall(frame); break;
         case SYS_SCHED_GETAFFINITY:
-            frame->rax = (uint64_t)sys_sched_getaffinity(frame->rdi,
-                                                        (size_t)frame->rsi, frame->rdx);
+            SYSCALL_RET(frame) = (uint64_t)sys_sched_getaffinity(SYSCALL_ARG0(frame),
+                                                        (size_t)SYSCALL_ARG1(frame), SYSCALL_ARG2(frame));
             break;
         case SYS_SCHED_SETAFFINITY:
-            frame->rax = (uint64_t)sys_sched_setaffinity(frame->rdi,
-                                                        (size_t)frame->rsi, frame->rdx);
-            if ((int64_t)frame->rax == 0) {
+            SYSCALL_RET(frame) = (uint64_t)sys_sched_setaffinity(SYSCALL_ARG0(frame),
+                                                        (size_t)SYSCALL_ARG1(frame), SYSCALL_ARG2(frame));
+            if ((int64_t)SYSCALL_RET(frame) == 0) {
                 uint64_t mask = 0;
                 if (process_get_affinity(0, &mask) == 0 &&
                     !(mask & (1ULL << cpu_current()->index)))
@@ -5051,40 +5051,40 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             }
             break;
         case SYS_EPOLL_CREATE:
-            frame->rax = frame->rdi == 0 ? (uint64_t)-(int64_t)EINVAL :
+            SYSCALL_RET(frame) = SYSCALL_ARG0(frame) == 0 ? (uint64_t)-(int64_t)EINVAL :
                          (uint64_t)sys_epoll_create(0);
             break;
-        case SYS_DUP: frame->rax = (uint64_t)sys_dup((int)frame->rdi, 0, 0); break;
-        case SYS_DUP2: frame->rax = (uint64_t)sys_dup_to((int)frame->rdi, (int)frame->rsi, 0, 0); break;
+        case SYS_DUP: SYSCALL_RET(frame) = (uint64_t)sys_dup((int)SYSCALL_ARG0(frame), 0, 0); break;
+        case SYS_DUP2: SYSCALL_RET(frame) = (uint64_t)sys_dup_to((int)SYSCALL_ARG0(frame), (int)SYSCALL_ARG1(frame), 0, 0); break;
         case SYS_DUP3:
-            if (frame->rdx & ~O_CLOEXEC) frame->rax = (uint64_t)-(int64_t)EINVAL;
-            else frame->rax = (uint64_t)sys_dup_to((int)frame->rdi, (int)frame->rsi,
-                                                   (frame->rdx & O_CLOEXEC) != 0, 1);
+            if (SYSCALL_ARG2(frame) & ~O_CLOEXEC) SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINVAL;
+            else SYSCALL_RET(frame) = (uint64_t)sys_dup_to((int)SYSCALL_ARG0(frame), (int)SYSCALL_ARG1(frame),
+                                                   (SYSCALL_ARG2(frame) & O_CLOEXEC) != 0, 1);
             break;
         case SYS_NANOSLEEP: {
             struct linux_timespec request;
-            if (copy_from_user(&request, frame->rdi, sizeof(request)) != 0) {
-                frame->rax = (uint64_t)-(int64_t)EFAULT;
+            if (copy_from_user(&request, SYSCALL_ARG0(frame), sizeof(request)) != 0) {
+                SYSCALL_RET(frame) = (uint64_t)-(int64_t)EFAULT;
                 break;
             }
             if (request.tv_sec < 0 || request.tv_nsec < 0 || request.tv_nsec >= 1000000000LL) {
-                frame->rax = (uint64_t)-(int64_t)EINVAL;
+                SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINVAL;
                 break;
             }
             int64_t duration = request.tv_sec > (INT64_MAX - request.tv_nsec) / 1000000000LL ?
                 INT64_MAX : request.tv_sec * 1000000000LL + request.tv_nsec;
-            if (duration == 0) frame->rax = 0;
-            else if (!retry_io_wait(frame, SYS_NANOSLEEP, duration)) frame->rax = 0;
+            if (duration == 0) SYSCALL_RET(frame) = 0;
+            else if (!retry_io_wait(frame, SYS_NANOSLEEP, duration)) SYSCALL_RET(frame) = 0;
             break;
         }
         case SYS_GETITIMER: {
             struct process *process = process_current();
-            if ((int)frame->rdi != 0 ) {
-                frame->rax = (uint64_t)-(int64_t)EINVAL;
+            if ((int)SYSCALL_ARG0(frame) != 0 ) {
+                SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINVAL;
                 break;
             }
             if (!process) {
-                frame->rax = (uint64_t)-(int64_t)EINVAL;
+                SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINVAL;
                 break;
             }
             uint64_t now = time_uptime_ns();
@@ -5095,35 +5095,35 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             current_value[0].tv_usec = (int64_t)((process->itimer_real_interval_ns / 1000ULL) % 1000000ULL);
             current_value[1].tv_sec = (int64_t)(remaining_ns / 1000000000ULL);
             current_value[1].tv_usec = (int64_t)((remaining_ns / 1000ULL) % 1000000ULL);
-            if (frame->rsi && copy_to_user(frame->rsi, current_value, sizeof(current_value)) != 0) {
-                frame->rax = (uint64_t)-(int64_t)EFAULT;
+            if (SYSCALL_ARG1(frame) && copy_to_user(SYSCALL_ARG1(frame), current_value, sizeof(current_value)) != 0) {
+                SYSCALL_RET(frame) = (uint64_t)-(int64_t)EFAULT;
                 break;
             }
-            frame->rax = 0;
+            SYSCALL_RET(frame) = 0;
             break;
         }
         case SYS_SETITIMER: {
             struct process *process = process_current();
-            if ((int)frame->rdi != 0 ) {
-                frame->rax = (uint64_t)-(int64_t)EINVAL;
+            if ((int)SYSCALL_ARG0(frame) != 0 ) {
+                SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINVAL;
                 break;
             }
-            if (!process || !frame->rsi) {
-                frame->rax = (uint64_t)-(int64_t)EFAULT;
+            if (!process || !SYSCALL_ARG1(frame)) {
+                SYSCALL_RET(frame) = (uint64_t)-(int64_t)EFAULT;
                 break;
             }
             struct linux_timeval new_value[2];
-            if (copy_from_user(new_value, frame->rsi, sizeof(new_value)) != 0) {
-                frame->rax = (uint64_t)-(int64_t)EFAULT;
+            if (copy_from_user(new_value, SYSCALL_ARG1(frame), sizeof(new_value)) != 0) {
+                SYSCALL_RET(frame) = (uint64_t)-(int64_t)EFAULT;
                 break;
             }
             if (new_value[0].tv_sec < 0 || new_value[0].tv_usec < 0 || new_value[0].tv_usec >= 1000000LL ||
                 new_value[1].tv_sec < 0 || new_value[1].tv_usec < 0 || new_value[1].tv_usec >= 1000000LL) {
-                frame->rax = (uint64_t)-(int64_t)EINVAL;
+                SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINVAL;
                 break;
             }
             uint64_t now = time_uptime_ns();
-            if (frame->rdx) {
+            if (SYSCALL_ARG2(frame)) {
                 uint64_t remaining_ns = process->itimer_real_deadline_ns > now ?
                     process->itimer_real_deadline_ns - now : 0;
                 struct linux_timeval old_value[2];
@@ -5131,8 +5131,8 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
                 old_value[0].tv_usec = (int64_t)((process->itimer_real_interval_ns / 1000ULL) % 1000000ULL);
                 old_value[1].tv_sec = (int64_t)(remaining_ns / 1000000000ULL);
                 old_value[1].tv_usec = (int64_t)((remaining_ns / 1000ULL) % 1000000ULL);
-                if (copy_to_user(frame->rdx, old_value, sizeof(old_value)) != 0) {
-                    frame->rax = (uint64_t)-(int64_t)EFAULT;
+                if (copy_to_user(SYSCALL_ARG2(frame), old_value, sizeof(old_value)) != 0) {
+                    SYSCALL_RET(frame) = (uint64_t)-(int64_t)EFAULT;
                     break;
                 }
             }
@@ -5142,16 +5142,16 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
                                 (uint64_t)new_value[1].tv_usec * 1000ULL;
             process->itimer_real_interval_ns = interval_ns;
             process->itimer_real_deadline_ns = value_ns ? now + value_ns : 0;
-            frame->rax = 0;
+            SYSCALL_RET(frame) = 0;
             break;
         }
         case SYS_ALARM: {
             struct process *process = process_current();
             if (!process) {
-                frame->rax = 0;
+                SYSCALL_RET(frame) = 0;
                 break;
             }
-            uint64_t seconds = frame->rdi & 0xFFFFFFFFULL;
+            uint64_t seconds = SYSCALL_ARG0(frame) & 0xFFFFFFFFULL;
             uint64_t now = time_uptime_ns();
             uint64_t remaining_ns = process->itimer_real_deadline_ns > now ?
                 process->itimer_real_deadline_ns - now : 0;
@@ -5159,32 +5159,32 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             if (remaining_ns % 1000000000ULL) remaining_sec++;
             process->itimer_real_interval_ns = 0;
             process->itimer_real_deadline_ns = seconds ? now + seconds * 1000000000ULL : 0;
-            frame->rax = remaining_sec;
+            SYSCALL_RET(frame) = remaining_sec;
             break;
         }
         case SYS_EPOLL_WAIT:
         case SYS_EPOLL_PWAIT: {
-            int timeout_ms = (int)frame->r10;
+            int timeout_ms = (int)SYSCALL_ARG3(frame);
             int64_t timeout_ns = timeout_ms_to_ns(timeout_ms);
-            int64_t result = sys_epoll_wait_once((int)frame->rdi, frame->rsi,
-                                                  (int)frame->rdx, timeout_ms == 0);
+            int64_t result = sys_epoll_wait_once((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame),
+                                                  (int)SYSCALL_ARG2(frame), timeout_ms == 0);
             if (result != 0 || timeout_ms == 0) {
                 clear_io_wait(process_current());
-                frame->rax = (uint64_t)result;
+                SYSCALL_RET(frame) = (uint64_t)result;
             } else if (!retry_io_wait(frame, syscall_number, timeout_ns)) {
-                frame->rax = (uint64_t)sys_epoll_wait_once((int)frame->rdi, frame->rsi,
-                                                            (int)frame->rdx, 1);
+                SYSCALL_RET(frame) = (uint64_t)sys_epoll_wait_once((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame),
+                                                            (int)SYSCALL_ARG2(frame), 1);
             }
             break;
         }
         case SYS_EPOLL_CTL:
-            frame->rax = (uint64_t)sys_epoll_ctl((int)frame->rdi, (int)frame->rsi,
-                                                 (int)frame->rdx, frame->r10);
+            SYSCALL_RET(frame) = (uint64_t)sys_epoll_ctl((int)SYSCALL_ARG0(frame), (int)SYSCALL_ARG1(frame),
+                                                 (int)SYSCALL_ARG2(frame), SYSCALL_ARG3(frame));
             break;
-        case SYS_SOCKET: frame->rax = (uint64_t)sys_socket((int)frame->rdi, (int)frame->rsi, (int)frame->rdx); break;
+        case SYS_SOCKET: SYSCALL_RET(frame) = (uint64_t)sys_socket((int)SYSCALL_ARG0(frame), (int)SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame)); break;
         case SYS_CONNECT: {
-            int fd = (int)frame->rdi;
-            int64_t result = sys_connect(fd, frame->rsi, frame->rdx);
+            int fd = (int)SYSCALL_ARG0(frame);
+            int64_t result = sys_connect(fd, SYSCALL_ARG1(frame), SYSCALL_ARG2(frame));
             struct process *process = process_current();
             struct file *file = process && fd >= 0 && fd < PROCESS_MAX_FDS ? process->files->fds[fd] : NULL;
 
@@ -5192,231 +5192,231 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
                 !(file->flags & O_NONBLOCK)) {
                 block_and_retry(frame, SYS_CONNECT, file, 1);
             } else {
-                frame->rax = (uint64_t)result;
+                SYSCALL_RET(frame) = (uint64_t)result;
             }
             break;
         }
         case SYS_ACCEPT:
-            accept_or_block(frame, SYS_ACCEPT, (int)frame->rdi, frame->rsi, frame->rdx, 0);
+            accept_or_block(frame, SYS_ACCEPT, (int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame), 0);
             break;
-        case SYS_SENDTO: frame->rax = (uint64_t)sys_sendto((int)frame->rdi, frame->rsi, frame->rdx, (int)frame->r10, frame->r8, frame->r9); break;
+        case SYS_SENDTO: SYSCALL_RET(frame) = (uint64_t)sys_sendto((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame), (int)SYSCALL_ARG3(frame), SYSCALL_ARG4(frame), SYSCALL_ARG5(frame)); break;
         case SYS_RECVFROM: {
-            int fd = (int)frame->rdi;
-            int flags = (int)frame->r10;
-            int64_t result = sys_recvfrom(fd, frame->rsi, frame->rdx, flags, frame->r8, frame->r9);
+            int fd = (int)SYSCALL_ARG0(frame);
+            int flags = (int)SYSCALL_ARG3(frame);
+            int64_t result = sys_recvfrom(fd, SYSCALL_ARG1(frame), SYSCALL_ARG2(frame), flags, SYSCALL_ARG4(frame), SYSCALL_ARG5(frame));
             struct process *process = process_current();
             struct file *file = process && fd >= 0 && fd < PROCESS_MAX_FDS ? process->files->fds[fd] : NULL;
             if (result == -EAGAIN && file && !(file->flags & O_NONBLOCK) && !(flags & MSG_DONTWAIT)) {
                 block_and_retry(frame, SYS_RECVFROM, file, 0);
             } else {
-                frame->rax = (uint64_t)result;
+                SYSCALL_RET(frame) = (uint64_t)result;
             }
             break;
         }
-        case SYS_SENDMSG: frame->rax = (uint64_t)sys_sendmsg((int)frame->rdi, frame->rsi, (int)frame->rdx); break;
-        case SYS_SENDMMSG: frame->rax = (uint64_t)sys_sendmmsg((int)frame->rdi, frame->rsi, (unsigned)frame->rdx, (int)frame->r10); break;
+        case SYS_SENDMSG: SYSCALL_RET(frame) = (uint64_t)sys_sendmsg((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame)); break;
+        case SYS_SENDMMSG: SYSCALL_RET(frame) = (uint64_t)sys_sendmmsg((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), (unsigned)SYSCALL_ARG2(frame), (int)SYSCALL_ARG3(frame)); break;
         case SYS_RECVMMSG: {
-            int fd = (int)frame->rdi;
-            int flags = (int)frame->r10;
-            int64_t result = sys_recvmmsg(fd, frame->rsi, (unsigned)frame->rdx, flags);
+            int fd = (int)SYSCALL_ARG0(frame);
+            int flags = (int)SYSCALL_ARG3(frame);
+            int64_t result = sys_recvmmsg(fd, SYSCALL_ARG1(frame), (unsigned)SYSCALL_ARG2(frame), flags);
             struct process *process = process_current();
             struct file *file = process && fd >= 0 && fd < PROCESS_MAX_FDS ? process->files->fds[fd] : NULL;
             if (result == -EAGAIN && file && !(file->flags & O_NONBLOCK) && !(flags & MSG_DONTWAIT)) {
                 block_and_retry(frame, SYS_RECVMMSG, file, 0);
             } else {
-                frame->rax = (uint64_t)result;
+                SYSCALL_RET(frame) = (uint64_t)result;
             }
             break;
         }
         case SYS_RECVMSG: {
-            int fd = (int)frame->rdi;
-            int flags = (int)frame->rdx;
-            int64_t result = sys_recvmsg(fd, frame->rsi, flags);
+            int fd = (int)SYSCALL_ARG0(frame);
+            int flags = (int)SYSCALL_ARG2(frame);
+            int64_t result = sys_recvmsg(fd, SYSCALL_ARG1(frame), flags);
             struct process *process = process_current();
             struct file *file = process && fd >= 0 && fd < PROCESS_MAX_FDS ? process->files->fds[fd] : NULL;
             if (result == -EAGAIN && file && !(file->flags & O_NONBLOCK) && !(flags & MSG_DONTWAIT)) {
                 block_and_retry(frame, SYS_RECVMSG, file, 0);
             } else {
-                frame->rax = (uint64_t)result;
+                SYSCALL_RET(frame) = (uint64_t)result;
             }
             break;
         }
-        case SYS_SHUTDOWN: frame->rax = (uint64_t)sys_shutdown((int)frame->rdi, (int)frame->rsi); break;
-        case SYS_BIND: frame->rax = (uint64_t)sys_bind((int)frame->rdi, frame->rsi, frame->rdx); break;
-        case SYS_LISTEN: frame->rax = (uint64_t)sys_listen((int)frame->rdi, (int)frame->rsi); break;
-        case SYS_GETSOCKNAME: frame->rax = (uint64_t)sys_socket_name((int)frame->rdi, frame->rsi, frame->rdx, 0); break;
-        case SYS_GETPEERNAME: frame->rax = (uint64_t)sys_socket_name((int)frame->rdi, frame->rsi, frame->rdx, 1); break;
-        case SYS_SOCKETPAIR: frame->rax = (uint64_t)sys_socketpair((int)frame->rdi, (int)frame->rsi, (int)frame->rdx, frame->r10); break;
-        case SYS_SETSOCKOPT: frame->rax = (uint64_t)sys_setsockopt((int)frame->rdi, (int)frame->rsi, (int)frame->rdx, frame->r10, frame->r8); break;
-        case SYS_GETSOCKOPT: frame->rax = (uint64_t)sys_getsockopt((int)frame->rdi, (int)frame->rsi, (int)frame->rdx, frame->r10, frame->r8); break;
-        case SYS_GETPID: frame->rax = process_current_pid(); break;
-        case SYS_GETTID: frame->rax = process_current_tid(); break;
+        case SYS_SHUTDOWN: SYSCALL_RET(frame) = (uint64_t)sys_shutdown((int)SYSCALL_ARG0(frame), (int)SYSCALL_ARG1(frame)); break;
+        case SYS_BIND: SYSCALL_RET(frame) = (uint64_t)sys_bind((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame)); break;
+        case SYS_LISTEN: SYSCALL_RET(frame) = (uint64_t)sys_listen((int)SYSCALL_ARG0(frame), (int)SYSCALL_ARG1(frame)); break;
+        case SYS_GETSOCKNAME: SYSCALL_RET(frame) = (uint64_t)sys_socket_name((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame), 0); break;
+        case SYS_GETPEERNAME: SYSCALL_RET(frame) = (uint64_t)sys_socket_name((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame), 1); break;
+        case SYS_SOCKETPAIR: SYSCALL_RET(frame) = (uint64_t)sys_socketpair((int)SYSCALL_ARG0(frame), (int)SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame), SYSCALL_ARG3(frame)); break;
+        case SYS_SETSOCKOPT: SYSCALL_RET(frame) = (uint64_t)sys_setsockopt((int)SYSCALL_ARG0(frame), (int)SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame), SYSCALL_ARG3(frame), SYSCALL_ARG4(frame)); break;
+        case SYS_GETSOCKOPT: SYSCALL_RET(frame) = (uint64_t)sys_getsockopt((int)SYSCALL_ARG0(frame), (int)SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame), SYSCALL_ARG3(frame), SYSCALL_ARG4(frame)); break;
+        case SYS_GETPID: SYSCALL_RET(frame) = process_current_pid(); break;
+        case SYS_GETTID: SYSCALL_RET(frame) = process_current_tid(); break;
         case SYS_CLONE: {
             int64_t pid = sys_clone_fork_compat(
-                frame, frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
-            frame->rax = (uint64_t)pid;
+                frame, SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame), SYSCALL_ARG3(frame), SYSCALL_ARG4(frame));
+            SYSCALL_RET(frame) = (uint64_t)pid;
             if (pid > 0) process_run_child_first_from_syscall(frame, (uint64_t)pid);
             break;
         }
         case SYS_CLONE3: {
-            int64_t pid = sys_clone3_fork_compat(frame, frame->rdi, (size_t)frame->rsi);
-            frame->rax = (uint64_t)pid;
+            int64_t pid = sys_clone3_fork_compat(frame, SYSCALL_ARG0(frame), (size_t)SYSCALL_ARG1(frame));
+            SYSCALL_RET(frame) = (uint64_t)pid;
             if (pid > 0) process_run_child_first_from_syscall(frame, (uint64_t)pid);
             break;
         }
         case SYS_FORK:
         case SYS_VFORK: {
             int64_t pid = process_fork_from_syscall(frame);
-            frame->rax = (uint64_t)pid;
+            SYSCALL_RET(frame) = (uint64_t)pid;
             if (pid > 0) process_run_child_first_from_syscall(frame, (uint64_t)pid);
             break;
         }
-        case SYS_EXECVE: frame->rax = (uint64_t)sys_execve(frame, frame->rdi, frame->rsi, frame->rdx); break;
-        case SYS_EXIT: process_exit_from_syscall(frame, (int)frame->rdi); break;
-        case SYS_EXIT_GROUP: process_exit_group_from_syscall(frame, (int)frame->rdi); break;
+        case SYS_EXECVE: SYSCALL_RET(frame) = (uint64_t)sys_execve(frame, SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame)); break;
+        case SYS_EXIT: process_exit_from_syscall(frame, (int)SYSCALL_ARG0(frame)); break;
+        case SYS_EXIT_GROUP: process_exit_group_from_syscall(frame, (int)SYSCALL_ARG0(frame)); break;
         case SYS_WAIT4: {
-            int64_t result = process_waitpid_from_syscall(frame, (int64_t)frame->rdi, frame->rsi, (int)frame->rdx);
-            if (process_current() == caller) frame->rax = (uint64_t)result;
+            int64_t result = process_waitpid_from_syscall(frame, (int64_t)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame));
+            if (process_current() == caller) SYSCALL_RET(frame) = (uint64_t)result;
             break;
         }
         case SYS_WAITID: {
 
-            int idtype = (int)frame->rdi;
-            int64_t id = (int64_t)frame->rsi;
-            int options = (int)frame->r10;
+            int idtype = (int)SYSCALL_ARG0(frame);
+            int64_t id = (int64_t)SYSCALL_ARG1(frame);
+            int options = (int)SYSCALL_ARG3(frame);
             int64_t pid_spec;
             if (idtype == 0) pid_spec = -1;
             else if (idtype == 1 && id > 0) pid_spec = id;
             else if (idtype == 2 && id > 0) pid_spec = -id;
-            else { frame->rax = (uint64_t)-(int64_t)EINVAL; break; }
+            else { SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINVAL; break; }
             options &= ~(WNOTHREAD | WALLCHILDREN | WCLONE);
             if ((options & ~(WNOHANG | WNOWAIT | WEXITED | WSTOPPED | WCONTINUED)) ||
                 !(options & (WEXITED | WSTOPPED | WCONTINUED))) {
-                frame->rax = (uint64_t)-(int64_t)EINVAL;
+                SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINVAL;
                 break;
             }
-            int64_t result = process_waitid_from_syscall(pid_spec, frame->rdx,
+            int64_t result = process_waitid_from_syscall(pid_spec, SYSCALL_ARG2(frame),
                                                          options);
             if (result == -EAGAIN) {
                 if (!retry_io_wait(frame, SYS_WAITID, -1))
-                    frame->rax = (uint64_t)-(int64_t)ECHILD;
+                    SYSCALL_RET(frame) = (uint64_t)-(int64_t)ECHILD;
             } else {
                 clear_io_wait(process_current());
-                frame->rax = (uint64_t)result;
+                SYSCALL_RET(frame) = (uint64_t)result;
             }
             break;
         }
-        case SYS_KILL: frame->rax = (uint64_t)process_send_signal_checked((int64_t)frame->rdi, (int)frame->rsi); break;
+        case SYS_KILL: SYSCALL_RET(frame) = (uint64_t)process_send_signal_checked((int64_t)SYSCALL_ARG0(frame), (int)SYSCALL_ARG1(frame)); break;
 
-        case SYS_TKILL: frame->rax = (uint64_t)process_send_signal_checked((int64_t)frame->rdi, (int)frame->rsi); break;
-        case SYS_TGKILL: frame->rax = (uint64_t)process_send_signal_checked((int64_t)frame->rsi, (int)frame->rdx); break;
-        case SYS_UNAME: frame->rax = (uint64_t)sys_uname(frame->rdi); break;
+        case SYS_TKILL: SYSCALL_RET(frame) = (uint64_t)process_send_signal_checked((int64_t)SYSCALL_ARG0(frame), (int)SYSCALL_ARG1(frame)); break;
+        case SYS_TGKILL: SYSCALL_RET(frame) = (uint64_t)process_send_signal_checked((int64_t)SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame)); break;
+        case SYS_UNAME: SYSCALL_RET(frame) = (uint64_t)sys_uname(SYSCALL_ARG0(frame)); break;
         case SYS_SYSLOG:
-            frame->rax = (uint64_t)sys_syslog((int)frame->rdi, frame->rsi,
-                                              (int)frame->rdx);
+            SYSCALL_RET(frame) = (uint64_t)sys_syslog((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame),
+                                              (int)SYSCALL_ARG2(frame));
             break;
         case SYS_SETHOSTNAME:
-            frame->rax = (uint64_t)set_machine_name(0, frame->rdi, frame->rsi);
+            SYSCALL_RET(frame) = (uint64_t)set_machine_name(0, SYSCALL_ARG0(frame), SYSCALL_ARG1(frame));
             break;
         case SYS_SETDOMAINNAME:
-            frame->rax = (uint64_t)set_machine_name(1, frame->rdi, frame->rsi);
+            SYSCALL_RET(frame) = (uint64_t)set_machine_name(1, SYSCALL_ARG0(frame), SYSCALL_ARG1(frame));
             break;
         case SYS_FCNTL: {
             struct process *process = process_current();
-            int fd = (int)frame->rdi;
-            int command = (int)frame->rsi;
+            int fd = (int)SYSCALL_ARG0(frame);
+            int command = (int)SYSCALL_ARG1(frame);
             if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) {
-                frame->rax = (uint64_t)-(int64_t)EBADF;
+                SYSCALL_RET(frame) = (uint64_t)-(int64_t)EBADF;
             } else if (command == F_DUPFD || command == F_DUPFD_CLOEXEC) {
-                frame->rax = (uint64_t)sys_dup(fd, (int)frame->rdx,
+                SYSCALL_RET(frame) = (uint64_t)sys_dup(fd, (int)SYSCALL_ARG2(frame),
                     command == F_DUPFD_CLOEXEC);
             } else if (command == F_GETFD) {
-                frame->rax = (process->files->fd_flags[fd] & PROCESS_FD_CLOEXEC) ? FD_CLOEXEC : 0;
+                SYSCALL_RET(frame) = (process->files->fd_flags[fd] & PROCESS_FD_CLOEXEC) ? FD_CLOEXEC : 0;
             } else if (command == F_SETFD) {
-                if (frame->rdx & ~(uint64_t)FD_CLOEXEC)
-                    frame->rax = (uint64_t)-(int64_t)EINVAL;
+                if (SYSCALL_ARG2(frame) & ~(uint64_t)FD_CLOEXEC)
+                    SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINVAL;
                 else {
-                    process->files->fd_flags[fd] = (frame->rdx & FD_CLOEXEC) ? PROCESS_FD_CLOEXEC : 0;
-                    frame->rax = 0;
+                    process->files->fd_flags[fd] = (SYSCALL_ARG2(frame) & FD_CLOEXEC) ? PROCESS_FD_CLOEXEC : 0;
+                    SYSCALL_RET(frame) = 0;
                 }
             } else if (command == F_GETLK || command == F_SETLK || command == F_SETLKW) {
 
-                frame->rax = (uint64_t)sys_fcntl_lock(fd, command, frame->rdx);
+                SYSCALL_RET(frame) = (uint64_t)sys_fcntl_lock(fd, command, SYSCALL_ARG2(frame));
             } else if (command == F_ADD_SEALS || command == F_GET_SEALS) {
 
                 struct file *file = process->files->fds[fd];
                 if (file->kind != FILE_KIND_MEMFD) {
-                    frame->rax = (uint64_t)-(int64_t)EINVAL;
+                    SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINVAL;
                 } else if (command == F_GET_SEALS) {
-                    frame->rax = memfd_seals(file->memfd);
+                    SYSCALL_RET(frame) = memfd_seals(file->memfd);
                 } else {
-                    frame->rax = (uint64_t)(int64_t)
-                        memfd_add_seals(file->memfd, (uint32_t)frame->rdx);
+                    SYSCALL_RET(frame) = (uint64_t)(int64_t)
+                        memfd_add_seals(file->memfd, (uint32_t)SYSCALL_ARG2(frame));
                 }
             } else if (command == F_GETFL) {
-                frame->rax = process->files->fds[fd]->flags;
+                SYSCALL_RET(frame) = process->files->fds[fd]->flags;
             } else if (command == F_SETFL) {
                 process->files->fds[fd]->flags =
                     (process->files->fds[fd]->flags & ~(uint32_t)O_NONBLOCK) |
-                    ((uint32_t)frame->rdx & (uint32_t)O_NONBLOCK);
-                frame->rax = 0;
+                    ((uint32_t)SYSCALL_ARG2(frame) & (uint32_t)O_NONBLOCK);
+                SYSCALL_RET(frame) = 0;
             } else {
-                frame->rax = (uint64_t)-(int64_t)EINVAL;
+                SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINVAL;
             }
             break;
         }
-        case SYS_FSYNC: frame->rax = (uint64_t)sys_fsync((int)frame->rdi); break;
-        case SYS_FDATASYNC: frame->rax = (uint64_t)sys_fsync((int)frame->rdi); break;
-        case SYS_SYNCFS: frame->rax = (uint64_t)sys_fsync((int)frame->rdi); break;
-        case SYS_SYNC: frame->rax = (uint64_t)ext2fs_sync(); break;
+        case SYS_FSYNC: SYSCALL_RET(frame) = (uint64_t)sys_fsync((int)SYSCALL_ARG0(frame)); break;
+        case SYS_FDATASYNC: SYSCALL_RET(frame) = (uint64_t)sys_fsync((int)SYSCALL_ARG0(frame)); break;
+        case SYS_SYNCFS: SYSCALL_RET(frame) = (uint64_t)sys_fsync((int)SYSCALL_ARG0(frame)); break;
+        case SYS_SYNC: SYSCALL_RET(frame) = (uint64_t)ext2fs_sync(); break;
         case SYS_REBOOT:
-            frame->rax = (uint64_t)sys_reboot((uint32_t)frame->rdi,
-                                              (uint32_t)frame->rsi,
-                                              (uint32_t)frame->rdx);
+            SYSCALL_RET(frame) = (uint64_t)sys_reboot((uint32_t)SYSCALL_ARG0(frame),
+                                              (uint32_t)SYSCALL_ARG1(frame),
+                                              (uint32_t)SYSCALL_ARG2(frame));
             break;
-        case SYS_FTRUNCATE: frame->rax = (uint64_t)sys_ftruncate((int)frame->rdi, frame->rsi); break;
+        case SYS_FTRUNCATE: SYSCALL_RET(frame) = (uint64_t)sys_ftruncate((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame)); break;
         case SYS_FLOCK: {
-            int operation = (int)frame->rsi;
-            int64_t result = sys_flock((int)frame->rdi, operation);
+            int operation = (int)SYSCALL_ARG1(frame);
+            int64_t result = sys_flock((int)SYSCALL_ARG0(frame), operation);
 
             if (result == -EAGAIN && !(operation & FILE_LOCK_NB)) {
                 if (!retry_io_wait(frame, SYS_FLOCK, -1))
-                    frame->rax = (uint64_t)result;
+                    SYSCALL_RET(frame) = (uint64_t)result;
             } else {
                 clear_io_wait(process_current());
-                frame->rax = (uint64_t)result;
+                SYSCALL_RET(frame) = (uint64_t)result;
             }
             break;
         }
         case SYS_MEMFD_CREATE:
-            frame->rax = (uint64_t)sys_memfd_create(frame->rdi, (uint32_t)frame->rsi);
+            SYSCALL_RET(frame) = (uint64_t)sys_memfd_create(SYSCALL_ARG0(frame), (uint32_t)SYSCALL_ARG1(frame));
             break;
         case SYS_FALLOCATE:
-            frame->rax = (uint64_t)sys_fallocate((int)frame->rdi, (int)frame->rsi,
-                                                 frame->rdx, frame->r10);
+            SYSCALL_RET(frame) = (uint64_t)sys_fallocate((int)SYSCALL_ARG0(frame), (int)SYSCALL_ARG1(frame),
+                                                 SYSCALL_ARG2(frame), SYSCALL_ARG3(frame));
             break;
 
         case SYS_SIGNALFD:
-            frame->rax = (uint64_t)sys_signalfd((int)frame->rdi, frame->rsi,
-                                                frame->rdx, 0);
+            SYSCALL_RET(frame) = (uint64_t)sys_signalfd((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame),
+                                                SYSCALL_ARG2(frame), 0);
             break;
         case SYS_SIGNALFD4:
-            frame->rax = (uint64_t)sys_signalfd((int)frame->rdi, frame->rsi,
-                                                frame->rdx, (int)frame->r10);
+            SYSCALL_RET(frame) = (uint64_t)sys_signalfd((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame),
+                                                SYSCALL_ARG2(frame), (int)SYSCALL_ARG3(frame));
             break;
-        case SYS_GETCWD: frame->rax = (uint64_t)sys_getcwd(frame->rdi, (size_t)frame->rsi); break;
-        case SYS_CHDIR: frame->rax = (uint64_t)sys_chdir(frame->rdi); break;
-        case SYS_FCHDIR: frame->rax = (uint64_t)sys_fchdir((int)frame->rdi); break;
-        case SYS_CHROOT: frame->rax = (uint64_t)sys_chroot(frame->rdi); break;
+        case SYS_GETCWD: SYSCALL_RET(frame) = (uint64_t)sys_getcwd(SYSCALL_ARG0(frame), (size_t)SYSCALL_ARG1(frame)); break;
+        case SYS_CHDIR: SYSCALL_RET(frame) = (uint64_t)sys_chdir(SYSCALL_ARG0(frame)); break;
+        case SYS_FCHDIR: SYSCALL_RET(frame) = (uint64_t)sys_fchdir((int)SYSCALL_ARG0(frame)); break;
+        case SYS_CHROOT: SYSCALL_RET(frame) = (uint64_t)sys_chroot(SYSCALL_ARG0(frame)); break;
         case SYS_SETXATTR:
         case SYS_LSETXATTR: {
-            int64_t status = xattr_target_exists(frame->rdi, syscall_number == SYS_SETXATTR);
-            frame->rax = (uint64_t)(status != 0 ? status : -(int64_t)EOPNOTSUPP);
+            int64_t status = xattr_target_exists(SYSCALL_ARG0(frame), syscall_number == SYS_SETXATTR);
+            SYSCALL_RET(frame) = (uint64_t)(status != 0 ? status : -(int64_t)EOPNOTSUPP);
             break;
         }
         case SYS_FSETXATTR: {
-            int64_t status = xattr_descriptor_exists((int)frame->rdi);
-            frame->rax = (uint64_t)(status != 0 ? status : -(int64_t)EOPNOTSUPP);
+            int64_t status = xattr_descriptor_exists((int)SYSCALL_ARG0(frame));
+            SYSCALL_RET(frame) = (uint64_t)(status != 0 ? status : -(int64_t)EOPNOTSUPP);
             break;
         }
         case SYS_GETXATTR:
@@ -5424,223 +5424,223 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         case SYS_REMOVEXATTR:
         case SYS_LREMOVEXATTR: {
             int follow = syscall_number == SYS_GETXATTR || syscall_number == SYS_REMOVEXATTR;
-            int64_t status = xattr_target_exists(frame->rdi, follow);
-            frame->rax = (uint64_t)(status != 0 ? status : -(int64_t)ENODATA);
+            int64_t status = xattr_target_exists(SYSCALL_ARG0(frame), follow);
+            SYSCALL_RET(frame) = (uint64_t)(status != 0 ? status : -(int64_t)ENODATA);
             break;
         }
         case SYS_FGETXATTR:
         case SYS_FREMOVEXATTR: {
-            int64_t status = xattr_descriptor_exists((int)frame->rdi);
-            frame->rax = (uint64_t)(status != 0 ? status : -(int64_t)ENODATA);
+            int64_t status = xattr_descriptor_exists((int)SYSCALL_ARG0(frame));
+            SYSCALL_RET(frame) = (uint64_t)(status != 0 ? status : -(int64_t)ENODATA);
             break;
         }
         case SYS_LISTXATTR:
         case SYS_LLISTXATTR: {
-            int64_t status = xattr_target_exists(frame->rdi, syscall_number == SYS_LISTXATTR);
-            frame->rax = (uint64_t)status;
+            int64_t status = xattr_target_exists(SYSCALL_ARG0(frame), syscall_number == SYS_LISTXATTR);
+            SYSCALL_RET(frame) = (uint64_t)status;
             break;
         }
         case SYS_FLISTXATTR:
-            frame->rax = (uint64_t)xattr_descriptor_exists((int)frame->rdi);
+            SYSCALL_RET(frame) = (uint64_t)xattr_descriptor_exists((int)SYSCALL_ARG0(frame));
             break;
-        case SYS_RENAME: frame->rax = (uint64_t)sys_rename_at(AT_FDCWD, frame->rdi, AT_FDCWD, frame->rsi, 0); break;
-        case SYS_MKDIR: frame->rax = (uint64_t)sys_mkdir_at(AT_FDCWD, frame->rdi, frame->rsi); break;
-        case SYS_RMDIR: frame->rax = (uint64_t)sys_unlink_at(AT_FDCWD, frame->rdi, AT_REMOVEDIR); break;
-        case SYS_UNLINK: frame->rax = (uint64_t)sys_unlink_at(AT_FDCWD, frame->rdi, 0); break;
-        case SYS_READLINK: frame->rax = (uint64_t)sys_readlink_at(AT_FDCWD, frame->rdi, frame->rsi, (size_t)frame->rdx); break;
-        case SYS_CHMOD: frame->rax = (uint64_t)sys_chmod_at(AT_FDCWD, frame->rdi, (uint32_t)frame->rsi, 0); break;
-        case SYS_FCHMOD: frame->rax = (uint64_t)sys_fchmod((int)frame->rdi, (uint32_t)frame->rsi); break;
+        case SYS_RENAME: SYSCALL_RET(frame) = (uint64_t)sys_rename_at(AT_FDCWD, SYSCALL_ARG0(frame), AT_FDCWD, SYSCALL_ARG1(frame), 0); break;
+        case SYS_MKDIR: SYSCALL_RET(frame) = (uint64_t)sys_mkdir_at(AT_FDCWD, SYSCALL_ARG0(frame), SYSCALL_ARG1(frame)); break;
+        case SYS_RMDIR: SYSCALL_RET(frame) = (uint64_t)sys_unlink_at(AT_FDCWD, SYSCALL_ARG0(frame), AT_REMOVEDIR); break;
+        case SYS_UNLINK: SYSCALL_RET(frame) = (uint64_t)sys_unlink_at(AT_FDCWD, SYSCALL_ARG0(frame), 0); break;
+        case SYS_READLINK: SYSCALL_RET(frame) = (uint64_t)sys_readlink_at(AT_FDCWD, SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), (size_t)SYSCALL_ARG2(frame)); break;
+        case SYS_CHMOD: SYSCALL_RET(frame) = (uint64_t)sys_chmod_at(AT_FDCWD, SYSCALL_ARG0(frame), (uint32_t)SYSCALL_ARG1(frame), 0); break;
+        case SYS_FCHMOD: SYSCALL_RET(frame) = (uint64_t)sys_fchmod((int)SYSCALL_ARG0(frame), (uint32_t)SYSCALL_ARG1(frame)); break;
         case SYS_CHOWN:
-            frame->rax = (uint64_t)sys_chown_at(AT_FDCWD, frame->rdi, (uint32_t)frame->rsi,
-                                                (uint32_t)frame->rdx, 0);
+            SYSCALL_RET(frame) = (uint64_t)sys_chown_at(AT_FDCWD, SYSCALL_ARG0(frame), (uint32_t)SYSCALL_ARG1(frame),
+                                                (uint32_t)SYSCALL_ARG2(frame), 0);
             break;
         case SYS_LCHOWN:
-            frame->rax = (uint64_t)sys_chown_at(AT_FDCWD, frame->rdi, (uint32_t)frame->rsi,
-                                                (uint32_t)frame->rdx, AT_SYMLINK_NOFOLLOW);
+            SYSCALL_RET(frame) = (uint64_t)sys_chown_at(AT_FDCWD, SYSCALL_ARG0(frame), (uint32_t)SYSCALL_ARG1(frame),
+                                                (uint32_t)SYSCALL_ARG2(frame), AT_SYMLINK_NOFOLLOW);
             break;
         case SYS_FCHOWN:
-            frame->rax = (uint64_t)sys_fchown((int)frame->rdi, (uint32_t)frame->rsi,
-                                              (uint32_t)frame->rdx);
+            SYSCALL_RET(frame) = (uint64_t)sys_fchown((int)SYSCALL_ARG0(frame), (uint32_t)SYSCALL_ARG1(frame),
+                                              (uint32_t)SYSCALL_ARG2(frame));
             break;
         case SYS_FCHOWNAT:
-            frame->rax = (uint64_t)sys_chown_at((int)frame->rdi, frame->rsi, (uint32_t)frame->rdx,
-                                                (uint32_t)frame->r10, (int)frame->r8);
+            SYSCALL_RET(frame) = (uint64_t)sys_chown_at((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), (uint32_t)SYSCALL_ARG2(frame),
+                                                (uint32_t)SYSCALL_ARG3(frame), (int)SYSCALL_ARG4(frame));
             break;
-        case SYS_UMASK: frame->rax = process_set_umask((uint32_t)frame->rdi); break;
-        case SYS_GETTIMEOFDAY: frame->rax = (uint64_t)sys_gettimeofday(frame->rdi); break;
-        case SYS_GETRLIMIT: frame->rax = (uint64_t)sys_prlimit(frame->rdi, frame->rsi); break;
+        case SYS_UMASK: SYSCALL_RET(frame) = process_set_umask((uint32_t)SYSCALL_ARG0(frame)); break;
+        case SYS_GETTIMEOFDAY: SYSCALL_RET(frame) = (uint64_t)sys_gettimeofday(SYSCALL_ARG0(frame)); break;
+        case SYS_GETRLIMIT: SYSCALL_RET(frame) = (uint64_t)sys_prlimit(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame)); break;
 
         case SYS_GETPRIORITY: {
             int nice = 0;
-            frame->rax = process_get_nice(frame->rdi == 0 ? frame->rsi : 0, &nice) == 0
+            SYSCALL_RET(frame) = process_get_nice(SYSCALL_ARG0(frame) == 0 ? SYSCALL_ARG1(frame) : 0, &nice) == 0
                              ? (uint64_t)(20 - nice) : 20;
             break;
         }
         case SYS_SETPRIORITY: {
-            int result = process_set_nice(frame->rdi == 0 ? frame->rsi : 0,
-                                          (int)(int32_t)frame->rdx);
-            frame->rax = result == 0 ? 0 : (uint64_t)(int64_t)result;
+            int result = process_set_nice(SYSCALL_ARG0(frame) == 0 ? SYSCALL_ARG1(frame) : 0,
+                                          (int)(int32_t)SYSCALL_ARG2(frame));
+            SYSCALL_RET(frame) = result == 0 ? 0 : (uint64_t)(int64_t)result;
             break;
         }
-        case SYS_GETRUSAGE: frame->rax = (uint64_t)sys_getrusage(frame->rsi); break;
+        case SYS_GETRUSAGE: SYSCALL_RET(frame) = (uint64_t)sys_getrusage(SYSCALL_ARG1(frame)); break;
 
         case SYS_SCHED_GETSCHEDULER: {
             int policy = 0;
-            int result = process_get_scheduler(frame->rdi, &policy, NULL);
-            frame->rax = result == 0 ? (uint64_t)policy : (uint64_t)(int64_t)result;
+            int result = process_get_scheduler(SYSCALL_ARG0(frame), &policy, NULL);
+            SYSCALL_RET(frame) = result == 0 ? (uint64_t)policy : (uint64_t)(int64_t)result;
             break;
         }
         case SYS_SCHED_SETSCHEDULER: {
             uint32_t priority = 0;
-            if (frame->rdx &&
-                copy_from_user(&priority, frame->rdx, sizeof(priority)) != 0) {
-                frame->rax = (uint64_t)-(int64_t)EFAULT;
+            if (SYSCALL_ARG2(frame) &&
+                copy_from_user(&priority, SYSCALL_ARG2(frame), sizeof(priority)) != 0) {
+                SYSCALL_RET(frame) = (uint64_t)-(int64_t)EFAULT;
                 break;
             }
-            int result = process_set_scheduler(frame->rdi, (int)frame->rsi,
+            int result = process_set_scheduler(SYSCALL_ARG0(frame), (int)SYSCALL_ARG1(frame),
                                                (int)priority);
-            frame->rax = result == 0 ? 0 : (uint64_t)(int64_t)result;
+            SYSCALL_RET(frame) = result == 0 ? 0 : (uint64_t)(int64_t)result;
             break;
         }
         case SYS_SCHED_GETPARAM:
         case SYS_SCHED_SETPARAM: {
             uint32_t priority = 0;
             if (syscall_number == SYS_SCHED_SETPARAM) {
-                if (copy_from_user(&priority, frame->rsi, sizeof(priority)) != 0) {
-                    frame->rax = (uint64_t)-(int64_t)EFAULT;
+                if (copy_from_user(&priority, SYSCALL_ARG1(frame), sizeof(priority)) != 0) {
+                    SYSCALL_RET(frame) = (uint64_t)-(int64_t)EFAULT;
                     break;
                 }
 
                 int policy = PROCESS_SCHED_OTHER;
-                int result = process_get_scheduler(frame->rdi, &policy, NULL);
+                int result = process_get_scheduler(SYSCALL_ARG0(frame), &policy, NULL);
                 if (result == 0)
-                    result = process_set_scheduler(frame->rdi, policy, (int)priority);
-                frame->rax = result == 0 ? 0 : (uint64_t)(int64_t)result;
+                    result = process_set_scheduler(SYSCALL_ARG0(frame), policy, (int)priority);
+                SYSCALL_RET(frame) = result == 0 ? 0 : (uint64_t)(int64_t)result;
                 break;
             }
             int stored = 0;
-            int result = process_get_scheduler(frame->rdi, NULL, &stored);
+            int result = process_get_scheduler(SYSCALL_ARG0(frame), NULL, &stored);
             if (result != 0) {
-                frame->rax = (uint64_t)(int64_t)result;
+                SYSCALL_RET(frame) = (uint64_t)(int64_t)result;
                 break;
             }
             priority = (uint32_t)stored;
-            frame->rax = copy_to_user(frame->rsi, &priority, sizeof(priority)) == 0
+            SYSCALL_RET(frame) = copy_to_user(SYSCALL_ARG1(frame), &priority, sizeof(priority)) == 0
                              ? 0 : (uint64_t)-(int64_t)EFAULT;
             break;
         }
 
         case SYS_SCHED_GET_PRIORITY_MAX:
-            frame->rax = (frame->rdi == PROCESS_SCHED_FIFO ||
-                          frame->rdi == PROCESS_SCHED_RR)
+            SYSCALL_RET(frame) = (SYSCALL_ARG0(frame) == PROCESS_SCHED_FIFO ||
+                          SYSCALL_ARG0(frame) == PROCESS_SCHED_RR)
                              ? PROCESS_RT_PRIORITY_MAX : 0;
             break;
         case SYS_SCHED_GET_PRIORITY_MIN:
-            frame->rax = (frame->rdi == PROCESS_SCHED_FIFO ||
-                          frame->rdi == PROCESS_SCHED_RR) ? 1 : 0;
+            SYSCALL_RET(frame) = (SYSCALL_ARG0(frame) == PROCESS_SCHED_FIFO ||
+                          SYSCALL_ARG0(frame) == PROCESS_SCHED_RR) ? 1 : 0;
             break;
         case SYS_SCHED_RR_GET_INTERVAL: {
             struct { int64_t seconds; int64_t nanoseconds; } slice = {0, 0};
-            frame->rax = copy_to_user(frame->rsi, &slice, sizeof(slice)) == 0
+            SYSCALL_RET(frame) = copy_to_user(SYSCALL_ARG1(frame), &slice, sizeof(slice)) == 0
                 ? 0 : (uint64_t)-(int64_t)EFAULT;
             break;
         }
         case SYS_GETCPU: {
             uint32_t cpu = cpu_current() ? cpu_current()->index : 0;
             uint32_t node = 0;
-            if (frame->rdi && copy_to_user(frame->rdi, &cpu, sizeof(cpu)) != 0)
-                frame->rax = (uint64_t)-(int64_t)EFAULT;
-            else if (frame->rsi && copy_to_user(frame->rsi, &node, sizeof(node)) != 0)
-                frame->rax = (uint64_t)-(int64_t)EFAULT;
-            else frame->rax = 0;
+            if (SYSCALL_ARG0(frame) && copy_to_user(SYSCALL_ARG0(frame), &cpu, sizeof(cpu)) != 0)
+                SYSCALL_RET(frame) = (uint64_t)-(int64_t)EFAULT;
+            else if (SYSCALL_ARG1(frame) && copy_to_user(SYSCALL_ARG1(frame), &node, sizeof(node)) != 0)
+                SYSCALL_RET(frame) = (uint64_t)-(int64_t)EFAULT;
+            else SYSCALL_RET(frame) = 0;
             break;
         }
 
-        case SYS_MEMBARRIER: frame->rax = 0; break;
-        case SYS_SYSINFO: frame->rax = (uint64_t)sys_sysinfo(frame->rdi); break;
+        case SYS_MEMBARRIER: SYSCALL_RET(frame) = 0; break;
+        case SYS_SYSINFO: SYSCALL_RET(frame) = (uint64_t)sys_sysinfo(SYSCALL_ARG0(frame)); break;
 
         case SYS_TIME: {
             int64_t seconds = (int64_t)time_epoch_seconds();
-            if (frame->rdi && copy_to_user(frame->rdi, &seconds, sizeof(seconds)) != 0)
-                frame->rax = (uint64_t)-(int64_t)EFAULT;
-            else frame->rax = (uint64_t)seconds;
+            if (SYSCALL_ARG0(frame) && copy_to_user(SYSCALL_ARG0(frame), &seconds, sizeof(seconds)) != 0)
+                SYSCALL_RET(frame) = (uint64_t)-(int64_t)EFAULT;
+            else SYSCALL_RET(frame) = (uint64_t)seconds;
             break;
         }
-        case SYS_TIMES: frame->rax = (uint64_t)sys_times(frame->rdi); break;
-        case SYS_GETUID: frame->rax = cred_current() ? cred_current()->uid : 0; break;
-        case SYS_GETGID: frame->rax = cred_current() ? cred_current()->gid : 0; break;
-        case SYS_GETEUID: frame->rax = cred_current() ? cred_current()->euid : 0; break;
-        case SYS_GETEGID: frame->rax = cred_current() ? cred_current()->egid : 0; break;
-        case SYS_SETUID: frame->rax = (uint64_t)cred_set_uid((uint32_t)frame->rdi); break;
-        case SYS_SETGID: frame->rax = (uint64_t)cred_set_gid((uint32_t)frame->rdi); break;
+        case SYS_TIMES: SYSCALL_RET(frame) = (uint64_t)sys_times(SYSCALL_ARG0(frame)); break;
+        case SYS_GETUID: SYSCALL_RET(frame) = cred_current() ? cred_current()->uid : 0; break;
+        case SYS_GETGID: SYSCALL_RET(frame) = cred_current() ? cred_current()->gid : 0; break;
+        case SYS_GETEUID: SYSCALL_RET(frame) = cred_current() ? cred_current()->euid : 0; break;
+        case SYS_GETEGID: SYSCALL_RET(frame) = cred_current() ? cred_current()->egid : 0; break;
+        case SYS_SETUID: SYSCALL_RET(frame) = (uint64_t)cred_set_uid((uint32_t)SYSCALL_ARG0(frame)); break;
+        case SYS_SETGID: SYSCALL_RET(frame) = (uint64_t)cred_set_gid((uint32_t)SYSCALL_ARG0(frame)); break;
         case SYS_SETREUID:
-            frame->rax = (uint64_t)cred_set_reuid((uint32_t)frame->rdi, (uint32_t)frame->rsi);
+            SYSCALL_RET(frame) = (uint64_t)cred_set_reuid((uint32_t)SYSCALL_ARG0(frame), (uint32_t)SYSCALL_ARG1(frame));
             break;
         case SYS_SETREGID:
-            frame->rax = (uint64_t)cred_set_regid((uint32_t)frame->rdi, (uint32_t)frame->rsi);
+            SYSCALL_RET(frame) = (uint64_t)cred_set_regid((uint32_t)SYSCALL_ARG0(frame), (uint32_t)SYSCALL_ARG1(frame));
             break;
         case SYS_SETRESUID:
-            frame->rax = (uint64_t)cred_set_resuid((uint32_t)frame->rdi, (uint32_t)frame->rsi,
-                                                   (uint32_t)frame->rdx);
+            SYSCALL_RET(frame) = (uint64_t)cred_set_resuid((uint32_t)SYSCALL_ARG0(frame), (uint32_t)SYSCALL_ARG1(frame),
+                                                   (uint32_t)SYSCALL_ARG2(frame));
             break;
         case SYS_SETRESGID:
-            frame->rax = (uint64_t)cred_set_resgid((uint32_t)frame->rdi, (uint32_t)frame->rsi,
-                                                   (uint32_t)frame->rdx);
+            SYSCALL_RET(frame) = (uint64_t)cred_set_resgid((uint32_t)SYSCALL_ARG0(frame), (uint32_t)SYSCALL_ARG1(frame),
+                                                   (uint32_t)SYSCALL_ARG2(frame));
             break;
-        case SYS_GETRESUID: frame->rax = (uint64_t)sys_getresuid(frame->rdi, frame->rsi, frame->rdx, 0); break;
-        case SYS_GETRESGID: frame->rax = (uint64_t)sys_getresuid(frame->rdi, frame->rsi, frame->rdx, 1); break;
-        case SYS_SETFSUID: frame->rax = (uint64_t)cred_set_fsuid((uint32_t)frame->rdi); break;
-        case SYS_SETFSGID: frame->rax = (uint64_t)cred_set_fsgid((uint32_t)frame->rdi); break;
+        case SYS_GETRESUID: SYSCALL_RET(frame) = (uint64_t)sys_getresuid(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame), 0); break;
+        case SYS_GETRESGID: SYSCALL_RET(frame) = (uint64_t)sys_getresuid(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame), 1); break;
+        case SYS_SETFSUID: SYSCALL_RET(frame) = (uint64_t)cred_set_fsuid((uint32_t)SYSCALL_ARG0(frame)); break;
+        case SYS_SETFSGID: SYSCALL_RET(frame) = (uint64_t)cred_set_fsgid((uint32_t)SYSCALL_ARG0(frame)); break;
         case SYS_GETGROUPS:
-            frame->rax = (uint64_t)sys_getgroups((int64_t)frame->rdi, frame->rsi);
+            SYSCALL_RET(frame) = (uint64_t)sys_getgroups((int64_t)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame));
             break;
         case SYS_SETGROUPS:
-            frame->rax = (uint64_t)sys_setgroups((int64_t)frame->rdi, frame->rsi);
+            SYSCALL_RET(frame) = (uint64_t)sys_setgroups((int64_t)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame));
             break;
-        case SYS_SETPGID: frame->rax = (uint64_t)process_setpgid((int64_t)frame->rdi, (int64_t)frame->rsi); break;
-        case SYS_GETPPID: frame->rax = process_current_ppid(); break;
-        case SYS_GETPGRP: frame->rax = process_current() ? process_current()->pgid : 0; break;
-        case SYS_SETSID: frame->rax = (uint64_t)process_setsid(); break;
+        case SYS_SETPGID: SYSCALL_RET(frame) = (uint64_t)process_setpgid((int64_t)SYSCALL_ARG0(frame), (int64_t)SYSCALL_ARG1(frame)); break;
+        case SYS_GETPPID: SYSCALL_RET(frame) = process_current_ppid(); break;
+        case SYS_GETPGRP: SYSCALL_RET(frame) = process_current() ? process_current()->pgid : 0; break;
+        case SYS_SETSID: SYSCALL_RET(frame) = (uint64_t)process_setsid(); break;
         case SYS_GETPGID: {
-            struct process *target = frame->rdi ? process_find(frame->rdi) : process_current();
-            frame->rax = target ? target->pgid : (uint64_t)-(int64_t)ESRCH;
+            struct process *target = SYSCALL_ARG0(frame) ? process_find(SYSCALL_ARG0(frame)) : process_current();
+            SYSCALL_RET(frame) = target ? target->pgid : (uint64_t)-(int64_t)ESRCH;
             break;
         }
         case SYS_GETSID: {
-            struct process *target = frame->rdi ? process_find(frame->rdi) : process_current();
-            frame->rax = target ? target->sid : (uint64_t)-(int64_t)ESRCH;
+            struct process *target = SYSCALL_ARG0(frame) ? process_find(SYSCALL_ARG0(frame)) : process_current();
+            SYSCALL_RET(frame) = target ? target->sid : (uint64_t)-(int64_t)ESRCH;
             break;
         }
-        case SYS_CAPGET: frame->rax = (uint64_t)sys_capget(frame->rdi, frame->rsi); break;
-        case SYS_CAPSET: frame->rax = (uint64_t)sys_capset(frame->rdi, frame->rsi); break;
-        case SYS_SIGALTSTACK: frame->rax = (uint64_t)sys_sigaltstack(frame, frame->rdi, frame->rsi); break;
-        case SYS_PRCTL: frame->rax = (uint64_t)sys_prctl((int)frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8); break;
-        case SYS_ARCH_PRCTL: frame->rax = (uint64_t)sys_arch_prctl((int)frame->rdi, frame->rsi); break;
+        case SYS_CAPGET: SYSCALL_RET(frame) = (uint64_t)sys_capget(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame)); break;
+        case SYS_CAPSET: SYSCALL_RET(frame) = (uint64_t)sys_capset(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame)); break;
+        case SYS_SIGALTSTACK: SYSCALL_RET(frame) = (uint64_t)sys_sigaltstack(frame, SYSCALL_ARG0(frame), SYSCALL_ARG1(frame)); break;
+        case SYS_PRCTL: SYSCALL_RET(frame) = (uint64_t)sys_prctl((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame), SYSCALL_ARG3(frame), SYSCALL_ARG4(frame)); break;
+        case SYS_ARCH_PRCTL: SYSCALL_RET(frame) = (uint64_t)sys_arch_prctl((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame)); break;
         case SYS_FUTEX: {
-            int operation = (int)frame->rsi;
+            int operation = (int)SYSCALL_ARG1(frame);
             int command = operation & FUTEX_CMD_MASK;
             int bitset_form = command == FUTEX_WAIT_BITSET || command == FUTEX_WAKE_BITSET;
 
-            uint32_t bitset = bitset_form ? (uint32_t)frame->r9 : FUTEX_BITSET_MATCH_ANY;
+            uint32_t bitset = bitset_form ? (uint32_t)SYSCALL_ARG5(frame) : FUTEX_BITSET_MATCH_ANY;
             if (!bitset) {
-                frame->rax = (uint64_t)-(int64_t)EINVAL;
+                SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINVAL;
                 break;
             }
 
             int shared = !(operation & FUTEX_PRIVATE_FLAG);
             if (command == FUTEX_WAKE || command == FUTEX_WAKE_BITSET) {
-                frame->rax = (uint64_t)process_futex_wake(frame->rdi, (int)frame->rdx,
+                SYSCALL_RET(frame) = (uint64_t)process_futex_wake(SYSCALL_ARG0(frame), (int)SYSCALL_ARG2(frame),
                                                           bitset, shared);
             } else if (command == FUTEX_WAIT || command == FUTEX_WAIT_BITSET) {
                 int64_t timeout_ns = -1;
-                if (frame->r10) {
+                if (SYSCALL_ARG3(frame)) {
                     struct linux_timespec timeout;
-                    if (copy_from_user(&timeout, frame->r10, sizeof(timeout)) != 0) {
-                        frame->rax = (uint64_t)-(int64_t)EFAULT;
+                    if (copy_from_user(&timeout, SYSCALL_ARG3(frame), sizeof(timeout)) != 0) {
+                        SYSCALL_RET(frame) = (uint64_t)-(int64_t)EFAULT;
                         break;
                     }
                     if (timeout.tv_sec < 0 || timeout.tv_nsec < 0 || timeout.tv_nsec >= 1000000000LL) {
-                        frame->rax = (uint64_t)-(int64_t)EINVAL;
+                        SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINVAL;
                         break;
                     }
                     timeout_ns = timeout.tv_sec > (INT64_MAX - timeout.tv_nsec) / 1000000000LL ?
@@ -5654,149 +5654,149 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
                     }
                 }
                 struct process *futex_caller = process_current();
-                int64_t result = process_futex_wait(frame, frame->rdi, (uint32_t)frame->rdx,
+                int64_t result = process_futex_wait(frame, SYSCALL_ARG0(frame), (uint32_t)SYSCALL_ARG2(frame),
                                                     timeout_ns, bitset, shared);
-                if (process_current() == futex_caller) frame->rax = (uint64_t)result;
+                if (process_current() == futex_caller) SYSCALL_RET(frame) = (uint64_t)result;
             } else {
-                frame->rax = (uint64_t)-(int64_t)ENOSYS;
+                SYSCALL_RET(frame) = (uint64_t)-(int64_t)ENOSYS;
             }
             break;
         }
         case SYS_SET_TID_ADDRESS: {
             struct process *process = process_current();
-            if (process) process->clear_child_tid_user = frame->rdi;
-            frame->rax = process_current_pid();
+            if (process) process->clear_child_tid_user = SYSCALL_ARG0(frame);
+            SYSCALL_RET(frame) = process_current_pid();
             break;
         }
-        case SYS_CLOCK_GETTIME: frame->rax = (uint64_t)sys_clock_gettime((int)frame->rdi, frame->rsi); break;
+        case SYS_CLOCK_GETTIME: SYSCALL_RET(frame) = (uint64_t)sys_clock_gettime((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame)); break;
         case SYS_CLOCK_GETRES: {
             struct linux_timespec value = {0, 1000000};
-            frame->rax = frame->rsi && copy_to_user(frame->rsi, &value, sizeof(value)) != 0 ? (uint64_t)-(int64_t)EFAULT : 0;
+            SYSCALL_RET(frame) = SYSCALL_ARG1(frame) && copy_to_user(SYSCALL_ARG1(frame), &value, sizeof(value)) != 0 ? (uint64_t)-(int64_t)EFAULT : 0;
             break;
         }
         case SYS_CLOCK_NANOSLEEP: {
-            if ((int)frame->rdi != 0 && (int)frame->rdi != 1 && (int)frame->rdi != 7) {
-                frame->rax = (uint64_t)-(int64_t)EINVAL;
+            if ((int)SYSCALL_ARG0(frame) != 0 && (int)SYSCALL_ARG0(frame) != 1 && (int)SYSCALL_ARG0(frame) != 7) {
+                SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINVAL;
                 break;
             }
-            if (frame->rsi & ~1ULL) {
-                frame->rax = (uint64_t)-(int64_t)EINVAL;
+            if (SYSCALL_ARG1(frame) & ~1ULL) {
+                SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINVAL;
                 break;
             }
             struct linux_timespec request;
-            if (copy_from_user(&request, frame->rdx, sizeof(request)) != 0 ||
+            if (copy_from_user(&request, SYSCALL_ARG2(frame), sizeof(request)) != 0 ||
                 request.tv_sec < 0 || request.tv_nsec < 0 ||
                 request.tv_nsec >= 1000000000LL) {
-                frame->rax = (uint64_t)-(int64_t)EINVAL;
+                SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINVAL;
                 break;
             }
             uint64_t requested = (uint64_t)request.tv_sec * 1000000000ULL +
                                  (uint64_t)request.tv_nsec;
             int64_t duration;
-            if (frame->rsi & 1ULL) {
-                uint64_t now = (int)frame->rdi == 0 ? time_realtime_ns() : time_uptime_ns();
+            if (SYSCALL_ARG1(frame) & 1ULL) {
+                uint64_t now = (int)SYSCALL_ARG0(frame) == 0 ? time_realtime_ns() : time_uptime_ns();
                 duration = requested <= now ? 0 :
                     (requested - now > (uint64_t)INT64_MAX ? INT64_MAX :
                      (int64_t)(requested - now));
             } else {
                 duration = requested > (uint64_t)INT64_MAX ? INT64_MAX : (int64_t)requested;
             }
-            if (duration == 0) frame->rax = 0;
-            else if (!retry_io_wait(frame, SYS_CLOCK_NANOSLEEP, duration)) frame->rax = 0;
+            if (duration == 0) SYSCALL_RET(frame) = 0;
+            else if (!retry_io_wait(frame, SYS_CLOCK_NANOSLEEP, duration)) SYSCALL_RET(frame) = 0;
             break;
         }
-        case SYS_INOTIFY_INIT: frame->rax = (uint64_t)sys_inotify_init(0); break;
+        case SYS_INOTIFY_INIT: SYSCALL_RET(frame) = (uint64_t)sys_inotify_init(0); break;
         case SYS_INOTIFY_ADD_WATCH:
-            frame->rax = (uint64_t)sys_inotify_add_watch((int)frame->rdi, frame->rsi,
-                                                         (uint32_t)frame->rdx);
+            SYSCALL_RET(frame) = (uint64_t)sys_inotify_add_watch((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame),
+                                                         (uint32_t)SYSCALL_ARG2(frame));
             break;
         case SYS_INOTIFY_RM_WATCH:
-            frame->rax = (uint64_t)sys_inotify_rm_watch((int)frame->rdi, (int)frame->rsi);
+            SYSCALL_RET(frame) = (uint64_t)sys_inotify_rm_watch((int)SYSCALL_ARG0(frame), (int)SYSCALL_ARG1(frame));
             break;
         case SYS_TIMERFD_CREATE:
-            frame->rax = (uint64_t)sys_timerfd_create((int)frame->rdi, (int)frame->rsi);
+            SYSCALL_RET(frame) = (uint64_t)sys_timerfd_create((int)SYSCALL_ARG0(frame), (int)SYSCALL_ARG1(frame));
             break;
         case SYS_EVENTFD:
-            frame->rax = (uint64_t)sys_eventfd((uint32_t)frame->rdi, 0, 1);
+            SYSCALL_RET(frame) = (uint64_t)sys_eventfd((uint32_t)SYSCALL_ARG0(frame), 0, 1);
             break;
         case SYS_TIMERFD_SETTIME:
-            frame->rax = (uint64_t)sys_timerfd_settime((int)frame->rdi,
-                (int)frame->rsi, frame->rdx, frame->r10);
+            SYSCALL_RET(frame) = (uint64_t)sys_timerfd_settime((int)SYSCALL_ARG0(frame),
+                (int)SYSCALL_ARG1(frame), SYSCALL_ARG2(frame), SYSCALL_ARG3(frame));
             break;
         case SYS_TIMERFD_GETTIME:
-            frame->rax = (uint64_t)sys_timerfd_gettime((int)frame->rdi, frame->rsi);
+            SYSCALL_RET(frame) = (uint64_t)sys_timerfd_gettime((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame));
             break;
         case SYS_EVENTFD2:
-            frame->rax = (uint64_t)sys_eventfd((uint32_t)frame->rdi,
-                                               (int)frame->rsi, 0);
+            SYSCALL_RET(frame) = (uint64_t)sys_eventfd((uint32_t)SYSCALL_ARG0(frame),
+                                               (int)SYSCALL_ARG1(frame), 0);
             break;
         case SYS_EPOLL_CREATE1:
-            frame->rax = (uint64_t)sys_epoll_create((int)frame->rdi);
+            SYSCALL_RET(frame) = (uint64_t)sys_epoll_create((int)SYSCALL_ARG0(frame));
             break;
         case SYS_INOTIFY_INIT1:
-            frame->rax = (uint64_t)sys_inotify_init((int)frame->rdi);
+            SYSCALL_RET(frame) = (uint64_t)sys_inotify_init((int)SYSCALL_ARG0(frame));
             break;
-        case SYS_OPENAT: frame->rax = (uint64_t)open_at((int)frame->rdi, frame->rsi, frame->rdx, frame->r10); break;
+        case SYS_OPENAT: SYSCALL_RET(frame) = (uint64_t)open_at((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame), SYSCALL_ARG3(frame)); break;
         case SYS_MKNOD:
-            frame->rax = (uint64_t)sys_mknodat(AT_FDCWD, frame->rdi,
-                                               (uint32_t)frame->rsi, frame->rdx);
+            SYSCALL_RET(frame) = (uint64_t)sys_mknodat(AT_FDCWD, SYSCALL_ARG0(frame),
+                                               (uint32_t)SYSCALL_ARG1(frame), SYSCALL_ARG2(frame));
             break;
         case SYS_MKNODAT:
-            frame->rax = (uint64_t)sys_mknodat((int)frame->rdi, frame->rsi,
-                                               (uint32_t)frame->rdx, frame->r10);
+            SYSCALL_RET(frame) = (uint64_t)sys_mknodat((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame),
+                                               (uint32_t)SYSCALL_ARG2(frame), SYSCALL_ARG3(frame));
             break;
-        case SYS_MKDIRAT: frame->rax = (uint64_t)sys_mkdir_at((int)frame->rdi, frame->rsi, frame->rdx); break;
+        case SYS_MKDIRAT: SYSCALL_RET(frame) = (uint64_t)sys_mkdir_at((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame)); break;
         case SYS_NEWFSTATAT:
-            if (frame->r10 & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH | AT_NO_AUTOMOUNT))
-                frame->rax = (uint64_t)-(int64_t)EINVAL;
+            if (SYSCALL_ARG3(frame) & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH | AT_NO_AUTOMOUNT))
+                SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINVAL;
             else {
                 char first = 0;
-                if (copy_from_user(&first, frame->rsi, 1) != 0) frame->rax = (uint64_t)-(int64_t)EFAULT;
-                else if (!first && (frame->r10 & AT_EMPTY_PATH) && (int)frame->rdi >= 0)
-                    frame->rax = (uint64_t)sys_fstat((int)frame->rdi, frame->rdx);
-                else frame->rax = (uint64_t)stat_path((int)frame->rdi, frame->rsi, frame->rdx,
-                                                      (frame->r10 & AT_SYMLINK_NOFOLLOW) == 0);
+                if (copy_from_user(&first, SYSCALL_ARG1(frame), 1) != 0) SYSCALL_RET(frame) = (uint64_t)-(int64_t)EFAULT;
+                else if (!first && (SYSCALL_ARG3(frame) & AT_EMPTY_PATH) && (int)SYSCALL_ARG0(frame) >= 0)
+                    SYSCALL_RET(frame) = (uint64_t)sys_fstat((int)SYSCALL_ARG0(frame), SYSCALL_ARG2(frame));
+                else SYSCALL_RET(frame) = (uint64_t)stat_path((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame),
+                                                      (SYSCALL_ARG3(frame) & AT_SYMLINK_NOFOLLOW) == 0);
             }
             break;
-        case SYS_UNLINKAT: frame->rax = (uint64_t)sys_unlink_at((int)frame->rdi, frame->rsi, (int)frame->rdx); break;
-        case SYS_RENAMEAT: frame->rax = (uint64_t)sys_rename_at((int)frame->rdi, frame->rsi, (int)frame->rdx, frame->r10, 0); break;
-        case SYS_SYMLINK: frame->rax = (uint64_t)sys_symlink_at(frame->rdi, AT_FDCWD, frame->rsi); break;
-        case SYS_SYMLINKAT: frame->rax = (uint64_t)sys_symlink_at(frame->rdi, (int)frame->rsi, frame->rdx); break;
-        case SYS_MOUNT: frame->rax = (uint64_t)sys_mount(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8); break;
-        case SYS_UMOUNT2: frame->rax = (uint64_t)sys_umount2(frame->rdi, (int)frame->rsi); break;
-        case SYS_LINK: frame->rax = (uint64_t)sys_link_at(AT_FDCWD, frame->rdi, AT_FDCWD, frame->rsi, 0); break;
-        case SYS_LINKAT: frame->rax = (uint64_t)sys_link_at((int)frame->rdi, frame->rsi, (int)frame->rdx, frame->r10, (int)frame->r8); break;
-        case SYS_READLINKAT: frame->rax = (uint64_t)sys_readlink_at((int)frame->rdi, frame->rsi, frame->rdx, (size_t)frame->r10); break;
-        case SYS_FCHMODAT: frame->rax = (uint64_t)sys_chmod_at((int)frame->rdi, frame->rsi, (uint32_t)frame->rdx, 0); break;
+        case SYS_UNLINKAT: SYSCALL_RET(frame) = (uint64_t)sys_unlink_at((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame)); break;
+        case SYS_RENAMEAT: SYSCALL_RET(frame) = (uint64_t)sys_rename_at((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame), SYSCALL_ARG3(frame), 0); break;
+        case SYS_SYMLINK: SYSCALL_RET(frame) = (uint64_t)sys_symlink_at(SYSCALL_ARG0(frame), AT_FDCWD, SYSCALL_ARG1(frame)); break;
+        case SYS_SYMLINKAT: SYSCALL_RET(frame) = (uint64_t)sys_symlink_at(SYSCALL_ARG0(frame), (int)SYSCALL_ARG1(frame), SYSCALL_ARG2(frame)); break;
+        case SYS_MOUNT: SYSCALL_RET(frame) = (uint64_t)sys_mount(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame), SYSCALL_ARG3(frame), SYSCALL_ARG4(frame)); break;
+        case SYS_UMOUNT2: SYSCALL_RET(frame) = (uint64_t)sys_umount2(SYSCALL_ARG0(frame), (int)SYSCALL_ARG1(frame)); break;
+        case SYS_LINK: SYSCALL_RET(frame) = (uint64_t)sys_link_at(AT_FDCWD, SYSCALL_ARG0(frame), AT_FDCWD, SYSCALL_ARG1(frame), 0); break;
+        case SYS_LINKAT: SYSCALL_RET(frame) = (uint64_t)sys_link_at((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame), SYSCALL_ARG3(frame), (int)SYSCALL_ARG4(frame)); break;
+        case SYS_READLINKAT: SYSCALL_RET(frame) = (uint64_t)sys_readlink_at((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame), (size_t)SYSCALL_ARG3(frame)); break;
+        case SYS_FCHMODAT: SYSCALL_RET(frame) = (uint64_t)sys_chmod_at((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), (uint32_t)SYSCALL_ARG2(frame), 0); break;
         case SYS_UTIMENSAT:
-            frame->rax = (uint64_t)sys_utimens_at((int)frame->rdi, frame->rsi,
-                                                  frame->rdx, (int)frame->r10);
+            SYSCALL_RET(frame) = (uint64_t)sys_utimens_at((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame),
+                                                  SYSCALL_ARG2(frame), (int)SYSCALL_ARG3(frame));
             break;
-        case SYS_SET_ROBUST_LIST: frame->rax = (uint64_t)sys_set_robust_list(frame->rdi, (size_t)frame->rsi); break;
-        case SYS_GET_ROBUST_LIST: frame->rax = (uint64_t)sys_get_robust_list((int)frame->rdi, frame->rsi, frame->rdx); break;
+        case SYS_SET_ROBUST_LIST: SYSCALL_RET(frame) = (uint64_t)sys_set_robust_list(SYSCALL_ARG0(frame), (size_t)SYSCALL_ARG1(frame)); break;
+        case SYS_GET_ROBUST_LIST: SYSCALL_RET(frame) = (uint64_t)sys_get_robust_list((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame)); break;
         case SYS_ACCEPT4:
-            accept_or_block(frame, SYS_ACCEPT4, (int)frame->rdi, frame->rsi, frame->rdx, (int)frame->r10);
+            accept_or_block(frame, SYS_ACCEPT4, (int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame), (int)SYSCALL_ARG3(frame));
             break;
-        case SYS_PIPE2: frame->rax = (uint64_t)sys_pipe(frame->rdi, (int)frame->rsi); break;
-        case SYS_PRLIMIT64: frame->rax = (uint64_t)sys_prlimit(frame->rsi, frame->r10); break;
-        case SYS_RENAMEAT2: frame->rax = (uint64_t)sys_rename_at((int)frame->rdi, frame->rsi, (int)frame->rdx, frame->r10, (unsigned)frame->r8); break;
-        case SYS_GETRANDOM: frame->rax = (uint64_t)sys_getrandom(frame->rdi, (size_t)frame->rsi, (unsigned)frame->rdx); break;
-        case SYS_GETDENTS64: frame->rax = (uint64_t)sys_getdents64((int)frame->rdi, frame->rsi, (size_t)frame->rdx); break;
-        case SYS_STATFS: frame->rax = (uint64_t)sys_statfs(frame->rdi, frame->rsi); break;
-        case SYS_FSTATFS: frame->rax = (uint64_t)sys_fstatfs((int)frame->rdi, frame->rsi); break;
+        case SYS_PIPE2: SYSCALL_RET(frame) = (uint64_t)sys_pipe(SYSCALL_ARG0(frame), (int)SYSCALL_ARG1(frame)); break;
+        case SYS_PRLIMIT64: SYSCALL_RET(frame) = (uint64_t)sys_prlimit(SYSCALL_ARG1(frame), SYSCALL_ARG3(frame)); break;
+        case SYS_RENAMEAT2: SYSCALL_RET(frame) = (uint64_t)sys_rename_at((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame), SYSCALL_ARG3(frame), (unsigned)SYSCALL_ARG4(frame)); break;
+        case SYS_GETRANDOM: SYSCALL_RET(frame) = (uint64_t)sys_getrandom(SYSCALL_ARG0(frame), (size_t)SYSCALL_ARG1(frame), (unsigned)SYSCALL_ARG2(frame)); break;
+        case SYS_GETDENTS64: SYSCALL_RET(frame) = (uint64_t)sys_getdents64((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), (size_t)SYSCALL_ARG2(frame)); break;
+        case SYS_STATFS: SYSCALL_RET(frame) = (uint64_t)sys_statfs(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame)); break;
+        case SYS_FSTATFS: SYSCALL_RET(frame) = (uint64_t)sys_fstatfs((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame)); break;
         case SYS_STATX:
-            frame->rax = (uint64_t)sys_statx((int)frame->rdi, frame->rsi, (int)frame->rdx,
-                                             (uint32_t)frame->r10, frame->r8);
+            SYSCALL_RET(frame) = (uint64_t)sys_statx((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame),
+                                             (uint32_t)SYSCALL_ARG3(frame), SYSCALL_ARG4(frame));
             break;
-        case SYS_RSEQ: frame->rax = (uint64_t)-(int64_t)ENOSYS; break;
+        case SYS_RSEQ: SYSCALL_RET(frame) = (uint64_t)-(int64_t)ENOSYS; break;
         case SYS_FACCESSAT2:
-            frame->rax = (uint64_t)sys_faccess_at((int)frame->rdi, frame->rsi,
-                                                  (int)frame->rdx, (int)frame->r10);
+            SYSCALL_RET(frame) = (uint64_t)sys_faccess_at((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame),
+                                                  (int)SYSCALL_ARG2(frame), (int)SYSCALL_ARG3(frame));
             break;
         case SYS_CLOSE_RANGE: {
             struct process *process = process_current();
-            uint64_t first = frame->rdi, last = frame->rsi, flags = frame->rdx;
-            if (!process || first >= PROCESS_MAX_FDS) frame->rax = 0;
+            uint64_t first = SYSCALL_ARG0(frame), last = SYSCALL_ARG1(frame), flags = SYSCALL_ARG2(frame);
+            if (!process || first >= PROCESS_MAX_FDS) SYSCALL_RET(frame) = 0;
             else {
                 if (last >= PROCESS_MAX_FDS) last = PROCESS_MAX_FDS - 1;
                 if (flags & CLOSE_RANGE_CLOEXEC) {
@@ -5808,7 +5808,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
                     for (uint64_t fd = first; fd <= last; fd++)
                         if (process->files->fds[fd]) process_close_fd(process, (int)fd);
                 }
-                frame->rax = 0;
+                SYSCALL_RET(frame) = 0;
             }
             break;
         }
@@ -5816,7 +5816,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
 
             KDEBUG("syscall: ENOSYS pid=%u nr=%u\n",
                     (unsigned)process_current_pid(), (unsigned)syscall_number);
-            frame->rax = (uint64_t)-(int64_t)ENOSYS;
+            SYSCALL_RET(frame) = (uint64_t)-(int64_t)ENOSYS;
             break;
     }
 
@@ -5835,20 +5835,20 @@ static int file_may_share(const struct file *file) {
 }
 
 static int syscall_try_shared(struct syscall_frame *frame) {
-    uint64_t number = frame->rax;
-    int fd = (int)frame->rdi;
+    uint64_t number = SYSCALL_NR(frame);
+    int fd = (int)SYSCALL_ARG0(frame);
     struct process *process = process_current();
     if (!process || !process->files || fd < 0 || fd >= PROCESS_MAX_FDS) return 0;
     struct file *file = process->files->fds[fd];
     if (!file_may_share(file)) return 0;
 
     int64_t result = number == SYS_READ
-        ? sys_read(fd, frame->rsi, (size_t)frame->rdx)
-        : sys_write(fd, frame->rsi, (size_t)frame->rdx);
+        ? sys_read(fd, SYSCALL_ARG1(frame), (size_t)SYSCALL_ARG2(frame))
+        : sys_write(fd, SYSCALL_ARG1(frame), (size_t)SYSCALL_ARG2(frame));
 
     if (result == -EAGAIN && !(file->flags & O_NONBLOCK)) return 0;
 
-    frame->rax = (uint64_t)result;
+    SYSCALL_RET(frame) = (uint64_t)result;
     return 1;
 }
 
@@ -5859,19 +5859,19 @@ static int syscall_number_may_share(uint64_t number) {
 #define VERBOSE_SYSCALL_LIMIT 24U
 
 void syscall_dispatch(struct syscall_frame *frame) {
-    uint64_t syscall_number = frame->rax;
-    klock_note(KLOCK_NOTE_SYSCALL | (uint32_t)frame->rax);
+    uint64_t syscall_number = SYSCALL_NR(frame);
+    klock_note(KLOCK_NOTE_SYSCALL | (uint32_t)SYSCALL_NR(frame));
 
     if (boot_verbose()) {
         static unsigned traced;
         if (traced < VERBOSE_SYSCALL_LIMIT) {
             traced++;
-            kprintf("syscall: %u from pid %d\n", (unsigned)frame->rax,
+            kprintf("syscall: %u from pid %d\n", (unsigned)SYSCALL_NR(frame),
                     (int)process_current_pid());
         }
     }
 
-    if (syscall_number_may_share(frame->rax)) {
+    if (syscall_number_may_share(SYSCALL_NR(frame))) {
         kernel_lock_shared();
         if (syscall_try_shared(frame)) {
 
@@ -5894,6 +5894,6 @@ void syscall_dispatch(struct syscall_frame *frame) {
         resumed = (struct syscall_frame *)(stack_top - sizeof(*frame));
         if (resumed != frame) *resumed = *frame;
     }
-    if ((int64_t)resumed->rax == -(int64_t)ENOSYS)
+    if ((int64_t)SYSCALL_RET(resumed) == -(int64_t)ENOSYS)
         abi_gaps_note(syscall_number);
 }

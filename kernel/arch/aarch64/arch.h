@@ -49,6 +49,18 @@ struct trap_frame {
 };
 _Static_assert(sizeof(struct trap_frame) == 288, "trap frame layout");
 
+/* The AArch64 half of the seam described in kernel/include/syscall_abi.h:
+   the number arrives in x8 and the result goes back in x0, so unlike x86-64
+   those two are genuinely different registers. */
+#define SYSCALL_NR(frame)   ((frame)->x[8])
+#define SYSCALL_RET(frame)  ((frame)->x[0])
+#define SYSCALL_ARG0(frame) ((frame)->x[0])
+#define SYSCALL_ARG1(frame) ((frame)->x[1])
+#define SYSCALL_ARG2(frame) ((frame)->x[2])
+#define SYSCALL_ARG3(frame) ((frame)->x[3])
+#define SYSCALL_ARG4(frame) ((frame)->x[4])
+#define SYSCALL_ARG5(frame) ((frame)->x[5])
+
 void uart_init(void);
 void uart_putc(char c);
 void uart_puts(const char *s);

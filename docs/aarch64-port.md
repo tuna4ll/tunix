@@ -204,11 +204,23 @@ in its own address space. What it still cannot be is a real program:
 - **Userland** — an AArch64 Void glibc rootfs, init, and a shell.
 - **Wiring the portable core** — the arch-neutral subsystems (vfs, ext2/3,
   scheduler policy, the module loader core minus relocations) plug in behind a
-  small arch interface. Note `kernel/elf.c`'s `elf_load_process` is written
-  against `struct process` and the VFS, and `syscall_dispatch` takes a
-  `struct syscall_frame` named after x86-64 registers, so converging the two
-  architectures means giving both an arch-neutral shape. The loaders here are
-  deliberately the same algorithms over a buffer, so they can fold into that
+  small arch interface.
+
+  The first piece of that interface is in place: `kernel/include/syscall_abi.h`
+  defines `SYSCALL_NR`, `SYSCALL_ARG0`–`SYSCALL_ARG5` and `SYSCALL_RET`, and
+  `kernel/syscall.c` now reaches the register file only through them, so the
+  5900-line dispatcher no longer names an x86-64 register. Each architecture
+  supplies the mapping — x86-64 in that header, AArch64 in
+  `kernel/arch/aarch64/arch.h` over `struct trap_frame`. They cannot share one
+  accessor for the number and the result, because AArch64 takes the number in
+  `x8` and returns in `x0` while x86-64 uses `rax` for both. `struct
+  syscall_frame`'s layout is now pinned with static assertions against the
+  offsets `syscall_entry.S` writes by hand.
+
+  What still needs an arch-neutral shape: `kernel/elf.c`'s `elf_load_process`
+  is written against `struct process` and the VFS, and `process.c` builds child
+  frames and saves interrupt context by register name. The loaders in this port
+  are deliberately the same algorithms over a buffer, so they can fold into the
   shared core once the VFS exists.
 - **Module loader** — `R_AARCH64_*` relocations and an AArch64 module area.
 

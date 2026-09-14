@@ -7,31 +7,32 @@
 #define SYS_EXIT_GROUP 94
 
 #define ENOSYS 38
+#define EBADF  9
 
 void aarch64_syscall_handler(struct trap_frame *frame) {
-    uint64_t number = frame->x[8];
+    uint64_t number = SYSCALL_NR(frame);
 
     switch (number) {
     case SYS_WRITE: {
-        uint64_t fd = frame->x[0];
-        const char *buffer = (const char *)frame->x[1];
-        uint64_t length = frame->x[2];
+        uint64_t fd = SYSCALL_ARG0(frame);
+        const char *buffer = (const char *)SYSCALL_ARG1(frame);
+        uint64_t length = SYSCALL_ARG2(frame);
         if (fd != 1 && fd != 2) {
-            frame->x[0] = (uint64_t)-9;              // -EBADF
+            SYSCALL_RET(frame) = (uint64_t)-EBADF;
             return;
         }
         for (uint64_t i = 0; i < length; i++) uart_putc(buffer[i]);
-        frame->x[0] = length;
+        SYSCALL_RET(frame) = length;
         return;
     }
     case SYS_EXIT:
     case SYS_EXIT_GROUP:
-        kprintf("[aarch64] EL0 task exited with status %lu\n", frame->x[0]);
+        kprintf("[aarch64] EL0 task exited with status %lu\n", SYSCALL_ARG0(frame));
         aarch64_leave_user();
         return;                                      // not reached
     default:
         kprintf("[aarch64] unimplemented syscall %lu from EL0\n", number);
-        frame->x[0] = (uint64_t)-ENOSYS;
+        SYSCALL_RET(frame) = (uint64_t)-ENOSYS;
         return;
     }
 }
