@@ -26,27 +26,3 @@ aarch64_leave_user:
     ldp     x10, x30, [x9]
     mov     sp, x10
     ret
-
-    // A page-aligned blob run at EL0; adr keeps it position independent.
-    .section .rodata.usertest, "a"
-    .align 12
-    .globl usertest_start
-usertest_start:
-    mov     x8, #64                 // __NR_write
-    mov     x0, #1                  // stdout
-    adr     x1, usertest_msg
-    mov     x2, #(usertest_msg_end - usertest_msg)
-    svc     #0
-
-    mov     x8, #93                 // __NR_exit
-    mov     x0, #7
-    svc     #0
-1:  b       1b
-
-usertest_msg:
-    .ascii  "hello from EL0, through svc\n"
-usertest_msg_end:
-
-    .align 12
-    .globl usertest_end
-usertest_end:

@@ -254,7 +254,16 @@ $(BUILD)/aarch64/%.c.o: %.c
 
 $(BUILD)/aarch64/%.S.o: %.S
 	@mkdir -p $(dir $@)
-	$(AARCH64_CC) $(AARCH64_CFLAGS) -c $< -o $@
+	$(AARCH64_CC) $(AARCH64_CFLAGS) -I$(BUILD)/aarch64 -c $< -o $@
+
+# A real static user binary, carried in the kernel image via .incbin.
+AARCH64_USER := $(BUILD)/aarch64/hello.elf
+
+$(AARCH64_USER): support/aarch64/hello.S
+	@mkdir -p $(dir $@)
+	$(AARCH64_CC) -nostdlib -static -ffreestanding -o $@ $<
+
+$(BUILD)/aarch64/kernel/arch/aarch64/userimage.S.o: $(AARCH64_USER)
 
 QEMU_AARCH64 ?= qemu-system-aarch64
 run-aarch64: $(AARCH64_IMAGE)

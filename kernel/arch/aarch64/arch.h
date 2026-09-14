@@ -96,6 +96,9 @@ void aarch64_enter_user(uint64_t entry, uint64_t user_sp);
 void aarch64_leave_user(void);
 void aarch64_syscall_handler(struct trap_frame *frame);
 
+int elf_load_image(uint64_t root_pa, const void *data, uint64_t length,
+                   uint64_t *entry);
+
 extern uint64_t *current_resume;
 void aarch64_context_switch(uint64_t *save_sp, uint64_t new_sp);
 void sched_init(void);

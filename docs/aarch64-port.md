@@ -9,7 +9,7 @@ its own build target.
 
 On QEMU's `virt` machine (GICv3, Cortex-A72) the kernel boots into the high half,
 sets up memory management, and runs preemptively scheduled tasks — one of which
-drops to EL0 and makes syscalls:
+loads a real static ELF binary and runs it at EL0:
 
 ```
 === Tunix aarch64 ===
@@ -25,8 +25,8 @@ generic timer armed at 100 Hz, enabling IRQs
 scheduler: 3 tasks queued behind the idle task
 [task 1] round 0 at tick 1
 [task 2] round 0 at tick 2
-[task 3] entering EL0 at 0x401000
-hello from EL0, through svc
+[task 3] loaded a 1200 byte ELF, entering EL0 at 0x4000d4
+hello from a real ELF binary at EL0
 [aarch64] EL0 task exited with status 7
 [task 3] back at EL1
 [task 1] round 1 at tick 22
@@ -102,6 +102,12 @@ Bring-up covers, in order:
     timer IRQ calls into the round-robin scheduler, so tasks are preempted rather
     than cooperative. A finished task is marked done and its stack is freed by the
     next scheduler pass, once nothing is standing on it.
+15. **ELF loading** (`elf.c`). A real static `ET_EXEC`/`EM_AARCH64` binary is
+    validated, its `PT_LOAD` segments are backed with fresh frames, the file
+    bytes are copied through the direct map, the remainder of each segment is
+    left zeroed for `.bss`, and the pages are mapped with the permissions the
+    segment asks for. Until there is a filesystem, the binary is built from
+    `support/aarch64/hello.S` and carried in the kernel image with `.incbin`.
 
 ## Building and running
 
@@ -111,27 +117,32 @@ make run-aarch64             # boot it under qemu-system-aarch64 -M virt
 ```
 
 The toolchain is `aarch64-linux-gnu-gcc`; QEMU is `qemu-system-aarch64`. The
-x86-64 build (`make`, `make kernel`) is untouched — its source glob prunes
+build also links `support/aarch64/hello.S` into a static user ELF and embeds it.
+The x86-64 build (`make`, `make kernel`) is untouched — its source glob prunes
 `kernel/arch/aarch64`.
 
 ## What is next
 
-There is a kernel with memory management, user mode and preemptive tasks, but no
-userland yet. The ladder from here:
+There is a kernel with memory management, user mode, preemptive tasks and an ELF
+loader, but no userland yet. The ladder from here:
 
-- **ELF loading** — map a real static AArch64 binary's segments into a fresh
-  address space instead of the built-in blob.
+- **The initial user stack** — a real program expects `argc`, `argv`, `envp` and
+  an auxiliary vector on the stack at entry. The test binary is freestanding and
+  ignores all of it; glibc will not.
+- **The syscall surface** — three calls is enough for a test binary; glibc needs
+  a couple of hundred (`openat`, `mmap`, `brk`, `clone`, `futex`, `ioctl`, …).
+  This is the bulk of the remaining work before any real program runs.
 - **Storage & console** — virtio-mmio block and console, then ext2 on top, so
-  binaries can come off a disk.
-- **The syscall surface** — three calls is enough for a test blob; glibc expects
-  a couple of hundred. This is the bulk of the remaining work before any real
-  program runs.
+  binaries can come off a disk instead of being baked into the kernel.
 - **Userland** — an AArch64 Void glibc rootfs, init, and a shell.
 - **Wiring the portable core** — the arch-neutral subsystems (vfs, ext2/3,
   scheduler policy, the module loader core minus relocations) plug in behind a
-  small arch interface. Note `syscall_dispatch` currently takes a
+  small arch interface. Note `kernel/elf.c`'s `elf_load_process` is written
+  against `struct process` and the VFS, and `syscall_dispatch` takes a
   `struct syscall_frame` named after x86-64 registers, so converging the two
-  architectures means giving that frame an arch-neutral shape.
+  architectures means giving both an arch-neutral shape. The aarch64 loader here
+  is deliberately the same algorithm over a memory buffer, so it can fold into
+  that shared core once the VFS exists.
 - **Module loader** — `R_AARCH64_*` relocations and an AArch64 module area.
 
 ### A note on SMP

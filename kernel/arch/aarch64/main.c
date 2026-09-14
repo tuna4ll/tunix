@@ -3,7 +3,8 @@
 #include "arch.h"
 
 extern char kernel_start[];
-extern char usertest_start[];
+extern char user_elf_start[];
+extern char user_elf_end[];
 
 static const char *current_el_name(void) {
     switch ((sysreg_read("CurrentEL") >> 2) & 3) {
@@ -88,20 +89,21 @@ static void user_task(void *argument) {
     (void)argument;
     uint64_t space = vmm_create_space();
     uint64_t stack_pa = (uint64_t)pmm_alloc_page();
-    uint64_t code_va = 0x0000000000401000UL;
     uint64_t stack_va = 0x0000000000500000UL;
+    uint64_t length = (uint64_t)(user_elf_end - user_elf_start);
+    uint64_t entry = 0;
 
     if (!space || !stack_pa ||
-        vmm_map(space, code_va, virt_to_phys((uint64_t)usertest_start),
-                VMM_USER | VMM_EXEC) != 0 ||
+        elf_load_image(space, user_elf_start, length, &entry) != 0 ||
         vmm_map(space, stack_va, stack_pa, VMM_USER | VMM_WRITE) != 0) {
-        kprintf("usermode: setup failed\n");
+        kprintf("usermode: could not load the %lu byte ELF\n", length);
         return;
     }
 
     sched_set_space(space);
-    kprintf("[task %d] entering EL0 at %p\n", sched_current_id(), (void *)code_va);
-    aarch64_enter_user(code_va, stack_va + 4096);
+    kprintf("[task %d] loaded a %lu byte ELF, entering EL0 at %p\n",
+            sched_current_id(), length, (void *)entry);
+    aarch64_enter_user(entry, stack_va + 4096);
     kprintf("[task %d] back at EL1\n", sched_current_id());
 }
 
