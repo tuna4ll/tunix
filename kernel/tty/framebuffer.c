@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
+#include "../include/cpu.h"
 #include "../include/file.h"
 #include "../include/framebuffer.h"
 #include "../include/terminal.h"
@@ -11,10 +12,6 @@
 
 extern void kprintf(const char *fmt, ...);
 
-/* Must sit ABOVE the kernel heap window, or the heap collides with it as it
-   grows and stops early. The heap is [HEAP_START, HEAP_START+HEAP_MAX_SIZE) =
-   [0xFFFFFFFFC0000000, 0xFFFFFFFFF0000000) (768 MiB); this is the first address
-   past it, leaving 256 MiB up to the top of the address space for the display. */
 #define FRAMEBUFFER_VIRTUAL_BASE 0xFFFFFFFFF0000000ULL
 
 #define EACCES 13
@@ -44,28 +41,12 @@ struct framebuffer_state {
     const uint8_t *font;
     uint16_t font_width;
     uint16_t font_height;
-    /* Whoever currently owns the display. Usually an open /dev/fb0 description,
-       but the DRM device claims it with a token of its own (see drm.c), so this
-       is deliberately untyped: the pointer is only ever compared. */
     const void *graphics_owner;
-    /* The owner is on a virtual terminal that is not the one in front. It keeps
-       its claim -- it is still running and still owns its buffers -- but it
-       does not reach the screen, and the console may draw again. */
     int graphics_suspended;
     int ready;
 };
 
 static struct framebuffer_state framebuffer;
-
-static uint64_t interrupt_save(void) {
-    uint64_t flags;
-    __asm__ volatile("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
-    return flags;
-}
-
-static void interrupt_restore(uint64_t flags) {
-    __asm__ volatile("pushq %0; popfq" : : "r"(flags) : "memory", "cc");
-}
 
 static uint64_t align_up_page(uint64_t value) {
     return (value + 4095ULL) & ~4095ULL;
@@ -82,21 +63,12 @@ static int file_is_writable(const struct file *file) {
 }
 
 static int framebuffer_owner_is(const void *owner) {
-    uint64_t interrupt_flags = interrupt_save();
+    uint64_t interrupt_flags = cpu_irq_save();
     int owned = framebuffer.graphics_owner == owner;
-    interrupt_restore(interrupt_flags);
+    cpu_irq_restore(interrupt_flags);
     return owned;
 }
 
-/*
- * Putting a terminal in KD_GRAPHICS and presenting through /dev/dri/card0 are
- * one handover, not two: an X server does exactly that, KDSETMODE on the
- * terminal it runs on and then SETCRTC on the card. Treating the second as a
- * competing claim answered it with EBUSY, and the X server reported "failed to
- * set mode: Resource busy" and never painted. So a claimer is let in alongside
- * the terminal that already stood the console down. Ownership stays with the
- * terminal, which is what KD_TEXT and switching away still act on.
- */
 static int shares_with_graphics_terminal(const void *owner) {
     const void *terminal = vt_graphics_mode_owner();
     return terminal && terminal == framebuffer.graphics_owner && terminal != owner;
@@ -106,17 +78,15 @@ int framebuffer_claim_graphics(const void *owner) {
     if (!framebuffer.ready) return -ENODEV;
     if (!owner) return -EINVAL;
 
-    uint64_t interrupt_flags = interrupt_save();
+    uint64_t interrupt_flags = cpu_irq_save();
     if (framebuffer.graphics_owner && framebuffer.graphics_owner != owner) {
         int shared = shares_with_graphics_terminal(owner);
-        interrupt_restore(interrupt_flags);
+        cpu_irq_restore(interrupt_flags);
         return shared ? 0 : -EBUSY;
     }
     int first_claim = framebuffer.graphics_owner == NULL;
     framebuffer.graphics_owner = owner;
-    interrupt_restore(interrupt_flags);
-    /* A new owner belongs to the terminal that is in front of the user now;
-       that is what decides where the display goes back to on a switch. */
+    cpu_irq_restore(interrupt_flags);
     if (first_claim) vt_display_claimed();
     return 0;
 }
@@ -124,46 +94,43 @@ int framebuffer_claim_graphics(const void *owner) {
 int framebuffer_release_graphics(const void *owner, int fail_if_not_owner) {
     if (!framebuffer.ready) return -ENODEV;
 
-    uint64_t interrupt_flags = interrupt_save();
+    uint64_t interrupt_flags = cpu_irq_save();
     if (framebuffer.graphics_owner != owner) {
         int no_owner = framebuffer.graphics_owner == NULL;
-        interrupt_restore(interrupt_flags);
+        cpu_irq_restore(interrupt_flags);
         if (no_owner) return 0;
         return fail_if_not_owner ? -EPERM : 0;
     }
     framebuffer.graphics_owner = NULL;
     framebuffer.graphics_suspended = 0;
-    interrupt_restore(interrupt_flags);
+    cpu_irq_restore(interrupt_flags);
 
     vt_display_released();
-    /* Whatever was on screen belonged to the owner that just left, so the
-       console has to paint itself back. */
     terminal_redraw();
     return 0;
 }
 
 void framebuffer_suspend_graphics(void) {
-    uint64_t interrupt_flags = interrupt_save();
+    uint64_t interrupt_flags = cpu_irq_save();
     if (framebuffer.graphics_owner) framebuffer.graphics_suspended = 1;
-    interrupt_restore(interrupt_flags);
+    cpu_irq_restore(interrupt_flags);
 }
 
 void framebuffer_resume_graphics(void) {
-    uint64_t interrupt_flags = interrupt_save();
+    uint64_t interrupt_flags = cpu_irq_save();
     framebuffer.graphics_suspended = 0;
-    interrupt_restore(interrupt_flags);
+    cpu_irq_restore(interrupt_flags);
 }
 
 int framebuffer_graphics_foreground(const void *owner) {
-    uint64_t interrupt_flags = interrupt_save();
+    uint64_t interrupt_flags = cpu_irq_save();
     int mine = framebuffer.graphics_owner == owner ||
                shares_with_graphics_terminal(owner);
     int foreground = mine && !framebuffer.graphics_suspended;
-    interrupt_restore(interrupt_flags);
+    cpu_irq_restore(interrupt_flags);
     return foreground;
 }
 
-/* /dev/fb0 owns by open file description, and only a writable one may draw. */
 static int framebuffer_acquire(struct file *file) {
     if (!framebuffer.ready) return -ENODEV;
     if (!file_is_writable(file)) return -EACCES;
@@ -191,12 +158,6 @@ int framebuffer_init(const struct boot_framebuffer_info *boot_info) {
     uint64_t framebuffer_bytes = (uint64_t)boot_info->pitch * boot_info->height;
     if (framebuffer_bytes > UINT64_MAX - page_offset) return -1;
     uint64_t mapped_size = align_up_page(framebuffer_bytes + page_offset);
-    /* Write-combining where the processor can do it, uncached where it cannot.
-       Never write-back: this is a device's memory, and the writes have to
-       reach it rather than sit in a cache line waiting for an eviction. The
-       distinction costs nothing under emulation, where the framebuffer is
-       ordinary RAM, and is the difference between a usable desktop and an
-       unusable one on a real card. */
     uint64_t cache_flags = vmm_write_combining_available() ? PAGE_WRITE_COMBINING
                                                           : PAGE_UNCACHED;
     for (uint64_t offset = 0; offset < mapped_size; offset += 4096ULL) {
@@ -434,19 +395,11 @@ void framebuffer_file_close(struct file *file) {
     if (file) (void)framebuffer_release(file, 0);
 }
 
-/*
- * The scanout as the kernel sees it, for drivers that composite in software.
- * The DRM device uses this to present a dumb buffer: there is no CRTC to point
- * at a different address, so presenting means copying into the one real
- * framebuffer the bootloader gave us.
- */
 uint8_t *framebuffer_scanout(void) {
     if (!framebuffer.ready || !framebuffer.base) return NULL;
     return (uint8_t *)framebuffer.base + framebuffer.memory_offset;
 }
 
-/* The mapping is write-through to the display, so presenting is only a barrier;
-   this is the same thing TUNIX_FBIO_FLUSH does. */
 void framebuffer_present(void) {
     __sync_synchronize();
 }
@@ -463,9 +416,6 @@ int64_t framebuffer_device_mmap(struct vfs_node *node, struct file *file,
         length > framebuffer.mapping_size - offset) return -EINVAL;
 
     uint64_t mapped = 0;
-    /* The same caching decision as the kernel's own mapping, and it matters
-       more here: this is the mapping Xorg and weston draw a whole screen
-       through, a word at a time. */
     uint64_t flags = page_flags | PAGE_USER | PAGE_DEVICE | PAGE_PRESENT | PAGE_NX |
                      (vmm_write_combining_available() ? PAGE_WRITE_COMBINING
                                                       : PAGE_UNCACHED);

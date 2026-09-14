@@ -87,16 +87,6 @@ static unsigned mouse_device_id;
 static unsigned mouse_present;
 static uint8_t mouse_buttons;
 
-static uint64_t interrupt_save(void) {
-    uint64_t flags;
-    __asm__ volatile("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
-    return flags;
-}
-
-static void interrupt_restore(uint64_t flags) {
-    __asm__ volatile("pushq %0; popfq" : : "r"(flags) : "memory", "cc");
-}
-
 static int ps2_wait_write(void) {
     for (unsigned i = 0; i < PS2_TIMEOUT; i++) {
         if (!(inb(PS2_STATUS_PORT) & PS2_STATUS_INPUT_FULL)) return 0;
@@ -228,9 +218,9 @@ int input_key_history_at(unsigned index, struct input_key_event *out) {
     if (!out || index >= key_history_total) return -1;
     if (key_history_total > INPUT_KEY_HISTORY &&
         index < key_history_total - INPUT_KEY_HISTORY) return -1;
-    uint64_t flags = interrupt_save();
+    uint64_t flags = cpu_irq_save();
     *out = key_history[index % INPUT_KEY_HISTORY];
-    interrupt_restore(flags);
+    cpu_irq_restore(flags);
     return 0;
 }
 
@@ -532,9 +522,9 @@ static void input_drain_controller(void) {
 }
 
 void input_poll(void) {
-    uint64_t flags = interrupt_save();
+    uint64_t flags = cpu_irq_save();
     input_drain_controller();
-    interrupt_restore(flags);
+    cpu_irq_restore(flags);
     xhci_poll();
 }
 
@@ -575,27 +565,27 @@ int input_get_device_info(unsigned device_id, struct tunix_input_device_info *in
 }
 
 void input_scancode_open(void) {
-    uint64_t flags = interrupt_save();
+    uint64_t flags = cpu_irq_save();
     raw_listeners++;
-    interrupt_restore(flags);
+    cpu_irq_restore(flags);
 }
 
 void input_scancode_close(void) {
-    uint64_t flags = interrupt_save();
+    uint64_t flags = cpu_irq_save();
     if (raw_listeners) raw_listeners--;
     if (!raw_listeners) {
         raw_head = 0;
         raw_tail = 0;
         raw_count = 0;
     }
-    interrupt_restore(flags);
+    cpu_irq_restore(flags);
 }
 
 int input_scancodes_ready(void) {
     input_poll();
-    uint64_t flags = interrupt_save();
+    uint64_t flags = cpu_irq_save();
     int ready = raw_count != 0;
-    interrupt_restore(flags);
+    cpu_irq_restore(flags);
     return ready;
 }
 
@@ -603,9 +593,9 @@ int64_t input_read_scancodes(size_t size, void *buffer) {
     if (!buffer) return -EINVAL;
     if (!size) return 0;
     input_poll();
-    uint64_t flags = interrupt_save();
+    uint64_t flags = cpu_irq_save();
     if (!raw_count) {
-        interrupt_restore(flags);
+        cpu_irq_restore(flags);
         return -EAGAIN;
     }
     uint8_t *out = (uint8_t *)buffer;
@@ -615,7 +605,7 @@ int64_t input_read_scancodes(size_t size, void *buffer) {
         raw_head = (raw_head + 1U) % RAW_INPUT_CAPACITY;
         raw_count--;
     }
-    interrupt_restore(flags);
+    cpu_irq_restore(flags);
     return (int64_t)completed;
 }
 
@@ -631,13 +621,13 @@ struct input_reader *input_reader_open(unsigned device_id) {
     reader->device_id = device_id;
     reader->vt_index = vt_current_index();
 
-    uint64_t flags = interrupt_save();
+    uint64_t flags = cpu_irq_save();
     reader->next = input_readers;
     input_readers = reader;
     unsigned total = 0;
     for (struct input_reader *walk = input_readers; walk; walk = walk->next)
         if (walk->device_id == device_id) total++;
-    interrupt_restore(flags);
+    cpu_irq_restore(flags);
     if (input_logging)
         kprintf("INPUT: open device %u vt %u by pid %d, %u readers now\n",
                 device_id, reader->vt_index, (int)process_current_pid(), total);
@@ -646,12 +636,12 @@ struct input_reader *input_reader_open(unsigned device_id) {
 
 void input_reader_close(struct input_reader *reader) {
     if (!reader) return;
-    uint64_t flags = interrupt_save();
+    uint64_t flags = cpu_irq_save();
     struct input_reader **link = &input_readers;
     while (*link && *link != reader) link = &(*link)->next;
     if (*link == reader) *link = reader->next;
     int was_grabbed = reader->grabbed;
-    interrupt_restore(flags);
+    cpu_irq_restore(flags);
     if (was_grabbed) tty_reset_keyboard_state();
     if (input_logging)
         kprintf("INPUT: close device %u vt %u\n", reader->device_id,
@@ -662,9 +652,9 @@ void input_reader_close(struct input_reader *reader) {
 int input_reader_ready(struct input_reader *reader) {
     if (!reader) return 0;
     input_poll();
-    uint64_t flags = interrupt_save();
+    uint64_t flags = cpu_irq_save();
     int ready = reader->count != 0;
-    interrupt_restore(flags);
+    cpu_irq_restore(flags);
     return ready;
 }
 
@@ -799,10 +789,10 @@ int64_t input_reader_ioctl(struct input_reader *reader, unsigned device_id,
 
     if (nr == EVIOCGKEY_NR) {
         memset(bits, 0, sizeof(bits));
-        uint64_t flags = interrupt_save();
+        uint64_t flags = cpu_irq_save();
         for (unsigned key = 0; key < INPUT_KEY_STATE_SIZE; key++)
             if (key_down[key]) bitmap_set(bits, sizeof(bits), key);
-        interrupt_restore(flags);
+        cpu_irq_restore(flags);
         return evdev_copy_out(user_argument, bits, size, size);
     }
     if (nr == EVIOCGLED_NR || nr == EVIOCGSND_NR || nr == EVIOCGSW_NR) {
@@ -832,10 +822,10 @@ int64_t input_reader_ioctl(struct input_reader *reader, unsigned device_id,
 
     if (nr == EVIOCREVOKE_NR) {
         if (reader) {
-            uint64_t flags = interrupt_save();
+            uint64_t flags = cpu_irq_save();
             reader->head = reader->tail = reader->count = 0;
             reader->grabbed = 0;
-            interrupt_restore(flags);
+            cpu_irq_restore(flags);
         }
         return 0;
     }
@@ -849,9 +839,9 @@ int64_t input_reader_read(struct input_reader *reader, size_t size, void *buffer
     input_poll();
 
     size_t event_capacity = size / sizeof(struct tunix_input_event);
-    uint64_t flags = interrupt_save();
+    uint64_t flags = cpu_irq_save();
     if (!reader->count) {
-        interrupt_restore(flags);
+        cpu_irq_restore(flags);
         return -EAGAIN;
     }
 
@@ -876,6 +866,6 @@ int64_t input_reader_read(struct input_reader *reader, size_t size, void *buffer
         reader->head = (reader->head + 1U) % INPUT_READER_CAPACITY;
         reader->count--;
     }
-    interrupt_restore(flags);
+    cpu_irq_restore(flags);
     return (int64_t)(completed * sizeof(struct tunix_input_event));
 }
