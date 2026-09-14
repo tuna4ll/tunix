@@ -36,16 +36,37 @@ void aarch64_main(uint64_t dtb) {
     kprintf("\n=== Tunix aarch64 ===\n");
     kprintf("running at %s\n", current_el_name());
 
-    uint64_t ram = 0;
+    uint64_t ram_base = 0x40000000, ram = 0;
     uint32_t cpus = 0;
     const void *dt = fdt_find((const void *)dtb);
-    if (dt && fdt_probe(dt, &ram, &cpus) == 0)
-        kprintf("device tree @ %p: %lu MiB RAM, %u CPU(s)\n", dt, ram >> 20, cpus);
+    if (dt && fdt_probe(dt, &ram_base, &ram, &cpus) == 0)
+        kprintf("device tree @ %p: %lu MiB RAM @ %lx, %u CPU(s)\n", dt, ram >> 20,
+                ram_base, cpus);
     else
         kprintf("device tree: not found\n");
 
     mmu_init();
     kprintf("MMU enabled (identity map, MAIR/TCR set)\n");
+
+    uint64_t dtb_size = dt ? 0x100000UL : 0;
+    pmm_init(ram_base, ram ? ram : 0x20000000UL, (uint64_t)dt, dtb_size);
+    kprintf("PMM: %lu free frames (%lu MiB)\n", pmm_free_pages(),
+            (pmm_free_pages() * 4096) >> 20);
+
+    uint64_t va = 0x0000008000000000UL;             // a fresh, unmapped region
+    uint64_t frame = (uint64_t)pmm_alloc_page();
+    if (frame && vmm_map_page(va, frame, 1) == 0) {
+        volatile uint64_t *p = (volatile uint64_t *)va;
+        p[0] = 0xC0DE1234ABCD5678UL;
+        p[1] = frame;
+        int ok = (p[0] == 0xC0DE1234ABCD5678UL) && (p[1] == frame);
+        kprintf("VMM: mapped %p -> %p, readback %s\n", (void *)va, (void *)frame,
+                ok ? "OK" : "BAD");
+        vmm_unmap_page(va);
+        kprintf("VMM: unmapped %p\n", (void *)va);
+    } else {
+        kprintf("VMM: mapping test failed\n");
+    }
 
     gic_init();
     kprintf("GICv3 initialised\n");

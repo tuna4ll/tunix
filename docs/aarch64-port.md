@@ -46,6 +46,11 @@ Bring-up covers, in order:
 7. **Timer** (`timer.c`). The architected generic timer at 100 Hz, acknowledged
    and re-armed from the IRQ handler.
 8. **Console** (`uart.c`). A PL011 driver with a small `kprintf`.
+9. **Physical memory** (`pmm.c`). A frame bitmap over the DTB-reported RAM, with
+   the kernel image and DTB reserved; `pmm_alloc_page`/`pmm_free_page`.
+10. **Page mapping** (`vmm.c`). A 4 KiB, four-level `vmm_map_page`/`vmm_unmap_page`
+    that grows intermediate tables from the PMM and shoots down the TLB entry —
+    the paging infrastructure processes will need.
 
 ## Building and running
 
@@ -60,11 +65,11 @@ x86-64 build (`make`, `make kernel`) is untouched — its source glob prunes
 
 ## What is next
 
-This is P0/P1 of the port (a HAL bring-up), not a running userland yet. The
+This is P0-P2 of the port (a HAL bring-up), not a running userland yet. The
 ladder from here:
 
-- **Physical page allocator + 4 KiB page-table API** — replace the 1 GiB
-  identity blocks with real mappings and a higher-half kernel VA (`TTBR1`).
+- **Higher-half kernel** — move the kernel to a `TTBR1` virtual address and keep
+  the identity map only for early boot.
 - **SMP** — bring up secondary cores with PSCI `CPU_ON`, per-CPU via
   `TPIDR_EL1`, and GIC SGIs for IPIs/TLB shootdown.
 - **Process & syscalls** — context switch, `SVC` entry, `TPIDR_EL0` for TLS,

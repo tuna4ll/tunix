@@ -51,7 +51,8 @@ const void *fdt_find(const void *hint) {
     return NULL;
 }
 
-int fdt_probe(const void *dtb, uint64_t *ram_bytes, uint32_t *cpu_count) {
+int fdt_probe(const void *dtb, uint64_t *ram_base, uint64_t *ram_bytes,
+              uint32_t *cpu_count) {
     const struct fdt_header *hdr = dtb;
     if (!dtb || be32(&hdr->magic) != FDT_MAGIC) return -1;
 
@@ -60,6 +61,7 @@ int fdt_probe(const void *dtb, uint64_t *ram_bytes, uint32_t *cpu_count) {
     const uint32_t *p = (const uint32_t *)(base + be32(&hdr->off_dt_struct));
     const uint32_t *end = p + be32(&hdr->size_dt_struct) / 4;
 
+    uint64_t rambase = 0;
     uint64_t ram = 0;
     uint32_t cpus = 0;
     int in_memory = 0;
@@ -77,14 +79,17 @@ int fdt_probe(const void *dtb, uint64_t *ram_bytes, uint32_t *cpu_count) {
             uint32_t len = be32(p++);
             uint32_t nameoff = be32(p++);
             const char *pname = (const char *)(strings + nameoff);
-            if (in_memory && name_is(pname, "reg") && len >= 16)
-                ram += be64((const uint8_t *)p + 8);     // size cell of first region
+            if (in_memory && name_is(pname, "reg") && len >= 16) {
+                if (!ram) rambase = be64((const uint8_t *)p);   // first region base
+                ram += be64((const uint8_t *)p + 8);            // ... and its size
+            }
             p += (len + 3) / 4;                          // skip value, 4-byte aligned
         } else if (token == FDT_END) {
             break;
         }
     }
 
+    if (ram_base) *ram_base = rambase;
     if (ram_bytes) *ram_bytes = ram;
     if (cpu_count) *cpu_count = cpus;
     return 0;

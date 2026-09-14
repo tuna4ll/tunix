@@ -19,6 +19,10 @@
 static uint64_t l0_table[PT_ENTRIES] __attribute__((aligned(4096)));
 static uint64_t l1_table[PT_ENTRIES] __attribute__((aligned(4096)));
 
+uint64_t *mmu_root_table(void) {
+    return l0_table;
+}
+
 void mmu_init(void) {
     for (int i = 0; i < PT_ENTRIES; i++) {
         l0_table[i] = 0;
