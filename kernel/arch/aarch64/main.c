@@ -2,6 +2,7 @@
 
 #include "arch.h"
 #include "../../include/cpu.h"
+#include "../../include/random.h"
 
 extern char kernel_start[];
 extern char user_elf_start[];
@@ -143,6 +144,10 @@ void aarch64_main(uint64_t dtb_phys) {
     kprintf("cpu: %s %s, part %x revision %u\n", identity.vendor,
             identity.model[0] ? identity.model : "(unlisted part)",
             identity.model_number, identity.stepping);
+
+    uint64_t samples[48];
+    kprintf("entropy: %u values from the processor\n",
+            (unsigned)arch_entropy_collect(samples, 48));
 
     uint64_t ram_base = KERNEL_PHYS_BASE, ram = 0;
     uint32_t cpus = 0;

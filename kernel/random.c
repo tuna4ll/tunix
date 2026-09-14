@@ -1,7 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "include/cpu.h"
-#include "include/io.h"
 #include "include/kstring.h"
 #include "include/random.h"
 #include "include/spinlock.h"
@@ -128,75 +127,15 @@ static void sha256_final(struct sha256_ctx *ctx, uint8_t digest[32]) {
     for (unsigned i = 0; i < 8; i++) store32_be(digest + i * 4U, ctx->state[i]);
 }
 
-static void cpuid(uint32_t leaf, uint32_t subleaf,
-                  uint32_t *a, uint32_t *b, uint32_t *c, uint32_t *d) {
-    __asm__ volatile("cpuid"
-                     : "=a"(*a), "=b"(*b), "=c"(*c), "=d"(*d)
-                     : "a"(leaf), "c"(subleaf));
-}
-
-static int cpu_has_rdrand(void) {
-    uint32_t a, b, c, d;
-    cpuid(1, 0, &a, &b, &c, &d);
-    return (c & (1U << 30)) != 0;
-}
-
-static int cpu_has_rdseed(void) {
-    uint32_t a, b, c, d;
-    cpuid(0, 0, &a, &b, &c, &d);
-    if (a < 7U) return 0;
-    cpuid(7, 0, &a, &b, &c, &d);
-    return (b & (1U << 18)) != 0;
-}
-
-static int get_rdrand(uint64_t *value) {
-    uint64_t result;
-    unsigned char ok;
-    __asm__ volatile("rdrand %0; setc %1" : "=r"(result), "=m"(ok) : : "cc");
-    if (ok) *value = result;
-    return ok != 0;
-}
-
-static int get_rdseed(uint64_t *value) {
-    uint64_t result;
-    unsigned char ok;
-    __asm__ volatile("rdseed %0; setc %1" : "=r"(result), "=m"(ok) : : "cc");
-    if (ok) *value = result;
-    return ok != 0;
-}
-
 static size_t collect_entropy(uint8_t *output, size_t capacity) {
     uint64_t values[64];
-    size_t count = 0;
-    uint32_t a, b, c, d;
+    size_t count = arch_entropy_collect(values, 48U);
 
-    cpuid(0, 0, &a, &b, &c, &d);
-    values[count++] = ((uint64_t)a << 32) | b;
-    values[count++] = ((uint64_t)c << 32) | d;
     values[count++] = time_realtime_ns();
     values[count++] = time_uptime_ns();
     values[count++] = time_tsc_frequency();
     values[count++] = (uint64_t)(uintptr_t)&values;
     values[count++] = (uint64_t)(uintptr_t)&chacha_state;
-
-    if (cpu_has_rdseed()) {
-        for (unsigned i = 0; i < 8 && count < 64U; i++) {
-            uint64_t value;
-            for (unsigned retry = 0; retry < 32U; retry++) {
-                if (get_rdseed(&value)) { values[count++] = value; break; }
-                cpu_relax();
-            }
-        }
-    }
-    if (cpu_has_rdrand()) {
-        for (unsigned i = 0; i < 8 && count < 64U; i++) {
-            uint64_t value;
-            for (unsigned retry = 0; retry < 16U; retry++) {
-                if (get_rdrand(&value)) { values[count++] = value; break; }
-                cpu_relax();
-            }
-        }
-    }
 
     uint64_t previous = cpu_counter_ordered();
     while (count < 64U) {
@@ -204,7 +143,7 @@ static size_t collect_entropy(uint8_t *output, size_t capacity) {
         for (unsigned sample = 0; sample < 32U; sample++) {
             unsigned loops = 1U + (unsigned)(previous & 0x3FU);
             for (unsigned i = 0; i < loops; i++) {
-                accumulator ^= (uint64_t)inb(0x61U) << ((i & 7U) * 8U);
+                accumulator ^= arch_entropy_noise() << ((i & 7U) * 8U);
                 cpu_relax();
             }
             uint64_t now = cpu_counter_ordered();
