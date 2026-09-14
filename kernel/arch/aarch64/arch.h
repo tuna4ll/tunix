@@ -97,8 +97,19 @@ void aarch64_enter_user(uint64_t entry, uint64_t user_sp);
 void aarch64_leave_user(void);
 void aarch64_syscall_handler(struct trap_frame *frame);
 
+struct elf_image {
+    uint64_t entry;
+    uint64_t phdr;                      // user address of the program headers
+    uint16_t phentsize;
+    uint16_t phnum;
+};
+
 int elf_load_image(uint64_t root_pa, const void *data, uint64_t length,
-                   uint64_t *entry);
+                   struct elf_image *out);
+
+int user_stack_build(uint64_t stack_top, const char *const argv[],
+                     const char *const envp[], const struct elf_image *image,
+                     uint64_t *sp_out);
 
 // QEMU virt lays 32 virtio-mmio slots out back to back, SPI 16 upwards.
 #define VIRTIO_MMIO_BASE     0x0A000000UL

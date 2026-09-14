@@ -9,6 +9,8 @@ extern char user_elf_end[];
 static const void *init_image;          // /sbin/init off the disk, when there is one
 static uint64_t init_length;
 
+#define USER_STACK_PAGES 4U
+
 static const char *current_el_name(void) {
     switch ((sysreg_read("CurrentEL") >> 2) & 3) {
     case 1: return "EL1";
@@ -90,26 +92,43 @@ static void worker_task(void *argument) {
 
 static void user_task(void *argument) {
     (void)argument;
+    static const char *const argv[] = {"/sbin/init", NULL};
+    static const char *const envp[] = {"PATH=/bin:/sbin", "TERM=linux", NULL};
+
     uint64_t space = vmm_create_space();
-    uint64_t stack_pa = (uint64_t)pmm_alloc_page();
     uint64_t stack_va = 0x0000000000500000UL;
     const void *image = init_image ? init_image : (const void *)user_elf_start;
     uint64_t length = init_image ? init_length
                                  : (uint64_t)(user_elf_end - user_elf_start);
     const char *source = init_image ? "/sbin/init" : "the built-in image";
-    uint64_t entry = 0;
+    struct elf_image loaded;
 
-    if (!space || !stack_pa ||
-        elf_load_image(space, image, length, &entry) != 0 ||
-        vmm_map(space, stack_va, stack_pa, VMM_USER | VMM_WRITE) != 0) {
+    if (!space || elf_load_image(space, image, length, &loaded) != 0) {
         kprintf("usermode: could not load %s (%lu bytes)\n", source, length);
         return;
     }
 
+    for (unsigned page = 0; page < USER_STACK_PAGES; page++) {
+        uint64_t frame = (uint64_t)pmm_alloc_page();
+        if (!frame || vmm_map(space, stack_va + page * 4096, frame,
+                              VMM_USER | VMM_WRITE) != 0) {
+            kprintf("usermode: could not map the user stack\n");
+            return;
+        }
+    }
+    uint64_t stack_top = stack_va + USER_STACK_PAGES * 4096;
+
     sched_set_space(space);
-    kprintf("[task %d] loaded %s (%lu bytes), entering EL0 at %p\n",
-            sched_current_id(), source, length, (void *)entry);
-    aarch64_enter_user(entry, stack_va + 4096);
+
+    uint64_t sp = 0;
+    if (user_stack_build(stack_top, argv, envp, &loaded, &sp) != 0) {
+        kprintf("usermode: could not build the initial stack\n");
+        return;
+    }
+
+    kprintf("[task %d] loaded %s (%lu bytes), phdr %p, sp %p\n",
+            sched_current_id(), source, length, (void *)loaded.phdr, (void *)sp);
+    aarch64_enter_user(loaded.entry, sp);
     kprintf("[task %d] back at EL1\n", sched_current_id());
 }
 

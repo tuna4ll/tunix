@@ -9,15 +9,15 @@ its own build target.
 
 On QEMU's `virt` machine (GICv3, Cortex-A72) the kernel boots into the high half,
 sets up memory management, reads `/sbin/init` off an ext2 disk over virtio-blk,
-and runs it at EL0 under a preemptive scheduler:
+and runs it at EL0 on a proper process stack under a preemptive scheduler:
 
 ```
 === Tunix aarch64 ===
 running at EL1, kernel at 0xffff000040000000 (higher half)
 device tree @ 0x48000000: 2048 MiB RAM @ 40000000, 4 CPU(s)
-PMM: 523934 free frames (2046 MiB)
+PMM: 523933 free frames (2046 MiB)
 heap: 16383 KiB, alloc/free stress OK, reclaimed fully
-address spaces: identity map dropped, TTBR0 = 0x41062000
+address spaces: identity map dropped, TTBR0 = 0x41063000
 VMM: VA 0x400000 reads aaaa in A and bbbb in B, isolation OK
 VMM: destroying a space reclaimed 4 page-table frames
 virtio-mmio slot 31: block (id 2, version 1, irq 79)
@@ -28,7 +28,7 @@ generic timer armed at 100 Hz, enabling IRQs
 scheduler: 3 tasks queued behind the idle task
 [task 1] round 0 at tick 1
 [task 2] round 0 at tick 2
-[task 3] loaded /sbin/init (1200 bytes), entering EL0 at 0x4000d4
+[task 3] loaded /sbin/init (1200 bytes), phdr 0x400040, sp 0x503e60
 hello from a real ELF binary at EL0
 [aarch64] EL0 task exited with status 7
 [task 3] back at EL1
@@ -111,8 +111,9 @@ Bring-up covers, in order:
     validated, its `PT_LOAD` segments are backed with fresh frames, the file
     bytes are copied through the direct map, the remainder of each segment is
     left zeroed for `.bss`, and the pages are mapped with the permissions the
-    segment asks for. It loads from a memory buffer, so the same call serves a
-    file read off the disk and the copy embedded in the kernel image.
+    segment asks for. It also reports where the program headers landed, which is
+    what `AT_PHDR` needs. Loading is from a memory buffer, so the same call serves
+    a file read off the disk and the copy embedded in the kernel image.
 16. **virtio-mmio and virtio-blk** (`virtio.c`). QEMU's `virt` lays 32 virtio-mmio
     slots end to end at `0x0A000000`, SPI 16 upwards, and fills them from the top;
     the probe walks them and reports what is plugged in. The block driver then
@@ -130,6 +131,34 @@ Bring-up covers, in order:
     under `-mstrict-align`. `/sbin/init` is resolved, read into the heap, and
     handed to the ELF loader; the embedded binary is only the fallback when no
     disk is attached.
+18. **The initial process stack** (`ustack.c`). The layout `kernel/elf.c` builds
+    for x86-64, mirrored: the random bytes and platform string at the top, then
+    the environment and argument strings, then a 16-byte-aligned block holding
+    the auxiliary vector, the `envp` and `argv` arrays and `argc`. The same
+    eighteen auxiliary entries are supplied, with `AT_PLATFORM` reading
+    `"aarch64"`. `AT_RANDOM` is seeded from the cycle counter, which is not a
+    cryptographic source and will have to be replaced. `support/aarch64/initargs.c`
+    is a freestanding program that walks what it was given and prints it back:
+
+    ```
+    [task 3] loaded /sbin/init (2912 bytes), phdr 0x400040, sp 0x503e60
+    initargs: argc=1
+    initargs: argv[0]=/sbin/init
+    initargs: envc=2
+    initargs: env PATH=/bin:/sbin
+    initargs: env TERM=linux
+    initargs: auxv type=6 value=0x1000       (AT_PAGESZ)
+    initargs: auxv type=3 value=0x400040     (AT_PHDR)
+    initargs: auxv type=4 value=0x38         (AT_PHENT)
+    initargs: auxv type=5 value=0x3          (AT_PHNUM)
+    initargs: auxv type=9 value=0x400120     (AT_ENTRY)
+    ...
+    initargs: auxv entries=18
+    INITARGS DONE
+    ```
+
+    `AT_PHDR`, `AT_PHENT`, `AT_PHNUM` and `AT_ENTRY` match what `readelf` reports
+    for the binary, and the stack pointer handed to EL0 is 16-byte aligned.
 
 ## Building and running
 
@@ -139,14 +168,14 @@ make run-aarch64             # boot it under qemu-system-aarch64 -M virt
 ```
 
 The toolchain is `aarch64-linux-gnu-gcc`; QEMU is `qemu-system-aarch64`. The
-build also links `support/aarch64/hello.S` into a static user ELF and embeds it
-as the fallback init.
+build also links two freestanding user programs: `hello.elf`, embedded in the
+kernel image as the fallback init, and `initargs.elf`, the stack reporter above.
 
 To boot from a disk instead, build an ext2 image with a `/sbin/init` in it — the
 same `mkfs` options the x86-64 image uses — and attach it:
 
 ```sh
-mkdir -p root/sbin && cp build/aarch64/hello.elf root/sbin/init
+mkdir -p root/sbin && cp build/aarch64/initargs.elf root/sbin/init
 truncate -s 16M disk.img
 mkfs.ext3 -q -r 1 -b 4096 -I 128 -m 1 -L tunix-root \
     -O ^resize_inode,^dir_index,^ext_attr,^metadata_csum,^64bit,^huge_file,^dir_nlink,^extra_isize \
@@ -162,15 +191,12 @@ The x86-64 build (`make`, `make kernel`) is untouched — its source glob prunes
 
 ## What is next
 
-A binary now comes off a real filesystem and runs in its own address space, but
-there is still no userland. The ladder from here:
+A binary comes off a real filesystem, gets a conforming process stack, and runs
+in its own address space. What it still cannot be is a real program:
 
-- **The initial user stack** — a real program expects `argc`, `argv`, `envp` and
-  an auxiliary vector on the stack at entry. The test binary is freestanding and
-  ignores all of it; glibc will not.
-- **The syscall surface** — three calls is enough for a test binary; glibc needs
-  a couple of hundred (`openat`, `mmap`, `brk`, `clone`, `futex`, `ioctl`, …).
-  This is the bulk of the remaining work before any real program runs.
+- **The syscall surface** — three calls is enough for a freestanding binary;
+  glibc needs a couple of hundred (`openat`, `mmap`, `brk`, `clone`, `futex`,
+  `ioctl`, …). This is the bulk of the remaining work.
 - **Writes and more devices** — the block path is read-only and polled, so
   writing, virtio-console and anything that cannot busy-wait need the device's
   SPI wired into the GIC (`GICD_ISENABLER`/`GICD_IROUTER`, which the PPI path

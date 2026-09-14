@@ -265,6 +265,18 @@ $(AARCH64_USER): support/aarch64/hello.S
 
 $(BUILD)/aarch64/kernel/arch/aarch64/userimage.S.o: $(AARCH64_USER)
 
+# A second test program: it reports the stack the kernel built for it. Put it
+# on a disk as /sbin/init to exercise the ext2 and auxv paths.
+AARCH64_INITARGS := $(BUILD)/aarch64/initargs.elf
+aarch64: $(AARCH64_INITARGS)
+
+$(AARCH64_INITARGS): support/aarch64/initargs.c
+	@mkdir -p $(dir $@)
+	$(AARCH64_CC) -std=gnu11 -Wall -Wextra -Werror -O2 -static -nostdlib \
+		-nostartfiles -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
+		-fno-builtin -fno-tree-loop-distribute-patterns \
+		-fno-asynchronous-unwind-tables -o $@ $<
+
 QEMU_AARCH64 ?= qemu-system-aarch64
 run-aarch64: $(AARCH64_IMAGE)
 	$(QEMU_AARCH64) -M virt,gic-version=3 -cpu cortex-a72 -smp $(QEMU_SMP) \

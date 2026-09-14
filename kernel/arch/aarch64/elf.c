@@ -79,13 +79,20 @@ static int load_segment(uint64_t root_pa, const uint8_t *image, uint64_t length,
 }
 
 int elf_load_image(uint64_t root_pa, const void *data, uint64_t length,
-                   uint64_t *entry) {
+                   struct elf_image *out) {
     const uint8_t *image = data;
     const struct elf64_header *header = data;
 
     if (length < sizeof(*header) || !header_is_supported(header)) return -1;
     if (header->phentsize < sizeof(struct elf64_phdr)) return -1;
-    if (header->phoff + (uint64_t)header->phnum * header->phentsize > length) return -1;
+
+    uint64_t table = (uint64_t)header->phnum * header->phentsize;
+    if (header->phoff + table > length) return -1;
+
+    out->entry = header->entry;
+    out->phdr = 0;
+    out->phentsize = header->phentsize;
+    out->phnum = header->phnum;
 
     for (unsigned i = 0; i < header->phnum; i++) {
         const struct elf64_phdr *segment =
@@ -93,8 +100,12 @@ int elf_load_image(uint64_t root_pa, const void *data, uint64_t length,
                                         (uint64_t)i * header->phentsize);
         if (segment->type != PT_LOAD || segment->memsz == 0) continue;
         if (load_segment(root_pa, image, length, segment) != 0) return -1;
+
+        // Where the program headers ended up, which is what AT_PHDR wants.
+        if (header->phoff >= segment->offset &&
+            header->phoff + table <= segment->offset + segment->filesz)
+            out->phdr = segment->vaddr + (header->phoff - segment->offset);
     }
 
-    *entry = header->entry;
     return 0;
 }
