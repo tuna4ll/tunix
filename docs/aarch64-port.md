@@ -51,6 +51,8 @@ Bring-up covers, in order:
 10. **Page mapping** (`vmm.c`). A 4 KiB, four-level `vmm_map_page`/`vmm_unmap_page`
     that grows intermediate tables from the PMM and shoots down the TLB entry —
     the paging infrastructure processes will need.
+11. **Kernel heap** (`heap.c`). A first-fit `kmalloc`/`kfree` with block splitting
+    and free-run coalescing over a 16 MiB arena reserved from the PMM.
 
 ## Building and running
 
@@ -65,7 +67,7 @@ x86-64 build (`make`, `make kernel`) is untouched — its source glob prunes
 
 ## What is next
 
-This is P0-P2 of the port (a HAL bring-up), not a running userland yet. The
+This is P0-P3 of the port (a HAL bring-up), not a running userland yet. The
 ladder from here:
 
 - **Higher-half kernel** — move the kernel to a `TTBR1` virtual address and keep

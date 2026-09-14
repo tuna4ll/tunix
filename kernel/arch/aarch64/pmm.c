@@ -34,6 +34,10 @@ static void reserve_range(uint64_t start, uint64_t end) {
         }
 }
 
+void pmm_reserve(uint64_t start, uint64_t bytes) {
+    reserve_range(start, start + bytes);
+}
+
 void pmm_init(uint64_t ram_base, uint64_t ram_bytes, uint64_t dtb, uint64_t dtb_size) {
     base_pa = ram_base;
     frame_count = ram_bytes / PAGE_SIZE;

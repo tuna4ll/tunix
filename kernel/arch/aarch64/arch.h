@@ -45,11 +45,17 @@ int fdt_probe(const void *dtb, uint64_t *ram_base, uint64_t *ram_bytes,
               uint32_t *cpu_count);
 
 void pmm_init(uint64_t ram_base, uint64_t ram_bytes, uint64_t dtb, uint64_t dtb_size);
+void pmm_reserve(uint64_t start, uint64_t bytes);
 void *pmm_alloc_page(void);
 void pmm_free_page(void *pa);
 uint64_t pmm_free_pages(void);
 
 int vmm_map_page(uint64_t va, uint64_t pa, int writable);
 int vmm_unmap_page(uint64_t va);
+
+void heap_init(void);
+void *kmalloc(size_t want);
+void kfree(void *ptr);
+uint64_t heap_free_bytes(void);
 
 #endif

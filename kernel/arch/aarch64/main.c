@@ -68,6 +68,24 @@ void aarch64_main(uint64_t dtb) {
         kprintf("VMM: mapping test failed\n");
     }
 
+    heap_init();
+    uint64_t heap_before = heap_free_bytes();
+    void *a = kmalloc(64), *b = kmalloc(4096), *c = kmalloc(32);
+    int corrupt = 0;
+    for (int i = 0; i < 4096; i++) ((uint8_t *)b)[i] = (uint8_t)i;
+    for (int i = 0; i < 4096; i++) corrupt |= ((uint8_t *)b)[i] != (uint8_t)i;
+    kfree(b);
+    kfree(a);
+    kfree(c);
+    for (int r = 0; r < 2000; r++) {
+        void *t = kmalloc(128 + (r & 511));
+        if (!t) { corrupt = 1; break; }
+        kfree(t);
+    }
+    uint64_t heap_after = heap_free_bytes();
+    kprintf("heap: %lu KiB, alloc/free stress %s, reclaimed %s\n", heap_before >> 10,
+            corrupt ? "FAILED" : "OK", heap_after == heap_before ? "fully" : "partly");
+
     gic_init();
     kprintf("GICv3 initialised\n");
 
