@@ -3,6 +3,7 @@
 #include "include/boot.h"
 #include "include/build_config.h"
 #include "include/block.h"
+#include "include/cpu.h"
 #include "include/kstring.h"
 #include "include/devfs.h"
 #include "include/sysfs.h"
@@ -84,7 +85,7 @@ void kmain(const struct boot_info *boot) {
 #if TUNIX_BOOT_TIMINGS
     uint64_t boot_started = boot_read_tsc();
 #endif
-    __asm__ volatile("cli");
+    cpu_irq_disable();
     pic_init();
     serial_init();
 #if TUNIX_DEBUG_LOGS

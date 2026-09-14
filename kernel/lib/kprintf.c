@@ -105,8 +105,7 @@ static void print_int(int64_t num, int base, int is_upper) {
 static volatile int log_lock;
 
 static uint64_t log_acquire(void) {
-    uint64_t flags;
-    __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags) :: "memory");
+    uint64_t flags = cpu_irq_save();
     while (__atomic_test_and_set(&log_lock, __ATOMIC_ACQUIRE)) {
         smp_service_flush();
         cpu_relax();
@@ -116,7 +115,7 @@ static uint64_t log_acquire(void) {
 
 static void log_release(uint64_t flags) {
     __atomic_clear(&log_lock, __ATOMIC_RELEASE);
-    if (flags & 0x200ULL) __asm__ volatile("sti");
+    cpu_irq_restore(flags);
 }
 
 void kprintf(const char *fmt, ...) {
@@ -188,5 +187,5 @@ void panic(const char *msg) {
     panic_sgr(alarm, 2U);
     terminal_print("\n\n*** KERNEL PANIC ***\n");
     terminal_print(msg);
-    while (1) __asm__ volatile("cli; hlt");
+    cpu_halt_forever();
 }

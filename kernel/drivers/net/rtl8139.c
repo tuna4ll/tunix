@@ -197,7 +197,7 @@ int rtl8139_transmit(const void *frame, size_t length) {
         memset(tx_buffer[slot] + length, 0, 60U - length);
         length = 60U;
     }
-    __asm__ volatile("mfence" : : : "memory");
+    cpu_memory_barrier();
     outl(status_port, (uint32_t)length);
     tx_count++;
     return 0;

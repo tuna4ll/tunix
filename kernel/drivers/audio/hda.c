@@ -319,7 +319,7 @@ static uint32_t codec_command(uint8_t nid, uint32_t verb, uint32_t payload) {
 
     hda.corb_wp = (uint16_t)((hda.corb_wp + 1U) % CORB_ENTRIES);
     hda.corb[hda.corb_wp] = value;
-    __asm__ volatile("mfence" : : : "memory");
+    cpu_memory_barrier();
     write16(HDA_CORBWP, hda.corb_wp);
 
     uint64_t deadline = time_uptime_ns() + VERB_TIMEOUT_NS;
@@ -333,7 +333,7 @@ static uint32_t codec_command(uint8_t nid, uint32_t verb, uint32_t payload) {
         cpu_relax();
     }
     hda.rirb_rp = (uint16_t)((hda.rirb_rp + 1U) % RIRB_ENTRIES);
-    __asm__ volatile("mfence" : : : "memory");
+    cpu_memory_barrier();
     uint64_t response = hda.rirb[hda.rirb_rp];
     write8(HDA_RIRBSTS, RIRBSTS_CLEAR);
     return (uint32_t)response;

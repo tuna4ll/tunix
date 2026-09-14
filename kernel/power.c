@@ -2,6 +2,7 @@
 
 #include "include/acpi.h"
 #include "include/ata.h"
+#include "include/cpu.h"
 #include "include/ext2.h"
 #include "include/power.h"
 
@@ -17,7 +18,7 @@ static void flush_disks(void) {
 
 static void park(void) __attribute__((noreturn));
 static void park(void) {
-    for (;;) __asm__ volatile("cli; hlt");
+    cpu_halt_forever();
 }
 
 void power_off(void) {

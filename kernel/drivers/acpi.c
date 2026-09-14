@@ -431,7 +431,7 @@ void acpi_reset(void) {
 
     struct { uint16_t limit; uint64_t base; } __attribute__((packed)) empty = { 0, 0 };
     __asm__ volatile("lidt %0; int3" : : "m"(empty));
-    for (;;) __asm__ volatile("cli; hlt");
+    cpu_halt_forever();
 }
 
 static uint16_t event_enable_port(uint32_t event_block) {
