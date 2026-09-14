@@ -2,14 +2,8 @@
 #include <stdint.h>
 #include "../include/kstring.h"
 
-/* The string instructions rather than a byte loop in C. */
-/* These two are what every copy in the kernel goes through -- a user copy, a
-   pipe, a page table being zeroed, a struct assignment the compiler turned into
-   a call -- and a loop that moves one byte per iteration was costing about a
-   nanosecond a byte. */
-/* The direction flag is clear whenever kernel code runs: FMASK clears it on the
-   syscall path and the interrupt stubs `cld` on theirs. */
-/* General registers only, which is what -mgeneral-regs-only asks for. */
+#if defined(__x86_64__)
+
 void *memset(void *dst, int value, size_t count) {
     void *out = dst;
     __asm__ volatile("rep stosb"
@@ -29,8 +23,6 @@ void *memcpy(void *dst, const void *src, size_t count) {
     return dst;
 }
 
-/* Only the descending case is written out, because the ascending one is a plain
-   copy and the flag this sets has to be cleared again before any C runs. */
 void *memmove(void *dst, const void *src, size_t count) {
     uint8_t *out = (uint8_t *)dst;
     const uint8_t *in = (const uint8_t *)src;
@@ -43,6 +35,33 @@ void *memmove(void *dst, const void *src, size_t count) {
                      : "memory");
     return dst;
 }
+
+#else
+
+void *memset(void *dst, int value, size_t count) {
+    volatile uint8_t *out = (volatile uint8_t *)dst;
+    while (count--) *out++ = (uint8_t)value;
+    return dst;
+}
+
+void *memcpy(void *dst, const void *src, size_t count) {
+    volatile uint8_t *out = (volatile uint8_t *)dst;
+    const volatile uint8_t *in = (const volatile uint8_t *)src;
+    while (count--) *out++ = *in++;
+    return dst;
+}
+
+void *memmove(void *dst, const void *src, size_t count) {
+    volatile uint8_t *out = (volatile uint8_t *)dst;
+    const volatile uint8_t *in = (const volatile uint8_t *)src;
+    if (out < in || !count) return memcpy(dst, src, count);
+    out += count;
+    in += count;
+    while (count--) *--out = *--in;
+    return dst;
+}
+
+#endif
 
 size_t strlen(const char *str) {
     size_t length = 0;
