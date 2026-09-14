@@ -9,7 +9,7 @@
 #define ENOSYS 38
 #define EBADF  9
 
-void aarch64_syscall_handler(struct trap_frame *frame) {
+void aarch64_syscall_handler(struct syscall_frame *frame) {
     uint64_t number = SYSCALL_NR(frame);
 
     switch (number) {

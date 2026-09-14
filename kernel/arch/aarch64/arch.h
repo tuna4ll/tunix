@@ -4,6 +4,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* The frame the vector table saves and the accessors the portable syscall
+   layer reads it with: one definition, shared with kernel/syscall.c. */
+#include "../../include/syscall.h"
+
 #define KERNEL_VA_OFFSET 0xFFFF000000000000UL
 #define KERNEL_PHYS_BASE 0x40000000UL
 
@@ -39,27 +43,9 @@ static inline uint32_t mmio_read32(uint64_t addr) {
 static inline void isb(void) { __asm__ volatile("isb" ::: "memory"); }
 static inline void dsb_sy(void) { __asm__ volatile("dsb sy" ::: "memory"); }
 
-// Must match SAVE_FRAME/RESTORE_FRAME in exceptions.S.
-struct trap_frame {
-    uint64_t x[31];
-    uint64_t elr;
-    uint64_t spsr;
-    uint64_t sp_el0;
-    uint64_t reserved[2];
-};
-_Static_assert(sizeof(struct trap_frame) == 288, "trap frame layout");
-
-/* The AArch64 half of the seam described in kernel/include/syscall_abi.h:
-   the number arrives in x8 and the result goes back in x0, so unlike x86-64
-   those two are genuinely different registers. */
-#define SYSCALL_NR(frame)   ((frame)->x[8])
-#define SYSCALL_RET(frame)  ((frame)->x[0])
-#define SYSCALL_ARG0(frame) ((frame)->x[0])
-#define SYSCALL_ARG1(frame) ((frame)->x[1])
-#define SYSCALL_ARG2(frame) ((frame)->x[2])
-#define SYSCALL_ARG3(frame) ((frame)->x[3])
-#define SYSCALL_ARG4(frame) ((frame)->x[4])
-#define SYSCALL_ARG5(frame) ((frame)->x[5])
+/* struct syscall_frame is what SAVE_FRAME/RESTORE_FRAME in exceptions.S fill;
+   syscall.h pins its 288-byte layout, and syscall_abi.h supplies the x8/x0
+   accessors, so the port and the portable dispatcher agree by construction. */
 
 void uart_init(void);
 void uart_putc(char c);
@@ -107,7 +93,7 @@ uint64_t heap_free_bytes(void);
 
 void aarch64_enter_user(uint64_t entry, uint64_t user_sp);
 void aarch64_leave_user(void);
-void aarch64_syscall_handler(struct trap_frame *frame);
+void aarch64_syscall_handler(struct syscall_frame *frame);
 
 struct elf_image {
     uint64_t entry;

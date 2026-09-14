@@ -221,6 +221,12 @@ in its own address space. What it still cannot be is a real program:
   the EFER/STAR/LSTAR MSRs — sit behind an architecture guard rather than in
   the dispatch path.
 
+  The port does not keep a private copy of any of this: `kernel/arch/aarch64/`
+  includes the portable `syscall.h` and uses `struct syscall_frame` directly,
+  so the frame `exceptions.S` fills and the frame `kernel/syscall.c` reads are
+  the same declaration, and the static assertions that pin its 288 bytes are
+  checked when the port itself is compiled.
+
   Every step of that migration was checked by rebuilding the x86-64 kernel and
   comparing it byte for byte with the kernel from before the change: the
   accessors expand to the same struct members, so `kernel.elf` is bit-identical
