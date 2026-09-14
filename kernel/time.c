@@ -31,13 +31,6 @@ static int tsc_invariant;
 static uint64_t processor_mark[SMP_MAX_CPUS];
 static uint64_t processor_skew[SMP_MAX_CPUS];
 
-static inline uint64_t read_tsc(void) {
-    uint32_t low;
-    uint32_t high;
-    __asm__ volatile("lfence; rdtsc" : "=a"(low), "=d"(high) : : "memory");
-    return ((uint64_t)high << 32) | low;
-}
-
 static void cpuid(uint32_t leaf, uint32_t subleaf,
                   uint32_t *a, uint32_t *b, uint32_t *c, uint32_t *d) {
     __asm__ volatile("cpuid"
@@ -78,16 +71,16 @@ static uint64_t frequency_from_pit(void) {
     outb(0x42, (uint8_t)(PIT_SAMPLE_TICKS >> 8));
     outb(0x61, (original & (uint8_t)~0x02U) | 0x01U);
 
-    uint64_t start = read_tsc();
+    uint64_t start = cpu_counter_ordered();
     uint64_t limit = start + 1000000000ULL;
     while ((inb(0x61) & 0x20U) == 0) {
-        if (read_tsc() > limit) {
+        if (cpu_counter_ordered() > limit) {
             outb(0x61, original);
             return 0;
         }
         cpu_relax();
     }
-    uint64_t end = read_tsc();
+    uint64_t end = cpu_counter_ordered();
     outb(0x61, original);
     if (end <= start) return 0;
     return ((end - start) * PIT_FREQUENCY) / PIT_SAMPLE_TICKS;
@@ -218,7 +211,7 @@ void time_init(void) {
     tsc_hz = frequency_from_cpuid();
     if (!tsc_hz) tsc_hz = frequency_from_pit();
     if (tsc_hz < 1000000ULL) panic("unable to calibrate TSC");
-    boot_tsc = read_tsc();
+    boot_tsc = cpu_counter_ordered();
     tsc_invariant = invariant_from_cpuid();
 
     struct tunix_rtc_time rtc;
@@ -227,7 +220,7 @@ void time_init(void) {
 }
 
 uint64_t time_uptime_ns(void) {
-    uint64_t raw = read_tsc();
+    uint64_t raw = cpu_counter_ordered();
     if (raw < boot_tsc) return 0;
     uint64_t delta = raw - boot_tsc;
     uint64_t seconds = delta / tsc_hz;

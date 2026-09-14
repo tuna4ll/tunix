@@ -41,13 +41,6 @@ extern void serial_init(void);
 extern void kprintf(const char *fmt, ...);
 extern void panic(const char *message);
 
-static inline uint64_t boot_read_tsc(void) {
-    uint32_t low;
-    uint32_t high;
-    __asm__ volatile("lfence; rdtsc" : "=a"(low), "=d"(high) : : "memory");
-    return ((uint64_t)high << 32) | low;
-}
-
 #if TUNIX_BOOT_TIMINGS
 static void boot_log_cycles(const char *name, uint64_t cycles) {
     uint64_t hz = time_tsc_frequency();
@@ -56,7 +49,7 @@ static void boot_log_cycles(const char *name, uint64_t cycles) {
 }
 
 static void boot_log_stage(const char *name, uint64_t *started) {
-    uint64_t now = boot_read_tsc();
+    uint64_t now = cpu_counter_ordered();
     boot_log_cycles(name, now - *started);
     *started = now;
 }
@@ -83,7 +76,7 @@ static int root_device_index(void) {
 
 void kmain(const struct boot_info *boot) {
 #if TUNIX_BOOT_TIMINGS
-    uint64_t boot_started = boot_read_tsc();
+    uint64_t boot_started = cpu_counter_ordered();
 #endif
     cpu_irq_disable();
     pic_init();
@@ -98,7 +91,7 @@ void kmain(const struct boot_info *boot) {
     process_enable_extended_fpu();
     time_init();
 #if TUNIX_BOOT_TIMINGS
-    uint64_t stage_started = boot_read_tsc();
+    uint64_t stage_started = cpu_counter_ordered();
 #endif
     random_init();
     pmm_init(boot->memory, boot->memory_count);
@@ -190,7 +183,7 @@ void kmain(const struct boot_info *boot) {
     kprintf("TUNIX: starting %s\n", init_path);
 #if TUNIX_BOOT_TIMINGS
     boot_log_stage("devices/process/init ELF", &stage_started);
-    boot_log_cycles("kernel boot total", boot_read_tsc() - boot_started);
+    boot_log_cycles("kernel boot total", cpu_counter_ordered() - boot_started);
 #endif
 
 #if TUNIX_DEBUG_LOGS

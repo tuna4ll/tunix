@@ -128,12 +128,6 @@ static void sha256_final(struct sha256_ctx *ctx, uint8_t digest[32]) {
     for (unsigned i = 0; i < 8; i++) store32_be(digest + i * 4U, ctx->state[i]);
 }
 
-static inline uint64_t read_tsc(void) {
-    uint32_t low, high;
-    __asm__ volatile("lfence; rdtsc" : "=a"(low), "=d"(high) : : "memory");
-    return ((uint64_t)high << 32) | low;
-}
-
 static void cpuid(uint32_t leaf, uint32_t subleaf,
                   uint32_t *a, uint32_t *b, uint32_t *c, uint32_t *d) {
     __asm__ volatile("cpuid"
@@ -204,7 +198,7 @@ static size_t collect_entropy(uint8_t *output, size_t capacity) {
         }
     }
 
-    uint64_t previous = read_tsc();
+    uint64_t previous = cpu_counter_ordered();
     while (count < 64U) {
         uint64_t accumulator = 0;
         for (unsigned sample = 0; sample < 32U; sample++) {
@@ -213,7 +207,7 @@ static size_t collect_entropy(uint8_t *output, size_t capacity) {
                 accumulator ^= (uint64_t)inb(0x61U) << ((i & 7U) * 8U);
                 cpu_relax();
             }
-            uint64_t now = read_tsc();
+            uint64_t now = cpu_counter_ordered();
             accumulator ^= rotr32((uint32_t)(now - previous), sample & 31U);
             accumulator ^= now;
             previous = now;

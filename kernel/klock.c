@@ -45,12 +45,6 @@ void klock_statistics_start(void) {
     __atomic_store_n(&klock_stats_on, 1, __ATOMIC_RELEASE);
 }
 
-static inline uint64_t read_tsc(void) {
-    uint32_t low, high;
-    __asm__ volatile("rdtsc" : "=a"(low), "=d"(high));
-    return ((uint64_t)high << 32) | low;
-}
-
 int klock_statistics(unsigned index, struct klock_hold *out) {
     if (!out || index >= KLOCK_HOLD_SLOTS || !holds[index].count) return -1;
     *out = holds[index];
@@ -84,12 +78,12 @@ static void record_hold(uint32_t note, uint64_t nanoseconds) {
 
 static void hold_begin(void) {
     if (!__atomic_load_n(&klock_stats_on, __ATOMIC_RELAXED)) return;
-    hold_started = read_tsc();
+    hold_started = cpu_counter();
 }
 
 static void hold_end(void) {
     if (!hold_started) return;
-    uint64_t now = read_tsc();
+    uint64_t now = cpu_counter();
     uint64_t held = now > hold_started ? now - hold_started : 0;
     hold_started = 0;
     record_hold(breadcrumb[cpu_current()->index], held);
