@@ -1,12 +1,11 @@
 #include <stddef.h>
 #include <stdint.h>
+#if defined(__x86_64__)
 #include "../include/io.h"
+#endif
 #include "../include/kstring.h"
 #include "../include/pci.h"
 #include "../include/vmm.h"
-
-#define PCI_ADDRESS 0xCF8U
-#define PCI_DATA 0xCFCU
 
 #define PCI_COMMAND 0x04U
 #define PCI_STATUS_HAS_CAPABILITIES (1U << 4)
@@ -29,8 +28,10 @@
 #define MSIX_ENTRY_CONTROL 3U
 #define MSIX_ENTRY_MASKED 1U
 
-#define APIC_MESSAGE_ADDRESS 0xFEE00000U
-#define APIC_MESSAGE_DESTINATION_SHIFT 12U
+#if defined(__x86_64__)
+
+#define PCI_ADDRESS 0xCF8U
+#define PCI_DATA 0xCFCU
 
 static uint32_t pci_address(uint8_t bus, uint8_t slot, uint8_t function, uint8_t offset) {
     return 0x80000000U | ((uint32_t)bus << 16) | ((uint32_t)slot << 11) |
@@ -46,6 +47,39 @@ void pci_config_write32(uint8_t bus, uint8_t slot, uint8_t function, uint8_t off
     outl(PCI_ADDRESS, pci_address(bus, slot, function, offset));
     outl(PCI_DATA, value);
 }
+
+#else
+
+static uint64_t ecam_base;
+static uint8_t ecam_first_bus;
+static uint8_t ecam_last_bus;
+
+void pci_ecam_attach(uint64_t virtual_base, uint8_t first_bus, uint8_t last_bus) {
+    ecam_first_bus = first_bus;
+    ecam_last_bus = last_bus;
+    ecam_base = virtual_base;
+}
+
+static volatile uint32_t *ecam_register(uint8_t bus, uint8_t slot, uint8_t function,
+                                        uint8_t offset) {
+    if (!ecam_base || bus < ecam_first_bus || bus > ecam_last_bus) return (volatile uint32_t *)0;
+    if (slot >= 32U || function >= 8U) return (volatile uint32_t *)0;
+    uint64_t index = ((uint64_t)(bus - ecam_first_bus) << 20) | ((uint64_t)slot << 15) |
+                     ((uint64_t)function << 12) | (offset & 0xFCU);
+    return (volatile uint32_t *)(ecam_base + index);
+}
+
+uint32_t pci_config_read32(uint8_t bus, uint8_t slot, uint8_t function, uint8_t offset) {
+    volatile uint32_t *reg = ecam_register(bus, slot, function, offset);
+    return reg ? *reg : 0xFFFFFFFFU;
+}
+
+void pci_config_write32(uint8_t bus, uint8_t slot, uint8_t function, uint8_t offset, uint32_t value) {
+    volatile uint32_t *reg = ecam_register(bus, slot, function, offset);
+    if (reg) *reg = value;
+}
+
+#endif
 
 static void fill_device(struct pci_device *out, uint8_t bus, uint8_t slot, uint8_t function) {
     memset(out, 0, sizeof(*out));
@@ -102,6 +136,10 @@ uint8_t pci_find_capability(const struct pci_device *device, uint8_t id) {
     return 0;
 }
 
+#if defined(__x86_64__)
+#define APIC_MESSAGE_ADDRESS 0xFEE00000U
+#define APIC_MESSAGE_DESTINATION_SHIFT 12U
+
 static uint32_t initial_apic_id(void) {
     uint32_t eax, ebx, ecx, edx;
     __asm__ volatile("cpuid"
@@ -110,6 +148,9 @@ static uint32_t initial_apic_id(void) {
     return ebx >> 24;
 }
 
+#endif
+
+#if defined(__x86_64__)
 static void msix_write_control(const struct pci_device *device, uint16_t control) {
     uint32_t header = pci_config_read32(device->bus, device->slot, device->function,
                                         device->msix_capability);
@@ -117,8 +158,13 @@ static void msix_write_control(const struct pci_device *device, uint16_t control
     pci_config_write32(device->bus, device->slot, device->function,
                        device->msix_capability, header);
 }
+#endif
 
 int pci_msix_enable(struct pci_device *device) {
+#if !defined(__x86_64__)
+    (void)device;
+    return -1;
+#else
     if (!device || !device->msix_capability || !device->msix_entries) return -1;
     if (device->msix_table) return 0;
 
@@ -146,6 +192,7 @@ int pci_msix_enable(struct pci_device *device) {
 
     msix_write_control(device, MSIX_CONTROL_ENABLE);
     return 0;
+#endif
 }
 
 int pci_msix_bind(struct pci_device *device, unsigned entry, unsigned vector) {
@@ -153,6 +200,7 @@ int pci_msix_bind(struct pci_device *device, unsigned entry, unsigned vector) {
     if (entry >= device->msix_entries) return -1;
     if (vector < 32U || vector > 255U) return -1;
 
+#if defined(__x86_64__)
     volatile uint32_t *slot = device->msix_table + entry * MSIX_ENTRY_WORDS;
     slot[MSIX_ENTRY_ADDRESS_LOW] =
         APIC_MESSAGE_ADDRESS | (initial_apic_id() << APIC_MESSAGE_DESTINATION_SHIFT);
@@ -160,6 +208,9 @@ int pci_msix_bind(struct pci_device *device, unsigned entry, unsigned vector) {
     slot[MSIX_ENTRY_DATA] = vector;
     slot[MSIX_ENTRY_CONTROL] = 0;
     return 0;
+#else
+    return -1;
+#endif
 }
 
 void pci_for_each_device(void (*visit)(const struct pci_device *, void *),
