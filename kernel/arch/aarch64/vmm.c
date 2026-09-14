@@ -3,7 +3,6 @@
 
 #include "arch.h"
 
-#define PAGE_SIZE 4096UL
 #define ADDR_MASK 0x0000FFFFFFFFF000UL
 
 #define DESC_VALID (1UL << 0)
@@ -15,15 +14,13 @@
 #define DESC_UXN   (1UL << 54)
 #define ATTR_IDX(n) ((uint64_t)(n) << 2)
 
-uint64_t *mmu_root_table(void);
-
 static uint64_t *next_table(uint64_t *table, unsigned index) {
     if (!(table[index] & DESC_VALID)) {
-        uint64_t *fresh = pmm_alloc_page();
+        void *fresh = pmm_alloc_page();
         if (!fresh) return NULL;
         table[index] = ((uint64_t)fresh & ADDR_MASK) | DESC_TABLE;
     }
-    return (uint64_t *)(table[index] & ADDR_MASK);   // identity-mapped
+    return (uint64_t *)phys_to_virt(table[index] & ADDR_MASK);
 }
 
 static void invalidate(uint64_t va) {
@@ -50,11 +47,11 @@ int vmm_map_page(uint64_t va, uint64_t pa, int writable) {
 
 int vmm_unmap_page(uint64_t va) {
     uint64_t *table = mmu_root_table();
-    unsigned shift[4] = {39, 30, 21, 12};
+    unsigned shift[3] = {39, 30, 21};
     for (int level = 0; level < 3; level++) {
         unsigned index = (va >> shift[level]) & 0x1FF;
         if (!(table[index] & DESC_VALID)) return -1;
-        table = (uint64_t *)(table[index] & ADDR_MASK);
+        table = (uint64_t *)phys_to_virt(table[index] & ADDR_MASK);
     }
     unsigned index = (va >> 12) & 0x1FF;
     if (!(table[index] & DESC_VALID)) return -1;

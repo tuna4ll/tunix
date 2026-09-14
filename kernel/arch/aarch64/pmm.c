@@ -44,7 +44,8 @@ void pmm_init(uint64_t ram_base, uint64_t ram_bytes, uint64_t dtb, uint64_t dtb_
     if (frame_count > MAX_FRAMES) frame_count = MAX_FRAMES;
     free_frames = frame_count;
 
-    reserve_range((uint64_t)kernel_start, (uint64_t)__image_end);
+    reserve_range(virt_to_phys((uint64_t)kernel_start),
+                  virt_to_phys((uint64_t)__image_end));
     if (dtb) reserve_range(dtb, dtb + dtb_size);
 }
 
@@ -54,7 +55,7 @@ void *pmm_alloc_page(void) {
         mark_used(f);
         free_frames--;
         uint64_t pa = base_pa + f * PAGE_SIZE;
-        uint64_t *p = (uint64_t *)pa;            // identity-mapped, zero it
+        uint64_t *p = (uint64_t *)phys_to_virt(pa);
         for (int i = 0; i < 512; i++) p[i] = 0;
         return (void *)pa;
     }

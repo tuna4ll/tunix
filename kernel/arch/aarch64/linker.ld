@@ -1,9 +1,12 @@
 OUTPUT_FORMAT(elf64-littleaarch64)
 ENTRY(_start)
 
+KERNEL_VA_OFFSET = 0xFFFF000000000000;
+KERNEL_PHYS_BASE = 0x40000000;
+
 SECTIONS
 {
-    . = 0x40000000;
+    . = KERNEL_VA_OFFSET + KERNEL_PHYS_BASE;
     kernel_start = .;
 
     .text : {

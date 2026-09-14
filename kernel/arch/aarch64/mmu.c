@@ -16,11 +16,17 @@
 #define MAIR_DEVICE_nGnRnE 0x00UL
 #define MAIR_NORMAL_WB     0xFFUL
 
+uint64_t va_offset;
+
 static uint64_t l0_table[PT_ENTRIES] __attribute__((aligned(4096)));
 static uint64_t l1_table[PT_ENTRIES] __attribute__((aligned(4096)));
 
 uint64_t *mmu_root_table(void) {
     return l0_table;
+}
+
+void arch_va_online(void) {
+    va_offset = KERNEL_VA_OFFSET;
 }
 
 void mmu_init(void) {
@@ -47,10 +53,18 @@ void mmu_init(void) {
                    (1UL << 10) |     // ORGN0 write-back
                    (3UL << 12) |     // SH0 inner shareable
                    (0UL << 14) |     // TG0 4 KiB
-                   (1UL << 23) |     // EPD1: no TTBR1 walks
+                   (16UL << 16) |    // T1SZ = 48-bit VA
+                   (1UL << 24) |     // IRGN1 write-back
+                   (1UL << 26) |     // ORGN1 write-back
+                   (3UL << 28) |     // SH1 inner shareable
+                   (2UL << 30) |     // TG1 4 KiB
                    (2UL << 32);      // IPS 40-bit PA
     sysreg_write("tcr_el1", tcr);
+
+    // The high half is a direct map, so VA[47:0] equals the PA and the very
+    // same tables serve both the boot identity map and the kernel map.
     sysreg_write("ttbr0_el1", (uint64_t)l0_table);
+    sysreg_write("ttbr1_el1", (uint64_t)l0_table);
     isb();
 
     __asm__ volatile("tlbi vmalle1; dsb sy; isb" ::: "memory");

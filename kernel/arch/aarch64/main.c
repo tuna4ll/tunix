@@ -2,6 +2,8 @@
 
 #include "arch.h"
 
+extern char kernel_start[];
+
 static const char *current_el_name(void) {
     switch ((sysreg_read("CurrentEL") >> 2) & 3) {
     case 1: return "EL1";
@@ -31,25 +33,24 @@ void aarch64_irq_handler(void) {
     if (intid < 1020) gic_eoi(intid);
 }
 
-void aarch64_main(uint64_t dtb) {
+void aarch64_main(uint64_t dtb_phys) {
     uart_init();
     kprintf("\n=== Tunix aarch64 ===\n");
-    kprintf("running at %s\n", current_el_name());
+    kprintf("running at %s, kernel at %p (higher half)\n", current_el_name(),
+            (void *)kernel_start);
 
-    uint64_t ram_base = 0x40000000, ram = 0;
+    uint64_t ram_base = KERNEL_PHYS_BASE, ram = 0;
     uint32_t cpus = 0;
-    const void *dt = fdt_find((const void *)dtb);
+    const void *dt = fdt_find((const void *)phys_to_virt(dtb_phys));
     if (dt && fdt_probe(dt, &ram_base, &ram, &cpus) == 0)
-        kprintf("device tree @ %p: %lu MiB RAM @ %lx, %u CPU(s)\n", dt, ram >> 20,
-                ram_base, cpus);
+        kprintf("device tree @ %p: %lu MiB RAM @ %lx, %u CPU(s)\n",
+                (void *)virt_to_phys((uint64_t)dt), ram >> 20, ram_base, cpus);
     else
         kprintf("device tree: not found\n");
 
-    mmu_init();
-    kprintf("MMU enabled (identity map, MAIR/TCR set)\n");
-
     uint64_t dtb_size = dt ? 0x100000UL : 0;
-    pmm_init(ram_base, ram ? ram : 0x20000000UL, (uint64_t)dt, dtb_size);
+    pmm_init(ram_base, ram ? ram : 0x20000000UL,
+             dt ? virt_to_phys((uint64_t)dt) : 0, dtb_size);
     kprintf("PMM: %lu free frames (%lu MiB)\n", pmm_free_pages(),
             (pmm_free_pages() * 4096) >> 20);
 

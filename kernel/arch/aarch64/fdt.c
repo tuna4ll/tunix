@@ -40,9 +40,9 @@ static int name_is(const char *name, const char *prefix) {
 const void *fdt_find(const void *hint) {
     const struct fdt_header *hdr = hint;
     if (hint && be32(&hdr->magic) == FDT_MAGIC) return hint;
-    // QEMU's -kernel ELF path leaves x0=0; scan low RAM for the blob.
+    // Some boot paths leave x0 = 0; scan low RAM for the blob.
     for (uint64_t a = 0x40000000UL; a < 0x48000000UL; a += 0x10000UL) {
-        hdr = (const struct fdt_header *)a;
+        hdr = (const struct fdt_header *)phys_to_virt(a);
         if (be32(&hdr->magic) == FDT_MAGIC) {
             uint32_t total = be32(&hdr->totalsize);
             if (total >= sizeof(*hdr) && total <= 0x200000U) return hdr;

@@ -4,11 +4,23 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define UART0_BASE   0x09000000UL
-#define GICD_BASE    0x08000000UL
-#define GICR_BASE    0x080A0000UL
+#define KERNEL_VA_OFFSET 0xFFFF000000000000UL
+#define KERNEL_PHYS_BASE 0x40000000UL
+
+#define UART0_PHYS   0x09000000UL
+#define GICD_PHYS    0x08000000UL
+#define GICR_PHYS    0x080A0000UL
 
 #define TIMER_PPI_INTID 30U
+
+extern uint64_t va_offset;              // 0 until the kernel runs virtual
+
+static inline uint64_t phys_to_virt(uint64_t pa) { return pa + va_offset; }
+static inline uint64_t virt_to_phys(uint64_t va) { return va - va_offset; }
+
+#define UART0_BASE phys_to_virt(UART0_PHYS)
+#define GICD_BASE  phys_to_virt(GICD_PHYS)
+#define GICR_BASE  phys_to_virt(GICR_PHYS)
 
 static inline void mmio_write32(uint64_t addr, uint32_t value) {
     *(volatile uint32_t *)addr = value;
@@ -33,6 +45,9 @@ void uart_puts(const char *s);
 void kprintf(const char *fmt, ...);
 
 void mmu_init(void);
+void arch_va_online(void);
+uint64_t *mmu_root_table(void);
+
 void gic_init(void);
 void gic_eoi(uint32_t intid);
 uint32_t gic_acknowledge(void);

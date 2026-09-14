@@ -19,7 +19,7 @@ static uint64_t heap_end;
 void heap_init(void) {
     heap_start = ALIGN_UP((uint64_t)__image_end, 4096);
     heap_end = heap_start + HEAP_SIZE;
-    pmm_reserve(heap_start, HEAP_SIZE);
+    pmm_reserve(virt_to_phys(heap_start), HEAP_SIZE);
 
     struct block *first = (struct block *)heap_start;
     first->size = HEAP_SIZE - sizeof(struct block);
