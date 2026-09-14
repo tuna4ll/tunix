@@ -7,22 +7,22 @@ its own build target.
 
 ## What works
 
-On QEMU's `virt` machine (GICv3, Cortex-A72) the kernel boots into the high half
-and reaches a timer-driven idle loop:
+On QEMU's `virt` machine (GICv3, Cortex-A72) the kernel boots into the high half,
+sets up memory management and reaches a timer-driven idle loop:
 
 ```
 === Tunix aarch64 ===
 running at EL1, kernel at 0xffff000040000000 (higher half)
 device tree @ 0x48000000: 2048 MiB RAM @ 40000000, 4 CPU(s)
 PMM: 523941 free frames (2046 MiB)
-VMM: mapped 0x8000000000 -> 0x4005b000, readback OK
-VMM: unmapped 0x8000000000
 heap: 16383 KiB, alloc/free stress OK, reclaimed fully
+address spaces: identity map dropped, TTBR0 = 0x4105b000
+VMM: VA 0x400000 reads aaaa in A and bbbb in B, isolation OK
+VMM: destroying a space reclaimed 4 page-table frames
 GICv3 initialised
 generic timer armed at 100 Hz, enabling IRQs
 running; waiting for timer interrupts...
 [aarch64] tick 100 (1 s)
-[aarch64] tick 200 (2 s)
 ```
 
 Bring-up covers, in order:
@@ -59,10 +59,19 @@ Bring-up covers, in order:
    through `phys_to_virt`, so the same driver works before and after the MMU.
 9. **Physical memory** (`pmm.c`). A frame bitmap over the DTB-reported RAM, with
    the kernel image, heap arena and DTB reserved; `pmm_alloc_page`/`pmm_free_page`.
-10. **Page mapping** (`vmm.c`). A 4 KiB, four-level `vmm_map_page`/`vmm_unmap_page`
-    that grows intermediate tables from the PMM and shoots down the TLB entry.
+10. **Page mapping** (`vmm.c`). A 4 KiB, four-level `vmm_map`/`vmm_unmap` that
+    grows intermediate tables from the PMM and shoots down the TLB entry.
+    Permissions are explicit: `VMM_WRITE`, `VMM_USER` and `VMM_EXEC` pick the
+    `AP` bits and leave `PXN`/`UXN` set so only one exception level can execute
+    any given page.
 11. **Kernel heap** (`heap.c`). A first-fit `kmalloc`/`kfree` with block splitting
     and free-run coalescing over a 16 MiB arena reserved from the PMM.
+12. **User address spaces** (`vmm.c`). `vmm_create_space`/`vmm_switch_space`/
+    `vmm_destroy_space` give each future process a private `TTBR0` root while the
+    kernel stays in `TTBR1`. Installing the first one is what retires the boot
+    identity map — the kernel keeps running purely out of the high half, which is
+    the proof that the split is real. The self-test maps one VA to two different
+    frames in two spaces and confirms each space reads back its own data.
 
 ## Building and running
 
@@ -79,10 +88,9 @@ x86-64 build (`make`, `make kernel`) is untouched — its source glob prunes
 
 This is the HAL bring-up, not a running userland yet. The ladder from here:
 
-- **User address spaces** — a private `TTBR0` root per process, so the kernel
-  keeps `TTBR1` and user memory is swapped underneath it.
 - **Process & syscalls** — context switch, `SVC` entry on top of the existing
-  vector table, `TPIDR_EL0` for TLS, then a first static AArch64 user binary.
+  vector table, `TPIDR_EL0` for TLS, then a first static AArch64 user binary
+  dropped to EL0 in its own address space.
 - **Storage & console** — virtio-mmio block and console, then ext2 on top.
 - **Userland** — an AArch64 Void glibc rootfs, init, and a shell.
 - **Wiring the portable core** — the arch-neutral subsystems (vfs, ext2/3,

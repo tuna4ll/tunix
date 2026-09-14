@@ -33,6 +33,43 @@ void aarch64_irq_handler(void) {
     if (intid < 1020) gic_eoi(intid);
 }
 
+static void address_space_selftest(void) {
+    uint64_t space_a = vmm_create_space();
+    uint64_t space_b = vmm_create_space();
+    uint64_t frame_a = (uint64_t)pmm_alloc_page();
+    uint64_t frame_b = (uint64_t)pmm_alloc_page();
+    uint64_t user_va = 0x0000000000400000UL;
+
+    if (!space_a || !space_b || !frame_a || !frame_b ||
+        vmm_map(space_a, user_va, frame_a, VMM_WRITE | VMM_USER) != 0 ||
+        vmm_map(space_b, user_va, frame_b, VMM_WRITE | VMM_USER) != 0) {
+        kprintf("address spaces: setup failed\n");
+        return;
+    }
+
+    // Leaving the boot identity map behind: TTBR0 is user memory from now on.
+    vmm_switch_space(space_a);
+    kprintf("address spaces: identity map dropped, TTBR0 = %p\n",
+            (void *)sysreg_read("ttbr0_el1"));
+
+    volatile uint64_t *slot = (volatile uint64_t *)user_va;
+    *slot = 0xAAAA;
+    vmm_switch_space(space_b);
+    *slot = 0xBBBB;
+    uint64_t seen_b = *slot;
+    vmm_switch_space(space_a);
+    uint64_t seen_a = *slot;
+
+    kprintf("VMM: VA %p reads %lx in A and %lx in B, isolation %s\n",
+            (void *)user_va, seen_a, seen_b,
+            (seen_a == 0xAAAA && seen_b == 0xBBBB) ? "OK" : "BAD");
+
+    uint64_t before = pmm_free_pages();
+    vmm_destroy_space(space_b);
+    kprintf("VMM: destroying a space reclaimed %lu page-table frames\n",
+            pmm_free_pages() - before);
+}
+
 void aarch64_main(uint64_t dtb_phys) {
     uart_init();
     kprintf("\n=== Tunix aarch64 ===\n");
@@ -54,21 +91,6 @@ void aarch64_main(uint64_t dtb_phys) {
     kprintf("PMM: %lu free frames (%lu MiB)\n", pmm_free_pages(),
             (pmm_free_pages() * 4096) >> 20);
 
-    uint64_t va = 0x0000008000000000UL;             // a fresh, unmapped region
-    uint64_t frame = (uint64_t)pmm_alloc_page();
-    if (frame && vmm_map_page(va, frame, 1) == 0) {
-        volatile uint64_t *p = (volatile uint64_t *)va;
-        p[0] = 0xC0DE1234ABCD5678UL;
-        p[1] = frame;
-        int ok = (p[0] == 0xC0DE1234ABCD5678UL) && (p[1] == frame);
-        kprintf("VMM: mapped %p -> %p, readback %s\n", (void *)va, (void *)frame,
-                ok ? "OK" : "BAD");
-        vmm_unmap_page(va);
-        kprintf("VMM: unmapped %p\n", (void *)va);
-    } else {
-        kprintf("VMM: mapping test failed\n");
-    }
-
     heap_init();
     uint64_t heap_before = heap_free_bytes();
     void *a = kmalloc(64), *b = kmalloc(4096), *c = kmalloc(32);
@@ -86,6 +108,8 @@ void aarch64_main(uint64_t dtb_phys) {
     uint64_t heap_after = heap_free_bytes();
     kprintf("heap: %lu KiB, alloc/free stress %s, reclaimed %s\n", heap_before >> 10,
             corrupt ? "FAILED" : "OK", heap_after == heap_before ? "fully" : "partly");
+
+    address_space_selftest();
 
     gic_init();
     kprintf("GICv3 initialised\n");

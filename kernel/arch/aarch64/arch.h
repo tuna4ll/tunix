@@ -65,8 +65,17 @@ void *pmm_alloc_page(void);
 void pmm_free_page(void *pa);
 uint64_t pmm_free_pages(void);
 
+#define VMM_WRITE 1U
+#define VMM_USER  2U
+#define VMM_EXEC  4U
+
+int vmm_map(uint64_t root_pa, uint64_t va, uint64_t pa, unsigned flags);
+int vmm_unmap(uint64_t root_pa, uint64_t va);
 int vmm_map_page(uint64_t va, uint64_t pa, int writable);
 int vmm_unmap_page(uint64_t va);
+uint64_t vmm_create_space(void);
+void vmm_destroy_space(uint64_t root_pa);
+void vmm_switch_space(uint64_t root_pa);
 
 void heap_init(void);
 void *kmalloc(size_t want);
