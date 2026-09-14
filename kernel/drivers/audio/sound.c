@@ -1,8 +1,7 @@
-/* The sound core: one card, one playback stream, and ALSA's device interface
-   over it. What alsa-lib asks for is answered here; hda.c moves the bytes. */
 #include <stddef.h>
 #include <stdint.h>
 
+#include "../../include/cpu.h"
 #include "../../include/file.h"
 #include "../../include/hda.h"
 #include "../../include/kstring.h"
@@ -26,17 +25,12 @@ extern void kprintf(const char *fmt, ...);
 #define EPIPE 32
 #define EBADFD 77
 
-/* 256 KiB of ring is a second of CD audio and four times any period PipeWire
-   asks for; the pages are pinned for the life of the system. */
 #define RING_PAGES 64U
 #define RING_BYTES (RING_PAGES * 4096U)
-/* The controller wants its cyclic buffer in whole 128-byte units. */
 #define PERIOD_BYTES_ALIGN 128U
 #define REFINE_PASSES 16U
 #define DRAIN_MAX_NS (300ULL * 1000ULL * 1000ULL)
 
-/* A layout change here is silent and fatal: the size of every structure is
-   part of the ioctl number alsa-lib sends. */
 _Static_assert(sizeof(struct snd_pcm_hw_params) == 608, "hw_params layout");
 _Static_assert(sizeof(struct snd_pcm_sw_params) == 136, "sw_params layout");
 _Static_assert(sizeof(struct snd_pcm_info) == 288, "pcm_info layout");
@@ -86,19 +80,12 @@ static struct {
     uint64_t trigger_ns;
 } pcm;
 
-/* Mixer state, mirrored so a read does not have to ask the codec. */
 static struct {
     uint32_t left;
     uint32_t right;
     int muted;
 } mixer;
 
-/* ---------------------------------------------------------------- helpers */
-
-/* Rounding is not symmetric on purpose: a lower bound rounds down and an upper
-   bound rounds up, so refining never throws away a value the hardware can
-   actually produce. A divisor of zero means the bound is unknown, which is the
-   loosest answer in each direction. */
 static uint64_t divide_up(uint64_t value, uint64_t divisor) {
     return divisor ? (value + divisor - 1U) / divisor : UINT32_MAX;
 }
@@ -121,8 +108,6 @@ static void copy_field(unsigned char *destination, size_t size, const char *text
     }
 }
 
-/* ------------------------------------------------------------ ring buffer */
-
 static int ring_allocate(void) {
     if (ring_page_count) return 0;
     for (unsigned index = 0; index < RING_PAGES; index++) {
@@ -143,7 +128,6 @@ static void ring_clear(void) {
         memset(ring_virtual[index], 0, 4096);
 }
 
-/* Zero `size` bytes of the ring at a byte offset, crossing pages. */
 static void ring_zero(uint32_t offset, uint32_t size) {
     while (size) {
         uint32_t page = offset / 4096U;
@@ -157,7 +141,6 @@ static void ring_zero(uint32_t offset, uint32_t size) {
     }
 }
 
-/* Move `size` bytes into the ring at a byte offset, crossing pages. */
 static void ring_store(uint32_t offset, const uint8_t *source, uint32_t size) {
     while (size) {
         uint32_t page = offset / 4096U;
@@ -172,8 +155,6 @@ static void ring_store(uint32_t offset, const uint8_t *source, uint32_t size) {
     }
 }
 
-/* ----------------------------------------------------------- pcm pointers */
-
 static uint64_t playback_used(void) {
     if (!pcm.boundary) return 0;
     return (pcm.appl_ptr + pcm.boundary - pcm.hw_ptr) % pcm.boundary;
@@ -185,13 +166,6 @@ static uint64_t playback_avail(void) {
     return pcm.buffer_size - used;
 }
 
-/* Where the hardware is, and nothing else. The position wraps with the ring
-   and the delta is taken modulo the buffer, so it has to be sampled more often
-   than a lap -- a tenth of a second, less than one frame of a game that stalls
-   the kernel. Measured half a second late: 280 frames of movement reported
-   where a whole buffer had played, and everything written after that went
-   where the hardware had already been. No state changes here, and the pointer
-   never passes what was written, so the tick may call it. */
 static void pcm_refresh_pointer(void) {
     if (!card || !pcm.buffer_size || !pcm.frame_bytes) return;
     if (pcm.state != SNDRV_PCM_STATE_RUNNING &&
@@ -210,16 +184,9 @@ static void pcm_refresh_pointer(void) {
     if (seen > pcm.avail_max) pcm.avail_max = seen;
 }
 
-/* Zero what the hardware is about to play and nobody has written. The engine
-   loops the ring for ever, so a writer that falls behind is not quiet: the same
-   fragment is played again and again at full amplitude, which is what an
-   underrun sounds like. Measured: 98% of the tail of a starved recording was
-   loud, and 10% once this silenced the free part. Only the space in front of
-   the writer is touched. */
 static void pcm_silence_ahead(void) {
     if (!pcm.buffer_size || !pcm.frame_bytes) return;
     uint64_t free_frames = playback_avail();
-    /* Nothing to do while the writer is keeping up, and this is not free. */
     if (free_frames < pcm.buffer_size / 2U) return;
     uint64_t at = pcm.appl_ptr % pcm.buffer_size;
     uint64_t remaining = free_frames;
@@ -232,10 +199,6 @@ static void pcm_silence_ahead(void) {
     }
 }
 
-/* The same, and then the decision that belongs to whoever asked: stopping a
-   stream is only ever right in answer to a syscall, because a ring that is
-   momentarily empty between the hardware taking the last frame and the writer
-   being scheduled is ordinary. */
 static void pcm_update_pointer(void) {
     pcm_refresh_pointer();
     if (!card || !pcm.buffer_size || !pcm.frame_bytes) return;
@@ -252,8 +215,6 @@ static void pcm_update_pointer(void) {
         }
         return;
     }
-    /* The hardware ran past what was written: the ring is being replayed and
-       the stream is no longer what the application thinks it is. */
     if (playback_used() > pcm.buffer_size ||
         (pcm.stop_threshold && avail >= pcm.stop_threshold)) {
         (void)card->trigger(0);
@@ -261,13 +222,6 @@ static void pcm_update_pointer(void) {
     }
 }
 
-/* Starting a stream that is already running is not an error: the write starts
-   it as soon as start_threshold frames are in the ring, so the prepare, write,
-   start every ALSA program recovers an underrun with found it started already
-   and got EBADFD -- which alsa-lib treats as fatal, and which is silence from
-   the first underrun rather than a gap. */
-/* Sampled from the tick as well, because the position wraps with the ring and
-   a program the kernel has stalled cannot sample it itself. */
 void sound_tick(void) {
     if (!card || !pcm.configured) return;
     pcm_refresh_pointer();
@@ -304,13 +258,10 @@ static int pcm_prepare(void) {
     return 0;
 }
 
-/* Start once the application has queued as much as it asked to queue. */
 static void pcm_maybe_start(void) {
     if (pcm.state != SNDRV_PCM_STATE_PREPARED) return;
     if (playback_used() >= pcm.start_threshold) (void)pcm_start();
 }
-
-/* ------------------------------------------------------- hw_params refine */
 
 static struct snd_interval *interval_of(struct snd_pcm_hw_params *params, unsigned var) {
     return &params->intervals[var - SNDRV_PCM_HW_PARAM_FIRST_INTERVAL];
@@ -341,8 +292,6 @@ static int mask_empty(const struct snd_mask *mask) {
     return 1;
 }
 
-/* Tighten an interval to [low, high]. All of ours are integer intervals, so
-   open bounds are folded into closed ones once, here. */
 static int interval_refine(struct snd_interval *interval, uint64_t low, uint64_t high) {
     uint64_t min = interval->min;
     uint64_t max = interval->max;
@@ -362,7 +311,6 @@ static int interval_refine(struct snd_interval *interval, uint64_t low, uint64_t
     return changed;
 }
 
-/* c = a * b / k, refined from all three sides. */
 static int relate_muldiv(struct snd_interval *c, struct snd_interval *a,
                          struct snd_interval *b, uint64_t k) {
     int changed = 0;
@@ -375,7 +323,6 @@ static int relate_muldiv(struct snd_interval *c, struct snd_interval *a,
     return changed;
 }
 
-/* Bits per sample for a format, or zero if this driver cannot play it. */
 static uint32_t format_bits(unsigned format) {
     switch (format) {
     case SNDRV_PCM_FORMAT_S16_LE: return 16;
@@ -401,7 +348,6 @@ static void supported_subformat_mask(uint32_t *bits) {
     bits[0] = 1U << SNDRV_PCM_SUBFORMAT_STD;
 }
 
-/* Pull the rate interval onto the rates the link can actually clock. */
 static int refine_rate_list(struct snd_interval *rate) {
     if (!card->hardware.rate_count) return 0;
     uint64_t low = UINT32_MAX;
@@ -434,12 +380,9 @@ static uint32_t ring_limit_bytes(void) {
     return limit;
 }
 
-/* Narrow a parameter set to what the card can do. */
 static int hw_refine(struct snd_pcm_hw_params *params) {
     const struct snd_hardware *hardware = &card->hardware;
     uint32_t allowed[SNDRV_MASK_WORDS];
-    /* Kept to answer the only question the caller asks afterwards: which of
-       these parameters did you change. See the end of this function. */
     struct snd_pcm_hw_params before = *params;
 
     supported_access_mask(allowed);
@@ -465,7 +408,6 @@ static int hw_refine(struct snd_pcm_hw_params *params) {
     struct snd_interval *buffer_bytes = interval_of(params, SNDRV_PCM_HW_PARAM_BUFFER_BYTES);
     struct snd_interval *tick_time = interval_of(params, SNDRV_PCM_HW_PARAM_TICK_TIME);
 
-    /* Sample width comes from the formats still on the table. */
     uint64_t bits_low = UINT32_MAX;
     uint64_t bits_high = 0;
     for (unsigned format = 0; format < 32U; format++) {
@@ -491,8 +433,6 @@ static int hw_refine(struct snd_pcm_hw_params *params) {
                                    hardware->periods_max);
         changed |= interval_refine(period_bytes, hardware->period_bytes_min,
                                    hardware->period_bytes_max);
-        /* The step the controller wants, as bounds: a single-valued request
-           that is not a multiple is rejected outright at hw_params. */
         changed |= interval_refine(period_bytes,
             divide_up(period_bytes->min, PERIOD_BYTES_ALIGN) * PERIOD_BYTES_ALIGN,
             divide_down(period_bytes->max, PERIOD_BYTES_ALIGN) * PERIOD_BYTES_ALIGN);
@@ -502,9 +442,6 @@ static int hw_refine(struct snd_pcm_hw_params *params) {
         changed |= relate_muldiv(period_bytes, period_size, frame_bits, 8);
         changed |= relate_muldiv(buffer_bytes, buffer_size, frame_bits, 8);
         changed |= relate_muldiv(buffer_size, period_size, periods, 1);
-/* And the part that is not a bound: the buffer is a whole number of periods,
-   and both are a whole number of frames, so the two intervals are refined
-   against each other rather than against the hardware alone. */
         if (!period_size->empty && period_size->min == period_size->max &&
             period_size->min) {
             uint64_t one = period_size->min;
@@ -512,7 +449,6 @@ static int hw_refine(struct snd_pcm_hw_params *params) {
                                        divide_up(buffer_size->min, one) * one,
                                        divide_down(buffer_size->max, one) * one);
         }
-        /* The two time parameters, in microseconds, both ways. */
         changed |= interval_refine(period_time,
                                    divide_down((uint64_t)period_size->min * 1000000U, rate->max),
                                    divide_up((uint64_t)period_size->max * 1000000U, rate->min));
@@ -538,9 +474,6 @@ static int hw_refine(struct snd_pcm_hw_params *params) {
     params->rate_den = 1;
     params->fifo_size = hardware->fifo_size;
 
-/* Which parameters this call actually narrowed, one bit each: alsa-lib refines
-   in steps and re-reads only what changed, so a cmask that claims more than it
-   should makes it walk the whole set again on every pass. */
     uint32_t changed_mask = 0;
     for (unsigned index = 0; index < SNDRV_PCM_HW_PARAM_MASK_COUNT; index++) {
         for (unsigned word = 0; word < SNDRV_MASK_WORDS; word++)
@@ -558,8 +491,6 @@ static int hw_refine(struct snd_pcm_hw_params *params) {
             changed_mask |= 1U << (SNDRV_PCM_HW_PARAM_FIRST_INTERVAL + index);
     }
     params->cmask = changed_mask;
-    /* Consumed: the request has been answered, and leaving it set makes the
-       next caller's refine look like a repeat of this one. */
     params->rmask = 0;
     return 0;
 }
@@ -580,7 +511,6 @@ static unsigned mask_single(const struct snd_mask *mask) {
     return found;
 }
 
-/* Commit a fully determined parameter set to the hardware. */
 static int hw_params(struct snd_pcm_hw_params *params) {
     if (hw_refine(params) != 0) return -EINVAL;
 
@@ -630,8 +560,6 @@ static int hw_params(struct snd_pcm_hw_params *params) {
     pcm.period_bytes = (uint32_t)period_bytes;
     pcm.buffer_bytes = (uint32_t)buffer_bytes;
 
-    /* ALSA's boundary: the largest power-of-two multiple of the buffer that
-       still leaves room to add a buffer without overflowing a long. */
     pcm.boundary = buffer_size;
     while (pcm.boundary * 2U <= (uint64_t)INT64_MAX - buffer_size)
         pcm.boundary *= 2U;
@@ -660,12 +588,9 @@ static int sw_params(struct snd_pcm_sw_params *params) {
     pcm.silence_threshold = params->silence_threshold;
     pcm.silence_size = params->silence_size;
     pcm.tstamp_mode = params->tstamp_mode;
-    /* The boundary belongs to the kernel; userspace is told what it is. */
     params->boundary = pcm.boundary;
     return 0;
 }
-
-/* -------------------------------------------------------------- transfers */
 
 static int64_t pcm_append(const uint8_t *source, uint64_t frames) {
     if (!pcm.configured) return -EBADFD;
@@ -701,8 +626,6 @@ int64_t sound_pcm_write(struct vfs_node *node, uint64_t offset, size_t size,
     return moved * (int64_t)pcm.frame_bytes;
 }
 
-/* The buffer has room for at least avail_min frames, so a blocked write or a
-   poll for POLLOUT can make progress. */
 int sound_pcm_write_ready(struct vfs_node *node) {
     (void)node;
     if (!card) return 1;
@@ -714,8 +637,6 @@ int sound_pcm_write_ready(struct vfs_node *node) {
     uint64_t minimum = pcm.avail_min ? pcm.avail_min : 1U;
     return playback_avail() >= minimum;
 }
-
-/* ---------------------------------------------------------------- ioctls */
 
 static void fill_status(struct snd_pcm_status *status) {
     memset(status, 0, sizeof(*status));
@@ -734,15 +655,12 @@ static void fill_status(struct snd_pcm_status *status) {
     status->suspended_state = SNDRV_PCM_STATE_SUSPENDED;
 }
 
-/* The pointer exchange, and the first thing alsa-lib asks for. */
 static int64_t ioctl_sync_ptr(uint64_t user_argument) {
     struct snd_pcm_sync_ptr sync;
     if (copy_from_user(&sync, user_argument, sizeof(sync)) != 0) return -EFAULT;
 
     if (!(sync.flags & SNDRV_PCM_SYNC_PTR_AVAIL_MIN))
         pcm.avail_min = sync.c.control.avail_min;
-    /* An application pointer means nothing until there is a ring to place it
-       in, and the wrap would be a division by zero. */
     if (pcm.boundary) {
         if (!(sync.flags & SNDRV_PCM_SYNC_PTR_APPL))
             pcm.appl_ptr = sync.c.control.appl_ptr % pcm.boundary;
@@ -798,16 +716,8 @@ static int64_t ioctl_xferi(uint64_t user_argument) {
     return (int64_t)done;
 }
 
-/*
- * Wait out what is still queued.
- *
- * Bounded, and by the queue itself: there is at most one ring of audio left,
- * so the spin is the time that audio takes and never longer. Anything still
- * playing after that is a stopped engine, and the state moves on regardless.
- */
 static int64_t ioctl_drain(void) {
     if (!pcm.configured) return -EBADFD;
-    /* Data queued but under the start threshold still has to be played. */
     if (pcm.state == SNDRV_PCM_STATE_PREPARED && playback_used())
         (void)pcm_start();
     if (pcm.state != SNDRV_PCM_STATE_RUNNING) {
@@ -819,7 +729,7 @@ static int64_t ioctl_drain(void) {
     while (pcm.state == SNDRV_PCM_STATE_DRAINING) {
         pcm_update_pointer();
         if (time_uptime_ns() >= deadline) break;
-        __asm__ volatile("pause");
+        cpu_relax();
     }
     pcm_stop(SNDRV_PCM_STATE_SETUP);
     return 0;
@@ -830,8 +740,6 @@ static int64_t ioctl_channel_info(uint64_t user_argument) {
     if (copy_from_user(&info, user_argument, sizeof(info)) != 0) return -EFAULT;
     if (!pcm.configured) return -EBADFD;
     if (info.channel >= pcm.channels) return -EINVAL;
-    /* Interleaved: one mapping for every channel, differing only in where the
-       first sample of the channel sits inside a frame. */
     info.offset = 0;
     info.first = info.channel * pcm.sample_bits;
     info.step = pcm.frame_bits;
@@ -856,9 +764,6 @@ static int64_t sound_pcm_ioctl_locked(struct vfs_node *node, unsigned long reque
 static int64_t sound_control_ioctl_locked(struct vfs_node *node, unsigned long request,
                                           uint64_t user_argument);
 
-/* The first few refusals, because a program that gives up on the first one
-   makes no sound at all and says nothing about why: `dmesg | grep SOUND` then
-   names the call and the answer. */
 #define SOUND_REFUSALS_REPORTED 12U
 
 static int64_t sound_report_refusal(unsigned nr, int64_t answer, const char *which) {
@@ -885,18 +790,18 @@ static int64_t sound_pcm_ioctl_locked(struct vfs_node *node, unsigned long reque
     if (SND_IOC_TYPE(request) != 'A') return -ENOTTY;
 
     switch (SND_IOC_NR(request)) {
-    case 0x00: {  /* PVERSION */
+    case 0x00: {
         int version = SNDRV_PCM_VERSION;
         return copy_to_user(user_argument, &version, sizeof(version)) == 0 ? 0 : -EFAULT;
     }
-    case 0x01: {  /* INFO */
+    case 0x01: {
         struct snd_pcm_info info;
         fill_pcm_info(&info);
         return copy_to_user(user_argument, &info, sizeof(info)) == 0 ? 0 : -EFAULT;
     }
-    case 0x02:    /* TSTAMP */
-    case 0x03:    /* TTSTAMP */
-    case 0x04:    /* USER_PVERSION */
+    case 0x02:
+    case 0x03:
+    case 0x04:
         return 0;
     case SNDRV_PCM_IOCTL_NR_HW_REFINE:
     case SNDRV_PCM_IOCTL_NR_HW_PARAMS: {
@@ -963,13 +868,6 @@ static int64_t sound_pcm_ioctl_locked(struct vfs_node *node, unsigned long reque
     }
 }
 
-/*
- * mmap of the ring, and only of the ring.
- *
- * The status and control pages are refused on purpose; see the note at the
- * top of this file. alsa-lib treats the failure as a signal to use SYNC_PTR,
- * which is the path this driver can keep honest.
- */
 int64_t sound_pcm_mmap(struct vfs_node *node, struct file *file, uint64_t cr3,
                        uint64_t virtual_address, uint64_t length,
                        uint64_t offset, uint64_t page_flags) {
@@ -1010,8 +908,6 @@ void sound_pcm_close(struct vfs_node *node) {
     pcm.configured = 0;
 }
 
-/* --------------------------------------------------------- control device */
-
 #define CTL_NUMID_VOLUME 1U
 #define CTL_NUMID_SWITCH 2U
 
@@ -1028,7 +924,6 @@ static void fill_element_id(struct snd_ctl_elem_id *id, unsigned numid) {
                                          : "Master Playback Switch");
 }
 
-/* Match by numid, or by name when userspace has none yet. */
 static unsigned element_lookup(const struct snd_ctl_elem_id *id) {
     if (id->numid == CTL_NUMID_VOLUME || id->numid == CTL_NUMID_SWITCH)
         return id->numid;
@@ -1166,7 +1061,6 @@ static int64_t sound_control_ioctl_locked(struct vfs_node *node, unsigned long r
     case SNDRV_CTL_IOCTL_NR_PCM_NEXT_DEVICE: {
         int device = -1;
         if (copy_from_user(&device, user_argument, sizeof(device)) != 0) return -EFAULT;
-        /* Device 0 is the only one; anything past it ends the enumeration. */
         device = device < 0 ? 0 : -1;
         return copy_to_user(user_argument, &device, sizeof(device)) == 0 ? 0 : -EFAULT;
     }
@@ -1189,8 +1083,6 @@ static int64_t sound_control_ioctl_locked(struct vfs_node *node, unsigned long r
     }
 }
 
-/* ------------------------------------------------------------ registration */
-
 int snd_register_card(const struct snd_backend *backend) {
     if (!backend || !backend->configure || !backend->trigger || !backend->position)
         return -1;
@@ -1198,8 +1090,6 @@ int snd_register_card(const struct snd_backend *backend) {
     card = backend;
     memset(&pcm, 0, sizeof(pcm));
     pcm.state = SNDRV_PCM_STATE_OPEN;
-    /* Start at full scale: the codec's own zero-decibel setting is already the
-       gain the path was opened with. */
     mixer.left = backend->volume_max;
     mixer.right = backend->volume_max;
     mixer.muted = 0;

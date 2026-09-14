@@ -1,23 +1,7 @@
-/*
- * Intel High Definition Audio.
- *
- * The controller every PC built since 2004 has, and the one QEMU emulates. It
- * is really two devices: a DMA engine that walks a scatter list of the ring
- * buffer, and a serial link to one or more codecs that actually convert the
- * samples. Neither knows anything about the other until told, which is what
- * most of this file does.
- *
- * The codec side is a graph -- converters, mixers, selectors, pins -- and its
- * shape differs per machine, so the output path is discovered rather than
- * assumed. Everything below the graph walk is fixed by the specification.
- *
- * Position is read from the DMA position buffer and not from an interrupt:
- * the sound core asks for it whenever userspace syncs, which is often enough
- * for a ring measured in milliseconds and costs nothing when nothing plays.
- */
 #include <stddef.h>
 #include <stdint.h>
 
+#include "../../include/cpu.h"
 #include "../../include/hda.h"
 #include "../../include/kstring.h"
 #include "../../include/pci.h"
@@ -31,8 +15,6 @@ extern void kprintf(const char *fmt, ...);
 #define PCI_CLASS_MULTIMEDIA 0x04U
 #define PCI_SUBCLASS_HDA 0x03U
 #define PCI_VENDOR_INTEL 0x8086U
-/* Traffic class select. Intel controllers come out of reset on a class the
-   chipset may not service; Linux clears it for the same reason. */
 #define PCI_TCSEL 0x44U
 
 #define BAR_IO 0x1U
@@ -40,7 +22,6 @@ extern void kprintf(const char *fmt, ...);
 #define BAR_TYPE_64BIT 0x4U
 #define BAR_ADDRESS_MASK 0xFFFFFFF0U
 
-/* Registers below 0x80 are the controller's; the stream descriptors follow. */
 #define HDA_GCAP 0x00U
 #define HDA_GCTL 0x08U
 #define HDA_WAKEEN 0x0CU
@@ -77,7 +58,6 @@ extern void kprintf(const char *fmt, ...);
 #define GCAP_OSS_SHIFT 12U
 #define GCAP_OSS_MASK 0xFU
 
-/* Stream descriptor, at STREAM_BASE + index * STREAM_STRIDE. */
 #define STREAM_BASE 0x80U
 #define STREAM_STRIDE 0x20U
 #define SD_CTL 0x00U
@@ -95,8 +75,6 @@ extern void kprintf(const char *fmt, ...);
 #define SDCTL_STREAM_SHIFT 20U
 #define SDSTS_CLEAR 0x1CU
 
-/* Codec verbs. Anything above 0xF carries an eight-bit payload; the four-bit
-   verbs carry sixteen, which is why the encoder splits on the value. */
 #define VERB_GET_PARAMETER 0xF00U
 #define VERB_GET_CONNECT_LIST 0xF02U
 #define VERB_SET_CONNECT_SEL 0x701U
@@ -138,7 +116,6 @@ extern void kprintf(const char *fmt, ...);
 #define PIN_CONTROL_HP 0x80U
 #define EAPD_ENABLE 0x2U
 
-/* Amp payload: which amp, which channels, which input index, then the gain. */
 #define AMP_SET_OUTPUT 0x8000U
 #define AMP_SET_INPUT 0x4000U
 #define AMP_SET_LEFT 0x2000U
@@ -150,7 +127,6 @@ extern void kprintf(const char *fmt, ...);
 #define AMPCAP_STEPS_SHIFT 8U
 #define AMPCAP_STEPS_MASK 0x7FU
 
-/* Config default: what the pin is wired to, and whether it is wired at all. */
 #define CONFIG_DEVICE_SHIFT 20U
 #define CONFIG_DEVICE_MASK 0xFU
 #define CONFIG_DEVICE_LINE_OUT 0x0U
@@ -166,12 +142,10 @@ extern void kprintf(const char *fmt, ...);
 #define MAX_WIDGETS 64U
 #define MAX_CONNECTIONS 16U
 #define MAX_PATH 8U
-/* One page of BDL is 256 entries, and one entry maps one page of ring. */
 #define MAX_BDL_ENTRIES 256U
 
 #define MMIO_PAGE_BYTES 4096ULL
 #define HDA_REGISTER_BYTES 0x4000ULL
-/* The slot this driver owns in the shared device window; see vmm.h. */
 #define HDA_MMIO_VIRTUAL_BASE (DEVICE_MMIO_VIRTUAL_BASE + 0x00500000ULL)
 
 #define RESET_TIMEOUT_NS (500ULL * 1000ULL * 1000ULL)
@@ -193,7 +167,7 @@ struct hda_widget {
 struct hda_controller {
     int present;
     uint64_t base;
-    uint32_t output_stream;    /* descriptor index, not the stream tag */
+    uint32_t output_stream;
     uint32_t stream_tag;
 
     uint32_t *corb;
@@ -212,15 +186,12 @@ struct hda_controller {
     uint8_t widget_count;
     struct hda_widget widgets[MAX_WIDGETS];
 
-    /* The output path, from the pin back to the converter. */
     uint8_t path[MAX_PATH];
     uint8_t path_length;
     uint8_t dac_nid;
     uint8_t pin_nid;
     uint32_t volume_steps;
 
-    /* The last configuration, kept because a prepare resets the descriptor
-       registers and has to put them back. */
     uint32_t buffer_bytes;
     uint16_t stream_format;
     uint16_t bdl_entries;
@@ -254,11 +225,9 @@ static inline void write32(uint32_t offset, uint32_t value) {
 
 static void delay_ns(uint64_t nanoseconds) {
     uint64_t deadline = time_uptime_ns() + nanoseconds;
-    while (time_uptime_ns() < deadline) __asm__ volatile("pause");
+    while (time_uptime_ns() < deadline) cpu_relax();
 }
 
-/* One zeroed page of DMA memory. The allocator only hands out pages inside the
-   direct map, so the kernel pointer is a subtraction away. */
 static void *dma_page(uint64_t *physical_out) {
     void *physical = pmm_alloc_page();
     if (!physical) return NULL;
@@ -284,17 +253,12 @@ static uint64_t map_registers(uint64_t physical) {
     return HDA_MMIO_VIRTUAL_BASE;
 }
 
-/*
- * Bring the controller out of whatever state the firmware left it in. The
- * reset bit is inverted: zero means held in reset, and the codecs only start
- * announcing themselves once it has been one for a while.
- */
 static int reset_controller(void) {
     write32(HDA_GCTL, read32(HDA_GCTL) & ~GCTL_RESET);
     uint64_t deadline = time_uptime_ns() + RESET_TIMEOUT_NS;
     while (read32(HDA_GCTL) & GCTL_RESET) {
         if (time_uptime_ns() >= deadline) return -1;
-        __asm__ volatile("pause");
+        cpu_relax();
     }
     delay_ns(CODEC_SETTLE_NS);
 
@@ -302,10 +266,8 @@ static int reset_controller(void) {
     deadline = time_uptime_ns() + RESET_TIMEOUT_NS;
     while (!(read32(HDA_GCTL) & GCTL_RESET)) {
         if (time_uptime_ns() >= deadline) return -1;
-        __asm__ volatile("pause");
+        cpu_relax();
     }
-    /* The specification's codec discovery window, after which STATESTS is
-       meaningful. Reading it earlier finds no codecs on real hardware. */
     delay_ns(CODEC_SETTLE_NS);
     return 0;
 }
@@ -323,19 +285,17 @@ static int start_ring_buffers(void) {
     write32(HDA_CORBLBASE, (uint32_t)hda.corb_physical);
     write32(HDA_CORBUBASE, (uint32_t)(hda.corb_physical >> 32));
 
-    /* The read pointer resets by a write-then-clear handshake, and the
-       controller answers each half in its own time. */
     write16(HDA_CORBRP, CORBRP_RESET);
     uint64_t deadline = time_uptime_ns() + RESET_TIMEOUT_NS;
     while (!(read16(HDA_CORBRP) & CORBRP_RESET)) {
         if (time_uptime_ns() >= deadline) break;
-        __asm__ volatile("pause");
+        cpu_relax();
     }
     write16(HDA_CORBRP, 0);
     deadline = time_uptime_ns() + RESET_TIMEOUT_NS;
     while (read16(HDA_CORBRP) & CORBRP_RESET) {
         if (time_uptime_ns() >= deadline) return -1;
-        __asm__ volatile("pause");
+        cpu_relax();
     }
     write16(HDA_CORBWP, 0);
     hda.corb_wp = 0;
@@ -344,17 +304,6 @@ static int start_ring_buffers(void) {
     write32(HDA_RIRBLBASE, (uint32_t)hda.rirb_physical);
     write32(HDA_RIRBUBASE, (uint32_t)(hda.rirb_physical >> 32));
     write16(HDA_RIRBWP, RIRBWP_RESET);
-    /*
-     * Not 1, which is what an interrupt-driven driver asks for.
-     *
-     * The response-interrupt count is also the point at which the controller
-     * stops taking commands until the status bit it raised is acknowledged. At
-     * 1 that is every single verb, and one missed acknowledgement wedges the
-     * command ring for good -- which is exactly what happened here: the second
-     * verb of codec enumeration never left the CORB. A high count means the
-     * interlock is reached rarely, and the acknowledgement after every response
-     * below clears it when it is.
-     */
     write16(HDA_RINTCNT, RIRB_INTERRUPT_COUNT);
     hda.rirb_rp = 0;
 
@@ -363,8 +312,6 @@ static int start_ring_buffers(void) {
     return 0;
 }
 
-/* Send one verb and wait for its response. Returns ~0 on timeout, which no
-   valid parameter read produces for the fields this driver uses. */
 static uint32_t codec_command(uint8_t nid, uint32_t verb, uint32_t payload) {
     uint32_t value = ((uint32_t)hda.codec << 28) | ((uint32_t)nid << 20);
     if (verb > 0xFU) value |= (verb << 8) | (payload & 0xFFU);
@@ -383,13 +330,11 @@ static uint32_t codec_command(uint8_t nid, uint32_t verb, uint32_t payload) {
             kprintf("HDA: verb %x got no response\n", value);
             return 0xFFFFFFFFU;
         }
-        __asm__ volatile("pause");
+        cpu_relax();
     }
     hda.rirb_rp = (uint16_t)((hda.rirb_rp + 1U) % RIRB_ENTRIES);
     __asm__ volatile("mfence" : : : "memory");
     uint64_t response = hda.rirb[hda.rirb_rp];
-    /* Written unconditionally rather than read-modify-write: both bits are
-       write-one-to-clear, and it is the clearing that lets the ring run on. */
     write8(HDA_RIRBSTS, RIRBSTS_CLEAR);
     return (uint32_t)response;
 }
@@ -404,8 +349,6 @@ static struct hda_widget *widget_for(uint8_t nid) {
     return NULL;
 }
 
-/* The connection list is four entries per response in short form and two in
-   long form; ranges are rare on output paths and treated as their endpoint. */
 static void read_connections(struct hda_widget *widget) {
     uint32_t length_parameter = get_parameter(widget->nid, PARAM_CONNLIST_LEN);
     unsigned count = length_parameter & 0x7FU;
@@ -424,7 +367,6 @@ static void read_connections(struct hda_widget *widget) {
     widget->connection_count = (uint8_t)count;
 }
 
-/* Walk the audio function group and record every widget in it. */
 static int enumerate_widgets(uint8_t function_group) {
     uint32_t nodes = get_parameter(function_group, PARAM_NODE_COUNT);
     uint8_t start = (uint8_t)((nodes >> 16) & 0xFFU);
@@ -444,8 +386,6 @@ static int enumerate_widgets(uint8_t function_group) {
         if (widget->caps == 0xFFFFFFFFU) continue;
         widget->type = (uint8_t)((widget->caps >> WIDGET_TYPE_SHIFT) & WIDGET_TYPE_MASK);
 
-        /* Amp capabilities live on the function group unless the widget says
-           it overrides them, so a widget-local read can legitimately be zero. */
         if (widget->caps & AWCAP_AMP_OVERRIDE) {
             widget->out_amp_cap = get_parameter(widget->nid, PARAM_OUT_AMP_CAP);
             widget->in_amp_cap = get_parameter(widget->nid, PARAM_IN_AMP_CAP);
@@ -464,13 +404,6 @@ static int enumerate_widgets(uint8_t function_group) {
     return hda.widget_count ? 0 : -1;
 }
 
-/*
- * Find a route from an output pin back to a converter.
- *
- * Breadth first over the connection lists, which are directed the way the
- * signal flows into a widget, so following them walks upstream. The parent
- * table then gives the path back in playback order.
- */
 static int find_path(uint8_t pin_nid) {
     uint8_t queue[MAX_WIDGETS];
     uint8_t parent[MAX_WIDGETS];
@@ -513,7 +446,6 @@ static int find_path(uint8_t pin_nid) {
     }
     if (!found) return -1;
 
-    /* Unwind to the pin, then reverse: the path is used from the pin down. */
     uint8_t reverse[MAX_PATH];
     unsigned length = 0;
     uint8_t nid = found;
@@ -532,7 +464,6 @@ static int find_path(uint8_t pin_nid) {
     hda.pin_nid = pin_nid;
     hda.dac_nid = found;
 
-    /* Point every selector on the path at the hop that was taken. */
     for (unsigned index = 0; index + 1 < length; index++) {
         struct hda_widget *widget = widget_for(hda.path[index]);
         struct hda_widget *next = widget_for(hda.path[index + 1]);
@@ -567,7 +498,6 @@ static void unmute_input_amp(struct hda_widget *widget, unsigned index) {
     (void)codec_command(widget->nid, VERB_SET_AMP_GAIN_MUTE, payload);
 }
 
-/* Power everything on the path, open its amps, and enable the jack. */
 static void enable_path(void) {
     for (unsigned index = 0; index < hda.path_length; index++) {
         struct hda_widget *widget = widget_for(hda.path[index]);
@@ -575,7 +505,6 @@ static void enable_path(void) {
         if (widget->caps & AWCAP_POWER)
             (void)codec_command(widget->nid, VERB_SET_POWER_STATE, 0);
         set_output_amp(widget, amp_offset(widget->out_amp_cap), 0);
-        /* Index zero is the selected input once the selector has been set. */
         unmute_input_amp(widget, 0);
     }
 
@@ -588,7 +517,6 @@ static void enable_path(void) {
         (void)codec_command(pin->nid, VERB_SET_EAPD, EAPD_ENABLE);
 }
 
-/* Prefer a pin that is wired to something and meant for listening. */
 static int pin_is_output(const struct hda_widget *widget, int strict) {
     if (widget->type != WIDGET_PIN) return 0;
     if (!(widget->pin_caps & PINCAP_OUTPUT)) return 0;
@@ -610,7 +538,6 @@ static int build_output_path(void) {
     return -1;
 }
 
-/* The first audio function group of the first codec that answers. */
 static int probe_codecs(void) {
     uint16_t present = read16(HDA_STATESTS);
     for (uint8_t address = 0; address < 15U; address++) {
@@ -635,8 +562,6 @@ static int probe_codecs(void) {
     return -1;
 }
 
-/* Sample rates the link can carry, with the base/multiplier/divisor triple the
-   format register spells them as. */
 struct rate_encoding {
     uint32_t rate;
     uint16_t bits;
@@ -692,31 +617,27 @@ static void stop_stream(void) {
     uint64_t deadline = time_uptime_ns() + RESET_TIMEOUT_NS;
     while (read32(stream_register(SD_CTL)) & SDCTL_RUN) {
         if (time_uptime_ns() >= deadline) break;
-        __asm__ volatile("pause");
+        cpu_relax();
     }
     write8(stream_register(SD_STS), SDSTS_CLEAR);
 }
 
-/* The engine has to be reset before its descriptors may be rewritten, and the
-   reset bit is another write-then-clear handshake. */
 static void reset_stream(void) {
     stop_stream();
     write32(stream_register(SD_CTL), SDCTL_RESET);
     uint64_t deadline = time_uptime_ns() + RESET_TIMEOUT_NS;
     while (!(read32(stream_register(SD_CTL)) & SDCTL_RESET)) {
         if (time_uptime_ns() >= deadline) break;
-        __asm__ volatile("pause");
+        cpu_relax();
     }
     write32(stream_register(SD_CTL), 0);
     deadline = time_uptime_ns() + RESET_TIMEOUT_NS;
     while (read32(stream_register(SD_CTL)) & SDCTL_RESET) {
         if (time_uptime_ns() >= deadline) break;
-        __asm__ volatile("pause");
+        cpu_relax();
     }
 }
 
-/* Reset the engine and write the stored descriptors back into it. The reset is
-   what puts the position counters at zero, so this is also the prepare path. */
 static int program_stream(void) {
     if (!hda.bdl_entries) return -1;
     reset_stream();
@@ -729,8 +650,6 @@ static int program_stream(void) {
     write32(stream_register(SD_CTL), hda.stream_tag << SDCTL_STREAM_SHIFT);
     hda.position_buffer[hda.output_stream * 2U] = 0;
 
-    /* The converter has to be told the same format and which stream tag on the
-       link carries it; a mismatch here plays silence with everything running. */
     (void)codec_command(hda.dac_nid, VERB_SET_CONVERTER_FORMAT, hda.stream_format);
     (void)codec_command(hda.dac_nid, VERB_SET_STREAM_CHANNEL, hda.stream_tag << 4);
     return 0;
@@ -744,9 +663,6 @@ static int hda_configure(const struct snd_stream_format *format,
     uint16_t encoded = 0;
     if (encode_format(format, &encoded) != 0) return -1;
 
-    /* The scatter list must have at least two entries, so a ring smaller than
-       a page is described in halves rather than one entry. Every chunk is a
-       power of two no larger than a page, which keeps it inside one. */
     uint32_t chunk = (uint32_t)PMM_PAGE_SIZE;
     while (chunk > 128U && buffer_bytes <= chunk) chunk /= 2U;
 
@@ -786,9 +702,6 @@ static int hda_trigger(int running) {
 
 static uint32_t hda_position(void) {
     if (!hda.present || !hda.buffer_bytes) return 0;
-    /* The position buffer is DMA-coherent memory and cheaper to trust than
-       LPIB, which lags on several chipsets; LPIB covers a controller that
-       never writes it. */
     uint32_t position = hda.position_buffer[hda.output_stream * 2U];
     if (!position) position = read32(stream_register(SD_LPIB));
     return position % hda.buffer_bytes;
@@ -819,8 +732,6 @@ static struct snd_backend hda_backend = {
         .channels_min = 2,
         .channels_max = 2,
         .formats = (1U << SND_FORMAT_S16_LE) | (1U << SND_FORMAT_S32_LE),
-        /* Both bounds are the controller's: a cyclic buffer length must be a
-           multiple of 128 bytes, and the scatter list holds one page each. */
         .period_bytes_min = 128,
         .period_bytes_max = 128 * 1024,
         .periods_min = 2,
@@ -865,8 +776,6 @@ int hda_init(void) {
         return -1;
     }
 
-    /* Nothing here uses interrupts; masking them keeps a controller the
-       firmware left armed from raising a line no handler owns. */
     write32(HDA_INTCTL, 0);
     if (reset_controller() != 0) {
         kprintf("HDA: controller will not reset\n");
@@ -883,8 +792,6 @@ int hda_init(void) {
         kprintf("HDA: controller has no output streams\n");
         return -1;
     }
-    /* Output descriptors follow the input ones in the register file, so the
-       first output stream is at the input count. */
     hda.output_stream = input_streams;
     hda.stream_tag = 1;
 

@@ -1,32 +1,11 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "../../include/block.h"
+#include "../../include/cpu.h"
 #include "../../include/kstring.h"
 #include "../../include/nvme.h"
 #include "../../include/pci.h"
 #include "../../include/vmm.h"
-
-/*
- * NVMe, enough of it to be a disk.
- *
- * Two queues: the admin pair the controller starts with, and one I/O pair
- * created on top of it. Commands are issued one at a time and polled for, the
- * same choice as the AHCI driver and for the same reason.
- *
- * Two details are worth knowing before reading this, because both are quiet
- * when they are wrong:
- *
- *  - A completion is *not* announced by a value appearing. The controller
- *    flips a phase bit on every wrap of the queue, so "done" means the entry's
- *    phase differs from the last pass, and an implementation that waits for a
- *    non-zero word works exactly once and then hangs. The command id is checked
- *    too, so a stale entry cannot be mistaken for the answer.
- *
- *  - A namespace picks its own block size. A drive formatted with 4 KiB blocks
- *    reports a quarter as many of them as the block layer counts in 512-byte
- *    sectors, and a read of one 512-byte sector is a read of the 4 KiB block it
- *    sits inside. Everything below translates; everything above counts in 512.
- */
 
 extern void kprintf(const char *fmt, ...);
 
@@ -55,8 +34,6 @@ extern void kprintf(const char *fmt, ...);
 
 #define QUEUE_ENTRIES 32U
 #define NVME_WAIT_SPINS 40000000U
-/* One PRP list page addresses 512 pages; the cap here is what the driver is
-   willing to stage, and 128 KiB matches the AHCI side. */
 #define NVME_MAX_PAGES 32U
 
 struct nvme_command {
@@ -80,7 +57,7 @@ struct nvme_completion {
     uint16_t sq_head;
     uint16_t sq_id;
     uint16_t command_id;
-    uint16_t status;   /* bit 0 is the phase */
+    uint16_t status;
 } __attribute__((packed));
 
 struct nvme_queue {
@@ -90,25 +67,18 @@ struct nvme_queue {
     uint64_t completion_physical;
     uint32_t submission_tail;
     uint32_t completion_head;
-    uint32_t phase;            /* the value that means "this entry is new" */
+    uint32_t phase;
     uint64_t submission_doorbell;
     uint64_t completion_doorbell;
 };
 
-static uint64_t registers;        /* how the window is reached now */
+static uint64_t registers;
 static uint64_t registers_physical;
 static uint32_t doorbell_stride;
 
-/*
- * Four queue pages, a pointer-list page and a scratch page, static rather than
- * allocated: they live for as long as the machine does. Each queue has to
- * start on a page boundary because the registers holding their addresses
- * reserve the low twelve bits.
- */
 #define NVME_DMA_PAGES 6U
 static uint8_t nvme_dma[NVME_DMA_PAGES][4096] __attribute__((aligned(4096)));
 
-/* The physical address of one of the static pages above. */
 static uint64_t static_physical(const void *address) {
     return vmm_dma_physical(address, 4096);
 }
@@ -123,9 +93,6 @@ static uint32_t namespace_block_bytes;
 static uint32_t sectors_per_block;
 
 
-/* And of one page of a buffer the block layer handed down, which may be
-   anywhere -- including a heap allocation whose pages are not consecutive, so
-   this is asked once per page rather than once per request. */
 static uint64_t buffer_physical(uint64_t address) {
     uint64_t cr3 = vmm_kernel_cr3();
     uint64_t physical = 0;
@@ -138,16 +105,13 @@ static void write32(uint64_t address, uint32_t value) {
     *(volatile uint32_t *)address = value;
 }
 
-/* 64-bit registers are written as two halves: the specification allows it, and
-   not every platform lets a single 64-bit store reach a device. */
 static void write64(uint64_t address, uint64_t value) {
     write32(address, (uint32_t)value);
     write32(address + 4U, (uint32_t)(value >> 32));
 }
 
-static void pause_cpu(void) { __asm__ volatile("pause"); }
+static void pause_cpu(void) { cpu_relax(); }
 
-/* The offset of a doorbell inside the window, not its address. */
 static uint64_t doorbell_of(uint32_t queue, int completion) {
     uint32_t index = queue * 2U + (completion ? 1U : 0U);
     return 0x1000U + (uint64_t)index * (4ULL << doorbell_stride);
@@ -162,20 +126,12 @@ static int allocate_queue(struct nvme_queue *queue, uint32_t id,
     queue->completion_physical = static_physical(queue->completion);
     memset(queue->submission, 0, 4096);
     memset(queue->completion, 0, 4096);
-    /* The queue starts empty, so the first entry the controller writes will
-       carry phase 1. */
     queue->phase = 1;
-    /* Offsets rather than addresses, so that a doorbell does not have to be
-       recomputed if the register window is ever mapped somewhere else. */
     queue->submission_doorbell = doorbell_of(id, 0);
     queue->completion_doorbell = doorbell_of(id, 1);
     return 0;
 }
 
-/*
- * Submit one command and wait for its completion. Returns the status field
- * with the phase bit removed, so zero is success.
- */
 static int submit(struct nvme_queue *queue, struct nvme_command *command) {
     uint16_t id = next_command_id++;
     if (!next_command_id) next_command_id = 1;
@@ -199,11 +155,6 @@ static int submit(struct nvme_queue *queue, struct nvme_command *command) {
     return -1;
 }
 
-/*
- * Describe a kernel virtual buffer to the controller. PRP1 may start part-way
- * into a page; every entry after it must be page aligned, which the pages of a
- * virtual range naturally are. Two pages fit in PRP1/PRP2; more need a list.
- */
 static int build_prp(struct nvme_command *command, const void *buffer, uint32_t bytes) {
     uint64_t address = (uint64_t)(uintptr_t)buffer;
     uint64_t physical = buffer_physical(address);
@@ -235,10 +186,7 @@ static int build_prp(struct nvme_command *command, const void *buffer, uint32_t 
     return 0;
 }
 
-/* --- the block layer's view ---------------------------------------------- */
-
 static int transfer(uint64_t lba, uint32_t count, void *buffer, int write) {
-    /* The namespace counts in its own block size; the caller counts in 512s. */
     if (count % sectors_per_block || lba % sectors_per_block) return -1;
     uint64_t block = lba / sectors_per_block;
     uint32_t blocks = count / sectors_per_block;
@@ -250,15 +198,10 @@ static int transfer(uint64_t lba, uint32_t count, void *buffer, int write) {
     if (build_prp(&command, buffer, count * BLOCK_SECTOR_SIZE) != 0) return -1;
     command.dword10 = (uint32_t)block;
     command.dword11 = (uint32_t)(block >> 32);
-    command.dword12 = blocks - 1U;   /* zero based */
+    command.dword12 = blocks - 1U;
     return submit(&io_queue, &command) == 0 ? 0 : -1;
 }
 
-/*
- * A namespace formatted with blocks larger than a sector cannot read or write
- * part of one, so a request that does not line up is staged through a whole
- * block: read it, patch it, write it back.
- */
 static int nvme_read(void *context, uint64_t lba, uint32_t count, void *destination) {
     (void)context;
     uint8_t *out = (uint8_t *)destination;
@@ -272,7 +215,6 @@ static int nvme_read(void *context, uint64_t lba, uint32_t count, void *destinat
         if (!within && chunk % sectors_per_block == 0) {
             if (transfer(lba, chunk, out, 0) != 0) return -1;
         } else {
-            /* The pointer-list page is idle for a single-block transfer. */
             uint8_t *staging = (uint8_t *)prp_list;
             if (namespace_block_bytes > 4096U) return -1;
             if (transfer(aligned, sectors_per_block, staging, 0) != 0) return -1;
@@ -326,8 +268,6 @@ static int nvme_flush(void *context) {
     return submit(&io_queue, &command) == 0 ? 0 : -1;
 }
 
-/* --- bring-up ------------------------------------------------------------ */
-
 static int wait_ready(int wanted) {
     for (uint32_t spin = 0; spin < NVME_WAIT_SPINS; spin++) {
         uint32_t status = read32(registers + REG_CSTS);
@@ -348,15 +288,15 @@ static int identify_namespace(void) {
     command.dword0 = ADMIN_IDENTIFY;
     command.nsid = 1;
     command.prp1 = page;
-    command.dword10 = 0;             /* CNS 0: this namespace */
+    command.dword10 = 0;
     if (submit(&admin_queue, &command) != 0) return -1;
 
     uint64_t size = 0;
     memcpy(&size, data, sizeof(size));
-    uint8_t formatted = data[26] & 0x0FU;      /* FLBAS: which format is in use */
+    uint8_t formatted = data[26] & 0x0FU;
     uint32_t format = 0;
     memcpy(&format, data + 128 + (size_t)formatted * 4U, sizeof(format));
-    uint8_t shift = (uint8_t)((format >> 16) & 0xFFU);   /* LBADS */
+    uint8_t shift = (uint8_t)((format >> 16) & 0xFFU);
 
     if (shift < 9U || shift > 12U || !size) return -1;
     namespace_blocks = size;
@@ -371,15 +311,15 @@ static int create_io_queues(void) {
     memset(&command, 0, sizeof(command));
     command.dword0 = ADMIN_CREATE_CQ;
     command.prp1 = io_queue.completion_physical;
-    command.dword10 = ((QUEUE_ENTRIES - 1U) << 16) | 1U;   /* size, queue id 1 */
-    command.dword11 = 1U;                                   /* physically contiguous */
+    command.dword10 = ((QUEUE_ENTRIES - 1U) << 16) | 1U;
+    command.dword11 = 1U;
     if (submit(&admin_queue, &command) != 0) return -1;
 
     memset(&command, 0, sizeof(command));
     command.dword0 = ADMIN_CREATE_SQ;
     command.prp1 = io_queue.submission_physical;
     command.dword10 = ((QUEUE_ENTRIES - 1U) << 16) | 1U;
-    command.dword11 = (1U << 16) | 1U;   /* completion queue 1, contiguous */
+    command.dword11 = (1U << 16) | 1U;
     return submit(&admin_queue, &command) == 0 ? 0 : -1;
 }
 
@@ -387,14 +327,11 @@ void nvme_init(void) {
     struct pci_device pci;
     if (pci_find_class(NVME_CLASS, NVME_SUBCLASS, &pci) != 0) return;
 
-    /* BAR0 is a 64-bit memory BAR, so the upper half lives in BAR1. */
     uint64_t base = ((uint64_t)pci.bar[0] & ~0xFULL);
     if ((pci.bar[0] & 0x6U) == 0x4U) base |= (uint64_t)pci.bar[1] << 32;
     if (!base) return;
 
     pci_enable_bus_mastering(&pci);
-    /* Mapped before the first register read; see the same place in ahci.c for
-       why it used not to be. */
     registers_physical = base;
     registers = vmm_map_device(base, 0x2000U);
     if (!registers) {
@@ -419,8 +356,6 @@ void nvme_init(void) {
     write64(registers + REG_ASQ, admin_queue.submission_physical);
     write64(registers + REG_ACQ, admin_queue.completion_physical);
 
-    /* 4 KiB pages, NVM command set, 64-byte submission and 16-byte completion
-       entries -- the sizes are given as their base-2 logarithms. */
     uint32_t configuration = CC_ENABLE | (6U << 16) | (4U << 20);
     write32(registers + REG_CC, configuration);
     if (wait_ready(1) != 0) {
@@ -451,4 +386,3 @@ void nvme_init(void) {
         kprintf("NVME: %u byte blocks, staged through as 512 byte sectors\n",
                 (unsigned)namespace_block_bytes);
 }
-

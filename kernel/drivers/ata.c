@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include "../include/ata.h"
 #include "../include/block.h"
+#include "../include/cpu.h"
 #include "../include/io.h"
 #include "../include/kstring.h"
 #include "../include/pci.h"
@@ -51,12 +52,6 @@ static int dma_probe_state;
 static uint16_t dma_io_base;
 static struct ata_prd dma_prdt[ATA_DMA_MAX_PRDS] __attribute__((aligned(16)));
 
-/*
- * Bus-master DMA needs one physically contiguous run, which the VMM answers
- * for and nothing else can: the direct map and the kernel image qualify, a
- * heap allocation does not, and where the image sits in physical memory is
- * the bootloader's choice rather than a constant this file can subtract.
- */
 static inline uint64_t ata_pointer_physical(const void *pointer, uint64_t length) {
     return vmm_dma_physical(pointer, length);
 }
@@ -79,7 +74,7 @@ static int ata_wait_not_busy(void) {
     for (uint32_t timeout = 0; timeout < 10000000U; timeout++) {
         uint8_t status = inb(ATA_STATUS);
         if (!(status & ATA_SR_BSY)) return status;
-        __asm__ volatile("pause");
+        cpu_relax();
     }
     return -1;
 }
@@ -89,7 +84,7 @@ static int ata_wait_drq(void) {
         uint8_t status = inb(ATA_STATUS);
         if (status & (ATA_SR_ERR | ATA_SR_DF)) return -1;
         if (!(status & ATA_SR_BSY) && (status & ATA_SR_DRQ)) return 0;
-        __asm__ volatile("pause");
+        cpu_relax();
     }
     return -1;
 }
@@ -187,7 +182,7 @@ static int ata_dma_transfer_chunk(uint32_t lba, uint32_t sectors,
             result = 0;
             break;
         }
-        __asm__ volatile("pause");
+        cpu_relax();
     }
 
     outb(command_port, direction);
@@ -202,20 +197,6 @@ static int ata_dma_transfer_chunk(uint32_t lba, uint32_t sectors,
     return 0;
 }
 
-/*
- * Whether there is a controller at the legacy ports at all.
- *
- * A machine with no ISA IDE -- q35, which is what this is usually run on --
- * leaves those ports unclaimed, and reads of an unclaimed port return 0xFF.
- * That looks exactly like a drive that is permanently busy, so the identify
- * below waited out its ten million reads before giving up: each one traps to
- * the emulator, and the boot spent seventy-five seconds asking a controller
- * that was not there.
- *
- * The check is the usual one: write two scratch registers and read them back.
- * Nothing answers on a floating bus, and a real controller keeps what it was
- * given whether or not a drive is attached.
- */
 static int ata_controller_present(void) {
     if (inb(ATA_STATUS) == 0xFFU) return 0;
     outb(ATA_LBA0, 0x55U);
@@ -239,9 +220,6 @@ uint32_t ata_disk_sectors(void) {
     outb(ATA_COMMAND, ATA_CMD_IDENTIFY);
 
     uint8_t status = inb(ATA_STATUS);
-    /* Zero is no drive on this channel; all ones is the floating bus again,
-       which the presence check above cannot rule out on its own once the
-       command has been written. */
     if (status == 0 || status == 0xFFU) return 0;
     if (ata_wait_not_busy() < 0) return 0;
     if (inb(ATA_LBA1) != 0 || inb(ATA_LBA2) != 0) return 0;
@@ -394,13 +372,6 @@ int ata_pio_read_bytes(uint64_t offset, size_t size, void *destination) {
     return (int)completed;
 }
 
-/* --- the block layer's view ---------------------------------------------- */
-
-/*
- * DMA first and programmed I/O as the answer when it is refused: the fallback
- * used to live in the filesystem, which is not a place that should know how a
- * disk is wired.
- */
 static int ata_block_read(void *context, uint64_t lba, uint32_t count, void *destination) {
     (void)context;
     if (lba > 0x0FFFFFFFULL) return -1;

@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include "include/cpu.h"
 #include "include/io.h"
 #include "include/percpu.h"
 #include "include/time.h"
@@ -28,7 +29,6 @@ static uint64_t tsc_hz;
 static uint64_t boot_realtime_ns;
 static int tsc_invariant;
 static uint64_t processor_mark[SMP_MAX_CPUS];
-/* How far each processor's reading fell outside the window, or zero. */
 static uint64_t processor_skew[SMP_MAX_CPUS];
 
 static inline uint64_t read_tsc(void) {
@@ -45,7 +45,6 @@ static void cpuid(uint32_t leaf, uint32_t subleaf,
                      : "a"(leaf), "c"(subleaf));
 }
 
-/* CPUID leaf 0x80000007 EDX bit 8, without which the counter may stop or change rate. */
 static int invariant_from_cpuid(void) {
     uint32_t a, b, c, d;
     cpuid(0x80000000U, 0, &a, &b, &c, &d);
@@ -86,7 +85,7 @@ static uint64_t frequency_from_pit(void) {
             outb(0x61, original);
             return 0;
         }
-        __asm__ volatile("pause");
+        cpu_relax();
     }
     uint64_t end = read_tsc();
     outb(0x61, original);
@@ -195,14 +194,14 @@ int time_get_rtc(struct tunix_rtc_time *out) {
         unsigned timeout = 1000000U;
         while (timeout && rtc_updating()) {
             timeout--;
-            __asm__ volatile("pause");
+            cpu_relax();
         }
         if (!timeout) break;
         rtc_read_once(&first);
         timeout = 1000000U;
         while (timeout && rtc_updating()) {
             timeout--;
-            __asm__ volatile("pause");
+            cpu_relax();
         }
         if (!timeout) break;
         rtc_read_once(&second);
@@ -227,8 +226,6 @@ void time_init(void) {
     boot_realtime_ns = rtc_to_epoch(&rtc) * 1000000000ULL;
 }
 
-/* Nanoseconds since calibration, clamped at the bottom so a processor
-   behind boot_tsc cannot wrap it. */
 uint64_t time_uptime_ns(void) {
     uint64_t raw = read_tsc();
     if (raw < boot_tsc) return 0;
@@ -254,7 +251,6 @@ void time_mark_processor(unsigned index) {
     if (index < SMP_MAX_CPUS) processor_mark[index] = time_uptime_ns();
 }
 
-/* The reading a processor took as it came up must fall between the two the starter took. */
 void time_check_processor(unsigned index, uint64_t before, uint64_t after) {
     if (index >= SMP_MAX_CPUS) return;
     uint64_t mark = processor_mark[index];

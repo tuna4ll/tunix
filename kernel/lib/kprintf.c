@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdarg.h>
+#include "../include/cpu.h"
 #include "../include/klog.h"
 #include "../include/smp.h"
 #include "../include/kstring.h"
@@ -24,18 +25,6 @@ static void klog_store_char(char c) {
     klog_buffer[index] = c;
 }
 
-/*
- * Whether the log also goes to the screen.
- *
- * On for the whole boot, and the reason is machines with no serial port: a
- * kernel that stops between the console coming up and init running leaves
- * nothing behind but a cursor, and which line it stopped after is the entire
- * diagnosis. It costs a few thousand glyphs.
- *
- * Painting is the terminal's decision, not this one -- it draws only while the
- * console owns the framebuffer, so once the compositor has taken the display
- * these characters go to the log and nowhere else.
- */
 static int klog_console_enabled = 1;
 static int klog_console_busy;
 
@@ -51,15 +40,6 @@ extern struct terminal_screen *terminal_screen_active(void);
 extern void terminal_set_sgr_sequence(struct terminal_screen *screen,
                                       const unsigned *codes, unsigned count);
 
-/*
- * Colour on the panic screen, and nowhere else in here.
- *
- * terminal_print() does not go through an escape parser -- that is on the tty
- * write path, in tty.c -- so the attribute is set on the screen itself. Which
- * is also why the serial log stays plain text: nothing is emitted to it.
- * A NULL screen, which is what there is before the first terminal exists or
- * while a graphics client owns the display, is ignored rather than guarded.
- */
 static void panic_sgr(const unsigned *codes, unsigned count) {
     terminal_set_sgr_sequence(terminal_screen_active(), codes, count);
 }
@@ -69,10 +49,6 @@ static void emit_char(char c) {
     serial_write_char(c);
 
     if (!klog_console_enabled || klog_console_busy || !terminal_ready()) return;
-    /* The terminal takes strings and this takes characters; the pair is the
-       shortest thing that is both. The flag is belt and braces: nothing under
-       terminal_print() logs, and if that ever changes this is why it will not
-       be a stack overflow. */
     klog_console_busy = 1;
     char pair[2] = {c, 0};
     terminal_print(pair);
@@ -126,29 +102,14 @@ static void print_int(int64_t num, int base, int is_upper) {
     }
 }
 
-/*
- * A message at a time.
- *
- * The terminal serialises characters on its own, which keeps the screen from
- * being corrupted but not from being unreadable: two processors printing at
- * once produce one line with both messages spliced into it, a character each.
- * This is the lock that makes a kprintf() atomic, and it is why the trace a
- * fault handler prints is legible at all.
- *
- * Interrupts go off with it for the usual reason: kprintf() is reachable from
- * an interrupt handler and a processor that took one here would wait for
- * itself.
- */
 static volatile int log_lock;
 
 static uint64_t log_acquire(void) {
     uint64_t flags;
     __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags) :: "memory");
-    /* As in terminal.c: interrupts are off here, so the flush another
-       processor is waiting on has to be serviced by hand. */
     while (__atomic_test_and_set(&log_lock, __ATOMIC_ACQUIRE)) {
         smp_service_flush();
-        __asm__ volatile("pause");
+        cpu_relax();
     }
     return flags;
 }
@@ -195,14 +156,6 @@ void kprintf(const char *fmt, ...) {
     log_release(flags);
 }
 
-/*
- * The tail of the log, on the terminal.
- *
- * A panic is the one moment the serial port is not enough. On real hardware
- * there is usually nothing attached to it, and the reason the kernel stopped
- * is never the panic line itself -- it is the twenty lines above it, which
- * until now only existed somewhere nobody was looking.
- */
 void klog_print_tail(unsigned lines) {
     if (!klog_count) return;
     size_t start = klog_count;
@@ -212,8 +165,6 @@ void klog_print_tail(unsigned lines) {
         if (klog_buffer[index] == '\n' && ++seen > lines) break;
         start--;
     }
-    /* One character at a time, because the log is a ring and the terminal
-       takes strings: a pair is the shortest thing that is both. */
     char pair[2] = {0, 0};
     for (size_t at = start; at < klog_count; at++) {
         pair[0] = klog_buffer[(klog_head + at) % KLOG_CAPACITY];
@@ -224,16 +175,10 @@ void klog_print_tail(unsigned lines) {
 #define PANIC_LOG_LINES 24U
 
 void panic(const char *msg) {
-    /* Both locks by force. The processor that held either of them may be the
-       one that just went wrong, and a panic that waits for it says nothing. */
     __atomic_clear(&log_lock, __ATOMIC_RELEASE);
     terminal_paint_lock_reset();
-    /* Whatever the last program left set, undone: a panic printed in some
-       half-finished attribute is a panic that looks like part of it. */
     panic_sgr(NULL, 0);
     kprintf("PANIC: %s\n", msg);
-    /* Blue for the heading and nothing for the log under it. The log is what
-       has to be read, so it is left in the colour everything else is in. */
     static const unsigned heading[] = {34U};
     static const unsigned alarm[] = {1U, 31U};
     panic_sgr(heading, 1U);

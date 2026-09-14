@@ -1,19 +1,7 @@
-/*
- * xHCI: the USB host controller every machine built this decade has, and the
- * only way to reach a keyboard on one that has no PS/2 port left.
- *
- * This is the bring-up half -- find the controller, map its registers, reset
- * it and start it. What runs on top of it (rings, devices, HID) is layered
- * above and depends on nothing here beyond the register accessors.
- *
- * Two things about xHCI shape the code. Its registers live in four separate
- * blocks whose offsets are read out of the first one, so nothing can be a
- * fixed address; and the controller answers "not ready" for a while after a
- * reset, which is a state to wait out rather than an error.
- */
 #include <stdint.h>
 #include <stddef.h>
 
+#include "../../include/cpu.h"
 #include "../../include/pci.h"
 #include "../../include/pmm.h"
 #include "../../include/vmm.h"
@@ -26,9 +14,6 @@
 
 extern void kprintf(const char *fmt, ...);
 
-/* PCI class 0x0C.03.30 is "serial bus / USB / xHCI". The programming
-   interface matters: the same class and subclass also cover UHCI, OHCI and
-   EHCI, which share nothing with this. */
 #define PCI_CLASS_SERIAL_BUS 0x0CU
 #define PCI_SUBCLASS_USB 0x03U
 #define PCI_PROG_IF_XHCI 0x30U
@@ -39,10 +24,6 @@ extern void kprintf(const char *fmt, ...);
 #define PCI_BAR_ADDRESS_MASK 0xFFFFFFF0U
 #define PCI_BAR0_OFFSET 0x10U
 
-/* Capability registers, at the start of the mapping. */
-/* CAPLENGTH is a byte and HCIVERSION the halfword above it, so both come out
-   of one aligned dword: a 32-bit read at 0x02 would straddle into HCSPARAMS1
-   and hand back a plausible-looking version that is really a slot count. */
 #define XHCI_CAPLENGTH 0x00U
 #define XHCI_VERSION_SHIFT 16U
 #define XHCI_HCSPARAMS1 0x04U
@@ -62,7 +43,6 @@ extern void kprintf(const char *fmt, ...);
 #define HCSPARAMS2_SCRATCHPAD_LOW_SHIFT 27U
 #define HCSPARAMS2_SCRATCHPAD_LOW_MASK 0x1FU
 
-/* Operational registers, at CAPLENGTH from the base. */
 #define XHCI_USBCMD 0x00U
 #define XHCI_USBSTS 0x04U
 #define XHCI_PAGESIZE 0x08U
@@ -70,7 +50,6 @@ extern void kprintf(const char *fmt, ...);
 #define XHCI_DCBAAP 0x30U
 #define XHCI_CONFIG 0x38U
 
-/* Interrupter 0, the only one this driver uses, at RTSOFF + 0x20. */
 #define XHCI_INTERRUPTER0 0x20U
 #define XHCI_IMAN 0x00U
 #define XHCI_IMOD 0x04U
@@ -79,13 +58,8 @@ extern void kprintf(const char *fmt, ...);
 #define XHCI_ERDP 0x18U
 
 #define CRCR_RING_CYCLE_STATE (1ULL << 0)
-/* Written back with the dequeue pointer to say the handler is done. */
 #define ERDP_EVENT_HANDLER_BUSY (1ULL << 3)
 
-/* A TRB is four dwords. The type lives in the top of the last one, and the
-   bottom bit of that dword is the cycle bit -- the only thing that
-   distinguishes an entry the controller has written from one left over from
-   the ring's previous lap. */
 #define TRB_BYTES 16U
 #define TRB_TYPE_SHIFT 10U
 #define TRB_TYPE_MASK 0x3FU
@@ -108,8 +82,6 @@ extern void kprintf(const char *fmt, ...);
 #define TRB_COMPLETION_MASK 0xFFU
 #define TRB_COMPLETION_SUCCESS 1U
 
-/* One page each: 256 TRBs is far more than this driver ever has outstanding,
-   and a page is the smallest thing the physical allocator hands out anyway. */
 #define RING_BYTES 4096U
 #define RING_TRB_COUNT (RING_BYTES / TRB_BYTES)
 #define EVENT_RING_SEGMENTS 1U
@@ -118,8 +90,6 @@ extern void kprintf(const char *fmt, ...);
 #define COMMAND_TIMEOUT_NS (1000ULL * 1000ULL * 1000ULL)
 #define RUN_TIMEOUT_NS (1000ULL * 1000ULL * 1000ULL)
 #define PORT_RESET_TIMEOUT_NS (500ULL * 1000ULL * 1000ULL)
-/* The specification's recovery time after a port reset, before the device is
-   required to answer anything. */
 #define PORT_SETTLE_NS (20ULL * 1000ULL * 1000ULL)
 
 #define XHCI_PORTSC_BASE 0x400U
@@ -130,9 +100,6 @@ extern void kprintf(const char *fmt, ...);
 #define PORTSC_POWER (1U << 9)
 #define PORTSC_SPEED_SHIFT 10U
 #define PORTSC_SPEED_MASK 0xFU
-/* Every status-change bit, and the enable bit, are write-one-to-clear. A plain
-   read-modify-write of this register therefore disables the port and throws
-   away the changes it was about to report; both have to be masked out first. */
 #define PORTSC_CHANGE_MASK 0x00FE0000U
 #define PORTSC_PRESERVE_MASK (~(PORTSC_CHANGE_MASK | PORTSC_ENABLED))
 
@@ -141,13 +108,10 @@ extern void kprintf(const char *fmt, ...);
 #define USB_SPEED_HIGH 3U
 #define USB_SPEED_SUPER 4U
 
-/* What a control endpoint may carry before the device has been asked. Low and
-   full speed must start at eight; the real figure comes from the descriptor. */
 #define EP0_PACKET_LOW_FULL 8U
 #define EP0_PACKET_HIGH 64U
 #define EP0_PACKET_SUPER 512U
 
-/* Input context: a control context, then the slot, then the endpoints. */
 #define INPUT_CONTROL_INDEX 0U
 #define SLOT_CONTEXT_INDEX 1U
 #define EP0_CONTEXT_INDEX 2U
@@ -169,8 +133,6 @@ extern void kprintf(const char *fmt, ...);
 
 #define MAX_DEVICES 8U
 
-/* Control transfer stages. The setup packet travels inside the TRB rather
-   than through a buffer, which is what the immediate-data bit says. */
 #define TRB_IMMEDIATE_DATA (1U << 6)
 #define TRB_INTERRUPT_ON_COMPLETION (1U << 5)
 #define TRB_CHAIN (1U << 4)
@@ -181,8 +143,6 @@ extern void kprintf(const char *fmt, ...);
 #define TRB_TRANSFER_TYPE_IN 3U
 #define SETUP_PACKET_BYTES 8U
 
-/* Endpoint 0 is device context index 1: the index counts endpoints in the
-   order the contexts appear, and the slot context occupies index 0. */
 #define EP0_DOORBELL_TARGET 1U
 #define DOORBELL_STRIDE 4U
 
@@ -192,7 +152,6 @@ extern void kprintf(const char *fmt, ...);
 #define USB_DESCRIPTOR_DEVICE 1U
 #define USB_DESCRIPTOR_TYPE_SHIFT 8U
 #define USB_DEVICE_DESCRIPTOR_BYTES 18U
-/* Offsets into the device descriptor that this driver reads. */
 #define DEVICE_DESCRIPTOR_MAX_PACKET 7U
 
 #define TRANSFER_TIMEOUT_NS (1000ULL * 1000ULL * 1000ULL)
@@ -214,10 +173,6 @@ extern void kprintf(const char *fmt, ...);
 #define ENDPOINT_MAX_PACKET_OFFSET 4U
 #define ENDPOINT_INTERVAL_OFFSET 6U
 
-/* The HID boot subclass is the reason this driver can read a keyboard without
-   understanding report descriptors at all: a device that advertises it must
-   also answer in a fixed eight-byte format that predates the whole HID
-   report machinery, and every keyboard and mouse supports it. */
 #define USB_CLASS_HID 3U
 #define HID_SUBCLASS_BOOT 1U
 #define HID_PROTOCOL_KEYBOARD 1U
@@ -229,8 +184,6 @@ extern void kprintf(const char *fmt, ...);
 #define ENDPOINT_TYPE_INTERRUPT 3U
 #define ENDPOINT_TYPE_BULK 2U
 
-/* Mass storage, bulk-only transport, SCSI command set: the combination every
-   USB stick reports and the only one this driver answers. */
 #define USB_CLASS_MASS_STORAGE 8U
 #define MSC_SUBCLASS_SCSI 6U
 #define MSC_PROTOCOL_BULK_ONLY 0x50U
@@ -243,12 +196,8 @@ extern void kprintf(const char *fmt, ...);
 #define EP_MAX_INTERVAL 15U
 #define EP_AVERAGE_TRB_SHIFT 0U
 #define EP_MAX_ESIT_SHIFT 16U
-/* Full and low speed state the interval in frames; the field here counts in
-   125-microsecond microframes, of which a frame holds eight. */
 #define MICROFRAMES_PER_FRAME 8U
 
-/* HID class requests. SET_PROTOCOL(0) is what puts a device into the fixed
-   report format this driver can read without a report-descriptor parser. */
 #define HID_REQUEST_TYPE_OUT 0x21U
 #define HID_REQUEST_SET_PROTOCOL 0x0BU
 #define HID_PROTOCOL_BOOT 0U
@@ -257,8 +206,6 @@ extern void kprintf(const char *fmt, ...);
 #define KEYBOARD_REPORT_KEYS 6U
 #define KEYBOARD_REPORT_KEYS_OFFSET 2U
 #define KEYBOARD_MODIFIER_COUNT 8U
-/* Usages below this are error conditions the device reports in every slot at
-   once (rollover, POST fail); they are not keys. */
 #define HID_USAGE_FIRST_KEY 4U
 
 #define MOUSE_BUTTON_MASK 0x07U
@@ -269,15 +216,10 @@ extern void kprintf(const char *fmt, ...);
 #define USBSTS_HOST_ERROR (1U << 2)
 #define USBSTS_NOT_READY (1U << 11)
 
-/* The specification's own limits: 20 ms for a reset to complete, and the
-   controller may hold "not ready" for a while after that. */
 #define XHCI_RESET_TIMEOUT_NS (1000ULL * 1000ULL * 1000ULL)
 #define XHCI_HALT_TIMEOUT_NS (100ULL * 1000ULL * 1000ULL)
 
 #define MMIO_PAGE_BYTES 4096ULL
-/* Enough for the capability, operational, runtime and doorbell blocks of any
-   controller: the doorbell array is one dword per slot, the runtime block one
-   interrupter set per interrupter, and both are bounded by the slot count. */
 #define XHCI_REGISTER_BYTES 0x10000ULL
 
 struct trb {
@@ -287,10 +229,6 @@ struct trb {
     uint32_t control;
 };
 
-/* A producer ring the driver writes and the controller reads. The cycle bit
-   is what says "this entry is mine now"; it flips every lap, so the ring never
-   needs clearing and the controller never mistakes a stale entry for a new
-   one. The last slot is always a Link back to the start. */
 struct producer_ring {
     struct trb *entries;
     uint64_t physical;
@@ -298,8 +236,6 @@ struct producer_ring {
     uint32_t cycle;
 };
 
-/* The ring the controller writes and the driver reads. No link entry: it
-   wraps, and the driver flips its own idea of the cycle bit when it does. */
 struct event_ring {
     struct trb *entries;
     uint64_t physical;
@@ -307,8 +243,6 @@ struct event_ring {
     uint32_t cycle;
 };
 
-/* One attached device: its slot, the contexts the controller reads, and the
-   ring its control endpoint runs on. */
 struct xhci_device {
     int used;
     uint32_t slot;
@@ -320,17 +254,13 @@ struct xhci_device {
     uint64_t output_physical;
     struct producer_ring control_ring;
 
-    /* What the configuration descriptor said, if this turned out to be a HID
-       device answering the boot protocol. */
-    uint8_t hid_protocol;      /* keyboard, mouse, or zero for neither */
+    uint8_t hid_protocol;
     uint8_t interface_number;
     uint8_t configuration_value;
     uint8_t endpoint_address;
     uint16_t endpoint_packet;
     uint8_t endpoint_interval;
 
-    /* Mass storage, if that is what this turned out to be: the two bulk
-       endpoints it moves everything through, each with its own ring. */
     int is_storage;
     uint8_t bulk_in_address;
     uint8_t bulk_out_address;
@@ -341,7 +271,6 @@ struct xhci_device {
     struct producer_ring bulk_in_ring;
     struct producer_ring bulk_out_ring;
 
-    /* The interrupt endpoint, once it is configured and running. */
     uint32_t endpoint_dci;
     struct producer_ring transfer_ring;
     uint8_t *report;
@@ -354,12 +283,9 @@ static struct xhci_controller controller;
 static struct xhci_device devices[MAX_DEVICES];
 static struct producer_ring command_ring;
 static struct event_ring event_ring;
-static uint64_t *device_contexts;      /* the DCBAA */
-static uint64_t interrupter;           /* runtime + XHCI_INTERRUPTER0 */
+static uint64_t *device_contexts;
+static uint64_t interrupter;
 
-/* One zeroed page of DMA memory, with its physical address. The physical
-   allocator only ever hands out memory inside the direct map, so a kernel
-   pointer to it is a subtraction away and no extra mapping is needed. */
 static void *dma_page(uint64_t *physical_out) {
     void *physical = pmm_alloc_page();
     if (!physical) return NULL;
@@ -382,8 +308,6 @@ uint32_t xhci_read32(uint64_t address) { return mmio_read32(address); }
 void xhci_write32(uint64_t address, uint32_t value) { mmio_write32(address, value); }
 
 uint64_t xhci_read64(uint64_t address) {
-    /* Two 32-bit halves rather than one 64-bit access: a controller behind a
-       32-bit bridge answers the wide read with garbage in the high word. */
     uint64_t low = mmio_read32(address);
     uint64_t high = mmio_read32(address + 4U);
     return low | (high << 32);
@@ -398,7 +322,6 @@ struct xhci_controller *xhci_get(void) {
     return controller.present ? &controller : NULL;
 }
 
-/* Map the register block uncached. Returns the virtual base, or 0. */
 static uint64_t map_registers(uint64_t physical) {
     if (physical & (MMIO_PAGE_BYTES - 1)) return 0;
     if (XHCI_REGISTER_BYTES > DEVICE_MMIO_VIRTUAL_BYTES) return 0;
@@ -412,19 +335,15 @@ static uint64_t map_registers(uint64_t physical) {
     return DEVICE_MMIO_VIRTUAL_BASE;
 }
 
-/* Spin until the masked bits reach `wanted`, or the deadline passes. */
 static int wait_for(uint64_t address, uint32_t mask, uint32_t wanted, uint64_t timeout_ns) {
     uint64_t deadline = time_uptime_ns() + timeout_ns;
     for (;;) {
         if ((mmio_read32(address) & mask) == wanted) return 0;
         if (time_uptime_ns() >= deadline) return -1;
-        __asm__ volatile("pause");
+        cpu_relax();
     }
 }
 
-/* Stop the controller and put it back to its power-on state. Whatever the
-   firmware left running -- and firmware does leave USB running, because it was
-   reading a keyboard a moment ago -- is not a state this driver knows. */
 static int reset_controller(void) {
     uint64_t operational = controller.operational;
 
@@ -440,8 +359,6 @@ static int reset_controller(void) {
 
     mmio_write32(operational + XHCI_USBCMD,
                  mmio_read32(operational + XHCI_USBCMD) | USBCMD_RESET);
-    /* The reset bit clears itself when the reset is done, and only then is the
-       rest of the register file worth reading. */
     if (wait_for(operational + XHCI_USBCMD, USBCMD_RESET, 0, XHCI_RESET_TIMEOUT_NS) != 0) {
         kprintf("XHCI: reset did not complete\n");
         return -1;
@@ -453,10 +370,6 @@ static int reset_controller(void) {
     return 0;
 }
 
-/* Build a command ring: empty, with its last entry pointing back at the
-   first. The Toggle Cycle bit on that link is what tells the controller to
-   invert its cycle state on the way round, which is how a ring with no end
-   marker still has laps. */
 static int build_command_ring(void) {
     command_ring.entries = dma_page(&command_ring.physical);
     if (!command_ring.entries) return -1;
@@ -474,8 +387,6 @@ static int build_command_ring(void) {
     return 0;
 }
 
-/* The event ring is described to the controller indirectly, through a table of
-   segments; this driver uses exactly one segment, so the table has one entry. */
 static int build_event_ring(void) {
     event_ring.entries = dma_page(&event_ring.physical);
     if (!event_ring.entries) return -1;
@@ -490,16 +401,12 @@ static int build_event_ring(void) {
     table[2] = RING_TRB_COUNT;
     table[3] = 0;
 
-    /* Size before base: the controller reads the table when the base is
-       written, and a table it thinks is zero-length is one it never reads. */
     xhci_write32(interrupter + XHCI_ERSTSZ, EVENT_RING_SEGMENTS);
     xhci_write64(interrupter + XHCI_ERDP, event_ring.physical | ERDP_EVENT_HANDLER_BUSY);
     xhci_write64(interrupter + XHCI_ERSTBA, table_physical);
     return 0;
 }
 
-/* Slot contexts live in an array the controller owns; entry zero is reserved
-   for the scratchpad table, which is memory the controller asks to borrow. */
 static int build_device_contexts(void) {
     uint64_t physical = 0;
     device_contexts = dma_page(&physical);
@@ -528,14 +435,11 @@ static int build_device_contexts(void) {
     return 0;
 }
 
-/* Put a TRB on the command ring and ring the controller's doorbell. */
 static void submit_command(uint32_t type, uint64_t parameter) {
     struct trb *entry = &command_ring.entries[command_ring.index];
     entry->parameter_low = (uint32_t)parameter;
     entry->parameter_high = (uint32_t)(parameter >> 32);
     entry->status = 0;
-    /* The cycle bit last: until it is written the controller must not see the
-       entry, and everything above has to be in memory before it does. */
     __asm__ volatile("" ::: "memory");
     entry->control = (type << TRB_TYPE_SHIFT) | command_ring.cycle;
 
@@ -551,7 +455,6 @@ static void submit_command(uint32_t type, uint64_t parameter) {
     xhci_write32(controller.doorbell, 0);
 }
 
-/* Take the next event the controller has posted, or nothing. */
 static int next_event(struct trb *out) {
     struct trb *entry = &event_ring.entries[event_ring.index];
     if ((entry->control & TRB_CYCLE) != event_ring.cycle) return 0;
@@ -568,9 +471,6 @@ static int next_event(struct trb *out) {
     return 1;
 }
 
-/* Wait for the completion of the command just submitted. Port status changes
-   arrive on the same ring and are simply stepped over here; enumeration reads
-   the ports directly rather than relying on having caught the event. */
 static int wait_for_command(uint32_t *completion_code) {
     uint64_t deadline = time_uptime_ns() + COMMAND_TIMEOUT_NS;
     for (;;) {
@@ -584,12 +484,10 @@ static int wait_for_command(uint32_t *completion_code) {
             if (type == TRB_TYPE_PORT_STATUS_CHANGE) continue;
         }
         if (time_uptime_ns() >= deadline) return -1;
-        __asm__ volatile("pause");
+        cpu_relax();
     }
 }
 
-/* The command completion event also carries the slot the controller assigned,
-   which is the only way to learn it. */
 static int run_command(uint32_t type, uint64_t parameter, uint32_t control_extra,
                        uint32_t *slot_out) {
     struct trb *entry = &command_ring.entries[command_ring.index];
@@ -621,7 +519,7 @@ static int run_command(uint32_t type, uint64_t parameter, uint32_t control_extra
             }
         }
         if (time_uptime_ns() >= deadline) return -1;
-        __asm__ volatile("pause");
+        cpu_relax();
     }
 }
 
@@ -629,9 +527,6 @@ static uint64_t port_register(uint32_t port) {
     return controller.operational + XHCI_PORTSC_BASE + (uint64_t)(port - 1) * XHCI_PORT_STRIDE;
 }
 
-/* Drive a port through reset and report the speed the controller then sees.
-   USB 3 ports enable themselves on connect; USB 2 ports need the reset, and
-   the keyboard is on one of those. */
 static int reset_port(uint32_t port, uint32_t *speed_out) {
     uint64_t address = port_register(port);
     uint32_t status = xhci_read32(address);
@@ -644,13 +539,12 @@ static int reset_port(uint32_t port, uint32_t *speed_out) {
             status = xhci_read32(address);
             if (status & PORTSC_ENABLED) break;
             if (time_uptime_ns() >= deadline) return -1;
-            __asm__ volatile("pause");
+            cpu_relax();
         }
         uint64_t settle = time_uptime_ns() + PORT_SETTLE_NS;
-        while (time_uptime_ns() < settle) __asm__ volatile("pause");
+        while (time_uptime_ns() < settle) cpu_relax();
     }
 
-    /* Acknowledge whatever changed, without disturbing the rest. */
     status = xhci_read32(address);
     xhci_write32(address, (status & PORTSC_PRESERVE_MASK) | (status & PORTSC_CHANGE_MASK));
 
@@ -670,9 +564,6 @@ static uint32_t *context_at(uint32_t *base, uint32_t index) {
     return base + (index * controller.context_bytes) / sizeof(uint32_t);
 }
 
-/* Describe the device to the controller and give it an address. The input
-   context says what to add -- the slot and its control endpoint -- and the
-   controller writes what it made of it into the output context. */
 static int address_device(struct xhci_device *device) {
     uint64_t input_physical = 0;
     device->input_context = dma_page(&input_physical);
@@ -712,8 +603,6 @@ static int address_device(struct xhci_device *device) {
                        device->slot << COMMAND_SLOT_SHIFT, NULL);
 }
 
-/* Put one TRB on a device's own ring. Same cycle-bit dance as the command
-   ring; the difference is which doorbell wakes it. */
 static void enqueue(struct producer_ring *ring, uint64_t parameter,
                     uint32_t status, uint32_t type, uint32_t control_extra) {
     struct trb *entry = &ring->entries[ring->index];
@@ -745,19 +634,14 @@ static int wait_for_transfer(void) {
             uint32_t type = (event.control >> TRB_TYPE_SHIFT) & TRB_TYPE_MASK;
             if (type == TRB_TYPE_TRANSFER_EVENT) {
                 uint32_t code = (event.status >> TRB_COMPLETION_SHIFT) & TRB_COMPLETION_MASK;
-                /* A short packet is how a device says "that is all I have",
-                   which for a descriptor read is success, not failure. */
                 return (code == TRB_COMPLETION_SUCCESS || code == 13U) ? 0 : -(int)code;
             }
         }
         if (time_uptime_ns() >= deadline) return -1;
-        __asm__ volatile("pause");
+        cpu_relax();
     }
 }
 
-/* A control transfer: setup, an optional data stage, then a status stage the
-   other way round. The interrupt-on-completion bit goes on the last stage,
-   because that is the one whose event says the whole thing is done. */
 static int control_transfer(struct xhci_device *device, uint8_t request_type,
                             uint8_t request, uint16_t value, uint16_t index,
                             void *buffer, uint16_t length) {
@@ -780,7 +664,6 @@ static int control_transfer(struct xhci_device *device, uint8_t request_type,
                 (request_type & USB_DIRECTION_IN) ? TRB_DIRECTION_IN : 0);
     }
 
-    /* The status stage runs opposite to the data, and with no data it is IN. */
     uint32_t status_direction = (length && (request_type & USB_DIRECTION_IN)) ? 0 : TRB_DIRECTION_IN;
     enqueue(&device->control_ring, 0, 0, TRB_TYPE_STATUS_STAGE,
             status_direction | TRB_INTERRUPT_ON_COMPLETION);
@@ -789,23 +672,12 @@ static int control_transfer(struct xhci_device *device, uint8_t request_type,
     return wait_for_transfer();
 }
 
-/* The first thing anyone asks a USB device. Its answer includes the real
-   maximum packet size for endpoint zero, which the addressing step could only
-   guess at from the port speed. */
 static int read_device_descriptor(struct xhci_device *device, uint8_t *out) {
     return control_transfer(device, USB_DIRECTION_IN, USB_REQUEST_GET_DESCRIPTOR,
                             USB_DESCRIPTOR_DEVICE << USB_DESCRIPTOR_TYPE_SHIFT, 0,
                             out, USB_DEVICE_DESCRIPTOR_BYTES);
 }
 
-/* Read the configuration descriptor and pick out a boot-protocol HID
- * interface and the interrupt endpoint it reports on.
- *
- * The descriptor is a flat run of variable-length records, so it is walked by
- * length rather than indexed. Only the endpoint that follows the interface we
- * accepted is taken, which is what keeps a composite device's other interfaces
- * from being mistaken for the keyboard's.
- */
 static int find_hid_interface(struct xhci_device *device, uint8_t *buffer) {
     if (control_transfer(device, USB_DIRECTION_IN, USB_REQUEST_GET_DESCRIPTOR,
                          USB_DESCRIPTOR_CONFIGURATION << USB_DESCRIPTOR_TYPE_SHIFT, 0,
@@ -858,10 +730,6 @@ static int find_hid_interface(struct xhci_device *device, uint8_t *buffer) {
     return -1;
 }
 
-/* HID usage to keycode. Only the boot-protocol range is here, because that is
-   the only range a boot-protocol device is allowed to send. The layout is the
-   usage table's own order -- letters, digits, then the rest -- which is why
-   this is a switch over ranges rather than a flat array. */
 static uint16_t keycode_for_usage(uint8_t usage) {
     static const uint16_t letters[] = {
         TUNIX_KEY_A, TUNIX_KEY_B, TUNIX_KEY_C, TUNIX_KEY_D, TUNIX_KEY_E,
@@ -920,9 +788,6 @@ static uint16_t keycode_for_modifier(unsigned bit) {
     return modifiers[bit];
 }
 
-/* A boot keyboard reports the set of keys currently held, not the change. The
-   difference against the previous report is where presses and releases come
-   from, in both directions. */
 static void handle_keyboard_report(struct xhci_device *device) {
     const uint8_t *now = device->report;
     const uint8_t *before = device->previous;
@@ -954,25 +819,18 @@ static void handle_keyboard_report(struct xhci_device *device) {
     memcpy(device->previous, now, KEYBOARD_REPORT_BYTES);
 }
 
-/* A boot mouse reports movement since the last report, so it needs no memory
-   of what came before. */
 static void handle_mouse_report(struct xhci_device *device) {
     const uint8_t *report = device->report;
     input_external_mouse((int)(int8_t)report[1], (int)(int8_t)report[2],
                          (int)(int8_t)report[3], report[0] & MOUSE_BUTTON_MASK);
 }
 
-/* Hand the endpoint a buffer and tell it to fill it. Every completed report
-   costs one of these, which is why it is also called from the poll. */
 static void arm_transfer(struct xhci_device *device) {
     enqueue(&device->transfer_ring, device->report_physical, device->endpoint_packet,
             TRB_TYPE_NORMAL, TRB_INTERRUPT_ON_COMPLETION);
     ring_doorbell(device->slot, device->endpoint_dci);
 }
 
-/* Describe the interrupt endpoint to the controller and turn it on. The input
-   context adds one endpoint and restates the slot, because the slot's count of
-   how many endpoint contexts are valid has to grow with it. */
 static int configure_endpoint(struct xhci_device *device) {
     uint8_t number = device->endpoint_address & ENDPOINT_NUMBER_MASK;
     device->endpoint_dci = (uint32_t)number * 2U + 1U;
@@ -987,8 +845,6 @@ static int configure_endpoint(struct xhci_device *device) {
     link->parameter_high = (uint32_t)(device->transfer_ring.physical >> 32);
     link->control = (TRB_TYPE_LINK << TRB_TYPE_SHIFT) | TRB_TOGGLE_CYCLE;
 
-    /* The interval field is a power of two in microframes. High speed already
-       states it that way; full and low speed count whole frames instead. */
     uint32_t interval = device->endpoint_interval ? device->endpoint_interval - 1U : 0U;
     if (device->speed == USB_SPEED_LOW || device->speed == USB_SPEED_FULL) {
         uint32_t microframes = (uint32_t)device->endpoint_interval * MICROFRAMES_PER_FRAME;
@@ -1020,11 +876,6 @@ static int configure_endpoint(struct xhci_device *device) {
                        device->slot << COMMAND_SLOT_SHIFT, NULL);
 }
 
-/*
- * Look for a bulk-only mass-storage interface and both of its endpoints. The
- * walk is the same shape as the HID one; what differs is that two endpoints
- * are wanted rather than one, and a device is only usable when both arrive.
- */
 static int find_storage_interface(struct xhci_device *device, uint8_t *buffer) {
     if (control_transfer(device, USB_DIRECTION_IN, USB_REQUEST_GET_DESCRIPTOR,
                          USB_DESCRIPTOR_CONFIGURATION << USB_DESCRIPTOR_TYPE_SHIFT, 0,
@@ -1071,7 +922,6 @@ static int find_storage_interface(struct xhci_device *device, uint8_t *buffer) {
     return (device->bulk_in_address && device->bulk_out_address) ? 0 : -1;
 }
 
-/* Give a ring its page and its trailing link back to the start. */
 static int prepare_ring(struct producer_ring *ring) {
     ring->entries = dma_page(&ring->physical);
     if (!ring->entries) return -1;
@@ -1084,12 +934,6 @@ static int prepare_ring(struct producer_ring *ring) {
     return 0;
 }
 
-/*
- * Both bulk endpoints in one CONFIGURE_ENDPOINT. They have to be added
- * together: the slot's context-entries field states the highest endpoint that
- * is valid, so configuring them one at a time would have the second command
- * describe a slot the first had already sized differently.
- */
 static int configure_bulk_endpoints(struct xhci_device *device) {
     device->bulk_in_dci = (uint32_t)(device->bulk_in_address & ENDPOINT_NUMBER_MASK) * 2U + 1U;
     device->bulk_out_dci = (uint32_t)(device->bulk_out_address & ENDPOINT_NUMBER_MASK) * 2U;
@@ -1136,13 +980,10 @@ static int start_storage(struct xhci_device *device) {
     return 0;
 }
 
-/* Everything between "a HID interface was found" and "reports are arriving". */
 static int start_hid(struct xhci_device *device) {
     if (control_transfer(device, 0, USB_REQUEST_SET_CONFIGURATION,
                          device->configuration_value, 0, NULL, 0) != 0) return -1;
     if (configure_endpoint(device) != 0) return -1;
-    /* Not fatal if refused: a device that only speaks the boot protocol has
-       nothing to switch, and answers the request with a stall. */
     (void)control_transfer(device, HID_REQUEST_TYPE_OUT, HID_REQUEST_SET_PROTOCOL,
                            HID_PROTOCOL_BOOT, device->interface_number, NULL, 0);
     device->running = 1;
@@ -1157,11 +998,6 @@ static struct xhci_device *device_for_slot(uint32_t slot) {
     return NULL;
 }
 
-/* What was found on the bus. Asked once, when the device nodes are created:
-   a machine whose keyboard and pointer are on USB has no PS/2 pair to answer
-   for them, and an evdev node that is never created is a desktop with no
-   mouse. `running` rather than `used`, so a device that enumerated but never
-   started reporting does not count. */
 static int hid_device_present(uint8_t protocol) {
     if (!controller.present) return 0;
     for (unsigned index = 0; index < MAX_DEVICES; index++) {
@@ -1175,8 +1011,6 @@ static int hid_device_present(uint8_t protocol) {
 int xhci_keyboard_present(void) { return hid_device_present(HID_PROTOCOL_KEYBOARD); }
 int xhci_pointer_present(void) { return hid_device_present(HID_PROTOCOL_MOUSE); }
 
-/* Called from the input layer's poll: take whatever the endpoints have
-   finished, turn it into key and pointer events, and ask for more. */
 void xhci_poll(void) {
     if (!controller.present) return;
 
@@ -1198,7 +1032,6 @@ void xhci_poll(void) {
     }
 }
 
-/* Walk the root hub and bring up whatever is plugged in. */
 static void enumerate_ports(void) {
     unsigned found = 0;
     for (uint32_t port = 1; port <= controller.max_ports && found < MAX_DEVICES; port++) {
@@ -1240,8 +1073,6 @@ static void enumerate_ports(void) {
         }
 
         if (find_hid_interface(device, descriptor) != 0) {
-            /* Not a keyboard or a mouse; the other thing this driver knows how
-               to be is a disk. */
             if (find_storage_interface(device, descriptor) == 0) {
                 if (start_storage(device) != 0)
                     kprintf("XHCI: port %u storage did not start\n", (unsigned)port);
@@ -1269,8 +1100,6 @@ static void enumerate_ports(void) {
     if (!found) kprintf("XHCI: no devices attached\n");
 }
 
-/* Start the controller and prove the rings work, which a No-Op command does
-   exactly: it asks the controller for nothing except an answer. */
 static int start_controller(void) {
     xhci_write32(controller.operational + XHCI_USBCMD,
                  xhci_read32(controller.operational + XHCI_USBCMD) | USBCMD_RUN);
@@ -1299,8 +1128,6 @@ static int xhci_host_bulk_transfer(int index, int in, uint64_t physical,
     return xhci_bulk_transfer(index, in, physical, length);
 }
 
-/* The seam described in usb.h. The two wrappers exist because the functions
-   they call are the driver's public ones and are defined further down. */
 static const struct usb_host xhci_host = {
     .name = "xhci",
     .storage_count = xhci_host_storage_count,
@@ -1308,9 +1135,6 @@ static const struct usb_host xhci_host = {
 };
 
 int xhci_init(void) {
-    /* Every USB controller on the machine, not the first one: a machine with
-       xHCI usually has EHCI beside it, and which of them PCI enumerates first
-       is not something to depend on. */
     struct pci_device device;
     unsigned nth = 0;
     for (;; nth++) {
@@ -1319,8 +1143,6 @@ int xhci_init(void) {
         if (device.prog_if == PCI_PROG_IF_XHCI) break;
     }
 
-    /* BAR0 is memory-mapped and, on every real xHCI, 64-bit -- which means it
-       is a pair of BARs and the high half lives in BAR1. */
     if (device.bar[0] & PCI_BAR_IO) return -1;
     uint64_t physical = device.bar[0] & PCI_BAR_ADDRESS_MASK;
     if ((device.bar[0] & PCI_BAR_TYPE_MASK) == PCI_BAR_TYPE_64BIT)
@@ -1333,8 +1155,6 @@ int xhci_init(void) {
         return -1;
     }
 
-    /* Bus mastering off means every ring this driver builds is invisible to
-       the controller, and nothing fails loudly -- it just never answers. */
     pci_enable_bus_mastering(&device);
 
     uint32_t length_and_version = mmio_read32(controller.base + XHCI_CAPLENGTH);
@@ -1375,8 +1195,6 @@ int xhci_init(void) {
     return 0;
 }
 
-/* --- what the mass-storage driver above needs ---------------------------- */
-
 static struct xhci_device *storage_device(int index) {
     int seen = 0;
     for (unsigned at = 0; at < MAX_DEVICES; at++) {
@@ -1394,11 +1212,6 @@ int xhci_storage_count(void) {
     return count;
 }
 
-/*
- * One bulk transfer, submitted and waited for. Everything the transport above
- * does -- command, data, status -- is one of these, and each is a single TRB
- * because the buffers handed down are already physically contiguous.
- */
 int xhci_bulk_transfer(int index, int in, uint64_t physical, uint32_t length) {
     struct xhci_device *device = storage_device(index);
     if (!device) return -1;

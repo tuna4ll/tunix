@@ -1,9 +1,7 @@
-/* A split virtqueue: three arrays the driver and the device share -- the
-   descriptors, the ring the driver posts into, and the ring the device
-   answers in. */
 #include <stddef.h>
 #include <stdint.h>
 
+#include "../../include/cpu.h"
 #include "../../include/dma.h"
 #include "../../include/kstring.h"
 #include "../../include/time.h"
@@ -14,9 +12,6 @@ extern void kprintf(const char *fmt, ...);
 
 #define SUBMIT_TIMEOUT_NS (2ULL * 1000ULL * 1000ULL * 1000ULL)
 
-/* The spec asks for 16, 2 and 4 byte alignment for the three rings. Sixteen
-   throughout costs a handful of bytes and makes the arithmetic below one rule
-   instead of three. */
 #define RING_ALIGNMENT 16ULL
 
 static uint64_t aligned(uint64_t value) {
@@ -28,9 +23,6 @@ int virtio_ring_alloc(struct virtio_queue *queue, uint16_t size) {
 
     memset(queue, 0, sizeof(*queue));
 
-    /* Both rings carry one more 16-bit field than their arrays: the event
-       index the other side publishes. Nothing here uses those, but the device
-       reads and writes them regardless, so the space has to be there. */
     uint64_t descriptor_bytes = aligned((uint64_t)size * sizeof(struct virtq_desc));
     uint64_t available_bytes = aligned(6ULL + 2ULL * size);
     uint64_t used_bytes = aligned(6ULL + 8ULL * size);
@@ -47,7 +39,6 @@ int virtio_ring_alloc(struct virtio_queue *queue, uint16_t size) {
     queue->used = (struct virtq_used *)(memory + descriptor_bytes + available_bytes);
     queue->size = size;
 
-    /* Every descriptor free, in one list. */
     for (uint16_t index = 0; index < size; index++)
         queue->descriptors[index].next = (uint16_t)(index + 1U);
     queue->free_head = 0;
@@ -55,7 +46,6 @@ int virtio_ring_alloc(struct virtio_queue *queue, uint16_t size) {
     return 0;
 }
 
-/* Take `count` descriptors off the free list and return the head, or -1. */
 static int take_descriptors(struct virtio_queue *queue, unsigned count) {
     if (queue->free_count < count) return -1;
     int head = queue->free_head;
@@ -69,7 +59,6 @@ static int take_descriptors(struct virtio_queue *queue, unsigned count) {
     return head;
 }
 
-/* Put a chain back, following it to its end. */
 static void give_descriptors_back(struct virtio_queue *queue, uint16_t head) {
     uint16_t index = head;
     for (unsigned guard = 0; guard < queue->size; guard++) {
@@ -77,8 +66,6 @@ static void give_descriptors_back(struct virtio_queue *queue, uint16_t head) {
         if (!(queue->descriptors[index].flags & VIRTQ_DESC_F_NEXT)) break;
         index = queue->descriptors[index].next;
     }
-    /* The chain's own links are already right; only its tail has to point at
-       what used to be free. */
     queue->descriptors[index].next = queue->free_head;
     queue->free_head = head;
 }
@@ -102,9 +89,6 @@ int virtio_queue_post(struct virtio_queue *queue, const struct virtio_buffer *bu
         index = descriptor->next;
     }
 
-    /* Silence first, watch second: nothing here waits for an interrupt, and
-       one raised for a completion the driver will notice anyway is a message,
-       a vector and a trip through the dispatcher spent saying so. */
     queue->available->flags = queue->interrupt_driven ? 0 : VIRTQ_AVAIL_F_NO_INTERRUPT;
     queue->available->ring[queue->available->index % queue->size] = (uint16_t)head;
     __sync_synchronize();
@@ -163,7 +147,7 @@ int virtio_queue_drain(struct virtio_queue *queue) {
                     (unsigned)virtio_queue_outstanding(queue));
             return -1;
         }
-        __asm__ volatile("pause");
+        cpu_relax();
     }
     return 0;
 }
@@ -174,13 +158,9 @@ void virtio_ring_free(struct virtio_queue *queue) {
     memset(queue, 0, sizeof(*queue));
 }
 
-/* Post one request and wait for the device to finish everything outstanding,
-   which is what a caller reading a response needs: this queue is answered in
-   order, so waiting for the last thing posted waits for all of them. */
 int virtio_queue_submit(struct virtio_queue *queue, const struct virtio_buffer *buffers,
                         unsigned count, unsigned write_from) {
     if (virtio_queue_post(queue, buffers, count, write_from) != 0) {
-        /* Out of descriptors: everything in flight has to come back first. */
         if (virtio_queue_drain(queue) != 0) return -1;
         if (virtio_queue_post(queue, buffers, count, write_from) != 0) return -1;
     }

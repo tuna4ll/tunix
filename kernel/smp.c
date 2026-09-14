@@ -4,6 +4,7 @@
 #include "include/acpi.h"
 #include "include/boot.h"
 #include "include/apic.h"
+#include "include/cpu.h"
 #include "include/gdt.h"
 #include "include/idt.h"
 #include "include/klock.h"
@@ -86,14 +87,14 @@ void smp_flush_address_space(uint64_t cr3) {
                 __atomic_store_n(&cpu->flush_pending, 0, __ATOMIC_RELEASE);
                 break;
             }
-            __asm__ volatile("pause");
+            cpu_relax();
         }
     }
 }
 
 static void wait_ns(uint64_t nanoseconds) {
     uint64_t deadline = time_uptime_ns() + nanoseconds;
-    while (time_uptime_ns() < deadline) __asm__ volatile("pause");
+    while (time_uptime_ns() < deadline) cpu_relax();
 }
 
 static void write_parameter(unsigned offset, uint64_t value) {
@@ -154,7 +155,7 @@ static int start_processor(unsigned index, uint32_t apic_id) {
     apic_send_startup(apic_id, TRAMPOLINE_PAGE);
 
     uint64_t deadline = time_uptime_ns() + STARTUP_TIMEOUT_MS * 1000000ULL;
-    while (!cpu->online && time_uptime_ns() < deadline) __asm__ volatile("pause");
+    while (!cpu->online && time_uptime_ns() < deadline) cpu_relax();
     if (!cpu->online) return -1;
     time_check_processor(index, before, time_uptime_ns());
     return 0;

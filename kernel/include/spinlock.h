@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+#include "cpu.h"
+
 typedef struct {
     volatile uint32_t lock;
 } spinlock_t;
@@ -13,7 +15,7 @@ static inline void spinlock_init(spinlock_t* sl) {
 
 static inline void spinlock_acquire(spinlock_t* sl) {
     while (__sync_lock_test_and_set(&sl->lock, 1)) {
-        __asm__ volatile("pause");
+        cpu_relax();
     }
 }
 

@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
+#include "include/cpu.h"
 #include "include/io.h"
 #include "include/kstring.h"
 #include "include/random.h"
@@ -189,7 +190,7 @@ static size_t collect_entropy(uint8_t *output, size_t capacity) {
             uint64_t value;
             for (unsigned retry = 0; retry < 32U; retry++) {
                 if (get_rdseed(&value)) { values[count++] = value; break; }
-                __asm__ volatile("pause");
+                cpu_relax();
             }
         }
     }
@@ -198,7 +199,7 @@ static size_t collect_entropy(uint8_t *output, size_t capacity) {
             uint64_t value;
             for (unsigned retry = 0; retry < 16U; retry++) {
                 if (get_rdrand(&value)) { values[count++] = value; break; }
-                __asm__ volatile("pause");
+                cpu_relax();
             }
         }
     }
@@ -210,7 +211,7 @@ static size_t collect_entropy(uint8_t *output, size_t capacity) {
             unsigned loops = 1U + (unsigned)(previous & 0x3FU);
             for (unsigned i = 0; i < loops; i++) {
                 accumulator ^= (uint64_t)inb(0x61U) << ((i & 7U) * 8U);
-                __asm__ volatile("pause");
+                cpu_relax();
             }
             uint64_t now = read_tsc();
             accumulator ^= rotr32((uint32_t)(now - previous), sample & 31U);

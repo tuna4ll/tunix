@@ -2,30 +2,10 @@
 #include <stdint.h>
 #include "../../include/ahci.h"
 #include "../../include/block.h"
+#include "../../include/cpu.h"
 #include "../../include/kstring.h"
 #include "../../include/pci.h"
 #include "../../include/vmm.h"
-
-/*
- * AHCI, enough of it to be a disk.
- *
- * The controller is a set of memory-mapped ports, each with a 32-slot command
- * list. A command is a header pointing at a command table; the table holds the
- * FIS the drive actually reads and a scatter/gather list of the memory to move.
- * Only slot 0 is ever used here -- commands are issued one at a time and waited
- * for, because nothing above this needs a queue yet and one outstanding command
- * removes every ordering question.
- *
- * The scatter/gather list is the part worth reading. A caller's buffer is a
- * kernel *virtual* range, and the kernel heap is not physically contiguous, so
- * the list is built one page at a time by translating each page separately.
- * Assuming contiguity is the bug this design exists to avoid: it works for
- * every small read and corrupts memory on the first large one.
- *
- * The translation has to answer before the page tables exist as well, because
- * this driver is probed early enough to read the boot manifest; see
- * buffer_physical().
- */
 
 extern void kprintf(const char *fmt, ...);
 
@@ -33,7 +13,6 @@ extern void kprintf(const char *fmt, ...);
 #define AHCI_SUBCLASS 0x06U
 #define AHCI_PROG_IF 0x01U
 
-/* Host registers. */
 #define HBA_CAP 0x00U
 #define HBA_GHC 0x04U
 #define HBA_PI 0x0CU
@@ -41,7 +20,6 @@ extern void kprintf(const char *fmt, ...);
 #define HBA_GHC_HR 0x00000001U
 #define HBA_CAP_S64A 0x80000000U
 
-/* Port registers, at 0x100 + port * 0x80. */
 #define PORT_BASE 0x100U
 #define PORT_STRIDE 0x80U
 #define PORT_CLB 0x00U
@@ -76,21 +54,11 @@ extern void kprintf(const char *fmt, ...);
 #define ATA_FLUSH_CACHE_EXT 0xEAU
 #define ATA_IDENTIFY 0xECU
 
-/* 32 entries, and a transfer capped one page below what they could describe.
-   The caller's buffer is rarely page aligned -- the heap hands out whatever
-   fits -- and a range that starts part-way into a page needs one entry more
-   than its length suggests. Sizing the cap to the aligned case made every
-   large write from the heap fail the table and return an error the seeding
-   path did not report, which is how a freshly seeded root came out with files
-   that were there but empty. */
 #define AHCI_PRDT_ENTRIES 32U
 #define AHCI_MAX_SECTORS ((AHCI_PRDT_ENTRIES - 1U) * 4096U / BLOCK_SECTOR_SIZE)
 #define AHCI_MAX_PORTS 8U
 #define AHCI_WAIT_SPINS 40000000U
 
-/* Offsets inside the one page each port gets. The alignment each structure
-   needs is what decides them: 1 KiB for the command list, 256 bytes for the
-   received-FIS area, 128 bytes for the command table. */
 #define PORT_PAGE_CL 0x000U
 #define PORT_PAGE_FIS 0x400U
 #define PORT_PAGE_CT 0x500U
@@ -108,7 +76,7 @@ struct ahci_prdt_entry {
     uint32_t address_low;
     uint32_t address_high;
     uint32_t reserved;
-    uint32_t count;      /* byte count - 1, bit 31 asks for an interrupt */
+    uint32_t count;
 } __attribute__((packed));
 
 struct ahci_command_table {
@@ -130,34 +98,24 @@ struct ahci_fis_h2d {
 } __attribute__((packed));
 
 struct ahci_port {
-    uint64_t registers;          /* virtual address of this port's block */
+    uint64_t registers;
     uint64_t page_physical;
     uint8_t *page;
     uint64_t sectors;
     char name[16];
 };
 
-static uint64_t hba_base;         /* how the window is reached now */
-static uint64_t hba_physical;     /* where PCI said it is */
+static uint64_t hba_base;
+static uint64_t hba_physical;
 static struct ahci_port ports[AHCI_MAX_PORTS];
 static unsigned port_count;
 
-/*
- * The command list, the received-FIS area and the command table for each port,
- * as a static buffer rather than a page from the allocator: it has to stay put
- * for the life of the machine and is sized once. The alignment is the command
- * list's -- a kilobyte -- and a page satisfies it and every other structure's.
- */
 static uint8_t port_dma[AHCI_MAX_PORTS][4096] __attribute__((aligned(4096)));
 
-/* The physical address of one of the static pages above. */
 static uint64_t static_physical(const void *address) {
     return vmm_dma_physical(address, 4096);
 }
 
-/* And of one page of a buffer the block layer handed down, which may be
-   anywhere -- including a heap allocation whose pages are not consecutive, so
-   this is asked once per page rather than once per request. */
 static uint64_t buffer_physical(uint64_t address) {
     uint64_t cr3 = vmm_kernel_cr3();
     uint64_t physical = 0;
@@ -173,9 +131,7 @@ static void write32(uint64_t address, uint32_t value) {
     *(volatile uint32_t *)address = value;
 }
 
-static void pause_cpu(void) { __asm__ volatile("pause"); }
-
-/* --- port start/stop ----------------------------------------------------- */
+static void pause_cpu(void) { cpu_relax(); }
 
 static int stop_port(struct ahci_port *port) {
     uint32_t command = read32(port->registers + PORT_CMD);
@@ -197,13 +153,6 @@ static void start_port(struct ahci_port *port) {
     write32(port->registers + PORT_CMD, command | PORT_CMD_FRE | PORT_CMD_ST);
 }
 
-/* --- issuing one command ------------------------------------------------- */
-
-/*
- * Fill the scatter/gather list from a kernel virtual buffer, one page at a
- * time. Returns the number of entries used, or -1 if the buffer needs more
- * than the table holds or a page has no translation.
- */
 static int build_prdt(struct ahci_command_table *table, const void *buffer,
                       uint32_t bytes) {
     uint64_t address = (uint64_t)(uintptr_t)buffer;
@@ -228,7 +177,7 @@ static int build_prdt(struct ahci_command_table *table, const void *buffer,
 static int wait_for_completion(struct ahci_port *port) {
     for (uint32_t spin = 0; spin < AHCI_WAIT_SPINS; spin++) {
         if (!(read32(port->registers + PORT_CI) & 1U)) break;
-        if (read32(port->registers + PORT_IS) & 0x40000000U) return -1; /* TFES */
+        if (read32(port->registers + PORT_IS) & 0x40000000U) return -1;
         pause_cpu();
     }
     if (read32(port->registers + PORT_CI) & 1U) return -1;
@@ -237,10 +186,6 @@ static int wait_for_completion(struct ahci_port *port) {
     return 0;
 }
 
-/*
- * One command, start to finish. `write` decides the direction; `buffer` may be
- * NULL for a command that moves nothing (a cache flush).
- */
 static int issue(struct ahci_port *port, uint8_t command, uint64_t lba,
                  uint32_t sectors, void *buffer, uint32_t bytes, int write) {
     struct ahci_command_header *header =
@@ -264,15 +209,13 @@ static int issue(struct ahci_port *port, uint8_t command, uint64_t lba,
     fis->lba0 = (uint8_t)lba;
     fis->lba1 = (uint8_t)(lba >> 8);
     fis->lba2 = (uint8_t)(lba >> 16);
-    fis->device = 0x40U;            /* LBA mode; IDENTIFY ignores it */
+    fis->device = 0x40U;
     fis->lba3 = (uint8_t)(lba >> 24);
     fis->lba4 = (uint8_t)(lba >> 32);
     fis->lba5 = (uint8_t)(lba >> 40);
     fis->count_low = (uint8_t)sectors;
     fis->count_high = (uint8_t)(sectors >> 8);
 
-    /* Command FIS length is counted in dwords, and the write bit is what tells
-       the controller which way the scatter/gather list moves. */
     header->flags = (uint16_t)((sizeof(*fis) / 4U) | (write ? 0x40U : 0U));
     header->prdt_length = (uint16_t)entries;
     header->transferred = 0;
@@ -290,8 +233,6 @@ static int issue(struct ahci_port *port, uint8_t command, uint64_t lba,
     write32(port->registers + PORT_CI, 1U);
     return wait_for_completion(port);
 }
-
-/* --- the block layer's view ---------------------------------------------- */
 
 static int ahci_read(void *context, uint64_t lba, uint32_t count, void *destination) {
     struct ahci_port *port = (struct ahci_port *)context;
@@ -325,19 +266,13 @@ static int ahci_flush(void *context) {
     return issue((struct ahci_port *)context, ATA_FLUSH_CACHE_EXT, 0, 0, NULL, 0, 0);
 }
 
-/* --- bring-up ------------------------------------------------------------ */
-
 static uint64_t identify_sectors(struct ahci_port *port) {
-    /* The tail of the port's own page is free and physically contiguous, which
-       is exactly what a 512-byte IDENTIFY answer needs. */
     uint8_t *identify = port->page + 0x800U;
     memset(identify, 0, 512);
     if (issue(port, ATA_IDENTIFY, 0, 0, identify, 512, 0) != 0) return 0;
 
     uint16_t words[256];
     memcpy(words, identify, sizeof(words));
-    /* Word 83 bit 10 says the drive speaks 48-bit addressing, and then words
-       100..103 hold the count; otherwise it is the 32-bit one in 60..61. */
     if (words[83] & (1U << 10)) {
         uint64_t sectors = 0;
         for (int index = 3; index >= 0; index--)
@@ -400,16 +335,10 @@ void ahci_init(void) {
     if (pci_find_class(AHCI_CLASS, AHCI_SUBCLASS, &pci) != 0) return;
     if (pci.prog_if != AHCI_PROG_IF) return;
 
-    /* ABAR is BAR5 and is always 32-bit memory space. */
     uint64_t abar = pci.bar[5] & ~0xFULL;
     if (!abar) return;
 
     pci_enable_bus_mastering(&pci);
-    /* Mapped before the first register read, not after. There used to be a
-       window here reachable at its physical address, because the old
-       bootloader identity mapped the low 4 GiB and the disks had to be found
-       before the kernel's own page tables existed. Neither is true now: Limine
-       maps nothing at zero, and the block layer is probed after vmm_init. */
     hba_physical = abar;
     hba_base = vmm_map_device(abar, 0x2000U);
     if (!hba_base) {
@@ -426,4 +355,3 @@ void ahci_init(void) {
     }
     if (!port_count) kprintf("AHCI: controller present, no disks\n");
 }
-

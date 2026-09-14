@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
+#include "../include/cpu.h"
 #include "../include/heap.h"
 extern void kprintf(const char *fmt, ...);
 #include "../include/boot.h"
@@ -42,13 +43,6 @@ extern void kprintf(const char *fmt, ...);
 #define EVDEV_CLOCK_REALTIME 0
 #define EVDEV_CLOCK_MONOTONIC 1
 
-/*
- * The queue holds a plain nanosecond timestamp rather than the timeval the
- * device reports, because the clock is a property of the *reader*: EVIOCSCLOCKID
- * lets each descriptor pick realtime or monotonic, and libinput switches to
- * monotonic the moment it opens the device. Converting at read time is what
- * makes that possible without keeping two copies of every event.
- */
 struct input_record {
     uint64_t time_ns;
     uint16_t type;
@@ -58,22 +52,12 @@ struct input_record {
 
 struct input_reader {
     unsigned device_id;
-    /*
-     * The virtual terminal this descriptor belongs to: the one its opener was
-     * on. Events are only delivered while that terminal is the active one,
-     * which is what stops an X server on tty7 from reading along with the
-     * password being typed at a login on tty2. It is the job logind does on a
-     * Linux desktop, and there is nothing here to do it anywhere else.
-     */
     unsigned vt_index;
     struct input_record events[INPUT_READER_CAPACITY];
     size_t head;
     size_t tail;
     size_t count;
-    /* CLOCK_REALTIME (0) or CLOCK_MONOTONIC (1), chosen with EVIOCSCLOCKID. */
     int clock_id;
-    /* EVIOCGRAB is exclusive access. Nothing here multiplexes a device between
-       compositors, so the grab is recorded and honoured but never contested. */
     int grabbed;
     struct input_reader *next;
 };
@@ -86,21 +70,14 @@ static unsigned raw_listeners;
 
 static struct input_reader *input_readers;
 
-/* Whether to say what each key event was, asked for with `inputlog`. */
-/* Bounded, because a stuck key would otherwise fill the console. */
 #define INPUT_LOG_LIMIT 120U
 static int input_logging;
 static uint8_t key_down[INPUT_KEY_STATE_SIZE];
 static unsigned keyboard_extended;
 static unsigned keyboard_pause_bytes;
 
-/* Defined with the rest of the reader bookkeeping, further down; the keyboard
-   path needs it to know whether the console still owns the keystrokes. */
 static int device_has_reader(unsigned device_id);
 
-/* Whether there is an i8042 at all. Read once, at init: an absent controller
-   answers every port with 0xFF, and taking that for real status is an endless
-   loop rather than a missing keyboard. */
 static unsigned ps2_present;
 
 static uint8_t mouse_packet[4];
@@ -123,7 +100,7 @@ static void interrupt_restore(uint64_t flags) {
 static int ps2_wait_write(void) {
     for (unsigned i = 0; i < PS2_TIMEOUT; i++) {
         if (!(inb(PS2_STATUS_PORT) & PS2_STATUS_INPUT_FULL)) return 0;
-        __asm__ volatile("pause");
+        cpu_relax();
     }
     return -1;
 }
@@ -140,7 +117,7 @@ static int ps2_wait_read(int expect_aux, uint8_t *value) {
             }
             continue;
         }
-        __asm__ volatile("pause");
+        cpu_relax();
     }
     return -1;
 }
@@ -241,7 +218,6 @@ static void reader_push(struct input_reader *reader,
 }
 
 static struct input_key_event key_history[INPUT_KEY_HISTORY];
-/* Every event ever, so the ring can be handed back oldest first. */
 static unsigned key_history_total;
 
 unsigned input_key_history_count(void) {
@@ -276,10 +252,6 @@ static void input_emit_at(unsigned device_id, uint64_t timestamp,
         .code = code,
         .value = value
     };
-    /* What the kernel actually produced, when `inputlog` asks. */
-    /* A key that arrives once and is typed several times is either delivered
-       twice here or delivered once and repeated above us, and only the two
-       timestamps of a press and its release tell those apart. */
     unsigned delivered = 0;
     for (struct input_reader *reader = input_readers; reader; reader = reader->next) {
         if (reader->device_id != device_id) continue;
@@ -338,16 +310,11 @@ static uint16_t extended_keycode(uint8_t scan) {
     }
 }
 
-/* One key, on its way to everything that cares. Returns 0 when the VT layer
-   took it for itself, which is how Ctrl+Alt+F2 reaches nothing else. */
 static int keyboard_emit_key(uint16_t keycode, int released) {
     if (!keycode || keycode >= INPUT_KEY_STATE_SIZE) return 1;
     int ctrl_held = key_down[TUNIX_KEY_LEFTCTRL] || key_down[TUNIX_KEY_RIGHTCTRL];
     int alt_held = key_down[TUNIX_KEY_LEFTALT] || key_down[TUNIX_KEY_RIGHTALT];
     if (vt_handle_hotkey(keycode, !released, ctrl_held, alt_held)) {
-        /* Still recorded as held or not: the key is real even though nobody
-           downstream is told about it, and the record is what stops a later
-           release from being read as a press. */
         key_down[keycode] = released ? 0 : 1;
         return 0;
     }
@@ -366,26 +333,18 @@ static int keyboard_emit_key(uint16_t keycode, int released) {
                   TUNIX_EV_KEY, keycode, value);
     input_sync_at(TUNIX_INPUT_DEVICE_KEYBOARD, timestamp);
 
-    /* And the console, unless an input stack has the keyboard open on the
-       terminal in front: then it owns the keystrokes and the console must not
-       cook them too. */
     if (!device_has_reader(TUNIX_INPUT_DEVICE_KEYBOARD))
         vt_handle_key(keycode, released ? 0 : 1);
     return 1;
 }
 
-/* Defined with the PS/2 packet handling, which wants the same helper. */
 static void mouse_emit_button(uint64_t timestamp, uint8_t changed,
                               uint8_t state, uint8_t bit, uint16_t code);
 
-/* The way in for a keyboard that is not on the PS/2 port: USB HID keycodes
-   join past the translation, so nothing downstream tells the two apart. */
 void input_external_key(uint16_t keycode, int released) {
     (void)keyboard_emit_key(keycode, released);
 }
 
-/* The same door for a pointer. Button state is a bitmap in the same order the
-   PS/2 packet uses, so the two share the change-detection below. */
 void input_external_mouse(int dx, int dy, int wheel, uint8_t buttons) {
     uint8_t changed = buttons ^ mouse_buttons;
     if (!dx && !dy && !wheel && !changed) return;
@@ -393,8 +352,6 @@ void input_external_mouse(int dx, int dy, int wheel, uint8_t buttons) {
     uint64_t timestamp = time_uptime_ns();
     if (dx) input_emit_at(TUNIX_INPUT_DEVICE_MOUSE, timestamp, TUNIX_EV_REL,
                           TUNIX_REL_X, dx);
-    /* HID counts Y downwards, which is the direction the rest of the system
-       wants; the PS/2 path negates because that one counts upwards. */
     if (dy) input_emit_at(TUNIX_INPUT_DEVICE_MOUSE, timestamp, TUNIX_EV_REL,
                           TUNIX_REL_Y, dy);
     if (wheel) input_emit_at(TUNIX_INPUT_DEVICE_MOUSE, timestamp, TUNIX_EV_REL,
@@ -432,15 +389,11 @@ static int keyboard_handle_event_byte(uint8_t byte) {
     uint16_t keycode;
     if (keyboard_extended) {
         keyboard_extended = 0;
-        /* PrintScreen emits fake extended shifts; they are not real keys. */
         if (scan == 0x2AU || scan == 0x36U) return 1;
         keycode = extended_keycode(scan);
     } else {
         keycode = scan <= TUNIX_KEY_F12 ? scan : TUNIX_KEY_RESERVED;
     }
-    /* When the VT layer takes the key, the console must not be given the
-       scancode either -- otherwise the F-key that switched the screen also
-       arrives at the shell that was left behind. */
     return keyboard_emit_key(keycode, released);
 }
 
@@ -461,8 +414,6 @@ static void mouse_complete_packet(void) {
     if (mouse_packet_size == 4U) {
         uint8_t fourth = mouse_packet[3];
         if (mouse_device_id == 4U) {
-            /* The Explorer spends the top of the byte on its two extra
-               buttons, so only the low nibble is the wheel. */
             wheel = (int)(fourth & 0x0FU);
             if (wheel & 0x08) wheel -= 16;
             if (fourth & 0x10U) new_buttons |= 0x08U;
@@ -485,9 +436,6 @@ static void mouse_complete_packet(void) {
                          TUNIX_REL_X, x);
     if (y) input_emit_at(TUNIX_INPUT_DEVICE_MOUSE, timestamp, TUNIX_EV_REL,
                          TUNIX_REL_Y, -y);
-    /* The wheel is negated for the same reason Y is: the mouse counts a push
-       away from the hand as negative, and REL_WHEEL counts it as positive.
-       Without this every scroll goes the wrong way. */
     if (wheel) input_emit_at(TUNIX_INPUT_DEVICE_MOUSE, timestamp, TUNIX_EV_REL,
                              TUNIX_REL_WHEEL, -wheel);
     mouse_emit_button(timestamp, changed, new_buttons, 0x01U, TUNIX_BTN_LEFT);
@@ -526,9 +474,6 @@ void input_init(void) {
     mouse_present = 0;
     tty_reset_keyboard_state();
 
-    /* Is the controller there at all? A machine whose keyboard is on USB may
-       have no i8042, and every port of one that is missing reads back 0xFF.
-       Everything below talks to it, so this question comes first. */
     ps2_present = inb(PS2_STATUS_PORT) != 0xFFU;
     if (!ps2_present) return;
 
@@ -563,12 +508,6 @@ void input_init(void) {
 
 }
 
-/* Is any descriptor reading this device? A userspace input stack that has the
-   keyboard open owns it -- Xorg's libinput driver (VT-less, so it never
-   EVIOCGRABs) as much as a Wayland compositor (which does grab). Either way the
-   kernel console must stop cooking the same keystrokes, or Ctrl+C typed into a
-   terminal under X fires a console SIGINT at the whole session. So gate on an
-   open reader, not just an exclusive grab. */
 static int device_has_reader(unsigned device_id) {
     for (struct input_reader *reader = input_readers; reader; reader = reader->next)
         if (reader->device_id == device_id && vt_input_delivered_to(reader->vt_index))
@@ -580,19 +519,12 @@ static void input_drain_controller(void) {
     if (!ps2_present) return;
     for (;;) {
         uint8_t status = inb(PS2_STATUS_PORT);
-        /* All ones is an absent controller, not a full output buffer. A
-           machine with no i8042 -- which is every machine whose keyboard is on
-           USB, and QEMU with i8042=off -- would otherwise read 0xFF for ever
-           and never leave this loop. */
         if (status == 0xFFU) return;
         if (!(status & PS2_STATUS_OUTPUT_FULL)) return;
         uint8_t value = inb(PS2_DATA_PORT);
         if (status & PS2_STATUS_AUX_DATA) {
             mouse_handle_byte(value);
         } else {
-            /* The raw byte is kept for /dev/input/keyboard, the one reader
-               that still wants scancodes. Everything else -- evdev and the
-               console alike -- is fed the keycode this decodes to. */
             raw_push(value);
             (void)keyboard_handle_event_byte(value);
         }
@@ -603,9 +535,6 @@ void input_poll(void) {
     uint64_t flags = interrupt_save();
     input_drain_controller();
     interrupt_restore(flags);
-    /* Outside the interrupt-off window: the USB poll talks to a controller
-       over MMIO and waits on it, which is not work to do with interrupts
-       masked. It has no shared state with the PS/2 path above. */
     xhci_poll();
 }
 
@@ -613,8 +542,6 @@ void input_irq(void) {
     input_drain_controller();
 }
 
-/* A pointer of either kind. The PS/2 one is what this driver negotiated; the
-   USB one belongs to the HID driver, and both feed the same evdev device. */
 int input_mouse_available(void) {
     return mouse_present != 0 || xhci_pointer_present();
 }
@@ -711,8 +638,6 @@ struct input_reader *input_reader_open(unsigned device_id) {
     for (struct input_reader *walk = input_readers; walk; walk = walk->next)
         if (walk->device_id == device_id) total++;
     interrupt_restore(flags);
-    /* One line per open, so a device that ends up with more readers than there
-       are openers says so. */
     if (input_logging)
         kprintf("INPUT: open device %u vt %u by pid %d, %u readers now\n",
                 device_id, reader->vt_index, (int)process_current_pid(), total);
@@ -727,8 +652,6 @@ void input_reader_close(struct input_reader *reader) {
     if (*link == reader) *link = reader->next;
     int was_grabbed = reader->grabbed;
     interrupt_restore(flags);
-    /* A compositor that exited or crashed while holding a grab hands the
-       keyboard back here; the console has been deaf since the grab. */
     if (was_grabbed) tty_reset_keyboard_state();
     if (input_logging)
         kprintf("INPUT: close device %u vt %u\n", reader->device_id,
@@ -745,15 +668,6 @@ int input_reader_ready(struct input_reader *reader) {
     return ready;
 }
 
-/* --- evdev ioctls -------------------------------------------------------- */
-
-/*
- * Linux's evdev interface, which is what libinput speaks. Like the DRM ioctls
- * these are matched by decoding the request rather than against fully encoded
- * constants: EVIOCGNAME, EVIOCGBIT and friends carry their buffer length and
- * their axis in the request itself, so there is no single constant to compare
- * against.
- */
 #define EVDEV_IOCTL_TYPE 'E'
 #define EVDEV_IOCTL_TYPE_OF(request) (((request) >> 8) & 0xFFU)
 #define EVDEV_IOCTL_NR(request) ((request) & 0xFFU)
@@ -769,13 +683,12 @@ int input_reader_ready(struct input_reader *reader) {
 #define EVIOCGLED_NR 0x19
 #define EVIOCGSND_NR 0x1a
 #define EVIOCGSW_NR 0x1b
-#define EVIOCGBIT_NR 0x20   /* .. 0x3f, one per event type */
-#define EVIOCGABS_NR 0x40   /* .. 0x7f, one per absolute axis */
+#define EVIOCGBIT_NR 0x20
+#define EVIOCGABS_NR 0x40
 #define EVIOCGRAB_NR 0x90
 #define EVIOCREVOKE_NR 0x91
 #define EVIOCSCLOCKID_NR 0xa0
 
-/* The version every evdev driver in Linux reports. */
 #define EVDEV_VERSION 0x010001
 
 #define EV_MSC 0x04
@@ -798,11 +711,6 @@ static void bitmap_set(uint8_t *bits, size_t limit, unsigned bit) {
     bits[bit / 8U] |= (uint8_t)(1U << (bit % 8U));
 }
 
-/*
- * Which event types a device produces. Getting this wrong is not a degradation:
- * libinput classifies a device purely from its bits, so a keyboard that also
- * claimed EV_REL would be taken for a pointer.
- */
 static void evdev_event_type_bits(unsigned device_id, uint8_t *bits, size_t limit) {
     memset(bits, 0, limit);
     bitmap_set(bits, limit, TUNIX_EV_SYN);
@@ -822,9 +730,6 @@ static void evdev_key_bits(unsigned device_id, uint8_t *bits, size_t limit) {
         }
         return;
     }
-    /* Every keycode the scancode tables can produce. They are contiguous from
-       KEY_ESC to KEY_COMPOSE apart from gaps Linux leaves reserved, and
-       claiming a reserved one costs nothing. */
     for (unsigned key = TUNIX_KEY_ESC; key <= TUNIX_KEY_COMPOSE; key++)
         bitmap_set(bits, limit, key);
 }
@@ -837,7 +742,6 @@ static void evdev_rel_bits(unsigned device_id, uint8_t *bits, size_t limit) {
     if (mouse_packet_size == 4U) bitmap_set(bits, limit, TUNIX_REL_WHEEL);
 }
 
-/* Copy at most `size` bytes of a bitmap out, and report how many went. */
 static int64_t evdev_copy_out(uint64_t user_argument, const void *source,
                               size_t available, size_t size) {
     if (!user_argument) return -EINVAL;
@@ -852,7 +756,6 @@ int64_t input_reader_ioctl(struct input_reader *reader, unsigned device_id,
     unsigned nr = EVDEV_IOCTL_NR(request);
     size_t size = EVDEV_IOCTL_SIZE(request);
 
-    /* Big enough for KEY_MAX, which is the largest bitmap evdev defines. */
     uint8_t bits[(KEY_MAX / 8U) + 1U];
 
     if (nr == EVIOCGVERSION_NR) {
@@ -862,8 +765,6 @@ int64_t input_reader_ioctl(struct input_reader *reader, unsigned device_id,
     }
 
     if (nr == EVIOCGID_NR) {
-        /* An i8042 device with no meaningful vendor or product id -- which is
-           the truth, and what a PS/2 controller reports on Linux too. */
         struct evdev_id id = { .bustype = BUS_I8042, .vendor = 0,
                                .product = 0, .version = 0 };
         return evdev_copy_out(user_argument, &id, sizeof(id), size) < 0
@@ -878,14 +779,9 @@ int64_t input_reader_ioctl(struct input_reader *reader, unsigned device_id,
         return evdev_copy_out(user_argument, info.name, length + 1U, size);
     }
 
-    /* No physical topology and no serial number to report. ENOENT is what
-       Linux answers for an absent string, and libevdev treats it as absent
-       rather than as a failure. */
     if (nr == EVIOCGPHYS_NR || nr == EVIOCGUNIQ_NR) return -ENOENT;
 
     if (nr == EVIOCGPROP_NR) {
-        /* INPUT_PROP_*: nothing here is a pointing stick, a buttonpad or a
-           direct-touch device. */
         memset(bits, 0, sizeof(bits));
         return evdev_copy_out(user_argument, bits, size, size);
     }
@@ -896,14 +792,11 @@ int64_t input_reader_ioctl(struct input_reader *reader, unsigned device_id,
         case 0: evdev_event_type_bits(device_id, bits, sizeof(bits)); break;
         case TUNIX_EV_KEY: evdev_key_bits(device_id, bits, sizeof(bits)); break;
         case TUNIX_EV_REL: evdev_rel_bits(device_id, bits, sizeof(bits)); break;
-        /* Absolute axes, LEDs, switches, sound, force feedback: none. */
         default: memset(bits, 0, sizeof(bits)); break;
         }
         return evdev_copy_out(user_argument, bits, size, size);
     }
 
-    /* Current state of the keys, LEDs, switches and sound. Only the key state
-       is real; the rest are permanently clear. */
     if (nr == EVIOCGKEY_NR) {
         memset(bits, 0, sizeof(bits));
         uint64_t flags = interrupt_save();
@@ -917,7 +810,6 @@ int64_t input_reader_ioctl(struct input_reader *reader, unsigned device_id,
         return evdev_copy_out(user_argument, bits, size, size);
     }
 
-    /* There are no absolute axes, so there is no axis to describe. */
     if (nr >= EVIOCGABS_NR && nr < EVIOCGABS_NR + 0x40U) return -EINVAL;
 
     if (nr == EVIOCSCLOCKID_NR) {
@@ -931,20 +823,13 @@ int64_t input_reader_ioctl(struct input_reader *reader, unsigned device_id,
     }
 
     if (nr == EVIOCGRAB_NR) {
-        /* The argument is a flag, not a pointer: non-zero grabs. */
         if (reader) {
             reader->grabbed = user_argument != 0;
-            /* The console saw part of a key sequence before ownership changed
-               hands, or will have missed the release of a held modifier while
-               it was grabbed. Either way its idea of what is held is stale. */
             tty_reset_keyboard_state();
         }
         return 0;
     }
 
-    /* Revoking is seatd handing the device back on session switch. There are no
-       sessions to switch between, but refusing makes seatd log an error on
-       every close, so the request is accepted and simply drains the queue. */
     if (nr == EVIOCREVOKE_NR) {
         if (reader) {
             uint64_t flags = interrupt_save();
@@ -970,7 +855,6 @@ int64_t input_reader_read(struct input_reader *reader, size_t size, void *buffer
         return -EAGAIN;
     }
 
-    /* Realtime is uptime plus the boot epoch; monotonic is uptime as-is. */
     uint64_t epoch_offset = 0;
     if (reader->clock_id == EVDEV_CLOCK_REALTIME) {
         uint64_t uptime = time_uptime_ns();

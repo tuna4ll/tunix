@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
+#include "../include/cpu.h"
 #include "../include/framebuffer.h"
 #include "../include/percpu.h"
 #include "../include/smp.h"
@@ -12,15 +13,6 @@
 #define MAX_CONSOLE_COLS 224
 #define MAX_CONSOLE_ROWS 80
 #define CELL_BG_EXPLICIT 0x01U
-/* What a cell with nothing said about it is drawn in, and what every pixel a
-   cell does not cover gets. Both come out of ansi_palette below rather than
-   being black and white beside it: the console, the boot menu that drew the
-   screen before it and the desktop that draws it afterwards are all the same
-   palette, and a console that started from plain black would be the one place
-   the machine changed its mind.
-
-   Keeping them constants rather than screen-sized arrays is what lets each
-   virtual terminal cost only its cells. */
 #define CONSOLE_BACKGROUND 0x1A1B26U
 #define CONSOLE_FOREGROUND 0xC0CAF5U
 
@@ -43,11 +35,6 @@ struct console_layout {
     uint16_t rows;
 };
 
-/*
- * One terminal's picture. `cells` is what is on it; `primary_cells` is the
- * ordinary screen parked while an application is using the alternate one, and
- * is only allocated if something ever asks for that.
- */
 struct terminal_screen {
     struct console_cell *cells;
     struct console_cell *primary_cells;
@@ -112,8 +99,6 @@ static void fill_background_rect(uint32_t x, uint32_t y, uint32_t width, uint32_
 }
 
 static void calculate_layout(void) {
-    /* Plain full-screen text console (VGA-text style): no floating window, no
-       margins beyond a small edge gap, text fills the whole framebuffer. */
     layout.screen_width = framebuffer_width();
     layout.screen_height = framebuffer_height();
     uint32_t margin = 8U;
@@ -139,8 +124,6 @@ static struct console_cell *cell_at(struct terminal_screen *screen, int row, int
     return &screen->cells[(size_t)row * layout.columns + (size_t)col];
 }
 
-/* Is this screen the one the display is showing? A background terminal answers
-   no, and so does every terminal while a graphics client owns the scanout. */
 static int visible(const struct terminal_screen *screen) {
     return terminal_is_ready && screen == active_screen && framebuffer_console_active();
 }
@@ -380,8 +363,6 @@ void terminal_screen_activate(struct terminal_screen *screen) {
     if (!terminal_is_ready) return;
     active_screen = screen;
     if (!framebuffer_console_active()) return;
-    /* The whole display, not just the text area: what was there belonged to
-       another terminal, or to a graphics client that has just stood down. */
     fill_background_rect(0, 0, layout.screen_width, layout.screen_height);
     if (screen) render_console(screen);
 }
@@ -436,8 +417,6 @@ void terminal_put_codepoint(struct terminal_screen *screen, uint32_t codepoint) 
         uint8_t explicit_background = screen->background_explicit;
         if (screen->reverse) {
             uint32_t temporary = foreground;
-            /* screen->background holds the effective colour whether or not
-               anything set it explicitly, so reversing is just a swap. */
             foreground = background;
             background = temporary;
             explicit_background = 1;
@@ -457,32 +436,14 @@ void terminal_put_codepoint(struct terminal_screen *screen, uint32_t codepoint) 
     if (screen->cursor_visible) render_cell(screen, screen->row, screen->col, 1);
 }
 
-/*
- * One processor paints at a time.
- *
- * Two write into the same screen from two directions: a terminal a program is
- * writing to, under the kernel lock, and the kernel log, which is not. Neither
- * cell model nor cursor survives that being interleaved -- what it looks like
- * from the front is two messages spliced into each other a character at a time
- * and coloured rubbish where a scroll got half done.
- *
- * Interrupts go off with it because kprintf() is reachable from an interrupt
- * handler, and a processor that took one while holding this would wait for
- * itself.
- */
 static volatile int paint_lock;
 
 static uint64_t paint_acquire(void) {
     uint64_t flags;
     __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags) :: "memory");
-    /* Servicing the flush inside the spin is not an optimisation. A processor
-       waiting here has interrupts off, so the one asking it to drop cached
-       translations cannot reach it as an interrupt -- and that processor is
-       very likely holding the kernel lock while it waits, which is a machine
-       that stops with one processor holding everything. */
     while (__atomic_test_and_set(&paint_lock, __ATOMIC_ACQUIRE)) {
         smp_service_flush();
-        __asm__ volatile("pause");
+        cpu_relax();
     }
     return flags;
 }
@@ -492,21 +453,8 @@ static void paint_release(uint64_t flags) {
     if (flags & 0x200ULL) __asm__ volatile("sti");
 }
 
-/*
- * Held across a run of characters, not around each one.
- *
- * Taking it per character was correct and far too expensive: interrupts off,
- * a contended cache line and a released lock for every glyph, which on the
- * boot messages alone is tens of thousands of times. What it produced was a
- * processor holding the kernel lock for seconds at a stretch while it painted
- * -- the lock watchdog saw it before anything else did.
- */
 static uint64_t paint_flags;
 static unsigned paint_depth;
-/* Which processor is inside, so a nested call can tell "somebody else has it"
-   from "I have it". Without that distinction the second call spins for a lock
-   its own processor is holding, with interrupts off, forever -- and if it got
-   there holding the kernel lock, so does the machine. */
 static volatile int paint_owner = -1;
 
 void terminal_paint_begin(void) {
@@ -538,8 +486,6 @@ void terminal_print(const char *text) {
     terminal_paint_end();
 }
 
-/* Panic runs after something has already gone wrong, and the processor that
-   held this may be the one that went wrong. */
 void terminal_paint_lock_reset(void) {
     paint_depth = 0;
     paint_owner = -1;
@@ -645,8 +591,6 @@ void terminal_set_alternate_screen(struct terminal_screen *screen, int enabled) 
     if (!terminal_is_ready || !screen || enabled == screen->alternate_active) return;
     size_t count = cell_count();
     if (enabled) {
-        /* Allocated on the first application that asks for it, which on a
-           machine with several terminals is usually none of them. */
         if (!screen->primary_cells) {
             screen->primary_cells = kmalloc(count * sizeof(struct console_cell));
             if (!screen->primary_cells) return;

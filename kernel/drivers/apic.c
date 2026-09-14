@@ -1,10 +1,9 @@
-/* The local APIC and the IOAPIC: routing comes from the MADT rather than the
-   IRQ number, and getting it wrong produces silence, not a wrong vector. */
 #include <stdint.h>
 #include <stddef.h>
 
 #include "../include/acpi.h"
 #include "../include/apic.h"
+#include "../include/cpu.h"
 #include "../include/percpu.h"
 #include "../include/pic.h"
 #include "../include/time.h"
@@ -12,18 +11,13 @@
 
 extern void kprintf(const char *fmt, ...);
 
-/* Their own slices of the device window, after the ACPI tables' 2 MiB. */
 #define APIC_WINDOW_OFFSET 0x00400000ULL
 #define IO_APIC_WINDOW_OFFSET 0x00401000ULL
 #define APIC_PAGE_BYTES 4096ULL
 
-/* Local APIC registers, as offsets from its base. */
 #define LAPIC_ID 0x020U
 #define LAPIC_EOI 0x0B0U
 #define LAPIC_SPURIOUS 0x0F0U
-/* The interrupt command register, which is how one processor talks to
-   another. The high half names the destination and must be written first:
-   writing the low half is what sends. */
 #define LAPIC_ICR_LOW 0x300U
 #define LAPIC_ICR_HIGH 0x310U
 #define LAPIC_LVT_TIMER 0x320U
@@ -40,18 +34,13 @@ extern void kprintf(const char *fmt, ...);
 
 #define LVT_MASKED (1U << 16)
 #define LVT_PERIODIC (1U << 17)
-/* Divide by 16. The encoding scatters its three bits, which is why it is not
-   the number it looks like. */
 #define TIMER_DIVIDE_16 0x3U
 #define TIMER_DIVISOR 16U
 #define CALIBRATION_MS 20ULL
 #define LAPIC_SPURIOUS_ENABLE (1U << 8)
-/* The vector delivered when an interrupt is withdrawn before it is taken. It
-   must have its low four bits set on some older parts, so 0xFF it is. */
 #define LAPIC_SPURIOUS_VECTOR 0xFFU
 #define LAPIC_ID_SHIFT 24U
 
-/* The IOAPIC is two registers: one selects, the other reads or writes. */
 #define IO_APIC_SELECT 0x00U
 #define IO_APIC_WINDOW 0x10U
 #define IO_APIC_VERSION_REGISTER 0x01U
@@ -92,8 +81,6 @@ static void io_apic_write(uint32_t index, uint32_t value) {
     io_apic[IO_APIC_WINDOW / sizeof(uint32_t)] = value;
 }
 
-/* Where a legacy IRQ actually arrives, and how it is wired, once the
-   firmware's overrides are taken into account. */
 static uint32_t global_for_irq(const struct acpi_machine *machine, unsigned irq,
                                int *active_low, int *level) {
     *active_low = 0;
@@ -107,9 +94,6 @@ static uint32_t global_for_irq(const struct acpi_machine *machine, unsigned irq,
     return irq;
 }
 
-/* The input to program and the vector to deliver are different numbers, and
-   confusing them is the whole trap: IRQ 0 arrives on input 2, but the timer
-   handler is on vector 32, not 34. */
 int apic_route_irq(unsigned global, unsigned vector, int active_low,
                    int level_triggered) {
     if (!active) return -1;
@@ -121,9 +105,6 @@ int apic_route_irq(unsigned global, unsigned vector, int active_low,
     if (active_low) low |= REDIRECTION_ACTIVE_LOW;
     if (level_triggered) low |= REDIRECTION_LEVEL_TRIGGERED;
 
-    /* High half first: it names the processor, and writing the low half is
-       what unmasks the entry. The other order delivers the first interrupt to
-       whichever processor the register happened to be pointing at. */
     io_apic_write(IO_APIC_REDIRECTION_BASE + entry * 2U + 1U,
                   local_apic_id << REDIRECTION_DESTINATION_SHIFT);
     io_apic_write(IO_APIC_REDIRECTION_BASE + entry * 2U, low);
@@ -131,11 +112,6 @@ int apic_route_irq(unsigned global, unsigned vector, int active_low,
 }
 
 int apic_route_global(unsigned global, unsigned vector) {
-    /* Overrides are listed by the legacy line they replace, but the entry also
-       carries the global number that line really arrives on, and that is what
-       matches here: the caller has a global number and no legacy line to look
-       up. On a machine where the two are equal -- which is every line but the
-       timer -- the lookup finds the same entry either way. */
     int active_low = 1;
     int level_triggered = 1;
     const struct acpi_machine *machine = acpi_describe_machine();
@@ -164,21 +140,17 @@ static uint32_t lapic_read(uint32_t offset) {
     return local_apic[offset / sizeof(uint32_t)];
 }
 
-/* Whichever processor asks -- the register is one address that answers
-   differently on each of them, which is the whole point of it. */
 uint32_t apic_local_id(void) {
     return active ? lapic_read(LAPIC_ID) >> LAPIC_ID_SHIFT : 0;
 }
 
-/* Until this bit is set the processor accepts nothing at all, and every
-   processor has to set its own. */
 void apic_enable_local(void) {
     if (!active) return;
     lapic_write(LAPIC_SPURIOUS, LAPIC_SPURIOUS_ENABLE | LAPIC_SPURIOUS_VECTOR);
 }
 
 static void wait_for_delivery(void) {
-    while (lapic_read(LAPIC_ICR_LOW) & ICR_DELIVERY_PENDING) __asm__ volatile("pause");
+    while (lapic_read(LAPIC_ICR_LOW) & ICR_DELIVERY_PENDING) cpu_relax();
 }
 
 static void send_command(uint32_t destination, uint32_t command) {
@@ -191,8 +163,6 @@ void apic_send_init(uint32_t apic_id) {
     if (active) send_command(apic_id, ICR_MODE_INIT | ICR_LEVEL_ASSERT);
 }
 
-/* The vector is a page number, not an address: the processor starts executing
-   in real mode at vector * 4096. */
 void apic_send_startup(uint32_t apic_id, uint8_t page) {
     if (active) send_command(apic_id, ICR_MODE_STARTUP | ICR_LEVEL_ASSERT | page);
 }
@@ -203,8 +173,6 @@ void apic_send_ipi_to_others(uint8_t vector) {
     wait_for_delivery();
 }
 
-/* The local timer, the only clock an application processor has; its rate is
-   measured against the TSC because nothing reports the bus clock. */
 static uint64_t timer_measured_hz[SMP_MAX_CPUS];
 static uint32_t timer_initial_count[SMP_MAX_CPUS];
 
@@ -216,7 +184,7 @@ void apic_timer_start(uint32_t hz, uint8_t vector) {
     lapic_write(LAPIC_TIMER_INITIAL, 0xFFFFFFFFU);
 
     uint64_t deadline = time_uptime_ns() + CALIBRATION_MS * 1000000ULL;
-    while (time_uptime_ns() < deadline) __asm__ volatile("pause");
+    while (time_uptime_ns() < deadline) cpu_relax();
 
     uint32_t remaining = lapic_read(LAPIC_TIMER_CURRENT);
     lapic_write(LAPIC_TIMER_INITIAL, 0);
@@ -225,8 +193,6 @@ void apic_timer_start(uint32_t hz, uint8_t vector) {
     uint64_t per_second = (elapsed * 1000ULL) / CALIBRATION_MS;
     uint32_t count = per_second > hz ? (uint32_t)(per_second / hz) : 1U;
 
-    /* Kept so a report can say what this processor measured, because a
-       calibration that went wrong is invisible from anywhere else. */
     unsigned index = cpu_current() ? cpu_current()->index : 0;
     if (index < SMP_MAX_CPUS) {
         timer_measured_hz[index] = per_second;
@@ -262,20 +228,14 @@ int apic_init(void) {
         ((io_apic_read(IO_APIC_VERSION_REGISTER) >> IO_APIC_MAX_ENTRY_SHIFT) &
          IO_APIC_MAX_ENTRY_MASK) + 1U;
 
-    /* Enabling the local APIC is a single bit, and until it is set the
-       processor will not accept anything the IOAPIC sends. */
     local_apic[LAPIC_SPURIOUS / sizeof(uint32_t)] =
         LAPIC_SPURIOUS_ENABLE | LAPIC_SPURIOUS_VECTOR;
 
-    /* Mask every input before routing any: whatever the firmware left enabled
-       would otherwise arrive on a vector this kernel has not claimed. */
     for (uint32_t entry = 0; entry < io_apic_entries; entry++)
         io_apic_write(IO_APIC_REDIRECTION_BASE + entry * 2U, REDIRECTION_MASKED);
 
     active = 1;
 
-    /* The 8259s stay initialised but silent. Leaving them delivering as well
-       would double every interrupt, and their vectors are the same ones. */
     for (unsigned irq = 0; irq < LEGACY_IRQ_COUNT; irq++) pic_mask(irq);
 
     kprintf("APIC: local apic %u, ioapic with %u inputs from global %u\n",

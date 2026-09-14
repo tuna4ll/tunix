@@ -1,7 +1,6 @@
-/* IPv4 network stack. */
-
 #include <stddef.h>
 #include <stdint.h>
+#include "../include/cpu.h"
 #include "../include/kstring.h"
 #include "../include/time.h"
 #include "../include/net/inet_socket.h"
@@ -235,7 +234,7 @@ static const uint8_t *resolve_mac(uint32_t destination) {
         net_poll();
         found = arp_lookup(next_hop);
         if (found) return found;
-        __asm__ volatile("pause");
+        cpu_relax();
     }
     return NULL;
 }
