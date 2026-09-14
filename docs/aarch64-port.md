@@ -8,17 +8,22 @@ its own build target.
 ## What works
 
 On QEMU's `virt` machine (GICv3, Cortex-A72) the kernel boots into the high half,
-sets up memory management and reaches a timer-driven idle loop:
+sets up memory management, runs a task at EL0, and reaches a timer-driven idle
+loop:
 
 ```
 === Tunix aarch64 ===
 running at EL1, kernel at 0xffff000040000000 (higher half)
 device tree @ 0x48000000: 2048 MiB RAM @ 40000000, 4 CPU(s)
-PMM: 523941 free frames (2046 MiB)
+PMM: 523939 free frames (2046 MiB)
 heap: 16383 KiB, alloc/free stress OK, reclaimed fully
-address spaces: identity map dropped, TTBR0 = 0x4105b000
+address spaces: identity map dropped, TTBR0 = 0x4105d000
 VMM: VA 0x400000 reads aaaa in A and bbbb in B, isolation OK
 VMM: destroying a space reclaimed 4 page-table frames
+usermode: entering EL0 at 0x401000
+hello from EL0, through svc
+[aarch64] EL0 task exited with status 7
+usermode: back at EL1, EL1
 GICv3 initialised
 generic timer armed at 100 Hz, enabling IRQs
 running; waiting for timer interrupts...
@@ -47,9 +52,9 @@ Bring-up covers, in order:
    runs virtual from there on.
 4. **Device tree** (`fdt.c`). A minimal flattened-device-tree reader pulls the RAM
    base, total RAM and the CPU count out of the DTB, read through the direct map.
-5. **Exceptions** (`exceptions.S`). A 16-entry `VBAR_EL1` vector table with a
-   full integer register frame saved on entry; synchronous and IRQ paths call
-   into C.
+5. **Exceptions** (`exceptions.S`). A 16-entry `VBAR_EL1` vector table. Entry
+   saves `x0`–`x30` plus `ELR_EL1`, `SPSR_EL1` and `SP_EL0`, which is what makes
+   returning to EL0 (and taking interrupts while there) safe.
 6. **Interrupts** (`gic.c`). GICv3: distributor + redistributor wake, the timer
    PPI enabled as Group 1, and the CPU interface (`ICC_SRE/PMR/IGRPEN1_EL1`)
    brought up.
@@ -72,6 +77,15 @@ Bring-up covers, in order:
     identity map — the kernel keeps running purely out of the high half, which is
     the proof that the split is real. The self-test maps one VA to two different
     frames in two spaces and confirms each space reads back its own data.
+13. **EL0 and syscalls** (`usermode.S`, `syscall.c`). `aarch64_enter_user` sets
+    `SP_EL0`/`ELR_EL1`/`SPSR_EL1` and `eret`s to EL0; `aarch64_leave_user`
+    restores the saved kernel stack so entering user mode looks like an ordinary
+    call that returns. `SVC` from EL0 is recognised by exception class `0x15` and
+    dispatched with the Linux AArch64 convention (`x8` = number, `x0`–`x5` =
+    arguments, result in `x0`). `write`, `exit` and `exit_group` are implemented;
+    anything else returns `-ENOSYS`. A small position-independent blob in the
+    kernel image is mapped user-executable into a fresh address space and run as
+    the self-test.
 
 ## Building and running
 
@@ -86,16 +100,22 @@ x86-64 build (`make`, `make kernel`) is untouched — its source glob prunes
 
 ## What is next
 
-This is the HAL bring-up, not a running userland yet. The ladder from here:
+There is a kernel and a way into user mode, but not yet processes or a userland.
+The ladder from here:
 
-- **Process & syscalls** — context switch, `SVC` entry on top of the existing
-  vector table, `TPIDR_EL0` for TLS, then a first static AArch64 user binary
-  dropped to EL0 in its own address space.
+- **Processes & scheduling** — a task struct, kernel stacks, a context switch,
+  and preemption driven by the timer IRQ that already fires.
+- **ELF loading** — map a real static AArch64 binary's segments into a fresh
+  address space instead of the built-in blob.
 - **Storage & console** — virtio-mmio block and console, then ext2 on top.
-- **Userland** — an AArch64 Void glibc rootfs, init, and a shell.
+- **Userland** — an AArch64 Void glibc rootfs, init, and a shell. This needs the
+  syscall surface to grow from three calls to the couple of hundred glibc
+  expects, which is why the next item matters most.
 - **Wiring the portable core** — the arch-neutral subsystems (vfs, ext2/3,
   scheduler logic, the module loader core minus relocations) plug in behind a
-  small arch interface; see the arch-coupling notes in the port plan.
+  small arch interface. Note `syscall_dispatch` currently takes a
+  `struct syscall_frame` named after x86-64 registers, so converging the two
+  architectures means giving that frame an arch-neutral shape.
 - **Module loader** — `R_AARCH64_*` relocations and an AArch64 module area.
 
 ### A note on SMP

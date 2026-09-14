@@ -39,6 +39,16 @@ static inline uint32_t mmio_read32(uint64_t addr) {
 static inline void isb(void) { __asm__ volatile("isb" ::: "memory"); }
 static inline void dsb_sy(void) { __asm__ volatile("dsb sy" ::: "memory"); }
 
+// Must match SAVE_FRAME/RESTORE_FRAME in exceptions.S.
+struct trap_frame {
+    uint64_t x[31];
+    uint64_t elr;
+    uint64_t spsr;
+    uint64_t sp_el0;
+    uint64_t reserved[2];
+};
+_Static_assert(sizeof(struct trap_frame) == 288, "trap frame layout");
+
 void uart_init(void);
 void uart_putc(char c);
 void uart_puts(const char *s);
@@ -81,5 +91,9 @@ void heap_init(void);
 void *kmalloc(size_t want);
 void kfree(void *ptr);
 uint64_t heap_free_bytes(void);
+
+void aarch64_enter_user(uint64_t entry, uint64_t user_sp);
+void aarch64_leave_user(void);
+void aarch64_syscall_handler(struct trap_frame *frame);
 
 #endif

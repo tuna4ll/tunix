@@ -3,6 +3,7 @@
 #include "arch.h"
 
 extern char kernel_start[];
+extern char usertest_start[];
 
 static const char *current_el_name(void) {
     switch ((sysreg_read("CurrentEL") >> 2) & 3) {
@@ -70,6 +71,26 @@ static void address_space_selftest(void) {
             pmm_free_pages() - before);
 }
 
+static void usermode_selftest(void) {
+    uint64_t space = vmm_create_space();
+    uint64_t stack_pa = (uint64_t)pmm_alloc_page();
+    uint64_t code_va = 0x0000000000401000UL;
+    uint64_t stack_va = 0x0000000000500000UL;
+
+    if (!space || !stack_pa ||
+        vmm_map(space, code_va, virt_to_phys((uint64_t)usertest_start),
+                VMM_USER | VMM_EXEC) != 0 ||
+        vmm_map(space, stack_va, stack_pa, VMM_USER | VMM_WRITE) != 0) {
+        kprintf("usermode: setup failed\n");
+        return;
+    }
+
+    vmm_switch_space(space);
+    kprintf("usermode: entering EL0 at %p\n", (void *)code_va);
+    aarch64_enter_user(code_va, stack_va + 4096);
+    kprintf("usermode: back at EL1, %s\n", current_el_name());
+}
+
 void aarch64_main(uint64_t dtb_phys) {
     uart_init();
     kprintf("\n=== Tunix aarch64 ===\n");
@@ -110,6 +131,7 @@ void aarch64_main(uint64_t dtb_phys) {
             corrupt ? "FAILED" : "OK", heap_after == heap_before ? "fully" : "partly");
 
     address_space_selftest();
+    usermode_selftest();
 
     gic_init();
     kprintf("GICv3 initialised\n");

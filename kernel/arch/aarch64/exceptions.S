@@ -1,8 +1,8 @@
     .section .text
 
-    // Save the full integer register frame on the kernel stack.
+    // Save the integer registers plus the state needed to return to EL0.
     .macro SAVE_FRAME
-    sub     sp, sp, #256
+    sub     sp, sp, #288
     stp     x0, x1,   [sp, #16 * 0]
     stp     x2, x3,   [sp, #16 * 1]
     stp     x4, x5,   [sp, #16 * 2]
@@ -19,9 +19,19 @@
     stp     x26, x27, [sp, #16 * 13]
     stp     x28, x29, [sp, #16 * 14]
     str     x30,      [sp, #16 * 15]
+    mrs     x9, elr_el1
+    mrs     x10, spsr_el1
+    stp     x9, x10,  [sp, #248]
+    mrs     x9, sp_el0
+    str     x9,       [sp, #264]
     .endm
 
     .macro RESTORE_FRAME
+    ldp     x9, x10,  [sp, #248]
+    msr     elr_el1, x9
+    msr     spsr_el1, x10
+    ldr     x9,       [sp, #264]
+    msr     sp_el0, x9
     ldp     x0, x1,   [sp, #16 * 0]
     ldp     x2, x3,   [sp, #16 * 1]
     ldp     x4, x5,   [sp, #16 * 2]
@@ -38,7 +48,7 @@
     ldp     x26, x27, [sp, #16 * 13]
     ldp     x28, x29, [sp, #16 * 14]
     ldr     x30,      [sp, #16 * 15]
-    add     sp, sp, #256
+    add     sp, sp, #288
     .endm
 
     .macro VENTRY label
@@ -68,9 +78,26 @@ __vectors:
 
 el1h_sync:
 el1t_sync:
+    SAVE_FRAME
+    mrs     x0, esr_el1
+    mrs     x1, elr_el1
+    mrs     x2, far_el1
+    bl      aarch64_sync_handler
+    RESTORE_FRAME
+    eret
+
+    // A synchronous entry from EL0 is a syscall unless the class says otherwise.
 lower_sync:
     SAVE_FRAME
     mrs     x0, esr_el1
+    lsr     x1, x0, #26
+    cmp     x1, #0x15               // EC = SVC executed in AArch64
+    b.ne    1f
+    mov     x0, sp
+    bl      aarch64_syscall_handler
+    RESTORE_FRAME
+    eret
+1:  mrs     x0, esr_el1
     mrs     x1, elr_el1
     mrs     x2, far_el1
     bl      aarch64_sync_handler
