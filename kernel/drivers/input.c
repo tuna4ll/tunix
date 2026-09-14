@@ -5,7 +5,9 @@
 extern void kprintf(const char *fmt, ...);
 #include "../include/boot.h"
 #include "../include/input.h"
+#if defined(__x86_64__)
 #include "../include/io.h"
+#endif
 #include "../include/kstring.h"
 #include "../include/process.h"
 #include "../include/time.h"
@@ -24,6 +26,7 @@ extern void kprintf(const char *fmt, ...);
 #define input_copy_to_user copy_to_user
 #define input_copy_from_user copy_from_user
 
+#if defined(__x86_64__)
 #define PS2_STATUS_PORT  0x64U
 #define PS2_COMMAND_PORT 0x64U
 #define PS2_DATA_PORT    0x60U
@@ -35,6 +38,7 @@ extern void kprintf(const char *fmt, ...);
 
 #define PS2_ACK 0xFAU
 #define PS2_MOUSE_WRITE 0xD4U
+#endif
 
 #define RAW_INPUT_CAPACITY 256U
 #define INPUT_READER_CAPACITY 128U
@@ -73,20 +77,25 @@ static struct input_reader *input_readers;
 #define INPUT_LOG_LIMIT 120U
 static int input_logging;
 static uint8_t key_down[INPUT_KEY_STATE_SIZE];
+#if defined(__x86_64__)
 static unsigned keyboard_extended;
 static unsigned keyboard_pause_bytes;
+#endif
 
 static int device_has_reader(unsigned device_id);
 
+#if defined(__x86_64__)
 static unsigned ps2_present;
 
 static uint8_t mouse_packet[4];
 static unsigned mouse_packet_index;
 static unsigned mouse_packet_size;
 static unsigned mouse_device_id;
+#endif
 static unsigned mouse_present;
 static uint8_t mouse_buttons;
 
+#if defined(__x86_64__)
 static int ps2_wait_write(void) {
     for (unsigned i = 0; i < PS2_TIMEOUT; i++) {
         if (!(inb(PS2_STATUS_PORT) & PS2_STATUS_INPUT_FULL)) return 0;
@@ -185,6 +194,8 @@ static unsigned ps2_mouse_negotiate_wheel(void) {
     return device_id == 4U ? 4U : 0U;
 }
 
+#endif
+
 static void reader_push(struct input_reader *reader,
                         const struct input_record *event) {
     if (!reader || !event) return;
@@ -265,6 +276,7 @@ static void input_sync_at(unsigned device_id, uint64_t timestamp) {
     input_emit_at(device_id, timestamp, TUNIX_EV_SYN, TUNIX_SYN_REPORT, 0);
 }
 
+#if defined(__x86_64__)
 static void raw_push(uint8_t value) {
     if (!raw_listeners) return;
     if (raw_count == RAW_INPUT_CAPACITY) {
@@ -299,6 +311,8 @@ static uint16_t extended_keycode(uint8_t scan) {
         default: return TUNIX_KEY_RESERVED;
     }
 }
+
+#endif
 
 static int keyboard_emit_key(uint16_t keycode, int released) {
     if (!keycode || keycode >= INPUT_KEY_STATE_SIZE) return 1;
@@ -353,6 +367,7 @@ void input_external_mouse(int dx, int dy, int wheel, uint8_t buttons) {
     input_sync_at(TUNIX_INPUT_DEVICE_MOUSE, timestamp);
 }
 
+#if defined(__x86_64__)
 static int keyboard_handle_event_byte(uint8_t byte) {
     if (keyboard_pause_bytes) {
         keyboard_pause_bytes--;
@@ -387,6 +402,8 @@ static int keyboard_handle_event_byte(uint8_t byte) {
     return keyboard_emit_key(keycode, released);
 }
 
+#endif
+
 static void mouse_emit_button(uint64_t timestamp, uint8_t changed,
                               uint8_t state, uint8_t bit, uint16_t code) {
     if (!(changed & bit)) return;
@@ -394,6 +411,7 @@ static void mouse_emit_button(uint64_t timestamp, uint8_t changed,
                   (state & bit) ? 1 : 0);
 }
 
+#if defined(__x86_64__)
 static void mouse_complete_packet(void) {
     uint8_t flags = mouse_packet[0];
     uint8_t new_buttons = flags & 0x07U;
@@ -447,9 +465,13 @@ static void mouse_handle_byte(uint8_t byte) {
     }
 }
 
+#endif
+
 void input_init(void) {
     input_logging = boot_command_line_flag("inputlog");
+#if defined(__x86_64__)
     uint8_t config = 0;
+#endif
 
     raw_head = 0;
     raw_tail = 0;
@@ -457,13 +479,16 @@ void input_init(void) {
     raw_listeners = 0;
     input_readers = NULL;
     memset(key_down, 0, sizeof(key_down));
+#if defined(__x86_64__)
     keyboard_extended = 0;
     keyboard_pause_bytes = 0;
     mouse_packet_index = 0;
+#endif
     mouse_buttons = 0;
     mouse_present = 0;
     tty_reset_keyboard_state();
 
+#if defined(__x86_64__)
     ps2_present = inb(PS2_STATUS_PORT) != 0xFFU;
     if (!ps2_present) return;
 
@@ -496,6 +521,7 @@ void input_init(void) {
         if (ps2_mouse_command(0xF4U) != 0) mouse_present = 0;
     }
 
+#endif
 }
 
 static int device_has_reader(unsigned device_id) {
@@ -506,6 +532,7 @@ static int device_has_reader(unsigned device_id) {
 }
 
 static void input_drain_controller(void) {
+#if defined(__x86_64__)
     if (!ps2_present) return;
     for (;;) {
         uint8_t status = inb(PS2_STATUS_PORT);
@@ -519,6 +546,7 @@ static void input_drain_controller(void) {
             (void)keyboard_handle_event_byte(value);
         }
     }
+#endif
 }
 
 void input_poll(void) {
@@ -552,12 +580,14 @@ int input_get_device_info(unsigned device_id, struct tunix_input_device_info *in
                             (1U << TUNIX_EV_REL);
         info->relative_axes = (1U << TUNIX_REL_X) | (1U << TUNIX_REL_Y);
         info->capabilities = TUNIX_INPUT_CAP_POINTER;
+#if defined(__x86_64__)
         if (mouse_packet_size == 4U) {
             info->relative_axes |= 1U << TUNIX_REL_WHEEL;
             info->capabilities |= TUNIX_INPUT_CAP_WHEEL;
         }
         if (mouse_device_id == 4U)
             info->capabilities |= TUNIX_INPUT_CAP_EXTRA_BUTTONS;
+#endif
         memcpy(info->name, "Tunix PS/2 Mouse", sizeof("Tunix PS/2 Mouse"));
         return 0;
     }
@@ -714,10 +744,12 @@ static void evdev_key_bits(unsigned device_id, uint8_t *bits, size_t limit) {
         bitmap_set(bits, limit, TUNIX_BTN_LEFT);
         bitmap_set(bits, limit, TUNIX_BTN_RIGHT);
         bitmap_set(bits, limit, TUNIX_BTN_MIDDLE);
+#if defined(__x86_64__)
         if (mouse_device_id == 4U) {
             bitmap_set(bits, limit, TUNIX_BTN_SIDE);
             bitmap_set(bits, limit, TUNIX_BTN_EXTRA);
         }
+#endif
         return;
     }
     for (unsigned key = TUNIX_KEY_ESC; key <= TUNIX_KEY_COMPOSE; key++)
@@ -729,7 +761,9 @@ static void evdev_rel_bits(unsigned device_id, uint8_t *bits, size_t limit) {
     if (device_id != TUNIX_INPUT_DEVICE_MOUSE) return;
     bitmap_set(bits, limit, TUNIX_REL_X);
     bitmap_set(bits, limit, TUNIX_REL_Y);
+#if defined(__x86_64__)
     if (mouse_packet_size == 4U) bitmap_set(bits, limit, TUNIX_REL_WHEEL);
+#endif
 }
 
 static int64_t evdev_copy_out(uint64_t user_argument, const void *source,
