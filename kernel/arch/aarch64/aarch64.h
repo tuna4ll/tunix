@@ -15,6 +15,7 @@
 #define AARCH64_RAM_RANGES 16U
 #define AARCH64_MAX_CPUS 8U
 #define AARCH64_SGI_FLUSH 1U
+#define AARCH64_MAX_SD 4U
 
 struct fdt_node {
     uint32_t offset;
@@ -38,6 +39,12 @@ int fdt_memreserve(unsigned index, uint64_t *base, uint64_t *size);
 struct aarch64_range {
     uint64_t base;
     uint64_t size;
+};
+
+struct aarch64_sd {
+    uint64_t physical;
+    uint64_t clock_hz;
+    int quirks;
 };
 
 struct aarch64_cpu {
@@ -67,6 +74,8 @@ struct aarch64_platform {
     uint64_t pci_mmio64_size;
     uint32_t cpu_count;
     struct aarch64_cpu cpus[AARCH64_MAX_CPUS];
+    struct aarch64_sd sd[AARCH64_MAX_SD];
+    unsigned sd_count;
     int psci_method;
 };
 

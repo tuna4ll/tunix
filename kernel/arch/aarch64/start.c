@@ -5,6 +5,7 @@
 #include "../../include/kstring.h"
 #include "../../include/percpu.h"
 #include "../../include/pmm.h"
+#include "../../include/sdhci.h"
 #include "../../include/serial.h"
 #include "../../include/vmm.h"
 #include "aarch64.h"
@@ -257,6 +258,27 @@ static void discover_devices(void) {
         const char *method = fdt_property(&node, "method", NULL);
         if (method && text_equal(method, "smc")) aarch64_platform.psci_method = PSCI_SMC;
         else if (method && text_equal(method, "hvc")) aarch64_platform.psci_method = PSCI_HVC;
+    }
+
+    static const char *const sd_compatibles[] = {
+        "brcm,bcm2711-emmc2", "brcm,bcm2835-sdhci", "arasan,sdhci-5.1", "arasan,sdhci-8.9a",
+        "snps,dwcmshc-sdhci", "rockchip,rk3588-dwcmshc", "rockchip,rk3568-dwcmshc",
+    };
+    for (unsigned kind = 0; kind < sizeof(sd_compatibles) / sizeof(sd_compatibles[0]); kind++) {
+        for (unsigned index = 0; fdt_find_compatible(sd_compatibles[kind], index, &node) == 0; index++) {
+            const char *status = fdt_property(&node, "status", NULL);
+            if (status && !text_equal(status, "okay") && !text_equal(status, "ok")) continue;
+            if (aarch64_platform.sd_count >= AARCH64_MAX_SD) break;
+            if (fdt_reg_cpu(&node, 0, &base, &size) != 0) continue;
+            int duplicate = 0;
+            for (unsigned seen = 0; seen < aarch64_platform.sd_count; seen++)
+                if (aarch64_platform.sd[seen].physical == base) duplicate = 1;
+            if (duplicate) continue;
+            struct aarch64_sd *sd = &aarch64_platform.sd[aarch64_platform.sd_count++];
+            sd->physical = base;
+            sd->clock_hz = property_u32(&node, "clock-frequency", 0);
+            sd->quirks = fdt_is_compatible(&node, "brcm,bcm2835-sdhci") ? SDHCI_QUIRK_WRITE_DELAY : 0;
+        }
     }
 
     aarch64_platform.cpu_count = 0;

@@ -1,6 +1,7 @@
 #include <stdint.h>
 
 #include "../../include/pci.h"
+#include "../../include/sdhci.h"
 #include "../../include/platform.h"
 #include "../../include/serial.h"
 #include "../../include/vmm.h"
@@ -55,6 +56,13 @@ void aarch64_pci_init(void) {
 void arch_probe_buses(void) {
     gic_init();
     aarch64_pci_init();
+    for (unsigned index = 0; index < aarch64_platform.sd_count; index++) {
+        const struct aarch64_sd *sd = &aarch64_platform.sd[index];
+        uint64_t registers = vmm_map_device(sd->physical, 0x1000ULL);
+        if (!registers) continue;
+        kprintf("SDHCI: controller at %p\n", (void *)sd->physical);
+        sdhci_attach(registers, sd->clock_hz, sd->quirks);
+    }
 }
 
 extern uint64_t psci_smc(uint64_t function, uint64_t first, uint64_t second, uint64_t third);
