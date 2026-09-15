@@ -1,5 +1,6 @@
 #include <stdint.h>
 
+#include "../../include/percpu.h"
 #include "../../include/vmm.h"
 #include "aarch64.h"
 
@@ -15,6 +16,7 @@ extern void panic(const char *message) __attribute__((noreturn));
 #define GICD_IPRIORITYR 0x0400U
 #define GICD_ITARGETSR 0x0800U
 #define GICD_ICFGR 0x0C00U
+#define GICD_SGIR 0x0F00U
 #define GICD_IROUTER 0x6000U
 
 #define GICR_TYPER 0x0008U
@@ -29,9 +31,12 @@ extern void panic(const char *message) __attribute__((noreturn));
 #define GICC_EOIR 0x10U
 
 #define PRIORITY_DEFAULT 0xA0U
+#define MPIDR_AFFINITY_MASK 0xFF00FFFFFFULL
 
 static uint64_t distributor;
-static uint64_t redistributor;
+static uint64_t redistributor_base;
+static uint64_t redistributor_frames;
+static uint64_t redistributors[SMP_MAX_CPUS];
 static uint64_t cpu_interface;
 static unsigned lines;
 
@@ -51,6 +56,18 @@ static void write64(uint64_t base, uint32_t offset, uint64_t value) {
     *(volatile uint64_t *)(base + offset) = value;
 }
 
+static uint64_t current_mpidr(void) {
+    uint64_t value;
+    __asm__ volatile("mrs %0, mpidr_el1" : "=r"(value));
+    return value;
+}
+
+static void banked_defaults(uint64_t base) {
+    write32(base, GICD_ICENABLER, 0xFFFFFFFFU);
+    for (unsigned line = 0; line < 32; line++)
+        *(volatile uint8_t *)(base + GICD_IPRIORITYR + line) = PRIORITY_DEFAULT;
+}
+
 static void distributor_defaults(void) {
     for (unsigned line = 32; line < lines; line += 32) {
         write32(distributor, GICD_ICENABLER + line / 8U, 0xFFFFFFFFU);
@@ -61,42 +78,31 @@ static void distributor_defaults(void) {
         *(volatile uint8_t *)(distributor + GICD_IPRIORITYR + line) = PRIORITY_DEFAULT;
 }
 
-static void init_v3(void) {
-    uint64_t mpidr;
-    __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
+static void cpu_local_v3(unsigned index) {
+    uint64_t mpidr = current_mpidr();
     uint64_t affinity = ((mpidr >> 32) & 0xFFULL) << 24 | (mpidr & 0xFFFFFFULL);
-
-    write32(distributor, GICD_CTLR, 0);
-    distributor_defaults();
-    for (unsigned line = 32; line < lines; line++)
-        write64(distributor, GICD_IROUTER + line * 8U, mpidr & 0xFF00FFFFFFULL);
-    write32(distributor, GICD_CTLR, (1U << 4) | (1U << 1));
-
-    uint64_t frames = aarch64_platform.gic_redistributor_size / GICR_FRAME_BYTES;
-    if (frames > aarch64_platform.cpu_count && aarch64_platform.cpu_count) frames = aarch64_platform.cpu_count;
-    if (!frames) frames = 1;
-    uint64_t mapped = vmm_map_device(aarch64_platform.gic_redistributor, frames * GICR_FRAME_BYTES);
-    if (!mapped) panic("GIC: redistributors could not be mapped");
-    redistributor = 0;
-    for (uint64_t frame = 0; frame < frames; frame++) {
-        uint64_t candidate = mapped + frame * GICR_FRAME_BYTES;
+    uint64_t found = 0;
+    for (uint64_t frame = 0; frame < redistributor_frames; frame++) {
+        uint64_t candidate = redistributor_base + frame * GICR_FRAME_BYTES;
         if ((read64(candidate, GICR_TYPER) >> 32) == affinity) {
-            redistributor = candidate;
+            found = candidate;
             break;
         }
     }
-    if (!redistributor) redistributor = mapped;
+    if (!found) {
+        if (index) panic("GIC: no redistributor for this processor");
+        found = redistributor_base;
+    }
+    if (index < SMP_MAX_CPUS) redistributors[index] = found;
 
-    uint32_t waker = read32(redistributor, GICR_WAKER);
-    write32(redistributor, GICR_WAKER, waker & ~(1U << 1));
-    for (unsigned spin = 0; spin < 1000000U && (read32(redistributor, GICR_WAKER) & (1U << 2)); spin++) {
+    uint32_t waker = read32(found, GICR_WAKER);
+    write32(found, GICR_WAKER, waker & ~(1U << 1));
+    for (unsigned spin = 0; spin < 1000000U && (read32(found, GICR_WAKER) & (1U << 2)); spin++) {
     }
 
-    uint64_t sgi = redistributor + GICR_SGI_BASE;
-    write32(sgi, GICD_ICENABLER, 0xFFFFFFFFU);
+    uint64_t sgi = found + GICR_SGI_BASE;
+    banked_defaults(sgi);
     write32(sgi, GICD_IGROUPR, 0xFFFFFFFFU);
-    for (unsigned line = 0; line < 32; line++)
-        *(volatile uint8_t *)(sgi + GICD_IPRIORITYR + line) = PRIORITY_DEFAULT;
 
     uint64_t sre;
     __asm__ volatile("mrs %0, ICC_SRE_EL1" : "=r"(sre));
@@ -106,18 +112,8 @@ static void init_v3(void) {
     __asm__ volatile("msr ICC_IGRPEN1_EL1, %0; isb" : : "r"(1ULL) : "memory");
 }
 
-static void init_v2(void) {
-    write32(distributor, GICD_CTLR, 0);
-    distributor_defaults();
-    for (unsigned line = 32; line < lines; line++)
-        *(volatile uint8_t *)(distributor + GICD_ITARGETSR + line) = 0x01U;
-    for (unsigned line = 0; line < 32; line++)
-        *(volatile uint8_t *)(distributor + GICD_IPRIORITYR + line) = PRIORITY_DEFAULT;
-    write32(distributor, GICD_ICENABLER, 0xFFFFFFFFU);
-    write32(distributor, GICD_CTLR, 1U);
-
-    cpu_interface = vmm_map_device(aarch64_platform.gic_cpu_interface, 0x2000ULL);
-    if (!cpu_interface) panic("GIC: cpu interface could not be mapped");
+static void cpu_local_v2(void) {
+    banked_defaults(distributor);
     write32(cpu_interface, GICC_PMR, 0xF0U);
     write32(cpu_interface, GICC_BPR, 0U);
     write32(cpu_interface, GICC_CTLR, 1U);
@@ -130,15 +126,48 @@ void gic_init(void) {
     if (!distributor) panic("GIC: distributor could not be mapped");
     lines = ((read32(distributor, GICD_TYPER) & 0x1FU) + 1U) * 32U;
     if (lines > 1020U) lines = 1020U;
-    if (aarch64_platform.gic_version == 3) init_v3();
-    else init_v2();
+
+    write32(distributor, GICD_CTLR, 0);
+    distributor_defaults();
+
+    if (aarch64_platform.gic_version == 3) {
+        uint64_t affinity = current_mpidr() & MPIDR_AFFINITY_MASK;
+        for (unsigned line = 32; line < lines; line++)
+            write64(distributor, GICD_IROUTER + line * 8U, affinity);
+        write32(distributor, GICD_CTLR, (1U << 4) | (1U << 1));
+
+        redistributor_frames = aarch64_platform.gic_redistributor_size / GICR_FRAME_BYTES;
+        if (redistributor_frames > SMP_MAX_CPUS) redistributor_frames = SMP_MAX_CPUS;
+        if (!redistributor_frames) redistributor_frames = 1;
+        redistributor_base = vmm_map_device(aarch64_platform.gic_redistributor,
+                                            redistributor_frames * GICR_FRAME_BYTES);
+        if (!redistributor_base) panic("GIC: redistributors could not be mapped");
+        cpu_local_v3(0);
+    } else {
+        for (unsigned line = 32; line < lines; line++)
+            *(volatile uint8_t *)(distributor + GICD_ITARGETSR + line) = 0x01U;
+        write32(distributor, GICD_CTLR, 1U);
+        cpu_interface = vmm_map_device(aarch64_platform.gic_cpu_interface, 0x2000ULL);
+        if (!cpu_interface) panic("GIC: cpu interface could not be mapped");
+        cpu_local_v2();
+    }
+    gic_enable_interrupt(AARCH64_SGI_FLUSH);
     kprintf("GIC: v%d with %u lines\n", aarch64_platform.gic_version, lines);
+}
+
+void gic_init_secondary(unsigned index) {
+    if (aarch64_platform.gic_version == 3) cpu_local_v3(index);
+    else cpu_local_v2();
+    gic_enable_interrupt(AARCH64_SGI_FLUSH);
 }
 
 void gic_enable_interrupt(uint32_t intid) {
     uint32_t bit = 1U << (intid % 32U);
     if (intid < 32U && aarch64_platform.gic_version == 3) {
-        write32(redistributor + GICR_SGI_BASE, GICD_ISENABLER, bit);
+        unsigned index = cpu_current()->index;
+        uint64_t base = index < SMP_MAX_CPUS && redistributors[index] ? redistributors[index]
+                                                                     : redistributor_base;
+        write32(base + GICR_SGI_BASE, GICD_ISENABLER, bit);
         return;
     }
     write32(distributor, GICD_ISENABLER + (intid / 32U) * 4U, bit);
@@ -159,4 +188,13 @@ void gic_end_of_interrupt(uint32_t intid) {
         return;
     }
     write32(cpu_interface, GICC_EOIR, intid);
+}
+
+void gic_send_flush_ipi(void) {
+    if (aarch64_platform.gic_version == 3) {
+        uint64_t value = (1ULL << 40) | ((uint64_t)AARCH64_SGI_FLUSH << 24);
+        __asm__ volatile("msr ICC_SGI1R_EL1, %0; isb" : : "r"(value) : "memory");
+        return;
+    }
+    write32(distributor, GICD_SGIR, (1U << 24) | AARCH64_SGI_FLUSH);
 }

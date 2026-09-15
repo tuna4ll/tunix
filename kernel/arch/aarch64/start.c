@@ -258,8 +258,17 @@ static void discover_devices(void) {
     }
 
     aarch64_platform.cpu_count = 0;
-    while (fdt_find_device_type("cpu", aarch64_platform.cpu_count, &node) == 0)
-        aarch64_platform.cpu_count++;
+    while (fdt_find_device_type("cpu", aarch64_platform.cpu_count, &node) == 0) {
+        unsigned index = aarch64_platform.cpu_count++;
+        if (index >= AARCH64_MAX_CPUS) continue;
+        if (fdt_reg(&node, 0, &base, &size) == 0) aarch64_platform.cpus[index].mpidr = base;
+        const char *method = fdt_property(&node, "enable-method", NULL);
+        uint32_t length = 0;
+        const uint8_t *release = fdt_property(&node, "cpu-release-addr", &length);
+        if (method && text_equal(method, "spin-table") && release && length == 8U)
+            aarch64_platform.cpus[index].release_address =
+                ((uint64_t)fdt_read32(release) << 32) | fdt_read32(release + 4);
+    }
 }
 
 static void map_direct_memory(void) {

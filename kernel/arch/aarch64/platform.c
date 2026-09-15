@@ -57,18 +57,19 @@ void arch_probe_buses(void) {
     aarch64_pci_init();
 }
 
-extern uint64_t psci_smc(uint64_t function);
-extern uint64_t psci_hvc(uint64_t function);
+extern uint64_t psci_smc(uint64_t function, uint64_t first, uint64_t second, uint64_t third);
+extern uint64_t psci_hvc(uint64_t function, uint64_t first, uint64_t second, uint64_t third);
 
-static void psci_call(uint64_t function) {
-    if (aarch64_platform.psci_method == PSCI_SMC) psci_smc(function);
-    else if (aarch64_platform.psci_method == PSCI_HVC) psci_hvc(function);
+uint64_t psci_call(uint64_t function, uint64_t first, uint64_t second, uint64_t third) {
+    if (aarch64_platform.psci_method == PSCI_SMC) return psci_smc(function, first, second, third);
+    if (aarch64_platform.psci_method == PSCI_HVC) return psci_hvc(function, first, second, third);
+    return (uint64_t)-1;
 }
 
 void psci_system_off(void) {
-    psci_call(PSCI_SYSTEM_OFF);
+    psci_call(PSCI_SYSTEM_OFF, 0, 0, 0);
 }
 
 void psci_system_reset(void) {
-    psci_call(PSCI_SYSTEM_RESET);
+    psci_call(PSCI_SYSTEM_RESET, 0, 0, 0);
 }

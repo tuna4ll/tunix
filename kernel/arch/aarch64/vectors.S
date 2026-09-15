@@ -89,6 +89,7 @@ el0_irq:
     SAVE_FRAME
     mov     x0, sp
     bl      aarch64_irq
+    cbz     x0, 2f
     ldr     x9, [sp, #FRAME_SPSR]
     tst     x9, #0xf
     b.ne    1f
@@ -97,7 +98,7 @@ el0_irq:
     cbz     x10, 1f
     sub     sp, x10, #FRAME_SIZE
 1:  bl      kernel_unlock_from_isr
-    RESTORE_FRAME
+2:  RESTORE_FRAME
     eret
 
 el0_sync:

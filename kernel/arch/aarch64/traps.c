@@ -6,6 +6,7 @@
 #include "../../include/process.h"
 #include "../../include/process_arch.h"
 #include "../../include/signal.h"
+#include "../../include/smp.h"
 #include "../../include/timer.h"
 #include "aarch64.h"
 
@@ -116,19 +117,26 @@ void aarch64_unexpected(struct syscall_frame *frame, uint64_t kind) {
     panic("unexpected exception");
 }
 
-void aarch64_irq(struct interrupt_frame *frame) {
+int aarch64_irq(struct interrupt_frame *frame) {
     uint32_t intid = gic_acknowledge();
+    if (intid >= 1020U) return 0;
+    if (intid == AARCH64_SGI_FLUSH) {
+        gic_end_of_interrupt(intid);
+        smp_flush_interrupt();
+        return 0;
+    }
+
     klock_note(KLOCK_NOTE_INTERRUPT | (intid & 0xFFFFU));
     kernel_lock_from_isr();
-    if (intid >= 1020U) return;
-
     if (intid == aarch64_platform.timer_interrupt) {
         aarch64_timer_rearm();
         gic_end_of_interrupt(intid);
-        timer_irq(frame);
+        if (cpu_current()->index == 0) timer_irq(frame);
+        else process_timer_interrupt(frame);
     } else {
         gic_end_of_interrupt(intid);
         irq_dispatch(IRQ_VECTOR_FIRST + intid);
     }
     relocate_user_frame(frame);
+    return 1;
 }
