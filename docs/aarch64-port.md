@@ -1,256 +1,120 @@
 # aarch64 Port
 
-Tunix is being ported to 64-bit ARM (AArch64). This documents the state of that
-port: what boots today, how it is built, and what remains. The x86-64 kernel is
-unaffected — the ARM backend lives entirely under `kernel/arch/aarch64/` and has
-its own build target.
-
-## What works
-
-On QEMU's `virt` machine (GICv3, Cortex-A72) the kernel boots into the high half,
-sets up memory management, reads `/sbin/init` off an ext2 disk over virtio-blk,
-and runs it at EL0 on a proper process stack under a preemptive scheduler:
+Tunix is being ported to 64-bit ARM. The port is no longer a separate bring-up
+kernel: the same portable kernel that runs the x86-64 desktop — process model,
+scheduler, signals, VFS, ext2/ext3, the block layer, PCI, NVMe, pipes, sockets
+and TTYs — is built for AArch64 and boots on QEMU's `virt` machine, mounts an
+ext3 root from an NVMe disk and runs `/sbin/init` at EL0.
 
 ```
-=== Tunix aarch64 ===
-running at EL1, kernel at 0xffff000040000000 (higher half)
-device tree @ 0x48000000: 2048 MiB RAM @ 40000000, 4 CPU(s)
-PMM: 523933 free frames (2046 MiB)
-heap: 16383 KiB, alloc/free stress OK, reclaimed fully
-address spaces: identity map dropped, TTBR0 = 0x41063000
-VMM: VA 0x400000 reads aaaa in A and bbbb in B, isolation OK
-VMM: destroying a space reclaimed 4 page-table frames
-virtio-mmio slot 31: block (id 2, version 1, irq 79)
-virtio-blk: 32768 sectors (16 MiB)
-ext2: read /sbin/init from inode 15, 1200 bytes
-GICv3 initialised
-generic timer armed at 100 Hz, enabling IRQs
-scheduler: 3 tasks queued behind the idle task
-[task 1] round 0 at tick 1
-[task 2] round 0 at tick 2
-[task 3] loaded /sbin/init (1200 bytes), phdr 0x400040, sp 0x503e60
-hello from a real ELF binary at EL0
-[aarch64] EL0 task exited with status 7
-[task 3] back at EL1
-[task 1] round 1 at tick 22
-[task 2] round 1 at tick 29
-[task 1] round 2 at tick 43
-[task 2] round 2 at tick 56
-[task 1] finished
-[task 2] finished
-[aarch64] alive at 2 s, task 0 running, heap 16382 KiB free
+TUNIX: aarch64 kernel at 0xffffffff80000000, loaded at 0x40200000, device tree at 0x48000000
+TUNIX: 1 memory range(s), 5 region(s), GICv3, timer 27, 1 cpu(s)
+PMM: 2036 MiB usable of 2036 MiB installed, ceiling 8192 MiB
+GIC: v3 with 288 lines
+PCI: ECAM at 0x4010000000, buses 0-255
+BLOCK: sda (nvme0), 131072 sectors
+BLOCK: root on sda
+EXT3: journal ready, 1024 blocks
+TUNIX: starting /sbin/init
+PROCTEST fork ok
+PROCTEST parent tls+fpu across switches ok
+PROCTEST clone thread ok
+PROCTEST thread tls and stack ok
+PROCTEST sigreturn reads the context ok
+PROCTEST read restarted with SA_RESTART ok
+PROCTEST execve ok
+PROCTEST PASS
 ```
 
-The interleaved rounds are the timer preempting the workers. The heap settles one
-KiB below where it started because the finished tasks' kernel stacks are handed
-back while the buffer holding `/sbin/init` is kept for the life of the boot.
-
-Bring-up covers, in order:
-
-1. **Boot & relocation** (`boot.S`). Entered via the arm64 Linux Image protocol,
-   so the firmware hands the DTB in `x0`. The loader may place the image at any
-   2 MiB-aligned address, so the head code copies it down to the physical base it
-   was built for — without this the vector table and globals point at the wrong
-   memory. Everything before the MMU is reached with `adr`/`adrp`, which yields
-   physical addresses while the kernel runs below its virtual link base.
-2. **EL2 → EL1**. If entered at EL2, it enables the EL1 physical timer/counter
-   (`CNTHCTL_EL2`) and GIC system-register access (`ICC_SRE_EL2`), then `eret`s
-   to EL1h.
-3. **MMU and the high half** (`mmu.c`). The kernel is linked at
-   `0xFFFF000040000000` and the high half is a *direct map*: `VA = PA +
-   0xFFFF000000000000`. Because a high address's low 48 bits are exactly the
-   physical address, one set of tables serves both the boot identity map
-   (`TTBR0`) and the kernel map (`TTBR1`). The map is built from 1 GiB blocks —
-   device memory for the peripheral window, normal write-back cacheable for RAM —
-   with `MAIR_EL1`/`TCR_EL1` set and `SCTLR_EL1.{M,C,I}` enabled. Head code then
-   branches to the virtual alias, moves `SP` and `VBAR_EL1` up, and the kernel
-   runs virtual from there on.
-4. **Device tree** (`fdt.c`). A minimal flattened-device-tree reader pulls the RAM
-   base, total RAM and the CPU count out of the DTB, read through the direct map.
-5. **Exceptions** (`exceptions.S`). A 16-entry `VBAR_EL1` vector table. Entry
-   saves `x0`–`x30` plus `ELR_EL1`, `SPSR_EL1` and `SP_EL0`, which is what makes
-   returning to EL0 — and taking interrupts while there — safe.
-6. **Interrupts** (`gic.c`). GICv3: distributor + redistributor wake, the timer
-   PPI enabled as Group 1, and the CPU interface (`ICC_SRE/PMR/IGRPEN1_EL1`)
-   brought up.
-7. **Timer** (`timer.c`). The architected generic timer at 100 Hz, acknowledged
-   and re-armed from the IRQ handler; it also drives preemption.
-8. **Console** (`uart.c`). A PL011 driver with a small `kprintf`. MMIO goes
-   through `phys_to_virt`, so the same driver works before and after the MMU.
-9. **Physical memory** (`pmm.c`). A frame bitmap over the DTB-reported RAM, with
-   the kernel image, heap arena and DTB reserved; single frames or a contiguous
-   run through `pmm_alloc_page`/`pmm_alloc_pages`.
-10. **Page mapping** (`vmm.c`). A 4 KiB, four-level `vmm_map`/`vmm_unmap` that
-    grows intermediate tables from the PMM and shoots down the TLB entry.
-    Permissions are explicit: `VMM_WRITE`, `VMM_USER` and `VMM_EXEC` pick the
-    `AP` bits and leave `PXN`/`UXN` set so only one exception level can execute
-    any given page.
-11. **Kernel heap** (`heap.c`). A first-fit `kmalloc`/`kfree` with block splitting
-    and free-run coalescing over a 16 MiB arena reserved from the PMM.
-12. **User address spaces** (`vmm.c`). `vmm_create_space`/`vmm_switch_space`/
-    `vmm_destroy_space` give each process a private `TTBR0` root while the kernel
-    stays in `TTBR1`. Installing the first one is what retires the boot identity
-    map — the kernel keeps running purely out of the high half, which is the proof
-    that the split is real. The self-test maps one VA to two different frames in
-    two spaces and confirms each space reads back its own data.
-13. **EL0 and syscalls** (`usermode.S`, `syscall.c`). `aarch64_enter_user` sets
-    `SP_EL0`/`ELR_EL1`/`SPSR_EL1` and `eret`s to EL0; `aarch64_leave_user`
-    restores the saved kernel stack so entering user mode looks like an ordinary
-    call that returns. The save slot lives in the task, so an EL0 task that is
-    preempted still returns to its own kernel context. `SVC` from EL0 is
-    recognised by exception class `0x15` and dispatched with the Linux AArch64
-    convention (`x8` = number, `x0`–`x5` = arguments, result in `x0`). `write`,
-    `exit` and `exit_group` are implemented; anything else returns `-ENOSYS`.
-14. **Tasks and preemption** (`sched.c`, `switch.S`). Each task gets a 16 KiB
-    kernel stack and a saved-`SP` context of the callee-saved registers; the boot
-    path becomes the idle task. `aarch64_context_switch` swaps stacks, and the
-    timer IRQ calls into the round-robin scheduler, so tasks are preempted rather
-    than cooperative. A finished task is marked done and its stack is freed by the
-    next scheduler pass, once nothing is standing on it.
-15. **ELF loading** (`elf.c`). A real static `ET_EXEC`/`EM_AARCH64` binary is
-    validated, its `PT_LOAD` segments are backed with fresh frames, the file
-    bytes are copied through the direct map, the remainder of each segment is
-    left zeroed for `.bss`, and the pages are mapped with the permissions the
-    segment asks for. It also reports where the program headers landed, which is
-    what `AT_PHDR` needs. Loading is from a memory buffer, so the same call serves
-    a file read off the disk and the copy embedded in the kernel image.
-16. **virtio-mmio and virtio-blk** (`virtio.c`). QEMU's `virt` lays 32 virtio-mmio
-    slots end to end at `0x0A000000`, SPI 16 upwards, and fills them from the top;
-    the probe walks them and reports what is plugged in. The block driver then
-    takes the device through the legacy (version 1) handshake — status bits,
-    feature selection, guest page size, a split virtqueue published through the
-    single page-frame-number register — and reads sectors with the usual
-    three-descriptor chain (header, data, status), polling the used ring rather
-    than taking the interrupt.
-17. **ext2** (`ext2.c`). Enough of the filesystem to boot from: superblock, group
-    descriptors, inodes, directory entries, and file data through the direct
-    blocks plus one level of indirection. It is read-only, assumes 4 KiB blocks
-    like the x86-64 driver does, and ignores the journal, which is safe for a
-    cleanly unmounted image. Every field is read at its byte offset rather than
-    through a packed struct, so nothing depends on how the compiler lays one out
-    under `-mstrict-align`. `/sbin/init` is resolved, read into the heap, and
-    handed to the ELF loader; the embedded binary is only the fallback when no
-    disk is attached.
-18. **The initial process stack** (`ustack.c`). The layout `kernel/elf.c` builds
-    for x86-64, mirrored: the random bytes and platform string at the top, then
-    the environment and argument strings, then a 16-byte-aligned block holding
-    the auxiliary vector, the `envp` and `argv` arrays and `argc`. The same
-    eighteen auxiliary entries are supplied, with `AT_PLATFORM` reading
-    `"aarch64"`. `AT_RANDOM` is seeded from the cycle counter, which is not a
-    cryptographic source and will have to be replaced. `support/aarch64/initargs.c`
-    is a freestanding program that walks what it was given and prints it back:
-
-    ```
-    [task 3] loaded /sbin/init (2912 bytes), phdr 0x400040, sp 0x503e60
-    initargs: argc=1
-    initargs: argv[0]=/sbin/init
-    initargs: envc=2
-    initargs: env PATH=/bin:/sbin
-    initargs: env TERM=linux
-    initargs: auxv type=6 value=0x1000       (AT_PAGESZ)
-    initargs: auxv type=3 value=0x400040     (AT_PHDR)
-    initargs: auxv type=4 value=0x38         (AT_PHENT)
-    initargs: auxv type=5 value=0x3          (AT_PHNUM)
-    initargs: auxv type=9 value=0x400120     (AT_ENTRY)
-    ...
-    initargs: auxv entries=18
-    INITARGS DONE
-    ```
-
-    `AT_PHDR`, `AT_PHENT`, `AT_PHNUM` and `AT_ENTRY` match what `readelf` reports
-    for the binary, and the stack pointer handed to EL0 is 16-byte aligned.
+`support/tests/proctest.c` builds for both architectures from one source, so the
+same checks — fork, CLONE_SETTLS threads, TLS and FPU state across context
+switches, SA_SIGINFO handlers and their context, EINTR against SA_RESTART,
+execve — run on either kernel.
 
 ## Building and running
 
 ```sh
-make aarch64                 # -> build/kernel-aarch64.img (a flat arm64 Image)
-make run-aarch64             # boot it under qemu-system-aarch64 -M virt
+make aarch64-core            # -> build/kernel-aarch64-core.img, an arm64 Image
+make run-aarch64-core QEMU_AARCH64_CORE_DISKS="-drive file=disk.img,if=none,id=nv0,format=raw \
+    -device nvme,drive=nv0,serial=tunix -append root=LABEL=tunix-root"
 ```
 
-The toolchain is `aarch64-linux-gnu-gcc`; QEMU is `qemu-system-aarch64`. The
-build also links two freestanding user programs: `hello.elf`, embedded in the
-kernel image as the fallback init, and `initargs.elf`, the stack reporter above.
-
-To boot from a disk instead, build an ext2 image with a `/sbin/init` in it — the
-same `mkfs` options the x86-64 image uses — and attach it:
+The toolchain is `aarch64-linux-gnu-gcc`. A root disk is an ext2/ext3 image made
+with the same `mkfs` options `support/image.sh` uses for x86-64:
 
 ```sh
-mkdir -p root/sbin && cp build/aarch64/initargs.elf root/sbin/init
-truncate -s 16M disk.img
+mkdir -p root/sbin root/dev root/proc root/sys root/tmp
+aarch64-linux-gnu-gcc -static -nostdlib -nostartfiles -ffreestanding -O2 \
+    support/tests/proctest.c -o root/sbin/init
+truncate -s 64M disk.img
 mkfs.ext3 -q -r 1 -b 4096 -I 128 -m 1 -L tunix-root \
     -O ^resize_inode,^dir_index,^ext_attr,^metadata_csum,^64bit,^huge_file,^dir_nlink,^extra_isize \
     -d root disk.img
-
-qemu-system-aarch64 -M virt,gic-version=3 -cpu cortex-a72 -m 2048M -nographic \
-    -kernel build/kernel-aarch64.img \
-    -drive file=disk.img,if=none,id=d0,format=raw -device virtio-blk-device,drive=d0
 ```
 
-The x86-64 build (`make`, `make kernel`) is untouched — its source glob prunes
-`kernel/arch/aarch64`, and the two trees produce a bit-identical `kernel.elf`.
+`make aarch64` still builds the original bring-up kernel from
+`kernel/arch/aarch64/bringup/`, which is kept only as a reference until the
+portable kernel covers everything it demonstrated.
+
+## How the port is put together
+
+The portable kernel reaches the machine through a small set of seams, each with
+an x86-64 and an AArch64 side. Every step of that work was checked by building
+the x86-64 kernel before and after and comparing the objects: where the seam
+only renames an operation, x86-64 compiles to the same instructions.
+
+| Seam | x86-64 | AArch64 |
+| --- | --- | --- |
+| `include/cpu.h` | `pause`, `cli`/`sti`, `rdtsc`, `cpuid` | `yield`, DAIF, `cntvct_el0`, `MIDR_EL1` |
+| `include/percpu.h` | GS base | `TPIDR_EL1` |
+| `include/syscall_abi.h` | `rax`, `rdi`…`r9`, `syscall` is 2 bytes | `x8`, `x0`…`x5`, `svc` is 4 bytes |
+| `include/process_arch.h` | register file, FS base, `ucontext` | `x0`–`x30`, `TPIDR_EL0`, arm64 `ucontext` |
+| `include/vmm_arch.h` | x86 page table entries, CR3 | arm64 descriptors, TTBR0/TTBR1 |
+| `include/platform.h` | PIC, GDT/IDT, IOAPIC routing | GIC, PCIe ECAM, generic timer |
+| `time.h` hooks | TSC calibration, CMOS | `CNTFRQ_EL0`, PL031 |
+| `random.h` hooks | RDSEED/RDRAND | RNDRRS/RNDR |
+
+**Paging.** `kernel/vmm.c` is shared. AArch64 with a 4 KiB granule and 48-bit
+virtual addresses walks four levels indexed exactly like x86-64, so copy-on-write,
+fork, pruning, translation and user copies are one implementation; only the entry
+encoding differs. Every address space has one root that is written to both
+`TTBR0_EL1` and `TTBR1_EL1`, which reproduces the CR3 model the core was written
+for. `T0SZ` is 17, so user space ends at the same `USER_ADDRESS_LIMIT` as on
+x86-64. The logical `PAGE_*` flags become AP, UXN/PXN, nG and AF bits, with
+copy-on-write, shared and file-backed pages in the software bits 55–58. The
+direct map covers RAM only, never the MMIO between memory ranges.
+
+**Boot.** `head.S` carries the arm64 Image header with the "place anywhere" flag,
+so any loader that speaks that protocol can start it at any 2 MiB boundary. It
+drops from EL2 to EL1 when entered there, enabling GICv3 system registers only
+when `ID_AA64PFR0_EL1` says they exist, sets `IPS` from `ID_AA64MMFR0_EL1`, and
+builds just enough tables — the image in both halves and the device tree — to
+reach `aarch64_start()` at the kernel's link address. Everything else comes from
+the device tree: memory ranges, `/memreserve/` and `/reserved-memory`, the
+initrd, the command line, the console named by `stdout-path` (PL011 or MMIO
+16550/DesignWare with `reg-shift` and `reg-io-width`), the GIC, the timer
+interrupt, the RTC, the PCIe host bridge and its windows, and PSCI.
+
+**Exceptions.** `vectors.S` saves the same 288-byte `struct syscall_frame` the
+dispatcher reads. The x86-64 rule that a returning frame is copied to the top of
+the current process's kernel stack carries over: the path back to EL0 loads
+`SP` from the per-CPU `kernel_rsp`, so `SP_EL1` is already correct on the next
+entry. System calls use the generic AArch64 numbers; `arch/aarch64/syscalls.c`
+maps them onto the kernel's table and keeps the result in the frame's reserved
+slot, so a restarted call does not overwrite `x8`.
+
+**Devices.** On a machine without firmware PCI setup, `pci_assign_resources()`
+sizes and places memory BARs from the host bridge's windows. NVMe runs as-is.
 
 ## What is next
 
-A binary comes off a real filesystem, gets a conforming process stack, and runs
-in its own address space. What it still cannot be is a real program:
-
-- **The syscall surface** — three calls is enough for a freestanding binary;
-  glibc needs a couple of hundred (`openat`, `mmap`, `brk`, `clone`, `futex`,
-  `ioctl`, …). This is the bulk of the remaining work.
-- **Writes and more devices** — the block path is read-only and polled, so
-  writing, virtio-console and anything that cannot busy-wait need the device's
-  SPI wired into the GIC (`GICD_ISENABLER`/`GICD_IROUTER`, which the PPI path
-  does not touch yet).
-- **Userland** — an AArch64 Void glibc rootfs, init, and a shell.
-- **Wiring the portable core** — the arch-neutral subsystems (vfs, ext2/3,
-  scheduler policy, the module loader core minus relocations) plug in behind a
-  small arch interface.
-
-  The first piece of that interface is in place. `kernel/include/syscall_abi.h`
-  defines `SYSCALL_NR`, `SYSCALL_ARG0`–`SYSCALL_ARG5`, `SYSCALL_RET`,
-  `SYSCALL_USER_SP` and `SYSCALL_REWIND`, with a mapping per architecture, and
-  `kernel/syscall.c` reaches the register file only through them — the
-  5900-line dispatcher no longer names a machine register anywhere. The number
-  and the result need separate accessors because AArch64 takes the number in
-  `x8` and returns in `x0` where x86-64 uses `rax` for both; `SYSCALL_REWIND`
-  exists because backing up over the trap instruction to restart a call means
-  two bytes on x86-64 (`syscall`) and four on AArch64 (`svc #0`). `struct
-  syscall_frame` is now selected per architecture in `syscall.h`, each variant
-  pinned by static assertions against the offsets its entry assembly writes by
-  hand. The x86-only parts of that file — installing `syscall_entry` through
-  the EFER/STAR/LSTAR MSRs — sit behind an architecture guard rather than in
-  the dispatch path.
-
-  The port does not keep a private copy of any of this: `kernel/arch/aarch64/`
-  includes the portable `syscall.h` and uses `struct syscall_frame` directly,
-  so the frame `exceptions.S` fills and the frame `kernel/syscall.c` reads are
-  the same declaration, and the static assertions that pin its 288 bytes are
-  checked when the port itself is compiled.
-
-  Every step of that migration was checked by rebuilding the x86-64 kernel and
-  comparing it byte for byte with the kernel from before the change: the
-  accessors expand to the same struct members, so `kernel.elf` is bit-identical
-  and the refactor is provably a no-op on the architecture that already works.
-
-  Where the portable core stands against the AArch64 compiler today: 56 of its
-  74 files build clean, including `vfs.c`, `ext2.c`, `ext3.c`, `file.c`,
-  `elf.c`, `heap.c`, `pmm.c`, `block.c`, all of `ipc/`, `net/` and `tty/`, and
-  now `syscall.c`. Of the 18 that do not, nine are x86 device drivers reaching
-  for port I/O — a concept AArch64 does not have, so `io.h` is now guarded to
-  x86-64 and those drivers simply are not built there. Six more stop at a
-  single instruction each (`rep stosb` in `memset`, `rdtsc`, `wrmsr`, `cpuid`)
-  and one wants a generated font header. The real work is `process.c`, which
-  saves the register file, builds child frames and lays out signal contexts by
-  register name; much of that is irreducibly architectural and belongs under
-  `kernel/arch/` rather than behind an accessor.
-- **Module loader** — `R_AARCH64_*` relocations and an AArch64 module area.
-
-### A note on SMP
-
-QEMU's `virt` exposes PSCI with `method = "hvc"`, i.e. the PSCI implementation
-lives at EL2. Since Tunix takes over EL2 and drops to EL1, an `HVC` from EL1
-would trap into our own (absent) EL2 handler rather than firmware, so secondary
-cores cannot be started that way as things stand. Bringing up SMP needs either a
-machine whose conduit is `smc` (an EL3 firmware, e.g. `virt,secure=on`) or a
-minimal EL2 stub that forwards PSCI calls. This is why SMP is sequenced after
-the single-core process work rather than before it.
+- **Userland ABI.** The kernel still fills x86-64 layouts where AArch64 differs:
+  `struct stat`, `O_*` flag values, `struct epoll_event` packing, `uname`'s
+  machine and `/proc/cpuinfo`. glibc on AArch64 also expects a signal return
+  trampoline when a program installs a handler without `SA_RESTORER`.
+- **Interrupts for devices.** Drivers currently poll. Wiring INTx through the
+  device tree's `interrupt-map` and MSI through the GICv3 ITS comes next.
+- **SMP** through PSCI `CPU_ON` (`smc` on real hardware).
+- **Display.** `simple-framebuffer` from the device tree, and a QEMU framebuffer.
+- **Real boards.** Beyond `virt`: GICv2 machines, non-ECAM PCIe hosts, SD/eMMC,
+  and UEFI/ACPI firmware.
