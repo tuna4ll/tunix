@@ -111,7 +111,9 @@ static void put_processors(void) {
         if (!cpu || !cpu->online) continue;
         uint64_t measured = 0;
         uint32_t count = 0;
+#if defined(__x86_64__)
         apic_timer_calibration(index, &measured, &count);
+#endif
         put("  cpu ");
         put_number(index);
         put("       apic_id ");

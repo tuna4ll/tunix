@@ -67,6 +67,11 @@ static inline void vmm_arch_invalidate(uint64_t address) {
     __asm__ volatile("invlpg (%0)" : : "r"(address) : "memory");
 }
 
+static inline int vmm_arch_direct_map_wanted(uint64_t physical) {
+    (void)physical;
+    return 1;
+}
+
 #elif defined(__aarch64__)
 
 #define PTE_ADDRESS_MASK 0x0000FFFFFFFFF000ULL
@@ -185,6 +190,12 @@ static inline void vmm_arch_write_root(uint64_t value) {
 
 static inline void vmm_arch_invalidate(uint64_t address) {
     __asm__ volatile("tlbi vaae1, %0; dsb sy; isb" : : "r"(address >> 12) : "memory");
+}
+
+int aarch64_physical_is_ram(uint64_t physical);
+
+static inline int vmm_arch_direct_map_wanted(uint64_t physical) {
+    return aarch64_physical_is_ram(physical);
 }
 
 #else

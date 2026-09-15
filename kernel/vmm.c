@@ -222,7 +222,8 @@ void vmm_init(void) {
         memset(table, 0, 4096);
         for (uint64_t i = 0; i < 512; i++) {
             uint64_t frame = gigabyte * 0x40000000ULL + i * 0x200000ULL;
-            table[i] = pte_block(frame, PAGE_PRESENT | PAGE_WRITE);
+            if (vmm_arch_direct_map_wanted(frame))
+                table[i] = pte_block(frame, PAGE_PRESENT | PAGE_WRITE);
         }
         direct_pdpt[gigabyte] = pte_table(table_physical, PAGE_PRESENT | PAGE_WRITE);
     }

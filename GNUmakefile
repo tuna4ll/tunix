@@ -278,6 +278,48 @@ $(AARCH64_INITARGS): support/aarch64/initargs.c
 		-fno-builtin -fno-tree-loop-distribute-patterns \
 		-fno-asynchronous-unwind-tables -o $@ $<
 
+AARCH64_CORE_BUILD := $(BUILD)/aarch64-core
+AARCH64_CORE_CFLAGS := -std=gnu11 -Wall -Wextra -Werror -ffreestanding \
+	-fno-stack-protector -fno-pic -fno-pie -fno-builtin \
+	-fno-asynchronous-unwind-tables -fno-unwind-tables -mgeneral-regs-only \
+	-mstrict-align -march=armv8-a -mno-outline-atomics -Os \
+	-ffunction-sections -fdata-sections \
+	-Ikernel/include -I$(BUILD)/generated $(KERNEL_CFLAGS_EXTRA)
+AARCH64_CORE_EXCLUDE := kernel/drivers/ata.c kernel/drivers/net/rtl8139.c
+AARCH64_CORE_SOURCES := $(filter-out $(AARCH64_CORE_EXCLUDE),$(shell find kernel -path kernel/arch -prune -o \( -name '*.c' -o -name '*.S' \) -print)) \
+	$(shell find kernel/arch/aarch64 -path kernel/arch/aarch64/bringup -prune -o \( -name '*.c' -o -name '*.S' \) -print)
+AARCH64_CORE_OBJECTS := $(AARCH64_CORE_SOURCES:%=$(AARCH64_CORE_BUILD)/%.o)
+AARCH64_CORE_KERNEL := $(BUILD)/kernel-aarch64-core.elf
+AARCH64_CORE_IMAGE := $(BUILD)/kernel-aarch64-core.img
+
+.PHONY: aarch64-core run-aarch64-core
+aarch64-core: $(AARCH64_CORE_IMAGE)
+
+$(AARCH64_CORE_KERNEL): $(AARCH64_CORE_OBJECTS) kernel/arch/aarch64/linker.ld
+	$(AARCH64_CC) -nostdlib -static -Wl,-T,kernel/arch/aarch64/linker.ld \
+		-Wl,--gc-sections -Wl,--build-id=none -Wl,-z,max-page-size=0x1000 \
+		$(AARCH64_CORE_OBJECTS) -lgcc -o $@
+
+$(AARCH64_CORE_IMAGE): $(AARCH64_CORE_KERNEL)
+	$(AARCH64_OBJCOPY) -O binary $< $@
+
+$(AARCH64_CORE_BUILD)/%.c.o: %.c $(TERMINAL_FONT_DATA)
+	@mkdir -p $(dir $@)
+	$(AARCH64_CC) $(AARCH64_CORE_CFLAGS) -MMD -MP -c $< -o $@
+
+$(AARCH64_CORE_BUILD)/%.S.o: %.S
+	@mkdir -p $(dir $@)
+	$(AARCH64_CC) $(AARCH64_CORE_CFLAGS) -MMD -MP -c $< -o $@
+
+$(AARCH64_CORE_OBJECTS): GNUmakefile
+
+-include $(AARCH64_CORE_OBJECTS:.o=.d)
+
+QEMU_AARCH64_CORE_DISKS ?=
+run-aarch64-core: $(AARCH64_CORE_IMAGE)
+	$(QEMU_AARCH64) -M virt,gic-version=3 -cpu cortex-a72 -m 2G -nographic \
+		-no-reboot -kernel $(AARCH64_CORE_IMAGE) $(QEMU_AARCH64_CORE_DISKS)
+
 QEMU_AARCH64 ?= qemu-system-aarch64
 run-aarch64: $(AARCH64_IMAGE)
 	$(QEMU_AARCH64) -M virt,gic-version=3 -cpu cortex-a72 -smp $(QEMU_SMP) \

@@ -20,7 +20,7 @@
 
 #elif defined(__aarch64__)
 
-#define SYSCALL_NR(frame)   ((frame)->x[8])
+#define SYSCALL_NR(frame)   ((frame)->reserved[0])
 #define SYSCALL_RET(frame)  ((frame)->x[0])
 #define SYSCALL_ARG0(frame) ((frame)->x[0])
 #define SYSCALL_ARG1(frame) ((frame)->x[1])

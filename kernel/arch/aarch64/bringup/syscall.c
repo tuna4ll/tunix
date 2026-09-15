@@ -10,7 +10,7 @@
 #define EBADF  9
 
 void aarch64_syscall_handler(struct syscall_frame *frame) {
-    uint64_t number = SYSCALL_NR(frame);
+    uint64_t number = frame->x[8];
 
     switch (number) {
     case SYS_WRITE: {
@@ -29,7 +29,7 @@ void aarch64_syscall_handler(struct syscall_frame *frame) {
     case SYS_EXIT_GROUP:
         kprintf("[aarch64] EL0 task exited with status %lu\n", SYSCALL_ARG0(frame));
         aarch64_leave_user();
-        return;                                      // not reached
+        return;
     default:
         kprintf("[aarch64] unimplemented syscall %lu from EL0\n", number);
         SYSCALL_RET(frame) = (uint64_t)-ENOSYS;

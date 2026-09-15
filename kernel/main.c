@@ -101,6 +101,7 @@ void kmain(const struct boot_info *boot) {
 #if TUNIX_BOOT_TIMINGS
     boot_log_stage("terminal initialization", &stage_started);
 #endif
+    arch_probe_buses();
     acpi_describe_machine();
     net_init();
     (void)xhci_init();
