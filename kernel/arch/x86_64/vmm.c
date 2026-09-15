@@ -1,15 +1,15 @@
-#include "include/build_config.h"
+#include "../../include/build_config.h"
 #include <stddef.h>
 #include <stdint.h>
-#include "include/kstring.h"
-#include "include/oplock.h"
+#include "../../include/kstring.h"
+#include "../../include/oplock.h"
 
 static int vmm_map_page_in_locked(uint64_t cr3_physical, uint64_t virtual_address,
                                   uint64_t physical_address, uint64_t flags);
-#include "include/boot.h"
-#include "include/pmm.h"
-#include "include/smp.h"
-#include "include/vmm.h"
+#include "../../include/boot.h"
+#include "../../include/pmm.h"
+#include "../../include/smp.h"
+#include "../../include/vmm.h"
 
 #define ADDRESS_MASK 0x000FFFFFFFFFF000ULL
 #define DIRECT_MAP_SIZE PMM_DIRECT_MAP_LIMIT
@@ -17,7 +17,6 @@ static int vmm_map_page_in_locked(uint64_t cr3_physical, uint64_t virtual_addres
 
 extern void panic(const char *msg) __attribute__((noreturn));
 extern void kprintf(const char *fmt, ...);
-/* Commits a reserved page the kernel is about to touch (see process.c). */
 extern int process_commit_area(uint64_t fault_address);
 extern int process_grow_user_stack(uint64_t fault_address);
 
@@ -65,8 +64,6 @@ void *vmm_phys_to_virt(uint64_t physical) {
     return (void *)(DIRECT_MAP_BASE + physical);
 }
 
-/* The other direction, and it has to accept two windows: the direct map, and
-   the kernel image, whose offset comes from the loader rather than a constant. */
 uint64_t vmm_virt_to_phys_direct(const void *virtual_address) {
     const struct boot_info *boot = boot_info();
     uint64_t value = (uint64_t)virtual_address;
@@ -175,13 +172,9 @@ static uint64_t *next_table(uint64_t *table, uint16_t index,
     return new_table;
 }
 
-/* Put write-combining where a page table entry can ask for it. Only slot 4 is
-   changed, because nothing selects it until a mapping sets bit 7. */
 #define IA32_PAT_MSR 0x277U
 #define CPUID_FEATURES_LEAF 1U
 #define CPUID_EDX_PAT (1U << 16)
-/* PA0..PA3 as the processor leaves them, PA4 write-combining, PA5..PA7 as
-   they were: WB, WT, UC-, UC, WC, WT, UC-, UC. */
 #define PAT_WITH_WRITE_COMBINING 0x0007040100070406ULL
 
 static int write_combining;
@@ -192,9 +185,6 @@ static inline void write_msr(uint32_t msr, uint64_t value) {
                                  "d"((uint32_t)(value >> 32)));
 }
 
-/* Once per processor, because the PAT is a per-processor register. Only the
-   boot processor used to be given it, which left the framebuffer
-   write-combining on one processor and cached on the others. */
 void vmm_configure_processor(void) {
     configure_page_attributes();
 }
@@ -212,21 +202,14 @@ int vmm_write_combining_available(void) { return write_combining; }
 
 void vmm_init(void) {
     memset(address_spaces, 0, sizeof(address_spaces));
-    /* Before any mapping is made, so nothing is ever mapped through a slot
-       whose meaning is about to change under it. */
     configure_page_attributes();
 
     kernel_cr3_physical = read_cr3();
 
-    /* Everything up to the point the direct map exists is reached through the
-       loader's own higher-half window instead, which covers every page the
-       tables below are allocated from. */
     const uint64_t hhdm = boot_info()->hhdm_offset;
 #define early(physical) ((uint64_t *)(hhdm + ((physical) & ADDRESS_MASK)))
     uint64_t *pml4 = early(kernel_cr3_physical);
 
-    /* The direct map, in a PML4 entry of its own, and only as much of it as
-       there is RAM: a gigabyte costs one page of directory here. */
     uint16_t direct_pml4 = (uint16_t)((DIRECT_MAP_BASE >> 39) & 0x1FF);
     uint64_t direct_pdpt_physical = (uint64_t)pmm_alloc_page();
     if (!direct_pdpt_physical) panic("VMM: direct map PDPT unavailable");
@@ -250,7 +233,6 @@ void vmm_init(void) {
     write_cr3(kernel_cr3_physical);
 #undef early
 
-    /* The direct map answers now, so the ordinary helpers can be used. */
     if (!pmm_page_is_allocated(kernel_cr3_physical) ||
         registry_add(address_spaces, MAX_ADDRESS_SPACES, kernel_cr3_physical) != 0) {
         panic("VMM: invalid boot CR3");
@@ -258,12 +240,6 @@ void vmm_init(void) {
     pml4 = page_table_pointer(kernel_cr3_physical);
     if (!pml4) panic("VMM: boot PML4 unavailable");
 
-    /*
-     * The heap's own PML4 entry, created here so that every address space
-     * cloned later inherits it. Everything below it is filled in on demand by
-     * heap_grow(), and those tables hang off this one entry, so they are
-     * visible everywhere without any further copying.
-     */
     uint16_t heap_pml4 = (uint16_t)((HEAP_VIRTUAL_BASE >> 39) & 0x1FF);
     if (!(pml4[heap_pml4] & PAGE_PRESENT)) {
         uint64_t heap_pdpt = (uint64_t)pmm_alloc_page();
@@ -330,13 +306,6 @@ void vmm_activate(uint64_t cr3_physical) {
     write_cr3(physical);
 }
 
-/*
- * Guarded because two threads of one process can now be inside the kernel at
- * once, and a mapping walks and extends tables they share. The intermediate
- * tables are the hazard rather than the leaf: two processors finding the same
- * directory missing would both create one, and one of the two would be lost
- * along with everything mapped through it.
- */
 int vmm_map_page_in(uint64_t cr3_physical, uint64_t virtual_address,
                     uint64_t physical_address, uint64_t flags) {
     oplock_enter();
@@ -372,9 +341,6 @@ static int vmm_map_page_in_locked(uint64_t cr3_physical, uint64_t virtual_addres
     return 0;
 }
 
-/* One shootdown for a run of pages instead of one for each. A batch is opened
-   and closed under the exclusive lock, so nothing else can be inside to take a
-   freed page, and a stale translation reaches only what was just unmapped. */
 static unsigned flush_batch_depth;
 static uint64_t flush_batch_cr3;
 static int flush_batch_pending;
@@ -397,8 +363,6 @@ static void flush_others(uint64_t cr3) {
         smp_flush_address_space(cr3);
         return;
     }
-    /* No caller touches two spaces in one batch, but if one ever does the
-       earlier space is shot down here rather than forgotten. */
     if (flush_batch_pending && flush_batch_cr3 != cr3)
         smp_flush_address_space(flush_batch_cr3);
     flush_batch_cr3 = cr3;
@@ -432,12 +396,6 @@ static int table_is_empty(const uint64_t *table) {
     return 1;
 }
 
-/* Give back the tables an unmapped range left behind. */
-/* Clearing a leaf entry leaves the table holding it present and empty, and
-   nothing ever looked at that again -- so fork went on cloning those tables and
-   exit went on destroying them for a mapping that had gone. */
-/* Measured: forking after mapping and unmapping 20000 pages cost 57.8 us
-   against 17.5 us before anything had been mapped at all. */
 void vmm_prune_empty_tables(uint64_t cr3_physical, uint64_t start, uint64_t end) {
     uint64_t cr3 = cr3_physical & ADDRESS_MASK;
     if (!address_space_registered(cr3) || start >= end) return;
@@ -445,7 +403,6 @@ void vmm_prune_empty_tables(uint64_t cr3_physical, uint64_t start, uint64_t end)
     if (!pml4) return;
 
     int freed = 0;
-    /* One directory at a time, because that is the span a page table covers. */
     for (uint64_t address = start & ~0x1FFFFFULL; address < end; address += 0x200000ULL) {
         if (address >= USER_ADDRESS_LIMIT) break;
         uint16_t i4 = (address >> 39) & 0x1FF;
@@ -476,8 +433,6 @@ void vmm_prune_empty_tables(uint64_t cr3_physical, uint64_t start, uint64_t end)
         pmm_free_page((void *)page);
     }
 
-    /* A freed table may still be in a paging-structure cache, and only a reload
-       is guaranteed to clear those. */
     if (freed) {
         if (cr3 == read_cr3()) write_cr3(cr3);
         flush_others(cr3);
@@ -587,19 +542,10 @@ int vmm_user_range_valid(uint64_t cr3_physical, uint64_t address,
     for (uint64_t page = first;; page += 4096) {
         uint64_t flags;
         if (vmm_translate(cr3_physical, page, NULL, &flags) != 0) {
-            /* Reserved but not yet touched: fault it in for the kernel rather
-               than give up. A signal frame is built below the stack pointer by
-               hand, so a process signalled near a page boundary had it land on
-               a page never reached, and a failed copy is a silent SIGSEGV. */
             if (cr3_physical != read_cr3() ||
                 (!process_commit_area(page) && !process_grow_user_stack(page)) ||
                 vmm_translate(cr3_physical, page, NULL, &flags) != 0) return 0;
         }
-        /* A copy-on-write page is logically writable even though the hardware
-           entry is read-only: the write is allowed, it just has to break the
-           sharing first. Callers that actually store into the page do that via
-           vmm_copy_to_space(); callers that only validate must not reject it,
-           or a post-fork read() into a buffer would fail with EFAULT. */
         if (!(flags & PAGE_USER) ||
             (write_required && !(flags & (PAGE_WRITE | PAGE_COW)))) return 0;
         if (page == last) break;
@@ -636,10 +582,6 @@ int vmm_copy_to_space(uint64_t cr3_physical, uint64_t destination_user,
         uint64_t flags;
         if (vmm_translate(cr3_physical, destination_user, &physical, &flags) != 0) return -1;
         if (flags & PAGE_DEVICE) return -1;
-        /* The kernel is about to store into this page, which is exactly the
-           event the copy-on-write mapping exists to intercept. Userspace would
-           have taken a fault here; do the same work inline, then re-translate
-           because the page may now live somewhere else. */
         if (flags & PAGE_COW) {
             if (vmm_handle_cow_fault(cr3_physical, destination_user & ~0xFFFULL) != 0)
                 return -1;
@@ -701,20 +643,10 @@ static uint64_t clone_user_table(uint64_t source_physical, int level) {
                     destroy_user_table(destination_physical, level);
                     return 0;
                 }
-                /*
-                 * A MAP_SHARED page is inherited as-is: both processes keep
-                 * writing to the same memory, which is the entire contract.
-                 * Marking it copy-on-write would give the child a private copy
-                 * on its first store and silently break wl_shm-style buffer
-                 * sharing.
-                 */
                 if ((entry & PAGE_SHARED) && pmm_page_ref(source_page) == 0) {
                     destination[index] = entry;
                     continue;
                 }
-                /* Share rather than copy: a writable page becomes read-only
-                 * and copy-on-write in both spaces, and a read-only one needs
-                 * only the reference. A saturated count falls back to a copy. */
                 if (pmm_page_ref(source_page) == 0) {
                     uint64_t shared_flags = preserved_flags;
                     if (shared_flags & PAGE_WRITE) {
@@ -770,24 +702,11 @@ uint64_t vmm_clone_address_space(uint64_t source_cr3) {
         }
         destination[index] = child | (entry & ~ADDRESS_MASK);
     }
-    /*
-     * The clone cleared PAGE_WRITE on the *source*'s shared pages, and the
-     * source is the running process, so its TLB still holds writable entries
-     * for them. Reloading CR3 flushes the lot; doing it once here is cheaper
-     * and far less error-prone than an invlpg per page during the walk.
-     */
     if (source_physical == read_cr3()) write_cr3(source_physical);
-    /* And every other processor running a thread of the same process, which
-       would otherwise keep writing straight through the sharing. */
     smp_flush_address_space(source_physical);
     return destination_cr3;
 }
 
-/*
- * Break a copy-on-write page after a write fault. Returns 0 when the fault was
- * handled and the instruction should be retried, -1 when it was not a COW fault
- * and the caller should carry on to the signal path.
- */
 int vmm_handle_cow_fault(uint64_t cr3_physical, uint64_t virtual_address) {
     uint64_t cr3 = cr3_physical & ADDRESS_MASK;
     if (!address_space_registered(cr3)) return -1;
@@ -804,9 +723,6 @@ int vmm_handle_cow_fault(uint64_t cr3_physical, uint64_t virtual_address) {
 
     uint16_t index = (virtual_address >> 12) & 0x1FF;
     uint64_t entry = pt[index];
-    /* Already private and writable: another processor running a thread of the
-       same process broke this page first, and this fault was taken on a
-       translation that has since been replaced. Retrying is the whole fix. */
     if ((entry & (PAGE_PRESENT | PAGE_USER | PAGE_WRITE | PAGE_COW)) ==
         (PAGE_PRESENT | PAGE_USER | PAGE_WRITE)) {
         if (cr3 == read_cr3()) invalidate(virtual_address);
@@ -818,9 +734,6 @@ int vmm_handle_cow_fault(uint64_t cr3_physical, uint64_t virtual_address) {
     uint64_t physical = entry & ADDRESS_MASK;
     uint64_t flags = (entry & ~ADDRESS_MASK & ~PAGE_COW & ~PAGE_FILEBACKED) | PAGE_WRITE;
 
-    /* Sole remaining owner: no copy needed, just hand the page back its write
-       permission. This is the common case once siblings have exited or exec'd.
-       Never for a file-backed frame -- see PAGE_FILEBACKED. */
     if (!(entry & PAGE_FILEBACKED) && pmm_page_refcount(physical) <= 1) {
         pt[index] = physical | flags;
     } else {
@@ -832,11 +745,7 @@ int vmm_handle_cow_fault(uint64_t cr3_physical, uint64_t virtual_address) {
         }
         memcpy((void *)(DIRECT_MAP_BASE + copy), (void *)(DIRECT_MAP_BASE + physical), 4096);
         pt[index] = copy | flags;
-        /* The other processors first, then the reference: one of them could
-           still be writing through the old translation, and this is the call
-           that may hand the frame back to the allocator. */
         smp_flush_address_space(cr3);
-        /* Drops this space's reference to the page it no longer maps. */
         pmm_free_page((void *)physical);
     }
     if (cr3 == read_cr3()) invalidate(virtual_address);

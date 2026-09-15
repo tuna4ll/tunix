@@ -1,22 +1,22 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "include/acpi.h"
-#include "include/boot.h"
-#include "include/apic.h"
-#include "include/cpu.h"
-#include "include/gdt.h"
-#include "include/idt.h"
-#include "include/klock.h"
-#include "include/kstring.h"
-#include "include/percpu.h"
-#include "include/pmm.h"
-#include "include/process.h"
-#include "include/smp.h"
-#include "include/syscall.h"
-#include "include/time.h"
-#include "include/timer.h"
-#include "include/vmm.h"
+#include "../../include/acpi.h"
+#include "../../include/boot.h"
+#include "../../include/apic.h"
+#include "../../include/cpu.h"
+#include "../../include/gdt.h"
+#include "../../include/idt.h"
+#include "../../include/klock.h"
+#include "../../include/kstring.h"
+#include "../../include/percpu.h"
+#include "../../include/pmm.h"
+#include "../../include/process.h"
+#include "../../include/smp.h"
+#include "../../include/syscall.h"
+#include "../../include/time.h"
+#include "../../include/timer.h"
+#include "../../include/vmm.h"
 
 extern void kprintf(const char *fmt, ...);
 

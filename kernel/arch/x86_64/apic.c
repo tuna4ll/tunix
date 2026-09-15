@@ -1,13 +1,13 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#include "../include/acpi.h"
-#include "../include/apic.h"
-#include "../include/cpu.h"
-#include "../include/percpu.h"
-#include "../include/pic.h"
-#include "../include/time.h"
-#include "../include/vmm.h"
+#include "../../include/acpi.h"
+#include "../../include/apic.h"
+#include "../../include/cpu.h"
+#include "../../include/percpu.h"
+#include "../../include/pic.h"
+#include "../../include/time.h"
+#include "../../include/vmm.h"
 
 extern void kprintf(const char *fmt, ...);
 

@@ -1,6 +1,6 @@
 #include <stdint.h>
-#include "../include/io.h"
-#include "../include/pic.h"
+#include "../../include/io.h"
+#include "../../include/pic.h"
 
 #define PIC1_COMMAND 0x20U
 #define PIC1_DATA    0x21U
@@ -17,8 +17,6 @@ static void pic_io_wait(void) {
 }
 
 void pic_init(void) {
-    /* Remap the legacy PIC away from CPU exception vectors, then begin with
-     * every IRQ masked. Drivers explicitly unmask the lines they own. */
     outb(PIC1_COMMAND, PIC_ICW1_INIT | PIC_ICW1_ICW4);
     pic_io_wait();
     outb(PIC2_COMMAND, PIC_ICW1_INIT | PIC_ICW1_ICW4);
@@ -29,7 +27,7 @@ void pic_init(void) {
     outb(PIC2_DATA, PIC_SLAVE_VECTOR);
     pic_io_wait();
 
-    outb(PIC1_DATA, 1U << 2); /* Slave PIC is connected to master IRQ2. */
+    outb(PIC1_DATA, 1U << 2);
     pic_io_wait();
     outb(PIC2_DATA, 2U);
     pic_io_wait();
