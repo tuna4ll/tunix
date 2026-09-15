@@ -6,7 +6,7 @@
 
 /* The frame the vector table saves and the accessors the portable syscall
    layer reads it with: one definition, shared with kernel/syscall.c. */
-#include "../../include/syscall.h"
+#include "../../../include/syscall.h"
 
 #define KERNEL_VA_OFFSET 0xFFFF000000000000UL
 #define KERNEL_PHYS_BASE 0x40000000UL

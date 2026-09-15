@@ -232,9 +232,10 @@ AARCH64_CFLAGS := -std=gnu11 -Wall -Wextra -Werror -ffreestanding \
 	-fno-stack-protector -fno-pic -fno-pie -fno-builtin \
 	-fno-asynchronous-unwind-tables -fno-unwind-tables \
 	-mgeneral-regs-only -mstrict-align -march=armv8-a -mno-outline-atomics \
-	-Ikernel/arch/aarch64
-AARCH64_LDFLAGS := -nostdlib -Wl,-T,kernel/arch/aarch64/linker.ld -Wl,--build-id=none
-AARCH64_SRC := $(shell find kernel/arch/aarch64 -name '*.c' -o -name '*.S' 2>/dev/null)
+	-Ikernel/arch/aarch64/bringup
+AARCH64_LDFLAGS := -nostdlib -Wl,-T,kernel/arch/aarch64/bringup/linker.ld -Wl,--build-id=none
+AARCH64_SHARED := kernel/arch/aarch64/identity.c kernel/arch/aarch64/entropy.c kernel/arch/aarch64/fpu.S
+AARCH64_SRC := $(shell find kernel/arch/aarch64/bringup -name '*.c' -o -name '*.S') $(AARCH64_SHARED)
 AARCH64_OBJ := $(AARCH64_SRC:%=$(BUILD)/aarch64/%.o)
 AARCH64_KERNEL := $(BUILD)/kernel-aarch64.elf
 AARCH64_IMAGE  := $(BUILD)/kernel-aarch64.img
@@ -242,7 +243,7 @@ AARCH64_IMAGE  := $(BUILD)/kernel-aarch64.img
 .PHONY: aarch64 run-aarch64
 aarch64: $(AARCH64_IMAGE)
 
-$(AARCH64_KERNEL): $(AARCH64_OBJ) kernel/arch/aarch64/linker.ld
+$(AARCH64_KERNEL): $(AARCH64_OBJ) kernel/arch/aarch64/bringup/linker.ld
 	$(AARCH64_CC) $(AARCH64_LDFLAGS) $(AARCH64_OBJ) -o $@
 
 $(AARCH64_IMAGE): $(AARCH64_KERNEL)
@@ -263,7 +264,7 @@ $(AARCH64_USER): support/aarch64/hello.S
 	@mkdir -p $(dir $@)
 	$(AARCH64_CC) -nostdlib -static -ffreestanding -o $@ $<
 
-$(BUILD)/aarch64/kernel/arch/aarch64/userimage.S.o: $(AARCH64_USER)
+$(BUILD)/aarch64/kernel/arch/aarch64/bringup/userimage.S.o: $(AARCH64_USER)
 
 # A second test program: it reports the stack the kernel built for it. Put it
 # on a disk as /sbin/init to exercise the ext2 and auxv paths.

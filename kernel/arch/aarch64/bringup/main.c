@@ -1,8 +1,8 @@
 #include <stdint.h>
 
 #include "arch.h"
-#include "../../include/cpu.h"
-#include "../../include/random.h"
+#include "../../../include/cpu.h"
+#include "../../../include/random.h"
 
 extern char kernel_start[];
 extern char user_elf_start[];
