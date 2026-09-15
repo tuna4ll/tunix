@@ -4,6 +4,7 @@
 #include "include/heap.h"
 #include "include/kstring.h"
 #include "include/pmm.h"
+#include "include/process_arch.h"
 #include "include/process.h"
 #include "include/random.h"
 #include "include/vfs.h"
@@ -537,6 +538,8 @@ int elf_load_process(struct process *process, struct vfs_node *file,
             goto done;
         }
     }
+
+    if (arch_map_signal_trampoline(process->cr3) != 0) goto done;
 
     process->entry = initial_entry;
     process->brk_start = align_up(main_image.image_end, 4096);

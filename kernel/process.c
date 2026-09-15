@@ -1777,6 +1777,8 @@ void process_set_sigaction(int signal_number,
                            const struct tunix_sigaction *action) {
     if (!current || signal_number < 1 || signal_number > TUNIX_NSIG) return;
     current->signal_actions[signal_number - 1] = *action;
+    arch_sanitize_sigaction(&current->signal_actions[signal_number - 1]);
+    action = &current->signal_actions[signal_number - 1];
     if (!queue) return;
     uint64_t group = current->tgid;
     struct process *item = queue;

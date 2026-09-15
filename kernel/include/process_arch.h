@@ -17,6 +17,15 @@ void arch_fpu_init(uint8_t *area);
 #if defined(__x86_64__)
 
 #define IA32_FS_BASE 0xC0000100U
+
+static inline int arch_map_signal_trampoline(uint64_t cr3) {
+    (void)cr3;
+    return 0;
+}
+
+static inline void arch_sanitize_sigaction(struct tunix_sigaction *action) {
+    (void)action;
+}
 #define IA32_KERNEL_GS_BASE 0xC0000102U
 
 static inline void arch_wrmsr(uint32_t msr, uint64_t value) {
@@ -178,6 +187,13 @@ static inline void arch_signal_enter_handler(struct syscall_frame *frame, uint64
 #elif defined(__aarch64__)
 
 #define ARCH_SPSR_MODE_MASK 0xFULL
+#define ARCH_SIGNAL_TRAMPOLINE 0x00007FFFFFFFF000ULL
+
+int arch_map_signal_trampoline(uint64_t cr3);
+
+static inline void arch_sanitize_sigaction(struct tunix_sigaction *action) {
+    if (!(action->flags & SA_RESTORER)) action->restorer = 0;
+}
 #define ARCH_SPSR_USER_FLAGS 0xF0000000ULL
 
 #define SIGCONTEXT_REGS_OFFSET 8U
@@ -268,7 +284,7 @@ static inline void arch_signal_enter_handler(struct syscall_frame *frame, uint64
     frame->x[0] = (uint64_t)signal_number;
     frame->x[1] = info;
     frame->x[2] = context;
-    frame->x[30] = restorer;
+    frame->x[30] = restorer ? restorer : ARCH_SIGNAL_TRAMPOLINE;
 }
 
 #else
