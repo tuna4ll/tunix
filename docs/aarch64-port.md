@@ -31,6 +31,32 @@ same checks — fork, CLONE_SETTLS threads, TLS and FPU state across context
 switches, SA_SIGINFO handlers and their context, EINTR against SA_RESTART,
 execve — run on either kernel.
 
+The userland above it is unmodified Void Linux for aarch64. From the published
+`void-aarch64-ROOTFS` tarball written to an ext3 disk, runit comes up as PID 1,
+stage 1 mounts the pseudo-filesystems, starts eudev, seeds the random number
+generator and applies sysctl settings, and stage 2 starts agetty on every
+virtual terminal:
+
+```
+- runit: enter stage: /etc/runit/1
+=> Welcome to Void!
+=> Starting udev and waiting for devices to settle...
+=> Seeding random number generator...
+=> Initialization complete, running stage 2...
+- runit: enter stage: /etc/runit/2
+Void 0.1.0 (void-live) (tty1)
+void-live login:
+```
+
+Dynamically linked glibc programs run through `ld-linux-aarch64.so.1`: bash
+5.2, coreutils, sed, grep, background jobs and `wait`. There is no display on
+`virt`, so the virtual terminals run headless and their output is mirrored to
+the serial console, which is also where their keyboard input comes from.
+
+The same kernel image has been checked on GICv2 (`-M virt,gic-version=2`) and on
+Cortex-A53, an ARMv8.0 core with a 40-bit physical address space, as well as the
+default Cortex-A72.
+
 ## Building and running
 
 ```sh
@@ -108,10 +134,10 @@ sizes and places memory BARs from the host bridge's windows. NVMe runs as-is.
 
 ## What is next
 
-- **Userland ABI.** The kernel still fills x86-64 layouts where AArch64 differs:
-  `struct stat`, `O_*` flag values, `struct epoll_event` packing, `uname`'s
-  machine and `/proc/cpuinfo`. glibc on AArch64 also expects a signal return
-  trampoline when a program installs a handler without `SA_RESTORER`.
+- **Userland ABI.** `struct stat`, the `O_*` values that differ, `epoll_event`
+  packing and `uname` already follow AArch64. glibc never sets `SA_RESTORER`
+  there, so every process gets a sigreturn trampoline page at `0x7FFFFFFFF000`.
+  Remaining differences show up as Void's services are exercised.
 - **Interrupts for devices.** Drivers currently poll. Wiring INTx through the
   device tree's `interrupt-map` and MSI through the GICv3 ITS comes next.
 - **SMP** through PSCI `CPU_ON` (`smc` on real hardware).
