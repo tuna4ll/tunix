@@ -15,6 +15,17 @@
 #define ET_EXEC 2
 #define ET_DYN 3
 #define EM_X86_64 62
+#define EM_AARCH64 183
+
+#if defined(__x86_64__)
+#define ELF_MACHINE EM_X86_64
+#define ELF_PLATFORM "x86_64"
+#define ELF_HWCAP 0
+#elif defined(__aarch64__)
+#define ELF_MACHINE EM_AARCH64
+#define ELF_PLATFORM "aarch64"
+#define ELF_HWCAP ((1UL << 0) | (1UL << 1))
+#endif
 #define PT_LOAD 1
 #define PT_INTERP 3
 #define PF_X 1
@@ -108,7 +119,7 @@ static int valid_header(const struct elf64_header *header, uint64_t file_size) {
     if (header->ident[4] != ELFCLASS64 || header->ident[5] != ELFDATA2LSB ||
         header->ident[6] != EV_CURRENT) return 0;
     if ((header->type != ET_EXEC && header->type != ET_DYN) ||
-        header->machine != EM_X86_64 || header->version != EV_CURRENT) return 0;
+        header->machine != ELF_MACHINE || header->version != EV_CURRENT) return 0;
     if (header->ehsize != sizeof(*header) ||
         header->phentsize != sizeof(struct elf64_program_header) ||
         header->phnum == 0) return 0;
@@ -376,7 +387,7 @@ static int place_initial_stack(struct process *process,
                                size_t argc, size_t envc,
                                uint64_t *argv_addresses, uint64_t *env_addresses) {
     uint64_t sp = USER_STACK_TOP;
-    static const char platform[] = "x86_64";
+    static const char platform[] = ELF_PLATFORM;
     uint8_t random_bytes[16];
     random_get_bytes(random_bytes, sizeof(random_bytes));
     if (push_bytes(process, &sp, random_bytes, sizeof(random_bytes)) != 0) return -1;
@@ -405,7 +416,7 @@ static int place_initial_stack(struct process *process,
         {AT_RANDOM, random_address},
         {AT_SECURE, 0},
         {AT_CLKTCK, 100},
-        {AT_HWCAP, 0},
+        {AT_HWCAP, ELF_HWCAP},
         {AT_PLATFORM, platform_address},
         {AT_EGID, 0}, {AT_GID, 0}, {AT_EUID, 0}, {AT_UID, 0},
         {AT_ENTRY, main_image->entry},
