@@ -79,6 +79,8 @@ struct walk_state {
     unsigned depth;
     uint32_t address_cells;
     uint32_t size_cells;
+    uint32_t own_address_cells;
+    uint32_t own_size_cells;
     uint32_t parent_offset;
 };
 
@@ -125,6 +127,8 @@ static int walk(walk_visit visit, void *context) {
                 .depth = depth,
                 .address_cells = cells_address[depth - 1],
                 .size_cells = cells_size[depth - 1],
+                .own_address_cells = cells_address[depth],
+                .own_size_cells = cells_size[depth],
                 .parent_offset = depth > 1 ? offsets[depth - 1] : 0xFFFFFFFFU,
             };
             if (depth == 1) {
@@ -315,4 +319,65 @@ int fdt_reg(const struct fdt_node *node, unsigned index, uint64_t *base, uint64_
     *base = read_cells(cells, node->address_cells);
     *size = read_cells(cells + node->address_cells * 4U, node->size_cells);
     return 0;
+}
+
+struct ancestry {
+    uint32_t target;
+    unsigned depth;
+    uint32_t offsets[FDT_MAX_DEPTH + 1];
+    uint32_t address_cells[FDT_MAX_DEPTH + 1];
+    uint32_t size_cells[FDT_MAX_DEPTH + 1];
+    int found;
+};
+
+static int visit_ancestry(const struct walk_state *state, void *context) {
+    struct ancestry *chain = context;
+    chain->offsets[state->depth] = state->offset;
+    chain->address_cells[state->depth] = state->own_address_cells;
+    chain->size_cells[state->depth] = state->own_size_cells;
+    if (state->offset != chain->target) return 0;
+    chain->depth = state->depth;
+    chain->found = 1;
+    return 1;
+}
+
+static int translate(const struct fdt_node *node, uint64_t *address) {
+    struct ancestry chain = { .target = node->offset };
+    walk(visit_ancestry, &chain);
+    if (!chain.found) return -1;
+
+    for (unsigned depth = chain.depth - 1U; depth >= 2U; depth--) {
+        struct fdt_node bus = { chain.offsets[depth], chain.address_cells[depth - 1U],
+                                chain.size_cells[depth - 1U] };
+        uint32_t length = 0;
+        const uint8_t *ranges = fdt_property(&bus, "ranges", &length);
+        if (!ranges) return -1;
+        if (!length) continue;
+
+        uint32_t child_cells = chain.address_cells[depth];
+        uint32_t parent_cells = chain.address_cells[depth - 1U];
+        uint32_t size_cells = chain.size_cells[depth];
+        uint32_t entry = (child_cells + parent_cells + size_cells) * 4U;
+        if (!entry || child_cells > 3U || parent_cells > 2U || size_cells > 2U) return -1;
+
+        int matched = 0;
+        for (uint32_t offset = 0; offset + entry <= length; offset += entry) {
+            uint64_t child = read_cells(ranges + offset, child_cells);
+            uint64_t parent = read_cells(ranges + offset + child_cells * 4U, parent_cells);
+            uint64_t size = read_cells(ranges + offset + (child_cells + parent_cells) * 4U,
+                                       size_cells);
+            if (*address >= child && *address - child < size) {
+                *address = parent + (*address - child);
+                matched = 1;
+                break;
+            }
+        }
+        if (!matched) return -1;
+    }
+    return 0;
+}
+
+int fdt_reg_cpu(const struct fdt_node *node, unsigned index, uint64_t *base, uint64_t *size) {
+    if (fdt_reg(node, index, base, size) != 0) return -1;
+    return translate(node, base);
 }

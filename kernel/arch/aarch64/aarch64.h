@@ -31,6 +31,7 @@ int fdt_child(const struct fdt_node *parent, unsigned index, struct fdt_node *ou
 const void *fdt_property(const struct fdt_node *node, const char *name, uint32_t *length);
 int fdt_is_compatible(const struct fdt_node *node, const char *compatible);
 int fdt_reg(const struct fdt_node *node, unsigned index, uint64_t *base, uint64_t *size);
+int fdt_reg_cpu(const struct fdt_node *node, unsigned index, uint64_t *base, uint64_t *size);
 uint32_t fdt_read32(const void *cell);
 int fdt_memreserve(unsigned index, uint64_t *base, uint64_t *size);
 

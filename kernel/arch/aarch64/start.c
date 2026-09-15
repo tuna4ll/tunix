@@ -178,11 +178,13 @@ static void attach_console(void) {
     if (stdout_node(&node) != 0 &&
         fdt_find_compatible("arm,pl011", 0, &node) != 0) return;
     uint64_t base, size;
-    if (fdt_reg(&node, 0, &base, &size) != 0) return;
+    if (fdt_reg_cpu(&node, 0, &base, &size) != 0) return;
     uint64_t mapped = aarch64_early_map_device(base, size < 0x1000ULL ? 0x1000ULL : size);
     if (!mapped) return;
     if (fdt_is_compatible(&node, "arm,pl011")) {
         serial_attach_pl011(mapped);
+    } else if (fdt_is_compatible(&node, "brcm,bcm2835-aux-uart")) {
+        serial_attach_ns16550(mapped, 2, 4);
     } else if (fdt_is_compatible(&node, "ns16550a") || fdt_is_compatible(&node, "ns16550") ||
                fdt_is_compatible(&node, "snps,dw-apb-uart")) {
         serial_attach_ns16550(mapped, property_u32(&node, "reg-shift", 0),
@@ -199,16 +201,16 @@ static void discover_devices(void) {
 
     if (fdt_find_compatible("arm,gic-v3", 0, &node) == 0) {
         aarch64_platform.gic_version = 3;
-        if (fdt_reg(&node, 0, &base, &size) == 0) aarch64_platform.gic_distributor = base;
-        if (fdt_reg(&node, 1, &base, &size) == 0) {
+        if (fdt_reg_cpu(&node, 0, &base, &size) == 0) aarch64_platform.gic_distributor = base;
+        if (fdt_reg_cpu(&node, 1, &base, &size) == 0) {
             aarch64_platform.gic_redistributor = base;
             aarch64_platform.gic_redistributor_size = size;
         }
     } else if (fdt_find_compatible("arm,gic-400", 0, &node) == 0 ||
                fdt_find_compatible("arm,cortex-a15-gic", 0, &node) == 0) {
         aarch64_platform.gic_version = 2;
-        if (fdt_reg(&node, 0, &base, &size) == 0) aarch64_platform.gic_distributor = base;
-        if (fdt_reg(&node, 1, &base, &size) == 0) aarch64_platform.gic_cpu_interface = base;
+        if (fdt_reg_cpu(&node, 0, &base, &size) == 0) aarch64_platform.gic_distributor = base;
+        if (fdt_reg_cpu(&node, 1, &base, &size) == 0) aarch64_platform.gic_cpu_interface = base;
     }
 
     aarch64_platform.timer_interrupt = 27;
@@ -219,11 +221,11 @@ static void discover_devices(void) {
         aarch64_platform.timer_frequency = property_u32(&node, "clock-frequency", 0);
     }
 
-    if (fdt_find_compatible("arm,pl031", 0, &node) == 0 && fdt_reg(&node, 0, &base, &size) == 0)
+    if (fdt_find_compatible("arm,pl031", 0, &node) == 0 && fdt_reg_cpu(&node, 0, &base, &size) == 0)
         aarch64_platform.rtc_base = aarch64_early_map_device(base, 0x1000ULL);
 
     if (fdt_find_compatible("pci-host-ecam-generic", 0, &node) == 0 &&
-        fdt_reg(&node, 0, &base, &size) == 0) {
+        fdt_reg_cpu(&node, 0, &base, &size) == 0) {
         aarch64_platform.ecam_physical = base;
         aarch64_platform.ecam_size = size;
         uint32_t length = 0;
