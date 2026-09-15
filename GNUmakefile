@@ -231,7 +231,7 @@ AARCH64_OBJCOPY ?= aarch64-linux-gnu-objcopy
 AARCH64_CFLAGS := -std=gnu11 -Wall -Wextra -Werror -ffreestanding \
 	-fno-stack-protector -fno-pic -fno-pie -fno-builtin \
 	-fno-asynchronous-unwind-tables -fno-unwind-tables \
-	-mgeneral-regs-only -mstrict-align -march=armv8-a \
+	-mgeneral-regs-only -mstrict-align -march=armv8-a -mno-outline-atomics \
 	-Ikernel/arch/aarch64
 AARCH64_LDFLAGS := -nostdlib -Wl,-T,kernel/arch/aarch64/linker.ld -Wl,--build-id=none
 AARCH64_SRC := $(shell find kernel/arch/aarch64 -name '*.c' -o -name '*.S' 2>/dev/null)

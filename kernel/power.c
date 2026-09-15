@@ -1,7 +1,9 @@
 #include <stdint.h>
 
 #include "include/acpi.h"
+#if defined(__x86_64__)
 #include "include/ata.h"
+#endif
 #include "include/cpu.h"
 #include "include/ext2.h"
 #include "include/power.h"
@@ -13,7 +15,9 @@ static int button_handled = 1;
 static void flush_disks(void) {
     (void)ext2fs_sync();
     (void)ext2fs_shutdown();
+#if defined(__x86_64__)
     (void)ata_flush_cache();
+#endif
 }
 
 static void park(void) __attribute__((noreturn));

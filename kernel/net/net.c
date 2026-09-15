@@ -5,7 +5,9 @@
 #include "../include/time.h"
 #include "../include/net/inet_socket.h"
 #include "../include/net/net.h"
+#if defined(__x86_64__)
 #include "../include/net/rtl8139.h"
+#endif
 #include "../include/net/virtio_net.h"
 
 extern void kprintf(const char *fmt, ...);
@@ -107,7 +109,9 @@ static enum adapter_kind adapter;
 
 static int adapter_transmit(const void *frame, size_t length) {
     if (adapter == ADAPTER_VIRTIO) return virtio_net_transmit(frame, length);
+#if defined(__x86_64__)
     if (adapter == ADAPTER_RTL8139) return rtl8139_transmit(frame, length);
+#endif
     return -1;
 }
 
@@ -459,6 +463,7 @@ void net_init(void) {
         kprintf("NET: virtio-net eth0 %x:%x:%x:%x:%x:%x ready\n",
                 config.mac[0], config.mac[1], config.mac[2], config.mac[3],
                 config.mac[4], config.mac[5]);
+#if defined(__x86_64__)
     } else if (rtl8139_init() == 0) {
         adapter = ADAPTER_RTL8139;
         memcpy(config.mac, rtl8139_mac(), 6);
@@ -466,6 +471,7 @@ void net_init(void) {
         config.interface_up = 1;
         kprintf("NET: rtl8139 eth0 %x:%x:%x:%x:%x:%x ready\n",
                 config.mac[0], config.mac[1], config.mac[2], config.mac[3], config.mac[4], config.mac[5]);
+#endif
     } else {
         kprintf("NET: no supported adapter found\n");
     }
@@ -480,10 +486,12 @@ void net_enable_interrupts(void) {
                     virtio_net_interrupt_vector());
         return;
     }
+#if defined(__x86_64__)
     rtl8139_enable_interrupt();
     if (rtl8139_interrupt_vector())
         kprintf("NET: rtl8139 interrupts on vector %u\n",
                 rtl8139_interrupt_vector());
+#endif
 }
 
 
@@ -506,7 +514,9 @@ void net_poll(void) {
     loopback_drain();
     if (!config.link_up) return;
     if (adapter == ADAPTER_VIRTIO) virtio_net_poll(receive_frame);
+#if defined(__x86_64__)
     else if (adapter == ADAPTER_RTL8139) rtl8139_poll(receive_frame);
+#endif
 
     static int timing;
     if (!timing) {
@@ -527,7 +537,11 @@ uint64_t net_tx_packets(void) { return stack_tx; }
 uint64_t net_rx_dropped(void) {
     uint64_t adapter_drops = adapter == ADAPTER_VIRTIO
         ? virtio_net_rx_dropped()
+#if defined(__x86_64__)
         : rtl8139_rx_dropped() + rtl8139_queue_dropped();
+#else
+        : 0;
+#endif
     return stack_drop + loopback_dropped + adapter_drops;
 }
 

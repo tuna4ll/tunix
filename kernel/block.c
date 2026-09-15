@@ -1,7 +1,9 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "include/ahci.h"
+#if defined(__x86_64__)
 #include "include/ata.h"
+#endif
 #include "include/block.h"
 #include "include/eventfs.h"
 #include "include/kstring.h"
@@ -10,9 +12,6 @@
 #include "include/time.h"
 #include "include/usb_storage.h"
 
-/* See include/block.h for what this is and why the early boot read is not
-   one of its clients. */
-
 extern void kprintf(const char *fmt, ...);
 
 static struct block_device devices[BLOCK_MAX_DEVICES];
@@ -20,12 +19,6 @@ static int device_count;
 static int disk_count;
 static int root_index;
 
-/*
- * A partition is a device in its own right, and the only thing it owns is
- * where on its parent it starts. The parent index rather than a pointer: the
- * table is an array, and an entry added later must not be able to move one
- * that a partition is pointing at.
- */
 struct partition_context {
     int parent;
     uint64_t start;
@@ -135,19 +128,11 @@ const struct block_device *block_root(void) {
     return root_index < device_count ? &devices[root_index] : NULL;
 }
 
-/* The root is device 0 unless something says otherwise. What used to decide
-   it -- reading every disk for the boot manifest -- went away with the
-   manifest; root= on the command line names the disk now, and a partition is
-   a device of its own here, so the answer is an index. */
 void block_select_root(int index) {
     root_index = index >= 0 && index < device_count ? index : 0;
     if (device_count) kprintf("BLOCK: root on %s\n", devices[root_index].dev_name);
 }
 
-/* What the medium was actually asked for. */
-/* A read reaches the device with the kernel lock held and the driver waiting on
-   it, so the count and the time are between them what a slow disk does to the
-   whole machine rather than to one process. */
 static uint64_t block_reads;
 static uint64_t block_sectors_read;
 static uint64_t block_read_ns;
@@ -179,8 +164,6 @@ int block_read(uint64_t lba, uint32_t count, void *destination) {
     return device_read_counted(device, lba, count, destination);
 }
 
-/* Bounded: a medium that fails at all fails a great deal, and the first few
-   say everything the later ones would. */
 #define WRITE_FAILURE_REPORT_LIMIT 8U
 
 int block_write(uint64_t lba, uint32_t count, const void *source) {
@@ -188,8 +171,6 @@ int block_write(uint64_t lba, uint32_t count, const void *source) {
     if (!device || !device->write || !count || !source) return -1;
     if (lba + count > device->sectors) return -1;
     int status = device->write(device->context, lba, count, source);
-    /* Said here rather than left to the filesystem, which only knows that
-       something above the medium would not persist. */
     if (status != 0) {
         block_write_failures++;
         if (block_write_failures <= WRITE_FAILURE_REPORT_LIMIT)
@@ -212,12 +193,6 @@ uint64_t block_sectors(void) {
     return device ? device->sectors : 0;
 }
 
-/*
- * Byte-granular reads for /dev/sda, which is a character-like view of a device
- * that only moves whole sectors. The staging buffer is one sector, so a read
- * that starts or ends mid-sector costs one extra transfer rather than a
- * bounce of the whole request.
- */
 int block_read_bytes(uint64_t offset, size_t size, void *destination) {
     return block_device_read_bytes(block_root(), offset, size, destination);
 }
@@ -245,7 +220,6 @@ int block_device_write_bytes(const struct block_device *device, uint64_t offset,
             continue;
         }
 
-        /* A partial sector is somebody else's data either side of it. */
         if (device_read_counted(device, lba, 1, sector) != 0) return -1;
         size_t chunk = BLOCK_SECTOR_SIZE - within;
         if (chunk > size) chunk = size;
@@ -270,7 +244,6 @@ int block_device_read_bytes(const struct block_device *device, uint64_t offset,
         if (lba >= device->sectors) return -1;
 
         if (!within && size >= BLOCK_SECTOR_SIZE) {
-            /* A whole run of sectors, straight into the caller's buffer. */
             uint64_t whole = size / BLOCK_SECTOR_SIZE;
             if (whole > device->sectors - lba) whole = device->sectors - lba;
             if (whole > 0xFFFFU) whole = 0xFFFFU;
@@ -294,11 +267,11 @@ int block_device_read_bytes(const struct block_device *device, uint64_t offset,
 }
 
 void block_probe(void) {
+#if defined(__x86_64__)
     ata_register_block_device();
+#endif
     ahci_init();
     nvme_init();
-    /* Before the partition scan and after the rest: the disks behind it hang
-       off the xHCI controller main.c starts a few lines earlier. */
     usb_storage_init();
     partition_scan();
 }
