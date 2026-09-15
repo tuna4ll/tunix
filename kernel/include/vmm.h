@@ -4,128 +4,53 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/*
- * Where the kernel image is linked: -mcmodel=kernel puts every symbol in the
- * top 2 GiB, so the code and its static data have no choice, and Limine
- * requires the same. Only the image is mapped here -- how far a static
- * buffer's address is from its physical one is the loader's to say, which is
- * why vmm_virt_to_phys_direct() asks boot_info() rather than subtracting this.
- */
 #define KERNEL_BASE 0xFFFFFFFF80000000ULL
-/* The direct map: all of physical memory in a PML4 slot of its own, which
-   replaced a 1792 MiB ceiling between two fixed addresses with 512 GiB. */
 #define DIRECT_MAP_BASE 0xFFFFFE8000000000ULL
-/* The kernel heap, in a PML4 entry of its own. It used to sit directly above
-   the direct map, which is what held the direct map -- and so the amount of
-   RAM the machine could use -- to a single gigabyte. */
 #define HEAP_VIRTUAL_BASE 0xFFFFFF0000000000ULL
-/* Where device registers get mapped, at the very top of the address space.
-   It shares the top 2 GiB with the kernel image and the framebuffer window,
-   which is now all that is up here: the direct map moved out from under them.
-   A huge page is not something a 4 KiB mapping can be placed inside, so these
-   windows stay clear of the first gigabyte the image is mapped through. */
 #define DEVICE_MMIO_VIRTUAL_BASE 0xFFFFFFFFFF000000ULL
 #define DEVICE_MMIO_VIRTUAL_BYTES 0x01000000ULL
-/*
- * Who owns what inside that window. Offsets are hard-coded by each driver, so
- * a collision does not look like one: the second mapping fails and the device
- * looks absent.
- *
- *   0x000000  xHCI registers      (64 KiB)   src/kernel/drivers/usb/xhci.c
- *   0x100000  ACPI tables         (2 MiB)    src/kernel/drivers/acpi.c
- *   0x400000  local APIC, IOAPIC  (8 KiB)    src/kernel/drivers/apic.c
- *   0x500000  HD Audio registers  (16 KiB)   src/kernel/drivers/audio/hda.c
- *   0x600000  unused legacy virtio window
- *   0x700000  handed out by vmm_map_device(), including virtio BARs
- */
 #define DEVICE_MMIO_ARENA_OFFSET 0x00700000ULL
 #define USER_ADDRESS_LIMIT 0x0000800000000000ULL
 
-/*
- * User stack layout. Only USER_STACK_INITIAL_PAGES are mapped when the image
- * is loaded; the rest is mapped on demand by the page-fault handler, so a
- * process pays for the pages it actually touches instead of reserving the
- * worst case up front. USER_STACK_MAX_PAGES is the ceiling a fault is still
- * allowed to grow into.
- */
 #define USER_STACK_TOP 0x00007FFFFFF00000ULL
-#define USER_STACK_INITIAL_PAGES 32ULL   /* 128 KiB mapped eagerly */
-#define USER_STACK_MAX_PAGES 2048ULL     /* 8 MiB ceiling, as on Linux */
+#define USER_STACK_INITIAL_PAGES 32ULL
+#define USER_STACK_MAX_PAGES 2048ULL
 #define USER_STACK_LIMIT (USER_STACK_TOP - USER_STACK_MAX_PAGES * 4096ULL)
 
 #define PAGE_PRESENT  (1ULL << 0)
 #define PAGE_WRITE    (1ULL << 1)
 #define PAGE_USER     (1ULL << 2)
-/* Registers are not memory: a cached mapping would let the processor answer a
-   read from a line it fetched earlier, and hide a write in a store buffer,
-   which is how a controller ends up looking dead when it is only unheard. */
 #define PAGE_WRITE_THROUGH (1ULL << 3)
 #define PAGE_UNCACHED (1ULL << 4)
 #define PAGE_HUGE     (1ULL << 7)
-/* Write-combining, for the framebuffer. Bit 7 is the PAT selector in a page
-   table entry and the huge bit in a directory one, so pass it only for 4 KiB
-   mappings. Uncached is correct and two orders of magnitude slower; QEMU's
-   framebuffer is ordinary RAM, so none of this shows up under emulation. */
 #define PAGE_WRITE_COMBINING (1ULL << 7)
 #define PAGE_DEVICE   (1ULL << 9)
-/* Software bit (the CPU ignores 9..11). Marks a page that fork shared instead
-   of copying: it is mapped read-only in every owner, and the first write takes
-   a fault that vmm_handle_cow_fault() turns into a private copy. */
 #define PAGE_COW      (1ULL << 10)
-/* Software bit. Marks a page belonging to a MAP_SHARED mapping, where the whole
-   point is that writes *are* visible to the other owners. fork() must hand this
-   one straight through -- copying it, whether eagerly or on write, would
-   silently break the sharing. */
 #define PAGE_SHARED   (1ULL << 11)
-/* Software bit (the CPU ignores 52..58). Marks a copy-on-write page whose frame
-   is the kernel's own cached copy of a file. The sole-owner shortcut in
-   vmm_handle_cow_fault() must never fire for one: the refcount stops counting
-   the cache once siblings copy away, and handing the frame back writable would
-   let a process edit the kernel's copy of the file. */
 #define PAGE_FILEBACKED (1ULL << 52)
 #define PAGE_NX       (1ULL << 63)
 
 void vmm_init(void);
-/* True once PAT entry 4 has been set to write-combining, which is what makes
-   PAGE_WRITE_COMBINING mean anything. False on a processor without PAT, where
-   the caller should map the framebuffer uncached and accept the cost. */
 int vmm_write_combining_available(void);
 
-/* The page-attribute table, which is per-processor: every processor that comes
-   up has to be given the same one or the framebuffer's memory type depends on
-   which one is writing to it. */
 void vmm_configure_processor(void);
 
 void *vmm_phys_to_virt(uint64_t physical);
 uint64_t vmm_virt_to_phys_direct(const void *virtual_address);
-/* The physical address of a buffer a device may be pointed at, or 0: DMA needs
-   the run contiguous, which is true of the direct map and the kernel image and
-   of nothing the heap hands out. */
 uint64_t vmm_dma_physical(const void *pointer, uint64_t length);
 uint64_t vmm_kernel_cr3(void);
-/* Map a device's registers and return where they can be reached, or 0. The
-   arena is handed out here rather than carved up by hand, because a colliding
-   offset makes the device look absent instead of failing loudly. `physical`
-   need not be page aligned. */
 uint64_t vmm_map_device(uint64_t physical, uint64_t bytes);
 uint64_t vmm_current_cr3(void);
 uint64_t vmm_create_address_space(void);
 uint64_t vmm_clone_address_space(uint64_t source_cr3);
-/* Give a copy-on-write page back its write permission, copying it first if it
-   still has other owners. 0 when the fault is handled, -1 when it was not a
-   copy-on-write fault. */
 int vmm_handle_cow_fault(uint64_t cr3_physical, uint64_t virtual_address);
 void vmm_destroy_address_space(uint64_t cr3_physical);
 void vmm_activate(uint64_t cr3_physical);
 int vmm_map_page_in(uint64_t cr3_physical, uint64_t virtual_address,
                     uint64_t physical_address, uint64_t flags);
 int vmm_unmap_page_in(uint64_t cr3_physical, uint64_t virtual_address);
-/* Give back the tables an unmapped range left behind. */
 void vmm_prune_empty_tables(uint64_t cr3_physical, uint64_t start, uint64_t end);
 
-/* Hold the other processors' shootdown until the whole run of pages is done. */
-/* Paired, and nestable; only a caller holding the kernel lock exclusively
-   may open one, because the batch is not per-processor state. */
 void vmm_flush_batch_begin(void);
 void vmm_flush_batch_end(void);
 int vmm_protect_page_in(uint64_t cr3_physical, uint64_t virtual_address, uint64_t flags);

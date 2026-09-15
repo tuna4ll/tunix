@@ -1,17 +1,18 @@
-#include "../../include/build_config.h"
+#include "include/build_config.h"
 #include <stddef.h>
 #include <stdint.h>
-#include "../../include/kstring.h"
-#include "../../include/oplock.h"
+#include "include/kstring.h"
+#include "include/oplock.h"
 
 static int vmm_map_page_in_locked(uint64_t cr3_physical, uint64_t virtual_address,
                                   uint64_t physical_address, uint64_t flags);
-#include "../../include/boot.h"
-#include "../../include/pmm.h"
-#include "../../include/smp.h"
-#include "../../include/vmm.h"
+#include "include/boot.h"
+#include "include/pmm.h"
+#include "include/smp.h"
+#include "include/vmm.h"
+#include "include/vmm_arch.h"
 
-#define ADDRESS_MASK 0x000FFFFFFFFFF000ULL
+#define ADDRESS_MASK PTE_ADDRESS_MASK
 #define DIRECT_MAP_SIZE PMM_DIRECT_MAP_LIMIT
 #define MAX_ADDRESS_SPACES 256
 
@@ -28,20 +29,6 @@ extern int process_grow_user_stack(uint64_t fault_address);
 
 static uint64_t kernel_cr3_physical;
 static uint64_t address_spaces[MAX_ADDRESS_SPACES];
-
-static inline uint64_t read_cr3(void) {
-    uint64_t value;
-    __asm__ volatile("mov %%cr3, %0" : "=r"(value));
-    return value & ADDRESS_MASK;
-}
-
-static inline void write_cr3(uint64_t value) {
-    __asm__ volatile("mov %0, %%cr3" : : "r"(value) : "memory");
-}
-
-static inline void invalidate(uint64_t address) {
-    __asm__ volatile("invlpg (%0)" : : "r"(address) : "memory");
-}
 
 static int physical_direct_range_valid(uint64_t physical, size_t length) {
     if (!length) return physical < DIRECT_MAP_SIZE;
@@ -144,17 +131,17 @@ static uint64_t *page_table_pointer(uint64_t physical) {
 }
 
 static uint64_t *table_from_entry(uint64_t entry) {
-    if (!(entry & PAGE_PRESENT) || (entry & PAGE_HUGE)) return NULL;
-    return page_table_pointer(entry & ADDRESS_MASK);
+    if (!pte_present(entry) || pte_huge(entry)) return NULL;
+    return page_table_pointer(pte_address(entry));
 }
 
 static uint64_t *next_table(uint64_t *table, uint16_t index,
                             uint64_t leaf_flags, int create) {
     if (!table) return NULL;
     uint64_t entry = table[index];
-    if (entry & PAGE_PRESENT) {
-        if (entry & PAGE_HUGE) return NULL;
-        if ((leaf_flags & PAGE_USER) && !(entry & PAGE_USER)) table[index] |= PAGE_USER;
+    if (pte_present(entry)) {
+        if (pte_huge(entry)) return NULL;
+        pte_table_grant_user(&table[index], leaf_flags);
         return table_from_entry(table[index]);
     }
     if (!create) return NULL;
@@ -168,10 +155,11 @@ static uint64_t *next_table(uint64_t *table, uint16_t index,
     memset(new_table, 0, 4096);
     uint64_t table_flags = PAGE_PRESENT | PAGE_WRITE;
     if (leaf_flags & PAGE_USER) table_flags |= PAGE_USER;
-    table[index] = physical | table_flags;
+    table[index] = pte_table(physical, table_flags);
     return new_table;
 }
 
+#if defined(__x86_64__)
 #define IA32_PAT_MSR 0x277U
 #define CPUID_FEATURES_LEAF 1U
 #define CPUID_EDX_PAT (1U << 16)
@@ -197,6 +185,15 @@ static void configure_page_attributes(void) {
     write_msr(IA32_PAT_MSR, PAT_WITH_WRITE_COMBINING);
     write_combining = 1;
 }
+#else
+static int write_combining = 1;
+
+void vmm_configure_processor(void) {
+}
+
+static void configure_page_attributes(void) {
+}
+#endif
 
 int vmm_write_combining_available(void) { return write_combining; }
 
@@ -204,7 +201,7 @@ void vmm_init(void) {
     memset(address_spaces, 0, sizeof(address_spaces));
     configure_page_attributes();
 
-    kernel_cr3_physical = read_cr3();
+    kernel_cr3_physical = vmm_arch_read_root();
 
     const uint64_t hhdm = boot_info()->hhdm_offset;
 #define early(physical) ((uint64_t *)(hhdm + ((physical) & ADDRESS_MASK)))
@@ -225,12 +222,12 @@ void vmm_init(void) {
         memset(table, 0, 4096);
         for (uint64_t i = 0; i < 512; i++) {
             uint64_t frame = gigabyte * 0x40000000ULL + i * 0x200000ULL;
-            table[i] = frame | PAGE_PRESENT | PAGE_WRITE | PAGE_HUGE;
+            table[i] = pte_block(frame, PAGE_PRESENT | PAGE_WRITE);
         }
-        direct_pdpt[gigabyte] = table_physical | PAGE_PRESENT | PAGE_WRITE;
+        direct_pdpt[gigabyte] = pte_table(table_physical, PAGE_PRESENT | PAGE_WRITE);
     }
-    pml4[direct_pml4] = direct_pdpt_physical | PAGE_PRESENT | PAGE_WRITE;
-    write_cr3(kernel_cr3_physical);
+    pml4[direct_pml4] = pte_table(direct_pdpt_physical, PAGE_PRESENT | PAGE_WRITE);
+    vmm_arch_write_root(kernel_cr3_physical);
 #undef early
 
     if (!pmm_page_is_allocated(kernel_cr3_physical) ||
@@ -241,15 +238,15 @@ void vmm_init(void) {
     if (!pml4) panic("VMM: boot PML4 unavailable");
 
     uint16_t heap_pml4 = (uint16_t)((HEAP_VIRTUAL_BASE >> 39) & 0x1FF);
-    if (!(pml4[heap_pml4] & PAGE_PRESENT)) {
+    if (!pte_present(pml4[heap_pml4])) {
         uint64_t heap_pdpt = (uint64_t)pmm_alloc_page();
         uint64_t *table = page_table_pointer(heap_pdpt);
         if (!table) panic("VMM: heap PDPT unavailable");
         memset(table, 0, 4096);
-        pml4[heap_pml4] = heap_pdpt | PAGE_PRESENT | PAGE_WRITE;
+        pml4[heap_pml4] = pte_table(heap_pdpt, PAGE_PRESENT | PAGE_WRITE);
     }
 
-    write_cr3(kernel_cr3_physical);
+    vmm_arch_write_root(kernel_cr3_physical);
     KDEBUG("VMM: %u MiB direct map ready, %u MiB of room\n",
            (unsigned)(mapped / (1024 * 1024)),
            (unsigned)(DIRECT_MAP_SIZE / (1024 * 1024)));
@@ -276,7 +273,7 @@ uint64_t vmm_map_device(uint64_t physical, uint64_t bytes) {
     arena_used += span;
     return base + page_offset;
 }
-uint64_t vmm_current_cr3(void) { return read_cr3(); }
+uint64_t vmm_current_cr3(void) { return vmm_arch_read_root(); }
 
 uint64_t vmm_create_address_space(void) {
     uint64_t physical = (uint64_t)pmm_alloc_page();
@@ -300,10 +297,10 @@ void vmm_activate(uint64_t cr3_physical) {
     uint64_t physical = cr3_physical & ADDRESS_MASK;
     if (!address_space_registered(physical)) {
         kprintf("VMM: activate rejected stale CR3=%p current=%p\n",
-                (void *)physical, (void *)read_cr3());
+                (void *)physical, (void *)vmm_arch_read_root());
         panic("VMM: attempted to activate stale address space");
     }
-    write_cr3(physical);
+    vmm_arch_write_root(physical);
 }
 
 int vmm_map_page_in(uint64_t cr3_physical, uint64_t virtual_address,
@@ -335,9 +332,9 @@ static int vmm_map_page_in_locked(uint64_t cr3_physical, uint64_t virtual_addres
     if (!pd) return -1;
     uint64_t *pt = next_table(pd, i2, flags, 1);
     if (!pt) return -1;
-    if (pt[i1] & PAGE_PRESENT) return -2;
-    pt[i1] = (physical_address & ADDRESS_MASK) | flags | PAGE_PRESENT;
-    if (cr3 == read_cr3()) invalidate(virtual_address);
+    if (pte_present(pt[i1])) return -2;
+    pt[i1] = pte_page(physical_address & ADDRESS_MASK, flags | PAGE_PRESENT);
+    if (cr3 == vmm_arch_read_root()) vmm_arch_invalidate(virtual_address);
     return 0;
 }
 
@@ -383,16 +380,16 @@ int vmm_unmap_page_in(uint64_t cr3_physical, uint64_t virtual_address) {
     uint64_t *pd = next_table(pdpt, i3, 0, 0);
     if (!pd) return -1;
     uint64_t *pt = next_table(pd, i2, 0, 0);
-    if (!pt || !(pt[i1] & PAGE_PRESENT)) return -1;
+    if (!pt || !pte_present(pt[i1])) return -1;
     pt[i1] = 0;
-    if (cr3 == read_cr3()) invalidate(virtual_address);
+    if (cr3 == vmm_arch_read_root()) vmm_arch_invalidate(virtual_address);
     flush_others(cr3);
     return 0;
 }
 
 static int table_is_empty(const uint64_t *table) {
     for (uint64_t index = 0; index < 512; index++)
-        if (table[index] & PAGE_PRESENT) return 0;
+        if (pte_present(table[index])) return 0;
     return 1;
 }
 
@@ -417,24 +414,24 @@ void vmm_prune_empty_tables(uint64_t cr3_physical, uint64_t start, uint64_t end)
         uint64_t *pt = table_from_entry(pd[i2]);
         if (!pt || !table_is_empty(pt)) continue;
 
-        uint64_t page = pd[i2] & ADDRESS_MASK;
+        uint64_t page = pte_address(pd[i2]);
         pd[i2] = 0;
         pmm_free_page((void *)page);
         freed = 1;
 
         if (!table_is_empty(pd)) continue;
-        page = pdpt[i3] & ADDRESS_MASK;
+        page = pte_address(pdpt[i3]);
         pdpt[i3] = 0;
         pmm_free_page((void *)page);
 
         if (!table_is_empty(pdpt)) continue;
-        page = pml4[i4] & ADDRESS_MASK;
+        page = pte_address(pml4[i4]);
         pml4[i4] = 0;
         pmm_free_page((void *)page);
     }
 
     if (freed) {
-        if (cr3 == read_cr3()) write_cr3(cr3);
+        if (cr3 == vmm_arch_read_root()) vmm_arch_write_root(cr3);
         flush_others(cr3);
     }
 }
@@ -454,10 +451,10 @@ int vmm_protect_page_in(uint64_t cr3_physical, uint64_t virtual_address,
     uint64_t *pd = next_table(pdpt, i3, flags, 0);
     if (!pd) return -1;
     uint64_t *pt = next_table(pd, i2, flags, 0);
-    if (!pt || !(pt[i1] & PAGE_PRESENT)) return -1;
-    uint64_t physical = pt[i1] & ADDRESS_MASK;
-    pt[i1] = physical | (flags & ~ADDRESS_MASK) | PAGE_PRESENT;
-    if (cr3 == read_cr3()) invalidate(virtual_address);
+    if (!pt || !pte_present(pt[i1])) return -1;
+    uint64_t physical = pte_address(pt[i1]);
+    pt[i1] = pte_page(physical, (flags & ~ADDRESS_MASK) | PAGE_PRESENT);
+    if (cr3 == vmm_arch_read_root()) vmm_arch_invalidate(virtual_address);
     flush_others(cr3);
     return 0;
 }
@@ -469,23 +466,25 @@ int vmm_translate(uint64_t cr3_physical, uint64_t virtual_address,
     uint64_t *pml4 = page_table_pointer(cr3);
     if (!pml4) return -1;
     uint64_t e4 = pml4[(virtual_address >> 39) & 0x1FF];
-    if (!(e4 & PAGE_PRESENT)) return -1;
-    uint64_t effective_user = e4 & PAGE_USER;
-    uint64_t effective_write = e4 & PAGE_WRITE;
-    uint64_t effective_nx = e4 & PAGE_NX;
+    if (!pte_present(e4)) return -1;
+    uint64_t f4 = pte_upper_flags(e4);
+    uint64_t effective_user = f4 & PAGE_USER;
+    uint64_t effective_write = f4 & PAGE_WRITE;
+    uint64_t effective_nx = f4 & PAGE_NX;
 
     uint64_t *pdpt = table_from_entry(e4);
     if (!pdpt) return -1;
     uint64_t e3 = pdpt[(virtual_address >> 30) & 0x1FF];
-    if (!(e3 & PAGE_PRESENT)) return -1;
-    effective_user &= e3;
-    effective_write &= e3;
-    effective_nx |= e3 & PAGE_NX;
-    if (e3 & PAGE_HUGE) {
+    if (!pte_present(e3)) return -1;
+    uint64_t f3 = pte_upper_flags(e3);
+    effective_user &= f3;
+    effective_write &= f3;
+    effective_nx |= f3 & PAGE_NX;
+    if (pte_huge(e3)) {
         if (physical_out) *physical_out =
-            (e3 & 0x000FFFFFC0000000ULL) | (virtual_address & 0x3FFFFFFFULL);
+            (pte_address(e3) & ~0x3FFFFFFFULL) | (virtual_address & 0x3FFFFFFFULL);
         if (flags_out) {
-            uint64_t effective = e3;
+            uint64_t effective = f3;
             if (!effective_user) effective &= ~PAGE_USER;
             if (!effective_write) effective &= ~PAGE_WRITE;
             if (effective_nx) effective |= PAGE_NX;
@@ -497,15 +496,16 @@ int vmm_translate(uint64_t cr3_physical, uint64_t virtual_address,
     uint64_t *pd = table_from_entry(e3);
     if (!pd) return -1;
     uint64_t e2 = pd[(virtual_address >> 21) & 0x1FF];
-    if (!(e2 & PAGE_PRESENT)) return -1;
-    effective_user &= e2;
-    effective_write &= e2;
-    effective_nx |= e2 & PAGE_NX;
-    if (e2 & PAGE_HUGE) {
+    if (!pte_present(e2)) return -1;
+    uint64_t f2 = pte_upper_flags(e2);
+    effective_user &= f2;
+    effective_write &= f2;
+    effective_nx |= f2 & PAGE_NX;
+    if (pte_huge(e2)) {
         if (physical_out) *physical_out =
-            (e2 & 0x000FFFFFFFE00000ULL) | (virtual_address & 0x1FFFFFULL);
+            (pte_address(e2) & ~0x1FFFFFULL) | (virtual_address & 0x1FFFFFULL);
         if (flags_out) {
-            uint64_t effective = e2;
+            uint64_t effective = f2;
             if (!effective_user) effective &= ~PAGE_USER;
             if (!effective_write) effective &= ~PAGE_WRITE;
             if (effective_nx) effective |= PAGE_NX;
@@ -517,14 +517,15 @@ int vmm_translate(uint64_t cr3_physical, uint64_t virtual_address,
     uint64_t *pt = table_from_entry(e2);
     if (!pt) return -1;
     uint64_t e1 = pt[(virtual_address >> 12) & 0x1FF];
-    if (!(e1 & PAGE_PRESENT)) return -1;
-    effective_user &= e1;
-    effective_write &= e1;
-    effective_nx |= e1 & PAGE_NX;
+    if (!pte_present(e1)) return -1;
+    uint64_t f1 = pte_leaf_flags(e1);
+    effective_user &= f1;
+    effective_write &= f1;
+    effective_nx |= f1 & PAGE_NX;
     if (physical_out) *physical_out =
-        (e1 & ADDRESS_MASK) | (virtual_address & 0xFFF);
+        pte_address(e1) | (virtual_address & 0xFFF);
     if (flags_out) {
-        uint64_t effective = e1;
+        uint64_t effective = f1;
         if (!effective_user) effective &= ~PAGE_USER;
         if (!effective_write) effective &= ~PAGE_WRITE;
         if (effective_nx) effective |= PAGE_NX;
@@ -542,7 +543,7 @@ int vmm_user_range_valid(uint64_t cr3_physical, uint64_t address,
     for (uint64_t page = first;; page += 4096) {
         uint64_t flags;
         if (vmm_translate(cr3_physical, page, NULL, &flags) != 0) {
-            if (cr3_physical != read_cr3() ||
+            if (cr3_physical != vmm_arch_read_root() ||
                 (!process_commit_area(page) && !process_grow_user_stack(page)) ||
                 vmm_translate(cr3_physical, page, NULL, &flags) != 0) return 0;
         }
@@ -627,23 +628,23 @@ static uint64_t clone_user_table(uint64_t source_physical, int level) {
 
     for (uint64_t index = 0; index < 512; index++) {
         uint64_t entry = source[index];
-        if (!(entry & PAGE_PRESENT)) continue;
-        if (entry & PAGE_HUGE) {
+        if (!pte_present(entry)) continue;
+        if (pte_huge(entry)) {
             destroy_user_table(destination_physical, level);
             return 0;
         }
-        uint64_t preserved_flags = entry & ~ADDRESS_MASK;
+        uint64_t preserved_flags = pte_flags(entry);
         if (level == 1) {
-            if (entry & PAGE_DEVICE) {
+            if (preserved_flags & PAGE_DEVICE) {
                 destination[index] = entry;
             } else {
-                uint64_t source_page = entry & ADDRESS_MASK;
+                uint64_t source_page = pte_address(entry);
                 if (!pmm_page_is_allocated(source_page) ||
                     !physical_direct_range_valid(source_page, 4096)) {
                     destroy_user_table(destination_physical, level);
                     return 0;
                 }
-                if ((entry & PAGE_SHARED) && pmm_page_ref(source_page) == 0) {
+                if ((preserved_flags & PAGE_SHARED) && pmm_page_ref(source_page) == 0) {
                     destination[index] = entry;
                     continue;
                 }
@@ -651,9 +652,9 @@ static uint64_t clone_user_table(uint64_t source_physical, int level) {
                     uint64_t shared_flags = preserved_flags;
                     if (shared_flags & PAGE_WRITE) {
                         shared_flags = (shared_flags & ~PAGE_WRITE) | PAGE_COW;
-                        source[index] = source_page | shared_flags;
+                        source[index] = pte_page(source_page, shared_flags);
                     }
-                    destination[index] = source_page | shared_flags;
+                    destination[index] = pte_page(source_page, shared_flags);
                 } else {
                     uint64_t page_physical = (uint64_t)pmm_alloc_page();
                     if (!page_physical) {
@@ -662,16 +663,16 @@ static uint64_t clone_user_table(uint64_t source_physical, int level) {
                     }
                     memcpy((void *)(DIRECT_MAP_BASE + page_physical),
                            (void *)(DIRECT_MAP_BASE + source_page), 4096);
-                    destination[index] = page_physical | preserved_flags;
+                    destination[index] = pte_retarget(entry, page_physical);
                 }
             }
         } else {
-            uint64_t child = clone_user_table(entry & ADDRESS_MASK, level - 1);
+            uint64_t child = clone_user_table(pte_address(entry), level - 1);
             if (!child) {
                 destroy_user_table(destination_physical, level);
                 return 0;
             }
-            destination[index] = child | preserved_flags;
+            destination[index] = pte_retarget(entry, child);
         }
     }
     return destination_physical;
@@ -690,19 +691,19 @@ uint64_t vmm_clone_address_space(uint64_t source_cr3) {
     }
     for (uint64_t index = 0; index < 256; index++) {
         uint64_t entry = source[index];
-        if (!(entry & PAGE_PRESENT)) continue;
-        if (entry & PAGE_HUGE) {
+        if (!pte_present(entry)) continue;
+        if (pte_huge(entry)) {
             vmm_destroy_address_space(destination_cr3);
             return 0;
         }
-        uint64_t child = clone_user_table(entry & ADDRESS_MASK, 3);
+        uint64_t child = clone_user_table(pte_address(entry), 3);
         if (!child) {
             vmm_destroy_address_space(destination_cr3);
             return 0;
         }
-        destination[index] = child | (entry & ~ADDRESS_MASK);
+        destination[index] = pte_retarget(entry, child);
     }
-    if (source_physical == read_cr3()) write_cr3(source_physical);
+    if (source_physical == vmm_arch_read_root()) vmm_arch_write_root(source_physical);
     smp_flush_address_space(source_physical);
     return destination_cr3;
 }
@@ -723,19 +724,20 @@ int vmm_handle_cow_fault(uint64_t cr3_physical, uint64_t virtual_address) {
 
     uint16_t index = (virtual_address >> 12) & 0x1FF;
     uint64_t entry = pt[index];
-    if ((entry & (PAGE_PRESENT | PAGE_USER | PAGE_WRITE | PAGE_COW)) ==
+    uint64_t entry_flags = pte_flags(entry);
+    if ((entry_flags & (PAGE_PRESENT | PAGE_USER | PAGE_WRITE | PAGE_COW)) ==
         (PAGE_PRESENT | PAGE_USER | PAGE_WRITE)) {
-        if (cr3 == read_cr3()) invalidate(virtual_address);
+        if (cr3 == vmm_arch_read_root()) vmm_arch_invalidate(virtual_address);
         return 0;
     }
-    if ((entry & (PAGE_PRESENT | PAGE_COW | PAGE_USER)) !=
+    if ((entry_flags & (PAGE_PRESENT | PAGE_COW | PAGE_USER)) !=
         (PAGE_PRESENT | PAGE_COW | PAGE_USER)) return -1;
 
-    uint64_t physical = entry & ADDRESS_MASK;
-    uint64_t flags = (entry & ~ADDRESS_MASK & ~PAGE_COW & ~PAGE_FILEBACKED) | PAGE_WRITE;
+    uint64_t physical = pte_address(entry);
+    uint64_t flags = (entry_flags & ~PAGE_COW & ~PAGE_FILEBACKED) | PAGE_WRITE;
 
-    if (!(entry & PAGE_FILEBACKED) && pmm_page_refcount(physical) <= 1) {
-        pt[index] = physical | flags;
+    if (!(entry_flags & PAGE_FILEBACKED) && pmm_page_refcount(physical) <= 1) {
+        pt[index] = pte_page(physical, flags);
     } else {
         if (!physical_direct_range_valid(physical, 4096)) return -1;
         uint64_t copy = (uint64_t)pmm_alloc_page();
@@ -744,11 +746,11 @@ int vmm_handle_cow_fault(uint64_t cr3_physical, uint64_t virtual_address) {
             return -1;
         }
         memcpy((void *)(DIRECT_MAP_BASE + copy), (void *)(DIRECT_MAP_BASE + physical), 4096);
-        pt[index] = copy | flags;
+        pt[index] = pte_page(copy, flags);
         smp_flush_address_space(cr3);
         pmm_free_page((void *)physical);
     }
-    if (cr3 == read_cr3()) invalidate(virtual_address);
+    if (cr3 == vmm_arch_read_root()) vmm_arch_invalidate(virtual_address);
     return 0;
 }
 
@@ -761,14 +763,14 @@ static void destroy_user_table(uint64_t physical, int level) {
     }
     for (uint64_t index = 0; index < 512; index++) {
         uint64_t entry = table[index];
-        if (!(entry & PAGE_PRESENT)) continue;
-        if (entry & PAGE_HUGE) {
+        if (!pte_present(entry)) continue;
+        if (pte_huge(entry)) {
             KDEBUG("VMM: skipped unexpected user huge page\n");
             continue;
         }
-        uint64_t child = entry & ADDRESS_MASK;
+        uint64_t child = pte_address(entry);
         if (level == 1) {
-            if (!(entry & PAGE_DEVICE) && pmm_page_is_allocated(child))
+            if (!(pte_flags(entry) & PAGE_DEVICE) && pmm_page_is_allocated(child))
                 pmm_free_page((void *)child);
         } else {
             destroy_user_table(child, level - 1);
@@ -786,7 +788,7 @@ void vmm_destroy_address_space(uint64_t cr3_physical) {
                (void *)physical);
         return;
     }
-    if (physical == read_cr3()) {
+    if (physical == vmm_arch_read_root()) {
         kprintf("VMM: refused to destroy active CR3=%p\n", (void *)physical);
         return;
     }
@@ -797,7 +799,7 @@ void vmm_destroy_address_space(uint64_t cr3_physical) {
     }
     for (uint64_t index = 0; index < 256; index++) {
         uint64_t entry = pml4[index];
-        if (entry & PAGE_PRESENT) destroy_user_table(entry & ADDRESS_MASK, 3);
+        if (pte_present(entry)) destroy_user_table(pte_address(entry), 3);
         pml4[index] = 0;
     }
     registry_remove(address_spaces, MAX_ADDRESS_SPACES, physical);
@@ -810,13 +812,14 @@ static uint64_t count_user_table(uint64_t table_physical, int level) {
     uint64_t count = 0;
     for (uint64_t index = 0; index < 512; index++) {
         uint64_t entry = table[index];
-        if (!(entry & PAGE_PRESENT) || !(entry & PAGE_USER)) continue;
+        uint64_t flags = level == 1 ? pte_flags(entry) : pte_upper_flags(entry);
+        if (!pte_present(entry) || !(flags & PAGE_USER)) continue;
         if (level == 1) {
-            if (!(entry & PAGE_DEVICE)) count++;
-        } else if (entry & PAGE_HUGE) {
+            if (!(flags & PAGE_DEVICE)) count++;
+        } else if (pte_huge(entry)) {
             count += level == 3 ? 262144ULL : 512ULL;
         } else {
-            count += count_user_table(entry & ADDRESS_MASK, level - 1);
+            count += count_user_table(pte_address(entry), level - 1);
         }
     }
     return count;
@@ -830,8 +833,8 @@ uint64_t vmm_count_user_pages(uint64_t cr3_physical) {
     uint64_t count = 0;
     for (uint64_t index = 0; index < 256; index++) {
         uint64_t entry = pml4[index];
-        if ((entry & (PAGE_PRESENT | PAGE_USER)) == (PAGE_PRESENT | PAGE_USER))
-            count += count_user_table(entry & ADDRESS_MASK, 3);
+        if ((pte_upper_flags(entry) & (PAGE_PRESENT | PAGE_USER)) == (PAGE_PRESENT | PAGE_USER))
+            count += count_user_table(pte_address(entry), 3);
     }
     return count;
 }
