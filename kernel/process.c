@@ -17,6 +17,7 @@ static int signal_would_act(const struct process *process, int signal_number);
 #include "include/percpu.h"
 #include "include/pmm.h"
 #include "include/process.h"
+#include "include/process_arch.h"
 #include "include/procfs.h"
 #include "include/smp.h"
 #include "include/syscall.h"
@@ -38,8 +39,6 @@ static int signal_would_act(const struct process *process, int signal_number);
 #define EFAULT 14
 #define ETIMEDOUT 110
 #define SIGSEGV 11
-#define IA32_FS_BASE 0xC0000100U
-#define IA32_KERNEL_GS_BASE 0xC0000102U
 #define FUTEX_OWNER_DIED 0x40000000U
 #define FUTEX_TID_MASK 0x3fffffffU
 #define ROBUST_LIST_LIMIT 2048U
@@ -132,12 +131,6 @@ static void sync_memory_view(struct process *process) {
     process->mmap_base = process->memory->mmap_base;
 }
 
-static inline void wrmsr(uint32_t msr, uint64_t value) {
-    uint32_t low = (uint32_t)value;
-    uint32_t high = (uint32_t)(value >> 32);
-    __asm__ volatile("wrmsr" : : "c"(msr), "a"(low), "d"(high));
-}
-
 static void set_process_cmdline(struct process *process, const char *path,
                                 const char *const argv[]) {
     process->cmdline_length = 0;
@@ -217,8 +210,8 @@ void process_dump_all(void) {
     struct process *item = queue;
     do {
         if (item->state == PROCESS_DEAD) { item = item->next; continue; }
-        uint64_t rip = item == current ? item->saved_frame.user_rip
-                                       : item->saved_frame.user_rip;
+        uint64_t rip = item == current ? SYSCALL_IP(&item->saved_frame)
+                                       : SYSCALL_IP(&item->saved_frame);
         uint64_t offset = 0;
         const char *object = object_at(item, rip, &offset);
         kprintf("  %d/%d %s %s", (int)item->pid, (int)item->tgid,
@@ -520,9 +513,7 @@ struct process *process_create_from_path(const char *path) {
         kfree(process);
         return NULL;
     }
-    process->saved_frame.user_rip = process->entry;
-    process->saved_frame.user_rsp = process->user_stack_top;
-    process->saved_frame.user_rflags = 0x202;
+    arch_frame_enter_user(&process->saved_frame, process->entry, process->user_stack_top);
     install_console(process);
 
     enqueue(process);
@@ -628,7 +619,7 @@ static void wake_expired_futex_waiters(void) {
             item->futex_wait_address = 0;
             item->futex_wait_key = 0;
             item->futex_wait_deadline_ns = 0;
-            item->saved_frame.rax = (uint64_t)-(int64_t)ETIMEDOUT;
+            SYSCALL_RET(&item->saved_frame) = (uint64_t)-(int64_t)ETIMEDOUT;
             wake_to_ready(item);
         }
         item = item->next;
@@ -801,68 +792,19 @@ static uint8_t *fpu_area(struct process *process) {
     return (uint8_t *)(((uintptr_t)process->fpu_state + 63U) & ~(uintptr_t)63U);
 }
 
-static uint64_t fpu_xstate_mask;
-static uint32_t fpu_xstate_size;
-
-void process_enable_extended_fpu(void) {
-    uint32_t a, b, c, d;
-    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1), "c"(0));
-    if (!(c & (1U << 26))) return;
-
-    uint64_t cr4;
-    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
-    cr4 |= 1ULL << 18;
-    __asm__ volatile("mov %0, %%cr4" : : "r"(cr4));
-
-    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(13U), "c"(0));
-    uint64_t wanted = ((uint64_t)a) & 0x7ULL;
-    if (!(wanted & 0x3ULL)) return;
-    wanted |= 0x3ULL;
-
-    __asm__ volatile("xsetbv" : : "a"((uint32_t)wanted), "d"(0U), "c"(0U));
-
-    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(13U), "c"(0));
-    if (b > PROCESS_FPU_STATE_SIZE) {
-        cr4 &= ~(1ULL << 18);
-        __asm__ volatile("mov %0, %%cr4" : : "r"(cr4));
-        return;
-    }
-    fpu_xstate_size = b;
-    fpu_xstate_mask = wanted;
-}
-
 static void fpu_save(struct process *process) {
     if (!process) return;
-    uint8_t *area = fpu_area(process);
-    if (fpu_xstate_mask)
-        __asm__ volatile("xsave64 (%0)" : : "r"(area),
-                         "a"((uint32_t)fpu_xstate_mask),
-                         "d"((uint32_t)(fpu_xstate_mask >> 32)) : "memory");
-    else
-        __asm__ volatile("fxsave64 (%0)" : : "r"(area) : "memory");
+    arch_fpu_save(fpu_area(process));
 }
 
 static void fpu_restore(struct process *process) {
     if (!process) return;
-    uint8_t *area = fpu_area(process);
-    if (fpu_xstate_mask)
-        __asm__ volatile("xrstor64 (%0)" : : "r"(area),
-                         "a"((uint32_t)fpu_xstate_mask),
-                         "d"((uint32_t)(fpu_xstate_mask >> 32)) : "memory");
-    else
-        __asm__ volatile("fxrstor64 (%0)" : : "r"(area) : "memory");
+    arch_fpu_restore(fpu_area(process));
 }
 
 static void fpu_init_state(struct process *process) {
     if (!process) return;
-    uint8_t *area = fpu_area(process);
-    memset(area, 0, PROCESS_FPU_STATE_SIZE);
-    area[0] = 0x7F;
-    area[1] = 0x03;
-    area[24] = 0x80;
-    area[25] = 0x1F;
-    area[28] = 0xFF;
-    area[29] = 0xFF;
+    arch_fpu_init(fpu_area(process));
 }
 
 static void fpu_copy(struct process *destination, struct process *source) {
@@ -870,7 +812,10 @@ static void fpu_copy(struct process *destination, struct process *source) {
 }
 
 static void activate_process(struct process *process) {
-    if (current && current != process) fpu_save(current);
+    if (current && current != process) {
+        arch_save_thread_pointers(current);
+        fpu_save(current);
+    }
     current = process;
     if (!process->time_slice_ticks)
         process->time_slice_ticks = process->rt_priority
@@ -884,56 +829,8 @@ static void activate_process(struct process *process) {
         vmm_activate(process->cr3);
         cpu_current()->address_space = process->cr3;
     }
-    wrmsr(IA32_FS_BASE, process->fs_base);
-    wrmsr(IA32_KERNEL_GS_BASE, process->gs_base);
+    arch_load_thread_pointers(process->fs_base, process->gs_base);
     fpu_restore(process);
-}
-
-static void save_interrupt_context(struct syscall_frame *destination,
-                                   const struct interrupt_frame *source) {
-    destination->r15 = source->r15;
-    destination->r14 = source->r14;
-    destination->r13 = source->r13;
-    destination->r12 = source->r12;
-    destination->rbp = source->rbp;
-    destination->rbx = source->rbx;
-    destination->r9 = source->r9;
-    destination->r8 = source->r8;
-    destination->r10 = source->r10;
-    destination->rdx = source->rdx;
-    destination->rsi = source->rsi;
-    destination->rdi = source->rdi;
-    destination->rax = source->rax;
-    destination->rcx = source->rcx;
-    destination->r11 = source->r11;
-    destination->user_rip = source->rip;
-    destination->user_rflags = source->rflags;
-    destination->user_rsp = source->rsp;
-}
-
-static void load_interrupt_context(struct interrupt_frame *destination,
-                                   const struct syscall_frame *source) {
-    destination->ds = 0x1b;
-    destination->r15 = source->r15;
-    destination->r14 = source->r14;
-    destination->r13 = source->r13;
-    destination->r12 = source->r12;
-    destination->r11 = source->r11;
-    destination->r10 = source->r10;
-    destination->r9 = source->r9;
-    destination->r8 = source->r8;
-    destination->rbp = source->rbp;
-    destination->rdi = source->rdi;
-    destination->rsi = source->rsi;
-    destination->rdx = source->rdx;
-    destination->rcx = source->rcx;
-    destination->rbx = source->rbx;
-    destination->rax = source->rax;
-    destination->rip = source->user_rip;
-    destination->cs = 0x23;
-    destination->rflags = source->user_rflags | 0x2ULL;
-    destination->rsp = source->user_rsp;
-    destination->ss = 0x1b;
 }
 
 static int switch_to_next(struct syscall_frame *frame, struct process *after) {
@@ -948,6 +845,7 @@ static void go_idle(void) __attribute__((noreturn));
 static void go_idle(void) {
     klock_note(KLOCK_NOTE_IDLE);
     if (current) {
+        arch_save_thread_pointers(current);
         fpu_save(current);
         current = NULL;
     }
@@ -1256,11 +1154,11 @@ int process_signal_has_handler(int signal_number) {
 }
 
 int process_fault_from_interrupt(struct interrupt_frame *frame, int signal_number) {
-    if (!frame || (frame->cs & 3U) != 3U || !current ||
+    if (!frame || !arch_interrupt_from_user(frame) || !current ||
         current->state != PROCESS_RUNNING) return 0;
 
     process_account_runtime();
-    save_interrupt_context(&current->saved_frame, frame);
+    arch_frame_from_interrupt(&current->saved_frame, frame);
     struct syscall_frame resume = current->saved_frame;
 
     const char *type = signal_number == SIGSEGV ? "segv" :
@@ -1274,7 +1172,7 @@ int process_fault_from_interrupt(struct interrupt_frame *frame, int signal_numbe
     process_prepare_user_return(&resume);
     if (!current || current->state != PROCESS_RUNNING) return 1;
     current->saved_frame = resume;
-    load_interrupt_context(frame, &resume);
+    arch_frame_to_interrupt(frame, &resume);
     return 1;
 }
 
@@ -1286,7 +1184,7 @@ static void resume_from_idle(struct interrupt_frame *frame) {
     process_prepare_user_return(&resume);
     if (!current || current->state != PROCESS_RUNNING) go_idle();
     current->saved_frame = resume;
-    load_interrupt_context(frame, &resume);
+    arch_frame_to_interrupt(frame, &resume);
 }
 
 void process_timer_interrupt(struct interrupt_frame *frame) {
@@ -1295,10 +1193,10 @@ void process_timer_interrupt(struct interrupt_frame *frame) {
         resume_from_idle(frame);
         return;
     }
-    if ((frame->cs & 3U) != 3U || current->state != PROCESS_RUNNING) return;
+    if (!arch_interrupt_from_user(frame) || current->state != PROCESS_RUNNING) return;
 
     process_account_runtime();
-    save_interrupt_context(&current->saved_frame, frame);
+    arch_frame_from_interrupt(&current->saved_frame, frame);
 
     struct syscall_frame resume = current->saved_frame;
     if (current->time_slice_ticks) current->time_slice_ticks--;
@@ -1324,7 +1222,7 @@ void process_timer_interrupt(struct interrupt_frame *frame) {
     process_prepare_user_return(&resume);
     if (!current || current->state != PROCESS_RUNNING) return;
     current->saved_frame = resume;
-    load_interrupt_context(frame, &resume);
+    arch_frame_to_interrupt(frame, &resume);
 }
 
 void process_yield_from_syscall(struct syscall_frame *frame) {
@@ -1397,8 +1295,8 @@ static void notify_parent_of_exit(struct process *child) {
     parent->signal_pending |= signal_bit(SIGCHLD);
     if (parent->wait4_active && parent->state == PROCESS_BLOCKED &&
         child_matches(child, parent, parent->wait_pid)) {
-        if (store_wait_status(parent, child, parent->wait_status_user) == 0) parent->saved_frame.rax = child->pid;
-        else parent->saved_frame.rax = (uint64_t)-(int64_t)EINVAL;
+        if (store_wait_status(parent, child, parent->wait_status_user) == 0) SYSCALL_RET(&parent->saved_frame) = child->pid;
+        else SYSCALL_RET(&parent->saved_frame) = (uint64_t)-(int64_t)EINVAL;
         parent->wait4_active = 0;
         parent->wait_pid = 0;
         parent->wait_status_user = 0;
@@ -1420,9 +1318,9 @@ static int notify_parent_of_job_change(struct process *child, int wait_flag, int
         !(parent->wait_options & wait_flag)) return 0;
 
     if (store_job_status(parent, status, parent->wait_status_user) == 0)
-        parent->saved_frame.rax = child->pid;
+        SYSCALL_RET(&parent->saved_frame) = child->pid;
     else
-        parent->saved_frame.rax = (uint64_t)-(int64_t)EINVAL;
+        SYSCALL_RET(&parent->saved_frame) = (uint64_t)-(int64_t)EINVAL;
     parent->wait4_active = 0;
     parent->wait_pid = 0;
     parent->wait_status_user = 0;
@@ -1508,8 +1406,8 @@ static void terminate_sibling_threads(int status);
 static void process_exit_from_signal(struct syscall_frame *frame, int signal_number) {
     if (current && current->pid == 1)
         kprintf("TUNIX: init killed by signal %d at rip %p rsp %p\n",
-                signal_number, (void *)(frame ? frame->user_rip : 0),
-                (void *)(frame ? frame->user_rsp : 0));
+                signal_number, (void *)(frame ? SYSCALL_IP(frame) : 0),
+                (void *)(frame ? SYSCALL_USER_SP(frame) : 0));
     if (current) current->termination_signal = signal_number;
     terminate_sibling_threads(128 + signal_number);
     if (current) current->is_thread = 0;
@@ -1597,6 +1495,7 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame) {
         return -EINVAL;
     }
     memory_copy_mappings(child->memory, parent->memory);
+    arch_save_thread_pointers(parent);
     fpu_save(parent);
     fpu_copy(child, parent);
     child->entry = parent->entry;
@@ -1618,7 +1517,7 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame) {
     }
 
     child->saved_frame = *frame;
-    child->saved_frame.rax = 0;
+    SYSCALL_RET(&child->saved_frame) = 0;
     child->signal_blocked = parent->signal_blocked;
     memcpy(child->signal_actions, parent->signal_actions, sizeof(child->signal_actions));
 
@@ -1680,6 +1579,7 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
     child->memory = parent->memory;
     memory_ref(child->memory);
     sync_memory_view(child);
+    arch_save_thread_pointers(parent);
     fpu_save(parent);
     fpu_copy(child, parent);
     child->entry = parent->entry;
@@ -1696,8 +1596,8 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
     }
 
     child->saved_frame = *frame;
-    child->saved_frame.rax = 0;
-    child->saved_frame.user_rsp = child_stack;
+    SYSCALL_RET(&child->saved_frame) = 0;
+    SYSCALL_USER_SP(&child->saved_frame) = child_stack;
     child->signal_blocked = parent->signal_blocked;
     memcpy(child->signal_actions, parent->signal_actions, sizeof(child->signal_actions));
 
@@ -1754,7 +1654,7 @@ int64_t process_futex_wait(struct syscall_frame *frame, uint64_t address,
 
     struct process *waiting = current;
     waiting->saved_frame = *frame;
-    waiting->saved_frame.rax = 0;
+    SYSCALL_RET(&waiting->saved_frame) = 0;
     waiting->state = PROCESS_BLOCKED;
     waiting->futex_wait_active = 1;
     waiting->futex_wait_address = address;
@@ -1862,7 +1762,7 @@ int process_futex_wake(uint64_t address, int maximum, uint32_t bitset, int share
             item->futex_wait_address = 0;
             item->futex_wait_key = 0;
             item->futex_wait_deadline_ns = 0;
-            item->saved_frame.rax = 0;
+            SYSCALL_RET(&item->saved_frame) = 0;
             wake_to_ready(item);
             woken++;
             if (woken >= maximum) break;
@@ -1981,13 +1881,10 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
     }
 
     memset(frame, 0, sizeof(*frame));
-    frame->user_rip = current->entry;
-    frame->user_rsp = current->user_stack_top;
-    frame->user_rflags = 0x202;
+    arch_frame_enter_user(frame, current->entry, current->user_stack_top);
     vmm_activate(new_cr3);
     cpu_current()->address_space = new_cr3;
-    wrmsr(IA32_FS_BASE, 0);
-    wrmsr(IA32_KERNEL_GS_BASE, 0);
+    arch_load_thread_pointers(0, 0);
     if (old_memory) memory_unref(old_memory);
     else vmm_destroy_address_space(old_cr3);
     eventfs_emit_process_exec(current->cred.euid, current->pid, current->name);
@@ -2142,7 +2039,7 @@ static void signal_one_process(struct process *target, int signal_number) {
         target->futex_wait_key = 0;
         target->futex_wait_deadline_ns = 0;
         if (!target->syscall_rewound)
-            target->saved_frame.rax = (uint64_t)-(int64_t)EINTR;
+            SYSCALL_RET(&target->saved_frame) = (uint64_t)-(int64_t)EINTR;
         target->wait4_active = 0;
         target->wait_channel = NULL;
         target->wait_pid = 0;
@@ -2301,36 +2198,9 @@ int process_signal_interrupts_wait(void) {
     return 1;
 }
 
-static void mcontext_put(uint8_t *context, unsigned slot, uint64_t value) {
-    memcpy(context + UCONTEXT_MCONTEXT_OFFSET + slot * 8U, &value, sizeof(value));
-}
-
-static uint64_t mcontext_get(const uint8_t *context, unsigned slot) {
-    uint64_t value;
-    memcpy(&value, context + UCONTEXT_MCONTEXT_OFFSET + slot * 8U, sizeof(value));
-    return value;
-}
-
 static void fill_user_context(uint8_t *context, const struct syscall_frame *frame,
                               uint64_t blocked) {
-    mcontext_put(context, MCONTEXT_R8, frame->r8);
-    mcontext_put(context, MCONTEXT_R9, frame->r9);
-    mcontext_put(context, MCONTEXT_R10, frame->r10);
-    mcontext_put(context, MCONTEXT_R11, frame->r11);
-    mcontext_put(context, MCONTEXT_R12, frame->r12);
-    mcontext_put(context, MCONTEXT_R13, frame->r13);
-    mcontext_put(context, MCONTEXT_R14, frame->r14);
-    mcontext_put(context, MCONTEXT_R15, frame->r15);
-    mcontext_put(context, MCONTEXT_RDI, frame->rdi);
-    mcontext_put(context, MCONTEXT_RSI, frame->rsi);
-    mcontext_put(context, MCONTEXT_RBP, frame->rbp);
-    mcontext_put(context, MCONTEXT_RBX, frame->rbx);
-    mcontext_put(context, MCONTEXT_RDX, frame->rdx);
-    mcontext_put(context, MCONTEXT_RAX, frame->rax);
-    mcontext_put(context, MCONTEXT_RCX, frame->rcx);
-    mcontext_put(context, MCONTEXT_RSP, frame->user_rsp);
-    mcontext_put(context, MCONTEXT_RIP, frame->user_rip);
-    mcontext_put(context, MCONTEXT_EFLAGS, frame->user_rflags);
+    arch_fill_mcontext(context, frame);
     memcpy(context + UCONTEXT_SIGMASK_OFFSET, &blocked, sizeof(blocked));
     uint64_t stack_pointer = current ? current->signal_stack_pointer : 0;
     uint64_t stack_size = current ? current->signal_stack_size : 0;
@@ -2341,27 +2211,7 @@ static void fill_user_context(uint8_t *context, const struct syscall_frame *fram
 }
 
 static void read_user_context(struct syscall_frame *frame, const uint8_t *context) {
-    frame->r8 = mcontext_get(context, MCONTEXT_R8);
-    frame->r9 = mcontext_get(context, MCONTEXT_R9);
-    frame->r10 = mcontext_get(context, MCONTEXT_R10);
-    frame->r11 = mcontext_get(context, MCONTEXT_R11);
-    frame->r12 = mcontext_get(context, MCONTEXT_R12);
-    frame->r13 = mcontext_get(context, MCONTEXT_R13);
-    frame->r14 = mcontext_get(context, MCONTEXT_R14);
-    frame->r15 = mcontext_get(context, MCONTEXT_R15);
-    frame->rdi = mcontext_get(context, MCONTEXT_RDI);
-    frame->rsi = mcontext_get(context, MCONTEXT_RSI);
-    frame->rbp = mcontext_get(context, MCONTEXT_RBP);
-    frame->rbx = mcontext_get(context, MCONTEXT_RBX);
-    frame->rdx = mcontext_get(context, MCONTEXT_RDX);
-    frame->rax = mcontext_get(context, MCONTEXT_RAX);
-    frame->rcx = mcontext_get(context, MCONTEXT_RCX);
-    uint64_t rsp = mcontext_get(context, MCONTEXT_RSP);
-    uint64_t rip = mcontext_get(context, MCONTEXT_RIP);
-    if (rsp && rsp < USER_ADDRESS_LIMIT) frame->user_rsp = rsp;
-    if (rip && rip < USER_ADDRESS_LIMIT) frame->user_rip = rip;
-    uint64_t flags = mcontext_get(context, MCONTEXT_EFLAGS);
-    frame->user_rflags = (flags & ~(uint64_t)0x200D5UL & 0x3F7FD5UL) | 0x202UL;
+    arch_read_mcontext(frame, context);
 }
 
 static int on_signal_stack(const struct process *process, uint64_t user_rsp) {
@@ -2412,18 +2262,18 @@ void process_prepare_user_return(struct syscall_frame *frame) {
     if (current->syscall_rewound) {
         current->syscall_rewound = 0;
         if (!(action->flags & SA_RESTART)) {
-            frame->user_rip += 2U;
-            frame->rax = (uint64_t)-(int64_t)EINTR;
+            SYSCALL_ADVANCE(frame);
+            SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINTR;
             current->io_wait_active = 0;
             current->io_wait_syscall = 0;
             current->io_wait_deadline_ns = 0;
         }
     }
 
-    uint64_t stack_top = frame->user_rsp;
+    uint64_t stack_top = SYSCALL_USER_SP(frame);
     if ((action->flags & SA_ONSTACK) &&
         current->signal_stack_flags != SS_DISABLE &&
-        !on_signal_stack(current, frame->user_rsp)) {
+        !on_signal_stack(current, SYSCALL_USER_SP(frame))) {
         stack_top = current->signal_stack_pointer + current->signal_stack_size;
     }
     uint64_t area = stack_top & ~15ULL;
@@ -2460,8 +2310,8 @@ void process_prepare_user_return(struct syscall_frame *frame) {
     current->signal_sender_pid[signal_number - 1] = 0;
     current->signal_sender_uid[signal_number - 1] = 0;
 
-    uint64_t new_rsp = area - 8;
-    if (vmm_copy_to_space(current->cr3, new_rsp, &action->restorer, sizeof(action->restorer)) != 0) {
+    uint64_t new_rsp;
+    if (arch_signal_push_restorer(current->cr3, area, &action->restorer, &new_rsp) != 0) {
         process_exit_from_signal(frame, SIGSEGV);
         return;
     }
@@ -2470,18 +2320,14 @@ void process_prepare_user_return(struct syscall_frame *frame) {
     current->signal_saved_mask = current->signal_blocked;
     current->signal_blocked |= action->mask | bit;
     current->in_signal = 1;
-    frame->user_rsp = new_rsp;
-    frame->user_rip = action->handler;
-    frame->rdi = (uint64_t)signal_number;
-    frame->rsi = siginfo_address;
-    frame->rdx = context_address;
-    frame->rax = 0;
+    arch_signal_enter_handler(frame, new_rsp, action->handler, action->restorer,
+                              signal_number, siginfo_address, context_address);
 }
 
 void process_set_fs_base(uint64_t value) {
     if (!current || value >= USER_ADDRESS_LIMIT) return;
     current->fs_base = value;
-    wrmsr(IA32_FS_BASE, value);
+    arch_write_fs_base(value);
 }
 
 uint64_t process_get_fs_base(void) {
@@ -2491,7 +2337,7 @@ uint64_t process_get_fs_base(void) {
 void process_set_gs_base(uint64_t value) {
     if (!current) return;
     current->gs_base = value;
-    wrmsr(IA32_KERNEL_GS_BASE, value);
+    arch_write_gs_base(value);
 }
 
 uint64_t process_get_gs_base(void) {

@@ -3,11 +3,8 @@
 
 #include <stdint.h>
 
-/*
- * Stack layout produced by src/kernel/arch/x86_64/isr.S.
- * For interrupts raised while CPL=3, rsp/ss are supplied by the CPU and are
- * therefore safe to access. Kernel-mode IRQ handlers must check cs first.
- */
+#if defined(__x86_64__)
+
 struct interrupt_frame {
     uint64_t ds;
     uint64_t rax;
@@ -34,9 +31,22 @@ struct interrupt_frame {
     uint64_t ss;
 };
 
-/* isr.S relocates the frame by this much, and reads `cs` at offset 152. */
 _Static_assert(sizeof(struct interrupt_frame) == 184, "isr.S assumes 184");
 _Static_assert(__builtin_offsetof(struct interrupt_frame, cs) == 152,
                "isr.S reads cs at 152");
+
+#elif defined(__aarch64__)
+
+struct interrupt_frame {
+    uint64_t x[31];
+    uint64_t elr;
+    uint64_t spsr;
+    uint64_t sp_el0;
+    uint64_t reserved[2];
+};
+
+_Static_assert(sizeof(struct interrupt_frame) == 288, "exceptions.S subtracts 288");
+
+#endif
 
 #endif

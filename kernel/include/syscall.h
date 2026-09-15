@@ -28,9 +28,6 @@ struct syscall_frame {
     uint64_t user_rsp;
 };
 
-/* syscall_entry.S builds this frame by hand at these offsets, and process.c
-   embeds it in every process; pin the layout so a field can not drift away
-   from the assembly that fills it. */
 _Static_assert(sizeof(struct syscall_frame) == 144, "syscall_entry.S subtracts 144");
 _Static_assert(__builtin_offsetof(struct syscall_frame, r15) == 0, "entry writes r15 at 0");
 _Static_assert(__builtin_offsetof(struct syscall_frame, rax) == 96, "entry writes rax at 96");
@@ -42,8 +39,6 @@ _Static_assert(__builtin_offsetof(struct syscall_frame, user_rsp) == 136, "entry
 
 #elif defined(__aarch64__)
 
-/* The same frame the AArch64 vector table saves: x0-x30 and the state needed
-   to return to EL0.  exceptions.S fills it at these offsets. */
 struct syscall_frame {
     uint64_t x[31];
     uint64_t elr;

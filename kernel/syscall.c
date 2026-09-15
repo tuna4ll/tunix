@@ -735,16 +735,12 @@ struct exec_arguments {
     const char *envp[MAX_EXEC_ITEMS + 1];
 };
 
-/* Whether the processor can mark a page no-execute: x86-64 detects it at
-   startup, AArch64 always has one. */
 static int nx_enabled;
 
 static inline uint64_t align_up(uint64_t value, uint64_t alignment) {
     return (value + alignment - 1) & ~(alignment - 1);
 }
 
-/* Installing the SYSCALL instruction is x86-64 setup, not dispatch: the
-   AArch64 side reaches this file through its own vector table instead. */
 #if defined(__x86_64__)
 
 extern void syscall_entry(void);
@@ -918,8 +914,7 @@ static int retry_io_wait(struct syscall_frame *frame, uint64_t syscall_number,
         return 1;
     }
 
-    SYSCALL_REWIND(frame);
-    SYSCALL_RET(frame) = syscall_number;
+    SYSCALL_RESTART(frame, syscall_number);
     waiting->syscall_rewound = 1;
 
     if (process_sleep_on(frame, process_io_wait_channel()) != 0)
@@ -3949,8 +3944,7 @@ static void block_and_retry(struct syscall_frame *frame, uint64_t syscall_number
         SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINTR;
         return;
     }
-    SYSCALL_REWIND(frame);
-    SYSCALL_RET(frame) = syscall_number;
+    SYSCALL_RESTART(frame, syscall_number);
     struct process *process = process_current();
     if (process) process->syscall_rewound = 1;
 
@@ -4914,8 +4908,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
                     SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINTR;
                     break;
                 }
-                SYSCALL_REWIND(frame);
-                SYSCALL_RET(frame) = SYS_IOCTL;
+                SYSCALL_RESTART(frame, SYS_IOCTL);
                 struct process *waiter = process_current();
                 if (waiter) waiter->syscall_rewound = 1;
                 if (process_sleep_on(frame, vt_switch_wait_channel()) != 0)

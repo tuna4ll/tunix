@@ -38,6 +38,7 @@
 #define SI_KERNEL 0x80
 
 #define SIGNAL_SIGINFO_SIZE 128
+#if defined(__x86_64__)
 #define SIGNAL_CONTEXT_SIZE 1024
 
 #define UCONTEXT_FLAGS_OFFSET 0
@@ -70,10 +71,19 @@
 #define MCONTEXT_OLDMASK 21
 #define MCONTEXT_CR2 22
 #define MCONTEXT_REGISTERS 23
+#define MINSIGSTKSZ 2048ULL
+#elif defined(__aarch64__)
+#define SIGNAL_CONTEXT_SIZE 4560
+#define UCONTEXT_FLAGS_OFFSET 0
+#define UCONTEXT_LINK_OFFSET 8
+#define UCONTEXT_STACK_OFFSET 16
+#define UCONTEXT_SIGMASK_OFFSET 40
+#define UCONTEXT_MCONTEXT_OFFSET 168
+#define MINSIGSTKSZ 5120ULL
+#endif
 
 #define SS_ONSTACK 1
 #define SS_DISABLE 2
-#define MINSIGSTKSZ 2048ULL
 
 struct tunix_sigaction {
     uint64_t handler;
