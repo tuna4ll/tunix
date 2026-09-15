@@ -323,7 +323,19 @@ static uint32_t xterm_256_color(unsigned index) {
 }
 
 int terminal_init(void) {
-    if (!framebuffer_available()) return -1;
+    if (!framebuffer_available()) {
+        layout.screen_width = 0;
+        layout.screen_height = 0;
+        layout.content_x = 0;
+        layout.content_y = 0;
+        layout.cell_width = TUNIX_TERMINAL_FONT_WIDTH;
+        layout.cell_height = TUNIX_TERMINAL_FONT_HEIGHT;
+        layout.columns = 80;
+        layout.rows = 25;
+        active_screen = NULL;
+        terminal_is_ready = 1;
+        return 0;
+    }
     calculate_layout();
     fill_background_rect(0, 0, layout.screen_width, layout.screen_height);
     active_screen = NULL;

@@ -1,5 +1,4 @@
 #include <stdint.h>
-#include "include/ata.h"
 #include "include/boot.h"
 #include "include/build_config.h"
 #include "include/block.h"
@@ -7,7 +6,6 @@
 #include "include/kstring.h"
 #include "include/devfs.h"
 #include "include/sysfs.h"
-#include "include/gdt.h"
 #include "include/framebuffer.h"
 #include "include/heap.h"
 #include "include/hwreport.h"
@@ -15,10 +13,9 @@
 #include "include/input.h"
 #include "include/ehci.h"
 #include "include/eventfs.h"
-#include "include/idt.h"
 #include "include/net/net.h"
+#include "include/platform.h"
 #include "include/pmm.h"
-#include "include/pic.h"
 #include "include/process.h"
 #include "include/procfs.h"
 #include "include/random.h"
@@ -32,12 +29,10 @@
 #include "include/terminal.h"
 #include "include/vmm.h"
 #include "include/acpi.h"
-#include "include/apic.h"
 #include "include/smp.h"
 #include "include/virtgpu.h"
 #include "include/xhci.h"
 
-extern void serial_init(void);
 extern void kprintf(const char *fmt, ...);
 extern void panic(const char *message);
 
@@ -79,15 +74,13 @@ void kmain(const struct boot_info *boot) {
     uint64_t boot_started = cpu_counter_ordered();
 #endif
     cpu_irq_disable();
-    pic_init();
-    serial_init();
+    arch_early_init();
 #if TUNIX_DEBUG_LOGS
     kprintf("TUNIX: boot regions=%u cmdline=\"%s\"\n", boot->memory_count,
             boot->command_line);
 #endif
 
-    gdt_init();
-    idt_init();
+    arch_cpu_init();
     process_enable_extended_fpu();
     time_init();
 #if TUNIX_BOOT_TIMINGS
@@ -96,8 +89,11 @@ void kmain(const struct boot_info *boot) {
     random_init();
     pmm_init(boot->memory, boot->memory_count);
     vmm_init();
+#if defined(__x86_64__)
     if (!boot->framebuffer) panic("no framebuffer from the bootloader");
-    if (framebuffer_init(boot->framebuffer) != 0) panic("framebuffer initialization failed");
+#endif
+    if (boot->framebuffer && framebuffer_init(boot->framebuffer) != 0)
+        panic("framebuffer initialization failed");
     heap_init();
     if (terminal_init() != 0)
         panic("framebuffer terminal initialization failed");
@@ -142,13 +138,7 @@ void kmain(const struct boot_info *boot) {
     boot_log_stage("root filesystem mount", &stage_started);
 #endif
     input_init();
-    int apic = apic_init() == 0;
-    if (apic) apic_route_legacy_irq(1U);
-    else pic_unmask(1U);
-    if (input_mouse_available()) {
-        if (apic) apic_route_legacy_irq(12U); else pic_unmask(12U);
-    }
-    if (apic) acpi_power_button_enable(ACPI_SCI_VECTOR);
+    arch_route_legacy_interrupts();
     net_enable_interrupts();
     devfs_init();
     sysfs_init();
@@ -176,7 +166,7 @@ void kmain(const struct boot_info *boot) {
         panic("no init");
     }
     timer_init();
-    if (apic_is_active()) apic_route_legacy_irq(0U); else pic_unmask(0U);
+    arch_route_timer();
     smp_init();
     hwreport_emit();
     if (boot_command_line_flag("klockstat")) klock_statistics_start();
