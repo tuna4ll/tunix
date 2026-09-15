@@ -8,6 +8,7 @@ struct interrupt_frame;
 #define TIMER_FREQUENCY_HZ 250U
 
 void timer_init(void);
+void arch_timer_start(unsigned hz);
 void timer_irq(struct interrupt_frame *frame);
 uint64_t timer_ticks(void);
 
