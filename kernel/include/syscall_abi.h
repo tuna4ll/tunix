@@ -11,6 +11,8 @@
 #define SYSCALL_ARG3(frame) ((frame)->r10)
 #define SYSCALL_ARG4(frame) ((frame)->r8)
 #define SYSCALL_ARG5(frame) ((frame)->r9)
+#define SYSCALL_CLONE_CHILD_TID(frame) SYSCALL_ARG3(frame)
+#define SYSCALL_CLONE_TLS(frame) SYSCALL_ARG4(frame)
 
 #define SYSCALL_USER_SP(frame) ((frame)->user_rsp)
 #define SYSCALL_REWIND(frame)  ((frame)->user_rip -= 2U)
@@ -28,6 +30,8 @@
 #define SYSCALL_ARG3(frame) ((frame)->x[3])
 #define SYSCALL_ARG4(frame) ((frame)->x[4])
 #define SYSCALL_ARG5(frame) ((frame)->x[5])
+#define SYSCALL_CLONE_CHILD_TID(frame) SYSCALL_ARG4(frame)
+#define SYSCALL_CLONE_TLS(frame) SYSCALL_ARG3(frame)
 
 #define SYSCALL_USER_SP(frame) ((frame)->sp_el0)
 #define SYSCALL_REWIND(frame)  ((frame)->elr -= 4U)

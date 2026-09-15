@@ -5262,7 +5262,8 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         case SYS_GETTID: SYSCALL_RET(frame) = process_current_tid(); break;
         case SYS_CLONE: {
             int64_t pid = sys_clone_fork_compat(
-                frame, SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame), SYSCALL_ARG3(frame), SYSCALL_ARG4(frame));
+                frame, SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame),
+                SYSCALL_CLONE_CHILD_TID(frame), SYSCALL_CLONE_TLS(frame));
             SYSCALL_RET(frame) = (uint64_t)pid;
             if (pid > 0) process_run_child_first_from_syscall(frame, (uint64_t)pid);
             break;
