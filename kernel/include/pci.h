@@ -37,6 +37,8 @@ uint64_t pci_bar_address(const struct pci_device *device, unsigned index);
 uint8_t pci_find_capability(const struct pci_device *device, uint8_t id);
 
 int pci_msix_enable(struct pci_device *device);
+void pci_assign_resources(uint64_t mmio32_base, uint64_t mmio32_size,
+                          uint64_t mmio64_base, uint64_t mmio64_size);
 int pci_msix_bind(struct pci_device *device, unsigned entry, unsigned vector);
 
 #endif

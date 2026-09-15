@@ -74,6 +74,79 @@ uint32_t pci_config_read32(uint8_t bus, uint8_t slot, uint8_t function, uint8_t 
     return reg ? *reg : 0xFFFFFFFFU;
 }
 
+struct bar_window {
+    uint64_t next;
+    uint64_t end;
+};
+
+static int window_take(struct bar_window *window, uint64_t size, uint64_t *address) {
+    uint64_t base = (window->next + size - 1U) & ~(size - 1U);
+    if (!window->end || base < window->next || base + size > window->end) return -1;
+    *address = base;
+    window->next = base + size;
+    return 0;
+}
+
+static void assign_function(uint8_t bus, uint8_t slot, uint8_t function,
+                            struct bar_window *low, struct bar_window *high) {
+    uint32_t header = pci_config_read32(bus, slot, function, 0x0C);
+    if (((header >> 16) & 0x7FU) != 0) return;
+    uint32_t command = pci_config_read32(bus, slot, function, 0x04);
+    pci_config_write32(bus, slot, function, 0x04, command & ~0x7U);
+
+    for (unsigned index = 0; index < 6U; index++) {
+        uint8_t offset = (uint8_t)(0x10U + index * 4U);
+        uint32_t original = pci_config_read32(bus, slot, function, offset);
+        if (original & 1U) continue;
+        int wide = ((original >> 1) & 3U) == 2U;
+        pci_config_write32(bus, slot, function, offset, 0xFFFFFFFFU);
+        uint64_t mask = pci_config_read32(bus, slot, function, offset) & ~0xFULL;
+        if (wide && index < 5U) {
+            pci_config_write32(bus, slot, function, (uint8_t)(offset + 4U), 0xFFFFFFFFU);
+            mask |= (uint64_t)pci_config_read32(bus, slot, function, (uint8_t)(offset + 4U)) << 32;
+        } else {
+            mask |= 0xFFFFFFFF00000000ULL;
+        }
+        if (!(mask & 0xFFFFFFF0ULL) && !(mask >> 32)) {
+            pci_config_write32(bus, slot, function, offset, original);
+            continue;
+        }
+        uint64_t size = ~mask + 1U;
+        uint64_t address = 0;
+        int placed = wide ? window_take(high, size, &address) : -1;
+        if (placed != 0) placed = window_take(low, size, &address);
+        if (placed != 0) {
+            pci_config_write32(bus, slot, function, offset, original);
+            if (wide) index++;
+            continue;
+        }
+        pci_config_write32(bus, slot, function, offset, (uint32_t)address | (original & 0xFU));
+        if (wide) {
+            pci_config_write32(bus, slot, function, (uint8_t)(offset + 4U), (uint32_t)(address >> 32));
+            index++;
+        }
+    }
+    pci_config_write32(bus, slot, function, 0x04, command | 0x2U);
+}
+
+void pci_assign_resources(uint64_t mmio32_base, uint64_t mmio32_size,
+                          uint64_t mmio64_base, uint64_t mmio64_size) {
+    struct bar_window low = { mmio32_base, mmio32_size ? mmio32_base + mmio32_size : 0 };
+    struct bar_window high = { mmio64_base, mmio64_size ? mmio64_base + mmio64_size : 0 };
+    uint8_t bus = ecam_first_bus;
+    for (unsigned slot = 0; slot < 32U; slot++) {
+        uint32_t id = pci_config_read32(bus, (uint8_t)slot, 0, 0);
+        if ((uint16_t)id == 0xFFFFU) continue;
+        uint32_t header = pci_config_read32(bus, (uint8_t)slot, 0, 0x0C);
+        unsigned functions = (header & 0x00800000U) ? 8U : 1U;
+        for (unsigned function = 0; function < functions; function++) {
+            if ((uint16_t)pci_config_read32(bus, (uint8_t)slot, (uint8_t)function, 0) == 0xFFFFU)
+                continue;
+            assign_function(bus, (uint8_t)slot, (uint8_t)function, &low, &high);
+        }
+    }
+}
+
 void pci_config_write32(uint8_t bus, uint8_t slot, uint8_t function, uint8_t offset, uint32_t value) {
     volatile uint32_t *reg = ecam_register(bus, slot, function, offset);
     if (reg) *reg = value;
