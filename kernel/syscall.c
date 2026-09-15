@@ -558,6 +558,7 @@ struct linux_rlimit {
     uint64_t rlim_max;
 };
 
+#if defined(__x86_64__)
 struct linux_stat {
     uint64_t st_dev;
     uint64_t st_ino;
@@ -575,6 +576,28 @@ struct linux_stat {
     struct linux_timespec st_ctim;
     int64_t __glibc_reserved[3];
 };
+#elif defined(__aarch64__)
+struct linux_stat {
+    uint64_t st_dev;
+    uint64_t st_ino;
+    uint32_t st_mode;
+    uint32_t st_nlink;
+    uint32_t st_uid;
+    uint32_t st_gid;
+    uint64_t st_rdev;
+    uint64_t __pad1;
+    int64_t st_size;
+    int32_t st_blksize;
+    int32_t __pad2;
+    int64_t st_blocks;
+    struct linux_timespec st_atim;
+    struct linux_timespec st_mtim;
+    struct linux_timespec st_ctim;
+    uint32_t __unused[2];
+};
+
+_Static_assert(sizeof(struct linux_stat) == 128, "arm64 struct stat is 128 bytes");
+#endif
 
 struct linux_statfs {
     uint64_t f_type;
@@ -4124,7 +4147,7 @@ static int64_t sys_uname(uint64_t user_buffer) {
     strncpy(value.nodename, uts_hostname(), sizeof(value.nodename) - 1);
     strncpy(value.release, "0.1.0", sizeof(value.release) - 1);
     strncpy(value.version, "Tunix Kernel", sizeof(value.version) - 1);
-    strncpy(value.machine, "x86_64", sizeof(value.machine) - 1);
+    strncpy(value.machine, SYSCALL_UTS_MACHINE, sizeof(value.machine) - 1);
     strncpy(value.domainname, uts_domainname(), sizeof(value.domainname) - 1);
     return copy_to_user(user_buffer, &value, sizeof(value)) == 0 ? 0 : -EFAULT;
 }
@@ -4845,7 +4868,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             }
             break;
         }
-        case SYS_OPEN: SYSCALL_RET(frame) = (uint64_t)open_at(AT_FDCWD, SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame)); break;
+        case SYS_OPEN: SYSCALL_RET(frame) = (uint64_t)open_at(AT_FDCWD, SYSCALL_ARG0(frame), SYSCALL_OPEN_FLAGS_IN(SYSCALL_ARG1(frame)), SYSCALL_ARG2(frame)); break;
         case SYS_CLOSE: SYSCALL_RET(frame) = (uint64_t)sys_close((int)SYSCALL_ARG0(frame)); break;
         case SYS_POLL: {
             int timeout_ms = (int)SYSCALL_ARG2(frame);
@@ -5364,7 +5387,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
                         memfd_add_seals(file->memfd, (uint32_t)SYSCALL_ARG2(frame));
                 }
             } else if (command == F_GETFL) {
-                SYSCALL_RET(frame) = process->files->fds[fd]->flags;
+                SYSCALL_RET(frame) = SYSCALL_OPEN_FLAGS_OUT(process->files->fds[fd]->flags);
             } else if (command == F_SETFL) {
                 process->files->fds[fd]->flags =
                     (process->files->fds[fd]->flags & ~(uint32_t)O_NONBLOCK) |
@@ -5746,7 +5769,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         case SYS_INOTIFY_INIT1:
             SYSCALL_RET(frame) = (uint64_t)sys_inotify_init((int)SYSCALL_ARG0(frame));
             break;
-        case SYS_OPENAT: SYSCALL_RET(frame) = (uint64_t)open_at((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame), SYSCALL_ARG3(frame)); break;
+        case SYS_OPENAT: SYSCALL_RET(frame) = (uint64_t)open_at((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_OPEN_FLAGS_IN(SYSCALL_ARG2(frame)), SYSCALL_ARG3(frame)); break;
         case SYS_MKNOD:
             SYSCALL_RET(frame) = (uint64_t)sys_mknodat(AT_FDCWD, SYSCALL_ARG0(frame),
                                                (uint32_t)SYSCALL_ARG1(frame), SYSCALL_ARG2(frame));
