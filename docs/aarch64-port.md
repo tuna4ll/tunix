@@ -141,6 +141,21 @@ mkfs.ext3 -q -r 1 -b 4096 -I 128 -m 1 -L tunix-root \
     -d root disk.img
 ```
 
+The kernel tests boot the same way on either architecture through
+`support/tests/kerneltest.sh`; `ARCH=aarch64` builds the test with the cross
+compiler and boots `virt` with the Image instead of Limine:
+
+```sh
+ARCH=aarch64 sh support/tests/proctest.sh build/kernel-aarch64-core.img
+ARCH=aarch64 sh support/tests/clone3-kerneltest.sh build/kernel-aarch64-core.img
+ARCH=aarch64 sh support/tests/scm-rights-kerneltest.sh build/kernel-aarch64-core.img
+ARCH=aarch64 sh support/tests/eventfs-kerneltest.sh build/kernel-aarch64-core.img
+ARCH=aarch64 support/tests/soundtest.sh 2 build/kernel-aarch64-core.img
+```
+
+The sound test plays through the emulated HD Audio codec into a wav file and
+checks that what came out is audible and never ran dry.
+
 `make aarch64` still builds the original bring-up kernel from
 `kernel/arch/aarch64/bringup/`, which is kept only as a reference until the
 portable kernel covers everything it demonstrated.
