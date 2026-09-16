@@ -100,6 +100,26 @@ Either one brings up the same console the x86-64 kernel draws, and the terminals
 stop being headless. ramfb memory is left out of the direct map so the same
 pages are never mapped with two different cache attributes.
 
+### The desktop image
+
+`make image-aarch64` builds the same image the x86-64 build does — Void's base,
+the package list in `GNUmakefile` with Weston, Mesa and Firefox, and
+`base-files/` over it — from Void's aarch64 repository. It needs no root: the
+sysroot and the ext3 image are assembled inside a user namespace
+(`unshare --map-auto --map-root-user`), which is enough for `chown` and for
+`mke2fs -d` to record real ownership, and the packages' install scripts run
+through the host's `qemu-aarch64` binfmt handler.
+
+```sh
+make image-aarch64           # -> build/tunix-aarch64.img, GPT with an ESP and an ext3 root
+make run-aarch64-image       # virt, ramfb, xHCI keyboard and mouse, virtio-net, NVMe
+```
+
+It boots to the Weston session: seatd hands over the display and the xHCI
+keyboard and mouse, Mesa renders through llvmpipe onto the DRM device backed by
+the ramfb framebuffer, the HD Audio codec is found on PCI, and DHCP and HTTPS
+work through virtio-net.
+
 ## Building and running
 
 ```sh
