@@ -23,6 +23,7 @@ typedef long s64;
 #define NR_CLOCK_GETTIME 228
 #define NR_EPOLL_CTL 233
 #define NR_GETRUSAGE 98
+#define NR_SOCKETPAIR 53
 #define EPOLL_PACKED __attribute__((packed))
 #define UCONTEXT_RET_OFFSET (40 + 13 * 8)
 #define UCONTEXT_IP_OFFSET (40 + 16 * 8)
@@ -47,6 +48,7 @@ typedef long s64;
 #define NR_CLOCK_GETTIME 113
 #define NR_EPOLL_CTL 21
 #define NR_GETRUSAGE 165
+#define NR_SOCKETPAIR 199
 #define EPOLL_PACKED
 #define UCONTEXT_RET_OFFSET (168 + 8)
 #define UCONTEXT_IP_OFFSET (168 + 264)
@@ -510,6 +512,33 @@ static void test_idle_poll_sleeps(void) {
     sys(NR_GETRUSAGE, 0, (u64)after, 0, 0, 0);
     s64 switches = (s64)(after[16] - before[16]);
     check("idle poll is not woken every tick", switches >= 1 && switches < 20, switches);
+
+    u64 readable[16] = { 0 };
+    readable[fds[0] / 64] |= 1UL << (fds[0] % 64);
+    wait.seconds = 1;
+    wait.nanoseconds = 0;
+    sys(NR_GETRUSAGE, 0, (u64)before, 0, 0, 0);
+    sys6(NR_PSELECT6, (u64)fds[0] + 1, (u64)readable, 0, 0, (u64)&wait, 0);
+    sys(NR_GETRUSAGE, 0, (u64)after, 0, 0, 0);
+    switches = (s64)(after[16] - before[16]);
+    check("idle select is not woken every tick", switches >= 1 && switches < 20, switches);
+
+    int pair[2] = { -1, -1 };
+    sys(NR_SOCKETPAIR, 1, 1, 0, (u64)pair, 0);
+    s64 pid = fork_process();
+    if (pid == 0) {
+        sleep_ms(1000);
+        sys(NR_WRITE, (u64)pair[1], (u64)"s", 1, 0, 0);
+        exit_now(0);
+    }
+    char byte = 0;
+    sys(NR_GETRUSAGE, 0, (u64)before, 0, 0, 0);
+    s64 got = sys(NR_READ, (u64)pair[0], (u64)&byte, 1, 0, 0);
+    sys(NR_GETRUSAGE, 0, (u64)after, 0, 0, 0);
+    switches = (s64)(after[16] - before[16]);
+    wait_child(pid);
+    check("blocked socket read is not woken every tick",
+          got == 1 && byte == 's' && switches >= 1 && switches < 20, got == 1 ? switches : got);
 }
 
 static int text_equal(const char *a, const char *b) {

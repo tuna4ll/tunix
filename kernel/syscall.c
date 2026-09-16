@@ -1086,6 +1086,13 @@ static int64_t sys_select_once(int nfds, uint64_t user_read, uint64_t user_write
         }
         if (this_ready) ready++;
     }
+    if (!ready && process) {
+        io_watch_begin(process);
+        for (int fd = 0; fd < nfds; fd++) {
+            if (fd_set_test(&requested_read, fd)) io_watch_add(process, fd, POLLIN);
+            if (fd_set_test(&requested_write, fd)) io_watch_add(process, fd, POLLOUT);
+        }
+    }
     if (ready || commit_empty) {
         if (user_read && copy_to_user(user_read, &result_read, sizeof(result_read)) != 0)
             return -EFAULT;
@@ -3983,6 +3990,26 @@ static int64_t sys_sigprocmask(int how, uint64_t user_set, uint64_t user_old_set
     return 0;
 }
 
+static void watch_blocked_file(struct process *process, uint64_t syscall_number,
+                               struct file *file) {
+    uint32_t events;
+    if (syscall_number == SYS_READ || syscall_number == SYS_READV ||
+        syscall_number == SYS_RECVFROM || syscall_number == SYS_RECVMSG ||
+        syscall_number == SYS_RECVMMSG || syscall_number == SYS_ACCEPT ||
+        syscall_number == SYS_ACCEPT4) events = POLLIN;
+    else if (syscall_number == SYS_WRITE || syscall_number == SYS_WRITEV ||
+             syscall_number == SYS_SENDTO || syscall_number == SYS_SENDMSG ||
+             syscall_number == SYS_CONNECT) events = POLLOUT;
+    else return;
+    if (!process || !process->files || !file) return;
+    for (int fd = 0; fd < PROCESS_MAX_FDS; fd++) {
+        if (process->files->fds[fd] != file) continue;
+        io_watch_begin(process);
+        io_watch_add(process, fd, events);
+        return;
+    }
+}
+
 static void block_and_retry(struct syscall_frame *frame, uint64_t syscall_number,
                             struct file *file, int writing) {
 
@@ -3996,7 +4023,10 @@ static void block_and_retry(struct syscall_frame *frame, uint64_t syscall_number
 
     const void *channel = writing ? file_write_wait_channel(file)
                                   : file_read_wait_channel(file);
-    if (!channel) channel = process_io_wait_channel();
+    if (!channel) {
+        channel = process_io_wait_channel();
+        watch_blocked_file(process, syscall_number, file);
+    }
     if (process_sleep_on(frame, channel) != 0)
         process_yield_from_syscall(frame);
 }
