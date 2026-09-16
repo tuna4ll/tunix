@@ -91,6 +91,15 @@ The SDHCI driver (`kernel/drivers/storage/sdhci.c`) is portable: PIO transfers,
 standard- and high-capacity cards, 32-bit register access throughout, and a
 write delay for the BCM2835 controller that needs one.
 
+### Display
+
+A framebuffer comes from the device tree's `simple-framebuffer` node, which is
+how the Raspberry Pi firmware hands over HDMI, or on QEMU from `-device ramfb`,
+configured through fw_cfg's DMA interface with memory carved off the top of RAM.
+Either one brings up the same console the x86-64 kernel draws, and the terminals
+stop being headless. ramfb memory is left out of the direct map so the same
+pages are never mapped with two different cache attributes.
+
 ## Building and running
 
 ```sh
@@ -174,6 +183,5 @@ sizes and places memory BARs from the host bridge's windows. NVMe runs as-is.
   Remaining differences show up as Void's services are exercised.
 - **Interrupts for devices.** Drivers currently poll. Wiring INTx through the
   device tree's `interrupt-map` and MSI through the GICv3 ITS comes next.
-- **Display.** `simple-framebuffer` from the device tree, and a QEMU framebuffer.
 - **Real boards.** Non-ECAM PCIe hosts (the Pi 4's own), USB, Ethernet, and
   UEFI/ACPI firmware.
