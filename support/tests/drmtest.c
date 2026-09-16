@@ -1,5 +1,3 @@
-/* The DRM device asked what a Linux graphics client asks, with Linux's own structures. */
-
 typedef unsigned long u64;
 typedef long s64;
 typedef unsigned int u32;
@@ -20,44 +18,10 @@ typedef int s32;
 #define CLOCK_MONOTONIC 1
 
 #define O_RDWR 2
-/* The event read must not block: a driver that never queues one would hang this. */
 #define O_NONBLOCK 04000
 
-static inline s64 syscall1(s64 n, s64 a) {
-    s64 r;
-    __asm__ volatile("syscall" : "=a"(r) : "a"(n), "D"(a) : "rcx", "r11", "memory");
-    return r;
-}
-static inline s64 syscall2(s64 n, s64 a, s64 b) {
-    s64 r;
-    __asm__ volatile("syscall" : "=a"(r) : "a"(n), "D"(a), "S"(b) : "rcx", "r11", "memory");
-    return r;
-}
-static inline s64 syscall3(s64 n, s64 a, s64 b, s64 c) {
-    s64 r;
-    __asm__ volatile("syscall" : "=a"(r) : "a"(n), "D"(a), "S"(b), "d"(c) : "rcx", "r11", "memory");
-    return r;
-}
-static inline s64 syscall4(s64 n, s64 a, s64 b, s64 c, s64 d) {
-    s64 r;
-    register s64 r10 __asm__("r10") = d;
-    __asm__ volatile("syscall" : "=a"(r) : "a"(n), "D"(a), "S"(b), "d"(c), "r"(r10)
-                     : "rcx", "r11", "memory");
-    return r;
-}
-static inline s64 syscall6(s64 n, s64 a, s64 b, s64 c, s64 d, s64 e, s64 f) {
-    s64 r;
-    register s64 r10 __asm__("r10") = d;
-    register s64 r8 __asm__("r8") = e;
-    register s64 r9 __asm__("r9") = f;
-    __asm__ volatile("syscall" : "=a"(r)
-                     : "a"(n), "D"(a), "S"(b), "d"(c), "r"(r10), "r"(r8), "r"(r9)
-                     : "rcx", "r11", "memory");
-    return r;
-}
+#include "tunix_syscall.h"
 
-/* Everything printed goes to a file as well, so a machine with no serial
-   cable can be read afterwards by mounting its disk. */
 static int results_fd = -1;
 
 static void put(const char *text) {
@@ -67,7 +31,7 @@ static void put(const char *text) {
     if (results_fd >= 0) (void)syscall3(SYS_write, results_fd, (s64)text, (s64)length);
 }
 
-#define O_WRONLY_CREAT_TRUNC 0x241   /* O_WRONLY | O_CREAT | O_TRUNC */
+#define O_WRONLY_CREAT_TRUNC 0x241
 
 static void open_results(void) {
     results_fd = (int)syscall3(SYS_open, (s64)"/tunix-drmtest-results.txt",
@@ -85,8 +49,6 @@ static void put_signed(s64 value) {
     put(buffer + index);
 }
 
-/* An ioctl number is a direction, a size, a type and an index; the driver reads
-   only the last two, but a real client sends all four. */
 #define IOC(dir, type, nr, size) \
     (((u64)(dir) << 30) | ((u64)(size) << 16) | ((u64)(type) << 8) | (u64)(nr))
 #define IOC_WRITE 1U
@@ -119,7 +81,6 @@ static void put_signed(s64 value) {
 #define DRM_MODE_PAGE_FLIP_EVENT 0x01
 #define DRM_CAP_SYNCOBJ 0x13
 #define DRM_CAP_SYNCOBJ_TIMELINE 0x14
-/* Linux has no DRM_CAP_ATOMIC; 0x15 is DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP. */
 #define DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP 0x15
 
 struct drm_version {
@@ -164,8 +125,6 @@ struct drm_mode_modeinfo {
     u32 vrefresh, flags, type; char name[32];
 };
 
-/* Linux's layout, which is the whole point: count_props_ptr is a pointer to a
-   per-object array of counts, and there is a user_data field at the end. */
 struct drm_mode_atomic {
     u32 flags; u32 count_objs;
     u64 objs_ptr;
@@ -204,8 +163,6 @@ static void test_version(void) {
     put("\n");
 }
 
-/* Whether the driver says atomic is available, which is what decides if a
-   compositor uses the atomic path at all. */
 static void test_atomic_advertised(void) {
     static const struct { u64 number; const char *name; } asked[] = {
         { DRM_CAP_SYNCOBJ, "syncobj(0x13)" },
@@ -229,7 +186,6 @@ static void test_atomic_advertised(void) {
     report("CLIENTCAP writeback", call(IOWR(NR_SET_CLIENT_CAP, struct drm_set_client_cap), &unknown));
 }
 
-/* An ioctl number is a direction, a size, a type and an index. */
 static void test_present_latency(u32 fb_id, u32 blob_id, unsigned short width,
                                  unsigned short height, unsigned commits);
 
@@ -270,13 +226,13 @@ static void test_atomic_modeset(void) {
         put("MODESET blob failed\n"); return;
     }
 
-    u32 objs[3]   = { 1, 2, 4 };            /* crtc, connector, plane */
+    u32 objs[3]   = { 1, 2, 4 };
     u32 counts[3] = { 2, 1, 10 };
     u32 props[13] = { 11, 12, 15, 14, 13, 16, 17, 18, 19, 20, 21, 22, 23 };
     u64 values[13] = {
-        1, blob.blob_id,                    /* ACTIVE, MODE_ID */
-        1,                                  /* connector CRTC_ID */
-        fb.fb_id, 1,                        /* plane FB_ID, CRTC_ID */
+        1, blob.blob_id,
+        1,
+        fb.fb_id, 1,
         0, 0, (u64)width << 16, (u64)height << 16,
         0, 0, width, height,
     };
@@ -291,7 +247,6 @@ static void test_atomic_modeset(void) {
     atomic.flags = DRM_MODE_PAGE_FLIP_EVENT;
     report("MODESET commit", call(IOWR(NR_MODE_ATOMIC, struct drm_mode_atomic), &atomic));
 
-    /* The completion the commit promised. */
     unsigned char event[64];
     s64 got = syscall3(SYS_read, card, (s64)event, sizeof(event));
     put("MODESET event ");
@@ -303,7 +258,6 @@ static void test_atomic_modeset(void) {
     }
     put("\n");
 
-    /* Before the teardown, while there is something to present. */
     test_present_latency(fb.fb_id, blob.blob_id, width, height, 200);
 
     struct drm_mode_destroy_blob kill = { blob.blob_id };
@@ -314,7 +268,6 @@ static void test_atomic_modeset(void) {
     (void)call(IOWR(NR_MODE_DESTROY_DUMB, struct drm_mode_destroy_dumb), &drop);
 }
 
-/* The properties the primary plane has, which an atomic commit has to set all of. */
 static void test_plane_properties(void) {
     u32 planes[8];
     struct drm_mode_get_plane_res res;
@@ -360,11 +313,10 @@ static void test_plane_properties(void) {
     put("\n");
 }
 
-/* A commit in the layout libdrm actually sends. */
 static void test_atomic_commit(void) {
-    u32 objs[1] = { 1 /* the CRTC */ };
+    u32 objs[1] = { 1  };
     u32 counts[1] = { 1 };
-    u32 props[1] = { 11 /* ACTIVE, as this driver numbers it */ };
+    u32 props[1] = { 11  };
     u64 values[1] = { 0 };
 
     struct drm_mode_atomic atomic;
@@ -381,14 +333,11 @@ static void test_atomic_commit(void) {
     put("\n");
 }
 
-/* Destroying a blob that does not exist, which is what a disable commit does
-   when it sets MODE_ID to zero. */
 static void test_blob_zero(void) {
     struct drm_mode_destroy_blob destroy = { 0 };
     report("BLOB destroy-zero", call(IOWR(NR_MODE_DESTROYPROPBLOB, struct drm_mode_destroy_blob), &destroy));
 }
 
-/* A commit in the layout libdrm actually sends. */
 #define PROT_READ 1
 #define PROT_WRITE 2
 #define MAP_SHARED 1
@@ -420,12 +369,10 @@ static void test_handle_isolation(void) {
         put("\n");
         return;
     }
-    /* Something only this process ever wrote, standing in for a window. */
     *(volatile u32 *)mapped = SECRET;
 
     s64 child = syscall1(SYS_fork, 0);
     if (child == 0) {
-        /* Its own descriptor on the card, and no handle of its own. */
         int own = (int)syscall3(SYS_open, (s64)"/dev/dri/card0", O_RDWR, 0);
         if (own < 0) { put("ISOLATION child open failed\n"); (void)syscall1(SYS_exit_group, 0); }
         struct drm_mode_map_dumb theirs;
@@ -461,8 +408,6 @@ static void test_handle_isolation(void) {
     (void)call(IOWR(NR_MODE_DESTROY_DUMB, struct drm_mode_destroy_dumb), &destroy);
 }
 
-/* Whether a framebuffer keeps its buffer alive, and whether the handle a
-   destroyed buffer had can come back as somebody else's. */
 static void test_framebuffer_lifetime(void) {
     struct drm_mode_create_dumb first;
     for (unsigned i = 0; i < sizeof(first); i++) ((char *)&first)[i] = 0;
@@ -471,14 +416,13 @@ static void test_framebuffer_lifetime(void) {
 
     struct drm_mode_fb_cmd2 fb;
     for (unsigned i = 0; i < sizeof(fb); i++) ((char *)&fb)[i] = 0;
-    fb.width = 64; fb.height = 64; fb.pixel_format = 0x34325258 /* XR24 */;
+    fb.width = 64; fb.height = 64; fb.pixel_format = 0x34325258 ;
     fb.handles[0] = first.handle; fb.pitches[0] = first.pitch;
     if (call(IOWR(NR_MODE_ADDFB2, struct drm_mode_fb_cmd2), &fb) != 0) return;
 
     struct drm_mode_destroy_dumb destroy = { first.handle, 0 };
     (void)call(IOWR(NR_MODE_DESTROY_DUMB, struct drm_mode_destroy_dumb), &destroy);
 
-    /* The buffer is gone; does the framebuffer that named it still exist? */
     struct drm_mode_fb_cmd query;
     for (unsigned i = 0; i < sizeof(query); i++) ((char *)&query)[i] = 0;
     query.fb_id = fb.fb_id;
@@ -489,8 +433,6 @@ static void test_framebuffer_lifetime(void) {
     put_signed(alive == 0 ? (s64)query.handle : -1);
     put("\n");
 
-    /* Allocate until the freed slot comes round again, which is when the
-       framebuffer's handle starts naming somebody else's buffer. */
     u32 reused = 0;
     for (int attempt = 0; attempt < 6000 && !reused; attempt++) {
         struct drm_mode_create_dumb again;
@@ -512,7 +454,6 @@ static void test_framebuffer_lifetime(void) {
     }
 }
 
-/* Whether one client can reach a buffer another client created. */
 static void test_size_overflow(void) {
     struct drm_mode_create_dumb create;
     for (unsigned i = 0; i < sizeof(create); i++) ((char *)&create)[i] = 0;
@@ -556,7 +497,6 @@ static void test_size_overflow(void) {
     (void)call(IOWR(NR_MODE_DESTROY_DUMB, struct drm_mode_destroy_dumb), &drop);
 }
 
-/* Longer than a blit takes here, so a gap this size is one the lock caused. */
 #define LONG_GAP_NS 150000UL
 
 static u64 now_ns(void) {
@@ -565,23 +505,15 @@ static u64 now_ns(void) {
     return (u64)value.seconds * 1000000000UL + (u64)value.nanoseconds;
 }
 
-/* How long the rest of the machine is stopped while a frame is presented. The
-   probe is a second process doing nothing but reading the clock, which needs
-   the kernel lock -- so a gap longer than a blit takes is one the lock caused.
-   The count matters more than the maximum: under emulation a blit is shorter
-   than a scheduling quantum, so the maximum is noise. */
 static void test_present_latency(u32 fb_id, u32 blob_id, unsigned short width,
                                  unsigned short height, unsigned commits) {
     int channel[2];
     if (syscall1(SYS_pipe, (s64)channel) != 0) { put("LATENCY pipe failed\n"); return; }
 
-    /* The maximum alone is noise on an emulated machine, where a blit is far
-       shorter than a scheduling quantum. What separates the two cases is how
-       *often* the clock was out of reach for longer than a blit takes. */
     s64 child = syscall1(SYS_fork, 0);
     if (child == 0) {
         (void)syscall1(SYS_close, channel[0]);
-        u64 report[2] = { 0, 0 };            /* worst gap, long gaps */
+        u64 report[2] = { 0, 0 };
         u64 started = now_ns();
         u64 last = started;
         while (now_ns() - started < 400000000UL) {
@@ -671,12 +603,4 @@ static void run_and_park(void) {
     __builtin_unreachable();
 }
 
-/* The entry point aligns the stack itself, because there is no libc here to
-   have done it and the compiler is promised a 16-byte boundary. */
-__asm__(".text\n"
-        ".globl _start\n"
-        "_start:\n"
-        "    xor %ebp, %ebp\n"
-        "    and $-16, %rsp\n"
-        "    call run_and_park\n"
-        "    hlt\n");
+TUNIX_START(run_and_park)

@@ -1,8 +1,3 @@
-/* Whether a keystroke arrives once. */
-/* Several processors read the same evdev device at once while keys are typed
-   into the machine, which is the shape that used to lose an event ring's
-   count and hand the same key out twice. */
-
 typedef unsigned long u64;
 typedef long s64;
 
@@ -20,24 +15,8 @@ typedef long s64;
 #define O_RDWR 2
 #define O_NONBLOCK 04000
 
-static inline s64 syscall1(s64 n, s64 a) {
-    s64 r;
-    __asm__ volatile("syscall" : "=a"(r) : "a"(n), "D"(a) : "rcx", "r11", "memory");
-    return r;
-}
-static inline s64 syscall2(s64 n, s64 a, s64 b) {
-    s64 r;
-    __asm__ volatile("syscall" : "=a"(r) : "a"(n), "D"(a), "S"(b) : "rcx", "r11", "memory");
-    return r;
-}
-static inline s64 syscall3(s64 n, s64 a, s64 b, s64 c) {
-    s64 r;
-    __asm__ volatile("syscall" : "=a"(r) : "a"(n), "D"(a), "S"(b), "d"(c)
-                     : "rcx", "r11", "memory");
-    return r;
-}
+#include "tunix_syscall.h"
 
-/* Printed and also kept, so a machine with no serial cable can be read after. */
 static int results_fd = -1;
 #define O_WRONLY_CREAT_TRUNC 0x241
 
@@ -94,8 +73,6 @@ static int open_keyboard(void) {
     return (int)syscall3(SYS_open, (s64)"/dev/input/event0", O_RDWR | O_NONBLOCK, 0);
 }
 
-/* One reader per processor, each with a device of its own, all reading at once:
-   the readers are what put several processors inside the same driver. */
 static void stress_reader(unsigned cpu) {
     pin_to_cpu(cpu);
     int fd = open_keyboard();
@@ -163,8 +140,6 @@ static int run_all(void) {
     put_number(total);
     put("\n");
 
-    /* What the kernel says it produced, read the way a person would read it on
-       the machine itself: from a terminal, with nothing written to a disk. */
     int history = (int)syscall3(SYS_open, (s64)"/proc/inputlog", 0, 0);
     if (history < 0) {
         put("INPUT history unavailable\n");
@@ -186,18 +161,10 @@ static int run_all(void) {
     return 0;
 }
 
-/* Init returning is a panic, which is not the report anybody wants. */
 static void run_and_park(void) __attribute__((noreturn, used));
 static void run_and_park(void) {
     (void)run_all();
     for (;;) sleep_ns(1000000000UL);
 }
 
-/* The entry point aligns the stack itself, because there is no libc here. */
-__asm__(".text\n"
-        ".globl _start\n"
-        "_start:\n"
-        "    xor %ebp, %ebp\n"
-        "    and $-16, %rsp\n"
-        "    call run_and_park\n"
-        "    hlt\n");
+TUNIX_START(run_and_park)

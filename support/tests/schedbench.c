@@ -1,5 +1,3 @@
-/* The scheduler measured from inside the machine it schedules, with no libc in between. */
-
 typedef unsigned long u64;
 typedef long s64;
 
@@ -45,60 +43,12 @@ struct timespec {
     s64 nanoseconds;
 };
 
-static inline s64 syscall1(s64 number, s64 a) {
-    s64 result;
-    __asm__ volatile("syscall" : "=a"(result) : "a"(number), "D"(a)
-                     : "rcx", "r11", "memory");
-    return result;
-}
+#include "tunix_syscall.h"
 
-static inline s64 syscall2(s64 number, s64 a, s64 b) {
-    s64 result;
-    __asm__ volatile("syscall" : "=a"(result) : "a"(number), "D"(a), "S"(b)
-                     : "rcx", "r11", "memory");
-    return result;
-}
 
-static inline s64 syscall3(s64 number, s64 a, s64 b, s64 c) {
-    s64 result;
-    __asm__ volatile("syscall" : "=a"(result) : "a"(number), "D"(a), "S"(b), "d"(c)
-                     : "rcx", "r11", "memory");
-    return result;
-}
 
-static inline s64 syscall4(s64 number, s64 a, s64 b, s64 c, s64 d) {
-    s64 result;
-    register s64 r10 __asm__("r10") = d;
-    __asm__ volatile("syscall" : "=a"(result)
-                     : "a"(number), "D"(a), "S"(b), "d"(c), "r"(r10)
-                     : "rcx", "r11", "memory");
-    return result;
-}
 
-/* The child comes back on a stack of its own, which is not something a C
-   function can be made to do, so the syscall itself is written out here. */
-extern s64 spawn_thread(u64 flags, void *child_stack_top);
-__asm__(".text\n"
-        ".globl spawn_thread\n"
-        "spawn_thread:\n"
-        "    xor %edx, %edx\n"
-        "    xor %r10d, %r10d\n"
-        "    xor %r8d, %r8d\n"
-        "    mov $56, %eax\n"
-        "    syscall\n"
-        "    test %rax, %rax\n"
-        "    jnz 1f\n"
-        "    xor %ebp, %ebp\n"
-        "    pop %rax\n"
-        "    call *%rax\n"
-        "    xor %edi, %edi\n"
-        "    mov $60, %eax\n"
-        "    syscall\n"
-        "    hlt\n"
-        "1:  ret\n");
 
-/* Everything printed goes to a file as well, so a machine with no serial
-   cable can be read afterwards by mounting its disk. */
 static int results_fd = -1;
 
 static void put(const char *text) {
@@ -108,15 +58,13 @@ static void put(const char *text) {
     if (results_fd >= 0) (void)syscall3(SYS_write, results_fd, (s64)text, (s64)length);
 }
 
-#define O_WRONLY_CREAT_TRUNC 0x241   /* O_WRONLY | O_CREAT | O_TRUNC */
+#define O_WRONLY_CREAT_TRUNC 0x241
 
 static void open_results(void) {
     results_fd = (int)syscall3(SYS_open, (s64)"/tunix-schedbench-results.txt",
                                O_WRONLY_CREAT_TRUNC, 0644);
 }
 
-/* Three digits of fraction is what makes a microsecond legible in a
-   millisecond column. */
 static void put_fixed(u64 value, unsigned fraction_digits) {
     char buffer[32];
     int index = (int)sizeof(buffer);
@@ -151,8 +99,6 @@ static void pin_to_cpu(unsigned cpu) {
     (void)syscall3(SYS_sched_setaffinity, 0, sizeof(mask), (s64)&mask);
 }
 
-/* A mask fork hands on, so a test that pinned itself has to give the whole
-   machine back before the next one forks its workers. */
 static void pin_to_all(unsigned cpus) {
     u64 mask = cpus >= 64 ? ~0UL : (1UL << cpus) - 1UL;
     (void)syscall3(SYS_sched_setaffinity, 0, sizeof(mask), (s64)&mask);
@@ -170,19 +116,14 @@ static void sort_ascending(u64 *values, unsigned count) {
     }
 }
 
-/* Work the compiler cannot fold away, so that a spinner really does spend the
-   processor it was given. */
 static volatile u64 sink;
 
-/* One round of arithmetic and nothing else, so that a spinner spends the
-   processor rather than the kernel lock every syscall takes. */
 static void spin_round(void) {
     u64 accumulator = sink;
     for (unsigned i = 0; i < 2048; i++) accumulator = accumulator * 6364136223846793005UL + 1442695040888963407UL;
     sink = accumulator;
 }
 
-/* Two equal children, one reniced, and the ratio of the work they got through. */
 static u64 spin_for(u64 nanoseconds) {
     u64 deadline = now_ns() + nanoseconds;
     u64 rounds = 0;
@@ -201,7 +142,6 @@ static void spin_forever(void) {
     for (;;) spin_round();
 }
 
-/* Two equal children, one reniced, and the ratio of the work they got through. */
 static void test_nice_ratio(u64 duration_ns) {
     int channel[2];
     if (syscall1(SYS_pipe, (s64)channel) != 0) { put("NICE fail pipe\n"); return; }
@@ -240,7 +180,6 @@ static void test_nice_ratio(u64 duration_ns) {
     put("\n");
 }
 
-/* How late a thread asking to wake every 20 ms actually woke, with the processors full. */
 static void test_wake_latency(unsigned spinners, unsigned samples, unsigned cpus) {
     static u64 lateness[512];
     if (samples > 512) samples = 512;
@@ -256,8 +195,6 @@ static void test_wake_latency(unsigned spinners, unsigned samples, unsigned cpus
         if (child > 0) children[started++] = child;
     }
 
-    /* Let them all be running before the first sample, or the first few measure
-       an empty machine. */
     sleep_ns(200000000UL);
 
     const u64 period = 20000000UL;
@@ -295,15 +232,12 @@ static void pingpong_partner(void) {
     }
 }
 
-/* The cost of a switch, between two threads of one process and between two processes. */
 static void test_switch_cost(int threaded, u64 rounds, unsigned cpus) {
     static char thread_stack[65536] __attribute__((aligned(16)));
     if (syscall1(SYS_pipe, (s64)pingpong_up) != 0) return;
     if (syscall1(SYS_pipe, (s64)pingpong_down) != 0) return;
     pingpong_rounds = rounds;
 
-    /* Both ends on one processor, so this measures a context switch rather than
-       how fast two processors can pass a byte between them. */
     pin_to_cpu(0);
 
     s64 partner;
@@ -345,7 +279,6 @@ static void test_switch_cost(int threaded, u64 rounds, unsigned cpus) {
     pin_to_all(cpus);
 }
 
-/* Whether the machine uses the processors it was given, which a fast switch cannot fake. */
 static u64 time_workers(unsigned workers, u64 rounds_each) {
     s64 children[16];
     unsigned started = 0;
@@ -376,7 +309,6 @@ static void test_parallel_speedup(unsigned workers, u64 rounds_each) {
     put("\n");
 }
 
-/* How long a runnable task waits while an equal one has the processor. */
 static void test_quantum(unsigned equals) {
     int channel[2];
     if (syscall1(SYS_pipe, (s64)channel) != 0) return;
@@ -404,7 +336,6 @@ static void test_quantum(unsigned equals) {
             for (unsigned i = 0; i < 8; i++) spin_round();
             u64 current = now_ns();
             u64 gap = current - last;
-            /* Anything under a tick is this loop running, not waiting. */
             if (gap > 2000000UL) gaps[seen++] = gap;
             last = current;
         }
@@ -436,8 +367,6 @@ static void test_quantum(unsigned equals) {
     put("ms\n");
 }
 
-/* A task that slept beside a spinner, and how long the spinner then went
-   without running. */
 static void test_sleeper_credit(void) {
     int channel[2];
     if (syscall1(SYS_pipe, (s64)channel) != 0) return;
@@ -446,8 +375,6 @@ static void test_sleeper_credit(void) {
     if (spinner == 0) {
         (void)syscall1(SYS_close, channel[0]);
         pin_to_cpu(0);
-        /* The longest this ever went without running, over the window the
-           sleeper is awake for. */
         u64 worst = 0;
         u64 last = now_ns();
         u64 deadline = last + 4000000000UL;
@@ -465,8 +392,6 @@ static void test_sleeper_credit(void) {
     }
     (void)syscall1(SYS_close, channel[1]);
 
-    /* Asleep for two of the spinner's four seconds, then awake and asking for
-       the processor on the same one. */
     s64 sleeper = syscall1(SYS_fork, 0);
     if (sleeper == 0) {
         pin_to_cpu(0);
@@ -486,8 +411,6 @@ static void test_sleeper_credit(void) {
     put("ms\n");
 }
 
-/* What a waiting process costs the processor: nothing if it sleeps, everything
-   it would have run if it rewinds the syscall and yields instead. */
 static u64 time_spinner_beside(int waiter_kind, u64 rounds) {
     static const char socket_path[] = "/schedbench.sock";
     int channel[2] = {-1, -1};
@@ -520,14 +443,12 @@ static u64 time_spinner_beside(int waiter_kind, u64 rounds) {
         waiter = syscall1(SYS_fork, 0);
         if (waiter == 0) {
             pin_to_cpu(0);
-            /* Nothing ever connects, so this waits for the whole measurement. */
             (void)syscall3(SYS_accept, listener, 0, 0);
             (void)syscall1(SYS_exit_group, 0);
         }
         (void)syscall1(SYS_close, listener);
     }
 
-    /* Let the waiter reach its wait before the clock starts. */
     sleep_ns(200000000UL);
 
     u64 begun = now_ns();
@@ -549,7 +470,6 @@ static u64 time_spinner_beside(int waiter_kind, u64 rounds) {
     return elapsed;
 }
 
-/* A blocking accept still has to answer when somebody does connect. */
 static void test_accept_completes(void) {
     static const char socket_path[] = "/schedbench-accept.sock";
     (void)syscall1(SYS_unlink, (s64)socket_path);
@@ -564,7 +484,6 @@ static void test_accept_completes(void) {
 
     s64 client = syscall1(SYS_fork, 0);
     if (client == 0) {
-        /* Late enough that the parent is already asleep inside accept(). */
         sleep_ns(300000000UL);
         int sock = (int)syscall3(SYS_socket, AF_UNIX, SOCK_STREAM, 0);
         (void)syscall3(SYS_connect, sock, (s64)&address, sizeof(address));
@@ -623,20 +542,10 @@ static int run_all(unsigned cpus) {
     return 0;
 }
 
-/* Init returning is a panic, and a panic is not the report anybody wants at the
-   end of a run that worked. */
 static void run_and_park(void) __attribute__((noreturn, used));
 static void run_and_park(void) {
     (void)run_all(TUNIX_BENCH_CPUS);
     for (;;) sleep_ns(1000000000UL);
 }
 
-/* A task that slept beside a spinner, and how long the spinner then
-   went without running. */
-__asm__(".text\n"
-        ".globl _start\n"
-        "_start:\n"
-        "    xor %ebp, %ebp\n"
-        "    and $-16, %rsp\n"
-        "    call run_and_park\n"
-        "    hlt\n");
+TUNIX_START(run_and_park)

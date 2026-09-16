@@ -1,6 +1,3 @@
-/* What the kernel costs, measured from inside it, with no libc in between. */
-/* It runs as init, prints one tagged line per measurement, and ends with PERF DONE. */
-
 typedef unsigned long u64;
 typedef long s64;
 typedef unsigned int u32;
@@ -36,71 +33,12 @@ typedef unsigned int u32;
 #define MS_SYNC 4
 #define FUTEX_WAIT 0
 #define FUTEX_WAKE 1
-#define O_RDWR_CREAT_TRUNC 0x242   /* O_RDWR | O_CREAT | O_TRUNC */
-#define THREAD_FLAGS 0x10F00UL   /* VM | FS | FILES | SIGHAND | THREAD */
+#define O_RDWR_CREAT_TRUNC 0x242
+#define THREAD_FLAGS 0x10F00UL
 
-static inline s64 syscall0(s64 n) {
-    s64 r;
-    __asm__ volatile("syscall" : "=a"(r) : "a"(n) : "rcx", "r11", "memory");
-    return r;
-}
-static inline s64 syscall1(s64 n, s64 a) {
-    s64 r;
-    __asm__ volatile("syscall" : "=a"(r) : "a"(n), "D"(a) : "rcx", "r11", "memory");
-    return r;
-}
-static inline s64 syscall2(s64 n, s64 a, s64 b) {
-    s64 r;
-    __asm__ volatile("syscall" : "=a"(r) : "a"(n), "D"(a), "S"(b) : "rcx", "r11", "memory");
-    return r;
-}
-static inline s64 syscall3(s64 n, s64 a, s64 b, s64 c) {
-    s64 r;
-    __asm__ volatile("syscall" : "=a"(r) : "a"(n), "D"(a), "S"(b), "d"(c)
-                     : "rcx", "r11", "memory");
-    return r;
-}
-static inline s64 syscall4(s64 n, s64 a, s64 b, s64 c, s64 d) {
-    s64 r;
-    register s64 r10 __asm__("r10") = d;
-    __asm__ volatile("syscall" : "=a"(r) : "a"(n), "D"(a), "S"(b), "d"(c), "r"(r10)
-                     : "rcx", "r11", "memory");
-    return r;
-}
-static inline s64 syscall6(s64 n, s64 a, s64 b, s64 c, s64 d, s64 e, s64 f) {
-    s64 r;
-    register s64 r10 __asm__("r10") = d;
-    register s64 r8 __asm__("r8") = e;
-    register s64 r9 __asm__("r9") = f;
-    __asm__ volatile("syscall" : "=a"(r)
-                     : "a"(n), "D"(a), "S"(b), "d"(c), "r"(r10), "r"(r8), "r"(r9)
-                     : "rcx", "r11", "memory");
-    return r;
-}
+#include "tunix_syscall.h"
 
-/* The child comes back on a stack of its own, which no C function can do. */
-extern s64 spawn_thread(u64 flags, void *child_stack_top);
-__asm__(".text\n"
-        ".globl spawn_thread\n"
-        "spawn_thread:\n"
-        "    xor %edx, %edx\n"
-        "    xor %r10d, %r10d\n"
-        "    xor %r8d, %r8d\n"
-        "    mov $56, %eax\n"
-        "    syscall\n"
-        "    test %rax, %rax\n"
-        "    jnz 1f\n"
-        "    xor %ebp, %ebp\n"
-        "    pop %rax\n"
-        "    call *%rax\n"
-        "    xor %edi, %edi\n"
-        "    mov $60, %eax\n"
-        "    syscall\n"
-        "    hlt\n"
-        "1:  ret\n");
 
-/* Everything printed goes to a file as well, so a machine with no serial
-   cable can be read afterwards by mounting its disk. */
 static int results_fd = -1;
 
 static void put(const char *text) {
@@ -110,7 +48,7 @@ static void put(const char *text) {
     if (results_fd >= 0) (void)syscall3(SYS_write, results_fd, (s64)text, (s64)length);
 }
 
-#define O_WRONLY_CREAT_TRUNC 0x241   /* O_WRONLY | O_CREAT | O_TRUNC */
+#define O_WRONLY_CREAT_TRUNC 0x241
 
 static void open_results(void) {
     results_fd = (int)syscall3(SYS_open, (s64)"/tunix-perftest-results.txt",
@@ -151,16 +89,12 @@ static void pin_to_cpu(unsigned cpu) {
     (void)syscall3(SYS_sched_setaffinity, 0, sizeof(mask), (s64)&mask);
 }
 
-/* getpid does nothing but enter and leave, so what it times is the entry, the
-   dispatch and everything the kernel does before it looks at the number. */
 static u64 syscall_cost_ns(u64 count) {
     u64 begun = now_ns();
     for (u64 i = 0; i < count; i++) (void)syscall0(SYS_getpid);
     return (now_ns() - begun) / count;
 }
 
-/* The same cost with more processes on the queue, which is what shows whether
-   anything on the entry path walks it. */
 static void test_syscall_cost(void) {
     static s64 idle[400];
     static const unsigned steps[] = { 0, 64, 192 };
@@ -173,8 +107,6 @@ static void test_syscall_cost(void) {
             s64 child = syscall1(SYS_fork, 0);
             if (child == 0) {
                 char byte;
-                /* Asleep for the whole measurement, so they cost the queue its
-                   length and nothing else. */
                 (void)syscall3(SYS_read, channel[0], (s64)&byte, 1);
                 (void)syscall1(SYS_exit_group, 0);
             }
@@ -189,17 +121,12 @@ static void test_syscall_cost(void) {
         put("\n");
     }
 
-    /* Every one of them is blocked in read(), which is the case a signal used to
-       be lost in: a rewound syscall wakes, re-runs, finds nothing and sleeps
-       again without ever reaching the code that delivers one. Half of these
-       stayed alive for as long as anything waited. */
     u64 kill_begun = now_ns();
     for (unsigned i = 0; i < started; i++) (void)syscall2(SYS_kill, idle[i], SIGKILL);
-    /* WNOHANG and a bound, because a blocking wait4 here does not come back. */
     unsigned reaped = 0;
     for (unsigned round = 0; round < 500 && reaped < started; round++) {
         for (;;) {
-            s64 got = syscall4(SYS_wait4, -1, 0, 1 /* WNOHANG */, 0);
+            s64 got = syscall4(SYS_wait4, -1, 0, 1 , 0);
             if (got <= 0) break;
             reaped++;
         }
@@ -216,7 +143,6 @@ static void test_syscall_cost(void) {
     (void)syscall1(SYS_close, channel[1]);
 }
 
-/* A byte through a pipe and back, which is two syscalls and a context switch. */
 static void test_pipe_throughput(u64 bytes, u64 block_size) {
     int up[2], down[2];
     if (syscall1(SYS_pipe, (s64)up) != 0 || syscall1(SYS_pipe, (s64)down) != 0) return;
@@ -259,7 +185,6 @@ static void test_pipe_throughput(u64 bytes, u64 block_size) {
     put("\n");
 }
 
-/* The first touch of an anonymous page, which is a fault and a page committed. */
 static void test_page_fault(u64 pages) {
     u64 length = pages * 4096UL;
     s64 base = syscall6(SYS_mmap, 0, (s64)length, PROT_READ | PROT_WRITE,
@@ -276,8 +201,6 @@ static void test_page_fault(u64 pages) {
     put("\n");
 }
 
-/* fork, and the child leaving straight away, so what it times is the copy of an
-   address space and the teardown of one. */
 static void test_fork_cost(u64 count, u64 extra_pages) {
     s64 extra = 0;
     if (extra_pages) {
@@ -305,8 +228,6 @@ static void test_fork_cost(u64 count, u64 extra_pages) {
     put("\n");
 }
 
-/* Reading a file the kernel already has cached, which is the copy and the VFS
-   walk and nothing else. */
 static void test_file_read(u64 rounds) {
     int fd = (int)syscall3(SYS_open, (s64)"/sbin/init", 0, 0);
     if (fd < 0) { put("FILE open failed\n"); return; }
@@ -334,13 +255,9 @@ static void test_file_read(u64 rounds) {
     put("\n");
 }
 
-/* Creating a thread shares the address space and the descriptor table, so what
-   it costs is everything fork does except cloning those two. */
 static volatile u64 thread_done;
 static void thread_body(void) { thread_done = 1; }
 
-/* fork and the child leaving, with nothing waited for until the end, so what it
-   times is creation and teardown without the wait. */
 static void test_fork_nowait(u64 count) {
     u64 begun = now_ns();
     u64 done = 0;
@@ -379,10 +296,6 @@ static void test_thread_cost(u64 count) {
     put("\n");
 }
 
-/* Unmapping while other threads of the same process are running.
-   Each page used to interrupt every processor sharing the address space and
-   spin until all of them had answered, so the cost was per page and only
-   appeared on a machine with more than one processor. */
 static volatile int helpers_stop;
 static volatile unsigned helpers_running;
 
@@ -406,8 +319,6 @@ static void test_unmap_shootdown(u64 pages, unsigned helpers) {
         if (spawn_thread(THREAD_FLAGS, top) < 0) break;
         started++;
     }
-    /* They have to be on a processor, not merely created: a thread that has not
-       run yet is not looking at the address space. */
     while (__atomic_load_n(&helpers_running, __ATOMIC_RELAXED) < started) { }
 
     u64 length = pages * 4096UL;
@@ -441,9 +352,6 @@ static void test_unmap_shootdown(u64 pages, unsigned helpers) {
 #define SYS_dup 32
 #define SYS_syslog 103
 
-/* Whether one syscall instruction ever runs twice. dup() takes the lowest free
-   descriptor, so the same call from the same state must answer the same number
-   every time; a second execution leaks one and every answer after is higher. */
 static void test_syscall_once(unsigned rounds) {
     int first = (int)syscall1(SYS_dup, 0);
     if (first < 0) { put("ONCE dup unavailable\n"); return; }
@@ -471,7 +379,6 @@ static void test_syscall_once(unsigned rounds) {
     put("\n");
 }
 
-/* The same question of fork, which answers it with a whole process. */
 static void test_fork_once(unsigned rounds) {
     static s64 made[512];
     static s64 seen[512];
@@ -482,15 +389,11 @@ static void test_fork_once(unsigned rounds) {
         if (child < 0) break;
         made[started++] = child;
     }
-    /* Every child there is, with its number, because "one more than asked for"
-       has two explanations and they are not the same bug: a fork that ran
-       twice makes a process nobody was told about, and a wait that reports the
-       same child twice makes none. */
     unsigned reaped = 0;
     unsigned repeated = 0;
     unsigned unknown = 0;
     for (unsigned round = 0; round < 400; round++) {
-        s64 got = syscall4(SYS_wait4, -1, 0, 1 /* WNOHANG */, 0);
+        s64 got = syscall4(SYS_wait4, -1, 0, 1 , 0);
         if (got > 0) {
             int already = 0;
             for (unsigned i = 0; i < reaped && i < 512; i++)
@@ -527,7 +430,6 @@ static void test_fork_once(unsigned rounds) {
     put("\n");
 }
 
-/* Every line of /proc/klock, tagged so the harness can pick them out. */
 static void report_lock_holds_as(const char *tag) {
     int fd = (int)syscall3(SYS_open, (s64)"/proc/klock", 0, 0);
     if (fd < 0) return;
@@ -551,13 +453,8 @@ static void report_lock_holds_as(const char *tag) {
 
 static void report_lock_holds(void) { report_lock_holds_as("KLOCK"); }
 
-/* What boot itself held, when the command line asked for the measurement. */
 static void report_boot_lock_holds(void) { report_lock_holds_as("KLOCKBOOT"); }
 
-/* Whether a process whose parent has gone can still be reaped.
-   A child that outlives its parent belongs to init, which is the only thing
-   left that can wait for it -- and a supervisor makes one of these every time
-   it starts a service. */
 static void test_orphan_reaped(unsigned rounds) {
     unsigned made = 0;
     for (unsigned round = 0; round < rounds; round++) {
@@ -565,7 +462,6 @@ static void test_orphan_reaped(unsigned rounds) {
         if (child == 0) {
             s64 grandchild = syscall1(SYS_fork, 0);
             if (grandchild == 0) {
-                /* Outlives its parent, so it is an orphan by the time it goes. */
                 sleep_ns(60000000UL);
                 (void)syscall1(SYS_exit_group, 0);
             }
@@ -579,7 +475,7 @@ static void test_orphan_reaped(unsigned rounds) {
     u64 begun = now_ns();
     for (unsigned round = 0; round < 400 && reaped < made; round++) {
         for (;;) {
-            s64 got = syscall4(SYS_wait4, -1, 0, 1 /* WNOHANG */, 0);
+            s64 got = syscall4(SYS_wait4, -1, 0, 1 , 0);
             if (got <= 0) break;
             reaped++;
         }
@@ -594,17 +490,12 @@ static void test_orphan_reaped(unsigned rounds) {
     put("\n");
 }
 
-/* Whether the kernel survives being entered with the direction flag set. User
-   code sets it legitimately -- musl's memmove does, for an overlapping copy --
-   and the C the kernel is built from assumes it is clear: a memset is a
-   `rep stos`, which walks backwards when DF is set. The guard in front of the
-   buffer the kernel writes into is what that would destroy. */
+#if defined(__x86_64__)
 #define DF_GUARD_BYTES 4096U
 #define DF_GUARD_PATTERN 0xA5
 
 static unsigned char df_area[DF_GUARD_BYTES * 2U];
 
-/* A syscall made with the flag set, and cleared again before any C runs. */
 static s64 syscall_with_df(s64 n, s64 a, s64 b, s64 c) {
     s64 r;
     __asm__ volatile("std\n\tsyscall\n\tcld"
@@ -613,7 +504,6 @@ static s64 syscall_with_df(s64 n, s64 a, s64 b, s64 c) {
     return r;
 }
 
-/* Set, spun on so a timer interrupt lands inside the window, and read back. */
 static int df_survives_interrupts(u64 spins) {
     u64 flags = 0;
     __asm__ volatile("std\n\t"
@@ -635,8 +525,6 @@ static void test_direction_flag(unsigned rounds) {
     unsigned lost = 0;
     for (unsigned round = 0; round < rounds; round++) {
         for (unsigned i = 0; i < sizeof(df_area); i++) df_area[i] = DF_GUARD_PATTERN;
-        /* The kernel fills the second half; the first is what a backwards
-           `rep stos` would run into. */
         s64 got = syscall_with_df(SYS_read, zero,
                                   (s64)(df_area + DF_GUARD_BYTES), DF_GUARD_BYTES);
         if (got != (s64)DF_GUARD_BYTES) { damaged++; break; }
@@ -654,14 +542,12 @@ static void test_direction_flag(unsigned rounds) {
     put_number(lost);
     put(damaged || lost ? " BROKEN\n" : " CLEAN\n");
 }
+#endif
 
-/* Whether dmesg can read the kernel's log. It asks syslog(2) before it falls
-   back to anything, so a kernel without it answers "Function not implemented"
-   and the log cannot be read by the one program everybody reads it with. */
 static void test_syslog(void) {
     static char text[4096];
-    s64 held = syscall3(SYS_syslog, 10 /* SIZE_BUFFER */, 0, 0);
-    s64 got = syscall3(SYS_syslog, 3 /* READ_ALL */, (s64)text, sizeof(text));
+    s64 held = syscall3(SYS_syslog, 10 , 0, 0);
+    s64 got = syscall3(SYS_syslog, 3 , (s64)text, sizeof(text));
     unsigned lines = 0;
     for (s64 at = 0; at < got; at++) if (text[at] == '\n') lines++;
     put("SYSLOG size=");
@@ -674,7 +560,6 @@ static void test_syslog(void) {
     put(got > 0 && lines > 0 ? " READABLE\n" : " UNREADABLE\n");
 }
 
-/* One number out of a /proc file that holds `name value` lines. */
 static u64 proc_value(const char *path, const char *name) {
     char text[512];
     int fd = (int)syscall3(SYS_open, (s64)path, 0, 0);
@@ -695,10 +580,6 @@ static u64 proc_value(const char *path, const char *name) {
     return 0;
 }
 
-/* What a startup costs the disk. */
-/* Opening several hundred files is what runit and a compositor do, and every
-   inode, directory block and indirect block behind them is a read that reaches
-   the medium with the kernel lock held. */
 static void test_startup_reads(unsigned count) {
     u64 reads_before = proc_value("/proc/blockstat", "reads");
     u64 sectors_before = proc_value("/proc/blockstat", "sectors");
@@ -743,15 +624,6 @@ static void test_startup_reads(unsigned count) {
     put("\n");
 }
 
-/* Whether a store through a shared file mapping reaches the disk.
- *
- * Nothing tells the filesystem when one lands, so a kernel that only persists
- * write(2) keeps the bytes in its cache and loses them when the cache is
- * dropped. Two files, because the two ways they can be written back are
- * separate: one asks with msync, the other only unmaps. What is on the medium
- * is checked from outside, by reading the image the machine booted from --
- * from in here a read is answered out of the same cache and would agree
- * whether or not anything was written. */
 #define MMAP_BYTES 8192
 
 static int write_through_mapping(const char *path, char fill, int sync) {
@@ -766,7 +638,6 @@ static int write_through_mapping(const char *path, char fill, int sync) {
     (void)syscall1(SYS_fsync, fd);
     s64 mapped = syscall6(SYS_mmap, 0, MMAP_BYTES, PROT_READ | PROT_WRITE,
                           MAP_SHARED, fd, 0);
-    /* An address, or a small negative errno; nothing is ever mapped this low. */
     if (mapped < 4096) { (void)syscall1(SYS_close, fd); return -2; }
     char *body = (char *)mapped;
     for (unsigned i = 0; i < MMAP_BYTES; i++) body[i] = fill;
@@ -781,8 +652,6 @@ static void test_shared_mapping(void) {
     int synced = write_through_mapping("/mmapsync.bin", 'S', 1);
     int unmapped = write_through_mapping("/mmapexit.bin", 'U', 0);
 
-    /* msync over a range nothing is mapped in is ENOMEM, and an undefined flag
-       is EINVAL. Both are what a program checks before it trusts the call. */
     s64 nowhere = syscall3(SYS_msync, 0x300000000000UL, 4096, MS_SYNC);
     s64 bad_flag = syscall3(SYS_msync, 0x300000000000UL, 4096, 0x40);
 
@@ -798,13 +667,6 @@ static void test_shared_mapping(void) {
         " OK\n" : " BROKEN\n");
 }
 
-/* What happens when the machine runs out of memory.
- *
- * The answer used to be a SIGSEGV for whoever touched a page next and nothing
- * reclaimed, so the next process to run got one too. Three things are checked:
- * that the runaway is the one chosen, that it dies of SIGKILL rather than a
- * fault, and that a small process touching memory the whole time is left
- * alone. */
 #define OOM_CHUNK (64UL * 1024 * 1024)
 #define WNOHANG 1
 
@@ -819,8 +681,6 @@ static int touch_and_free(u64 bytes) {
 }
 
 static void test_out_of_memory(void) {
-    /* Small, blameless, and touching memory the whole way through, so it is in
-       the kernel's allocator at the moment the machine runs dry. */
     s64 bystander = syscall0(SYS_fork);
     if (bystander == 0) {
         for (;;) if (!touch_and_free(1024UL * 1024)) sleep_ns(1000000UL);
@@ -830,7 +690,6 @@ static void test_out_of_memory(void) {
     u64 begun = now_ns();
     s64 eater = syscall0(SYS_fork);
     if (eater == 0) {
-        /* Kept, not freed: the point is to run the machine out. */
         for (;;) {
             s64 got = syscall6(SYS_mmap, 0, OOM_CHUNK, PROT_READ | PROT_WRITE,
                                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -868,13 +727,6 @@ static void test_out_of_memory(void) {
         " SURVIVED\n" : " BROKEN\n");
 }
 
-/* Whether a futex on memory two processes share ever wakes.
- *
- * A waiter used to be found by the address it named inside its own address
- * space, so nothing outside that space could reach it: every process-shared
- * mutex and every named semaphore blocked until its timeout. Two shapes, and
- * the second is the one an address alone cannot answer -- the same word mapped
- * at a different place in each process. */
 static int futex_wakes_across_processes(int through_file) {
     int fd = -1;
     s64 shared;
@@ -897,8 +749,6 @@ static int futex_wakes_across_processes(int through_file) {
     s64 child = syscall0(SYS_fork);
     if (child == 0) {
         s64 word = shared;
-        /* Somewhere else entirely, so that matching on the address cannot be
-           what wakes this. */
         if (through_file) {
             (void)syscall2(SYS_munmap, shared, 4096);
             word = syscall6(SYS_mmap, 0x40000000, 4096, PROT_READ | PROT_WRITE,
@@ -910,8 +760,6 @@ static int futex_wakes_across_processes(int through_file) {
         (void)syscall1(SYS_exit_group, result == 0 ? 0 : 1);
     }
 
-    /* Long enough for the child to have reached the wait; the word is left at
-       zero so it cannot come back with EAGAIN instead of blocking. */
     sleep_ns(200000000UL);
     s64 woken = syscall6(SYS_futex, shared, FUTEX_WAKE, 1, 0, 0, 0);
 
@@ -936,12 +784,6 @@ static int run_all(void) {
     open_results();
     put("PERF START\n");
     pin_to_cpu(0);
-    /* The queue-length test goes last: it leaves processes behind, and every
-       syscall the others make would then be paying for them. */
-    /* Before anything maps memory, so the address space it clones is only what
-       the program started with. */
-    /* First, before anything else has made a process: an extra child is only
-       evidence if nothing else could have left one behind. */
     test_fork_once(200);
     test_orphan_reaped(50);
     test_fork_cost(300, 0);
@@ -955,14 +797,8 @@ static int run_all(void) {
     test_unmap_shootdown(8192, 0);
     test_unmap_shootdown(8192, 3);
     test_file_read(20000);
-    /* Late, because reading a few megabytes leaves the heap in a state the
-       others would then be measuring: fork takes a 32 KiB kernel stack from it
-       and went from 17.9 to 50 us when this ran first. */
-    /* Started here, so what it reports is the reads below and not the whole
-       run: a hold is how long an input event waits before anything can look
-       at it, and the disk is where the long ones come from. */
     report_boot_lock_holds();
-    int klock = (int)syscall3(SYS_open, (s64)"/proc/klock", 1 /* O_WRONLY */, 0);
+    int klock = (int)syscall3(SYS_open, (s64)"/proc/klock", 1 , 0);
     if (klock >= 0) {
         (void)syscall3(SYS_write, klock, (s64)"1", 1);
         (void)syscall1(SYS_close, klock);
@@ -970,7 +806,7 @@ static int run_all(void) {
     test_startup_reads(400);
     report_lock_holds();
     if (klock >= 0) {
-        klock = (int)syscall3(SYS_open, (s64)"/proc/klock", 1 /* O_WRONLY */, 0);
+        klock = (int)syscall3(SYS_open, (s64)"/proc/klock", 1 , 0);
         if (klock >= 0) {
             (void)syscall3(SYS_write, klock, (s64)"0", 1);
             (void)syscall1(SYS_close, klock);
@@ -979,29 +815,20 @@ static int run_all(void) {
     test_syslog();
     test_shared_mapping();
     test_shared_futex();
+#if defined(__x86_64__)
     test_direction_flag(200);
+#endif
     test_syscall_once(20000);
     test_syscall_cost();
-    /* Last: it takes the machine to its knees on purpose, and everything
-       above would then be measuring the recovery. */
     test_out_of_memory();
     put("PERF DONE\n");
     return 0;
 }
 
-/* Init returning is a panic, which is not the report anybody wants. */
 static void run_and_park(void) __attribute__((noreturn, used));
 static void run_and_park(void) {
     (void)run_all();
     for (;;) sleep_ns(1000000000UL);
 }
 
-/* The entry point aligns the stack itself, because there is no libc here to
-   have done it and the compiler is promised a 16-byte boundary. */
-__asm__(".text\n"
-        ".globl _start\n"
-        "_start:\n"
-        "    xor %ebp, %ebp\n"
-        "    and $-16, %rsp\n"
-        "    call run_and_park\n"
-        "    hlt\n");
+TUNIX_START(run_and_park)
