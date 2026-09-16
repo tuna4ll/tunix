@@ -77,6 +77,9 @@ struct aarch64_platform {
     struct aarch64_sd sd[AARCH64_MAX_SD];
     unsigned sd_count;
     int psci_method;
+    uint64_t fw_cfg_base;
+    uint64_t display_hole_base;
+    uint64_t display_hole_size;
 };
 
 #define PSCI_NONE 0
@@ -108,6 +111,9 @@ uint32_t gic_acknowledge(void);
 void gic_end_of_interrupt(uint32_t intid);
 void aarch64_timer_rearm(void);
 void aarch64_pci_init(void);
+struct boot_framebuffer_info;
+void aarch64_display_reserve(void);
+const struct boot_framebuffer_info *aarch64_display_setup(void);
 uint64_t psci_call(uint64_t function, uint64_t first, uint64_t second, uint64_t third);
 void psci_system_off(void);
 void psci_system_reset(void);

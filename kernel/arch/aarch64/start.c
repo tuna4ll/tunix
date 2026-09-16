@@ -33,6 +33,9 @@ static char command_line[COMMAND_LINE_BYTES];
 const struct boot_info *boot_info(void) { return &info; }
 
 int aarch64_physical_is_ram(uint64_t physical) {
+    if (aarch64_platform.display_hole_size && physical >= aarch64_platform.display_hole_base &&
+        physical - aarch64_platform.display_hole_base < aarch64_platform.display_hole_size)
+        return 0;
     for (unsigned index = 0; index < aarch64_platform.ram_count; index++) {
         const struct aarch64_range *range = &aarch64_platform.ram[index];
         if (physical >= range->base && physical - range->base < range->size) return 1;
@@ -93,6 +96,8 @@ static void collect_memory(uint64_t dtb_physical, uint64_t load_physical) {
     }
 
     reserve(load_physical, (uint64_t)(__image_end - kernel_image_start));
+    aarch64_display_reserve();
+    reserve(aarch64_platform.display_hole_base, aarch64_platform.display_hole_size);
     reserve(dtb_physical, fdt_total_size());
     uint64_t base, size;
     for (unsigned index = 0; fdt_memreserve(index, &base, &size) == 0; index++) reserve(base, size);
@@ -326,7 +331,7 @@ void aarch64_start(uint64_t dtb_physical, uint64_t load_physical) {
     map_direct_memory();
 
     info.command_line = command_line;
-    info.framebuffer = NULL;
+    info.framebuffer = aarch64_display_setup();
     info.rsdp = 0;
     info.hhdm_offset = DIRECT_MAP_BASE;
     info.kernel_physical_base = load_physical;
