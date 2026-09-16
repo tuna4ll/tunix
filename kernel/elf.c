@@ -148,9 +148,9 @@ static int validate_programs(const struct elf64_header *header,
         }
         if (program->type != PT_LOAD) continue;
         load_count++;
-        if (program->memsz < program->filesz ||
-            program->offset > file_size ||
-            program->filesz > file_size - program->offset) return -1;
+        if (program->memsz < program->filesz) return -1;
+        if (program->filesz && (program->offset > file_size ||
+                                program->filesz > file_size - program->offset)) return -1;
         if (program->align > 1 && !power_of_two(program->align)) return -1;
         if ((program->vaddr & 0xFFFULL) != (program->offset & 0xFFFULL)) return -1;
         if (add_overflows(program->vaddr, program->memsz)) return -1;
