@@ -16,11 +16,12 @@ CACHE=${2:?usage: sysroot.sh SYSROOT CACHE}
 
 MIRROR=${VOID_MIRROR:-https://repo-default.voidlinux.org}
 ROOTFS_DATE=${VOID_ROOTFS_DATE:-20250202}
+ARCH=${VOID_ARCH:-x86_64}
 XBPS_STATIC_VERSION=${XBPS_STATIC_VERSION:-0.60.4_1}
 INSTALL=${VOID_INSTALL:-base-files bash coreutils util-linux runit runit-void}
 REMOVE=${VOID_REMOVE:-}
 
-ROOTFS_TARBALL="$CACHE/void-x86_64-ROOTFS-$ROOTFS_DATE.tar.xz"
+ROOTFS_TARBALL="$CACHE/void-$ARCH-ROOTFS-$ROOTFS_DATE.tar.xz"
 XBPS_TARBALL="$CACHE/xbps-static-$XBPS_STATIC_VERSION.tar.xz"
 XBPS_DIR="$CACHE/xbps"
 
@@ -78,7 +79,7 @@ if [ ! -x "$XBPS_DIR/usr/bin/xbps-install" ]; then
 	tar -xJf "$XBPS_TARBALL" -C "$XBPS_DIR"
 fi
 
-fetch "$MIRROR/live/current/void-x86_64-ROOTFS-$ROOTFS_DATE.tar.xz" "$ROOTFS_TARBALL"
+fetch "$MIRROR/live/current/void-$ARCH-ROOTFS-$ROOTFS_DATE.tar.xz" "$ROOTFS_TARBALL"
 
 # --- the base ---------------------------------------------------------------
 
@@ -90,11 +91,13 @@ tar -xJpf "$ROOTFS_TARBALL" -C "$SYSROOT"
 # The tarball's xbps.d points at whatever mirror it was built against; ours
 # has to be the one the packages are actually coming from.
 mkdir -p "$SYSROOT/etc/xbps.d"
-printf 'repository=%s/current\n' "$MIRROR" > "$SYSROOT/etc/xbps.d/00-repository-main.conf"
+REPOSITORY="$MIRROR/current"
+[ "$ARCH" = x86_64 ] || REPOSITORY="$MIRROR/current/$ARCH"
+printf 'repository=%s\n' "$REPOSITORY" > "$SYSROOT/etc/xbps.d/00-repository-main.conf"
 
 # --- the packages -----------------------------------------------------------
 
-export XBPS_ARCH=x86_64
+export XBPS_ARCH=$ARCH
 XBPS="$XBPS_DIR/usr/bin"
 
 # The downloaded packages live in the cache beside the tarballs rather than in

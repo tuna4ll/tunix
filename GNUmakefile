@@ -316,6 +316,34 @@ $(AARCH64_CORE_OBJECTS): GNUmakefile
 -include $(AARCH64_CORE_OBJECTS:.o=.d)
 
 QEMU_AARCH64_CORE_DISKS ?=
+
+USERNS ?= $(if $(filter 0,$(shell id -u)),,unshare --map-auto --map-root-user)
+SYSROOT_AARCH64 ?= $(BUILD)/sysroot-aarch64
+SYSROOT_AARCH64_STAMP := $(BUILD)/.sysroot-aarch64
+IMAGE_AARCH64 := $(BUILD)/tunix-aarch64.img
+
+.PHONY: sysroot-aarch64 image-aarch64 run-aarch64-image
+sysroot-aarch64: $(SYSROOT_AARCH64_STAMP)
+
+$(SYSROOT_AARCH64_STAMP): support/sysroot.sh $(BASE_FILES) $(SYSROOT_RECIPE) | $(BUILD)
+	$(USERNS) env VOID_ARCH=aarch64 VOID_MIRROR='$(VOID_MIRROR)' \
+		VOID_ROOTFS_DATE='$(VOID_ROOTFS_DATE)' VOID_INSTALL='$(VOID_INSTALL)' \
+		VOID_REMOVE='$(VOID_REMOVE)' support/sysroot.sh $(SYSROOT_AARCH64) $(CACHE)
+	@touch $@
+
+image-aarch64: $(IMAGE_AARCH64)
+
+$(IMAGE_AARCH64): $(AARCH64_CORE_IMAGE) support/image.sh $(SYSROOT_AARCH64_STAMP)
+	$(USERNS) env ARCH=aarch64 TABLE='$(IMAGE_TABLE)' ROOT_SLACK_MIB='$(IMAGE_SLACK_MIB)' \
+		support/image.sh $@ $(AARCH64_CORE_IMAGE) $(LIMINE_DIR) support/limine.conf $(SYSROOT_AARCH64)
+
+QEMU_AARCH64_DEVICES ?= -device ramfb -device qemu-xhci -device usb-kbd -device usb-mouse \
+	-netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
+run-aarch64-image: $(IMAGE_AARCH64)
+	$(QEMU_AARCH64) -M virt,gic-version=3 -cpu cortex-a72 -smp $(QEMU_SMP) -m $(QEMU_MEMORY) \
+		-kernel $(AARCH64_CORE_IMAGE) -append root=LABEL=tunix-root \
+		-drive file=$(IMAGE_AARCH64),if=none,id=disk0,format=raw -device nvme,drive=disk0,serial=tunix \
+		$(QEMU_AARCH64_DEVICES) -serial stdio -display gtk
 run-aarch64-core: $(AARCH64_CORE_IMAGE)
 	$(QEMU_AARCH64) -M virt,gic-version=3 -cpu cortex-a72 -m 2G -nographic \
 		-no-reboot -kernel $(AARCH64_CORE_IMAGE) $(QEMU_AARCH64_CORE_DISKS)

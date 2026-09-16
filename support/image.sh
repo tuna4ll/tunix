@@ -8,6 +8,7 @@ LIMINE_CONF=${4:?}
 SYSROOT=${5:?}
 
 TABLE=${TABLE:-gpt}
+ARCH=${ARCH:-x86_64}
 case $TABLE in
 gpt | mbr) ;;
 *) echo "image.sh: TABLE must be gpt or mbr, not $TABLE" >&2; exit 1 ;;
@@ -29,10 +30,14 @@ echo ":: building the ESP"
 truncate -s "${ESP_MIB}M" "$WORK/esp.img"
 mformat -i "$WORK/esp.img" -F -v TUNIX ::
 mkdir -p "$WORK/esp-root/EFI/BOOT" "$WORK/esp-root/boot/limine"
-esp_copy "$LIMINE_DIR/BOOTX64.EFI" EFI/BOOT/BOOTX64.EFI
-esp_copy "$LIMINE_DIR/limine-bios.sys" boot/limine/limine-bios.sys
-esp_copy "$LIMINE_CONF" boot/limine/limine.conf
-esp_copy "$KERNEL" boot/kernel.elf
+if [ "$ARCH" = x86_64 ]; then
+	esp_copy "$LIMINE_DIR/BOOTX64.EFI" EFI/BOOT/BOOTX64.EFI
+	esp_copy "$LIMINE_DIR/limine-bios.sys" boot/limine/limine-bios.sys
+	esp_copy "$LIMINE_CONF" boot/limine/limine.conf
+	esp_copy "$KERNEL" boot/kernel.elf
+else
+	esp_copy "$KERNEL" boot/Image
+fi
 esp_copy "$SYSROOT/usr/share/weston/wallpapers/tunix.png" boot/wallpaper.png
 mcopy -s -i "$WORK/esp.img" "$WORK/esp-root"/* ::
 
@@ -70,7 +75,7 @@ dd if="$WORK/esp.img" of="$IMAGE" bs=4M oflag=seek_bytes \
 dd if="$WORK/root.img" of="$IMAGE" bs=4M oflag=seek_bytes \
 	seek=$(( ROOT_START * 512 )) conv=notrunc status=none
 
-"$LIMINE_DIR/limine" bios-install "$IMAGE"
+[ "$ARCH" != x86_64 ] || "$LIMINE_DIR/limine" bios-install "$IMAGE"
 
 rm -rf "$WORK"
 if [ -n "${SUDO_UID:-}" ] && [ -n "${SUDO_GID:-}" ]; then
