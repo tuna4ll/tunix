@@ -57,6 +57,40 @@ The same kernel image has been checked on GICv2 (`-M virt,gic-version=2`) and on
 Cortex-A53, an ARMv8.0 core with a 40-bit physical address space, as well as the
 default Cortex-A72.
 
+Secondary processors come up through PSCI `CPU_ON` or, on boards whose firmware
+parks them, through the spin table named by `cpu-release-addr`. `-smp 4` runs
+four processors; eight parallel `tar | cksum` passes over `/usr/bin` produce the
+same checksum as a single one.
+
+### Raspberry Pi 4
+
+The same image boots QEMU's `raspi4b` machine with the Raspberry Pi firmware's
+own `bcm2711-rpi-4-b.dtb`. That device tree puts the mini UART, the GIC-400 and
+the SD controllers behind `/soc`'s `ranges`, parks the secondary processors on
+spin tables, and names the console through the `serial0` alias. The kernel
+translates every address through the bus ranges, takes the mini UART as a
+16550 with `reg-shift = 2`, finds the SD card through the SDHCI driver, mounts
+ext3 from it and starts all four processors:
+
+```sh
+qemu-system-aarch64 -M raspi4b -kernel build/kernel-aarch64-core.img \
+    -dtb bcm2711-rpi-4-b.dtb -append root=LABEL=tunix-root \
+    -nographic -serial null -serial stdio -drive file=sd.img,if=sd,format=raw
+```
+
+```
+TUNIX: 1 memory range(s), 6 region(s), GICv2, timer 27, 4 cpu(s)
+SDHCI: controller at 0xfe300000
+SDHCI: high-capacity card, 4096 MiB
+EXT3: journal ready, 16384 blocks
+SMP: 4 of 4 processors running
+PROCTEST PASS
+```
+
+The SDHCI driver (`kernel/drivers/storage/sdhci.c`) is portable: PIO transfers,
+standard- and high-capacity cards, 32-bit register access throughout, and a
+write delay for the BCM2835 controller that needs one.
+
 ## Building and running
 
 ```sh
@@ -140,7 +174,6 @@ sizes and places memory BARs from the host bridge's windows. NVMe runs as-is.
   Remaining differences show up as Void's services are exercised.
 - **Interrupts for devices.** Drivers currently poll. Wiring INTx through the
   device tree's `interrupt-map` and MSI through the GICv3 ITS comes next.
-- **SMP** through PSCI `CPU_ON` (`smc` on real hardware).
 - **Display.** `simple-framebuffer` from the device tree, and a QEMU framebuffer.
-- **Real boards.** Beyond `virt`: GICv2 machines, non-ECAM PCIe hosts, SD/eMMC,
-  and UEFI/ACPI firmware.
+- **Real boards.** Non-ECAM PCIe hosts (the Pi 4's own), USB, Ethernet, and
+  UEFI/ACPI firmware.
