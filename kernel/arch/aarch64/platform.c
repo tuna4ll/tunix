@@ -81,3 +81,13 @@ void psci_system_off(void) {
 void psci_system_reset(void) {
     psci_call(PSCI_SYSTEM_RESET, 0, 0, 0);
 }
+
+void arch_power_off(void) {
+    psci_system_off();
+}
+
+void arch_restart(void) {
+    psci_system_reset();
+    kprintf("POWER: the machine did not restart; halted\n");
+    for (;;) __asm__ volatile("msr daifset, #2; wfi");
+}

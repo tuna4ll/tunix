@@ -6,6 +6,7 @@
 #endif
 #include "include/cpu.h"
 #include "include/ext2.h"
+#include "include/platform.h"
 #include "include/power.h"
 
 extern void kprintf(const char *fmt, ...);
@@ -28,7 +29,7 @@ static void park(void) {
 void power_off(void) {
     kprintf("POWER: flushing and powering off\n");
     flush_disks();
-    acpi_power_off();
+    arch_power_off();
     kprintf("POWER: the machine did not power off; halted\n");
     park();
 }
@@ -36,7 +37,7 @@ void power_off(void) {
 void power_restart(void) {
     kprintf("POWER: flushing and restarting\n");
     flush_disks();
-    acpi_reset();
+    arch_restart();
 }
 
 void power_halt(void) {
