@@ -1681,6 +1681,7 @@ int process_sleep_on(struct syscall_frame *frame, const void *channel) {
     waiting->saved_frame = *frame;
     waiting->state = PROCESS_BLOCKED;
     waiting->wait_channel = channel;
+    waiting->voluntary_switches++;
     if (switch_to_next(frame, waiting) != 0) {
         go_idle();
     }
@@ -1688,6 +1689,20 @@ int process_sleep_on(struct syscall_frame *frame, const void *channel) {
 }
 
 static const char io_wait_token;
+
+static int io_waiter_ready(const struct process *item) {
+    if (!item->io_watch_armed) return 1;
+    if (item->signal_pending & ~item->signal_blocked) return 1;
+    if (item->io_wait_active && item->io_wait_deadline_ns != UINT64_MAX &&
+        time_uptime_ns() >= item->io_wait_deadline_ns) return 1;
+    for (unsigned index = 0; index < item->io_watch_count; index++) {
+        int fd = item->io_watch_fd[index];
+        struct file *file = item->files && fd >= 0 && fd < PROCESS_MAX_FDS ?
+            item->files->fds[fd] : NULL;
+        if (!file || file_poll_events(file, item->io_watch_events[index])) return 1;
+    }
+    return 0;
+}
 
 const void *process_io_wait_channel(void) { return &io_wait_token; }
 
@@ -1706,7 +1721,8 @@ static int process_wake_all_locked(const void *channel) {
     struct process *item = queue;
     do {
         if (item->state == PROCESS_BLOCKED &&
-            (item->wait_channel == channel || item->wait_channel == &io_wait_token)) {
+            ((channel != &io_wait_token && item->wait_channel == channel) ||
+             (item->wait_channel == &io_wait_token && io_waiter_ready(item)))) {
             item->wait_channel = NULL;
             wake_to_ready(item);
             woken++;

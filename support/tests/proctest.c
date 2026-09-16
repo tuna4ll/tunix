@@ -22,6 +22,7 @@ typedef long s64;
 #define NR_EPOLL_PWAIT 281
 #define NR_CLOCK_GETTIME 228
 #define NR_EPOLL_CTL 233
+#define NR_GETRUSAGE 98
 #define EPOLL_PACKED __attribute__((packed))
 #define UCONTEXT_RET_OFFSET (40 + 13 * 8)
 #define UCONTEXT_IP_OFFSET (40 + 16 * 8)
@@ -45,6 +46,7 @@ typedef long s64;
 #define NR_EPOLL_PWAIT 22
 #define NR_CLOCK_GETTIME 113
 #define NR_EPOLL_CTL 21
+#define NR_GETRUSAGE 165
 #define EPOLL_PACKED
 #define UCONTEXT_RET_OFFSET (168 + 8)
 #define UCONTEXT_IP_OFFSET (168 + 264)
@@ -494,6 +496,22 @@ static void test_edge_triggered(void) {
     check("epoll edge rearms after EAGAIN", idle == 0 && rearmed == 1, idle * 10 + rearmed);
 }
 
+static void test_idle_poll_sleeps(void) {
+    int fds[2] = { -1, -1 };
+    sys(NR_PIPE2, (u64)fds, 0, 0, 0, 0);
+    struct { int fd; short events; short revents; } poller = { fds[0], 1, 0 };
+    u64 before[18];
+    u64 after[18];
+    sys(NR_GETRUSAGE, 0, (u64)before, 0, 0, 0);
+    struct timespec wait;
+    wait.seconds = 1;
+    wait.nanoseconds = 0;
+    sys6(NR_PPOLL, (u64)&poller, 1, (u64)&wait, 0, 8, 0);
+    sys(NR_GETRUSAGE, 0, (u64)after, 0, 0, 0);
+    s64 switches = (s64)(after[16] - before[16]);
+    check("idle poll is not woken every tick", switches >= 1 && switches < 20, switches);
+}
+
 static int text_equal(const char *a, const char *b) {
     while (*a && *a == *b) {
         a++;
@@ -521,6 +539,7 @@ void start_c(u64 *stack) {
 
     test_timeouts();
     test_edge_triggered();
+    test_idle_poll_sleeps();
     test_fork_and_switches();
     test_thread();
     test_siginfo();

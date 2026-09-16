@@ -12,6 +12,7 @@
 #define PROCESS_READY 0
 #define PROCESS_RUNNING 1
 #define PROCESS_BLOCKED 2
+#define PROCESS_IO_WATCHES 64
 #define PROCESS_ZOMBIE 3
 #define PROCESS_DEAD 4
 #define PROCESS_STOPPED 5
@@ -113,6 +114,7 @@ struct process {
     int nice;
     uint64_t affinity_mask;
     uint64_t involuntary_switches;
+    uint64_t voluntary_switches;
     char cmdline[512];
     uint64_t cmdline_length;
     struct vfs_node *cwd;
@@ -129,6 +131,10 @@ struct process {
     int io_wait_active;
     uint64_t io_wait_syscall;
     uint64_t io_wait_deadline_ns;
+    int io_watch_armed;
+    unsigned io_watch_count;
+    int io_watch_fd[PROCESS_IO_WATCHES];
+    uint32_t io_watch_events[PROCESS_IO_WATCHES];
 
     int syscall_rewound;
 

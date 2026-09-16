@@ -905,6 +905,7 @@ static void clear_io_wait(struct process *process) {
     process->io_wait_active = 0;
     process->io_wait_syscall = 0;
     process->io_wait_deadline_ns = 0;
+    process->io_watch_armed = 0;
 }
 
 static uint64_t saturating_add_u64(uint64_t left, uint64_t right) {
@@ -945,6 +946,23 @@ static int retry_io_wait(struct syscall_frame *frame, uint64_t syscall_number,
     return 1;
 }
 
+static void io_watch_begin(struct process *process) {
+    if (!process) return;
+    process->io_watch_count = 0;
+    process->io_watch_armed = 1;
+}
+
+static void io_watch_add(struct process *process, int fd, uint32_t events) {
+    if (!process || !process->io_watch_armed) return;
+    if (process->io_watch_count >= PROCESS_IO_WATCHES) {
+        process->io_watch_armed = 0;
+        return;
+    }
+    process->io_watch_fd[process->io_watch_count] = fd;
+    process->io_watch_events[process->io_watch_count] = events;
+    process->io_watch_count++;
+}
+
 static int64_t sys_poll_once(uint64_t user_fds, uint64_t count, int commit_empty) {
     if (count > PROCESS_MAX_FDS) return -EINVAL;
     struct linux_pollfd fds[PROCESS_MAX_FDS];
@@ -965,6 +983,11 @@ static int64_t sys_poll_once(uint64_t user_fds, uint64_t count, int commit_empty
         struct file *file = process->files->fds[fd];
         fds[i].revents = (int16_t)file_poll_events(file, (uint32_t)(uint16_t)fds[i].events);
         if (fds[i].revents) ready++;
+    }
+    if (!ready && process) {
+        io_watch_begin(process);
+        for (uint64_t i = 0; i < count; i++)
+            if (fds[i].fd >= 0) io_watch_add(process, fds[i].fd, (uint32_t)(uint16_t)fds[i].events);
     }
     if ((ready || commit_empty) && bytes && copy_to_user(user_fds, fds, bytes) != 0)
         return -EFAULT;
@@ -4088,6 +4111,10 @@ static int64_t sys_getrusage(uint64_t user_buffer) {
         utime.microseconds = (int64_t)((nanoseconds % 1000000000ULL) / 1000ULL);
     }
     memcpy(value, &utime, sizeof(utime));
+    if (process) {
+        memcpy(value + 128, &process->voluntary_switches, sizeof(uint64_t));
+        memcpy(value + 136, &process->involuntary_switches, sizeof(uint64_t));
+    }
     return copy_to_user(user_buffer, value, sizeof(value)) == 0 ? 0 : -EFAULT;
 }
 
@@ -4755,6 +4782,10 @@ static int64_t sys_epoll_wait_once(int epoll_fd, uint64_t user_events,
     struct tunix_epoll_event events[128];
     int ready = epoll_collect(file->epoll, events, maximum, 0);
     if (ready < 0) return ready;
+    if (!ready) {
+        io_watch_begin(process_current());
+        io_watch_add(process_current(), epoll_fd, POLLIN);
+    }
     if ((ready || commit_empty) && ready > 0 &&
         copy_to_user(user_events, events, (size_t)ready * sizeof(events[0])) != 0)
         return -EFAULT;
@@ -4850,7 +4881,10 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
     struct process *caller = process_current();
     uint64_t syscall_number = SYSCALL_NR(frame);
     uint64_t first_argument = SYSCALL_ARG0(frame);
-    if (caller) caller->syscall_rewound = 0;
+    if (caller) {
+        caller->syscall_rewound = 0;
+        caller->io_watch_armed = 0;
+    }
     if (caller && caller->io_wait_active && caller->io_wait_syscall != syscall_number)
         clear_io_wait(caller);
     int skip_signal_delivery = 0;
