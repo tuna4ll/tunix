@@ -118,7 +118,10 @@ make run-aarch64-image       # virt, ramfb, xHCI keyboard and mouse, virtio-net,
 It boots to the Weston session: seatd hands over the display and the xHCI
 keyboard and mouse, Mesa renders through llvmpipe onto the DRM device backed by
 the ramfb framebuffer, the HD Audio codec is found on PCI, and DHCP and HTTPS
-work through virtio-net.
+work through virtio-net. Firefox opens its window in about three minutes even
+under full emulation, once idle waiters stopped being woken on every timer tick
+and epoll honoured `EPOLLET`; before that its threads kept four emulated cores
+busy doing nothing.
 
 ## Building and running
 
