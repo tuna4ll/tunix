@@ -1,25 +1,22 @@
-/* Whether the playback pointer stays honest when the program is late. */
-/* The hardware position wraps with the ring, so a pointer sampled only when
-   userspace asks comes back wrong after a lap -- and a lap is a tenth of a
-   second, less than one frame of a game that stalls the kernel. */
-
 typedef unsigned long u64;
 typedef long s64;
 typedef unsigned int u32;
 
-#define SYS_read 0
-#define SYS_write 1
-#define SYS_open 2
-#define SYS_close 3
-#define SYS_ioctl 16
-#define SYS_nanosleep 35
-#define SYS_clock_gettime 228
-#define SYS_fork 57
-#define SYS_wait4 61
-#define SYS_exit_group 231
 #define CLOCK_MONOTONIC 1
 #define O_RDWR 2
 #define O_WRONLY_CREAT_TRUNC 0x241
+#define AT_FDCWD -100
+#define SIGCHLD 17
+
+#if defined(__x86_64__)
+#define SYS_write 1
+#define SYS_ioctl 16
+#define SYS_nanosleep 35
+#define SYS_clone 56
+#define SYS_wait4 61
+#define SYS_clock_gettime 228
+#define SYS_exit_group 231
+#define SYS_openat 257
 
 static inline s64 syscall1(s64 n, s64 a) {
     s64 r;
@@ -45,6 +42,33 @@ static inline s64 syscall4(s64 n, s64 a, s64 b, s64 c, s64 d) {
                      : "rcx", "r11", "memory");
     return r;
 }
+#elif defined(__aarch64__)
+#define SYS_write 64
+#define SYS_ioctl 29
+#define SYS_nanosleep 101
+#define SYS_clone 220
+#define SYS_wait4 260
+#define SYS_clock_gettime 113
+#define SYS_exit_group 94
+#define SYS_openat 56
+
+extern s64 system_call(s64 n, s64 a, s64 b, s64 c, s64 d);
+__asm__(".text\n"
+        ".globl system_call\n"
+        "system_call:\n"
+        "    mov x8, x0\n"
+        "    mov x0, x1\n"
+        "    mov x1, x2\n"
+        "    mov x2, x3\n"
+        "    mov x3, x4\n"
+        "    svc #0\n"
+        "    ret\n");
+
+static inline s64 syscall1(s64 n, s64 a) { return system_call(n, a, 0, 0, 0); }
+static inline s64 syscall2(s64 n, s64 a, s64 b) { return system_call(n, a, b, 0, 0); }
+static inline s64 syscall3(s64 n, s64 a, s64 b, s64 c) { return system_call(n, a, b, c, 0); }
+static inline s64 syscall4(s64 n, s64 a, s64 b, s64 c, s64 d) { return system_call(n, a, b, c, d); }
+#endif
 
 static int results_fd = -1;
 
@@ -82,8 +106,6 @@ static void sleep_ns(u64 nanoseconds) {
     (void)syscall2(SYS_nanosleep, (s64)&request, 0);
 }
 
-/* --- the slice of ALSA's ABI this needs ---------------------------------- */
-
 #define MASK_WORDS 8
 #define MASK_COUNT 3
 #define INTERVAL_COUNT 12
@@ -104,7 +126,7 @@ static void sleep_ns(u64 nanoseconds) {
 struct mask { u32 bits[MASK_WORDS]; };
 struct interval {
     unsigned int min, max;
-    unsigned int flags;          /* openmin:1 openmax:1 integer:1 empty:1 */
+    unsigned int flags;
 };
 struct hw_params {
     unsigned int flags;
@@ -159,7 +181,7 @@ static void mask_set(struct mask *m, unsigned bit) { m->bits[bit / 32] |= 1U << 
 static void fix(struct hw_params *p, unsigned which, unsigned value) {
     struct interval *i = &p->intervals[which - PARAM_FIRST_INTERVAL];
     i->min = i->max = value;
-    i->flags = 4;                 /* integer */
+    i->flags = 4;
     p->rmask |= 1U << which;
 }
 
@@ -194,8 +216,6 @@ static int configure(void) {
     for (unsigned i = 0; i < sizeof(sw); i++) ((char *)&sw)[i] = 0;
     sw.avail_min = PERIOD_FRAMES;
     sw.start_threshold = 1;
-    /* Never stop on an underrun: the point of the test is to be late on
-       purpose and still ask where the hardware got to. */
     sw.stop_threshold = ~0UL;
     if (syscall3(SYS_ioctl, pcm, (s64)IOWR(NR_SW_PARAMS, struct sw_params),
                  (s64)&sw) != 0) return -1;
@@ -209,11 +229,6 @@ static int status(struct pcm_status *out) {
 
 static short tone[BUFFER_FRAMES * CHANNELS];
 
-/*
- * Write a whole buffer, start, then go away for longer than one lap and ask
- * where the hardware got to. The answer should be about as many frames as the
- * time that passed, whatever userspace did in between.
- */
 static void test_pointer_survives_a_stall(u64 stall_ns) {
     if (syscall3(SYS_ioctl, pcm, (s64)IOC(0u, 'A', NR_PREPARE, 0), 0) != 0) {
         put("SOUND prepare failed\n"); return;
@@ -238,7 +253,7 @@ static void test_pointer_survives_a_stall(u64 stall_ns) {
     put("SOUND stall_ms=");
     put_signed((s64)(elapsed / 1000000UL));
     put(" laps=");
-    put_signed((s64)(expected * 10UL / BUFFER_FRAMES));   /* tenths */
+    put_signed((s64)(expected * 10UL / BUFFER_FRAMES));
     put(" hw_advanced=");
     put_signed((s64)advanced);
     put(" of_buffer=");
@@ -249,20 +264,11 @@ static void test_pointer_survives_a_stall(u64 stall_ns) {
     put("\n");
 }
 
-/*
- * Playback that is fed properly, which must not be stopped by anything the
- * kernel does on its own. The tick samples the pointer between syscalls, and
- * a tick that also decided when the ring had run dry declared an underrun on
- * the ordinary gap between the hardware taking a frame and the writer being
- * scheduled -- which stopped the stream for good and was silence, not crackle.
- */
 static int present_frames_until(u64 deadline_ns, unsigned *commits);
 static void test_playback(u64 duration_ns, int presenting);
 
 static void test_continuous_playback(u64 duration_ns) { return test_playback(duration_ns, 0); }
 
-/* `presenting` forks a second process that pushes frames through the kernel for
-   as long as the sound plays, which is the shape a game has. */
 static void test_playback(u64 duration_ns, int presenting) {
     if (syscall3(SYS_ioctl, pcm, (s64)IOC(0u, 'A', NR_PREPARE, 0), 0) != 0) {
         put("SOUND prepare failed\n"); return;
@@ -279,7 +285,7 @@ static void test_playback(u64 duration_ns, int presenting) {
     u64 begun = now_ns();
     s64 painter = -1;
     if (presenting) {
-        painter = syscall1(SYS_fork, 0);
+        painter = syscall4(SYS_clone, SIGCHLD, 0, 0, 0);
         if (painter == 0) {
             unsigned commits = 0;
             (void)present_frames_until(begun + duration_ns, &commits);
@@ -288,8 +294,8 @@ static void test_playback(u64 duration_ns, int presenting) {
     }
     u64 written = 0;
     unsigned stalls = 0;
-    unsigned empty = 0;         /* the ring ran dry: what a gap in the sound is */
-    unsigned nearly = 0;        /* under a period left: the edge of one */
+    unsigned empty = 0;
+    unsigned nearly = 0;
     struct pcm_status now_status = begin_status;
     while (now_ns() - begun < duration_ns) {
         if (status(&now_status) != 0) break;
@@ -332,11 +338,6 @@ static void test_playback(u64 duration_ns, int presenting) {
     put(stalls ? " STALLED\n" : "\n");
 }
 
-/*
- * An underrun, and then the recovery every ALSA program makes: prepare, write,
- * start. If that does not put the stream back, the first stall a program hits
- * is the last sound it makes -- silence rather than a gap.
- */
 static void test_xrun_recovery(void) {
     if (syscall3(SYS_ioctl, pcm, (s64)IOC(0u, 'A', NR_PREPARE, 0), 0) != 0) {
         put("SOUND prepare failed\n"); return;
@@ -345,12 +346,10 @@ static void test_xrun_recovery(void) {
     (void)syscall3(SYS_ioctl, pcm, (s64)IOW(NR_WRITEI, struct writei), (s64)&first);
     (void)syscall3(SYS_ioctl, pcm, (s64)IOC(0u, 'A', NR_START, 0), 0);
 
-    /* Long enough that the ring has certainly run dry. */
     sleep_ns(300000000UL);
     struct pcm_status drained;
     (void)status(&drained);
 
-    /* The recovery, exactly as alsa-lib does it. */
     s64 prepared = syscall3(SYS_ioctl, pcm, (s64)IOC(0u, 'A', NR_PREPARE, 0), 0);
     struct writei again = { 0, tone, BUFFER_FRAMES };
     s64 rewritten = syscall3(SYS_ioctl, pcm, (s64)IOW(NR_WRITEI, struct writei), (s64)&again);
@@ -379,12 +378,6 @@ static void test_xrun_recovery(void) {
 }
 
 
-/* --- the frame the sound has to survive ---------------------------------- */
-/*
- * A second process presenting frames as fast as it can, which is what a game
- * does while it plays sound. Every present is a whole screen through the
- * kernel, and audio that runs dry underneath it is what crackles.
- */
 #define DRM_TYPE 'd'
 #define NR_MODE_GETCRTC 0xa1
 #define NR_MODE_CREATE_DUMB 0xb2
@@ -422,7 +415,7 @@ struct drm_mode_atomic {
 #define DRM_IOWR(nr, type) IOC(3u, DRM_TYPE, nr, sizeof(type))
 
 static int present_frames_until(u64 deadline_ns, unsigned *commits) {
-    int card = (int)syscall3(SYS_open, (s64)"/dev/dri/card0", O_RDWR, 0);
+    int card = (int)syscall4(SYS_openat, AT_FDCWD, (s64)"/dev/dri/card0", O_RDWR, 0);
     if (card < 0) return -1;
 
     struct drm_mode_crtc crtc;
@@ -473,8 +466,7 @@ static int present_frames_until(u64 deadline_ns, unsigned *commits) {
     return 0;
 }
 
-/* The tick's own string instruction, met with the direction flag set: a starved
-   ring is silenced from the tick, and that silencing is a memset. */
+#if defined(__x86_64__)
 #define DF_GUARD 4096U
 #define DF_PATTERN 0x5A
 static unsigned char df_area[DF_GUARD * 2U];
@@ -492,7 +484,6 @@ static int df_spin_returns_flag(u64 spins) {
     return (int)((flags >> 10) & 1U);
 }
 
-/* Called while the ring is starved, so the tick is silencing it every 4 ms. */
 static void test_direction_flag_under_silencing(unsigned rounds) {
     unsigned damaged = 0, lost = 0;
     for (unsigned round = 0; round < rounds; round++) {
@@ -509,11 +500,12 @@ static void test_direction_flag_under_silencing(unsigned rounds) {
     put_signed((s64)lost);
     put(damaged || lost ? " BROKEN\n" : " CLEAN\n");
 }
+#endif
 
 static int run(void) {
-    results_fd = (int)syscall3(SYS_open, (s64)"/tunix-soundtest-results.txt",
+    results_fd = (int)syscall4(SYS_openat, AT_FDCWD, (s64)"/tunix-soundtest-results.txt",
                                O_WRONLY_CREAT_TRUNC, 0644);
-    pcm = (int)syscall3(SYS_open, (s64)"/dev/snd/pcmC0D0p", O_RDWR, 0);
+    pcm = (int)syscall4(SYS_openat, AT_FDCWD, (s64)"/dev/snd/pcmC0D0p", O_RDWR, 0);
     if (pcm < 0) {
         put("SOUND no pcm device\n");
         put("SOUNDTEST DONE\n");
@@ -534,7 +526,6 @@ static int run(void) {
     put_signed(BUFFER_FRAMES * 1000UL / RATE);
     put("\n");
 
-    /* Inside a lap, which always worked, and then past one, which did not. */
     test_continuous_playback(5000000000UL);
     test_playback(5000000000UL, 1);
     test_xrun_recovery();
@@ -542,21 +533,17 @@ static int run(void) {
     test_pointer_survives_a_stall(200000000UL);
     test_pointer_survives_a_stall(500000000UL);
 
-    /* Starved on purpose so the tick is silencing the ring, and the flag held
-       set across it. */
     if (syscall3(SYS_ioctl, pcm, (s64)IOC(0u, 'A', NR_PREPARE, 0), 0) == 0) {
         struct writei burst = { 0, tone, BUFFER_FRAMES };
         (void)syscall3(SYS_ioctl, pcm, (s64)IOW(NR_WRITEI, struct writei), (s64)&burst);
         (void)syscall3(SYS_ioctl, pcm, (s64)IOC(0u, 'A', NR_START, 0), 0);
         sleep_ns(200000000UL);
+#if defined(__x86_64__)
         test_direction_flag_under_silencing(60);
+#endif
         (void)syscall3(SYS_ioctl, pcm, (s64)IOC(0u, 'A', NR_DROP, 0), 0);
     }
 
-    /* Ends starved on purpose and stays that way: whatever the card plays from
-       here is what an underrun sounds like, and the tail of the recording is
-       checked for it. A ring nobody refills is replayed by the engine for ever
-       unless the driver silences what is in front of the writer. */
     if (syscall3(SYS_ioctl, pcm, (s64)IOC(0u, 'A', NR_PREPARE, 0), 0) == 0) {
         struct writei burst = { 0, tone, BUFFER_FRAMES };
         (void)syscall3(SYS_ioctl, pcm, (s64)IOW(NR_WRITEI, struct writei), (s64)&burst);
@@ -573,6 +560,7 @@ static void run_and_park(void) {
     for (;;) sleep_ns(1000000000UL);
 }
 
+#if defined(__x86_64__)
 __asm__(".text\n"
         ".globl _start\n"
         "_start:\n"
@@ -580,3 +568,11 @@ __asm__(".text\n"
         "    and $-16, %rsp\n"
         "    call run_and_park\n"
         "    hlt\n");
+#else
+__asm__(".text\n"
+        ".globl _start\n"
+        "_start:\n"
+        "    mov x29, #0\n"
+        "    bl run_and_park\n"
+        "    b .\n");
+#endif
