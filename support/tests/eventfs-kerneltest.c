@@ -1,6 +1,17 @@
 typedef unsigned long u64;
 typedef long s64;
 
+#define O_WRONLY 1
+#define O_CREAT 0100
+#define O_TRUNC 01000
+#define O_NONBLOCK 04000
+#define POLLIN 1
+#define EAGAIN 11
+#define EMSGSIZE 90
+#define AF_INET 2
+#define SOCK_STREAM 1
+
+#if defined(__x86_64__)
 #define SYS_read 0
 #define SYS_write 1
 #define SYS_open 2
@@ -18,16 +29,6 @@ typedef long s64;
 #define SYS_rename 82
 #define SYS_unlink 87
 #define SYS_exit_group 231
-
-#define O_WRONLY 1
-#define O_CREAT 0100
-#define O_TRUNC 01000
-#define O_NONBLOCK 04000
-#define POLLIN 1
-#define EAGAIN 11
-#define EMSGSIZE 90
-#define AF_INET 2
-#define SOCK_STREAM 1
 
 static inline s64 call1(s64 number, s64 first) {
     s64 result;
@@ -60,6 +61,85 @@ static inline s64 call4(s64 number, s64 first, s64 second, s64 third,
     return result;
 }
 
+static s64 open_path(const char *path, int flags, int mode) {
+    return call3(SYS_open, (s64)path, flags, mode);
+}
+
+static s64 poll_one(void *pollfd, int milliseconds) {
+    return call3(SYS_poll, (s64)pollfd, 1, milliseconds);
+}
+
+static s64 fork_process(void) {
+    return call1(SYS_fork, 0);
+}
+
+static s64 rename_path(const char *from, const char *to) {
+    return call2(SYS_rename, (s64)from, (s64)to);
+}
+
+static s64 unlink_path(const char *path) {
+    return call1(SYS_unlink, (s64)path);
+}
+#elif defined(__aarch64__)
+#define SYS_read 63
+#define SYS_write 64
+#define SYS_openat 56
+#define SYS_close 57
+#define SYS_fstat 80
+#define SYS_ppoll 73
+#define SYS_nanosleep 101
+#define SYS_socket 198
+#define SYS_connect 203
+#define SYS_accept 202
+#define SYS_bind 200
+#define SYS_listen 201
+#define SYS_clone 220
+#define SYS_wait4 260
+#define SYS_renameat 38
+#define SYS_unlinkat 35
+#define SYS_exit_group 94
+#define AT_FDCWD -100
+#define SIGCHLD 17
+
+extern s64 system_call(s64 number, s64 a, s64 b, s64 c, s64 d);
+__asm__(".text\n"
+        ".globl system_call\n"
+        "system_call:\n"
+        "    mov x8, x0\n"
+        "    mov x0, x1\n"
+        "    mov x1, x2\n"
+        "    mov x2, x3\n"
+        "    mov x3, x4\n"
+        "    svc #0\n"
+        "    ret\n");
+
+static inline s64 call1(s64 number, s64 first) { return system_call(number, first, 0, 0, 0); }
+static inline s64 call2(s64 number, s64 first, s64 second) { return system_call(number, first, second, 0, 0); }
+static inline s64 call3(s64 number, s64 first, s64 second, s64 third) { return system_call(number, first, second, third, 0); }
+static inline s64 call4(s64 number, s64 first, s64 second, s64 third, s64 fourth) { return system_call(number, first, second, third, fourth); }
+
+static s64 open_path(const char *path, int flags, int mode) {
+    return call4(SYS_openat, AT_FDCWD, (s64)path, flags, mode);
+}
+
+static s64 poll_one(void *pollfd, int milliseconds) {
+    struct { s64 seconds, nanoseconds; } timeout = { milliseconds / 1000, (milliseconds % 1000) * 1000000L };
+    return call4(SYS_ppoll, (s64)pollfd, 1, (s64)&timeout, 0);
+}
+
+static s64 fork_process(void) {
+    return call4(SYS_clone, SIGCHLD, 0, 0, 0);
+}
+
+static s64 rename_path(const char *from, const char *to) {
+    return call4(SYS_renameat, AT_FDCWD, (s64)from, AT_FDCWD, (s64)to);
+}
+
+static s64 unlink_path(const char *path) {
+    return call3(SYS_unlinkat, AT_FDCWD, (s64)path, 0);
+}
+#endif
+
 static u64 text_length(const char *text) {
     u64 length = 0;
     while (text[length]) length++;
@@ -89,13 +169,13 @@ static void sleep_ms(u64 milliseconds) {
 }
 
 static int process_stream_test(void) {
-    int first = (int)call3(SYS_open, (s64)"/events/process", O_NONBLOCK, 0);
-    int second = (int)call3(SYS_open, (s64)"/events/process", O_NONBLOCK, 0);
+    int first = (int)open_path("/events/process", O_NONBLOCK, 0);
+    int second = (int)open_path("/events/process", O_NONBLOCK, 0);
     if (first < 0 || second < 0) return 0;
     u64 stat_buffer[32];
     if (call2(SYS_fstat, first, (s64)stat_buffer) != 0) return 0;
 
-    s64 child = call1(SYS_fork, 0);
+    s64 child = fork_process();
     if (child == 0) {
         sleep_ms(200);
         (void)call1(SYS_exit_group, 7);
@@ -111,12 +191,12 @@ static int process_stream_test(void) {
     if (!contains(left, left_size, "fork ") || !contains(right, right_size, "fork "))
         return 0;
 
-    int late = (int)call3(SYS_open, (s64)"/events/process", O_NONBLOCK, 0);
+    int late = (int)open_path("/events/process", O_NONBLOCK, 0);
     if (late < 0 || call3(SYS_read, late, (s64)left, sizeof(left)) != -EAGAIN)
         return 0;
 
     struct { int fd; short events; short revents; } pollfd = { first, POLLIN, 0 };
-    if (call3(SYS_poll, (s64)&pollfd, 1, 2000) <= 0 || !(pollfd.revents & POLLIN))
+    if (poll_one(&pollfd, 2000) <= 0 || !(pollfd.revents & POLLIN))
         return 0;
     left_size = call3(SYS_read, first, (s64)left, sizeof(left));
     s64 late_size = call3(SYS_read, late, (s64)right, sizeof(right));
@@ -133,14 +213,13 @@ static int process_stream_test(void) {
 static int file_stream_test(void) {
     static const char old_path[] = "/tmp/eventfs a\nb";
     static const char new_path[] = "/tmp/eventfs c";
-    int events = (int)call3(SYS_open, (s64)"/events/files", O_NONBLOCK, 0);
+    int events = (int)open_path("/events/files", O_NONBLOCK, 0);
     if (events < 0) return 0;
-    int file = (int)call3(SYS_open, (s64)old_path,
-                          O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    int file = (int)open_path(old_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (file < 0 || call3(SYS_write, file, (s64)"x", 1) != 1) return 0;
     (void)call1(SYS_close, file);
-    if (call2(SYS_rename, (s64)old_path, (s64)new_path) != 0) return 0;
-    if (call1(SYS_unlink, (s64)new_path) != 0) return 0;
+    if (rename_path(old_path, new_path) != 0) return 0;
+    if (unlink_path(new_path) != 0) return 0;
 
     char output[4096];
     s64 length = call3(SYS_read, events, (s64)output, sizeof(output));
@@ -152,9 +231,8 @@ static int file_stream_test(void) {
 }
 
 static int overflow_test(void) {
-    int events = (int)call3(SYS_open, (s64)"/events/files", O_NONBLOCK, 0);
-    int file = (int)call3(SYS_open, (s64)"/tmp/eventfs-overflow",
-                          O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    int events = (int)open_path("/events/files", O_NONBLOCK, 0);
+    int file = (int)open_path("/tmp/eventfs-overflow", O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (events < 0 || file < 0) return 0;
     char output[4096];
     (void)call3(SYS_read, events, (s64)output, sizeof(output));
@@ -167,7 +245,7 @@ static int overflow_test(void) {
         if (contains(output, length, "lost ")) saw_loss = 1;
     }
     (void)call1(SYS_close, file);
-    (void)call1(SYS_unlink, (s64)"/tmp/eventfs-overflow");
+    (void)unlink_path("/tmp/eventfs-overflow");
     (void)call1(SYS_close, events);
     return saw_loss;
 }
@@ -183,13 +261,13 @@ static int network_stream_test(void) {
         unsigned address;
         unsigned char zero[8];
     } address = { AF_INET, network_port(24567), 0x0100007fU, {0} };
-    int events = (int)call3(SYS_open, (s64)"/events/network", O_NONBLOCK, 0);
+    int events = (int)open_path("/events/network", O_NONBLOCK, 0);
     int listener = (int)call3(SYS_socket, AF_INET, SOCK_STREAM, 0);
     if (events < 0 || listener < 0 ||
         call3(SYS_bind, listener, (s64)&address, sizeof(address)) != 0 ||
         call2(SYS_listen, listener, 4) != 0) return 0;
 
-    s64 child = call1(SYS_fork, 0);
+    s64 child = fork_process();
     if (child == 0) {
         (void)call1(SYS_close, listener);
         int socket = (int)call3(SYS_socket, AF_INET, SOCK_STREAM, 0);
@@ -218,12 +296,11 @@ static int network_stream_test(void) {
 }
 
 static int close_race_test(void) {
-    int file = (int)call3(SYS_open, (s64)"/tmp/eventfs-race",
-                          O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    int file = (int)open_path("/tmp/eventfs-race", O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (file < 0) return 0;
     s64 children[4];
     for (unsigned index = 0; index < 4U; index++) {
-        children[index] = call1(SYS_fork, 0);
+        children[index] = fork_process();
         if (children[index] == 0) {
             for (unsigned write = 0; write < 300U; write++)
                 (void)call3(SYS_write, file, (s64)"r", 1);
@@ -233,13 +310,13 @@ static int close_race_test(void) {
         if (children[index] < 0) return 0;
     }
     for (unsigned index = 0; index < 500U; index++) {
-        int events = (int)call3(SYS_open, (s64)"/events/files", O_NONBLOCK, 0);
+        int events = (int)open_path("/events/files", O_NONBLOCK, 0);
         if (events >= 0) (void)call1(SYS_close, events);
     }
     for (unsigned index = 0; index < 4U; index++)
         (void)call4(SYS_wait4, children[index], 0, 0, 0);
     (void)call1(SYS_close, file);
-    (void)call1(SYS_unlink, (s64)"/tmp/eventfs-race");
+    (void)unlink_path("/tmp/eventfs-race");
     return 1;
 }
 
@@ -261,6 +338,7 @@ static void run(void) {
     for (;;) sleep_ms(1000);
 }
 
+#if defined(__x86_64__)
 __asm__(".text\n"
         ".globl _start\n"
         "_start:\n"
@@ -268,3 +346,11 @@ __asm__(".text\n"
         "    and $-16, %rsp\n"
         "    call run\n"
         "    hlt\n");
+#else
+__asm__(".text\n"
+        ".globl _start\n"
+        "_start:\n"
+        "    mov x29, #0\n"
+        "    bl run\n"
+        "    b .\n");
+#endif

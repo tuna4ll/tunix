@@ -2,15 +2,6 @@ typedef unsigned long u64;
 typedef long s64;
 typedef unsigned int u32;
 
-#define SYS_READ 0
-#define SYS_WRITE 1
-#define SYS_OPEN 2
-#define SYS_CLOSE 3
-#define SYS_SENDMSG 46
-#define SYS_RECVMSG 47
-#define SYS_SOCKETPAIR 53
-#define SYS_EXIT_GROUP 231
-
 #define AF_UNIX 1
 #define SOCK_STREAM 1
 #define SOCK_NONBLOCK 04000
@@ -47,6 +38,16 @@ struct control {
     int padding;
 };
 
+#if defined(__x86_64__)
+#define SYS_READ 0
+#define SYS_WRITE 1
+#define SYS_OPEN 2
+#define SYS_CLOSE 3
+#define SYS_SENDMSG 46
+#define SYS_RECVMSG 47
+#define SYS_SOCKETPAIR 53
+#define SYS_EXIT_GROUP 231
+
 static inline s64 call1(s64 number, s64 first) {
     s64 result;
     __asm__ volatile("syscall" : "=a"(result) : "a"(number), "D"(first)
@@ -70,6 +71,41 @@ static inline s64 call4(s64 number, s64 first, s64 second, s64 third,
                      : "rcx", "r11", "memory");
     return result;
 }
+
+static s64 open_path(const char *path, int flags) {
+    return call3(SYS_OPEN, (s64)path, flags, 0);
+}
+#elif defined(__aarch64__)
+#define SYS_READ 63
+#define SYS_WRITE 64
+#define SYS_OPENAT 56
+#define SYS_CLOSE 57
+#define SYS_SENDMSG 211
+#define SYS_RECVMSG 212
+#define SYS_SOCKETPAIR 199
+#define SYS_EXIT_GROUP 94
+#define AT_FDCWD -100
+
+extern s64 system_call(s64 number, s64 a, s64 b, s64 c, s64 d);
+__asm__(".text\n"
+        ".globl system_call\n"
+        "system_call:\n"
+        "    mov x8, x0\n"
+        "    mov x0, x1\n"
+        "    mov x1, x2\n"
+        "    mov x2, x3\n"
+        "    mov x3, x4\n"
+        "    svc #0\n"
+        "    ret\n");
+
+static inline s64 call1(s64 number, s64 first) { return system_call(number, first, 0, 0, 0); }
+static inline s64 call3(s64 number, s64 first, s64 second, s64 third) { return system_call(number, first, second, third, 0); }
+static inline s64 call4(s64 number, s64 first, s64 second, s64 third, s64 fourth) { return system_call(number, first, second, third, fourth); }
+
+static s64 open_path(const char *path, int flags) {
+    return call4(SYS_OPENAT, AT_FDCWD, (s64)path, flags, 0);
+}
+#endif
 
 static u64 text_length(const char *text) {
     u64 length = 0;
@@ -187,8 +223,8 @@ static int test_plain_read_discards(int fd) {
 }
 
 static int run_test(void) {
-    int first_fd = (int)call3(SYS_OPEN, (s64)"/proc/abi_gaps", O_RDONLY, 0);
-    int second_fd = (int)call3(SYS_OPEN, (s64)"/proc/abi_gaps", O_RDONLY, 0);
+    int first_fd = (int)open_path("/proc/abi_gaps", O_RDONLY);
+    int second_fd = (int)open_path("/proc/abi_gaps", O_RDONLY);
     if (first_fd < 0 || second_fd < 0) return 0;
     int passed = test_boundaries(first_fd, second_fd) &&
                  test_offset(first_fd) &&
@@ -198,9 +234,27 @@ static int run_test(void) {
     return passed;
 }
 
-void _start(void) {
+static void run(void) __attribute__((noreturn, used));
+static void run(void) {
     if (run_test()) print("SCMRIGHTSTEST PASS\n");
     else print("SCMRIGHTSTEST FAIL\n");
     call1(SYS_EXIT_GROUP, 0);
     for (;;) { }
 }
+
+#if defined(__x86_64__)
+__asm__(".text\n"
+        ".globl _start\n"
+        "_start:\n"
+        "    xor %ebp, %ebp\n"
+        "    and $-16, %rsp\n"
+        "    call run\n"
+        "    hlt\n");
+#else
+__asm__(".text\n"
+        ".globl _start\n"
+        "_start:\n"
+        "    mov x29, #0\n"
+        "    bl run\n"
+        "    b .\n");
+#endif

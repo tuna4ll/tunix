@@ -1,15 +1,6 @@
 typedef unsigned long u64;
 typedef long s64;
 
-#define SYS_READ 0
-#define SYS_WRITE 1
-#define SYS_OPEN 2
-#define SYS_CLOSE 3
-#define SYS_RT_SIGACTION 13
-#define SYS_WAIT4 61
-#define SYS_EXIT_GROUP 231
-#define SYS_CLONE3 435
-
 #define O_RDONLY 0
 #define O_WRONLY 1
 #define SIGCHLD 17
@@ -55,6 +46,16 @@ static volatile unsigned thread_tid;
 
 extern s64 clone3_vfork(struct clone_args *args, u64 size);
 extern s64 clone3_thread(struct clone_args *args, u64 size);
+
+#if defined(__x86_64__)
+#define SYS_READ 0
+#define SYS_WRITE 1
+#define SYS_OPEN 2
+#define SYS_CLOSE 3
+#define SYS_RT_SIGACTION 13
+#define SYS_WAIT4 61
+#define SYS_EXIT_GROUP 231
+#define SYS_CLONE3 435
 
 __asm__(
     ".text\n"
@@ -118,6 +119,73 @@ static inline s64 call4(s64 number, s64 first, s64 second, s64 third,
     return result;
 }
 
+static s64 open_path(const char *path, int flags) {
+    return call3(SYS_OPEN, (s64)path, flags, 0);
+}
+#elif defined(__aarch64__)
+#define SYS_READ 63
+#define SYS_WRITE 64
+#define SYS_OPENAT 56
+#define SYS_CLOSE 57
+#define SYS_RT_SIGACTION 134
+#define SYS_WAIT4 260
+#define SYS_EXIT_GROUP 94
+#define SYS_CLONE3 435
+#define AT_FDCWD -100
+
+__asm__(
+    ".text\n"
+    ".global clone3_vfork\n"
+    "clone3_vfork:\n"
+    "mov x8, #435\n"
+    "svc #0\n"
+    "cbz x0, 1f\n"
+    "ret\n"
+    "1:\n"
+    "mov x0, #0\n"
+    "mov x8, #94\n"
+    "svc #0\n"
+    "brk #0\n");
+
+__asm__(
+    ".text\n"
+    ".global clone3_thread\n"
+    "clone3_thread:\n"
+    "mov x8, #435\n"
+    "svc #0\n"
+    "cbz x0, 1f\n"
+    "ret\n"
+    "1:\n"
+    "adrp x1, thread_done\n"
+    "mov x2, #1\n"
+    "str x2, [x1, :lo12:thread_done]\n"
+    "mov x0, #0\n"
+    "mov x8, #93\n"
+    "svc #0\n"
+    "brk #0\n");
+
+extern s64 system_call(s64 number, s64 a, s64 b, s64 c, s64 d);
+__asm__(".text\n"
+        ".globl system_call\n"
+        "system_call:\n"
+        "    mov x8, x0\n"
+        "    mov x0, x1\n"
+        "    mov x1, x2\n"
+        "    mov x2, x3\n"
+        "    mov x3, x4\n"
+        "    svc #0\n"
+        "    ret\n");
+
+static inline s64 call1(s64 number, s64 first) { return system_call(number, first, 0, 0, 0); }
+static inline s64 call2(s64 number, s64 first, s64 second) { return system_call(number, first, second, 0, 0); }
+static inline s64 call3(s64 number, s64 first, s64 second, s64 third) { return system_call(number, first, second, third, 0); }
+static inline s64 call4(s64 number, s64 first, s64 second, s64 third, s64 fourth) { return system_call(number, first, second, third, fourth); }
+
+static s64 open_path(const char *path, int flags) {
+    return call4(SYS_OPENAT, AT_FDCWD, (s64)path, flags, 0);
+}
+#endif
+
 static u64 text_length(const char *text) {
     u64 length = 0;
     while (text[length]) length++;
@@ -145,7 +213,7 @@ static void zero(void *data, u64 size) {
 }
 
 static int clear_gaps(void) {
-    s64 fd = call3(SYS_OPEN, (s64)"/proc/abi_gaps", O_WRONLY, 0);
+    s64 fd = open_path("/proc/abi_gaps", O_WRONLY);
     if (fd < 0) return 0;
     s64 result = call3(SYS_WRITE, fd, (s64)"0", 1);
     (void)call1(SYS_CLOSE, fd);
@@ -154,7 +222,7 @@ static int clear_gaps(void) {
 
 static int gaps_have_clone3(void) {
     char output[1024];
-    s64 fd = call3(SYS_OPEN, (s64)"/proc/abi_gaps", O_RDONLY, 0);
+    s64 fd = open_path("/proc/abi_gaps", O_RDONLY);
     if (fd < 0) return 1;
     s64 length = call3(SYS_READ, fd, (s64)output, sizeof(output));
     (void)call1(SYS_CLOSE, fd);
