@@ -335,6 +335,8 @@ static int vmm_map_page_in_locked(uint64_t cr3_physical, uint64_t virtual_addres
     if (!pt) return -1;
     if (pte_present(pt[i1])) return -2;
     pt[i1] = pte_page(physical_address & ADDRESS_MASK, flags | PAGE_PRESENT);
+    if ((flags & PAGE_USER) && !(flags & (PAGE_NX | PAGE_DEVICE)))
+        vmm_arch_sync_executable(physical_address);
     if (cr3 == vmm_arch_read_root()) vmm_arch_invalidate(virtual_address);
     return 0;
 }
@@ -455,6 +457,8 @@ int vmm_protect_page_in(uint64_t cr3_physical, uint64_t virtual_address,
     if (!pt || !pte_present(pt[i1])) return -1;
     uint64_t physical = pte_address(pt[i1]);
     pt[i1] = pte_page(physical, (flags & ~ADDRESS_MASK) | PAGE_PRESENT);
+    if ((flags & PAGE_USER) && !(flags & (PAGE_NX | PAGE_DEVICE)))
+        vmm_arch_sync_executable(physical);
     if (cr3 == vmm_arch_read_root()) vmm_arch_invalidate(virtual_address);
     flush_others(cr3);
     return 0;
@@ -595,6 +599,7 @@ int vmm_copy_to_space(uint64_t cr3_physical, uint64_t destination_user,
         if (chunk > length) chunk = length;
         if (!physical_direct_range_valid(physical, chunk)) return -1;
         memcpy((void *)(DIRECT_MAP_BASE + physical), in, chunk);
+        if (!(flags & PAGE_NX)) vmm_arch_sync_executable(physical);
         in += chunk;
         destination_user += chunk;
         length -= chunk;
@@ -748,6 +753,7 @@ int vmm_handle_cow_fault(uint64_t cr3_physical, uint64_t virtual_address) {
         }
         memcpy((void *)(DIRECT_MAP_BASE + copy), (void *)(DIRECT_MAP_BASE + physical), 4096);
         pt[index] = pte_page(copy, flags);
+        if (!(flags & (PAGE_NX | PAGE_DEVICE))) vmm_arch_sync_executable(copy);
         smp_flush_address_space(cr3);
         pmm_free_page((void *)physical);
     }

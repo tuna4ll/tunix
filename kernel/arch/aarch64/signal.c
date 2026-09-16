@@ -3,6 +3,7 @@
 #include "../../include/pmm.h"
 #include "../../include/process_arch.h"
 #include "../../include/vmm.h"
+#include "../../include/vmm_arch.h"
 
 #define INSTRUCTION_MOV_X8_RT_SIGRETURN 0xD2801168U
 #define INSTRUCTION_SVC_0 0xD4000001U
@@ -17,6 +18,7 @@ int arch_map_signal_trampoline(uint64_t cr3) {
         for (unsigned index = 0; index < 1024U; index++) code[index] = INSTRUCTION_SVC_0;
         code[0] = INSTRUCTION_MOV_X8_RT_SIGRETURN;
         code[1] = INSTRUCTION_SVC_0;
+        vmm_arch_sync_executable(physical);
         trampoline_physical = physical;
     }
     int status = vmm_map_page_in(cr3, ARCH_SIGNAL_TRAMPOLINE, trampoline_physical,

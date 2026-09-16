@@ -72,6 +72,10 @@ static inline int vmm_arch_direct_map_wanted(uint64_t physical) {
     return 1;
 }
 
+static inline void vmm_arch_sync_executable(uint64_t physical) {
+    (void)physical;
+}
+
 #elif defined(__aarch64__)
 
 #define PTE_ADDRESS_MASK 0x0000FFFFFFFFF000ULL
@@ -196,6 +200,18 @@ int aarch64_physical_is_ram(uint64_t physical);
 
 static inline int vmm_arch_direct_map_wanted(uint64_t physical) {
     return aarch64_physical_is_ram(physical);
+}
+
+static inline void vmm_arch_sync_executable(uint64_t physical) {
+    uint64_t ctr;
+    __asm__ volatile("mrs %0, ctr_el0" : "=r"(ctr));
+    uint64_t start = DIRECT_MAP_BASE + (physical & ~0xFFFULL);
+    if (!(ctr & (1ULL << 28))) {
+        uint64_t line = 4ULL << ((ctr >> 16) & 0xFU);
+        for (uint64_t address = start; address < start + 4096ULL; address += line)
+            __asm__ volatile("dc cvau, %0" : : "r"(address) : "memory");
+    }
+    if (!(ctr & (1ULL << 29))) __asm__ volatile("ic ialluis" ::: "memory");
 }
 
 #else
