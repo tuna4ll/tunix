@@ -36,7 +36,7 @@ void *memmove(void *dst, const void *src, size_t count) {
     return dst;
 }
 
-#else
+#elif !defined(__aarch64__)
 
 void *memset(void *dst, int value, size_t count) {
     volatile uint8_t *out = (volatile uint8_t *)dst;
