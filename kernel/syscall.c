@@ -4830,6 +4830,16 @@ static int64_t sys_reboot(uint32_t magic1, uint32_t magic2, uint32_t command) {
     }
 }
 
+static void note_would_block(struct syscall_frame *frame, uint64_t number, uint64_t fd) {
+    if ((int64_t)SYSCALL_RET(frame) != -(int64_t)EAGAIN) return;
+    if (number != SYS_READ && number != SYS_WRITE && number != SYS_READV &&
+        number != SYS_WRITEV && number != SYS_RECVFROM && number != SYS_SENDTO &&
+        number != SYS_RECVMSG && number != SYS_SENDMSG && number != SYS_RECVMMSG &&
+        number != SYS_SENDMMSG && number != SYS_ACCEPT && number != SYS_ACCEPT4) return;
+    struct file *file = file_from_fd((int)fd);
+    if (file) file->edge_generation++;
+}
+
 static void syscall_dispatch_locked(struct syscall_frame *frame) {
     if (!frame) return;
     process_account_runtime();
@@ -4839,6 +4849,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
     if (heap_under_pressure()) vfs_reclaim_file_data(vfs_root);
     struct process *caller = process_current();
     uint64_t syscall_number = SYSCALL_NR(frame);
+    uint64_t first_argument = SYSCALL_ARG0(frame);
     if (caller) caller->syscall_rewound = 0;
     if (caller && caller->io_wait_active && caller->io_wait_syscall != syscall_number)
         clear_io_wait(caller);
@@ -5853,6 +5864,8 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             break;
     }
 
+    if (caller && caller == process_current())
+        note_would_block(frame, syscall_number, first_argument);
     if (!skip_signal_delivery) process_prepare_user_return(frame);
 }
 
@@ -5882,6 +5895,7 @@ static int syscall_try_shared(struct syscall_frame *frame) {
         : sys_write(fd, SYSCALL_ARG1(frame), (size_t)SYSCALL_ARG2(frame));
 
     if (result == -EAGAIN && !(file->flags & O_NONBLOCK)) return 0;
+    if (result == -EAGAIN) file->edge_generation++;
 
     SYSCALL_RET(frame) = (uint64_t)result;
     return 1;

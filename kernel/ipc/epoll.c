@@ -13,22 +13,16 @@
 #define EPOLLET (1U << 31)
 #define EPOLLERR 0x008U
 #define EPOLLHUP 0x010U
-#define EPOLLRDHUP 0x2000U
 #define EPOLL_MAX_ENTRIES 128
 
 struct epoll_entry {
     int active;
-    /* EPOLLONESHOT has fired. A disarmed entry reports *nothing* -- not even
-       EPOLLERR/EPOLLHUP, which are otherwise always reported -- until an
-       EPOLL_CTL_MOD re-arms it. dasynq (dinit's event library) leans on
-       exactly this: it "disables" a watch by re-arming with events set to
-       just EPOLLONESHOT, so a hung-up pipe under a disabled watch must fall
-       silent after one report or every epoll_wait returns instantly and the
-       caller's drain loop never terminates. */
     int disarmed;
     int fd;
     struct file *file;
     uint32_t events;
+    uint32_t edge_seen;
+    uint32_t edge_generation;
     uint64_t data;
 };
 
@@ -44,6 +38,26 @@ static struct epoll_entry *find_entry(struct epoll_context *context, int fd,
         if (entry->active && entry->fd == fd && entry->file == file) return entry;
     }
     return NULL;
+}
+
+static void arm_entry(struct epoll_entry *entry, const struct tunix_epoll_event *event) {
+    entry->events = event->events;
+    entry->data = event->data;
+    entry->disarmed = 0;
+    entry->edge_seen = 0;
+    entry->edge_generation = entry->file->edge_generation;
+}
+
+static uint32_t entry_occurred(const struct epoll_entry *entry, unsigned depth) {
+    uint32_t reportable = (entry->events & ~(EPOLLET | EPOLLONESHOT)) | EPOLLERR | EPOLLHUP;
+    return file_poll_events_nested(entry->file, reportable, depth + 1) & reportable;
+}
+
+static int entry_fresh(const struct epoll_entry *entry, uint32_t occurred) {
+    if (!occurred) return 0;
+    if (!(entry->events & EPOLLET)) return 1;
+    return (occurred & ~entry->edge_seen) != 0 ||
+           entry->file->edge_generation != entry->edge_generation;
 }
 
 struct epoll_context *epoll_create(void) {
@@ -70,11 +84,9 @@ int epoll_ctl_add(struct epoll_context *context, int fd, struct file *file,
         struct epoll_entry *entry = &context->entries[index];
         if (!entry->active) {
             entry->active = 1;
-            entry->disarmed = 0;
             entry->fd = fd;
             entry->file = file;
-            entry->events = event->events;
-            entry->data = event->data;
+            arm_entry(entry, event);
             file_ref(file);
             return 0;
         }
@@ -87,9 +99,7 @@ int epoll_ctl_mod(struct epoll_context *context, int fd, struct file *file,
     if (!context || !file || !event) return -EINVAL;
     struct epoll_entry *entry = find_entry(context, fd, file);
     if (!entry) return -ENOENT;
-    entry->events = event->events;
-    entry->data = event->data;
-    entry->disarmed = 0;
+    arm_entry(entry, event);
     return 0;
 }
 
@@ -110,13 +120,13 @@ int epoll_collect(struct epoll_context *context,
     for (int index = 0; index < EPOLL_MAX_ENTRIES && ready < maximum; index++) {
         struct epoll_entry *entry = &context->entries[index];
         if (!entry->active || !entry->file || entry->disarmed) continue;
-        uint32_t requested = entry->events & ~(EPOLLET | EPOLLONESHOT);
-        uint32_t occurred = file_poll_events_nested(entry->file,
-                                                    requested | EPOLLERR |
-                                                    EPOLLHUP | EPOLLRDHUP,
-                                                    depth + 1);
-        occurred &= requested | EPOLLERR | EPOLLHUP | EPOLLRDHUP;
-        if (!occurred) continue;
+        uint32_t occurred = entry_occurred(entry, depth);
+        int fresh = entry_fresh(entry, occurred);
+        if (entry->events & EPOLLET) {
+            entry->edge_seen = occurred;
+            entry->edge_generation = entry->file->edge_generation;
+        }
+        if (!fresh) continue;
         events[ready].events = occurred;
         events[ready].data = entry->data;
         ready++;
@@ -131,12 +141,7 @@ int epoll_read_ready(struct epoll_context *context, unsigned depth) {
     for (int index = 0; index < EPOLL_MAX_ENTRIES; index++) {
         struct epoll_entry *entry = &context->entries[index];
         if (!entry->active || !entry->file || entry->disarmed) continue;
-        uint32_t requested = entry->events & ~(EPOLLET | EPOLLONESHOT);
-        uint32_t occurred = file_poll_events_nested(entry->file,
-                                                    requested | EPOLLERR |
-                                                    EPOLLHUP | EPOLLRDHUP,
-                                                    depth + 1);
-        if (occurred & (requested | EPOLLERR | EPOLLHUP | EPOLLRDHUP)) return 1;
+        if (entry_fresh(entry, entry_occurred(entry, depth))) return 1;
     }
     return 0;
 }

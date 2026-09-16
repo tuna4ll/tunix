@@ -21,6 +21,8 @@ typedef long s64;
 #define NR_EPOLL_CREATE1 291
 #define NR_EPOLL_PWAIT 281
 #define NR_CLOCK_GETTIME 228
+#define NR_EPOLL_CTL 233
+#define EPOLL_PACKED __attribute__((packed))
 #define UCONTEXT_RET_OFFSET (40 + 13 * 8)
 #define UCONTEXT_IP_OFFSET (40 + 16 * 8)
 #elif defined(__aarch64__)
@@ -42,6 +44,8 @@ typedef long s64;
 #define NR_EPOLL_CREATE1 20
 #define NR_EPOLL_PWAIT 22
 #define NR_CLOCK_GETTIME 113
+#define NR_EPOLL_CTL 21
+#define EPOLL_PACKED
 #define UCONTEXT_RET_OFFSET (168 + 8)
 #define UCONTEXT_IP_OFFSET (168 + 264)
 #endif
@@ -52,6 +56,10 @@ typedef long s64;
 #define SIGUSR1 10
 #define SIGUSR2 12
 #define EINTR 4
+#define O_NONBLOCK 04000
+#define EPOLLIN 0x001U
+#define EPOLLET 0x80000000U
+#define EPOLL_CTL_ADD 1
 #define SA_SIGINFO 0x00000004UL
 #define SA_RESTORER 0x04000000UL
 #define SA_RESTART 0x10000000UL
@@ -444,6 +452,48 @@ static void test_timeouts(void) {
     check_wait("ppoll on an idle pipe waits", started, sys6(NR_PPOLL, (u64)&poller, 1, (u64)&wait, 0, 8, 0));
 }
 
+struct epoll_event_abi {
+    unsigned int events;
+    u64 data;
+} EPOLL_PACKED;
+
+static s64 epoll_now(s64 epoll, struct epoll_event_abi *out) {
+    return sys6(NR_EPOLL_PWAIT, (u64)epoll, (u64)out, 4, 0, 0, 8);
+}
+
+static void test_edge_triggered(void) {
+    int fds[2] = { -1, -1 };
+    s64 made = sys(NR_PIPE2, (u64)fds, O_NONBLOCK, 0, 0, 0);
+    s64 edge = sys(NR_EPOLL_CREATE1, 0, 0, 0, 0, 0);
+    s64 level = sys(NR_EPOLL_CREATE1, 0, 0, 0, 0, 0);
+    if (made != 0 || edge < 0 || level < 0) {
+        check("epoll setup", 0, made ? made : edge);
+        return;
+    }
+    struct epoll_event_abi interest = { EPOLLIN | EPOLLET, 7 };
+    sys(NR_EPOLL_CTL, (u64)edge, EPOLL_CTL_ADD, (u64)fds[0], (u64)&interest, 0);
+    interest.events = EPOLLIN;
+    sys(NR_EPOLL_CTL, (u64)level, EPOLL_CTL_ADD, (u64)fds[0], (u64)&interest, 0);
+    struct epoll_event_abi out[4];
+
+    sys(NR_WRITE, (u64)fds[1], (u64)"ab", 2, 0, 0);
+    s64 first = epoll_now(edge, out);
+    u64 data = out[0].data;
+    s64 again = epoll_now(edge, out);
+    check("epoll edge reported once", first == 1 && data == 7 && again == 0, first * 10 + again);
+
+    s64 steady = epoll_now(level, out) + epoll_now(level, out);
+    check("epoll level stays ready", steady == 2, steady);
+
+    char buffer[8];
+    while (sys(NR_READ, (u64)fds[0], (u64)buffer, sizeof(buffer), 0, 0) > 0) {
+    }
+    s64 idle = epoll_now(edge, out);
+    sys(NR_WRITE, (u64)fds[1], (u64)"c", 1, 0, 0);
+    s64 rearmed = epoll_now(edge, out);
+    check("epoll edge rearms after EAGAIN", idle == 0 && rearmed == 1, idle * 10 + rearmed);
+}
+
 static int text_equal(const char *a, const char *b) {
     while (*a && *a == *b) {
         a++;
@@ -470,6 +520,7 @@ void start_c(u64 *stack) {
     }
 
     test_timeouts();
+    test_edge_triggered();
     test_fork_and_switches();
     test_thread();
     test_siginfo();

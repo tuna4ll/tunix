@@ -36,14 +36,10 @@ struct eventfs_subscriber;
 #define FILE_KIND_NETLINK_SOCKET 14
 #define FILE_KIND_MEMFD       15
 #define FILE_KIND_SIGNALFD    16
-/* A DRM buffer exported by PRIME. The descriptor is the buffer: it can be
-   mapped, and it keeps the buffer alive after its handle is destroyed. */
 #define FILE_KIND_DMABUF      17
 #define FILE_KIND_EVENTFS     18
 
 struct file {
-    /* Taken by shared-mode reads and writes, because the offset below is
-       mutated and two descriptors onto the same open file share it. */
     spinlock_t lock;
     int refs;
     int kind;
@@ -63,11 +59,9 @@ struct file {
     struct memfd_object *memfd;
     struct signalfd_context *signalfd;
     struct eventfs_subscriber *eventfs;
-    /* PRIME export: which DRM buffer handle this descriptor stands for. */
     uint32_t dmabuf_handle;
-    /* LOCK_SH or LOCK_EX while this open file description holds an advisory
-       lock on file->node, 0 otherwise. */
     int flock_type;
+    uint32_t edge_generation;
 };
 
 struct file *file_open_node(struct vfs_node *node, uint32_t flags);
@@ -87,26 +81,17 @@ struct file *file_create_pty_endpoint(struct pty_pair *pty, int master,
 void file_ref(struct file *file);
 void file_unref(struct file *file);
 
-/* flock(2) operations, as the ABI defines them. */
 #define FILE_LOCK_SH 1
 #define FILE_LOCK_EX 2
 #define FILE_LOCK_NB 4
 #define FILE_LOCK_UN 8
-/* Take or release an advisory lock. Returns 0 on success, -EWOULDBLOCK when the
-   lock is contended, or another negative errno. */
 int file_flock(struct file *file, int operation);
 void file_flock_release(struct file *file);
 int64_t file_read(struct file *file, size_t size, void *buffer);
 int64_t file_write(struct file *file, size_t size, const void *buffer);
-/*
- * Channel to sleep on when a read/write returned EAGAIN, or NULL when this file
- * kind has no wakeup source and the caller must fall back to retrying.
- */
 const void *file_read_wait_channel(struct file *file);
 const void *file_write_wait_channel(struct file *file);
 uint32_t file_poll_events(struct file *file, uint32_t requested);
-/* The same question asked from inside an epoll set, which has to carry how
-   many sets deep it already is. See EPOLL_MAX_NESTING. */
 uint32_t file_poll_events_nested(struct file *file, uint32_t requested,
                                  unsigned depth);
 
