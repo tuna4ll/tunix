@@ -26,6 +26,7 @@ typedef long s64;
 #define NR_SOCKETPAIR 53
 #define EPOLL_PACKED __attribute__((packed))
 #define UCONTEXT_RET_OFFSET (40 + 13 * 8)
+#define TRAP_LENGTH 2
 #define UCONTEXT_IP_OFFSET (40 + 16 * 8)
 #elif defined(__aarch64__)
 #define NR_READ 63
@@ -51,12 +52,14 @@ typedef long s64;
 #define NR_SOCKETPAIR 199
 #define EPOLL_PACKED
 #define UCONTEXT_RET_OFFSET (168 + 8)
+#define TRAP_LENGTH 4
 #define UCONTEXT_IP_OFFSET (168 + 264)
 #endif
 
 #define AT_FDCWD -100
 #define O_WRONLY 1
 #define SIGCHLD 17
+#define SIGILL 4
 #define SIGUSR1 10
 #define SIGUSR2 12
 #define EINTR 4
@@ -89,6 +92,7 @@ struct timespec {
 extern s64 sys(u64 number, u64 a, u64 b, u64 c, u64 d, u64 e);
 extern s64 sys6(u64 number, u64 a, u64 b, u64 c, u64 d, u64 e, u64 f);
 extern void restorer(void);
+extern s64 trap_site(void);
 extern s64 clone_thread(u64 flags, u64 stack, u64 tls, s64 (*entry)(void));
 
 #if defined(__x86_64__)
@@ -127,6 +131,11 @@ __asm__(
     "    mov $15, %eax\n"
     "    syscall\n"
     "    hlt\n"
+    ".globl trap_site\n"
+    "trap_site:\n"
+    "    ud2\n"
+    "    mov $77, %eax\n"
+    "    ret\n"
     ".globl clone_thread\n"
     "clone_thread:\n"
     "    mov %rcx, %r9\n"
@@ -179,6 +188,11 @@ __asm__(
     "    mov x8, #139\n"
     "    svc #0\n"
     "    b .\n"
+    ".globl trap_site\n"
+    "trap_site:\n"
+    "    udf #0\n"
+    "    mov x0, #77\n"
+    "    ret\n"
     ".globl clone_thread\n"
     "clone_thread:\n"
     "    mov x10, x3\n"
@@ -371,6 +385,28 @@ static void test_siginfo(void) {
           handler_signal * 100 + handler_info_signal);
     check("context ip", handler_ip != 0, 0);
     check("sigreturn reads the context", result == 0x5157, result);
+}
+
+static volatile u64 trap_ip;
+
+static void trap_handler(int signal_number, int *info, void *context) {
+    (void)signal_number;
+    (void)info;
+    u64 *ip = (u64 *)((char *)context + UCONTEXT_IP_OFFSET);
+    trap_ip = *ip;
+    *ip += TRAP_LENGTH;
+}
+
+static void test_trap_resume(void) {
+    struct sigaction action;
+    action.handler = (u64)trap_handler;
+    action.flags = SA_SIGINFO | SA_RESTORER;
+    action.restorer = (u64)restorer;
+    action.mask = 0;
+    sys(NR_RT_SIGACTION, SIGILL, (u64)&action, 0, 8, 0);
+    s64 result = trap_site();
+    check("illegal instruction resumes where the handler says",
+          result == 77 && trap_ip == (u64)trap_site, result);
 }
 
 static volatile int interrupts;
@@ -572,6 +608,7 @@ void start_c(u64 *stack) {
     test_fork_and_switches();
     test_thread();
     test_siginfo();
+    test_trap_resume();
     test_blocked_read("read interrupted without SA_RESTART", 0, -EINTR);
     test_blocked_read("read restarted with SA_RESTART", SA_RESTART, 1);
 
