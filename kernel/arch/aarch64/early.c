@@ -2,7 +2,7 @@
 
 #include "aarch64.h"
 
-#define EARLY_TABLES 24U
+#define EARLY_TABLES 40U
 #define TABLE_ENTRIES 512U
 #define ADDRESS_MASK 0x0000FFFFFFFFF000ULL
 
@@ -42,23 +42,32 @@ static uint64_t *descend(uint64_t *table, unsigned index) {
     return (uint64_t *)((table[index] & ADDRESS_MASK) - table_offset);
 }
 
+static int is_block(uint64_t entry) {
+    return (entry & DESC_TABLE) == DESC_VALID;
+}
+
 static int map_into(uint64_t *root, uint64_t virtual_address, uint64_t physical,
                     uint64_t attributes, int level) {
     uint64_t *l1 = descend(root, (unsigned)(virtual_address >> 39) & 0x1FFU);
     if (!l1) return -1;
+    unsigned i1 = (unsigned)(virtual_address >> 30) & 0x1FFU;
     if (level == 1) {
-        l1[(virtual_address >> 30) & 0x1FFU] = physical | attributes | DESC_VALID;
+        l1[i1] = physical | attributes | DESC_VALID;
         return 0;
     }
-    uint64_t *l2 = descend(l1, (unsigned)(virtual_address >> 30) & 0x1FFU);
+    if (is_block(l1[i1])) return 0;
+    uint64_t *l2 = descend(l1, i1);
     if (!l2) return -1;
+    unsigned i2 = (unsigned)(virtual_address >> 21) & 0x1FFU;
     if (level == 2) {
-        l2[(virtual_address >> 21) & 0x1FFU] = physical | attributes | DESC_VALID;
+        if (!(l2[i2] & DESC_VALID)) l2[i2] = physical | attributes | DESC_VALID;
         return 0;
     }
-    uint64_t *l3 = descend(l2, (unsigned)(virtual_address >> 21) & 0x1FFU);
+    if (is_block(l2[i2])) return 0;
+    uint64_t *l3 = descend(l2, i2);
     if (!l3) return -1;
-    l3[(virtual_address >> 12) & 0x1FFU] = physical | attributes | DESC_PAGE;
+    unsigned i3 = (unsigned)(virtual_address >> 12) & 0x1FFU;
+    if (!(l3[i3] & DESC_VALID)) l3[i3] = physical | attributes | DESC_PAGE;
     return 0;
 }
 
@@ -68,16 +77,31 @@ void aarch64_build_early_tables(uint64_t load_physical, uint64_t dtb_physical) {
     uint64_t kernel_attributes = DESC_AF | DESC_SH_INNER | DESC_UXN;
     uint64_t data_attributes = kernel_attributes | DESC_PXN;
 
-    for (uint64_t offset = 0; offset < image_bytes; offset += BLOCK_2M) {
-        map_into(boot_root, load_physical + offset, load_physical + offset,
-                 kernel_attributes, 2);
-        map_into(boot_root, AARCH64_KERNEL_VIRTUAL_BASE + offset, load_physical + offset,
-                 kernel_attributes, 2);
+    if (load_physical & (BLOCK_2M - 1U)) {
+        for (uint64_t offset = 0; offset < image_bytes; offset += 4096U) {
+            map_into(boot_root, load_physical + offset, load_physical + offset,
+                     kernel_attributes, 3);
+            map_into(boot_root, AARCH64_KERNEL_VIRTUAL_BASE + offset, load_physical + offset,
+                     kernel_attributes, 3);
+        }
+    } else {
+        for (uint64_t offset = 0; offset < image_bytes; offset += BLOCK_2M) {
+            map_into(boot_root, load_physical + offset, load_physical + offset,
+                     kernel_attributes, 2);
+            map_into(boot_root, AARCH64_KERNEL_VIRTUAL_BASE + offset, load_physical + offset,
+                     kernel_attributes, 2);
+        }
     }
     if (dtb_physical) {
-        uint64_t base = dtb_physical & ~(BLOCK_2M - 1U);
-        for (uint64_t offset = 0; offset < 2U * BLOCK_2M; offset += BLOCK_2M)
-            map_into(boot_root, base + offset, base + offset, data_attributes, 2);
+        const uint8_t *header = (const uint8_t *)dtb_physical;
+        uint64_t bytes = 4096U;
+        if (header[0] == 0xD0 && header[1] == 0x0D && header[2] == 0xFE && header[3] == 0xED)
+            bytes = ((uint64_t)header[4] << 24) | ((uint64_t)header[5] << 16) |
+                    ((uint64_t)header[6] << 8) | header[7];
+        uint64_t first = dtb_physical & ~0xFFFULL;
+        uint64_t last = dtb_physical + bytes;
+        for (uint64_t page = first; page < last; page += 4096U)
+            map_into(boot_root, page, page, data_attributes, 3);
     }
 }
 
