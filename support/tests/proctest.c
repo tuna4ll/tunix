@@ -16,6 +16,11 @@ typedef long s64;
 #define NR_ARCH_PRCTL 158
 #define NR_OPENAT 257
 #define NR_PIPE2 293
+#define NR_PPOLL 271
+#define NR_PSELECT6 270
+#define NR_EPOLL_CREATE1 291
+#define NR_EPOLL_PWAIT 281
+#define NR_CLOCK_GETTIME 228
 #define UCONTEXT_RET_OFFSET (40 + 13 * 8)
 #define UCONTEXT_IP_OFFSET (40 + 16 * 8)
 #elif defined(__aarch64__)
@@ -32,6 +37,11 @@ typedef long s64;
 #define NR_KILL 129
 #define NR_OPENAT 56
 #define NR_PIPE2 59
+#define NR_PPOLL 73
+#define NR_PSELECT6 72
+#define NR_EPOLL_CREATE1 20
+#define NR_EPOLL_PWAIT 22
+#define NR_CLOCK_GETTIME 113
 #define UCONTEXT_RET_OFFSET (168 + 8)
 #define UCONTEXT_IP_OFFSET (168 + 264)
 #endif
@@ -65,6 +75,7 @@ struct timespec {
 };
 
 extern s64 sys(u64 number, u64 a, u64 b, u64 c, u64 d, u64 e);
+extern s64 sys6(u64 number, u64 a, u64 b, u64 c, u64 d, u64 e, u64 f);
 extern void restorer(void);
 extern s64 clone_thread(u64 flags, u64 stack, u64 tls, s64 (*entry)(void));
 
@@ -86,6 +97,17 @@ __asm__(
     "    mov %rcx, %rdx\n"
     "    mov %r8, %r10\n"
     "    mov %r9, %r8\n"
+    "    syscall\n"
+    "    ret\n"
+    ".globl sys6\n"
+    "sys6:\n"
+    "    mov %rdi, %rax\n"
+    "    mov %rsi, %rdi\n"
+    "    mov %rdx, %rsi\n"
+    "    mov %rcx, %rdx\n"
+    "    mov %r8, %r10\n"
+    "    mov %r9, %r8\n"
+    "    mov 8(%rsp), %r9\n"
     "    syscall\n"
     "    ret\n"
     ".globl restorer\n"
@@ -127,6 +149,17 @@ __asm__(
     "    mov x2, x3\n"
     "    mov x3, x4\n"
     "    mov x4, x5\n"
+    "    svc #0\n"
+    "    ret\n"
+    ".globl sys6\n"
+    "sys6:\n"
+    "    mov x8, x0\n"
+    "    mov x0, x1\n"
+    "    mov x1, x2\n"
+    "    mov x2, x3\n"
+    "    mov x3, x4\n"
+    "    mov x4, x5\n"
+    "    mov x5, x6\n"
     "    svc #0\n"
     "    ret\n"
     ".globl restorer\n"
@@ -372,6 +405,45 @@ static void test_blocked_read(const char *name, u64 extra_flags, s64 expected_fi
     wait_child(pid);
 }
 
+static s64 monotonic_ms(void) {
+    struct timespec now;
+    sys(NR_CLOCK_GETTIME, 1, (u64)&now, 0, 0, 0);
+    return now.seconds * 1000 + now.nanoseconds / 1000000;
+}
+
+static void check_wait(const char *name, s64 started, s64 result) {
+    s64 elapsed = monotonic_ms() - started;
+    check(name, result == 0 && elapsed >= 250 && elapsed < 3000, result ? result : elapsed);
+}
+
+static void test_timeouts(void) {
+    struct timespec wait;
+    wait.seconds = 0;
+    wait.nanoseconds = 300000000;
+    s64 started = monotonic_ms();
+    check_wait("ppoll waits for its timeout", started, sys6(NR_PPOLL, 0, 0, (u64)&wait, 0, 8, 0));
+
+    wait.seconds = 0;
+    wait.nanoseconds = 300000000;
+    started = monotonic_ms();
+    check_wait("pselect6 waits for its timeout", started,
+               sys6(NR_PSELECT6, 0, 0, 0, 0, (u64)&wait, 0));
+
+    s64 epoll = sys(NR_EPOLL_CREATE1, 0, 0, 0, 0, 0);
+    char events[64];
+    started = monotonic_ms();
+    check_wait("epoll_pwait waits for its timeout", started,
+               epoll < 0 ? epoll : sys6(NR_EPOLL_PWAIT, (u64)epoll, (u64)events, 4, 300, 0, 8));
+
+    int fds[2] = { -1, -1 };
+    sys(NR_PIPE2, (u64)fds, 0, 0, 0, 0);
+    struct { int fd; short events; short revents; } poller = { fds[0], 1, 0 };
+    wait.seconds = 0;
+    wait.nanoseconds = 300000000;
+    started = monotonic_ms();
+    check_wait("ppoll on an idle pipe waits", started, sys6(NR_PPOLL, (u64)&poller, 1, (u64)&wait, 0, 8, 0));
+}
+
 static int text_equal(const char *a, const char *b) {
     while (*a && *a == *b) {
         a++;
@@ -397,6 +469,7 @@ void start_c(u64 *stack) {
         finish();
     }
 
+    test_timeouts();
     test_fork_and_switches();
     test_thread();
     test_siginfo();
