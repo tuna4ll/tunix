@@ -106,6 +106,9 @@ struct tcp_control_block {
 #define IP_PKTINFO 8
 #define IP_RECVERR 11
 #define TCP_NODELAY 1
+#define TCP_KEEPIDLE 4
+#define TCP_KEEPINTVL 5
+#define TCP_KEEPCNT 6
 
 #define SIOCADDRT 0x890BU
 #define SIOCDELRT 0x890CU
@@ -972,7 +975,8 @@ int inet_socket_setsockopt(struct inet_socket *socket, int level, int option,
         if (option == IP_PKTINFO) return 0;
     }
 
-    if (level == IPPROTO_TCP && option == TCP_NODELAY) return 0;
+    if (level == IPPROTO_TCP && (option == TCP_NODELAY || option == TCP_KEEPIDLE ||
+                                 option == TCP_KEEPINTVL || option == TCP_KEEPCNT)) return 0;
     if (level == SOL_PACKET && option == PACKET_AUXDATA) return 0;
 
     report_refused_option("setsockopt", level, option);
