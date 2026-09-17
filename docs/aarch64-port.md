@@ -154,14 +154,17 @@ ARCH=aarch64 sh support/tests/clone3-kerneltest.sh build/kernel-aarch64-core.img
 ARCH=aarch64 sh support/tests/scm-rights-kerneltest.sh build/kernel-aarch64-core.img
 ARCH=aarch64 sh support/tests/eventfs-kerneltest.sh build/kernel-aarch64-core.img
 ARCH=aarch64 support/tests/soundtest.sh 2 build/kernel-aarch64-core.img
+ARCH=aarch64 support/tests/drmtest.sh 4 build/kernel-aarch64-core.img
+ARCH=aarch64 support/tests/inputtest.sh 4 build/kernel-aarch64-core.img
+ARCH=aarch64 support/tests/perftest.sh 4 build/kernel-aarch64-core.img
+ARCH=aarch64 support/tests/schedbench.sh 4 build/kernel-aarch64-core.img
 ```
 
 The sound test plays through the emulated HD Audio codec into a wav file and
-checks that what came out is audible and never ran dry.
-
-`make aarch64` still builds the original bring-up kernel from
-`kernel/arch/aarch64/bringup/`, which is kept only as a reference until the
-portable kernel covers everything it demonstrated.
+checks that what came out is audible and never ran dry. The DRM, input,
+performance and scheduler tests keep their x86-64 system call numbers in the
+source; `support/tests/tunix_syscall.h` turns them into AArch64 calls, standing
+in `openat`, `clone`, `pipe2` and `unlinkat` for the calls AArch64 does not have.
 
 ## How the port is put together
 
@@ -212,6 +215,15 @@ slot, so a restarted call does not overwrite `x8`.
 
 **Devices.** On a machine without firmware PCI setup, `pci_assign_resources()`
 sizes and places memory BARs from the host bridge's windows. NVMe runs as-is.
+Where the device tree has a GICv3 ITS, MSI-X works as it does on x86-64:
+`arch/aarch64/its.c` maps each device's events to LPIs routed to the boot
+processor, using the host bridge's `msi-map` for device IDs, so virtio-net and
+virtio-gpu take interrupts instead of being polled.
+
+**Memory routines.** `memset`, `memcpy` and `memmove` are written in assembly
+(`arch/aarch64/string.S`) and move 16 bytes per step, the counterpart of the
+`rep stosb`/`rep movsb` the x86-64 kernel uses; the portable byte loops made a
+page fault six times slower and file reads four times slower.
 
 ## What is next
 
@@ -219,7 +231,8 @@ sizes and places memory BARs from the host bridge's windows. NVMe runs as-is.
   packing and `uname` already follow AArch64. glibc never sets `SA_RESTORER`
   there, so every process gets a sigreturn trampoline page at `0x7FFFFFFFF000`.
   Remaining differences show up as Void's services are exercised.
-- **Interrupts for devices.** Drivers currently poll. Wiring INTx through the
-  device tree's `interrupt-map` and MSI through the GICv3 ITS comes next.
+- **Interrupts on GICv2 boards.** MSI needs an ITS; the Raspberry Pi 4 has a
+  GIC-400 and no ITS, so its devices are still polled until INTx is wired
+  through the device tree's `interrupt-map`.
 - **Real boards.** Non-ECAM PCIe hosts (the Pi 4's own), USB, Ethernet, and
   UEFI/ACPI firmware.
