@@ -57,11 +57,15 @@ if [ "$ARCH" = aarch64 ]; then
 		-device nvme,drive=disk0,serial=tunix \
 		-display none -no-reboot -serial "file:$LOG" >/dev/null 2>&1 &
 else
-	ACCEL=tcg
-	[ -w /dev/kvm ] && ACCEL=kvm
+	if [ -z "${ACCEL:-}" ]; then
+		ACCEL=tcg
+		[ -w /dev/kvm ] && ACCEL=kvm
+	fi
+	CPU=host
+	[ "$ACCEL" = tcg ] && CPU=max
 	echo ":: booting $CPUS-processor machine on $ACCEL"
 	timeout "$WAIT" qemu-system-x86_64 \
-		-machine "q35,accel=$ACCEL" -cpu host -smp "$CPUS" -m ${BENCH_MEMORY:-4G} \
+		-machine "q35,accel=$ACCEL" -cpu "$CPU" -smp "$CPUS" -m ${BENCH_MEMORY:-4G} \
 		${DRMTEST_GPU:-} -drive "format=raw,file=$IMAGE,if=none,id=disk0" \
 		-device ide-hd,drive=disk0,bus=ide.0 \
 		-display none -no-reboot -serial "file:$LOG" >/dev/null 2>&1 &

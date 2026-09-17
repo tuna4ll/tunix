@@ -18,7 +18,7 @@ cp base-files/overlay/usr/share/weston/wallpapers/tunix.png \
     "$work/root/usr/share/weston/wallpapers/tunix.png"
 
 compiler=cc
-flags="${CFLAGS_EXTRA:-}"
+flags="${CFLAGS_EXTRA:-} -Isupport/tests"
 if [ "$arch" = aarch64 ]; then
     compiler=aarch64-linux-gnu-gcc
 else
@@ -45,18 +45,18 @@ if [ "$arch" = aarch64 ]; then
     timeout "$wait" qemu-system-aarch64 -M virt,gic-version=3 -cpu cortex-a72 \
         -smp "${CPUS:-1}" -m "${MEMORY:-4G}" -kernel "$kernel" -append root=LABEL=tunix-root \
         -drive "format=raw,file=$work/tunix.img,if=none,id=disk0" \
-        -device nvme,drive=disk0,serial=tunix -display none -no-reboot \
+        -device nvme,drive=disk0,serial=tunix -display none -no-reboot ${QEMU_EXTRA:-} \
         -serial "file:$work/serial.log" >/dev/null 2>&1 &
 else
-    accel=tcg
+    accel="${ACCEL:-tcg}"
     cpu=max
-    if test -w /dev/kvm; then
+    if [ -z "${ACCEL:-}" ] && test -w /dev/kvm; then
         accel=kvm
-        cpu=host
     fi
+    [ "$accel" = kvm ] && cpu=host
     timeout "$wait" qemu-system-x86_64 -machine "q35,accel=$accel" -cpu "$cpu" \
         -smp "${CPUS:-1}" -m "${MEMORY:-4G}" -drive "format=raw,file=$work/tunix.img,if=none,id=disk0" \
-        -device ide-hd,drive=disk0,bus=ide.0 -display none -no-reboot \
+        -device ide-hd,drive=disk0,bus=ide.0 -display none -no-reboot ${QEMU_EXTRA:-} \
         -serial "file:$work/serial.log" >/dev/null 2>&1 &
 fi
 qemu_pid=$!
