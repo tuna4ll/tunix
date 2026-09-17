@@ -80,6 +80,13 @@ extern void panic(const char *msg) __attribute__((noreturn));
 
 static struct process *queue;
 static uint64_t next_pid = 1;
+static unsigned ready_processes;
+
+static void set_process_state(struct process *process, int state) {
+    if (process->state == PROCESS_READY && ready_processes) ready_processes--;
+    if (state == PROCESS_READY) ready_processes++;
+    process->state = state;
+}
 static int reap_pending;
 static int zombie_memory_pending;
 
@@ -455,6 +462,7 @@ struct process *process_create_from_path(const char *path) {
     process->pgid = process->pid;
     process->sid = process->pid;
     process->state = PROCESS_READY;
+    ready_processes++;
     process->umask = 022;
     process->signal_stack_flags = SS_DISABLE;
     process->dumpable = 1;
@@ -570,22 +578,21 @@ static void place_waking_task(struct process *process) {
 
 static void mark_dead(struct process *process) {
     if (!process) return;
-    process->state = PROCESS_DEAD;
+    set_process_state(process, PROCESS_DEAD);
     reap_pending = 1;
 }
 
 static void wake_to_ready(struct process *process) {
     if (!process) return;
     place_waking_task(process);
-    process->state = PROCESS_READY;
+    set_process_state(process, PROCESS_READY);
 }
 
 static void signal_one_process(struct process *target, int signal_number);
 
-static void wake_expired_itimers(void) {
+static void wake_expired_timers(uint64_t now) {
     if (!queue) return;
 
-    uint64_t now = time_uptime_ns();
     struct process *item = queue;
     do {
         if (item->state != PROCESS_DEAD && item->itimer_real_deadline_ns &&
@@ -602,16 +609,6 @@ static void wake_expired_itimers(void) {
             }
             signal_one_process(item, SIGALRM);
         }
-        item = item->next;
-    } while (item != queue);
-}
-
-static void wake_expired_futex_waiters(void) {
-    if (!queue) return;
-
-    uint64_t now = time_uptime_ns();
-    struct process *item = queue;
-    do {
         if (item->state == PROCESS_BLOCKED && item->futex_wait_active &&
             item->futex_wait_deadline_ns != UINT64_MAX &&
             now >= item->futex_wait_deadline_ns) {
@@ -627,7 +624,7 @@ static void wake_expired_futex_waiters(void) {
 }
 
 static int higher_priority_waiting(const struct process *than) {
-    if (!queue || !than) return 0;
+    if (!queue || !than || !ready_processes) return 0;
     struct process *walk = queue;
     do {
         if (walk != than && runnable(walk) && walk->rt_priority > than->rt_priority)
@@ -638,7 +635,7 @@ static int higher_priority_waiting(const struct process *than) {
 }
 
 static int ordinary_should_preempt(const struct process *running) {
-    if (!queue || !running || running->rt_priority) return 0;
+    if (!queue || !running || running->rt_priority || !ready_processes) return 0;
     struct process *walk = queue;
     do {
         if (walk != running && runnable(walk) && !walk->rt_priority &&
@@ -674,8 +671,8 @@ static uint32_t ordinary_slice_ticks(const struct process *selected) {
 
 static struct process *next_runnable(struct process *after) {
     if (!queue) return NULL;
-    wake_expired_itimers();
-    wake_expired_futex_waiters();
+    wake_expired_timers(time_uptime_ns());
+    if (!ready_processes) return NULL;
 
     int best = -1;
     struct process *walk = queue;
@@ -822,7 +819,7 @@ static void activate_process(struct process *process) {
                                       ? PROCESS_DEFAULT_QUANTUM_TICKS
                                       : ordinary_slice_ticks(process);
     process->last_scheduled_ns = time_uptime_ns();
-    process->state = PROCESS_RUNNING;
+    set_process_state(process, PROCESS_RUNNING);
     set_kernel_stack(process->kernel_stack_top);
     syscall_set_kernel_stack(process->kernel_stack_top);
     if (cpu_current()->address_space != process->cr3) {
@@ -1203,7 +1200,7 @@ void process_timer_interrupt(struct interrupt_frame *frame) {
     if (!current->time_slice_ticks || higher_priority_waiting(current) ||
         ordinary_should_preempt(current) || !allowed_on_this_cpu(current)) {
         struct process *preempted = current;
-        preempted->state = PROCESS_READY;
+        set_process_state(preempted, PROCESS_READY);
         struct process *next = next_runnable(preempted);
         if (next && next != preempted) {
             preempted->involuntary_switches++;
@@ -1214,7 +1211,7 @@ void process_timer_interrupt(struct interrupt_frame *frame) {
             preempted->time_slice_ticks = preempted->rt_priority
                                            ? PROCESS_DEFAULT_QUANTUM_TICKS
                                            : ordinary_slice_ticks(preempted);
-            preempted->state = PROCESS_RUNNING;
+            set_process_state(preempted, PROCESS_RUNNING);
             current = preempted;
         }
     }
@@ -1229,10 +1226,10 @@ void process_yield_from_syscall(struct syscall_frame *frame) {
     if (!current || !frame) return;
     struct process *yielding = current;
     yielding->saved_frame = *frame;
-    yielding->state = PROCESS_READY;
+    set_process_state(yielding, PROCESS_READY);
     struct process *next = next_runnable(yielding);
     if (!next || next == yielding) {
-        yielding->state = PROCESS_RUNNING;
+        set_process_state(yielding, PROCESS_RUNNING);
         return;
     }
     *frame = next->saved_frame;
@@ -1249,7 +1246,7 @@ void process_run_child_first_from_syscall(struct syscall_frame *frame, uint64_t 
          !(child->is_thread && child->tgid == parent->tgid))) return;
 
     parent->saved_frame = *frame;
-    parent->state = PROCESS_READY;
+    set_process_state(parent, PROCESS_READY);
     *frame = child->saved_frame;
     activate_process(child);
 }
@@ -1423,7 +1420,7 @@ void process_exit_from_syscall(struct syscall_frame *frame, int status) {
     }
     eventfs_emit_process_exit(exiting->cred.euid, exiting->pid, status);
     exiting->exit_status = status;
-    exiting->state = PROCESS_ZOMBIE;
+    set_process_state(exiting, PROCESS_ZOMBIE);
     if (exiting->memory) zombie_memory_pending = 1;
     process_handle_robust_list(exiting);
     notify_children_of_parent_death(exiting);
@@ -1458,6 +1455,7 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame) {
     child->pgid = parent->pgid;
     child->sid = parent->sid;
     child->state = PROCESS_READY;
+    ready_processes++;
     child->cwd = parent->cwd;
     vfs_node_ref(child->cwd);
     child->root = parent->root;
@@ -1556,6 +1554,7 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
     child->pgid = parent->pgid;
     child->sid = parent->sid;
     child->state = PROCESS_READY;
+    ready_processes++;
     child->is_thread = 1;
     child->cwd = parent->cwd;
     vfs_node_ref(child->cwd);
@@ -1655,7 +1654,7 @@ int64_t process_futex_wait(struct syscall_frame *frame, uint64_t address,
     struct process *waiting = current;
     waiting->saved_frame = *frame;
     SYSCALL_RET(&waiting->saved_frame) = 0;
-    waiting->state = PROCESS_BLOCKED;
+    set_process_state(waiting, PROCESS_BLOCKED);
     waiting->futex_wait_active = 1;
     waiting->futex_wait_address = address;
     waiting->futex_wait_key = shared ? futex_shared_key(address) : 0;
@@ -1665,7 +1664,7 @@ int64_t process_futex_wait(struct syscall_frame *frame, uint64_t address,
     waiting->futex_wait_deadline_ns = timeout_ns < 0 ? UINT64_MAX :
         time_uptime_ns() + (uint64_t)timeout_ns;
     if (switch_to_next(frame, waiting) != 0) {
-        waiting->state = PROCESS_RUNNING;
+        set_process_state(waiting, PROCESS_RUNNING);
         waiting->futex_wait_active = 0;
         waiting->futex_wait_address = 0;
         waiting->futex_wait_key = 0;
@@ -1679,7 +1678,7 @@ int process_sleep_on(struct syscall_frame *frame, const void *channel) {
     if (!current || !frame || !channel) return -EAGAIN;
     struct process *waiting = current;
     waiting->saved_frame = *frame;
-    waiting->state = PROCESS_BLOCKED;
+    set_process_state(waiting, PROCESS_BLOCKED);
     waiting->wait_channel = channel;
     waiting->voluntary_switches++;
     if (switch_to_next(frame, waiting) != 0) {
@@ -1690,11 +1689,13 @@ int process_sleep_on(struct syscall_frame *frame, const void *channel) {
 
 static const char io_wait_token;
 
-static int io_waiter_ready(const struct process *item) {
+static int io_waiter_ready(const struct process *item, uint64_t *now) {
     if (!item->io_watch_armed) return 1;
     if (item->signal_pending & ~item->signal_blocked) return 1;
-    if (item->io_wait_active && item->io_wait_deadline_ns != UINT64_MAX &&
-        time_uptime_ns() >= item->io_wait_deadline_ns) return 1;
+    if (item->io_wait_active && item->io_wait_deadline_ns != UINT64_MAX) {
+        if (!*now) *now = time_uptime_ns();
+        if (*now >= item->io_wait_deadline_ns) return 1;
+    }
     for (unsigned index = 0; index < item->io_watch_count; index++) {
         int fd = item->io_watch_fd[index];
         struct file *file = item->files && fd >= 0 && fd < PROCESS_MAX_FDS ?
@@ -1718,11 +1719,12 @@ int process_wake_all(const void *channel) {
 static int process_wake_all_locked(const void *channel) {
     if (!queue || !channel) return 0;
     int woken = 0;
+    uint64_t now = 0;
     struct process *item = queue;
     do {
         if (item->state == PROCESS_BLOCKED &&
             ((channel != &io_wait_token && item->wait_channel == channel) ||
-             (item->wait_channel == &io_wait_token && io_waiter_ready(item)))) {
+             (item->wait_channel == &io_wait_token && io_waiter_ready(item, &now)))) {
             item->wait_channel = NULL;
             wake_to_ready(item);
             woken++;
@@ -1947,7 +1949,7 @@ int64_t process_waitpid_from_syscall(struct syscall_frame *frame, int64_t pid,
     if (process_signal_interrupts_wait()) return -EINTR;
 
     parent->saved_frame = *frame;
-    parent->state = PROCESS_BLOCKED;
+    set_process_state(parent, PROCESS_BLOCKED);
     parent->wait4_active = 1;
     parent->wait_pid = pid;
     parent->wait_status_user = status_user;
@@ -2262,7 +2264,7 @@ void process_prepare_user_return(struct syscall_frame *frame) {
         current->stop_signal = signal_number;
         current->stop_reported = 0;
         current->continued_pending = 0;
-        current->state = PROCESS_STOPPED;
+        set_process_state(current, PROCESS_STOPPED);
         current->stop_reported = notify_parent_of_job_change(
             current, WUNTRACED, ((signal_number & 0xFF) << 8) | 0x7F);
         if (switch_to_next(frame, current) != 0) go_idle();
