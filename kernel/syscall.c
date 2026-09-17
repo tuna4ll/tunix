@@ -4903,7 +4903,6 @@ static void note_would_block(struct syscall_frame *frame, uint64_t number, uint6
 
 static void syscall_dispatch_locked(struct syscall_frame *frame) {
     if (!frame) return;
-    process_account_runtime();
     process_reap_deferred();
 
     vfs_trim_cache(file_cache_budget());
@@ -5181,7 +5180,10 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             int64_t duration = request.tv_sec > (INT64_MAX - request.tv_nsec) / 1000000000LL ?
                 INT64_MAX : request.tv_sec * 1000000000LL + request.tv_nsec;
             if (duration == 0) SYSCALL_RET(frame) = 0;
-            else if (!retry_io_wait(frame, SYS_NANOSLEEP, duration)) SYSCALL_RET(frame) = 0;
+            else {
+                io_watch_begin(process_current());
+                if (!retry_io_wait(frame, SYS_NANOSLEEP, duration)) SYSCALL_RET(frame) = 0;
+            }
             break;
         }
         case SYS_GETITIMER: {
@@ -5810,7 +5812,10 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
                 duration = requested > (uint64_t)INT64_MAX ? INT64_MAX : (int64_t)requested;
             }
             if (duration == 0) SYSCALL_RET(frame) = 0;
-            else if (!retry_io_wait(frame, SYS_CLOCK_NANOSLEEP, duration)) SYSCALL_RET(frame) = 0;
+            else {
+                io_watch_begin(process_current());
+                if (!retry_io_wait(frame, SYS_CLOCK_NANOSLEEP, duration)) SYSCALL_RET(frame) = 0;
+            }
             break;
         }
         case SYS_INOTIFY_INIT: SYSCALL_RET(frame) = (uint64_t)sys_inotify_init(0); break;
