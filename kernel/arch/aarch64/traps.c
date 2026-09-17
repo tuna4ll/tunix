@@ -126,18 +126,17 @@ int aarch64_irq(struct interrupt_frame *frame) {
         return 0;
     }
 
+    int timer = intid == aarch64_platform.timer_interrupt;
+    if (timer) aarch64_timer_rearm();
+    gic_end_of_interrupt(intid);
     klock_note(KLOCK_NOTE_INTERRUPT | (intid & 0xFFFFU));
     kernel_lock_from_isr();
-    if (intid == aarch64_platform.timer_interrupt) {
-        aarch64_timer_rearm();
-        gic_end_of_interrupt(intid);
+    if (timer) {
         if (cpu_current()->index == 0) timer_irq(frame);
         else process_timer_interrupt(frame);
     } else if (intid >= 8192U) {
-        gic_end_of_interrupt(intid);
         irq_dispatch(IRQ_VECTOR_FIRST + (intid - 8192U));
     } else {
-        gic_end_of_interrupt(intid);
         irq_dispatch(IRQ_VECTOR_FIRST + intid);
     }
     relocate_user_frame(frame);
