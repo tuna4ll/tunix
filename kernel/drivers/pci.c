@@ -309,6 +309,58 @@ int pci_msix_bind(struct pci_device *device, unsigned entry, unsigned vector) {
 #endif
 }
 
+int pci_msi_bind(struct pci_device *device, unsigned vector) {
+    if (!device || vector < 32U || vector > 255U) return -1;
+    uint8_t capability = pci_find_capability(device, 0x05U);
+    if (!capability) return -1;
+    uint64_t address;
+    uint32_t data;
+#if defined(__x86_64__)
+    address = APIC_MESSAGE_ADDRESS | (initial_apic_id() << APIC_MESSAGE_DESTINATION_SHIFT);
+    data = vector;
+#elif defined(__aarch64__)
+    if (vector < IRQ_VECTOR_FIRST || !its_ready()) return -1;
+    uint32_t requester = ((uint32_t)device->bus << 8) | ((uint32_t)device->slot << 3) |
+                         device->function;
+    data = vector - IRQ_VECTOR_FIRST;
+    if (its_bind_msi(requester - aarch64_platform.msi_rid_base +
+                         aarch64_platform.msi_device_base,
+                     data, &address) != 0)
+        return -1;
+#else
+    return -1;
+#endif
+    uint32_t header = pci_config_read32(device->bus, device->slot, device->function, capability);
+    uint16_t control = (uint16_t)(header >> 16);
+    int wide = (control & 0x80U) != 0;
+    if (!wide && (address >> 32)) return -1;
+    control = (uint16_t)(control & ~0x71U);
+    pci_config_write32(device->bus, device->slot, device->function, capability,
+                       (header & 0xFFFFU) | ((uint32_t)control << 16));
+    pci_config_write32(device->bus, device->slot, device->function, (uint8_t)(capability + 4U),
+                       (uint32_t)address);
+    uint8_t data_offset = (uint8_t)(capability + 8U);
+    if (wide) {
+        pci_config_write32(device->bus, device->slot, device->function, (uint8_t)(capability + 8U),
+                           (uint32_t)(address >> 32));
+        data_offset = (uint8_t)(capability + 12U);
+    }
+    uint32_t data_word = pci_config_read32(device->bus, device->slot, device->function, data_offset);
+    pci_config_write32(device->bus, device->slot, device->function, data_offset,
+                       (data_word & 0xFFFF0000U) | (data & 0xFFFFU));
+    if (control & 0x100U) {
+        uint8_t mask_offset = (uint8_t)(data_offset + 4U);
+        pci_config_write32(device->bus, device->slot, device->function, mask_offset, 0);
+    }
+    uint32_t command = pci_config_read32(device->bus, device->slot, device->function, PCI_COMMAND);
+    pci_config_write32(device->bus, device->slot, device->function, PCI_COMMAND,
+                       command | PCI_COMMAND_INTX_DISABLE);
+    control = (uint16_t)(control | 0x01U);
+    pci_config_write32(device->bus, device->slot, device->function, capability,
+                       (header & 0xFFFFU) | ((uint32_t)control << 16));
+    return 0;
+}
+
 void pci_for_each_device(void (*visit)(const struct pci_device *, void *),
                          void *context) {
     if (!visit) return;
