@@ -87,7 +87,7 @@ static inline uint64_t cpu_counter(void) {
 
 static inline uint64_t cpu_counter_ordered(void) {
     uint64_t value;
-    __asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(value) : : "memory");
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(value));
     return value;
 }
 
