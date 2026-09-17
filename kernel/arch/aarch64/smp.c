@@ -10,6 +10,7 @@
 #include "../../include/timer.h"
 #include "../../include/vmm.h"
 #include "../../include/vmm_arch.h"
+#include "../../include/hwcap.h"
 #include "aarch64.h"
 
 extern void kprintf(const char *fmt, ...);
@@ -83,6 +84,7 @@ void aarch64_secondary_start(uint64_t index) {
     percpu_activate(cpu);
     time_mark_processor(cpu);
     process_enable_extended_fpu();
+    arch_note_cpu_features();
     gic_init_secondary(cpu);
     arch_timer_start(TIMER_FREQUENCY_HZ);
     gic_enable_interrupt(aarch64_platform.timer_interrupt);

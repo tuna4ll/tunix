@@ -22,6 +22,7 @@
 #include "../include/vmm.h"
 #include "../include/net/inet_socket.h"
 #include "../include/net/net.h"
+#include "../include/hwcap.h"
 
 #define PROC_BUFFER_SIZE 4096
 
@@ -94,6 +95,10 @@ static int64_t proc_cpuinfo_read(struct vfs_node *node, uint64_t offset,
         text_string(&text, "address sizes\t: 48 bits virtual\n");
 #if defined(__x86_64__)
         text_string(&text, "flags\t\t: fpu tsc msr pae apic mtrr cmov pat mmx fxsr sse sse2 syscall nx lm\n");
+#elif defined(__aarch64__)
+        char features[256];
+        (void)arch_hwcap_names(features, sizeof(features));
+        text_string(&text, "Features\t: "); text_string(&text, features); text_char(&text, '\n');
 #endif
         text_char(&text, '\n');
     }

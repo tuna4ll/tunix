@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include "include/elf.h"
 #include "include/heap.h"
+#include "include/hwcap.h"
 #include "include/kstring.h"
 #include "include/pmm.h"
 #include "include/process_arch.h"
@@ -21,11 +22,9 @@
 #if defined(__x86_64__)
 #define ELF_MACHINE EM_X86_64
 #define ELF_PLATFORM "x86_64"
-#define ELF_HWCAP 0
 #elif defined(__aarch64__)
 #define ELF_MACHINE EM_AARCH64
 #define ELF_PLATFORM "aarch64"
-#define ELF_HWCAP ((1UL << 0) | (1UL << 1))
 #endif
 #define PT_LOAD 1
 #define PT_INTERP 3
@@ -417,7 +416,7 @@ static int place_initial_stack(struct process *process,
         {AT_RANDOM, random_address},
         {AT_SECURE, 0},
         {AT_CLKTCK, 100},
-        {AT_HWCAP, ELF_HWCAP},
+        {AT_HWCAP, arch_elf_hwcap()},
         {AT_PLATFORM, platform_address},
         {AT_EGID, 0}, {AT_GID, 0}, {AT_EUID, 0}, {AT_UID, 0},
         {AT_ENTRY, main_image->entry},

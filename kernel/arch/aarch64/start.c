@@ -8,6 +8,7 @@
 #include "../../include/sdhci.h"
 #include "../../include/serial.h"
 #include "../../include/vmm.h"
+#include "../../include/hwcap.h"
 #include "aarch64.h"
 
 #define DESC_SH_INNER (3ULL << 8)
@@ -325,6 +326,7 @@ static void map_direct_memory(void) {
 void aarch64_start(uint64_t dtb_physical, uint64_t load_physical) {
     aarch64_platform.load_offset = load_physical - AARCH64_KERNEL_VIRTUAL_BASE;
     percpu_activate(0);
+    arch_note_cpu_features();
 
     if (fdt_init((const void *)dtb_physical) != 0) {
         for (;;) __asm__ volatile("wfi");
