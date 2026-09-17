@@ -108,31 +108,42 @@ static void klock_report(const char *what, uint32_t ticket) {
     }
 }
 
+struct klock_watchdog {
+    uint64_t deadline;
+    unsigned spins;
+    int reported;
+};
+
+static int watchdog_expired(struct klock_watchdog *watchdog) {
+    if (watchdog->reported || (++watchdog->spins & 1023U)) return 0;
+    uint64_t now = time_uptime_ns();
+    if (!watchdog->deadline) {
+        watchdog->deadline = now + KLOCK_WATCHDOG_NS;
+        return 0;
+    }
+    if (now < watchdog->deadline) return 0;
+    watchdog->reported = 1;
+    return 1;
+}
+
 static void wait_for_turn(uint32_t ticket) {
-    uint64_t deadline = time_uptime_ns() + KLOCK_WATCHDOG_NS;
-    int reported = 0;
+    struct klock_watchdog watchdog = {0, 0, 0};
     while (__atomic_load_n(&now_serving, __ATOMIC_ACQUIRE) != ticket) {
         smp_service_flush();
         cpu_relax();
-        if (!reported && time_uptime_ns() >= deadline) {
-            reported = 1;
-            klock_report("waiting for ticket", ticket);
-        }
+        if (watchdog_expired(&watchdog)) klock_report("waiting for ticket", ticket);
     }
 }
 
 void kernel_lock(void) {
     uint32_t ticket = __atomic_fetch_add(&next_ticket, 1, __ATOMIC_RELAXED);
     wait_for_turn(ticket);
-    uint64_t deadline = time_uptime_ns() + KLOCK_WATCHDOG_NS;
-    int reported = 0;
+    struct klock_watchdog watchdog = {0, 0, 0};
     while (__atomic_load_n(&shared_holders, __ATOMIC_ACQUIRE) != 0) {
         smp_service_flush();
         cpu_relax();
-        if (!reported && time_uptime_ns() >= deadline) {
-            reported = 1;
+        if (watchdog_expired(&watchdog))
             klock_report("waiting for shared holders to leave", ticket);
-        }
     }
     held_mode[cpu_current()->index] = KLOCK_MODE_EXCLUSIVE;
     hold_begin();
