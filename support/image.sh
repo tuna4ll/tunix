@@ -36,6 +36,10 @@ if [ "$ARCH" = x86_64 ]; then
 	esp_copy "$LIMINE_CONF" boot/limine/limine.conf
 	esp_copy "$KERNEL" boot/kernel.elf
 else
+	if [ -f "$LIMINE_DIR/BOOTAA64.EFI" ]; then
+		esp_copy "$LIMINE_DIR/BOOTAA64.EFI" EFI/BOOT/BOOTAA64.EFI
+		esp_copy "$LIMINE_CONF" boot/limine/limine.conf
+	fi
 	esp_copy "$KERNEL" boot/Image
 fi
 esp_copy "$SYSROOT/usr/share/weston/wallpapers/tunix.png" boot/wallpaper.png

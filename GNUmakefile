@@ -283,13 +283,31 @@ $(SYSROOT_AARCH64_STAMP): support/sysroot.sh $(BASE_FILES) $(SYSROOT_RECIPE) | $
 
 image-aarch64: $(IMAGE_AARCH64)
 
-$(IMAGE_AARCH64): $(AARCH64_CORE_IMAGE) support/image.sh $(SYSROOT_AARCH64_STAMP)
+$(IMAGE_AARCH64): $(AARCH64_CORE_IMAGE) $(LIMINE_EXE) support/limine-aarch64.conf support/image.sh $(SYSROOT_AARCH64_STAMP)
 	$(USERNS) env ARCH=aarch64 TABLE='$(IMAGE_TABLE)' ROOT_SLACK_MIB='$(IMAGE_SLACK_MIB)' \
-		support/image.sh $@ $(AARCH64_CORE_IMAGE) $(LIMINE_DIR) support/limine.conf $(SYSROOT_AARCH64)
+		support/image.sh $@ $(AARCH64_CORE_IMAGE) $(LIMINE_DIR) support/limine-aarch64.conf $(SYSROOT_AARCH64)
 
 QEMU_AARCH64_DEVICES ?= -device ramfb -device qemu-xhci -device usb-kbd -device usb-mouse \
 	-netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
-run-aarch64-image: $(IMAGE_AARCH64)
+OVMF_AARCH64      := $(CACHE)/edk2-ovmf/ovmf-code-aarch64.fd
+OVMF_AARCH64_VARS := $(BUILD)/ovmf-vars-aarch64.fd
+
+$(OVMF_AARCH64): $(OVMF_TARBALL)
+	tar -xJf $< -C $(CACHE)
+	@touch $@
+
+$(OVMF_AARCH64_VARS): $(OVMF_AARCH64)
+	@mkdir -p $(dir $@)
+	cp $(CACHE)/edk2-ovmf/ovmf-vars-aarch64.fd $@
+
+.PHONY: run-aarch64-image-kernel
+run-aarch64-image: $(IMAGE_AARCH64) $(OVMF_AARCH64) $(OVMF_AARCH64_VARS)
+	$(QEMU_AARCH64) -M virt,gic-version=3 -cpu cortex-a72 -smp $(QEMU_SMP) -m $(QEMU_MEMORY) \
+		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_AARCH64) \
+		-drive if=pflash,format=raw,file=$(OVMF_AARCH64_VARS) \
+		-drive file=$(IMAGE_AARCH64),if=none,id=disk0,format=raw -device nvme,drive=disk0,serial=tunix \
+		$(QEMU_AARCH64_DEVICES) -serial stdio -display gtk
+run-aarch64-image-kernel: $(IMAGE_AARCH64)
 	$(QEMU_AARCH64) -M virt,gic-version=3 -cpu cortex-a72 -smp $(QEMU_SMP) -m $(QEMU_MEMORY) \
 		-kernel $(AARCH64_CORE_IMAGE) -append root=LABEL=tunix-root \
 		-drive file=$(IMAGE_AARCH64),if=none,id=disk0,format=raw -device nvme,drive=disk0,serial=tunix \
