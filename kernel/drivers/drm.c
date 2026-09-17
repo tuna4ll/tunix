@@ -191,6 +191,7 @@ typedef char drm_virtgpu_get_caps_size_check[
 #define DRM_CAP_CURSOR_WIDTH 0x8
 #define DRM_CAP_CURSOR_HEIGHT 0x9
 #define DRM_CAP_ADDFB2_MODIFIERS 0x10
+#define DRM_CAP_CRTC_IN_VBLANK_EVENT 0x12
 
 #define DRM_CRTC_ID 1
 #define DRM_CONNECTOR_ID 2
@@ -211,6 +212,7 @@ typedef char drm_virtgpu_get_caps_size_check[
 #define DRM_PROP_PLANE_CRTC_Y 21
 #define DRM_PROP_PLANE_CRTC_W 22
 #define DRM_PROP_PLANE_CRTC_H 23
+#define DRM_PROP_PLANE_FB_DAMAGE_CLIPS 24
 #define DRM_PROP_PLANE_FIRST_RECT DRM_PROP_PLANE_SRC_X
 #define DRM_PROP_PLANE_LAST_RECT DRM_PROP_PLANE_CRTC_H
 
@@ -513,10 +515,11 @@ static uint32_t open_count;
 static struct drm_dumb_buffer buffers[DRM_MAX_BUFFERS];
 static struct drm_framebuffer framebuffers[DRM_MAX_FRAMEBUFFERS];
 #define DRM_MAX_BLOBS 32
-#define DRM_MAX_BLOB_BYTES 256
+#define DRM_MAX_DAMAGE_RECTS 16
+#define DRM_MAX_BLOB_BYTES 65536
 struct drm_property_blob {
     uint32_t id; const struct file *owner;
-    uint32_t length; uint8_t data[DRM_MAX_BLOB_BYTES];
+    uint32_t length; uint8_t *data;
 };
 static struct drm_property_blob blobs[DRM_MAX_BLOBS];
 static uint32_t next_blob_id = 1;
@@ -585,6 +588,11 @@ static struct drm_framebuffer *framebuffer_of(const struct file *client, uint32_
     return (fb && fb->owner == client) ? fb : NULL;
 }
 
+static void blob_release(struct drm_property_blob *blob) {
+    kfree(blob->data);
+    memset(blob, 0, sizeof(*blob));
+}
+
 static struct drm_property_blob *blob_of(const struct file *client, uint32_t id) {
     struct drm_property_blob *blob = blob_find(id);
     return (blob && blob->owner == client) ? blob : NULL;
@@ -593,10 +601,19 @@ static struct drm_property_blob *blob_of(const struct file *client, uint32_t id)
 static int64_t ioctl_create_blob(const struct file *client, uint64_t user_argument) {
     struct drm_mode_create_blob request;
     if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
-    if (!request.data || !request.length || request.length > DRM_MAX_BLOB_BYTES) return -EINVAL;
+    if (request.length > DRM_MAX_BLOB_BYTES || (request.length && !request.data)) return -EINVAL;
     for (unsigned index = 0; index < DRM_MAX_BLOBS; index++) {
         if (blobs[index].id) continue;
-        if (copy_from_user(blobs[index].data, request.data, request.length) != 0) return -EFAULT;
+        uint8_t *data = NULL;
+        if (request.length) {
+            data = (uint8_t *)kmalloc(request.length);
+            if (!data) return -ENOMEM;
+        }
+        if (request.length && copy_from_user(data, request.data, request.length) != 0) {
+            kfree(data);
+            return -EFAULT;
+        }
+        blobs[index].data = data;
         blobs[index].id = next_blob_id++;
         if (!blobs[index].id) blobs[index].id = next_blob_id++;
         blobs[index].owner = client;
@@ -612,7 +629,7 @@ static int64_t ioctl_destroy_blob(const struct file *client, uint64_t user_argum
     if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
     struct drm_property_blob *blob = blob_of(client, request.blob_id);
     if (!blob) return -ENOENT;
-    memset(blob, 0, sizeof(*blob));
+    blob_release(blob);
     return 0;
 }
 
@@ -648,7 +665,15 @@ static int64_t ioctl_cursor(const struct file *client, uint64_t user_argument, i
 #define DRM_ATOMIC_MAX_OBJECTS 16U
 #define DRM_ATOMIC_MAX_PROPS 64U
 
-static int present_framebuffer(const struct file *client, uint32_t fb_id);
+struct drm_damage {
+    uint32_t count;
+    struct drm_mode_rect { int32_t x1, y1, x2, y2; } rects[DRM_MAX_DAMAGE_RECTS];
+};
+
+static int scanout_current;
+
+static int present_framebuffer(const struct file *client, uint32_t fb_id,
+                               const struct drm_damage *damage);
 static void queue_flip_event(uint64_t user_data);
 
 static int plane_rectangle_ok(uint32_t property, uint64_t value) {
@@ -662,6 +687,26 @@ static int plane_rectangle_ok(uint32_t property, uint64_t value) {
     case DRM_PROP_PLANE_CRTC_W: return value == framebuffer_width();
     case DRM_PROP_PLANE_CRTC_H: return value == framebuffer_height();
     default: return 0;
+    }
+}
+
+static void damage_collect(struct drm_damage *damage, const uint8_t *data, uint32_t count) {
+    damage->count = 0;
+    struct drm_mode_rect bounds = { INT32_MAX, INT32_MAX, INT32_MIN, INT32_MIN };
+    for (uint32_t index = 0; index < count; index++) {
+        struct drm_mode_rect rect;
+        memcpy(&rect, data + (uint64_t)index * sizeof(rect), sizeof(rect));
+        if (rect.x1 >= rect.x2 || rect.y1 >= rect.y2) continue;
+        if (rect.x1 < bounds.x1) bounds.x1 = rect.x1;
+        if (rect.y1 < bounds.y1) bounds.y1 = rect.y1;
+        if (rect.x2 > bounds.x2) bounds.x2 = rect.x2;
+        if (rect.y2 > bounds.y2) bounds.y2 = rect.y2;
+        if (damage->count < DRM_MAX_DAMAGE_RECTS) damage->rects[damage->count] = rect;
+        damage->count++;
+    }
+    if (damage->count > DRM_MAX_DAMAGE_RECTS) {
+        damage->rects[0] = bounds;
+        damage->count = 1;
     }
 }
 
@@ -694,6 +739,7 @@ static int64_t ioctl_atomic(const struct file *client, uint64_t user_argument) {
                        (uint64_t)total * sizeof(values[0])) != 0) return -EFAULT;
 
     uint32_t new_fb = active_fb_id;
+    const struct drm_property_blob *damage_blob = NULL;
     int new_active = active_fb_id != 0;
     int mode_cleared = 0;
     uint32_t taken = 0;
@@ -716,6 +762,13 @@ static int64_t ioctl_atomic(const struct file *client, uint64_t user_argument) {
                 if (value > UINT32_MAX ||
                     (value && !framebuffer_of(client, (uint32_t)value))) return -EINVAL;
                 new_fb = (uint32_t)value;
+            } else if (objects[object] == DRM_PLANE_ID &&
+                       id == DRM_PROP_PLANE_FB_DAMAGE_CLIPS) {
+                if (!value) { damage_blob = NULL; continue; }
+                struct drm_property_blob *blob =
+                    value > UINT32_MAX ? NULL : blob_of(client, (uint32_t)value);
+                if (!blob || blob->length % sizeof(struct drm_mode_rect)) return -EINVAL;
+                damage_blob = blob;
             } else if (objects[object] == DRM_PLANE_ID && id == DRM_PROP_PLANE_CRTC_ID) {
                 if (value != 0 && value != DRM_CRTC_ID) return -EINVAL;
             } else if (objects[object] == DRM_PLANE_ID &&
@@ -735,9 +788,17 @@ static int64_t ioctl_atomic(const struct file *client, uint64_t user_argument) {
     if (!new_active || !new_fb) {
         active_fb_id = 0;
         virtgpu_scanout_disable();
+        scanout_current = 0;
         (void)framebuffer_release_graphics(&drm_display_owner, 0);
     } else {
-        int status = present_framebuffer(client, new_fb);
+        struct drm_damage damage;
+        const struct drm_damage *clips = NULL;
+        if (damage_blob) {
+            damage_collect(&damage, damage_blob->data,
+                           damage_blob->length / sizeof(struct drm_mode_rect));
+            clips = &damage;
+        }
+        int status = present_framebuffer(client, new_fb, clips);
         if (status != 0) return status;
         active_fb_id = new_fb;
     }
@@ -855,6 +916,7 @@ static int64_t ioctl_get_cap(uint64_t user_argument) {
     case DRM_CAP_CURSOR_HEIGHT: cap.value = 64; break;
     case DRM_CAP_PRIME: cap.value = DRM_PRIME_CAP_IMPORT | DRM_PRIME_CAP_EXPORT; break;
     case DRM_CAP_ADDFB2_MODIFIERS: cap.value = 1; break;
+    case DRM_CAP_CRTC_IN_VBLANK_EVENT: cap.value = 1; break;
     default: cap.value = 0; break;
     }
     return copy_to_user(user_argument, &cap, sizeof(cap)) == 0 ? 0 : -EFAULT;
@@ -1057,9 +1119,12 @@ static int64_t ioctl_get_property(uint64_t user_argument) {
                            sizeof(range[0]), 2) != 0) return -EFAULT;
         return copy_to_user(user_argument, &property, sizeof(property)) == 0 ? 0 : -EFAULT;
     }
-    if (property.prop_id == DRM_PROP_CRTC_MODE_ID) {
+    if (property.prop_id == DRM_PROP_CRTC_MODE_ID ||
+        property.prop_id == DRM_PROP_PLANE_FB_DAMAGE_CLIPS) {
         memset(property.name, 0, sizeof(property.name));
-        strncpy(property.name, "MODE_ID", sizeof(property.name) - 1);
+        strncpy(property.name,
+                property.prop_id == DRM_PROP_CRTC_MODE_ID ? "MODE_ID" : "FB_DAMAGE_CLIPS",
+                sizeof(property.name) - 1);
         property.flags = DRM_MODE_PROP_BLOB;
         property.count_values = 0;
         property.count_enum_blobs = 0;
@@ -1144,7 +1209,8 @@ static int64_t ioctl_obj_get_properties(uint64_t user_argument) {
         ids[8] = DRM_PROP_PLANE_CRTC_Y; values[8] = 0;
         ids[9] = DRM_PROP_PLANE_CRTC_W; values[9] = framebuffer_width();
         ids[10] = DRM_PROP_PLANE_CRTC_H; values[10] = framebuffer_height();
-        count = 11;
+        ids[11] = DRM_PROP_PLANE_FB_DAMAGE_CLIPS; values[11] = 0;
+        count = 12;
     } else if (request.obj_type == DRM_MODE_OBJECT_CRTC) {
         if (request.obj_id != DRM_CRTC_ID) return -ENOENT;
         ids[0] = DRM_PROP_CRTC_ACTIVE; values[0] = active_fb_id != 0;
@@ -1210,7 +1276,32 @@ static int drm_is_busy(void) {
     return __atomic_load_n(&drm_busy_holder, __ATOMIC_RELAXED) != 0;
 }
 
-static int present_framebuffer(const struct file *client, uint32_t fb_id) {
+
+static void copy_row_span(const struct drm_framebuffer *fb, const struct drm_dumb_buffer *buffer,
+                          uint8_t *destination, uint32_t row, uint32_t first, uint32_t end) {
+    uint64_t source_offset = (uint64_t)row * fb->pitch + first;
+    uint64_t page = source_offset / 4096ULL;
+    uint64_t within = source_offset % 4096ULL;
+    uint32_t copied = first;
+    while (copied < end && page < buffer->page_count) {
+        uint64_t chunk = 4096ULL - within;
+        if (chunk > end - copied) chunk = end - copied;
+        memcpy(destination + copied,
+               (uint8_t *)vmm_phys_to_virt(buffer->pages[page]) + within,
+               (size_t)chunk);
+        copied += (uint32_t)chunk;
+        page++;
+        within = 0;
+    }
+}
+
+static int32_t clamp_edge(int32_t value, uint32_t limit) {
+    if (value < 0) return 0;
+    return (uint32_t)value > limit ? (int32_t)limit : value;
+}
+
+static int present_framebuffer(const struct file *client, uint32_t fb_id,
+                               const struct drm_damage *damage) {
     struct drm_framebuffer *fb = client ? framebuffer_of(client, fb_id) : framebuffer_find(fb_id);
     if (!fb) return -ENOENT;
     struct drm_dumb_buffer *buffer = buffer_find(fb->handle);
@@ -1219,7 +1310,10 @@ static int present_framebuffer(const struct file *client, uint32_t fb_id) {
     int status = framebuffer_claim_graphics(&drm_display_owner);
     if (status != 0) return status;
 
-    if (!framebuffer_graphics_foreground(&drm_display_owner)) return 0;
+    if (!framebuffer_graphics_foreground(&drm_display_owner)) {
+        scanout_current = 0;
+        return 0;
+    }
 
     if (virtgpu_available() && present_via_virtgpu(fb, buffer) == 0) return 0;
 
@@ -1230,40 +1324,27 @@ static int present_framebuffer(const struct file *client, uint32_t fb_id) {
     uint32_t screen_pitch = framebuffer_pitch();
     uint32_t rows = fb->height < screen_height ? fb->height : screen_height;
     uint32_t row_bytes = fb->pitch < screen_pitch ? fb->pitch : screen_pitch;
-    uint64_t started_ns = time_uptime_ns();
+    uint32_t columns = row_bytes / 4U;
+    struct drm_damage whole = { 1, { { 0, 0, (int32_t)columns, (int32_t)rows } } };
+    if (!damage || !scanout_current) damage = &whole;
+
     int released = kernel_lock_release_for_wait();
-    for (uint32_t row = 0; row < rows; row++) {
-        uint64_t source_offset = (uint64_t)row * fb->pitch;
-        uint64_t page = source_offset / 4096ULL;
-        uint64_t within = source_offset % 4096ULL;
-        uint8_t *destination = scanout + (uint64_t)row * screen_pitch;
-        uint32_t copied = 0;
-        while (copied < row_bytes && page < buffer->page_count) {
-            uint64_t chunk = 4096ULL - within;
-            if (chunk > row_bytes - copied) chunk = row_bytes - copied;
-            memcpy(destination + copied,
-                   (uint8_t *)vmm_phys_to_virt(buffer->pages[page]) + within,
-                   (size_t)chunk);
-            copied += (uint32_t)chunk;
-            page++;
-            within = 0;
+    for (uint32_t index = 0; index < damage->count; index++) {
+        const struct drm_mode_rect *rect = &damage->rects[index];
+        uint32_t top = (uint32_t)clamp_edge(rect->y1, rows);
+        uint32_t bottom = (uint32_t)clamp_edge(rect->y2, rows);
+        uint32_t first = (uint32_t)clamp_edge(rect->x1, columns) * 4U;
+        uint32_t end = (uint32_t)clamp_edge(rect->x2, columns) * 4U;
+        if (rect == &whole.rects[0]) end = row_bytes;
+        if (first >= end) continue;
+        for (uint32_t row = top; row < bottom; row++) {
+            copy_row_span(fb, buffer, scanout + (uint64_t)row * screen_pitch, row, first, end);
+            kernel_lock_wait_tick();
         }
-        kernel_lock_wait_tick();
     }
     kernel_lock_retake_after_wait(released);
     framebuffer_present();
-    {
-        static unsigned reported;
-        if (reported < 4U) {
-            reported++;
-            uint64_t elapsed = time_uptime_ns() - started_ns;
-            uint64_t bytes = (uint64_t)rows * row_bytes;
-            kprintf("DRM: present %u rows of %u bytes in %u us (%u MB/s)\n",
-                    (unsigned)rows, (unsigned)row_bytes,
-                    (unsigned)(elapsed / 1000ULL),
-                    (unsigned)(elapsed ? bytes * 1000ULL / elapsed : 0));
-        }
-    }
+    scanout_current = 1;
     return 0;
 }
 
@@ -1275,10 +1356,11 @@ static int64_t ioctl_set_crtc(const struct file *client, uint64_t user_argument)
     if (!crtc.fb_id) {
         active_fb_id = 0;
         virtgpu_scanout_disable();
+        scanout_current = 0;
         (void)framebuffer_release_graphics(&drm_display_owner, 0);
         return 0;
     }
-    int status = present_framebuffer(client, crtc.fb_id);
+    int status = present_framebuffer(client, crtc.fb_id, NULL);
     if (status != 0) return status;
     active_fb_id = crtc.fb_id;
     return 0;
@@ -1295,7 +1377,7 @@ struct drm_mode_fb_dirty_cmd {
 static int64_t ioctl_dirty_fb(const struct file *client, uint64_t user_argument) {
     struct drm_mode_fb_dirty_cmd cmd;
     if (copy_from_user(&cmd, user_argument, sizeof(cmd)) != 0) return -EFAULT;
-    return present_framebuffer(client, cmd.fb_id);
+    return present_framebuffer(client, cmd.fb_id, NULL);
 }
 
 static void queue_flip_event(uint64_t user_data) {
@@ -1343,7 +1425,7 @@ static int64_t ioctl_page_flip(const struct file *client, uint64_t user_argument
     struct drm_mode_crtc_page_flip flip;
     if (copy_from_user(&flip, user_argument, sizeof(flip)) != 0) return -EFAULT;
     if (flip.crtc_id != DRM_CRTC_ID) return -ENOENT;
-    int status = present_framebuffer(client, flip.fb_id);
+    int status = present_framebuffer(client, flip.fb_id, NULL);
     if (status != 0) return status;
     active_fb_id = flip.fb_id;
     if (flip.flags & DRM_MODE_PAGE_FLIP_EVENT) queue_flip_event(flip.user_data);
@@ -1747,6 +1829,7 @@ static int64_t drm_dispatch_ioctl(struct file *file, unsigned long request,
     case DRM_NR_DROP_MASTER:
         active_fb_id = 0;
         virtgpu_scanout_disable();
+        scanout_current = 0;
         (void)framebuffer_release_graphics(&drm_display_owner, 0);
         return 0;
     case DRM_NR_SET_MASTER:
@@ -1857,6 +1940,7 @@ void drm_device_close(struct vfs_node *node) {
         event_head = event_tail = event_count = 0;
         render_contexts_release();
         virtgpu_scanout_disable();
+        scanout_current = 0;
         (void)framebuffer_release_graphics(&drm_display_owner, 0);
     }
     drm_leave();
@@ -1874,7 +1958,7 @@ void drm_file_close(struct file *file) {
     }
     for (unsigned index = 0; index < DRM_MAX_BLOBS; index++)
         if (blobs[index].id && blobs[index].owner == file)
-            memset(&blobs[index], 0, sizeof(blobs[index]));
+            blob_release(&blobs[index]);
     for (int index = 0; index < DRM_MAX_BUFFERS; index++)
         if (buffers[index].handle && buffers[index].owner == file)
             buffer_release(&buffers[index]);
@@ -1900,6 +1984,6 @@ void drm_console_present(void) {
 void drm_display_resume(void) {
     if (!drm_ready || !active_fb_id) return;
     drm_enter();
-    (void)present_framebuffer(NULL, active_fb_id);
+    (void)present_framebuffer(NULL, active_fb_id, NULL);
     drm_leave();
 }

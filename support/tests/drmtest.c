@@ -189,6 +189,9 @@ static void test_atomic_advertised(void) {
 static void test_present_latency(u32 fb_id, u32 blob_id, unsigned short width,
                                  unsigned short height, unsigned commits);
 
+static void test_damage_clips(u32 fb_id, u32 blob_id, unsigned short width,
+                              unsigned short height, unsigned commits);
+
 static void test_atomic_modeset(void) {
     struct drm_mode_crtc crtc;
     for (unsigned i = 0; i < sizeof(crtc); i++) ((char *)&crtc)[i] = 0;
@@ -259,6 +262,7 @@ static void test_atomic_modeset(void) {
     put("\n");
 
     test_present_latency(fb.fb_id, blob.blob_id, width, height, 200);
+    test_damage_clips(fb.fb_id, blob.blob_id, width, height, 200);
 
     struct drm_mode_destroy_blob kill = { blob.blob_id };
     (void)call(IOWR(NR_MODE_DESTROYPROPBLOB, struct drm_mode_destroy_blob), &kill);
@@ -567,6 +571,66 @@ static void test_present_latency(u32 fb_id, u32 blob_id, unsigned short width,
     put(" worst_us=");
     put_signed((s64)(report[0] / 1000UL));
     put("\n");
+}
+
+static void test_damage_clips(u32 fb_id, u32 blob_id, unsigned short width,
+                              unsigned short height, unsigned commits) {
+    s32 rect[4] = { 16, 16, 80, 80 };
+    struct drm_mode_create_blob clips;
+    for (unsigned i = 0; i < sizeof(clips); i++) ((char *)&clips)[i] = 0;
+    clips.data = (u64)rect;
+    clips.length = sizeof(rect);
+    if (call(IOWR(NR_MODE_CREATEPROPBLOB, struct drm_mode_create_blob), &clips) != 0) {
+        put("DAMAGE blob failed\n");
+        return;
+    }
+    struct drm_mode_create_blob odd = clips;
+    odd.length = sizeof(rect) - 1;
+    odd.blob_id = 0;
+    (void)call(IOWR(NR_MODE_CREATEPROPBLOB, struct drm_mode_create_blob), &odd);
+
+    u32 objs[3]   = { 1, 2, 4 };
+    u32 counts[3] = { 2, 1, 11 };
+    u32 props[14] = { 11, 12, 15, 14, 13, 16, 17, 18, 19, 20, 21, 22, 23, 24 };
+    u64 values[14] = {
+        1, blob_id, 1, fb_id, 1,
+        0, 0, (u64)width << 16, (u64)height << 16, 0, 0, width, height, odd.blob_id,
+    };
+    struct drm_mode_atomic atomic;
+    for (unsigned i = 0; i < sizeof(atomic); i++) ((char *)&atomic)[i] = 0;
+    atomic.count_objs = 3;
+    atomic.objs_ptr = (u64)objs;
+    atomic.count_props_ptr = (u64)counts;
+    atomic.props_ptr = (u64)props;
+    atomic.prop_values_ptr = (u64)values;
+    report("DAMAGE ragged", call(IOWR(NR_MODE_ATOMIC, struct drm_mode_atomic), &atomic));
+
+    struct drm_mode_create_blob empty;
+    for (unsigned i = 0; i < sizeof(empty); i++) ((char *)&empty)[i] = 0;
+    report("DAMAGE empty-blob", call(IOWR(NR_MODE_CREATEPROPBLOB, struct drm_mode_create_blob), &empty));
+    values[13] = empty.blob_id;
+    report("DAMAGE empty-commit", call(IOWR(NR_MODE_ATOMIC, struct drm_mode_atomic), &atomic));
+
+    values[13] = clips.blob_id;
+    u64 begun = now_ns();
+    unsigned done = 0;
+    for (unsigned round = 0; round < commits; round++) {
+        if (call(IOWR(NR_MODE_ATOMIC, struct drm_mode_atomic), &atomic) != 0) break;
+        done++;
+    }
+    u64 elapsed = now_ns() - begun;
+    put("DAMAGE commits=");
+    put_signed((s64)done);
+    put(" us_each=");
+    put_signed(done ? (s64)(elapsed / done / 1000UL) : 0);
+    put("\n");
+
+    struct drm_mode_destroy_blob kill = { clips.blob_id };
+    (void)call(IOWR(NR_MODE_DESTROYPROPBLOB, struct drm_mode_destroy_blob), &kill);
+    kill.blob_id = empty.blob_id;
+    (void)call(IOWR(NR_MODE_DESTROYPROPBLOB, struct drm_mode_destroy_blob), &kill);
+    kill.blob_id = odd.blob_id;
+    (void)call(IOWR(NR_MODE_DESTROYPROPBLOB, struct drm_mode_destroy_blob), &kill);
 }
 
 static int run(void) {

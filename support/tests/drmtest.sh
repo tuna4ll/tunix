@@ -71,7 +71,7 @@ done
 kill $QEMU 2>/dev/null || true
 wait $QEMU 2>/dev/null || true
 
-grep -aE "^(LATENCY|DRMTEST|VERSION|CAP|CLIENTCAP|PLANE|ATOMIC|BLOB|ISOLATION|FBLIFETIME|OVERFLOW|MODESET)" "$LOG" || {
+grep -aE "^(LATENCY|DRMTEST|VERSION|CAP|CLIENTCAP|PLANE|ATOMIC|BLOB|ISOLATION|FBLIFETIME|OVERFLOW|MODESET|DAMAGE)" "$LOG" || {
 	echo "drmtest: the machine printed no results; $LOG has the boot" >&2
 	exit 1
 }
