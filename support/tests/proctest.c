@@ -51,9 +51,9 @@ typedef long s64;
 #define NR_GETRUSAGE 165
 #define NR_SOCKETPAIR 199
 #define EPOLL_PACKED
-#define UCONTEXT_RET_OFFSET (168 + 8)
+#define UCONTEXT_RET_OFFSET (176 + 8)
 #define TRAP_LENGTH 4
-#define UCONTEXT_IP_OFFSET (168 + 264)
+#define UCONTEXT_IP_OFFSET (176 + 264)
 #endif
 
 #define AT_FDCWD -100
