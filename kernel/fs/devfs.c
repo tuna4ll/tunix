@@ -151,7 +151,6 @@ static int64_t rtc_ioctl(struct vfs_node *node, unsigned long request,
     return copy_to_user(user_argument, &value, sizeof(value)) == 0 ? 0 : -EFAULT;
 }
 
-/* One node per device the block layer holds, disks and partitions alike. */
 static const struct block_device *disk_of(const struct vfs_node *node) {
     return block_device_at(block_device_index_by_name(node->name));
 }
@@ -201,8 +200,6 @@ static int64_t input_event_ioctl(struct vfs_node *node, unsigned long request,
     return copy_to_user(user_argument, &info, sizeof(info)) == 0 ? 0 : -EFAULT;
 }
 
-/* The terminal devices, where /dev/tty0 and /dev/console mean whichever
-   one is active. */
 static struct vfs_node *attach_terminal(struct vfs_node *dev, const char *name,
                                         unsigned index, uint32_t major,
                                         uint32_t minor) {
@@ -235,14 +232,23 @@ static struct vfs_node *attach_device(struct vfs_node *dev, const char *name,
     return node;
 }
 
+void devfs_add_block(int index) {
+    const struct block_device *device = block_device_at(index);
+    struct vfs_node *dev = vfs_lookup("/dev");
+    if (!device || !dev || vfs_find_entry(dev, device->dev_name)) return;
+    struct vfs_node *disk = attach_device(dev, device->dev_name, VFS_BLOCKDEVICE, 0660,
+                                          disk_read, device->write ? disk_write : NULL, NULL);
+    if (!disk) return;
+    disk->length = device->sectors * BLOCK_SECTOR_SIZE;
+    disk->gid = DEV_GROUP_DISK;
+}
+
 void devfs_init(void) {
     struct vfs_node *dev = vfs_mkdir_p("/dev");
     if (!dev) return;
     vfs_mount_builtin("devtmpfs", "/dev", "devtmpfs", dev);
     pty_init();
 
-    /* /dev/console is the active terminal, as it is on Linux when the
-       console is a VT. */
     (void)attach_terminal(dev, "console", VT_NODE_ACTIVE, DEV_MAJOR_TTYAUX,
                           DEV_MINOR_TTYAUX_CONSOLE);
     (void)attach_terminal(dev, "tty0", VT_NODE_ACTIVE, DEV_MAJOR_TTY, 0);
@@ -262,8 +268,6 @@ void devfs_init(void) {
         (void)attach_terminal(dev, name, index, DEV_MAJOR_TTY, index);
     }
 
-    /* These three keep nothing, which is what lets a read of one run without
-       excluding the rest of the kernel; see file_may_share(). */
     struct vfs_node *stateless[3];
     stateless[0] = attach_device(dev, "null", VFS_CHARDEVICE, 0666,
                                  null_read, discard_write, always_ready);
@@ -284,17 +288,7 @@ void devfs_init(void) {
                                          rtc_read, NULL, always_ready);
     if (rtc) rtc->ioctl = rtc_ioctl;
 
-    for (int index = 0; index < block_device_count(); index++) {
-        const struct block_device *device = block_device_at(index);
-        if (!device) break;
-        struct vfs_node *disk = attach_device(dev, device->dev_name, VFS_BLOCKDEVICE, 0660,
-                                              disk_read,
-                                              device->write ? disk_write : NULL,
-                                              NULL);
-        if (!disk) continue;
-        disk->length = device->sectors * BLOCK_SECTOR_SIZE;
-        disk->gid = DEV_GROUP_DISK;
-    }
+    for (int index = 0; index < block_device_count(); index++) devfs_add_block(index);
 
     if (framebuffer_available()) {
         struct vfs_node *fb = attach_device(dev, "fb0",
@@ -306,14 +300,10 @@ void devfs_init(void) {
         }
     }
 
-    /* The DRM device sits beside /dev/fb0 and drives the same display; it is
-       what lets unmodified Linux graphics software run here. */
     drm_init();
     if (drm_available()) {
         struct vfs_node *dri = vfs_mkdir_p("/dev/dri");
         if (dri) {
-            /* read() delivers page-flip completions, so readiness is whether
-               any are queued rather than always. */
             struct vfs_node *card = attach_device(dri, "card0", VFS_CHARDEVICE,
                                                   0660, drm_device_read, NULL,
                                                   drm_device_read_ready);
@@ -323,14 +313,10 @@ void devfs_init(void) {
                 card->gid = DEV_GROUP_VIDEO;
                 card->file_ioctl = drm_file_ioctl;
                 card->mmap = drm_device_mmap;
-                /* Open/close counting is how the console gets the display back
-                   when the last client goes away. */
                 card->open = drm_device_open;
                 card->close = drm_device_close;
             }
 
-            /* The render node, which is the only way in for mesa and exists only
-               where virgl does. */
             if (virtgpu_virgl_available()) {
                 struct vfs_node *render = attach_device(dri, "renderD128",
                                                         VFS_CHARDEVICE, 0666,
@@ -349,14 +335,10 @@ void devfs_init(void) {
         }
     }
 
-    /* /dev/snd, laid out and numbered as ALSA does it: alsa-lib opens these
-       paths by name and nothing else will do. */
     sound_init();
     if (sound_card_available()) {
         struct vfs_node *snd = vfs_mkdir_p("/dev/snd");
         if (snd) {
-            /* No read-readiness, because this driver never generates an element
-               change event. */
             struct vfs_node *control = attach_device(snd, "controlC0",
                 VFS_CHARDEVICE, 0660, NULL, NULL, NULL);
             if (control) {
@@ -373,8 +355,6 @@ void devfs_init(void) {
                 playback->dev_minor = DEV_MINOR_SOUND_PCM_PLAYBACK;
                 playback->ioctl = sound_pcm_ioctl;
                 playback->mmap = sound_pcm_mmap;
-                /* Without this a full ring still reports POLLOUT, and a
-                   blocked write turns into a busy loop. */
                 playback->write_ready = sound_pcm_write_ready;
                 playback->open = sound_pcm_open;
                 playback->close = sound_pcm_close;
@@ -385,7 +365,6 @@ void devfs_init(void) {
 
     struct vfs_node *input = vfs_mkdir_p("/dev/input");
     if (input) {
-        /* Keep the legacy raw-scancode node for console tooling. */
         struct vfs_node *keyboard = attach_device(input, "keyboard", VFS_CHARDEVICE, 0440,
                                                   keyboard_read, NULL, keyboard_ready);
         if (keyboard) {
@@ -393,8 +372,6 @@ void devfs_init(void) {
             keyboard->close = keyboard_close;
         }
 
-        /* 0660 rather than 0440: evdev is opened read-write, because ioctls
-           like EVIOCGRAB and EVIOCSCLOCKID are writes to the device. */
         struct vfs_node *event0 = attach_device(input, "event0",
             VFS_CHARDEVICE | VFS_INPUTDEVICE, 0660, NULL, NULL, NULL);
         if (event0) {
@@ -420,8 +397,6 @@ void devfs_init(void) {
     }
     (void)vfs_create_symlink("/dev/rtc0", "/dev/rtc", 0);
 
-    /* Where shm_open puts its files, on a tmpfs of its own so nothing
-       reaches the disk. */
     struct vfs_node *shm = vfs_mkdir_p("/dev/shm");
     if (shm) {
         shm->mode = 01777;

@@ -4,19 +4,6 @@
 #include "../include/block.h"
 #include "../include/kstring.h"
 
-/*
- * Partition tables.
- *
- * The disk Limine boots from is partitioned: an EFI system partition holding
- * the bootloader and the kernel, and the root filesystem beside it. Without
- * this the kernel could only ever mount a filesystem that owned a whole disk,
- * which is not a layout any firmware will boot from.
- *
- * Both schemes are read because both are used: BIOS installs write an MBR,
- * UEFI wants GPT, and the image carries a protective MBR in front of the GPT
- * so that one disk boots either way.
- */
-
 extern void kprintf(const char *fmt, ...);
 
 #define MBR_SIGNATURE_OFFSET 0x1FEU
@@ -52,10 +39,6 @@ static int entry_is_empty(const uint8_t *guid) {
     return 1;
 }
 
-/*
- * Returns the number of partitions registered, or -1 when the disk has no GPT
- * -- which is not a failure, only an answer, and sends the caller to the MBR.
- */
 static int scan_gpt(int disk, const struct block_device *device) {
     uint8_t header[BLOCK_SECTOR_SIZE];
     if (device->sectors <= GPT_HEADER_LBA) return -1;
@@ -67,8 +50,6 @@ static int scan_gpt(int disk, const struct block_device *device) {
     uint32_t entry_bytes = read_le32(header + 84);
     if (!entry_bytes || entry_bytes > BLOCK_SECTOR_SIZE ||
         BLOCK_SECTOR_SIZE % entry_bytes != 0) return -1;
-    /* The usual table is 128 entries and there is no reason to read a longer
-       one: only the first nine can be named /dev/sdaN anyway. */
     if (entries > 128U) entries = 128U;
 
     uint32_t per_sector = BLOCK_SECTOR_SIZE / entry_bytes;
@@ -105,9 +86,6 @@ static void scan_mbr(int disk, const struct block_device *device) {
         const uint8_t *entry = sector + MBR_TABLE_OFFSET + index * MBR_ENTRY_BYTES;
         uint8_t type = entry[4];
         if (!type || type == MBR_TYPE_PROTECTIVE) continue;
-        /* Extended partitions are a linked list inside one primary entry.
-           Nothing this kernel boots from uses them, and following the chain
-           for its own sake would be code with no caller. */
         if (type == MBR_TYPE_EXTENDED_CHS || type == MBR_TYPE_EXTENDED_LBA) continue;
 
         uint64_t start = read_le32(entry + 8);
@@ -117,17 +95,14 @@ static void scan_mbr(int disk, const struct block_device *device) {
     }
 }
 
-/*
- * Every disk registered so far. Partitions are appended to the same table, and
- * the loop stops at the count taken before it started, so a partition is never
- * itself scanned for partitions.
- */
+void partition_scan_disk(int index) {
+    const struct block_device *device = block_device_at(index);
+    if (!device || device->parent != -1) return;
+    if (scan_gpt(index, device) >= 0) return;
+    scan_mbr(index, device);
+}
+
 void partition_scan(void) {
     int disks = block_device_count();
-    for (int index = 0; index < disks; index++) {
-        const struct block_device *device = block_device_at(index);
-        if (!device || device->parent != -1) continue;
-        if (scan_gpt(index, device) >= 0) continue;
-        scan_mbr(index, device);
-    }
+    for (int index = 0; index < disks; index++) partition_scan_disk(index);
 }
