@@ -575,11 +575,17 @@ int input_get_device_info(unsigned device_id, struct tunix_input_device_info *in
         memcpy(info->name, "Tunix PS/2 Keyboard", sizeof("Tunix PS/2 Keyboard"));
         return 0;
     }
-    if (device_id == TUNIX_INPUT_DEVICE_MOUSE && mouse_present) {
+    if (device_id == TUNIX_INPUT_DEVICE_MOUSE && input_mouse_available()) {
         info->event_types = (1U << TUNIX_EV_SYN) | (1U << TUNIX_EV_KEY) |
                             (1U << TUNIX_EV_REL);
         info->relative_axes = (1U << TUNIX_REL_X) | (1U << TUNIX_REL_Y);
         info->capabilities = TUNIX_INPUT_CAP_POINTER;
+        if (!mouse_present) {
+            info->relative_axes |= 1U << TUNIX_REL_WHEEL;
+            info->capabilities |= TUNIX_INPUT_CAP_WHEEL;
+            memcpy(info->name, "Tunix USB Mouse", sizeof("Tunix USB Mouse"));
+            return 0;
+        }
 #if defined(__x86_64__)
         if (mouse_packet_size == 4U) {
             info->relative_axes |= 1U << TUNIX_REL_WHEEL;
@@ -643,7 +649,7 @@ struct input_reader *input_reader_open(unsigned device_id) {
     if (device_id != TUNIX_INPUT_DEVICE_KEYBOARD &&
         device_id != TUNIX_INPUT_DEVICE_MOUSE)
         return NULL;
-    if (device_id == TUNIX_INPUT_DEVICE_MOUSE && !mouse_present) return NULL;
+    if (device_id == TUNIX_INPUT_DEVICE_MOUSE && !input_mouse_available()) return NULL;
 
     struct input_reader *reader = (struct input_reader *)kmalloc(sizeof(*reader));
     if (!reader) return NULL;
