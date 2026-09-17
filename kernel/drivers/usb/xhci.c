@@ -1159,6 +1159,11 @@ int xhci_init(void) {
 
     uint32_t length_and_version = mmio_read32(controller.base + XHCI_CAPLENGTH);
     uint8_t capability_length = (uint8_t)length_and_version;
+    if (length_and_version == 0xFFFFFFFFU || capability_length < 0x20U ||
+        (capability_length & 3U)) {
+        kprintf("XHCI: registers at %p do not answer\n", (void *)physical);
+        return -1;
+    }
     uint32_t structural = mmio_read32(controller.base + XHCI_HCSPARAMS1);
     uint32_t capabilities = mmio_read32(controller.base + XHCI_HCCPARAMS1);
 
