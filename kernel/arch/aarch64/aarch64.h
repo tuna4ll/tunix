@@ -12,7 +12,7 @@
 #define AARCH64_EARLY_DEVICE_PAGES 32U
 #define AARCH64_ECAM_VIRTUAL_BASE 0xFFFFFFFFE0000000ULL
 #define AARCH64_ECAM_VIRTUAL_BYTES 0x10000000ULL
-#define AARCH64_RAM_RANGES 16U
+#define AARCH64_RAM_RANGES 32U
 #define AARCH64_MAX_CPUS 8U
 #define AARCH64_SGI_FLUSH 1U
 #define AARCH64_MAX_SD 4U
@@ -83,6 +83,13 @@ struct aarch64_platform {
     uint64_t fw_cfg_base;
     uint64_t display_hole_base;
     uint64_t display_hole_size;
+    uint64_t uefi_system_table;
+    uint64_t uefi_map;
+    uint64_t uefi_map_size;
+    uint64_t uefi_descriptor_size;
+    uint64_t rsdp;
+    uint64_t firmware_epoch;
+    uint64_t firmware_epoch_counter;
 };
 
 #define PSCI_NONE 0
@@ -96,7 +103,7 @@ void aarch64_build_early_tables(uint64_t load_physical, uint64_t dtb_physical);
 int aarch64_early_map(uint64_t virtual_address, uint64_t physical, uint64_t attributes,
                       int level);
 uint64_t aarch64_early_map_device(uint64_t physical, uint64_t bytes);
-int aarch64_physical_is_ram(uint64_t physical);
+int aarch64_direct_map_wanted(uint64_t physical);
 
 void aarch64_start(uint64_t dtb_physical, uint64_t load_physical);
 int aarch64_el0_sync(struct syscall_frame *frame);
@@ -122,6 +129,14 @@ void aarch64_pci_init(void);
 struct boot_framebuffer_info;
 void aarch64_display_reserve(void);
 const struct boot_framebuffer_info *aarch64_display_setup(void);
+int uefi_detect(void);
+void uefi_collect_ram(void);
+void uefi_each_region(void (*visit)(uint64_t base, uint64_t end, int usable));
+void uefi_scan_tables(void);
+void uefi_read_time(void);
+const struct boot_framebuffer_info *uefi_framebuffer(void);
+const uint8_t *aarch64_physical_bytes(uint64_t physical, uint64_t bytes);
+int aarch64_acpi_discover(void);
 uint64_t psci_call(uint64_t function, uint64_t first, uint64_t second, uint64_t third);
 void psci_system_off(void);
 void psci_system_reset(void);

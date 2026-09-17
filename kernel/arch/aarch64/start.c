@@ -16,6 +16,7 @@
 #define DESC_PXN (1ULL << 53)
 #define DESC_UXN (1ULL << 54)
 #define RESERVED_RANGES 32U
+#define BLOCK_2M 0x200000ULL
 #define COMMAND_LINE_BYTES 1024U
 
 extern char kernel_image_start[];
@@ -33,13 +34,14 @@ static char command_line[COMMAND_LINE_BYTES];
 
 const struct boot_info *boot_info(void) { return &info; }
 
-int aarch64_physical_is_ram(uint64_t physical) {
-    if (aarch64_platform.display_hole_size && physical >= aarch64_platform.display_hole_base &&
-        physical - aarch64_platform.display_hole_base < aarch64_platform.display_hole_size)
+int aarch64_direct_map_wanted(uint64_t physical) {
+    uint64_t frame = physical & ~(BLOCK_2M - 1U);
+    if (aarch64_platform.display_hole_size && frame + BLOCK_2M > aarch64_platform.display_hole_base &&
+        frame < aarch64_platform.display_hole_base + aarch64_platform.display_hole_size)
         return 0;
     for (unsigned index = 0; index < aarch64_platform.ram_count; index++) {
         const struct aarch64_range *range = &aarch64_platform.ram[index];
-        if (physical >= range->base && physical - range->base < range->size) return 1;
+        if (frame < range->base + range->size && frame + BLOCK_2M > range->base) return 1;
     }
     return 0;
 }
@@ -84,6 +86,13 @@ static void add_usable_without_reserved(uint64_t base, uint64_t end, unsigned fr
     add_region(base, end, 1);
 }
 
+static int uefi_owns_memory;
+
+static void add_firmware_region(uint64_t base, uint64_t end, int usable) {
+    if (usable) add_usable_without_reserved(base, end, 0);
+    else add_region(base, end, 0);
+}
+
 static void collect_memory(uint64_t dtb_physical, uint64_t load_physical) {
     struct fdt_node node;
     for (unsigned index = 0; fdt_find_device_type("memory", index, &node) == 0; index++) {
@@ -94,6 +103,11 @@ static void collect_memory(uint64_t dtb_physical, uint64_t load_physical) {
             aarch64_platform.ram[aarch64_platform.ram_count].size = size;
             aarch64_platform.ram_count++;
         }
+    }
+    uefi_owns_memory = !aarch64_platform.ram_count && aarch64_platform.uefi_map;
+    if (uefi_owns_memory) {
+        uefi_collect_ram();
+        reserve(aarch64_platform.uefi_map, aarch64_platform.uefi_map_size);
     }
 
     reserve(load_physical, (uint64_t)(__image_end - kernel_image_start));
@@ -128,9 +142,15 @@ static void collect_memory(uint64_t dtb_physical, uint64_t load_physical) {
             if (last > first) reserve(first, last - first);
         }
     }
+}
 
+static void build_regions(void) {
     info.memory = regions;
     info.memory_count = 0;
+    if (aarch64_platform.uefi_map && uefi_owns_memory) {
+        uefi_each_region(add_firmware_region);
+        return;
+    }
     for (unsigned index = 0; index < aarch64_platform.ram_count; index++) {
         const struct aarch64_range *range = &aarch64_platform.ram[index];
         add_usable_without_reserved(range->base, range->base + range->size, 0);
@@ -331,6 +351,7 @@ void aarch64_start(uint64_t dtb_physical, uint64_t load_physical) {
     if (fdt_init((const void *)dtb_physical) != 0) {
         for (;;) __asm__ volatile("wfi");
     }
+    int firmware = uefi_detect();
     attach_console();
     kprintf("\nTUNIX: aarch64 kernel at %p, loaded at %p, device tree at %p\n",
             (void *)kernel_image_start, (void *)load_physical, (void *)dtb_physical);
@@ -339,10 +360,17 @@ void aarch64_start(uint64_t dtb_physical, uint64_t load_physical) {
     collect_memory(dtb_physical, load_physical);
     copy_command_line();
     map_direct_memory();
+    if (firmware) {
+        uefi_scan_tables();
+        reserve(aarch64_platform.display_hole_base, aarch64_platform.display_hole_size);
+        if (!aarch64_platform.gic_version && aarch64_platform.rsdp) aarch64_acpi_discover();
+        uefi_read_time();
+    }
+    build_regions();
 
     info.command_line = command_line;
     info.framebuffer = aarch64_display_setup();
-    info.rsdp = 0;
+    info.rsdp = aarch64_platform.rsdp;
     info.hhdm_offset = DIRECT_MAP_BASE;
     info.kernel_physical_base = load_physical;
     info.kernel_virtual_base = (uint64_t)kernel_image_start;

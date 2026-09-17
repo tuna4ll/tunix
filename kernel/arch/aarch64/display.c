@@ -188,7 +188,8 @@ void aarch64_display_reserve(void) {
             ((base + size + BLOCK_2M - 1U) & ~(BLOCK_2M - 1U)) - aarch64_platform.display_hole_base;
         return;
     }
-    if (fdt_find_compatible("qemu,fw-cfg-mmio", 0, &node) != 0 ||
+    if (aarch64_platform.uefi_system_table ||
+        fdt_find_compatible("qemu,fw-cfg-mmio", 0, &node) != 0 ||
         fdt_reg_cpu(&node, 0, &fw_cfg_physical, &size) != 0 || !aarch64_platform.ram_count)
         return;
     aarch64_platform.fw_cfg_base = aarch64_early_map_device(fw_cfg_physical, 0x1000ULL);
@@ -206,7 +207,9 @@ void aarch64_display_reserve(void) {
 }
 
 const struct boot_framebuffer_info *aarch64_display_setup(void) {
-    if (simple_framebuffer() || ramfb()) {
+    const struct boot_framebuffer_info *firmware = uefi_framebuffer();
+    if (!simple_framebuffer() && firmware) framebuffer = *firmware;
+    if (framebuffer.magic || ramfb()) {
         kprintf("TUNIX: framebuffer %ux%u at %p\n", framebuffer.width, framebuffer.height,
                 (void *)framebuffer.physical_address);
         return &framebuffer;

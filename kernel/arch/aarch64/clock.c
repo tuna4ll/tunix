@@ -23,6 +23,12 @@ int arch_rtc_read(struct tunix_rtc_time *out) {
     if (aarch64_platform.rtc_base) {
         uint32_t value = *(volatile uint32_t *)(aarch64_platform.rtc_base + PL031_DATA);
         if (value) seconds = value;
+    } else if (aarch64_platform.firmware_epoch) {
+        uint64_t counter;
+        __asm__ volatile("mrs %0, cntvct_el0" : "=r"(counter));
+        uint64_t frequency = arch_clock_frequency();
+        seconds = aarch64_platform.firmware_epoch +
+                  (frequency ? (counter - aarch64_platform.firmware_epoch_counter) / frequency : 0);
     }
     time_epoch_to_calendar(seconds, out);
     return 0;

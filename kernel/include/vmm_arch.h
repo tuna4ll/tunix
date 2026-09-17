@@ -196,10 +196,10 @@ static inline void vmm_arch_invalidate(uint64_t address) {
     __asm__ volatile("tlbi vaae1, %0; dsb sy; isb" : : "r"(address >> 12) : "memory");
 }
 
-int aarch64_physical_is_ram(uint64_t physical);
+int aarch64_direct_map_wanted(uint64_t physical);
 
 static inline int vmm_arch_direct_map_wanted(uint64_t physical) {
-    return aarch64_physical_is_ram(physical);
+    return aarch64_direct_map_wanted(physical);
 }
 
 static inline void vmm_arch_sync_executable(uint64_t physical) {

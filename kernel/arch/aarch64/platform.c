@@ -47,8 +47,9 @@ void aarch64_pci_init(void) {
     uint32_t last = aarch64_platform.ecam_first_bus + (uint32_t)(bytes >> 20) - 1U;
     pci_ecam_attach(AARCH64_ECAM_VIRTUAL_BASE, (uint8_t)aarch64_platform.ecam_first_bus,
                     (uint8_t)last);
-    pci_assign_resources(aarch64_platform.pci_mmio32_base, aarch64_platform.pci_mmio32_size,
-                         aarch64_platform.pci_mmio64_base, aarch64_platform.pci_mmio64_size);
+    if (!aarch64_platform.uefi_system_table)
+        pci_assign_resources(aarch64_platform.pci_mmio32_base, aarch64_platform.pci_mmio32_size,
+                             aarch64_platform.pci_mmio64_base, aarch64_platform.pci_mmio64_size);
     kprintf("PCI: ECAM at %p, buses %u-%u\n", (void *)aarch64_platform.ecam_physical,
             aarch64_platform.ecam_first_bus, last);
 }

@@ -7,6 +7,7 @@
 #include "../include/io.h"
 #include "../include/time.h"
 #include "../include/vmm.h"
+#include "../include/pmm.h"
 #include "../include/kstring.h"
 
 extern void kprintf(const char *fmt, ...);
@@ -114,6 +115,10 @@ static uint64_t window_used;
 
 static const void *map_physical(uint64_t physical, uint32_t length) {
     if (!physical || !length) return NULL;
+#if defined(__aarch64__)
+    if (physical + length > PMM_DIRECT_MAP_LIMIT) return NULL;
+    return (const void *)(DIRECT_MAP_BASE + physical);
+#endif
     uint64_t page = physical & ~(ACPI_PAGE_BYTES - 1);
     uint64_t offset = physical - page;
     uint64_t bytes = (offset + length + ACPI_PAGE_BYTES - 1) & ~(ACPI_PAGE_BYTES - 1);
@@ -354,6 +359,7 @@ const struct acpi_machine *acpi_describe_machine(void) {
             kprintf("ACPI: %u cpu(s), local apic at %x, %u ioapic(s), %u override(s)\n",
                     (unsigned)machine.cpu_count, (unsigned)machine.local_apic,
                     (unsigned)machine.io_apic_count, (unsigned)machine.override_count);
+#if defined(__x86_64__)
         if (power_known)
             kprintf("ACPI: pm1a at %x, sci %u, %s, reset %s\n",
                     (unsigned)power.pm1a_control, (unsigned)power.sci_interrupt,
@@ -361,6 +367,7 @@ const struct acpi_machine *acpi_describe_machine(void) {
                     power.reset_supported ? "register" : "keyboard controller");
         else
             kprintf("ACPI: no usable fadt; the machine cannot be powered off\n");
+#endif
     }
     if (!machine.local_apic || !machine.io_apic_count) return NULL;
     return &machine;
