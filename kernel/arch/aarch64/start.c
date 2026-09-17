@@ -212,6 +212,9 @@ static void discover_devices(void) {
             aarch64_platform.gic_redistributor = base;
             aarch64_platform.gic_redistributor_size = size;
         }
+        if (fdt_find_compatible("arm,gic-v3-its", 0, &node) == 0 &&
+            fdt_reg_cpu(&node, 0, &base, &size) == 0)
+            aarch64_platform.gic_its = base;
     } else if (fdt_find_compatible("arm,gic-400", 0, &node) == 0 ||
                fdt_find_compatible("arm,cortex-a15-gic", 0, &node) == 0) {
         aarch64_platform.gic_version = 2;
@@ -238,6 +241,11 @@ static void discover_devices(void) {
         const uint8_t *range = fdt_property(&node, "bus-range", &length);
         aarch64_platform.ecam_first_bus = range && length >= 8U ? fdt_read32(range) : 0;
         aarch64_platform.ecam_last_bus = range && length >= 8U ? fdt_read32(range + 4) : 255;
+        const uint8_t *msi = fdt_property(&node, "msi-map", &length);
+        if (msi && length >= 16U) {
+            aarch64_platform.msi_rid_base = fdt_read32(msi);
+            aarch64_platform.msi_device_base = fdt_read32(msi + 8);
+        }
         const uint8_t *ranges = fdt_property(&node, "ranges", &length);
         uint32_t parent_cells = node.address_cells;
         uint32_t entry = (3U + parent_cells + 2U) * 4U;

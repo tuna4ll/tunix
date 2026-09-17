@@ -3,6 +3,10 @@
 #if defined(__x86_64__)
 #include "../include/io.h"
 #endif
+#if defined(__aarch64__)
+#include "../arch/aarch64/aarch64.h"
+#include "../include/irq.h"
+#endif
 #include "../include/kstring.h"
 #include "../include/pci.h"
 #include "../include/vmm.h"
@@ -223,7 +227,7 @@ static uint32_t initial_apic_id(void) {
 
 #endif
 
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
 static void msix_write_control(const struct pci_device *device, uint16_t control) {
     uint32_t header = pci_config_read32(device->bus, device->slot, device->function,
                                         device->msix_capability);
@@ -234,12 +238,15 @@ static void msix_write_control(const struct pci_device *device, uint16_t control
 #endif
 
 int pci_msix_enable(struct pci_device *device) {
-#if !defined(__x86_64__)
+#if !defined(__x86_64__) && !defined(__aarch64__)
     (void)device;
     return -1;
 #else
     if (!device || !device->msix_capability || !device->msix_entries) return -1;
     if (device->msix_table) return 0;
+#if defined(__aarch64__)
+    if (!its_ready()) return -1;
+#endif
 
     uint32_t location = pci_config_read32(device->bus, device->slot, device->function,
                                           (uint8_t)(device->msix_capability +
@@ -280,6 +287,22 @@ int pci_msix_bind(struct pci_device *device, unsigned entry, unsigned vector) {
     slot[MSIX_ENTRY_ADDRESS_HIGH] = 0;
     slot[MSIX_ENTRY_DATA] = vector;
     slot[MSIX_ENTRY_CONTROL] = 0;
+    return 0;
+#elif defined(__aarch64__)
+    if (vector < IRQ_VECTOR_FIRST) return -1;
+    uint32_t requester = ((uint32_t)device->bus << 8) | ((uint32_t)device->slot << 3) |
+                         device->function;
+    uint32_t event = vector - IRQ_VECTOR_FIRST;
+    uint64_t address;
+    if (its_bind_msi(requester - aarch64_platform.msi_rid_base +
+                         aarch64_platform.msi_device_base,
+                     event, &address) != 0)
+        return -1;
+    volatile uint32_t *message = device->msix_table + entry * MSIX_ENTRY_WORDS;
+    message[MSIX_ENTRY_ADDRESS_LOW] = (uint32_t)address;
+    message[MSIX_ENTRY_ADDRESS_HIGH] = (uint32_t)(address >> 32);
+    message[MSIX_ENTRY_DATA] = event;
+    message[MSIX_ENTRY_CONTROL] = 0;
     return 0;
 #else
     return -1;

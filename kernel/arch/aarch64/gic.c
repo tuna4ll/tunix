@@ -37,6 +37,7 @@ static uint64_t distributor;
 static uint64_t redistributor_base;
 static uint64_t redistributor_frames;
 static uint64_t redistributors[SMP_MAX_CPUS];
+static uint64_t redistributor_physical[SMP_MAX_CPUS];
 static uint64_t cpu_interface;
 static unsigned lines;
 
@@ -82,10 +83,12 @@ static void cpu_local_v3(unsigned index) {
     uint64_t mpidr = current_mpidr();
     uint64_t affinity = ((mpidr >> 32) & 0xFFULL) << 24 | (mpidr & 0xFFFFFFULL);
     uint64_t found = 0;
+    uint64_t found_frame = 0;
     for (uint64_t frame = 0; frame < redistributor_frames; frame++) {
         uint64_t candidate = redistributor_base + frame * GICR_FRAME_BYTES;
         if ((read64(candidate, GICR_TYPER) >> 32) == affinity) {
             found = candidate;
+            found_frame = frame;
             break;
         }
     }
@@ -93,7 +96,11 @@ static void cpu_local_v3(unsigned index) {
         if (index) panic("GIC: no redistributor for this processor");
         found = redistributor_base;
     }
-    if (index < SMP_MAX_CPUS) redistributors[index] = found;
+    if (index < SMP_MAX_CPUS) {
+        redistributors[index] = found;
+        redistributor_physical[index] = aarch64_platform.gic_redistributor +
+                                        found_frame * GICR_FRAME_BYTES;
+    }
 
     uint32_t waker = read32(found, GICR_WAKER);
     write32(found, GICR_WAKER, waker & ~(1U << 1));
@@ -143,6 +150,7 @@ void gic_init(void) {
                                             redistributor_frames * GICR_FRAME_BYTES);
         if (!redistributor_base) panic("GIC: redistributors could not be mapped");
         cpu_local_v3(0);
+        its_init();
     } else {
         for (unsigned line = 32; line < lines; line++)
             *(volatile uint8_t *)(distributor + GICD_ITARGETSR + line) = 0x01U;
@@ -188,6 +196,14 @@ void gic_end_of_interrupt(uint32_t intid) {
         return;
     }
     write32(cpu_interface, GICC_EOIR, intid);
+}
+
+uint64_t gic_boot_redistributor(void) {
+    return redistributors[0];
+}
+
+uint64_t gic_boot_redistributor_physical(void) {
+    return redistributor_physical[0];
 }
 
 void gic_send_flush_ipi(void) {

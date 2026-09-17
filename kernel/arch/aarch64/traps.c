@@ -119,7 +119,7 @@ void aarch64_unexpected(struct syscall_frame *frame, uint64_t kind) {
 
 int aarch64_irq(struct interrupt_frame *frame) {
     uint32_t intid = gic_acknowledge();
-    if (intid >= 1020U) return 0;
+    if (intid >= 1020U && intid < 8192U) return 0;
     if (intid == AARCH64_SGI_FLUSH) {
         gic_end_of_interrupt(intid);
         smp_flush_interrupt();
@@ -133,6 +133,9 @@ int aarch64_irq(struct interrupt_frame *frame) {
         gic_end_of_interrupt(intid);
         if (cpu_current()->index == 0) timer_irq(frame);
         else process_timer_interrupt(frame);
+    } else if (intid >= 8192U) {
+        gic_end_of_interrupt(intid);
+        irq_dispatch(IRQ_VECTOR_FIRST + (intid - 8192U));
     } else {
         gic_end_of_interrupt(intid);
         irq_dispatch(IRQ_VECTOR_FIRST + intid);
