@@ -225,58 +225,8 @@ TEST ?= schedbench
 testimage: $(KERNEL) $(LIMINE_EXE)
 	BOOT=0 IMAGE_TABLE='$(IMAGE_TABLE)' support/tests/$(TEST).sh $(SCHEDBENCH_CPUS) $(KERNEL)
 
-# --- aarch64 port (QEMU virt bring-up) -------------------------------------
 AARCH64_CC     ?= aarch64-linux-gnu-gcc
 AARCH64_OBJCOPY ?= aarch64-linux-gnu-objcopy
-AARCH64_CFLAGS := -std=gnu11 -Wall -Wextra -Werror -ffreestanding \
-	-fno-stack-protector -fno-pic -fno-pie -fno-builtin \
-	-fno-asynchronous-unwind-tables -fno-unwind-tables \
-	-mgeneral-regs-only -mstrict-align -march=armv8-a -mno-outline-atomics \
-	-Ikernel/arch/aarch64/bringup
-AARCH64_LDFLAGS := -nostdlib -Wl,-T,kernel/arch/aarch64/bringup/linker.ld -Wl,--build-id=none
-AARCH64_SHARED := kernel/arch/aarch64/identity.c kernel/arch/aarch64/entropy.c kernel/arch/aarch64/fpu.S
-AARCH64_SRC := $(shell find kernel/arch/aarch64/bringup -name '*.c' -o -name '*.S') $(AARCH64_SHARED)
-AARCH64_OBJ := $(AARCH64_SRC:%=$(BUILD)/aarch64/%.o)
-AARCH64_KERNEL := $(BUILD)/kernel-aarch64.elf
-AARCH64_IMAGE  := $(BUILD)/kernel-aarch64.img
-
-.PHONY: aarch64 run-aarch64
-aarch64: $(AARCH64_IMAGE)
-
-$(AARCH64_KERNEL): $(AARCH64_OBJ) kernel/arch/aarch64/bringup/linker.ld
-	$(AARCH64_CC) $(AARCH64_LDFLAGS) $(AARCH64_OBJ) -o $@
-
-$(AARCH64_IMAGE): $(AARCH64_KERNEL)
-	$(AARCH64_OBJCOPY) -O binary $< $@
-
-$(BUILD)/aarch64/%.c.o: %.c
-	@mkdir -p $(dir $@)
-	$(AARCH64_CC) $(AARCH64_CFLAGS) -c $< -o $@
-
-$(BUILD)/aarch64/%.S.o: %.S
-	@mkdir -p $(dir $@)
-	$(AARCH64_CC) $(AARCH64_CFLAGS) -I$(BUILD)/aarch64 -c $< -o $@
-
-# A real static user binary, carried in the kernel image via .incbin.
-AARCH64_USER := $(BUILD)/aarch64/hello.elf
-
-$(AARCH64_USER): support/aarch64/hello.S
-	@mkdir -p $(dir $@)
-	$(AARCH64_CC) -nostdlib -static -ffreestanding -o $@ $<
-
-$(BUILD)/aarch64/kernel/arch/aarch64/bringup/userimage.S.o: $(AARCH64_USER)
-
-# A second test program: it reports the stack the kernel built for it. Put it
-# on a disk as /sbin/init to exercise the ext2 and auxv paths.
-AARCH64_INITARGS := $(BUILD)/aarch64/initargs.elf
-aarch64: $(AARCH64_INITARGS)
-
-$(AARCH64_INITARGS): support/aarch64/initargs.c
-	@mkdir -p $(dir $@)
-	$(AARCH64_CC) -std=gnu11 -Wall -Wextra -Werror -O2 -static -nostdlib \
-		-nostartfiles -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
-		-fno-builtin -fno-tree-loop-distribute-patterns \
-		-fno-asynchronous-unwind-tables -o $@ $<
 
 AARCH64_CORE_BUILD := $(BUILD)/aarch64-core
 AARCH64_CORE_CFLAGS := -std=gnu11 -Wall -Wextra -Werror -ffreestanding \
@@ -287,7 +237,7 @@ AARCH64_CORE_CFLAGS := -std=gnu11 -Wall -Wextra -Werror -ffreestanding \
 	-Ikernel/include -I$(BUILD)/generated $(KERNEL_CFLAGS_EXTRA)
 AARCH64_CORE_EXCLUDE := kernel/drivers/ata.c kernel/drivers/net/rtl8139.c
 AARCH64_CORE_SOURCES := $(filter-out $(AARCH64_CORE_EXCLUDE),$(shell find kernel -path kernel/arch -prune -o \( -name '*.c' -o -name '*.S' \) -print)) \
-	$(shell find kernel/arch/aarch64 -path kernel/arch/aarch64/bringup -prune -o \( -name '*.c' -o -name '*.S' \) -print)
+	$(shell find kernel/arch/aarch64 \( -name '*.c' -o -name '*.S' \) -print)
 AARCH64_CORE_OBJECTS := $(AARCH64_CORE_SOURCES:%=$(AARCH64_CORE_BUILD)/%.o)
 AARCH64_CORE_KERNEL := $(BUILD)/kernel-aarch64-core.elf
 AARCH64_CORE_IMAGE := $(BUILD)/kernel-aarch64-core.img
@@ -349,6 +299,3 @@ run-aarch64-core: $(AARCH64_CORE_IMAGE)
 		-no-reboot -kernel $(AARCH64_CORE_IMAGE) $(QEMU_AARCH64_CORE_DISKS)
 
 QEMU_AARCH64 ?= qemu-system-aarch64
-run-aarch64: $(AARCH64_IMAGE)
-	$(QEMU_AARCH64) -M virt,gic-version=3 -cpu cortex-a72 -smp $(QEMU_SMP) \
-		-m 512M -nographic -no-reboot -kernel $(AARCH64_IMAGE)
