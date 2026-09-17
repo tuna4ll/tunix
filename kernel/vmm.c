@@ -114,10 +114,15 @@ static void registry_remove(uint64_t *registry, size_t count, uint64_t value) {
     }
 }
 
+static uint64_t last_registered;
+
 static int address_space_registered(uint64_t cr3_physical) {
     uint64_t physical = cr3_physical & ADDRESS_MASK;
-    return physical != 0 &&
-           registry_contains(address_spaces, MAX_ADDRESS_SPACES, physical);
+    if (!physical) return 0;
+    if (physical == last_registered) return 1;
+    if (!registry_contains(address_spaces, MAX_ADDRESS_SPACES, physical)) return 0;
+    last_registered = physical;
+    return 1;
 }
 
 static uint64_t *page_table_pointer(uint64_t physical) {
@@ -286,6 +291,7 @@ uint64_t vmm_create_address_space(void) {
     uint64_t *kernel_pml4 = page_table_pointer(kernel_cr3_physical);
     if (!new_pml4 || !kernel_pml4) {
         registry_remove(address_spaces, MAX_ADDRESS_SPACES, physical);
+        last_registered = 0;
         pmm_free_page((void *)physical);
         return 0;
     }
@@ -559,14 +565,27 @@ int vmm_user_range_valid(uint64_t cr3_physical, uint64_t address,
     return 1;
 }
 
+static int user_page_translate(uint64_t cr3_physical, uint64_t address, int write_required,
+                               uint64_t *physical, uint64_t *flags) {
+    if (vmm_translate(cr3_physical, address, physical, flags) != 0) {
+        uint64_t page = address & ~0xFFFULL;
+        if (cr3_physical != vmm_arch_read_root() ||
+            (!process_commit_area(page) && !process_grow_user_stack(page)) ||
+            vmm_translate(cr3_physical, address, physical, flags) != 0) return -1;
+    }
+    if (!(*flags & PAGE_USER) ||
+        (write_required && !(*flags & (PAGE_WRITE | PAGE_COW)))) return -1;
+    return 0;
+}
+
 int vmm_copy_from_space(uint64_t cr3_physical, void *destination,
                         uint64_t source_user, size_t length) {
-    if (!vmm_user_range_valid(cr3_physical, source_user, length, 0)) return -1;
+    if (source_user >= USER_ADDRESS_LIMIT || length > USER_ADDRESS_LIMIT - source_user) return -1;
     uint8_t *out = (uint8_t *)destination;
     while (length) {
         uint64_t physical;
         uint64_t flags;
-        if (vmm_translate(cr3_physical, source_user, &physical, &flags) != 0) return -1;
+        if (user_page_translate(cr3_physical, source_user, 0, &physical, &flags) != 0) return -1;
         if (flags & PAGE_DEVICE) return -1;
         size_t chunk = 4096 - (size_t)(source_user & 0xFFF);
         if (chunk > length) chunk = length;
@@ -581,12 +600,13 @@ int vmm_copy_from_space(uint64_t cr3_physical, void *destination,
 
 int vmm_copy_to_space(uint64_t cr3_physical, uint64_t destination_user,
                       const void *source, size_t length) {
-    if (!vmm_user_range_valid(cr3_physical, destination_user, length, 1)) return -1;
+    if (destination_user >= USER_ADDRESS_LIMIT ||
+        length > USER_ADDRESS_LIMIT - destination_user) return -1;
     const uint8_t *in = (const uint8_t *)source;
     while (length) {
         uint64_t physical;
         uint64_t flags;
-        if (vmm_translate(cr3_physical, destination_user, &physical, &flags) != 0) return -1;
+        if (user_page_translate(cr3_physical, destination_user, 1, &physical, &flags) != 0) return -1;
         if (flags & PAGE_DEVICE) return -1;
         if (flags & PAGE_COW) {
             if (vmm_handle_cow_fault(cr3_physical, destination_user & ~0xFFFULL) != 0)
@@ -802,6 +822,7 @@ void vmm_destroy_address_space(uint64_t cr3_physical) {
     uint64_t *pml4 = page_table_pointer(physical);
     if (!pml4) {
         registry_remove(address_spaces, MAX_ADDRESS_SPACES, physical);
+        last_registered = 0;
         return;
     }
     for (uint64_t index = 0; index < 256; index++) {
@@ -810,6 +831,7 @@ void vmm_destroy_address_space(uint64_t cr3_physical) {
         pml4[index] = 0;
     }
     registry_remove(address_spaces, MAX_ADDRESS_SPACES, physical);
+        last_registered = 0;
     if (pmm_page_is_allocated(physical)) pmm_free_page((void *)physical);
 }
 
