@@ -98,7 +98,36 @@ how the Raspberry Pi firmware hands over HDMI, or on QEMU from `-device ramfb`,
 configured through fw_cfg's DMA interface with memory carved off the top of RAM.
 Either one brings up the same console the x86-64 kernel draws, and the terminals
 stop being headless. ramfb memory is left out of the direct map so the same
-pages are never mapped with two different cache attributes.
+pages are never mapped with two different cache attributes. Under UEFI the
+firmware's Graphics Output Protocol framebuffer is used instead (see below).
+
+### UEFI and ACPI
+
+The desktop image boots itself on any 64-bit ARM UEFI machine. Its EFI system
+partition carries Limine's `BOOTAA64.EFI` and `boot/limine/limine.conf`
+(`support/limine-aarch64.conf`), which loads `boot/Image` with the Linux arm64
+protocol. Limine exits boot services and passes a device tree whose `/chosen`
+names the UEFI system table and memory map; when the firmware has no device tree
+of its own, that tree holds nothing else.
+
+`arch/aarch64/uefi.c` reads that memory map when the tree has no memory nodes,
+finds the ACPI RSDP and the `screen_info` table (the GOP framebuffer) among the
+configuration tables, and calls the runtime service `GetTime` once at boot for
+the wall clock. When the tree describes no interrupt controller,
+`arch/aarch64/acpi_tables.c` takes the machine from ACPI instead: the GIC
+distributor, redistributors, ITS and processors from MADT, the virtual timer
+from GTDT, the console from SPCR, PCIe ECAM from MCFG, MSI device IDs from IORT,
+and the PSCI conduit from FADT. The firmware has already placed PCI BARs, so the
+kernel keeps them.
+
+```sh
+make run-aarch64-image         # edk2 firmware, Limine, ACPI
+make run-aarch64-image-kernel  # QEMU loads the Image directly with its own device tree
+```
+
+Both boot to the desktop, as do `-M virt,acpi=off` (UEFI with a device tree) and
+`-M virt,gic-version=2`. edk2's ramfb driver offers at most 1024x768, so the
+UEFI boot runs at that size on QEMU; the direct boot sets ramfb to 1280x720.
 
 ### The desktop image
 
@@ -112,16 +141,16 @@ through the host's `qemu-aarch64` binfmt handler.
 
 ```sh
 make image-aarch64           # -> build/tunix-aarch64.img, GPT with an ESP and an ext3 root
-make run-aarch64-image       # virt, ramfb, xHCI keyboard and mouse, virtio-net, NVMe
+make run-aarch64-image       # virt, UEFI, ramfb, xHCI keyboard and mouse, virtio-net, NVMe
 ```
 
 It boots to the Weston session: seatd hands over the display and the xHCI
-keyboard and mouse, Mesa renders through llvmpipe onto the DRM device backed by
-the ramfb framebuffer, the HD Audio codec is found on PCI, and DHCP and HTTPS
-work through virtio-net. Firefox opens its window in about three minutes even
-under full emulation, once idle waiters stopped being woken on every timer tick
-and epoll honoured `EPOLLET`; before that its threads kept four emulated cores
-busy doing nothing.
+keyboard and mouse, Weston draws with pixman onto the DRM device backed by the
+framebuffer (llvmpipe when there is no GPU costs far more under emulation), the
+HD Audio codec is found on PCI, and DHCP and HTTPS work through virtio-net.
+Weston commits atomically and names the rectangles it changed through
+`FB_DAMAGE_CLIPS`, so a cursor move copies a few kilobytes instead of the whole
+screen. Firefox opens its window in about a minute under full emulation.
 
 ## Building and running
 
@@ -232,7 +261,11 @@ page fault six times slower and file reads four times slower.
   there, so every process gets a sigreturn trampoline page at `0x7FFFFFFFF000`.
   Remaining differences show up as Void's services are exercised.
 - **Interrupts on GICv2 boards.** MSI needs an ITS; the Raspberry Pi 4 has a
-  GIC-400 and no ITS, so its devices are still polled until INTx is wired
-  through the device tree's `interrupt-map`.
-- **Real boards.** Non-ECAM PCIe hosts (the Pi 4's own), USB, Ethernet, and
-  UEFI/ACPI firmware.
+  GIC-400 and no ITS, so virtio devices are polled there until INTx is wired
+  through the device tree's `interrupt-map`. NVMe, xHCI and HD Audio are polled
+  on both architectures.
+- **Real boards.** Non-ECAM PCIe hosts (the Pi 4's own, and so its USB),
+  Ethernet controllers such as GENET, and devices that ACPI describes only in
+  AML (SD controllers, a PL031 on machines without `GetTime`). QEMU's `raspi4b`
+  emulates none of the Pi's PCIe or Ethernet, so those need real hardware to
+  test.
