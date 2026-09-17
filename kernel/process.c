@@ -1663,14 +1663,8 @@ int64_t process_futex_wait(struct syscall_frame *frame, uint64_t address,
     futex_note('W', address, 0, 0, expected);
     waiting->futex_wait_deadline_ns = timeout_ns < 0 ? UINT64_MAX :
         time_uptime_ns() + (uint64_t)timeout_ns;
-    if (switch_to_next(frame, waiting) != 0) {
-        set_process_state(waiting, PROCESS_RUNNING);
-        waiting->futex_wait_active = 0;
-        waiting->futex_wait_address = 0;
-        waiting->futex_wait_key = 0;
-        waiting->futex_wait_deadline_ns = 0;
-        return -EAGAIN;
-    }
+    waiting->voluntary_switches++;
+    if (switch_to_next(frame, waiting) != 0) go_idle();
     return 0;
 }
 
