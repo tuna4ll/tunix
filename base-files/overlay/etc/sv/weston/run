@@ -17,12 +17,14 @@ export XDG_CONFIG_DIRS=/etc/xdg
 export XDG_SESSION_TYPE=wayland
 export XDG_CURRENT_DESKTOP=Weston
 export SHELL=/bin/bash
+set --
 if grep -qs '^DRIVER=virtio_gpu$' /sys/devices/card0/uevent; then
 	unset LIBGL_ALWAYS_SOFTWARE
 	unset GALLIUM_DRIVER
 else
 	export LIBGL_ALWAYS_SOFTWARE=1
 	export GALLIUM_DRIVER=llvmpipe
+	[ "$(uname -m)" = aarch64 ] && set -- --renderer=pixman
 fi
 export EGL_PLATFORM=wayland
 
@@ -37,4 +39,4 @@ export MOZ_ACCELERATED=0
 install -d -m 0700 -o tunix -g tunix "$XDG_RUNTIME_DIR"
 
 cd "$HOME" || exit 1
-exec chpst -u tunix:tunix:_seatd:audio weston
+exec chpst -u tunix:tunix:_seatd:audio weston "$@"
