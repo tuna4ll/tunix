@@ -406,6 +406,6 @@ int pci_find_nth_class(uint8_t class_code, uint8_t subclass, unsigned nth,
 void pci_enable_bus_mastering(const struct pci_device *device) {
     if (!device) return;
     uint32_t value = pci_config_read32(device->bus, device->slot, device->function, 0x04);
-    value |= 0x00000005U;
+    value |= 0x00000007U;
     pci_config_write32(device->bus, device->slot, device->function, 0x04, value);
 }

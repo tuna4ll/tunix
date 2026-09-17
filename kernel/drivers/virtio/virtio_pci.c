@@ -1,12 +1,3 @@
-/*
- * The virtio 1.0 PCI transport.
- *
- * A modern virtio device does not put its registers at a fixed offset in a BAR.
- * It publishes a chain of vendor-specific PCI capabilities, each naming a BAR,
- * an offset and a length, and the driver has to walk that chain to find out
- * where the common configuration, the notification area and the device's own
- * configuration actually live.
- */
 #include <stddef.h>
 #include <stdint.h>
 
@@ -44,13 +35,8 @@
 #define VIRTIO_MMIO_BAR_BYTES 0x10000ULL
 #define VIRTIO_MMIO_BAR_COUNT 6U
 
-/* What the device writes back when it could not take the vector, and the only
-   way it reports that: the write itself is silent. */
 #define MSIX_NO_VECTOR 0xFFFFU
 
-/* Not a device limit -- it is what this driver is willing to allocate rings
-   for, and it was 64 only because three rings had to fit in three pages. The
-   devices here offer 256. */
 #define QUEUE_SIZE_MAX 256U
 #define RESET_TIMEOUT_NS (500ULL * 1000ULL * 1000ULL)
 
@@ -88,8 +74,6 @@ static uint8_t read8(volatile uint8_t *base, uint32_t offset) {
     return *(base + offset);
 }
 
-/* 64-bit registers are written as two halves: the low one first, so the device
-   never sees an address made of one new dword and one stale one. */
 static void write64(volatile uint8_t *base, uint32_t offset, uint64_t value) {
     write32(base, offset, (uint32_t)value);
     write32(base, offset + 4U, (uint32_t)(value >> 32));
@@ -147,8 +131,6 @@ static int negotiate(struct virtio_device *device, uint64_t wanted, uint64_t *ag
         write32(device->common, COMMON_DEVICE_FEATURE_SELECT, half);
         offered |= (uint64_t)read32(device->common, COMMON_DEVICE_FEATURE) << (half * 32U);
     }
-    /* VERSION_1 is not optional: without it the device stays in the legacy
-       layout this transport cannot speak. */
     if (!(offered & (1ULL << VIRTIO_F_VERSION_1))) return -1;
 
     uint64_t accepted = (offered & wanted) | (1ULL << VIRTIO_F_VERSION_1);
@@ -168,6 +150,7 @@ int virtio_pci_attach(struct virtio_device *device, uint16_t device_id,
     memset(device, 0, sizeof(*device));
     if (pci_find_device(VIRTIO_VENDOR_ID, device_id, &device->pci) != 0) return -1;
     if (walk_capabilities(device) != 0) return -1;
+    pci_enable_bus_mastering(&device->pci);
 
     write8(device->common, COMMON_DEVICE_STATUS, 0);
     uint64_t deadline = time_uptime_ns() + RESET_TIMEOUT_NS;
@@ -180,7 +163,6 @@ int virtio_pci_attach(struct virtio_device *device, uint16_t device_id,
         virtio_pci_set_failed(device);
         return -1;
     }
-    pci_enable_bus_mastering(&device->pci);
     return 0;
 }
 
@@ -198,8 +180,6 @@ int virtio_pci_setup_queue(struct virtio_device *device, struct virtio_queue *qu
     queue->index = index;
 
     write16(device->common, COMMON_QUEUE_SIZE, size);
-    /* While this queue is the selected one, and only then: the vector register
-       is per-queue but reached through the same window as everything else. */
     if (device->vector) {
         write16(device->common, COMMON_QUEUE_MSIX_VECTOR, 0);
         if (read16(device->common, COMMON_QUEUE_MSIX_VECTOR) == MSIX_NO_VECTOR)
@@ -227,9 +207,6 @@ int virtio_pci_request_irq(struct virtio_device *device, const char *name,
     if (!vector) return -1;
     if (pci_msix_bind(&device->pci, 0, vector) != 0) return -1;
 
-    /* Entry 0 answers for the device's configuration as well as its queues.
-       The read back is the whole check: writing a vector a device cannot take
-       leaves NO_VECTOR here and nothing else says so. */
     write16(device->common, COMMON_CONFIG_MSIX_VECTOR, 0);
     if (read16(device->common, COMMON_CONFIG_MSIX_VECTOR) == MSIX_NO_VECTOR)
         return -1;
