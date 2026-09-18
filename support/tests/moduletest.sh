@@ -144,6 +144,26 @@ rmmod tunix_probe_user tunix_probe
 check modinfo-license "$(modinfo -F license $kernel/tunix_probe.ko)" MIT
 check modinfo-vermagic "$(modinfo -F vermagic $kernel/tunix_probe.ko)" "$release $(uname -m)"
 
+head -c 512 $kernel/tunix_probe.ko > /tmp/truncated.ko
+insmod /tmp/truncated.ko 2>/dev/null
+check insmod-truncated "$?" 1
+echo "not an object file at all" > /tmp/garbage.ko
+insmod /tmp/garbage.ko 2>/dev/null
+check insmod-garbage "$?" 1
+sed "s/vermagic=$release/vermagic=9.9.9/" $kernel/tunix_probe.ko > /tmp/stale.ko
+insmod /tmp/stale.ko 2>/dev/null
+check insmod-vermagic "$?" 1
+rmmod tunix_probe 2>/dev/null
+check rmmod-missing "$?" 1
+check survived-bad-modules "$(lsmod | tail -n +2 | wc -l)" 0
+
+mkdir -p /etc/modprobe.d
+echo "options tunix_probe number=9 text=configured" > /etc/modprobe.d/tunix.conf
+modprobe tunix_probe
+check modprobe-options "$(cat /sys/module/tunix_probe/parameters/number)" 9
+check modprobe-options-text "$(cat /sys/module/tunix_probe/parameters/text)" configured
+rmmod tunix_probe
+
 echo "MODULETEST sysfs-pci: $(ls /sys/bus/pci/devices | tr '\n' ' ')"
 lspci > /tmp/lspci.txt 2>&1
 check lspci "$?" 0
