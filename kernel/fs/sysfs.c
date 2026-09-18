@@ -27,7 +27,7 @@ static void append_number(char *out, size_t limit, size_t *used, uint32_t value)
     while (count-- > 0 && *used + 1 < limit) out[(*used)++] = digits[count];
 }
 
-#define SYSFS_MAX_DEVICES 40
+#define SYSFS_MAX_DEVICES 64
 
 struct sysfs_device {
     char devpath[64];
