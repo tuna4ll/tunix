@@ -729,7 +729,7 @@ int module_load(const void *contents, size_t bytes, const char *arguments) {
     if (!image.symbols) return -ENOEXEC;
 
     char name[MODULE_NAME_MAX];
-    char vermagic[64];
+    char vermagic[64] = { 0 };
     if (!modinfo_value(&image, "name", name, sizeof(name))) return -ENOEXEC;
     if (!modinfo_value(&image, "vermagic", vermagic, sizeof(vermagic)) ||
         strcmp(vermagic, MODULE_VERMAGIC) != 0) {
