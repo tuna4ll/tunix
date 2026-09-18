@@ -180,10 +180,13 @@ modprobe snd_hda
 check modprobe-snd "$?" 0
 check snd-loaded "$(lsmod | awk '$1 == "snd_hda" {print $1}')" snd_hda
 check snd-nodes "$(ls /dev/snd | tr '\n' ' ')" "controlC0 pcmC0D0p "
-check snd-bound "$(basename $(readlink $audio/driver))" snd_hda
+controllers=$(grep -l '^0x0403' /sys/bus/pci/devices/*/class | wc -l)
+bound=$(ls /sys/bus/pci/drivers/snd_hda)
+check snd-bound "$(basename $(readlink /sys/bus/pci/devices/$bound/driver))" snd_hda
+check snd-bound-once "$(ls /sys/bus/pci/drivers/snd_hda | wc -l)" 1
 lspci -k > /tmp/lspcik.txt 2>/dev/null
 check snd-lspci "$(grep -c 'Kernel driver in use: snd_hda' /tmp/lspcik.txt)" 1
-check snd-lspci-module "$(grep -c 'Kernel modules: snd_hda' /tmp/lspcik.txt)" 1
+check snd-lspci-module "$(grep -c 'Kernel modules: snd_hda' /tmp/lspcik.txt)" "$controllers"
 
 exec 3<>/dev/snd/pcmC0D0p
 check snd-refcnt-open "$(cat /sys/module/snd_hda/refcnt)" 1
@@ -195,7 +198,8 @@ check snd-refcnt-closed "$(cat /sys/module/snd_hda/refcnt)" 0
 rmmod snd_hda
 check rmmod-snd "$?" 0
 check snd-nodes-gone "$(test -e /dev/snd/pcmC0D0p; echo $?)" 1
-check snd-unbound "$(test -e $audio/driver; echo $?)" 1
+check snd-unbound "$(test -e /sys/bus/pci/devices/$bound/driver; echo $?)" 1
+check snd-driver-gone "$(test -d /sys/bus/pci/drivers/snd_hda; echo $?)" 1
 
 udevd --daemon
 udevadm trigger --action=add --type=devices
@@ -230,7 +234,8 @@ ARCH=$ARCH TABLE=gpt ROOT_SLACK_MIB=16 RELEASE="$RELEASE" \
 	MODULES="$MODULE_DIR/test-modules $MODULE_DIR/modules" \
 	support/image.sh "$IMAGE" "$KERNEL" "$LIMINE_DIR" "$WORK/limine.conf" "$ROOT" >/dev/null || exit 1
 
-AUDIO="-audiodev none,id=snd0 -device intel-hda -device hda-output,audiodev=snd0"
+AUDIO="-audiodev none,id=snd0 -device intel-hda,id=hda0 -device intel-hda,id=hda1 \
+	-device hda-output,bus=hda1.0,audiodev=snd0"
 if [ "$NIC" = virtio ]; then
 	NET="-netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0"
 else

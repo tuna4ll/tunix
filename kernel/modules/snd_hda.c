@@ -146,7 +146,7 @@ extern void kprintf(const char *fmt, ...);
 
 #define MMIO_PAGE_BYTES 4096ULL
 #define HDA_REGISTER_BYTES 0x4000ULL
-#define HDA_MMIO_VIRTUAL_BASE (DEVICE_MMIO_VIRTUAL_BASE + 0x00500000ULL)
+#define HDA_MAX_CONTROLLERS 4U
 
 #define RESET_TIMEOUT_NS (500ULL * 1000ULL * 1000ULL)
 #define VERB_TIMEOUT_NS (100ULL * 1000ULL * 1000ULL)
@@ -238,19 +238,29 @@ static void *dma_page(uint64_t *physical_out) {
     return virtual_address;
 }
 
+static struct {
+    uint64_t physical;
+    uint64_t base;
+} register_windows[HDA_MAX_CONTROLLERS];
+
 static uint64_t map_registers(uint64_t physical) {
     if (physical & (MMIO_PAGE_BYTES - 1)) return 0;
-    uint64_t cr3 = vmm_kernel_cr3();
-    for (uint64_t offset = 0; offset < HDA_REGISTER_BYTES; offset += MMIO_PAGE_BYTES) {
-        int status = vmm_map_page_in(cr3, HDA_MMIO_VIRTUAL_BASE + offset,
-                                     physical + offset,
-                                     PAGE_WRITE | PAGE_DEVICE | PAGE_UNCACHED | PAGE_NX);
-        if (status != 0 && status != -2) {
-            kprintf("HDA: map offset %x -> %d\n", (unsigned)offset, status);
-            return 0;
-        }
+    for (unsigned index = 0; index < HDA_MAX_CONTROLLERS; index++)
+        if (register_windows[index].base && register_windows[index].physical == physical)
+            return register_windows[index].base;
+
+    uint64_t base = vmm_map_device(physical, HDA_REGISTER_BYTES);
+    if (!base) {
+        kprintf("HDA: no room to map registers at %x\n", (unsigned)physical);
+        return 0;
     }
-    return HDA_MMIO_VIRTUAL_BASE;
+    for (unsigned index = 0; index < HDA_MAX_CONTROLLERS; index++) {
+        if (register_windows[index].base) continue;
+        register_windows[index].physical = physical;
+        register_windows[index].base = base;
+        break;
+    }
+    return base;
 }
 
 static int reset_controller(void) {
