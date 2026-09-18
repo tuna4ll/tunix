@@ -2,6 +2,8 @@
 #include <stddef.h>
 
 #include "../../include/cpu.h"
+#include "../../include/hid.h"
+#include "../../include/hid_input.h"
 #include "../../include/pci.h"
 #include "../../include/pmm.h"
 #include "../../include/vmm.h"
@@ -40,12 +42,14 @@ extern void kprintf(const char *fmt, ...);
 
 #define USBCMD_RUN (1U << 0)
 #define USBCMD_RESET (1U << 1)
+#define USBCMD_PERIODIC_ENABLE (1U << 4)
 #define USBCMD_ASYNC_ENABLE (1U << 5)
 #define USBCMD_ASYNC_DOORBELL (1U << 6)
 #define USBCMD_INTERRUPT_THRESHOLD_SHIFT 16U
 
 #define USBSTS_ASYNC_ADVANCE (1U << 5)
 #define USBSTS_HALTED (1U << 12)
+#define USBSTS_PERIODIC_RUNNING (1U << 14)
 #define USBSTS_ASYNC_RUNNING (1U << 15)
 
 #define PORTSC_CONNECTED (1U << 0)
@@ -81,7 +85,17 @@ extern void kprintf(const char *fmt, ...);
 #define QTD_DATA_TOGGLE (1U << 31)
 
 #define QH_ENDPOINT_SHIFT 8U
-#define QH_SPEED_HIGH (2U << 12)
+#define QH_SPEED_SHIFT 12U
+#define SPEED_FULL 0U
+#define SPEED_LOW 1U
+#define SPEED_HIGH 2U
+#define QH_SPEED_HIGH (SPEED_HIGH << QH_SPEED_SHIFT)
+#define QH_CONTROL_ENDPOINT (1U << 27)
+#define QH_START_MASK_FRAME 0x01U
+#define QH_COMPLETE_MASK_SPLIT 0x1CU
+#define QH_COMPLETE_MASK_SHIFT 8U
+#define QH_HUB_ADDRESS_SHIFT 16U
+#define QH_HUB_PORT_SHIFT 23U
 #define QH_DATA_TOGGLE_CONTROL (1U << 14)
 #define QH_HEAD_OF_LIST (1U << 15)
 #define QH_MAX_PACKET_SHIFT 16U
@@ -144,6 +158,10 @@ struct ehci_qh {
 struct ehci_device {
     int used;
     int is_storage;
+    int is_hid;
+    uint8_t speed;
+    uint8_t hub_address;
+    uint8_t hub_port;
     uint8_t address;
     uint8_t configuration;
     uint16_t max_packet;
@@ -171,7 +189,38 @@ struct ehci {
     uint32_t work_capabilities;
     struct ehci_device devices[MAX_DEVICES];
     unsigned device_count;
+    uint32_t *frame_list;
+    uint64_t frame_list_physical;
+    uint32_t periodic_head;
+    int periodic_running;
 };
+
+#define MAX_PIPES 8U
+#define FRAME_LIST_ENTRIES 1024U
+#define PIPE_QTD_OFFSET 0x100U
+#define PIPE_BUFFER_OFFSET 0x200U
+#define PIPE_FAILURE_LIMIT 16U
+#define REPORT_DESCRIPTOR_BYTES 1024U
+
+struct ehci_pipe {
+    int used;
+    struct ehci *host;
+    struct ehci_device *device;
+    int keyboard;
+    int report_mode;
+    struct hid_mouse_layout layout;
+    uint8_t endpoint;
+    uint16_t packet;
+    struct ehci_qh *qh;
+    struct ehci_qtd *qtd;
+    uint8_t *buffer;
+    uint64_t physical;
+    uint8_t previous[HID_KEYBOARD_REPORT_BYTES];
+    unsigned failures;
+};
+
+static struct ehci_pipe pipes[MAX_PIPES];
+static int transfer_busy;
 
 static struct ehci controllers[MAX_CONTROLLERS];
 static unsigned controller_count;
@@ -432,24 +481,39 @@ static void async_kick(struct ehci *host) {
                    USBSTS_ASYNC_RUNNING, ASYNC_KICK_TIMEOUT_NS);
 }
 
+static void endpoint_fields(const struct ehci_device *device, uint8_t endpoint,
+                            uint16_t max_packet, int is_control,
+                            uint32_t *characteristics, uint32_t *capabilities) {
+    uint32_t fields = device->address | ((uint32_t)endpoint << QH_ENDPOINT_SHIFT) |
+                      ((uint32_t)device->speed << QH_SPEED_SHIFT) |
+                      ((uint32_t)max_packet << QH_MAX_PACKET_SHIFT);
+    uint32_t caps = 1U << QH_MULT_SHIFT;
+    if (device->speed == SPEED_HIGH) {
+        fields |= 3U << QH_RELOAD_SHIFT;
+    } else {
+        if (is_control) fields |= QH_CONTROL_ENDPOINT;
+        caps |= ((uint32_t)device->hub_address << QH_HUB_ADDRESS_SHIFT) |
+                ((uint32_t)device->hub_port << QH_HUB_PORT_SHIFT);
+    }
+    *characteristics = fields;
+    *capabilities = caps;
+}
+
 static int run_qtds(struct ehci *host, struct ehci_device *device,
                     uint8_t endpoint, uint16_t max_packet, int is_control,
                     struct ehci_qtd *first, struct ehci_qtd *last,
                     uint64_t timeout_ns) {
     struct ehci_qh *work_qh = host->work_qh;
+    transfer_busy++;
 
     dma_store32(&work_qh->overlay_next, LINK_TERMINATE);
     dma_store32(&work_qh->overlay_token, 0);
     dma_store32(&work_qh->overlay_alternate, LINK_TERMINATE);
     dma_store32(&work_qh->current_qtd, 0);
 
-    (void)is_control;
-    uint32_t characteristics = device->address |
-                               ((uint32_t)endpoint << QH_ENDPOINT_SHIFT) |
-                               QH_SPEED_HIGH | QH_DATA_TOGGLE_CONTROL |
-                               ((uint32_t)max_packet << QH_MAX_PACKET_SHIFT) |
-                               (3U << QH_RELOAD_SHIFT);
-    uint32_t capabilities = (1U << QH_MULT_SHIFT);
+    uint32_t characteristics, capabilities;
+    endpoint_fields(device, endpoint, max_packet, is_control, &characteristics, &capabilities);
+    characteristics |= QH_DATA_TOGGLE_CONTROL;
     if (characteristics != host->work_characteristics ||
         capabilities != host->work_capabilities) {
         dma_store32(&work_qh->characteristics, characteristics);
@@ -495,6 +559,7 @@ static int run_qtds(struct ehci *host, struct ehci_device *device,
 
     dma_store32(&work_qh->overlay_next, LINK_TERMINATE);
     if (abandoned) async_advance(host);
+    transfer_busy--;
     return status;
 }
 
@@ -588,10 +653,14 @@ static const char *port_name(unsigned where) {
 }
 
 static int address_device(struct ehci *host, struct ehci_device *device,
-                          uint8_t address, unsigned where) {
+                          uint8_t address, unsigned where, uint8_t speed,
+                          uint8_t hub_address, uint8_t hub_port) {
     memset(device, 0, sizeof(*device));
     device->address = 0;
-    device->max_packet = 64;
+    device->speed = speed;
+    device->hub_address = hub_address;
+    device->hub_port = hub_port;
+    device->max_packet = speed == SPEED_HIGH ? 64 : 8;
 
     uint8_t header[8];
     if (control_transfer(host, device, 0x80U, USB_REQUEST_GET_DESCRIPTOR,
@@ -612,8 +681,80 @@ static int address_device(struct ehci *host, struct ehci_device *device,
     return header[4];
 }
 
-static int enumerate_storage(struct ehci *host, struct ehci_device *device,
-                             unsigned where) {
+static const char *speed_name(uint8_t speed) {
+    return speed == SPEED_HIGH ? "high" : speed == SPEED_LOW ? "low" : "full";
+}
+
+static void link_pipe(struct ehci *host, struct ehci_pipe *pipe) {
+    dma_store32(&pipe->qh->horizontal, host->periodic_head);
+    host->periodic_head = (uint32_t)pipe->physical | LINK_TYPE_QH;
+    for (unsigned frame = 0; frame < FRAME_LIST_ENTRIES; frame++)
+        dma_store32(&host->frame_list[frame], host->periodic_head);
+}
+
+static void queue_report(struct ehci_pipe *pipe) {
+    build_qtd(pipe->qtd, QTD_PID_IN, pipe->physical + PIPE_BUFFER_OFFSET, pipe->packet, 0);
+    dma_store32(&pipe->qh->overlay_next, (uint32_t)pipe->physical + PIPE_QTD_OFFSET);
+    dma_store32(&pipe->qh->overlay_token, dma_load32(&pipe->qh->overlay_token) & QTD_DATA_TOGGLE);
+}
+
+static struct ehci_pipe *open_pipe(struct ehci *host, struct ehci_device *device,
+                                   uint8_t endpoint, uint16_t packet) {
+    struct ehci_pipe *pipe = NULL;
+    for (unsigned index = 0; index < MAX_PIPES; index++)
+        if (!pipes[index].used) {
+            pipe = &pipes[index];
+            break;
+        }
+    if (!pipe || packet > 4096U - PIPE_BUFFER_OFFSET) return NULL;
+    if (!host->frame_list) {
+        host->frame_list = dma_alloc_page(&host->frame_list_physical);
+        if (!host->frame_list) return NULL;
+        host->periodic_head = LINK_TERMINATE;
+        for (unsigned frame = 0; frame < FRAME_LIST_ENTRIES; frame++)
+            dma_store32(&host->frame_list[frame], LINK_TERMINATE);
+    }
+    memset(pipe, 0, sizeof(*pipe));
+    uint8_t *page = dma_alloc_page(&pipe->physical);
+    if (!page) return NULL;
+    pipe->host = host;
+    pipe->device = device;
+    pipe->endpoint = endpoint & 0x0FU;
+    pipe->packet = packet;
+    pipe->qh = (struct ehci_qh *)page;
+    pipe->qtd = (struct ehci_qtd *)(page + PIPE_QTD_OFFSET);
+    pipe->buffer = page + PIPE_BUFFER_OFFSET;
+
+    uint32_t characteristics, capabilities;
+    endpoint_fields(device, pipe->endpoint, packet, 0, &characteristics, &capabilities);
+    capabilities |= QH_START_MASK_FRAME;
+    if (device->speed != SPEED_HIGH) capabilities |= QH_COMPLETE_MASK_SPLIT << QH_COMPLETE_MASK_SHIFT;
+    dma_store32(&pipe->qh->characteristics, characteristics);
+    dma_store32(&pipe->qh->capabilities, capabilities);
+    dma_store32(&pipe->qh->current_qtd, 0);
+    dma_store32(&pipe->qh->overlay_alternate, LINK_TERMINATE);
+    dma_store32(&pipe->qh->overlay_token, 0);
+    queue_report(pipe);
+    pipe->used = 1;
+    link_pipe(host, pipe);
+    return pipe;
+}
+
+static void start_periodic(struct ehci *host) {
+    if (!host->frame_list || host->periodic_running) return;
+    mmio_write32(operational(host, EHCI_PERIODICLISTBASE), (uint32_t)host->frame_list_physical);
+    uint32_t command = mmio_read32(operational(host, EHCI_USBCMD));
+    mmio_write32(operational(host, EHCI_USBCMD), command | USBCMD_PERIODIC_ENABLE);
+    if (wait_for(operational(host, EHCI_USBSTS), USBSTS_PERIODIC_RUNNING,
+                 USBSTS_PERIODIC_RUNNING, RESET_TIMEOUT_NS) != 0) {
+        kprintf("EHCI: the periodic schedule would not start\n");
+        return;
+    }
+    host->periodic_running = 1;
+}
+
+static int read_configuration(struct ehci *host, struct ehci_device *device, unsigned where,
+                              uint8_t *configuration, uint16_t *total_out) {
     uint8_t header[9];
     if (control_transfer(host, device, 0x80U, USB_REQUEST_GET_DESCRIPTOR,
                          (uint16_t)(USB_DESCRIPTOR_CONFIGURATION << 8), 0, 9,
@@ -623,33 +764,163 @@ static int enumerate_storage(struct ehci *host, struct ehci_device *device,
     }
     uint16_t total = (uint16_t)(header[2] | ((uint16_t)header[3] << 8));
     if (total > CONFIGURATION_BYTES) total = CONFIGURATION_BYTES;
-
-    static uint8_t configuration[CONFIGURATION_BYTES];
-    if (control_transfer(host, device, 0x80U, USB_REQUEST_GET_DESCRIPTOR,
+    if (total < 9U ||
+        control_transfer(host, device, 0x80U, USB_REQUEST_GET_DESCRIPTOR,
                          (uint16_t)(USB_DESCRIPTOR_CONFIGURATION << 8), 0, total,
                          configuration) != 0) {
         kprintf("EHCI: port %s would not give up its configuration\n", port_name(where));
         return -1;
     }
-
-    if (find_storage_interface(device, configuration, total) != 0) {
-        kprintf("EHCI: port %s is not bulk-only mass storage\n", port_name(where));
-        return -1;
-    }
     device->configuration = header[5];
+    *total_out = total;
+    return 0;
+}
 
+struct hid_interface {
+    uint8_t number;
+    uint8_t subclass;
+    uint8_t protocol;
+    uint8_t endpoint;
+    uint16_t packet;
+    uint16_t descriptor_length;
+};
+
+static unsigned find_hid_interfaces(const uint8_t *buffer, uint16_t total,
+                                    struct hid_interface *out, unsigned room) {
+    unsigned found = 0;
+    struct hid_interface current;
+    int in_hid = 0;
+    memset(&current, 0, sizeof(current));
+    for (uint16_t offset = 0; offset + 2U <= total;) {
+        uint8_t length = buffer[offset];
+        uint8_t type = buffer[offset + 1U];
+        if (length < 2U || offset + length > total) break;
+        if (type == 0x04U && length >= 9U) {
+            in_hid = buffer[offset + 5U] == 0x03U;
+            memset(&current, 0, sizeof(current));
+            current.number = buffer[offset + 2U];
+            current.subclass = buffer[offset + 6U];
+            current.protocol = buffer[offset + 7U];
+        } else if (type == 0x21U && length >= 9U && in_hid) {
+            current.descriptor_length = (uint16_t)(buffer[offset + 7U] | (buffer[offset + 8U] << 8));
+        } else if (type == 0x05U && length >= 7U && in_hid && !current.endpoint &&
+                   (buffer[offset + 2U] & 0x80U) && (buffer[offset + 3U] & 0x03U) == 0x03U) {
+            current.endpoint = buffer[offset + 2U];
+            current.packet = (uint16_t)((buffer[offset + 4U] | (buffer[offset + 5U] << 8)) & 0x7FFU);
+            if (found < room) out[found++] = current;
+            in_hid = 0;
+        }
+        offset = (uint16_t)(offset + length);
+    }
+    return found;
+}
+
+static void list_interfaces(const uint8_t *buffer, uint16_t total, unsigned where) {
+    for (uint16_t offset = 0; offset + 2U <= total;) {
+        uint8_t length = buffer[offset];
+        if (length < 2U || offset + length > total) break;
+        if (buffer[offset + 1U] == 0x04U && length >= 9U)
+            kprintf("EHCI: port %s interface %u: class %u subclass %u protocol %u\n",
+                    port_name(where), (unsigned)buffer[offset + 2U], (unsigned)buffer[offset + 5U],
+                    (unsigned)buffer[offset + 6U], (unsigned)buffer[offset + 7U]);
+        offset = (uint16_t)(offset + length);
+    }
+}
+
+static int start_hid(struct ehci *host, struct ehci_device *device, unsigned where,
+                     const uint8_t *configuration, uint16_t total) {
+    struct hid_interface interfaces[4];
+    unsigned count = find_hid_interfaces(configuration, total, interfaces, 4U);
+    if (!count) return -1;
+    static uint8_t report_descriptor[REPORT_DESCRIPTOR_BYTES];
+    struct hid_mouse_layout layouts[4];
+    int kinds[4];
+    unsigned usable = 0;
+    for (unsigned index = 0; index < count; index++) {
+        struct hid_interface *interface = &interfaces[index];
+        kinds[index] = 0;
+        if (interface->subclass == 1U && interface->protocol == 1U) {
+            kinds[index] = 1;
+            usable++;
+            continue;
+        }
+        uint16_t length = interface->descriptor_length;
+        if (!length || length > REPORT_DESCRIPTOR_BYTES) length = REPORT_DESCRIPTOR_BYTES;
+        memset(report_descriptor, 0, sizeof(report_descriptor));
+        if (control_transfer(host, device, 0x81U, USB_REQUEST_GET_DESCRIPTOR, 0x2200U,
+                             interface->number, length, report_descriptor) == 0 &&
+            hid_parse_mouse(report_descriptor, length, &layouts[index]) == 0) {
+            kinds[index] = 2;
+            usable++;
+        } else if (interface->subclass == 1U && interface->protocol == 2U) {
+            kinds[index] = 3;
+            usable++;
+        } else {
+            kprintf("EHCI: port %s interface %u is HID but not a keyboard or a relative mouse\n",
+                    port_name(where), (unsigned)interface->number);
+        }
+    }
+    if (!usable) return -1;
     if (control_transfer(host, device, 0x00U, USB_REQUEST_SET_CONFIGURATION,
                          device->configuration, 0, 0, NULL) != 0) {
         kprintf("EHCI: port %s refused SET_CONFIGURATION\n", port_name(where));
         return -1;
     }
+    int opened = 0;
+    for (unsigned index = 0; index < count; index++) {
+        struct hid_interface *interface = &interfaces[index];
+        if (!kinds[index]) continue;
+        if (kinds[index] != 2 || interface->subclass == 1U)
+            (void)control_transfer(host, device, 0x21U, 0x0BU, kinds[index] == 2 ? 1U : 0U,
+                                   interface->number, 0, NULL);
+        (void)control_transfer(host, device, 0x21U, 0x0AU, 0, interface->number, 0, NULL);
+        struct ehci_pipe *pipe = open_pipe(host, device, interface->endpoint, interface->packet);
+        if (!pipe) {
+            kprintf("EHCI: port %s has no room for another report pipe\n", port_name(where));
+            continue;
+        }
+        pipe->keyboard = kinds[index] == 1;
+        pipe->report_mode = kinds[index] == 2;
+        if (pipe->report_mode) pipe->layout = layouts[index];
+        opened++;
+        if (kinds[index] == 2)
+            kprintf("EHCI: port %s: mouse at address %u, %s speed, endpoint %x, report %u, %u buttons, %u-bit motion\n",
+                    port_name(where), (unsigned)device->address, speed_name(device->speed),
+                    (unsigned)interface->endpoint, (unsigned)layouts[index].report_id,
+                    (unsigned)layouts[index].buttons, (unsigned)layouts[index].x.size);
+        else
+            kprintf("EHCI: port %s: %s at address %u, %s speed, endpoint %x\n", port_name(where),
+                    kinds[index] == 1 ? "keyboard" : "boot mouse", (unsigned)device->address,
+                    speed_name(device->speed), (unsigned)interface->endpoint);
+    }
+    if (!opened) return -1;
+    device->used = 1;
+    device->is_hid = 1;
+    start_periodic(host);
+    return 0;
+}
 
+static int enumerate_device(struct ehci *host, struct ehci_device *device, unsigned where) {
+    static uint8_t configuration[CONFIGURATION_BYTES];
+    uint16_t total = 0;
+    if (read_configuration(host, device, where, configuration, &total) != 0) return -1;
+    if (start_hid(host, device, where, configuration, total) == 0) return 0;
+    if (find_storage_interface(device, configuration, total) != 0) {
+        kprintf("EHCI: port %s (%s speed) is not a device this driver knows\n", port_name(where),
+                speed_name(device->speed));
+        list_interfaces(configuration, total, where);
+        return -1;
+    }
+    if (control_transfer(host, device, 0x00U, USB_REQUEST_SET_CONFIGURATION,
+                         device->configuration, 0, 0, NULL) != 0) {
+        kprintf("EHCI: port %s refused SET_CONFIGURATION\n", port_name(where));
+        return -1;
+    }
     device->used = 1;
     device->is_storage = 1;
-    kprintf("EHCI: port %s: mass storage at address %u, bulk in %u out %u\n",
-            port_name(where), (unsigned)device->address,
-            (unsigned)device->bulk_in_endpoint,
-            (unsigned)device->bulk_out_endpoint);
+    kprintf("EHCI: port %s: mass storage at address %u, %s speed, bulk in %u out %u\n",
+            port_name(where), (unsigned)device->address, speed_name(device->speed),
+            (unsigned)device->bulk_in_endpoint, (unsigned)device->bulk_out_endpoint);
     return 0;
 }
 
@@ -664,6 +935,7 @@ static int enumerate_storage(struct ehci *host, struct ehci_device *device,
 #define HUB_PORT_CONNECTED (1U << 0)
 #define HUB_PORT_ENABLED (1U << 1)
 #define HUB_PORT_RESETTING (1U << 4)
+#define HUB_PORT_LOW_SPEED (1U << 9)
 #define HUB_PORT_HIGH_SPEED (1U << 10)
 #define HUB_MAX_PORTS 15U
 #define HUB_RESET_POLL_NS (10ULL * 1000ULL * 1000ULL)
@@ -687,7 +959,7 @@ static int hub_port_feature(struct ehci *host, struct ehci_device *hub,
 }
 
 static int hub_reset_port(struct ehci *host, struct ehci_device *hub,
-                          unsigned port, unsigned where) {
+                          unsigned port, uint8_t *speed) {
     if (hub_port_feature(host, hub, port, HUB_FEATURE_PORT_RESET, 1) != 0)
         return -1;
 
@@ -701,10 +973,8 @@ static int hub_reset_port(struct ehci *host, struct ehci_device *hub,
     hub_port_feature(host, hub, port, HUB_FEATURE_C_PORT_RESET, 0);
 
     if (!(status & HUB_PORT_ENABLED)) return -1;
-    if (!(status & HUB_PORT_HIGH_SPEED)) {
-        kprintf("EHCI: port %s is not high speed, skipped\n", port_name(where));
-        return -1;
-    }
+    *speed = (status & HUB_PORT_HIGH_SPEED) ? SPEED_HIGH
+             : (status & HUB_PORT_LOW_SPEED) ? SPEED_LOW : SPEED_FULL;
     delay_ns(RESET_RECOVERY_NS);
     return 0;
 }
@@ -743,18 +1013,19 @@ static void enumerate_hub(struct ehci *host, struct ehci_device *hub,
         uint32_t status = 0;
         if (hub_port_status(host, hub, port, &status) != 0) continue;
         if (!(status & HUB_PORT_CONNECTED)) continue;
-        if (hub_reset_port(host, hub, port, where) != 0) continue;
+        uint8_t speed = SPEED_HIGH;
+        if (hub_reset_port(host, hub, port, &speed) != 0) continue;
 
-        struct ehci_device candidate;
-        int class_code = address_device(host, &candidate, *next_address, where);
+        struct ehci_device *candidate = &host->devices[host->device_count];
+        int class_code = address_device(host, candidate, *next_address, where, speed,
+                                        hub->address, (uint8_t)port);
         if (class_code < 0) continue;
         (*next_address)++;
         if (class_code == (int)USB_CLASS_HUB) {
             kprintf("EHCI: port %s is a second hub, not followed\n", port_name(where));
             continue;
         }
-        if (enumerate_storage(host, &candidate, where) == 0)
-            host->devices[host->device_count++] = candidate;
+        if (enumerate_device(host, candidate, where) == 0) host->device_count++;
     }
 }
 
@@ -766,7 +1037,7 @@ static void enumerate_ports(struct ehci *host) {
 
         unsigned where = (port + 1U) << 4;
         struct ehci_device candidate;
-        int class_code = address_device(host, &candidate, next_address, where);
+        int class_code = address_device(host, &candidate, next_address, where, SPEED_HIGH, 0, 0);
         if (class_code < 0) continue;
         next_address++;
 
@@ -774,8 +1045,9 @@ static void enumerate_ports(struct ehci *host) {
             enumerate_hub(host, &candidate, port + 1U, &next_address);
             continue;
         }
-        if (enumerate_storage(host, &candidate, where) == 0)
-            host->devices[host->device_count++] = candidate;
+        host->devices[host->device_count] = candidate;
+        if (enumerate_device(host, &host->devices[host->device_count], where) == 0)
+            host->device_count++;
     }
     if (host->device_count) return;
 
@@ -814,6 +1086,38 @@ static int clear_endpoint_halt(struct ehci *host, struct ehci_device *device,
     uint16_t address = (uint16_t)(endpoint | (in ? 0x80U : 0x00U));
     return control_transfer(host, device, 0x02U, USB_REQUEST_CLEAR_FEATURE,
                             USB_FEATURE_ENDPOINT_HALT, address, 0, NULL);
+}
+
+static void service_pipe(struct ehci_pipe *pipe) {
+    uint32_t token = dma_load32(&pipe->qtd->token);
+    if (token & QTD_STATUS_ACTIVE) return;
+    if (token & QTD_STATUS_HALTED) {
+        if (transfer_busy) return;
+        pipe->failures++;
+        if (pipe->failures > PIPE_FAILURE_LIMIT) {
+            if (pipe->failures == PIPE_FAILURE_LIMIT + 1U)
+                kprintf("EHCI: endpoint %u at address %u keeps failing (token %x); left stopped\n",
+                        (unsigned)pipe->endpoint, (unsigned)pipe->device->address, (unsigned)token);
+            return;
+        }
+        (void)clear_endpoint_halt(pipe->host, pipe->device, pipe->endpoint, 1);
+        dma_store32(&pipe->qh->overlay_token, 0);
+        queue_report(pipe);
+        return;
+    }
+    uint32_t remaining = (token >> QTD_LENGTH_SHIFT) & 0x7FFFU;
+    uint32_t length = pipe->packet > remaining ? pipe->packet - remaining : 0;
+    pipe->failures = 0;
+    if (length && !(token & QTD_STATUS_ERROR_MASK)) {
+        if (pipe->keyboard) hid_keyboard_report(pipe->previous, pipe->buffer, length);
+        else hid_mouse_report(pipe->report_mode ? &pipe->layout : NULL, pipe->buffer, length);
+    }
+    queue_report(pipe);
+}
+
+void ehci_poll(void) {
+    for (unsigned index = 0; index < MAX_PIPES; index++)
+        if (pipes[index].used) service_pipe(&pipes[index]);
 }
 
 static int ehci_bulk_transfer(int index, int in, uint64_t physical,

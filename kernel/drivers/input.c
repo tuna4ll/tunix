@@ -12,6 +12,7 @@ extern void kprintf(const char *fmt, ...);
 #include "../include/process.h"
 #include "../include/time.h"
 #include "../include/xhci.h"
+#include "../include/ehci.h"
 #include "../include/tty.h"
 #include "../include/usercopy.h"
 #include "../include/vt.h"
@@ -554,6 +555,7 @@ void input_poll(void) {
     input_drain_controller();
     cpu_irq_restore(flags);
     xhci_poll();
+    ehci_poll();
 }
 
 void input_irq(void) {
