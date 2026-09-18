@@ -20,6 +20,10 @@ On top of it, runit as PID 1 with udevd and agetty, Void's bash, coreutils,
 sudo, curl and htop, and a Weston desktop that gets the display through seatd,
 with Firefox a click away on the panel.
 
+Loadable modules, so `lsmod`, `modprobe` and `lspci -k` answer what they answer
+on Linux: the sound and RTL8139 drivers are `.ko` files that udev loads from the
+device's own modalias.
+
 Underneath: a block layer over IDE, AHCI, NVMe and USB storage, with GPT and MBR
 partitions and a read-write ext3 root whose journal the kernel writes and
 replays; IPv4 with both ends of TCP over RTL8139; a framebuffer console with

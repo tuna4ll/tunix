@@ -49,6 +49,9 @@ Input no longer needs this: libinput drives both evdev nodes under weston.
 
 ## 7. Hotplug that means something
 
-Uevents are sent and udevd acts on them, but every device this kernel has
-exists from boot and is announced once. Nothing appears or disappears later, so
-the half of udev that matters most on real hardware has never run.
+Half of this is done: a sound card now appears when `snd_hda` is loaded and
+disappears when it is removed, devfs and sysfs publish and withdraw its nodes
+around that, and udev loads the module in the first place from the device's
+modalias (see [Modules](modules.md)). USB devices already come and go. What is
+still missing is a PCI device arriving on a live machine, which QEMU can do and
+nothing here answers.
