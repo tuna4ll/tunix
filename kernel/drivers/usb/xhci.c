@@ -2,6 +2,7 @@
 #include <stddef.h>
 
 #include "../../include/cpu.h"
+#include "../../include/hid.h"
 #include "../../include/irq.h"
 #include "../../include/pci.h"
 #include "../../include/pmm.h"
@@ -184,6 +185,10 @@ extern void kprintf(const char *fmt, ...);
 #define DESCRIPTOR_INTERFACE 4U
 #define DESCRIPTOR_ENDPOINT 5U
 #define DESCRIPTOR_HUB 0x29U
+#define DESCRIPTOR_HID 0x21U
+#define DESCRIPTOR_HID_REPORT 0x22U
+#define REQUEST_TYPE_STANDARD_INTERFACE_IN 0x81U
+#define HID_PROTOCOL_REPORT 1U
 
 #define CLASS_HID 3U
 #define CLASS_STORAGE 8U
@@ -270,6 +275,11 @@ struct endpoint_result {
 
 struct hid_function {
     uint8_t protocol;
+    uint8_t subclass;
+    uint8_t interface_protocol;
+    uint16_t descriptor_length;
+    int report_mode;
+    struct hid_mouse_layout layout;
     uint8_t interface;
     uint8_t address;
     uint8_t interval;
@@ -312,6 +322,8 @@ struct usb_device {
 
     struct hid_function hid[MAX_HID];
     unsigned hid_count;
+    uint8_t interfaces[8][3];
+    unsigned interface_count;
 
     int storage;
     uint8_t storage_interface;
@@ -895,6 +907,14 @@ static void keyboard_report(struct hid_function *function, uint32_t length) {
 }
 
 static void mouse_report(struct hid_function *function, uint32_t length) {
+    if (function->report_mode) {
+        int dx, dy, wheel;
+        uint32_t buttons;
+        if (hid_decode_mouse(&function->layout, function->report, length, &dx, &dy, &wheel, &buttons) != 0)
+            return;
+        input_external_mouse(dx, dy, wheel, (uint8_t)(buttons & MOUSE_BUTTON_MASK));
+        return;
+    }
     if (length < 3U) return;
     const uint8_t *report = function->report;
     int wheel = length >= 4U ? (int)(int8_t)report[3] : 0;
@@ -1005,11 +1025,19 @@ static void parse_configuration(struct usb_device *device, uint16_t total) {
             subclass = buffer[offset + 6U];
             protocol = buffer[offset + 7U];
             function = NULL;
-            if (class_code == CLASS_HID && subclass == HID_SUBCLASS_BOOT &&
-                (protocol == HID_KEYBOARD || protocol == HID_MOUSE) && device->hid_count < MAX_HID) {
+            if (device->interface_count < 8U) {
+                device->interfaces[device->interface_count][0] = class_code;
+                device->interfaces[device->interface_count][1] = subclass;
+                device->interfaces[device->interface_count][2] = protocol;
+                device->interface_count++;
+            }
+            if (class_code == CLASS_HID && device->hid_count < MAX_HID) {
                 function = &device->hid[device->hid_count];
                 memset(function, 0, sizeof(*function));
-                function->protocol = protocol;
+                function->protocol = subclass == HID_SUBCLASS_BOOT && protocol == HID_KEYBOARD
+                                         ? HID_KEYBOARD : HID_MOUSE;
+                function->subclass = subclass;
+                function->interface_protocol = protocol;
                 function->interface = interface;
             }
             if (class_code == CLASS_HUB) device->hub = 1;
@@ -1017,6 +1045,8 @@ static void parse_configuration(struct usb_device *device, uint16_t total) {
                 protocol == STORAGE_BULK_ONLY && !device->storage_interface &&
                 !device->bulk_in_address)
                 device->storage_interface = (uint8_t)(interface | 0x80U);
+        } else if (type == DESCRIPTOR_HID && length >= 9U && function) {
+            function->descriptor_length = (uint16_t)(buffer[offset + 7U] | (buffer[offset + 8U] << 8));
         } else if (type == DESCRIPTOR_ENDPOINT && length >= 7U) {
             uint8_t address = buffer[offset + 2U];
             uint8_t attributes = buffer[offset + 3U];
@@ -1055,8 +1085,33 @@ static void parse_configuration(struct usb_device *device, uint16_t total) {
     if (device->device_class == CLASS_HUB) device->hub = 1;
 }
 
+static int classify_hid(struct usb_device *device, struct hid_function *function) {
+    if (function->protocol == HID_KEYBOARD) return 0;
+    uint16_t length = function->descriptor_length;
+    if (!length || length > RING_BYTES) length = RING_BYTES;
+    memset(device->buffer, 0, RING_BYTES);
+    if (control(device, REQUEST_TYPE_STANDARD_INTERFACE_IN, REQUEST_GET_DESCRIPTOR,
+                DESCRIPTOR_HID_REPORT << 8, function->interface, length) == 0 &&
+        hid_parse_mouse(device->buffer, length, &function->layout) == 0) {
+        function->report_mode = 1;
+        return 0;
+    }
+    if (function->subclass == HID_SUBCLASS_BOOT && function->interface_protocol == HID_MOUSE) return 0;
+    kprintf("XHCI: %s interface %u is HID but not a keyboard or a relative mouse\n", device->name,
+            (unsigned)function->interface);
+    return -1;
+}
+
 static int start_hid(struct usb_device *device) {
     uint32_t added = 0, entries = 1;
+    unsigned kept = 0;
+    for (unsigned index = 0; index < device->hid_count; index++) {
+        if (classify_hid(device, &device->hid[index]) != 0) continue;
+        if (kept != index) device->hid[kept] = device->hid[index];
+        kept++;
+    }
+    device->hid_count = kept;
+    if (!kept) return -1;
     clear_input(device);
     for (unsigned index = 0; index < device->hid_count; index++) {
         struct hid_function *function = &device->hid[index];
@@ -1071,8 +1126,9 @@ static int start_hid(struct usb_device *device) {
     if (configure(device, added, entries) != 0) return -1;
     for (unsigned index = 0; index < device->hid_count; index++) {
         struct hid_function *function = &device->hid[index];
-        (void)control(device, REQUEST_TYPE_CLASS_INTERFACE, REQUEST_HID_SET_PROTOCOL, 0,
-                      function->interface, 0);
+        if (!function->report_mode || function->subclass == HID_SUBCLASS_BOOT)
+            (void)control(device, REQUEST_TYPE_CLASS_INTERFACE, REQUEST_HID_SET_PROTOCOL,
+                          function->report_mode ? HID_PROTOCOL_REPORT : 0, function->interface, 0);
         (void)control(device, REQUEST_TYPE_CLASS_INTERFACE, REQUEST_HID_SET_IDLE, 0,
                       function->interface, 0);
         hid_arm(device, function);
@@ -1228,15 +1284,19 @@ static struct usb_device *attach(struct xhci_host *host, struct usb_device *pare
         device->started = 1;
         return device;
     }
-    if (device->hid_count) {
-        if (start_hid(device) != 0) {
-            kprintf("XHCI: %s would not start reporting\n", device->name);
-            goto fail;
+    if (device->hid_count && start_hid(device) == 0) {
+        for (unsigned index = 0; index < device->hid_count; index++) {
+            struct hid_function *function = &device->hid[index];
+            if (function->report_mode)
+                kprintf("XHCI: mouse at %s slot %u, endpoint %x, report %u, %u buttons, %u-bit motion\n",
+                        device->name, (unsigned)slot, (unsigned)function->address,
+                        (unsigned)function->layout.report_id, (unsigned)function->layout.buttons,
+                        (unsigned)function->layout.x.size);
+            else
+                kprintf("XHCI: %s at %s slot %u, endpoint %x reporting\n",
+                        function->protocol == HID_KEYBOARD ? "keyboard" : "boot mouse",
+                        device->name, (unsigned)slot, (unsigned)function->address);
         }
-        for (unsigned index = 0; index < device->hid_count; index++)
-            kprintf("XHCI: %s at %s slot %u, endpoint %x reporting\n",
-                    device->hid[index].protocol == HID_KEYBOARD ? "keyboard" : "mouse",
-                    device->name, (unsigned)slot, (unsigned)device->hid[index].address);
         device->started = 1;
         return device;
     }
@@ -1252,6 +1312,10 @@ static struct usb_device *attach(struct xhci_host *host, struct usb_device *pare
     }
     kprintf("XHCI: %s slot %u is not a device this driver knows (class %u)\n", device->name,
             (unsigned)slot, (unsigned)device->device_class);
+    for (unsigned index = 0; index < device->interface_count; index++)
+        kprintf("XHCI: %s interface %u: class %u subclass %u protocol %u\n", device->name, index,
+                (unsigned)device->interfaces[index][0], (unsigned)device->interfaces[index][1],
+                (unsigned)device->interfaces[index][2]);
     device->started = 1;
     return device;
 
