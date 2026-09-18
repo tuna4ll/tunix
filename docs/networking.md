@@ -37,8 +37,12 @@ interrupt acknowledges the device; `net_poll()` takes completed buffers from
 the used ring and enters the stack where it is safe to do so.
 
 RTL8139 remains the fallback for real hardware and for
-`QEMU_NET="-netdev user,id=net0 -device rtl8139,netdev=net0"`. Its receive path
-is the one below.
+`QEMU_NET="-netdev user,id=net0 -device rtl8139,netdev=net0"`, and it is a
+module (`kernel/modules/x86_64/rtl8139.c`): udev loads it from the card's PCI
+modalias and it registers itself, so `eth0` exists from the moment a driver
+claims a card rather than from boot. Either driver registers a `struct
+net_adapter` and the stack above them never names one. Its receive path is the
+one below.
 
 ## How an RTL8139 frame gets in
 

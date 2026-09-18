@@ -13,12 +13,18 @@ Everything the kernel addresses lives in the top half. Four regions matter:
 | `0xFFFFFE8000000000` | direct map — all of physical memory | 512 GiB of room |
 | `0xFFFFFF0000000000` | kernel heap | grows on demand |
 | `0xFFFFFFFF80000000` | kernel image, and the first GiB of RAM | 1 GiB |
+| `0xFFFFFFFFC0000000` | loadable modules (x86-64) | 16 MiB |
 | `0xFFFFFFFFF0000000` | framebuffer | as large as the mode needs |
 | `0xFFFFFFFFFF000000` | device registers | 16 MiB |
 
-The last three share one PML4 entry — the top 2 GiB — because that is where
+The last four share one PML4 entry — the top 2 GiB — because that is where
 `-mcmodel=kernel` requires every symbol to be. The first two have entries of
 their own and are only there because a pointer can be computed to them.
+
+A module's window has to satisfy its relocations rather than the code model,
+which is why aarch64 puts it somewhere else entirely — 64 MiB above the image,
+at `0xFFFFFFFF84000000`, because `CALL26` reaches only ±128 MiB. See
+[Modules](modules.md).
 
 ## Why the ceiling existed
 
@@ -54,12 +60,15 @@ the top 2 GiB, so the first gigabyte of RAM is still mapped at `KERNEL_BASE` —
 that mapping is how the image is reachable at all.
 
 **`vmm_virt_to_phys_direct` has to accept two windows.** Most callers hand it
-something `vmm_phys_to_virt` gave them, which is in the direct map. But the DMA
-drivers hand it a *static* buffer: rtl8139's receive ring and transmit slots are
-plain arrays in the kernel image, living at `KERNEL_BASE`. They only ever worked
-because the direct map *was* `KERNEL_BASE`. Both windows map physical memory at
-a fixed offset, so both can be answered — refusing the second would hand the
-network card a garbage address to write into.
+something `vmm_phys_to_virt` gave them, which is in the direct map. But a DMA
+driver could hand it a *static* buffer in the kernel image, living at
+`KERNEL_BASE` — rtl8139's receive ring and transmit slots were such arrays until
+the driver became a module, and they only ever worked because the direct map
+*was* `KERNEL_BASE`. Both windows map physical memory at a fixed offset, so both
+can be answered — refusing the second would hand the network card a garbage
+address to write into. A module cannot do this at all: its pages are neither
+window, which is why `dma_alloc()` is the only way a module gets memory a device
+can be pointed at.
 
 **The map has to be built through the old window.** `page_table_pointer` answers
 with an address in the direct map, which does not exist while the direct map is

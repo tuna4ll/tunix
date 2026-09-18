@@ -5,8 +5,13 @@ Tunix has one sound card: the Intel HD Audio controller, behind ALSA's
 through it by way of OpenAL Soft.
 
 ```
-game -> OpenAL Soft -> alsa-lib -> /dev/snd/pcmC0D0p -> hda.c -> the controller
+game -> OpenAL Soft -> alsa-lib -> /dev/snd/pcmC0D0p -> snd_hda.ko -> the controller
 ```
+
+The driver is a module (`kernel/modules/snd_hda.c`), loaded by udev from the
+controller's PCI modalias; `/dev/snd` and the sound class in sysfs appear when
+it registers the card and go away when it is removed. See
+[Modules](modules.md).
 
 The driver was written and verified in 2026-08 against programs built here.
 Everything below is what it took to make Void's stack, which had never touched
