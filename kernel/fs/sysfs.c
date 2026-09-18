@@ -27,7 +27,7 @@ static void append_number(char *out, size_t limit, size_t *used, uint32_t value)
     while (count-- > 0 && *used + 1 < limit) out[(*used)++] = digits[count];
 }
 
-#define SYSFS_MAX_DEVICES 8
+#define SYSFS_MAX_DEVICES 40
 
 struct sysfs_device {
     char devpath[64];
@@ -97,6 +97,15 @@ static void append_hex(char *out, size_t limit, size_t *used, uint32_t value,
     }
 }
 
+static void append_hex_upper(char *out, size_t limit, size_t *used, uint32_t value,
+                             unsigned digits) {
+    static const char alphabet[] = "0123456789ABCDEF";
+    while (digits--) {
+        if (*used + 1 >= limit) return;
+        out[(*used)++] = alphabet[(value >> (digits * 4)) & 0xFU];
+    }
+}
+
 static void publish_hex_attribute(const char *directory, const char *name,
                                   uint32_t value, unsigned digits) {
     char path[224];
@@ -120,17 +129,67 @@ static void append_hex64(char *out, size_t limit, size_t *used, uint64_t value) 
     append_hex(out, limit, used, (uint32_t)value, 8);
 }
 
+static void pci_slot_name(char *out, size_t limit, size_t *used,
+                          const struct pci_device *device) {
+    append_string(out, limit, used, "0000:");
+    append_hex(out, limit, used, device->bus, 2);
+    append_string(out, limit, used, ":");
+    append_hex(out, limit, used, device->slot, 2);
+    append_string(out, limit, used, ".");
+    append_hex(out, limit, used, device->function, 1);
+}
+
+static void pci_device_path(char *out, size_t limit, const struct pci_device *device,
+                            const char *suffix) {
+    size_t used = 0;
+    append_string(out, limit, &used, "/sys/devices/pci0000:00/");
+    pci_slot_name(out, limit, &used, device);
+    if (suffix) append_string(out, limit, &used, suffix);
+    out[used] = '\0';
+}
+
+static void pci_modalias(char *out, size_t limit, size_t *used,
+                         const struct pci_device *device, const uint8_t *config) {
+    append_string(out, limit, used, "pci:v");
+    append_hex_upper(out, limit, used, device->vendor_id, 8);
+    append_string(out, limit, used, "d");
+    append_hex_upper(out, limit, used, device->device_id, 8);
+    append_string(out, limit, used, "sv");
+    append_hex_upper(out, limit, used, (uint32_t)(config[44] | (config[45] << 8)), 8);
+    append_string(out, limit, used, "sd");
+    append_hex_upper(out, limit, used, (uint32_t)(config[46] | (config[47] << 8)), 8);
+    append_string(out, limit, used, "bc");
+    append_hex_upper(out, limit, used, device->class_code, 2);
+    append_string(out, limit, used, "sc");
+    append_hex_upper(out, limit, used, device->subclass, 2);
+    append_string(out, limit, used, "i");
+    append_hex_upper(out, limit, used, device->prog_if, 2);
+}
+
+static struct sysfs_device *register_uevent(const char *devpath, const char *file,
+                                            const char *properties, size_t length) {
+    struct vfs_node *node = vfs_create_file(file, properties, length, 0, 1);
+    if (!node || sysfs_device_count >= SYSFS_MAX_DEVICES) return NULL;
+
+    struct sysfs_device *device = &sysfs_devices[sysfs_device_count++];
+    size_t at = 0;
+    append_string(device->devpath, sizeof(device->devpath), &at, devpath);
+    device->devpath[at] = '\0';
+    size_t out = 0;
+    for (size_t index = 0; index < length && out + 1 < sizeof(device->properties);
+         index++)
+        device->properties[out++] = properties[index] == '\n' ? 0 : properties[index];
+    device->properties_length = out;
+    node->fs_private = device;
+    node->write = uevent_write;
+    node->mode = 0644;
+    return device;
+}
+
 static void publish_pci_device(const struct pci_device *device, void *context) {
     (void)context;
     char directory[96];
-    size_t used = 0;
-    append_string(directory, sizeof(directory), &used, "/sys/bus/pci/devices/0000:");
-    append_hex(directory, sizeof(directory), &used, device->bus, 2);
-    append_string(directory, sizeof(directory), &used, ":");
-    append_hex(directory, sizeof(directory), &used, device->slot, 2);
-    append_string(directory, sizeof(directory), &used, ".");
-    append_hex(directory, sizeof(directory), &used, device->function, 1);
-    directory[used] = '\0';
+    pci_device_path(directory, sizeof(directory), device, NULL);
     if (!vfs_mkdir_p(directory)) return;
 
     uint8_t config[256];
@@ -144,7 +203,7 @@ static void publish_pci_device(const struct pci_device *device, void *context) {
     }
 
     char file[128];
-    used = 0;
+    size_t used = 0;
     append_string(file, sizeof(file), &used, directory);
     append_string(file, sizeof(file), &used, "/config");
     file[used] = '\0';
@@ -152,6 +211,11 @@ static void publish_pci_device(const struct pci_device *device, void *context) {
 
     publish_hex_attribute(directory, "vendor", device->vendor_id, 4);
     publish_hex_attribute(directory, "device", device->device_id, 4);
+    publish_hex_attribute(directory, "revision", config[8], 2);
+    publish_hex_attribute(directory, "subsystem_vendor",
+                          (uint32_t)(config[44] | (config[45] << 8)), 4);
+    publish_hex_attribute(directory, "subsystem_device",
+                          (uint32_t)(config[46] | (config[47] << 8)), 4);
     publish_hex_attribute(directory, "class",
                           ((uint32_t)device->class_code << 16) |
                           ((uint32_t)device->subclass << 8) | device->prog_if, 6);
@@ -182,10 +246,153 @@ static void publish_pci_device(const struct pci_device *device, void *context) {
     append_string(file, sizeof(file), &used, "/resource");
     file[used] = '\0';
     (void)vfs_create_file(file, resource, length, 0, 1);
+
+    char alias[80];
+    size_t alias_length = 0;
+    pci_modalias(alias, sizeof(alias), &alias_length, device, config);
+    alias[alias_length] = '\0';
+    used = 0;
+    append_string(file, sizeof(file), &used, directory);
+    append_string(file, sizeof(file), &used, "/modalias");
+    file[used] = '\0';
+    char alias_file[96];
+    size_t alias_file_length = 0;
+    append_string(alias_file, sizeof(alias_file), &alias_file_length, alias);
+    append_string(alias_file, sizeof(alias_file), &alias_file_length, "\n");
+    (void)vfs_create_file(file, alias_file, alias_file_length, 0, 1);
+
+    char slot[16];
+    size_t slot_length = 0;
+    pci_slot_name(slot, sizeof(slot), &slot_length, device);
+    slot[slot_length] = '\0';
+
+    char devpath[80];
+    size_t devpath_length = 0;
+    append_string(devpath, sizeof(devpath), &devpath_length, "/devices/pci0000:00/");
+    append_string(devpath, sizeof(devpath), &devpath_length, slot);
+    devpath[devpath_length] = '\0';
+
+    char properties[256];
+    length = 0;
+    append_string(properties, sizeof(properties), &length, "DRIVER=\nPCI_CLASS=");
+    append_hex(properties, sizeof(properties), &length,
+               ((uint32_t)device->class_code << 16) |
+               ((uint32_t)device->subclass << 8) | device->prog_if, 6);
+    append_string(properties, sizeof(properties), &length, "\nPCI_ID=");
+    append_hex(properties, sizeof(properties), &length, device->vendor_id, 4);
+    append_string(properties, sizeof(properties), &length, ":");
+    append_hex(properties, sizeof(properties), &length, device->device_id, 4);
+    append_string(properties, sizeof(properties), &length, "\nPCI_SLOT_NAME=");
+    append_string(properties, sizeof(properties), &length, slot);
+    append_string(properties, sizeof(properties), &length, "\nSUBSYSTEM=pci\nMODALIAS=");
+    append_string(properties, sizeof(properties), &length, alias);
+    append_string(properties, sizeof(properties), &length, "\n");
+
+    used = 0;
+    append_string(file, sizeof(file), &used, directory);
+    append_string(file, sizeof(file), &used, "/uevent");
+    file[used] = '\0';
+    (void)register_uevent(devpath, file, properties, length);
+
+    used = 0;
+    append_string(file, sizeof(file), &used, directory);
+    append_string(file, sizeof(file), &used, "/subsystem");
+    file[used] = '\0';
+    (void)vfs_create_symlink(file, "/sys/bus/pci", 0);
+
+    char link[96];
+    used = 0;
+    append_string(link, sizeof(link), &used, "/sys/bus/pci/devices/");
+    append_string(link, sizeof(link), &used, slot);
+    link[used] = '\0';
+    char target[80];
+    used = 0;
+    append_string(target, sizeof(target), &used, "../../../devices/pci0000:00/");
+    append_string(target, sizeof(target), &used, slot);
+    target[used] = '\0';
+    (void)vfs_create_symlink(link, target, 0);
+}
+
+static void driver_directory(char *out, size_t limit, const char *driver,
+                             const char *suffix) {
+    size_t used = 0;
+    append_string(out, limit, &used, "/sys/bus/pci/drivers/");
+    append_string(out, limit, &used, driver);
+    if (suffix) append_string(out, limit, &used, suffix);
+    out[used] = '\0';
+}
+
+void sysfs_pci_driver_added(const char *driver) {
+    char path[96];
+    driver_directory(path, sizeof(path), driver, NULL);
+    struct vfs_node *node = vfs_mkdir_p(path);
+    if (node) node->mode = 0555;
+}
+
+void sysfs_pci_driver_removed(const char *driver) {
+    char path[96];
+    driver_directory(path, sizeof(path), driver, NULL);
+    struct vfs_node *node = vfs_lookup(path);
+    if (node && node->parent) (void)vfs_detach_child(node->parent, node);
+}
+
+void sysfs_pci_bound(const struct pci_device *device, const char *driver) {
+    char slot[16];
+    size_t slot_length = 0;
+    pci_slot_name(slot, sizeof(slot), &slot_length, device);
+    slot[slot_length] = '\0';
+
+    char link[128];
+    pci_device_path(link, sizeof(link), device, "/driver");
+    char target[96];
+    size_t used = 0;
+    append_string(target, sizeof(target), &used, "../../../bus/pci/drivers/");
+    append_string(target, sizeof(target), &used, driver);
+    target[used] = '\0';
+    (void)vfs_create_symlink(link, target, 0);
+
+    char reverse[128];
+    used = 0;
+    append_string(reverse, sizeof(reverse), &used, "/sys/bus/pci/drivers/");
+    append_string(reverse, sizeof(reverse), &used, driver);
+    append_string(reverse, sizeof(reverse), &used, "/");
+    append_string(reverse, sizeof(reverse), &used, slot);
+    reverse[used] = '\0';
+    used = 0;
+    char device_target[96];
+    append_string(device_target, sizeof(device_target), &used,
+                  "../../../../devices/pci0000:00/");
+    append_string(device_target, sizeof(device_target), &used, slot);
+    device_target[used] = '\0';
+    (void)vfs_create_symlink(reverse, device_target, 0);
+
+    char devpath[80];
+    used = 0;
+    append_string(devpath, sizeof(devpath), &used, "/devices/pci0000:00/");
+    append_string(devpath, sizeof(devpath), &used, slot);
+    devpath[used] = '\0';
+    for (size_t index = 0; index < sysfs_device_count; index++) {
+        struct sysfs_device *entry = &sysfs_devices[index];
+        if (strcmp(entry->devpath, devpath) != 0) continue;
+        size_t at = 0;
+        append_string(entry->properties, sizeof(entry->properties), &at, "DRIVER=");
+        append_string(entry->properties, sizeof(entry->properties), &at, driver);
+        entry->properties[at] = '\0';
+        break;
+    }
+}
+
+void sysfs_pci_unbound(const struct pci_device *device) {
+    char link[128];
+    pci_device_path(link, sizeof(link), device, "/driver");
+    struct vfs_node *node = vfs_lookup_nofollow(link);
+    if (node && node->parent) (void)vfs_detach_child(node->parent, node);
 }
 
 static void publish_pci_bus(void) {
     if (!vfs_mkdir_p("/sys/bus/pci/devices")) return;
+    if (!vfs_mkdir_p("/sys/bus/pci/drivers")) return;
+    if (!vfs_mkdir_p("/sys/devices/pci0000:00")) return;
     pci_for_each_device(publish_pci_device, NULL);
 }
 
@@ -296,24 +503,13 @@ static void publish_device(const char *name, const char *devname,
     append_string(file, sizeof(file), &used, path);
     append_string(file, sizeof(file), &used, "/uevent");
     file[used] = '\0';
-    struct vfs_node *uevent_node = vfs_create_file(file, uevent, length, 0, 1);
 
-    if (uevent_node && sysfs_device_count < SYSFS_MAX_DEVICES) {
-        struct sysfs_device *device = &sysfs_devices[sysfs_device_count++];
-        size_t at = 0;
-        append_string(device->devpath, sizeof(device->devpath), &at, "/devices/");
-        append_string(device->devpath, sizeof(device->devpath), &at, name);
-        device->devpath[at] = '\0';
-        size_t out = 0;
-        for (size_t index = 0; index < length && out + 1 < sizeof(device->properties);
-             index++)
-            device->properties[out++] =
-                uevent[index] == '\n' ? 0 : uevent[index];
-        device->properties_length = out;
-        uevent_node->fs_private = device;
-        uevent_node->write = uevent_write;
-        uevent_node->mode = 0644;
-    }
+    char devpath[96];
+    size_t devpath_length = 0;
+    append_string(devpath, sizeof(devpath), &devpath_length, "/devices/");
+    append_string(devpath, sizeof(devpath), &devpath_length, name);
+    devpath[devpath_length] = '\0';
+    (void)register_uevent(devpath, file, uevent, length);
 
     char class_path[128];
     used = 0;
@@ -495,6 +691,45 @@ void sysfs_module_removed(const char *name) {
     if (node && node->parent) (void)vfs_detach_child(node->parent, node);
 }
 
+static void remove_published(const char *name) {
+    char path[128];
+    size_t used = 0;
+    append_string(path, sizeof(path), &used, "/sys/devices/");
+    append_string(path, sizeof(path), &used, name);
+    path[used] = '\0';
+    struct vfs_node *node = vfs_lookup(path);
+    if (node && node->parent) (void)vfs_detach_child(node->parent, node);
+
+    for (size_t index = 0; index < sysfs_device_count; index++) {
+        if (strcmp(sysfs_devices[index].devpath + 9, name) != 0) continue;
+        uevent_send(&sysfs_devices[index], "remove");
+        sysfs_devices[index].devpath[0] = '\0';
+        break;
+    }
+}
+
+static void announce(const char *name) {
+    for (size_t index = 0; index < sysfs_device_count; index++) {
+        if (strcmp(sysfs_devices[index].devpath + 9, name) != 0) continue;
+        uevent_send(&sysfs_devices[index], "add");
+        return;
+    }
+}
+
+void sysfs_publish_sound(void) {
+    publish_device("controlC0", "snd/controlC0", "sound", NULL,
+                   DEV_MAJOR_SOUND, DEV_MINOR_SOUND_CONTROL);
+    publish_device("pcmC0D0p", "snd/pcmC0D0p", "sound", NULL,
+                   DEV_MAJOR_SOUND, DEV_MINOR_SOUND_PCM_PLAYBACK);
+    announce("controlC0");
+    announce("pcmC0D0p");
+}
+
+void sysfs_remove_sound(void) {
+    remove_published("controlC0");
+    remove_published("pcmC0D0p");
+}
+
 void sysfs_init(void) {
     struct vfs_node *sys = vfs_mkdir_p("/sys");
     if (!sys) return;
@@ -522,13 +757,6 @@ void sysfs_init(void) {
             publish_pci_parent("card0");
             publish_pci_parent("renderD128");
         }
-    }
-
-    if (sound_card_available()) {
-        publish_device("controlC0", "snd/controlC0", "sound", NULL,
-                       DEV_MAJOR_SOUND, DEV_MINOR_SOUND_CONTROL);
-        publish_device("pcmC0D0p", "snd/pcmC0D0p", "sound", NULL,
-                       DEV_MAJOR_SOUND, DEV_MINOR_SOUND_PCM_PLAYBACK);
     }
 
     for (unsigned device = 0; device < 2U; device++) {

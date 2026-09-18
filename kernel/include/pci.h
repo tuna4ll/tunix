@@ -19,6 +19,28 @@ struct pci_device {
     volatile uint32_t *msix_table;
 };
 
+#define PCI_ANY_ID 0xFFFFU
+
+struct pci_device_id {
+    uint16_t vendor;
+    uint16_t device;
+    uint16_t class_code;
+    uint16_t subclass;
+};
+
+struct pci_driver {
+    const char *name;
+    const struct pci_device_id *ids;
+    unsigned id_count;
+    int (*probe)(const struct pci_device *device);
+    void (*remove)(const struct pci_device *device);
+    struct pci_driver *next;
+};
+
+int pci_register_driver(struct pci_driver *driver);
+void pci_unregister_driver(struct pci_driver *driver);
+const char *pci_device_driver(const struct pci_device *device);
+
 void pci_ecam_attach(uint64_t virtual_base, uint8_t first_bus, uint8_t last_bus);
 uint32_t pci_config_read32(uint8_t bus, uint8_t slot, uint8_t function, uint8_t offset);
 void pci_config_write32(uint8_t bus, uint8_t slot, uint8_t function, uint8_t offset, uint32_t value);
