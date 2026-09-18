@@ -96,10 +96,25 @@ and mouse endpoints are put back this way up to eight times before the driver
 gives up on them. The storage reset the transport asks for is the Bulk-Only
 Mass Storage Reset with both bulk endpoints put back the same way.
 
+**Mice.** A mouse is read the way Linux reads one, in report protocol:
+`kernel/drivers/usb/hid.c` parses the interface's HID report descriptor and
+finds the report ID, the buttons and the relative X, Y and wheel fields, of
+whatever size and position the device chose. Boot protocol is only the fallback
+for a boot mouse whose descriptor says nothing usable. Keyboards stay on boot
+protocol. `support/tests/hidparse.c` checks the parser on the host against
+descriptors shaped like a plain mouse, a Logitech-style receiver (report ID,
+16 buttons, 12-bit motion), a 16-bit gaming mouse, a keyboard and mouse sharing
+one interface, and an absolute tablet, which is refused.
+
+`/dev/input/event1` exists whether or not a mouse was there at boot. It used to
+be created only when one was, so a mouse plugged in later was enumerated by the
+driver and never seen by Weston.
+
 **Other details.** The endpoint 0 packet size of a full-speed device is read
 from the first eight bytes of its descriptor and set with Evaluate Context
-rather than assumed to be eight. Every boot-protocol keyboard and mouse
-interface of a device is used, so a receiver carrying both works. A controller
+rather than assumed to be eight. Every keyboard and mouse interface of a device
+is used, so a receiver carrying both works, and a device the driver does not
+know has its interfaces listed in the log. A controller
 that cannot address 64 bits gets all of its rings and buffers below 4 GiB.
 
 `support/tests/usbtest.sh` exercises all of it on QEMU: two controllers, a
