@@ -122,6 +122,11 @@ time.sleep(10)
 if hot: send({'execute': 'device_del', 'arguments': {'id': 'hot'}})
 time.sleep(6)
 key('kbd2', 'e', 10)
+send({'execute': 'device_del', 'arguments': {'id': 'mouse1'}})
+time.sleep(3)
+send({'execute': 'device_add', 'arguments': {'driver': 'usb-mouse', 'id': 'mouse2', 'bus': 'xhci2.0', 'port': '4'}})
+time.sleep(4)
+mouse('mouse2', 10)
 PY
 
 for _ in $(seq 120); do
@@ -144,7 +149,7 @@ for code, name in ((30, 'a'), (48, 'b'), (46, 'c'), (32, 'd'), (18, 'e')):
     if not match or match.group(1) != ('30' if name == 'd' else '10') or match.group(1) != match.group(2):
         failures.append('key ' + name)
 mouse = re.search(r'USBMOUSE rel=(\d+) press=(\d+) release=(\d+)', text)
-if not mouse or int(mouse.group(1)) < 10 or mouse.group(2) != '1' or mouse.group(3) != '1':
+if not mouse or int(mouse.group(1)) < 20 or mouse.group(2) != '2' or mouse.group(3) != '2':
     failures.append('mouse')
 disks = ['/dev/sdb', '/dev/sdc'] + (['/dev/sdd'] if sys.argv[2] == '1' else [])
 for disk in disks:
