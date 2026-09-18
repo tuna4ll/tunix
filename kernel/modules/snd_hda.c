@@ -1,14 +1,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "../../include/cpu.h"
-#include "../../include/hda.h"
-#include "../../include/kstring.h"
-#include "../../include/pci.h"
-#include "../../include/pmm.h"
-#include "../../include/sound.h"
-#include "../../include/time.h"
-#include "../../include/vmm.h"
+#include "../include/cpu.h"
+#include "../include/kstring.h"
+#include "../include/module.h"
+#include "../include/pci.h"
+#include "../include/pmm.h"
+#include "../include/sound.h"
+#include "../include/time.h"
+#include "../include/vmm.h"
 
 extern void kprintf(const char *fmt, ...);
 
@@ -245,7 +245,7 @@ static uint64_t map_registers(uint64_t physical) {
         int status = vmm_map_page_in(cr3, HDA_MMIO_VIRTUAL_BASE + offset,
                                      physical + offset,
                                      PAGE_WRITE | PAGE_DEVICE | PAGE_UNCACHED | PAGE_NX);
-        if (status != 0) {
+        if (status != 0 && status != -2) {
             kprintf("HDA: map offset %x -> %d\n", (unsigned)offset, status);
             return 0;
         }
@@ -747,11 +747,9 @@ static struct snd_backend hda_backend = {
     .set_volume = hda_set_volume
 };
 
-int hda_init(void) {
-    struct pci_device device;
+static int hda_probe(const struct pci_device *found) {
+    struct pci_device device = *found;
     memset(&hda, 0, sizeof(hda));
-    if (pci_find_class(PCI_CLASS_MULTIMEDIA, PCI_SUBCLASS_HDA, &device) != 0)
-        return -1;
     if (device.bar[0] & BAR_IO) return -1;
 
     uint64_t physical = device.bar[0] & BAR_ADDRESS_MASK;
@@ -825,3 +823,39 @@ int hda_init(void) {
             (unsigned)hda.output_stream);
     return snd_register_card(&hda_backend);
 }
+
+static void hda_remove(const struct pci_device *device) {
+    (void)device;
+    if (!hda.present) return;
+    snd_unregister_card(&hda_backend);
+    (void)hda_trigger(0);
+    write32(HDA_INTCTL, 0);
+    write32(stream_register(SD_CTL), 0);
+    hda.present = 0;
+}
+
+static const struct pci_device_id hda_ids[] = {
+    { PCI_ANY_ID, PCI_ANY_ID, PCI_CLASS_MULTIMEDIA, PCI_SUBCLASS_HDA },
+};
+
+static struct pci_driver hda_driver = {
+    .name = "snd_hda",
+    .ids = hda_ids,
+    .id_count = sizeof(hda_ids) / sizeof(hda_ids[0]),
+    .probe = hda_probe,
+    .remove = hda_remove,
+};
+
+static int snd_hda_start(void) {
+    return pci_register_driver(&hda_driver);
+}
+
+static void snd_hda_stop(void) {
+    pci_unregister_driver(&hda_driver);
+}
+
+MODULE_MAIN(snd_hda_start, snd_hda_stop);
+MODULE_ALIAS("pci:v*d*sv*sd*bc04sc03i*");
+MODULE_LICENSE("MIT");
+MODULE_DESCRIPTION("Intel HD Audio controller");
+MODULE_AUTHOR("Tunix");
