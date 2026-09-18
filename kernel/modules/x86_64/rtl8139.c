@@ -91,8 +91,11 @@ static int rtl8139_start(const struct pci_device *found) {
     irq_pin = device.irq_line;
     pci_enable_bus_mastering(&device);
 
-    if (!rx_buffer) rx_buffer = dma_alloc(RX_BUFFER_BYTES, 4096, &rx_physical);
-    if (!tx_buffer) tx_buffer = dma_alloc(4U * TX_BUFFER_BYTES, 256, &tx_physical);
+    if (!rx_buffer)
+        rx_buffer = dma_alloc_below(RX_BUFFER_BYTES, 4096, DMA_LIMIT_32BIT, &rx_physical);
+    if (!tx_buffer)
+        tx_buffer = dma_alloc_below(4U * TX_BUFFER_BYTES, 256, DMA_LIMIT_32BIT,
+                                    &tx_physical);
     if (!rx_buffer || !tx_buffer) return -1;
 
     outb((uint16_t)(io_base + REG_CONFIG1), 0x00U);

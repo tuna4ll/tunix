@@ -135,17 +135,19 @@ static void *pmm_alloc_page_locked(void) {
     return NULL;
 }
 
-void *pmm_alloc_pages(uint64_t count, uint64_t alignment_bytes) {
+void *pmm_alloc_pages_below(uint64_t count, uint64_t alignment_bytes, uint64_t limit) {
     if (!count) return NULL;
     uint64_t stride = alignment_bytes > PMM_PAGE_SIZE
                           ? alignment_bytes / PMM_PAGE_SIZE
                           : 1ULL;
     if (alignment_bytes & (alignment_bytes - 1ULL)) return NULL;
+    uint64_t last = limit ? limit / PMM_PAGE_SIZE : total_pages;
+    if (last > total_pages) last = total_pages;
 
     oplock_enter();
     void *found = NULL;
     if (free_pages >= count) {
-        for (uint64_t first = stride; first + count <= total_pages; first += stride) {
+        for (uint64_t first = stride; first + count <= last; first += stride) {
             uint64_t page = first;
             while (page < first + count && !bit_test(page)) page++;
             if (page < first + count) {
@@ -163,6 +165,10 @@ void *pmm_alloc_pages(uint64_t count, uint64_t alignment_bytes) {
     }
     oplock_leave();
     return found;
+}
+
+void *pmm_alloc_pages(uint64_t count, uint64_t alignment_bytes) {
+    return pmm_alloc_pages_below(count, alignment_bytes, 0);
 }
 
 void pmm_free_pages(void *physical_address, uint64_t count) {

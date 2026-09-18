@@ -33,6 +33,7 @@ const struct module_export kernel_symbols[] = {
     EXPORT(strncmp),
     EXPORT(strncpy),
     EXPORT(dma_alloc),
+    EXPORT(dma_alloc_below),
     EXPORT(dma_free),
     EXPORT(pmm_alloc_page),
     EXPORT(pmm_alloc_pages),
