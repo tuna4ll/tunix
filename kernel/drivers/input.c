@@ -575,7 +575,7 @@ int input_get_device_info(unsigned device_id, struct tunix_input_device_info *in
         memcpy(info->name, "Tunix PS/2 Keyboard", sizeof("Tunix PS/2 Keyboard"));
         return 0;
     }
-    if (device_id == TUNIX_INPUT_DEVICE_MOUSE && input_mouse_available()) {
+    if (device_id == TUNIX_INPUT_DEVICE_MOUSE) {
         info->event_types = (1U << TUNIX_EV_SYN) | (1U << TUNIX_EV_KEY) |
                             (1U << TUNIX_EV_REL);
         info->relative_axes = (1U << TUNIX_REL_X) | (1U << TUNIX_REL_Y);
@@ -649,7 +649,6 @@ struct input_reader *input_reader_open(unsigned device_id) {
     if (device_id != TUNIX_INPUT_DEVICE_KEYBOARD &&
         device_id != TUNIX_INPUT_DEVICE_MOUSE)
         return NULL;
-    if (device_id == TUNIX_INPUT_DEVICE_MOUSE && !input_mouse_available()) return NULL;
 
     struct input_reader *reader = (struct input_reader *)kmalloc(sizeof(*reader));
     if (!reader) return NULL;
@@ -767,6 +766,7 @@ static void evdev_rel_bits(unsigned device_id, uint8_t *bits, size_t limit) {
     if (device_id != TUNIX_INPUT_DEVICE_MOUSE) return;
     bitmap_set(bits, limit, TUNIX_REL_X);
     bitmap_set(bits, limit, TUNIX_REL_Y);
+    if (!mouse_present) bitmap_set(bits, limit, TUNIX_REL_WHEEL);
 #if defined(__x86_64__)
     if (mouse_packet_size == 4U) bitmap_set(bits, limit, TUNIX_REL_WHEEL);
 #endif

@@ -382,18 +382,16 @@ void devfs_init(void) {
             event0->gid = DEV_GROUP_INPUT;
         }
 
-        if (input_mouse_available()) {
-            struct vfs_node *event1 = attach_device(input, "event1",
-                VFS_CHARDEVICE | VFS_INPUTDEVICE, 0660, NULL, NULL, NULL);
-            if (event1) {
-                event1->data = (void *)(uintptr_t)TUNIX_INPUT_DEVICE_MOUSE;
-                event1->ioctl = input_event_ioctl;
-                event1->dev_major = DEV_MAJOR_INPUT;
-                event1->dev_minor = DEV_MINOR_INPUT_EVENT_BASE + 1U;
-                event1->gid = DEV_GROUP_INPUT;
-            }
-            (void)vfs_create_symlink("/dev/input/mouse0", "/dev/input/event1", 0);
+        struct vfs_node *event1 = attach_device(input, "event1",
+            VFS_CHARDEVICE | VFS_INPUTDEVICE, 0660, NULL, NULL, NULL);
+        if (event1) {
+            event1->data = (void *)(uintptr_t)TUNIX_INPUT_DEVICE_MOUSE;
+            event1->ioctl = input_event_ioctl;
+            event1->dev_major = DEV_MAJOR_INPUT;
+            event1->dev_minor = DEV_MINOR_INPUT_EVENT_BASE + 1U;
+            event1->gid = DEV_GROUP_INPUT;
         }
+        (void)vfs_create_symlink("/dev/input/mouse0", "/dev/input/event1", 0);
     }
     (void)vfs_create_symlink("/dev/rtc0", "/dev/rtc", 0);
 
