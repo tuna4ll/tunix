@@ -10,6 +10,7 @@
 #include "../../include/apic.h"
 #include "../../include/boot.h"
 #include "../../include/file.h"
+#include "../../include/module.h"
 #include "../../include/process.h"
 #include "../../include/vmm.h"
 #include "../../include/vfs.h"
@@ -128,7 +129,9 @@ static void isr_dispatch(struct interrupt_frame *regs) {
         struct vm_area *area = process_find_area(fault_rip);
         const char *object = "?";
         uint64_t within = fault_rip;
-        if (area) {
+        if (module_address_owner(fault_rip, &object, &within) == 0) {
+            area = NULL;
+        } else if (area) {
             within = fault_rip - area->start + area->offset;
             object = area->file && area->file->node ? area->file->node->name : "anon";
         }

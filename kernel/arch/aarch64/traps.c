@@ -9,6 +9,7 @@
 #include "../../include/smp.h"
 #include "../../include/timer.h"
 #include "aarch64.h"
+#include "../../include/module.h"
 
 extern void kprintf(const char *fmt, ...);
 extern void panic(const char *message) __attribute__((noreturn));
@@ -105,6 +106,10 @@ void aarch64_el1_sync(struct syscall_frame *frame) {
     kprintf("\nKERNEL EXCEPTION: class %x esr %p elr %p far %p sp %p\n",
             (unsigned)(esr >> 26), (void *)esr, (void *)frame->elr, (void *)read_far(),
             (void *)((uint64_t)frame + sizeof(*frame)));
+    const char *module = NULL;
+    uint64_t offset = 0;
+    if (module_address_owner(frame->elr, &module, &offset) == 0)
+        kprintf("in module %s+%p\n", module, (void *)offset);
     kprintf("x0 %p x1 %p x2 %p x3 %p x30 %p\n", (void *)frame->x[0], (void *)frame->x[1],
             (void *)frame->x[2], (void *)frame->x[3], (void *)frame->x[30]);
     panic("kernel exception");
