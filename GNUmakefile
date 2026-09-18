@@ -96,7 +96,8 @@ $(LIMINE_EXE): $(LIMINE_HEADER)
 	$(MAKE) -C $(LIMINE_DIR)
 
 clean:
-	rm -rf $(BUILD)/kernel $(BUILD)/generated $(KERNEL) $(IMAGE)
+	rm -rf $(BUILD)/kernel $(BUILD)/generated $(BUILD)/modules \
+		$(BUILD)/test-modules $(KERNEL) $(IMAGE)
 
 distclean:
 	rm -rf $(BUILD)
