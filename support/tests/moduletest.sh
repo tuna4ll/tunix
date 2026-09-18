@@ -14,6 +14,8 @@ else
 	MODULE_DIR=${MODULE_DIR:-$BUILD}
 	CC=cc
 fi
+NIC=${NIC:-rtl8139}
+[ -f "$MODULE_DIR/modules/x86_64/rtl8139.ko" ] || NIC=virtio
 WORK=$BUILD/moduletest
 ROOT=$WORK/root
 IMAGE=$BUILD/moduletest.img
@@ -94,6 +96,7 @@ for rules in ('80-drivers.rules',):
     copy(os.path.join('usr/lib/udev/rules.d', rules))
 PY
 
+echo "$NIC" > "$ROOT/nic"
 cat > "$ROOT/moduletest.sh" <<'GUEST'
 export PATH=/usr/bin:/usr/sbin
 release=$(uname -r)
@@ -141,12 +144,6 @@ rmmod tunix_probe_user tunix_probe
 check modinfo-license "$(modinfo -F license $kernel/tunix_probe.ko)" MIT
 check modinfo-vermagic "$(modinfo -F vermagic $kernel/tunix_probe.ko)" "$release $(uname -m)"
 
-echo "DIAG ls -ld"; ls -ld /sys /sys/bus /sys/bus/pci /sys/bus/pci/devices
-echo "DIAG device dir"; ls -l /sys/bus/pci/devices/0000:00:01.0/
-echo "DIAG vendor"; cat /sys/bus/pci/devices/0000:00:01.0/vendor
-echo "DIAG config size"; wc -c < /sys/bus/pci/devices/0000:00:01.0/config
-echo "DIAG lspci -v"; lspci -v 2>&1 | head -20
-echo "DIAG lspci -A sysfs"; lspci -A sysfs 2>&1 | head -5
 echo "MODULETEST sysfs-pci: $(ls /sys/bus/pci/devices | tr '\n' ' ')"
 lspci > /tmp/lspci.txt 2>&1
 check lspci "$?" 0
@@ -168,6 +165,13 @@ lspci -k > /tmp/lspcik.txt 2>/dev/null
 check snd-lspci "$(grep -c 'Kernel driver in use: snd_hda' /tmp/lspcik.txt)" 1
 check snd-lspci-module "$(grep -c 'Kernel modules: snd_hda' /tmp/lspcik.txt)" 1
 
+exec 3<>/dev/snd/pcmC0D0p
+check snd-refcnt-open "$(cat /sys/module/snd_hda/refcnt)" 1
+rmmod snd_hda
+check rmmod-open "$?" 1
+exec 3<&-
+check snd-refcnt-closed "$(cat /sys/module/snd_hda/refcnt)" 0
+
 rmmod snd_hda
 check rmmod-snd "$?" 0
 check snd-nodes-gone "$(test -e /dev/snd/pcmC0D0p; echo $?)" 1
@@ -179,14 +183,14 @@ udevadm settle --timeout=30
 check udev-autoload "$(lsmod | awk '$1 == "snd_hda" {print $1}')" snd_hda
 check udev-nodes "$(ls /dev/snd | tr '\n' ' ')" "controlC0 pcmC0D0p "
 
-if [ -f $kernel/rtl8139.ko ]; then
+if [ "$(cat /nic)" = rtl8139 ]; then
 	check net-autoload "$(lsmod | awk '$1 == "rtl8139" {print $1}')" rtl8139
-	check net-interface "$(grep -c eth0 /proc/net/dev)" 1
-	dhcpcd -1 -t 30 eth0 > /tmp/dhcpcd.log 2>&1
-	check net-dhcp "$?" 0
-	echo "MODULETEST route: $(cat /proc/net/route | tr '\t' ' ' | tr '\n' '|')"
-	check net-gateway "$(awk 'NR > 1 && $2 == "00000000" && $3 != "00000000" {print "yes"}' /proc/net/route | head -1)" yes
 fi
+check net-interface "$(grep -c eth0 /proc/net/dev)" 1
+dhcpcd -1 -t 30 eth0 > /tmp/dhcpcd.log 2>&1
+check net-dhcp "$?" 0
+echo "MODULETEST route: $(cat /proc/net/route | tr '\t' ' ' | tr '\n' '|')"
+check net-gateway "$(awk 'NR > 1 && $2 == "00000000" && $3 != "00000000" {print "yes"}' /proc/net/route | head -1)" yes
 
 echo "MODULETEST DONE"
 sleep 3600
@@ -207,16 +211,18 @@ ARCH=$ARCH TABLE=gpt ROOT_SLACK_MIB=16 RELEASE="$RELEASE" \
 	support/image.sh "$IMAGE" "$KERNEL" "$LIMINE_DIR" "$WORK/limine.conf" "$ROOT" >/dev/null || exit 1
 
 AUDIO="-audiodev none,id=snd0 -device intel-hda -device hda-output,audiodev=snd0"
-NET=
-[ -f "$MODULE_DIR/modules/x86_64/rtl8139.ko" ] && \
+if [ "$NIC" = virtio ]; then
+	NET="-netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0"
+else
 	NET="-netdev user,id=net0 -device rtl8139,netdev=net0"
+fi
 
 rm -f "$LOG"
 if [ "$ARCH" = aarch64 ]; then
 	timeout "$WAIT" qemu-system-aarch64 -M virt,gic-version=3 -cpu cortex-a72 \
 		-smp "${SMP:-2}" -m 2G -kernel "$KERNEL" -append "root=LABEL=tunix-root ${EXTRA_CMDLINE:-}" \
 		-drive "format=raw,file=$IMAGE,if=none,id=disk0" -device nvme,drive=disk0,serial=tunix \
-		$AUDIO ${QEMU_EXTRA:-} -display none -no-reboot -serial "file:$LOG" >"$WORK/qemu.err" 2>&1 &
+		$AUDIO $NET ${QEMU_EXTRA:-} -display none -no-reboot -serial "file:$LOG" >"$WORK/qemu.err" 2>&1 &
 else
 	ACCEL=tcg
 	[ -w /dev/kvm ] && ACCEL=kvm
