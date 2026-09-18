@@ -243,6 +243,40 @@ void devfs_add_block(int index) {
     disk->gid = DEV_GROUP_DISK;
 }
 
+void devfs_publish_sound(void) {
+    struct vfs_node *snd = vfs_mkdir_p("/dev/snd");
+    if (!snd) return;
+
+    struct vfs_node *control = attach_device(snd, "controlC0",
+        VFS_CHARDEVICE, 0660, NULL, NULL, NULL);
+    if (control) {
+        control->dev_major = DEV_MAJOR_SOUND;
+        control->dev_minor = DEV_MINOR_SOUND_CONTROL;
+        control->ioctl = sound_control_ioctl;
+        control->gid = DEV_GROUP_AUDIO;
+    }
+
+    struct vfs_node *playback = attach_device(snd, "pcmC0D0p",
+        VFS_CHARDEVICE, 0660, NULL, sound_pcm_write, NULL);
+    if (playback) {
+        playback->dev_major = DEV_MAJOR_SOUND;
+        playback->dev_minor = DEV_MINOR_SOUND_PCM_PLAYBACK;
+        playback->ioctl = sound_pcm_ioctl;
+        playback->mmap = sound_pcm_mmap;
+        playback->write_ready = sound_pcm_write_ready;
+        playback->open = sound_pcm_open;
+        playback->close = sound_pcm_close;
+        playback->gid = DEV_GROUP_AUDIO;
+    }
+}
+
+void devfs_remove_sound(void) {
+    struct vfs_node *snd = vfs_lookup("/dev/snd");
+    if (!snd) return;
+    while (snd->children) (void)vfs_detach_child(snd, snd->children);
+    if (snd->parent) (void)vfs_detach_child(snd->parent, snd);
+}
+
 void devfs_init(void) {
     struct vfs_node *dev = vfs_mkdir_p("/dev");
     if (!dev) return;
@@ -331,34 +365,6 @@ void devfs_init(void) {
                     render->open = drm_device_open;
                     render->close = drm_device_close;
                 }
-            }
-        }
-    }
-
-    sound_init();
-    if (sound_card_available()) {
-        struct vfs_node *snd = vfs_mkdir_p("/dev/snd");
-        if (snd) {
-            struct vfs_node *control = attach_device(snd, "controlC0",
-                VFS_CHARDEVICE, 0660, NULL, NULL, NULL);
-            if (control) {
-                control->dev_major = DEV_MAJOR_SOUND;
-                control->dev_minor = DEV_MINOR_SOUND_CONTROL;
-                control->ioctl = sound_control_ioctl;
-                control->gid = DEV_GROUP_AUDIO;
-            }
-
-            struct vfs_node *playback = attach_device(snd, "pcmC0D0p",
-                VFS_CHARDEVICE, 0660, NULL, sound_pcm_write, NULL);
-            if (playback) {
-                playback->dev_major = DEV_MAJOR_SOUND;
-                playback->dev_minor = DEV_MINOR_SOUND_PCM_PLAYBACK;
-                playback->ioctl = sound_pcm_ioctl;
-                playback->mmap = sound_pcm_mmap;
-                playback->write_ready = sound_pcm_write_ready;
-                playback->open = sound_pcm_open;
-                playback->close = sound_pcm_close;
-                playback->gid = DEV_GROUP_AUDIO;
             }
         }
     }

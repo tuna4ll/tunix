@@ -3,10 +3,12 @@
 
 #include "../../include/cpu.h"
 #include "../../include/file.h"
-#include "../../include/hda.h"
+#include "../../include/devfs.h"
+#include "../../include/module.h"
 #include "../../include/kstring.h"
 #include "../../include/pmm.h"
 #include "../../include/sound.h"
+#include "../../include/sysfs.h"
 #include "../../include/time.h"
 #include "../../include/usercopy.h"
 #include "../../include/vfs.h"
@@ -44,6 +46,7 @@ _Static_assert(sizeof(struct snd_ctl_elem_info) == 272, "elem_info layout");
 _Static_assert(sizeof(struct snd_ctl_elem_value) == 1224, "elem_value layout");
 
 static const struct snd_backend *card;
+static struct module *card_owner;
 
 static uint64_t ring_physical[RING_PAGES];
 static uint8_t *ring_virtual[RING_PAGES];
@@ -896,6 +899,7 @@ int64_t sound_pcm_mmap(struct vfs_node *node, struct file *file, uint64_t cr3,
 
 void sound_pcm_open(struct vfs_node *node) {
     (void)node;
+    if (!pcm.open) (void)module_get(card_owner);
     pcm.open++;
     if (pcm.open == 1) pcm.state = SNDRV_PCM_STATE_OPEN;
 }
@@ -904,6 +908,7 @@ void sound_pcm_close(struct vfs_node *node) {
     (void)node;
     if (pcm.open) pcm.open--;
     if (pcm.open) return;
+    module_put(card_owner);
     pcm_stop(SNDRV_PCM_STATE_OPEN);
     pcm.configured = 0;
 }
@@ -1084,21 +1089,29 @@ static int64_t sound_control_ioctl_locked(struct vfs_node *node, unsigned long r
 }
 
 int snd_register_card(const struct snd_backend *backend) {
+    if (card) return -1;
     if (!backend || !backend->configure || !backend->trigger || !backend->position)
         return -1;
     if (ring_allocate() != 0) return -1;
     card = backend;
+    card_owner = module_active();
     memset(&pcm, 0, sizeof(pcm));
     pcm.state = SNDRV_PCM_STATE_OPEN;
     mixer.left = backend->volume_max;
     mixer.right = backend->volume_max;
     mixer.muted = 0;
+    devfs_publish_sound();
+    sysfs_publish_sound();
     return 0;
 }
 
-void sound_init(void) {
-    if (card) return;
-    (void)hda_init();
+void snd_unregister_card(const struct snd_backend *backend) {
+    if (!card || (backend && backend != card)) return;
+    pcm_stop(SNDRV_PCM_STATE_OPEN);
+    devfs_remove_sound();
+    sysfs_remove_sound();
+    card = NULL;
+    card_owner = NULL;
 }
 
 int sound_card_available(void) {
