@@ -5,7 +5,7 @@ Two host controllers, one transport above them.
 | Driver | Controller | What it reaches |
 | --- | --- | --- |
 | `kernel/drivers/usb/xhci.c` | xHCI (USB 3.x), all of them | keyboards, mice, hubs, mass storage, hot-plug |
-| `kernel/drivers/usb/ehci.c` | EHCI (USB 2.0), all of them | high-speed mass storage |
+| `kernel/drivers/usb/ehci.c` | EHCI (USB 2.0), all of them | keyboards, mice, mass storage, behind one hub |
 
 `kernel/drivers/usb/usb.c` is the seam between them and
 `kernel/drivers/usb/usb_storage.c`, which speaks the bulk-only transport and
@@ -144,19 +144,32 @@ root filesystem mount failed
 with the machine's internal disk listed and the stick it had just been booted
 from absent.
 
-## What the EHCI driver does not do
+## What the EHCI driver does and does not do
 
-- **High-speed devices only.** A full- or low-speed device is handed to the
-  companion UHCI or OHCI controller by writing Port Owner, which is what the
-  specification asks for. There is no companion driver, so such a device is not
-  reached. It does not cost anything worth having: a USB stick is high speed,
-  and a keyboard is behind the firmware's legacy emulation long before this.
-- **Hubs, but only one level of them, and only for high-speed devices.** See
-  below -- a rate-matching hub is not optional on the machines this exists for.
-  A slower device behind a hub would need split transactions, which this driver
-  does not do, and is skipped with a line saying so.
-- **No HID.** See above -- the devices EHCI would have to talk to at full speed
-  are the ones it deliberately gives away.
+- **Slower devices through the hub's translator.** On the machines EHCI exists
+  for, every socket hangs off the chipset's rate-matching hub, so a mouse or a
+  keyboard -- low or full speed -- is always behind a transaction translator.
+  Such a device is addressed with split transactions: its queue head carries
+  the speed, the hub's address and port, the control-endpoint flag for endpoint
+  0 and a zero NAK reload, and the controller runs the start and complete splits
+  itself. A full-speed USB stick is reached the same way. A slow device on a
+  root port is still handed to the companion controller, for which there is no
+  driver; Intel's rate-matching-hub chipsets have none.
+- **Keyboards and mice.** Each keyboard or mouse endpoint gets an interrupt
+  queue head of its own, linked into every frame of the periodic schedule --
+  start split in micro-frame 0 and complete splits in 2 to 4 when it is behind a
+  translator. Its reports are collected from the input poll, and the same
+  report handling as xHCI turns them into key and pointer events
+  (`kernel/drivers/usb/hid_input.c`), mice through their HID report descriptor.
+  A halted endpoint has its halt cleared and is queued again; sixteen failures
+  in a row stop it.
+- **Hubs, but only one level of them.** See below.
+- **No hot-plug.** Devices are found at boot.
+
+The translator path cannot be tested in the emulator, which has no high-speed
+hub; with its fields forced on for devices on a root port, keyboard, mouse and
+disks still pass `MODE=ehci support/tests/usbtest.sh`, which checks everything
+but the hub's side of the handshake.
 
 ## Ports have to be turned on before they can be asked
 
