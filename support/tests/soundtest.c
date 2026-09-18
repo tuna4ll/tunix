@@ -17,6 +17,8 @@ typedef unsigned int u32;
 #define SYS_clock_gettime 228
 #define SYS_exit_group 231
 #define SYS_openat 257
+#define SYS_close 3
+#define SYS_finit_module 313
 
 static inline s64 syscall1(s64 n, s64 a) {
     s64 r;
@@ -51,6 +53,8 @@ static inline s64 syscall4(s64 n, s64 a, s64 b, s64 c, s64 d) {
 #define SYS_clock_gettime 113
 #define SYS_exit_group 94
 #define SYS_openat 56
+#define SYS_close 57
+#define SYS_finit_module 273
 
 extern s64 system_call(s64 n, s64 a, s64 b, s64 c, s64 d);
 __asm__(".text\n"
@@ -502,9 +506,21 @@ static void test_direction_flag_under_silencing(unsigned rounds) {
 }
 #endif
 
+static int load_module(const char *path) {
+    int fd = (int)syscall4(SYS_openat, AT_FDCWD, (s64)path, 0, 0);
+    if (fd < 0) return -1;
+    s64 status = syscall3(SYS_finit_module, fd, (s64)"", 0);
+    (void)syscall1(SYS_close, fd);
+    return status == 0 ? 0 : (int)status;
+}
+
 static int run(void) {
     results_fd = (int)syscall4(SYS_openat, AT_FDCWD, (s64)"/tunix-soundtest-results.txt",
                                O_WRONLY_CREAT_TRUNC, 0644);
+    int loaded = load_module("/modules/snd_hda.ko");
+    put("SOUND module ");
+    put_signed(loaded);
+    put("\n");
     pcm = (int)syscall4(SYS_openat, AT_FDCWD, (s64)"/dev/snd/pcmC0D0p", O_RDWR, 0);
     if (pcm < 0) {
         put("SOUND no pcm device\n");

@@ -26,7 +26,8 @@ WAIT=${WAIT:-300}
 
 rm -rf "$WORK"
 mkdir -p "$ROOT/sbin" "$ROOT/dev" "$ROOT/proc" "$ROOT/sys" "$ROOT/tmp" "$ROOT/etc" \
-	"$ROOT/usr/share/weston/wallpapers" "$ROOT/usr/lib/modules/$RELEASE/kernel"
+	"$ROOT/run/udev" "$ROOT/var/run" "$ROOT/var/db/dhcpcd" "$ROOT/var/lib/dhcpcd" \
+	"$ROOT/usr/share/weston/wallpapers"
 cp base-files/overlay/usr/share/weston/wallpapers/tunix.png \
 	"$ROOT/usr/share/weston/wallpapers/tunix.png"
 ln -sf usr/lib "$ROOT/lib"
@@ -44,7 +45,8 @@ import os, re, shutil, subprocess, sys
 sysroot, root = sys.argv[1], sys.argv[2]
 programs = ['bash', 'kmod', 'lsmod', 'insmod', 'rmmod', 'modprobe', 'modinfo', 'depmod',
             'lspci', 'cat', 'ls', 'grep', 'sort', 'head', 'tail', 'wc', 'awk',
-            'uname', 'sleep', 'mkdir', 'udevadm', 'sed', 'tr', 'dmesg']
+            'uname', 'sleep', 'mkdir', 'udevadm', 'udevd', 'sed', 'tr', 'dmesg',
+            'basename', 'readlink', 'dirname', 'env', 'mount', 'ip', 'dhcpcd']
 copied = set()
 
 def needed(path):
@@ -85,15 +87,12 @@ for program in programs:
 
 copy('usr/share/hwdata/pci.ids')
 copy('etc/ld.so.cache')
+copy('etc/dhcpcd.conf')
+for helper in os.listdir(os.path.join(sysroot, 'usr/lib/dhcpcd/dev')):
+    copy(os.path.join('usr/lib/dhcpcd/dev', helper))
 for rules in ('80-drivers.rules',):
     copy(os.path.join('usr/lib/udev/rules.d', rules))
 PY
-
-for module in "$MODULE_DIR"/test-modules/*.ko "$MODULE_DIR"/modules/*.ko \
-		"$MODULE_DIR"/modules/x86_64/*.ko; do
-	[ -f "$module" ] && cp "$module" "$ROOT/usr/lib/modules/$RELEASE/kernel/"
-done
-depmod -b "$ROOT" "$RELEASE" 2>/dev/null
 
 cat > "$ROOT/moduletest.sh" <<'GUEST'
 export PATH=/usr/bin:/usr/sbin
@@ -142,11 +141,52 @@ rmmod tunix_probe_user tunix_probe
 check modinfo-license "$(modinfo -F license $kernel/tunix_probe.ko)" MIT
 check modinfo-vermagic "$(modinfo -F vermagic $kernel/tunix_probe.ko)" "$release $(uname -m)"
 
+echo "DIAG ls -ld"; ls -ld /sys /sys/bus /sys/bus/pci /sys/bus/pci/devices
+echo "DIAG device dir"; ls -l /sys/bus/pci/devices/0000:00:01.0/
+echo "DIAG vendor"; cat /sys/bus/pci/devices/0000:00:01.0/vendor
+echo "DIAG config size"; wc -c < /sys/bus/pci/devices/0000:00:01.0/config
+echo "DIAG lspci -v"; lspci -v 2>&1 | head -20
+echo "DIAG lspci -A sysfs"; lspci -A sysfs 2>&1 | head -5
 echo "MODULETEST sysfs-pci: $(ls /sys/bus/pci/devices | tr '\n' ' ')"
 lspci > /tmp/lspci.txt 2>&1
 check lspci "$?" 0
 echo "MODULETEST lspci:"
 cat /tmp/lspci.txt
+check lspci-lines "$(grep -c . /tmp/lspci.txt)" "$(ls /sys/bus/pci/devices | wc -l)"
+
+audio=$(grep -l '^0x0403' /sys/bus/pci/devices/*/class 2>/dev/null | head -1)
+audio=${audio%/class}
+check audio-present "$(test -n "$audio"; echo $?)" 0
+echo "MODULETEST modalias: $(cat $audio/modalias)"
+
+modprobe snd_hda
+check modprobe-snd "$?" 0
+check snd-loaded "$(lsmod | awk '$1 == "snd_hda" {print $1}')" snd_hda
+check snd-nodes "$(ls /dev/snd | tr '\n' ' ')" "controlC0 pcmC0D0p "
+check snd-bound "$(basename $(readlink $audio/driver))" snd_hda
+lspci -k > /tmp/lspcik.txt 2>/dev/null
+check snd-lspci "$(grep -c 'Kernel driver in use: snd_hda' /tmp/lspcik.txt)" 1
+check snd-lspci-module "$(grep -c 'Kernel modules: snd_hda' /tmp/lspcik.txt)" 1
+
+rmmod snd_hda
+check rmmod-snd "$?" 0
+check snd-nodes-gone "$(test -e /dev/snd/pcmC0D0p; echo $?)" 1
+check snd-unbound "$(test -e $audio/driver; echo $?)" 1
+
+udevd --daemon
+udevadm trigger --action=add --type=devices
+udevadm settle --timeout=30
+check udev-autoload "$(lsmod | awk '$1 == "snd_hda" {print $1}')" snd_hda
+check udev-nodes "$(ls /dev/snd | tr '\n' ' ')" "controlC0 pcmC0D0p "
+
+if [ -f $kernel/rtl8139.ko ]; then
+	check net-autoload "$(lsmod | awk '$1 == "rtl8139" {print $1}')" rtl8139
+	check net-interface "$(grep -c eth0 /proc/net/dev)" 1
+	dhcpcd -1 -t 30 eth0 > /tmp/dhcpcd.log 2>&1
+	check net-dhcp "$?" 0
+	echo "MODULETEST route: $(cat /proc/net/route | tr '\t' ' ' | tr '\n' '|')"
+	check net-gateway "$(awk 'NR > 1 && $2 == "00000000" && $3 != "00000000" {print "yes"}' /proc/net/route | head -1)" yes
+fi
 
 echo "MODULETEST DONE"
 sleep 3600
@@ -162,21 +202,27 @@ serial: yes
     cmdline: root=LABEL=tunix-root ${EXTRA_CMDLINE:-}
 CONF
 
-ARCH=$ARCH TABLE=gpt ROOT_SLACK_MIB=16 \
+ARCH=$ARCH TABLE=gpt ROOT_SLACK_MIB=16 RELEASE="$RELEASE" \
+	MODULES="$MODULE_DIR/test-modules $MODULE_DIR/modules" \
 	support/image.sh "$IMAGE" "$KERNEL" "$LIMINE_DIR" "$WORK/limine.conf" "$ROOT" >/dev/null || exit 1
+
+AUDIO="-audiodev none,id=snd0 -device intel-hda -device hda-output,audiodev=snd0"
+NET=
+[ -f "$MODULE_DIR/modules/x86_64/rtl8139.ko" ] && \
+	NET="-netdev user,id=net0 -device rtl8139,netdev=net0"
 
 rm -f "$LOG"
 if [ "$ARCH" = aarch64 ]; then
 	timeout "$WAIT" qemu-system-aarch64 -M virt,gic-version=3 -cpu cortex-a72 \
 		-smp "${SMP:-2}" -m 2G -kernel "$KERNEL" -append "root=LABEL=tunix-root ${EXTRA_CMDLINE:-}" \
 		-drive "format=raw,file=$IMAGE,if=none,id=disk0" -device nvme,drive=disk0,serial=tunix \
-		${QEMU_EXTRA:-} -display none -no-reboot -serial "file:$LOG" >"$WORK/qemu.err" 2>&1 &
+		$AUDIO ${QEMU_EXTRA:-} -display none -no-reboot -serial "file:$LOG" >"$WORK/qemu.err" 2>&1 &
 else
 	ACCEL=tcg
 	[ -w /dev/kvm ] && ACCEL=kvm
 	timeout "$WAIT" qemu-system-x86_64 -machine "q35,accel=$ACCEL" -cpu "$([ $ACCEL = kvm ] && echo host || echo max)" \
 		-smp "${SMP:-2}" -m 2G -drive "format=raw,file=$IMAGE,if=none,id=disk0" \
-		-device ide-hd,drive=disk0,bus=ide.0 ${QEMU_EXTRA:-} -display none -no-reboot \
+		-device ide-hd,drive=disk0,bus=ide.0 $AUDIO $NET ${QEMU_EXTRA:-} -display none -no-reboot \
 		-serial "file:$LOG" >"$WORK/qemu.err" 2>&1 &
 fi
 QEMU=$!
@@ -198,6 +244,7 @@ failures = [line for line in text.splitlines() if re.match(r'MODULETEST \S+ FAIL
 if 'MODULETEST DONE' not in text:
     failures.append('the guest did not finish')
 for wanted in ('TUNIXPROBE loaded number=7 flag=1 text=hello',
+               'HDA: codec',
                'TUNIXPROBE unloaded number=7',
                'TUNIXPROBEUSER loaded'):
     if wanted not in text:

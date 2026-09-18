@@ -21,6 +21,11 @@ mkdir -p "$WORK/root/sbin" "$WORK/root/dev" "$WORK/root/proc"
 mkdir -p "$WORK/root/usr/share/weston/wallpapers"
 cp base-files/overlay/usr/share/weston/wallpapers/tunix.png "$WORK/root/usr/share/weston/wallpapers/tunix.png"
 
+MODULE_DIR=$BUILD
+[ "$ARCH" = aarch64 ] && MODULE_DIR=$BUILD/aarch64-core
+mkdir -p "$WORK/root/modules"
+cp "$MODULE_DIR/modules/snd_hda.ko" "$WORK/root/modules/" || exit 1
+
 mkdir -p "$WORK/root/files"
 for i in $(seq 0 399); do
 	printf %s "$(head -c 8192 /dev/zero | tr "\\0" "x")" > "$WORK/root/files/f$(printf %03d $i)"
