@@ -749,6 +749,7 @@ static struct snd_backend hda_backend = {
 
 static int hda_probe(const struct pci_device *found) {
     struct pci_device device = *found;
+    if (hda.present) return -1;
     memset(&hda, 0, sizeof(hda));
     if (device.bar[0] & BAR_IO) return -1;
 

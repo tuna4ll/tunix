@@ -85,7 +85,7 @@ static int wait_clear(uint16_t port, uint8_t mask, uint64_t timeout_ns) {
 
 static int rtl8139_start(const struct pci_device *found) {
     struct pci_device device = *found;
-    available = 0;
+    if (available) return -1;
     if (!(device.bar[0] & 1U)) return -1;
     io_base = (uint16_t)(device.bar[0] & ~3U);
     irq_pin = device.irq_line;
