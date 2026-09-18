@@ -9,6 +9,7 @@
 #include "include/epoll.h"
 #include "include/inotify.h"
 #include "include/memfd.h"
+#include "include/module.h"
 #include "include/signalfd.h"
 #include "include/sysvshm.h"
 #include "include/framebuffer.h"
@@ -158,6 +159,9 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define SYS_FSTATFS 138
 #define SYS_SYNC 162
 #define SYS_REBOOT 169
+#define SYS_INIT_MODULE 175
+#define SYS_DELETE_MODULE 176
+#define SYS_FINIT_MODULE 313
 #define SYS_SYNCFS 306
 #define SYS_FTRUNCATE 77
 #define SYS_GETCWD 79
@@ -4197,13 +4201,69 @@ static int64_t sys_syslog(int action, uint64_t user_buffer, int length) {
     }
 }
 
+#define MODULE_IMAGE_MAX (16ULL * 1024ULL * 1024ULL)
+#define MODULE_ARGUMENTS_MAX 256
+
+static int64_t module_arguments(char *out, size_t capacity, uint64_t user_arguments) {
+    out[0] = '\0';
+    if (!user_arguments) return 0;
+    return copy_string_from_user(out, capacity, user_arguments) < 0 ? -EFAULT : 0;
+}
+
+static int64_t sys_init_module(uint64_t user_image, uint64_t length,
+                               uint64_t user_arguments) {
+    if (!cred_is_root()) return -EPERM;
+    if (!length || length > MODULE_IMAGE_MAX) return -EINVAL;
+    char arguments[MODULE_ARGUMENTS_MAX];
+    int64_t status = module_arguments(arguments, sizeof(arguments), user_arguments);
+    if (status != 0) return status;
+
+    void *image = kmalloc((size_t)length);
+    if (!image) return -ENOMEM;
+    if (copy_from_user(image, user_image, (size_t)length) != 0) {
+        kfree(image);
+        return -EFAULT;
+    }
+    int64_t result = module_load(image, (size_t)length, arguments);
+    kfree(image);
+    return result;
+}
+
+static int64_t sys_finit_module(int fd, uint64_t user_arguments, int flags) {
+    (void)flags;
+    if (!cred_is_root()) return -EPERM;
+    struct file *file = file_from_fd(fd);
+    if (!file || file->kind != FILE_KIND_VFS || !file->node) return -EBADF;
+    uint64_t length = file->node->length;
+    if (!length || length > MODULE_IMAGE_MAX) return -EINVAL;
+
+    char arguments[MODULE_ARGUMENTS_MAX];
+    int64_t status = module_arguments(arguments, sizeof(arguments), user_arguments);
+    if (status != 0) return status;
+
+    void *image = kmalloc((size_t)length);
+    if (!image) return -ENOMEM;
+    int64_t got = vfs_read(file->node, 0, (size_t)length, image);
+    int64_t result = got == (int64_t)length
+        ? module_load(image, (size_t)length, arguments) : -EIO;
+    kfree(image);
+    return result;
+}
+
+static int64_t sys_delete_module(uint64_t user_name, uint32_t flags) {
+    if (!cred_is_root()) return -EPERM;
+    char name[MODULE_NAME_MAX];
+    if (copy_string_from_user(name, sizeof(name), user_name) < 0) return -EFAULT;
+    return module_unload(name, flags);
+}
+
 static int64_t sys_uname(uint64_t user_buffer) {
     struct linux_utsname value;
     memset(&value, 0, sizeof(value));
-    strncpy(value.sysname, "Tunix", sizeof(value.sysname) - 1);
+    strncpy(value.sysname, UTS_SYSNAME, sizeof(value.sysname) - 1);
     strncpy(value.nodename, uts_hostname(), sizeof(value.nodename) - 1);
-    strncpy(value.release, "0.1.0", sizeof(value.release) - 1);
-    strncpy(value.version, "Tunix Kernel", sizeof(value.version) - 1);
+    strncpy(value.release, UTS_RELEASE, sizeof(value.release) - 1);
+    strncpy(value.version, UTS_VERSION, sizeof(value.version) - 1);
     strncpy(value.machine, SYSCALL_UTS_MACHINE, sizeof(value.machine) - 1);
     strncpy(value.domainname, uts_domainname(), sizeof(value.domainname) - 1);
     return copy_to_user(user_buffer, &value, sizeof(value)) == 0 ? 0 : -EFAULT;
@@ -5479,6 +5539,20 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         case SYS_FDATASYNC: SYSCALL_RET(frame) = (uint64_t)sys_fsync((int)SYSCALL_ARG0(frame)); break;
         case SYS_SYNCFS: SYSCALL_RET(frame) = (uint64_t)sys_fsync((int)SYSCALL_ARG0(frame)); break;
         case SYS_SYNC: SYSCALL_RET(frame) = (uint64_t)ext2fs_sync(); break;
+        case SYS_INIT_MODULE:
+            SYSCALL_RET(frame) = (uint64_t)sys_init_module(SYSCALL_ARG0(frame),
+                                                           SYSCALL_ARG1(frame),
+                                                           SYSCALL_ARG2(frame));
+            break;
+        case SYS_FINIT_MODULE:
+            SYSCALL_RET(frame) = (uint64_t)sys_finit_module((int)SYSCALL_ARG0(frame),
+                                                            SYSCALL_ARG1(frame),
+                                                            (int)SYSCALL_ARG2(frame));
+            break;
+        case SYS_DELETE_MODULE:
+            SYSCALL_RET(frame) = (uint64_t)sys_delete_module(SYSCALL_ARG0(frame),
+                                                             (uint32_t)SYSCALL_ARG1(frame));
+            break;
         case SYS_REBOOT:
             SYSCALL_RET(frame) = (uint64_t)sys_reboot((uint32_t)SYSCALL_ARG0(frame),
                                               (uint32_t)SYSCALL_ARG1(frame),

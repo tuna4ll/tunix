@@ -13,10 +13,12 @@
 #include "../include/block.h"
 #include "../include/input.h"
 #include "../include/klock.h"
+#include "../include/module.h"
 #include "../include/procfs.h"
 #include "../include/random.h"
 #include "../include/uts.h"
 #include "../include/smp.h"
+#include "../include/syscall_abi.h"
 #include "../include/time.h"
 #include "../include/vfs.h"
 #include "../include/vmm.h"
@@ -340,7 +342,7 @@ static int64_t proc_ostype_read(struct vfs_node *node, uint64_t offset,
                                 size_t size, void *output) {
     (void)node;
     struct text_buffer text = {{0}, 0};
-    text_string(&text, "Tunix\n");
+    text_string(&text, UTS_SYSNAME "\n");
     return text_read(&text, offset, size, output);
 }
 
@@ -348,7 +350,7 @@ static int64_t proc_osrelease_read(struct vfs_node *node, uint64_t offset,
                                    size_t size, void *output) {
     (void)node;
     struct text_buffer text = {{0}, 0};
-    text_string(&text, "0.1.0\n");
+    text_string(&text, UTS_RELEASE "\n");
     return text_read(&text, offset, size, output);
 }
 
@@ -385,7 +387,42 @@ static int64_t proc_version_read(struct vfs_node *node, uint64_t offset,
                                  size_t size, void *output) {
     (void)node;
     struct text_buffer text = {{0}, 0};
-    text_string(&text, "Tunix version 0.1.0 #1 x86_64\n");
+    text_string(&text, UTS_SYSNAME " version " UTS_RELEASE " #1 " SYSCALL_UTS_MACHINE "\n");
+    return text_read(&text, offset, size, output);
+}
+
+static void text_hex64(struct text_buffer *text, uint64_t value) {
+    static const char alphabet[] = "0123456789abcdef";
+    for (unsigned shift = 64; shift; shift -= 4)
+        text_char(text, alphabet[(value >> (shift - 4)) & 0xFULL]);
+}
+
+static int64_t proc_modules_read(struct vfs_node *node, uint64_t offset,
+                                 size_t size, void *output) {
+    (void)node;
+    struct text_buffer text = {{0}, 0};
+    for (struct module *module = module_list(); module; module = module->next) {
+        text_string(&text, module->name);
+        text_char(&text, ' ');
+        text_unsigned(&text, module->bytes);
+        text_char(&text, ' ');
+        text_unsigned(&text, module->refs);
+        text_char(&text, ' ');
+        int listed = 0;
+        for (struct module *user = module_list(); user; user = user->next)
+            for (unsigned index = 0; index < user->use_count; index++) {
+                if (user->uses[index] != module) continue;
+                text_string(&text, user->name);
+                text_char(&text, ',');
+                listed = 1;
+            }
+        if (!listed) text_char(&text, '-');
+        text_char(&text, ' ');
+        text_string(&text, module_state_name(module));
+        text_string(&text, " 0x");
+        text_hex64(&text, module->base);
+        text_char(&text, '\n');
+    }
     return text_read(&text, offset, size, output);
 }
 
@@ -924,6 +961,7 @@ void procfs_init(void) {
     }
     virtual_file(root, "version", proc_version_read, 0);
     virtual_file(root, "mounts", proc_mounts_read, 0);
+    virtual_file(root, "modules", proc_modules_read, 0);
     virtual_file(root, "stat", proc_stat_read, 0);
     virtual_file(root, "loadavg", proc_loadavg_read, 0);
     virtual_file(root, "cmdline", proc_cmdline_line_read, 0);

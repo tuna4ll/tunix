@@ -6,6 +6,7 @@
 #include "../include/virtgpu.h"
 
 #include "../include/kstring.h"
+#include "../include/module.h"
 #include "../include/net/netlink.h"
 #include "../include/sound.h"
 #include "../include/sysfs.h"
@@ -351,6 +352,149 @@ static void publish_device(const char *name, const char *devname,
     (void)vfs_create_symlink(devnum, target, 0);
 }
 
+
+static int64_t module_text_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                void *output);
+
+static int64_t attribute_reply(const char *text, size_t length, uint64_t offset,
+                               size_t size, void *output) {
+    if (offset >= length) return 0;
+    size_t available = length - (size_t)offset;
+    if (size > available) size = available;
+    memcpy(output, text + offset, size);
+    return (int64_t)size;
+}
+
+static int64_t module_number_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                  void *output) {
+    const struct module *module = (const struct module *)node->fs_private;
+    if (!module) return 0;
+    char text[24];
+    size_t length = 0;
+    uint64_t value = node->inode == 1 ? module->refs : module->bytes;
+    append_number(text, sizeof(text), &length, (uint32_t)value);
+    append_string(text, sizeof(text), &length, "\n");
+    return attribute_reply(text, length, offset, size, output);
+}
+
+static int64_t module_state_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
+    const struct module *module = (const struct module *)node->fs_private;
+    if (!module) return 0;
+    const char *state = module->state == MODULE_STATE_LIVE ? "live\n" : "coming\n";
+    return attribute_reply(state, strlen(state), offset, size, output);
+}
+
+static int64_t module_parameter_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                     void *output) {
+    const struct module *module = (const struct module *)node->fs_private;
+    if (!module) return 0;
+    char text[64];
+    int length = module_param_format(module, (unsigned)node->inode, text, sizeof(text));
+    if (length < 0) return 0;
+    return attribute_reply(text, (size_t)length, offset, size, output);
+}
+
+static struct vfs_node *module_attribute(struct vfs_node *parent, const char *name,
+                                         vfs_read_fn reader, void *context,
+                                         uint64_t tag) {
+    struct vfs_node *node = vfs_alloc_node(name, VFS_FILE);
+    if (!node) return NULL;
+    node->mode = 0444;
+    node->length = 64;
+    node->read = reader;
+    node->fs_private = context;
+    node->inode = tag;
+    if (vfs_attach(parent, node) != 0) return NULL;
+    return node;
+}
+
+static void holders_refresh(struct vfs_node *directory) {
+    static int busy;
+    const struct module *owner = (const struct module *)directory->fs_private;
+    if (!owner || busy) return;
+    busy = 1;
+    while (directory->children)
+        (void)vfs_detach_child(directory, directory->children);
+    for (struct module *user = module_list(); user; user = user->next) {
+        for (unsigned index = 0; index < user->use_count; index++) {
+            if (user->uses[index] != owner) continue;
+            char target[MODULE_NAME_MAX + 8];
+            size_t used = 0;
+            append_string(target, sizeof(target), &used, "../../");
+            append_string(target, sizeof(target), &used, user->name);
+            target[used] = '\0';
+            (void)vfs_attach_symlink(directory, user->name, target);
+        }
+    }
+    busy = 0;
+}
+
+static struct vfs_node *module_directory(const char *name, const char *child) {
+    char path[96];
+    size_t used = 0;
+    append_string(path, sizeof(path), &used, "/sys/module/");
+    append_string(path, sizeof(path), &used, name);
+    if (child) {
+        append_string(path, sizeof(path), &used, "/");
+        append_string(path, sizeof(path), &used, child);
+    }
+    path[used] = '\0';
+    return vfs_mkdir_p(path);
+}
+
+void sysfs_module_added(struct module *module) {
+    if (!module) return;
+    struct vfs_node *root = module_directory(module->name, NULL);
+    if (!root) return;
+    root->mode = 0555;
+    (void)module_attribute(root, "initstate", module_state_read, module, 0);
+    (void)module_attribute(root, "refcnt", module_number_read, module, 1);
+    (void)module_attribute(root, "coresize", module_number_read, module, 2);
+
+    struct vfs_node *holders = module_directory(module->name, "holders");
+    if (holders) {
+        holders->mode = 0555;
+        holders->fs_private = module;
+        holders->refresh = holders_refresh;
+    }
+
+    struct vfs_node *sections = module_directory(module->name, "sections");
+    if (sections) {
+        sections->mode = 0555;
+        (void)module_attribute(sections, ".text", module_text_read, module, 0);
+    }
+
+    if (!module->param_count) return;
+    struct vfs_node *parameters = module_directory(module->name, "parameters");
+    if (!parameters) return;
+    parameters->mode = 0555;
+    for (unsigned index = 0; index < module->param_count; index++)
+        (void)module_attribute(parameters, module->params[index].name,
+                               module_parameter_read, module, index);
+}
+
+static int64_t module_text_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                void *output) {
+    const struct module *module = (const struct module *)node->fs_private;
+    if (!module) return 0;
+    char text[32];
+    size_t length = 0;
+    append_hex64(text, sizeof(text), &length, module->text);
+    append_string(text, sizeof(text), &length, "\n");
+    return attribute_reply(text, length, offset, size, output);
+}
+
+void sysfs_module_removed(const char *name) {
+    char path[96];
+    size_t used = 0;
+    append_string(path, sizeof(path), &used, "/sys/module/");
+    append_string(path, sizeof(path), &used, name);
+    path[used] = '\0';
+    struct vfs_node *node = vfs_lookup(path);
+    if (node && node->parent) (void)vfs_detach_child(node->parent, node);
+}
+
 void sysfs_init(void) {
     struct vfs_node *sys = vfs_mkdir_p("/sys");
     if (!sys) return;
@@ -359,6 +503,7 @@ void sysfs_init(void) {
     if (!vfs_mkdir_p("/sys/class")) return;
     if (!vfs_mkdir_p("/sys/dev/char")) return;
     if (!vfs_mkdir_p("/sys/dev/block")) return;
+    if (!vfs_mkdir_p("/sys/module")) return;
 
     publish_pci_bus();
 

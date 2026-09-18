@@ -1,7 +1,10 @@
 #ifndef TUNIX_SYSFS_H
 #define TUNIX_SYSFS_H
 
-/* Builds the minimal /sys tree udev needs to enumerate devices; see sysfs.c. */
+struct module;
+
 void sysfs_init(void);
+void sysfs_module_added(struct module *module);
+void sysfs_module_removed(const char *name);
 
 #endif
