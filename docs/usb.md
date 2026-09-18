@@ -4,7 +4,7 @@ Two host controllers, one transport above them.
 
 | Driver | Controller | What it reaches |
 | --- | --- | --- |
-| `kernel/drivers/usb/xhci.c` | xHCI (USB 3.x) | keyboards, mice, mass storage |
+| `kernel/drivers/usb/xhci.c` | xHCI (USB 3.x), all of them | keyboards, mice, hubs, mass storage, hot-plug |
 | `kernel/drivers/usb/ehci.c` | EHCI (USB 2.0), all of them | high-speed mass storage |
 
 `kernel/drivers/usb/usb.c` is the seam between them and
@@ -34,6 +34,84 @@ USB: xhci at 0:14.0
 "there is no EHCI here" and "the EHCI here found nothing" are different
 answers, and on a machine with no serial port this line is the only place the
 difference shows.
+
+## The xHCI driver
+
+Every xHCI controller on the machine is taken, up to four, and each is named by
+its position in the log (`XHCI0`, `XHCI1`). Devices are named by controller,
+root port and hub ports, so `0-5.3` is controller 0, root port 5, port 3 of the
+hub on it:
+
+```
+XHCI0: 1.0 at 0:3.0, 64 slots, 8 ports, 32-byte contexts, interrupts
+XHCI: hub at 0-5 slot 1, 8 ports
+XHCI: keyboard at 0-5.1 slot 2, endpoint 81 reporting
+XHCI: mass storage at 1-2 slot 1
+```
+
+**Taking the controller.** The firmware's USB legacy support capability is
+handed over first -- OS-owned is set and the BIOS given a second to let go --
+and its SMIs are switched off, so the firmware stops emulating a PS/2 keyboard
+behind the kernel's back. A controller with port power control has its ports
+powered before anything is asked of them, and the first scan waits 200 ms for
+connections to settle.
+
+**One place for events.** Every event the controller posts is read in one
+pump and handed to its owner: a command completion to the command waiting for
+it, a transfer event to the endpoint that queued it, a keyboard or mouse report
+straight to the input layer, a hub's change bitmap to that hub, a port change to
+the port. The earlier driver read events only while waiting for a particular
+one and dropped the rest, so typing while a USB stick was busy could lose the
+report that re-armed the keyboard, and the keyboard fell silent.
+
+The pump runs from the controller's interrupt -- MSI-X, or MSI when that is all
+the controller offers -- from every wait, and from the input poll, so a
+controller without message interrupts still works, only less promptly.
+
+**Hubs and hot-plug.** USB 2 hubs are followed to the specification's five
+tiers: ports powered, reset through class requests, and each device given its
+route string and, when it is low or full speed behind a high-speed hub, the
+transaction translator it hangs from. A hub's status-change endpoint and the
+controller's port change events feed the same service step, which runs from the
+input poll: a new connection is debounced for 100 ms, reset and enumerated; a
+disconnection removes the device and everything behind it, releases any keys a
+keyboard was holding, and disables its slot. A transfer to a device whose port
+reported a change stops waiting at once instead of timing out.
+
+A SuperSpeed hub is not followed. A USB 3 hub is two hubs, and its USB 2 half
+appears on the matching USB 2 root port, so keyboards, mice and USB 2 disks
+behind it still work; a USB 3 disk behind it does not.
+
+**Storage.** Mass-storage devices keep the number they were first given for as
+long as the machine is up, in `usb.c` as well as in the driver: a disk that is
+unplugged leaves a hole that fails every command rather than shifting every
+disk after it onto the wrong device. A stick plugged in after boot is
+registered with the block layer, its partitions are read and its `/dev` nodes
+appear, the same as one found at boot.
+
+**When something goes wrong.** A stalled or failed endpoint is reset, its
+dequeue pointer moved past the transfer that failed, and the halt cleared on
+the device; a transfer that timed out has its endpoint stopped first. Keyboard
+and mouse endpoints are put back this way up to eight times before the driver
+gives up on them. The storage reset the transport asks for is the Bulk-Only
+Mass Storage Reset with both bulk endpoints put back the same way.
+
+**Other details.** The endpoint 0 packet size of a full-speed device is read
+from the first eight bytes of its descriptor and set with Evaluate Context
+rather than assumed to be eight. Every boot-protocol keyboard and mouse
+interface of a device is used, so a receiver carrying both works. A controller
+that cannot address 64 bits gets all of its rings and buffers below 4 GiB.
+
+`support/tests/usbtest.sh` exercises all of it on QEMU: two controllers, a
+keyboard, a mouse and a full-speed disk behind a hub, a high-speed disk on the
+second controller, a keyboard moved between controllers and hot-plugged behind
+the hub, and a disk plugged in and pulled out during I/O, with key and mouse
+events counted and every disk block written and read back. `XHCI=` picks the
+controller model and its interrupt mode (`qemu-xhci,msix=off,msi=on`,
+`nec-usb-xhci`, `qemu-xhci,msix=off,msi=off`); `ARCH=aarch64` runs it on `virt`.
+
+Not tested in the emulator: endpoint stall recovery, which QEMU gives no way to
+provoke, and controllers limited to 32-bit addresses.
 
 ## Why EHCI exists here
 
