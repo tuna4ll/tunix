@@ -2,14 +2,16 @@
 #include <stdint.h>
 #include "../../include/apic.h"
 #include "../../include/cpu.h"
+#include "../../include/dma.h"
 #include "../../include/heap.h"
 #include "../../include/io.h"
 #include "../../include/irq.h"
 #include "../../include/kstring.h"
+#include "../../include/module.h"
 #include "../../include/pci.h"
 #include "../../include/time.h"
 #include "../../include/vmm.h"
-#include "../../include/net/rtl8139.h"
+#include "../../include/net/net.h"
 
 #define RTL_VENDOR 0x10ECU
 #define RTL_DEVICE 0x8139U
@@ -54,8 +56,12 @@ static volatile uint16_t rx_queue_tail;
 static uint64_t queue_drop_count;
 static unsigned rx_vector;
 
-static uint8_t rx_buffer[RX_BUFFER_BYTES] __attribute__((aligned(4096)));
-static uint8_t tx_buffer[4][TX_BUFFER_BYTES] __attribute__((aligned(256)));
+typedef void (*rtl8139_receive_fn)(const uint8_t *frame, size_t length);
+
+static uint8_t *rx_buffer;
+static uint64_t rx_physical;
+static uint8_t *tx_buffer;
+static uint64_t tx_physical;
 static uint16_t io_base;
 static uint8_t irq_pin;
 static uint16_t rx_offset;
@@ -66,6 +72,8 @@ static uint64_t rx_count;
 static uint64_t tx_count;
 static uint64_t drop_count;
 
+static const struct net_adapter rtl8139_adapter;
+
 static int wait_clear(uint16_t port, uint8_t mask, uint64_t timeout_ns) {
     uint64_t deadline = time_uptime_ns() + timeout_ns;
     while (inb(port) & mask) {
@@ -75,14 +83,17 @@ static int wait_clear(uint16_t port, uint8_t mask, uint64_t timeout_ns) {
     return 0;
 }
 
-int rtl8139_init(void) {
-    struct pci_device device;
+static int rtl8139_start(const struct pci_device *found) {
+    struct pci_device device = *found;
     available = 0;
-    if (pci_find_device(RTL_VENDOR, RTL_DEVICE, &device) != 0) return -1;
     if (!(device.bar[0] & 1U)) return -1;
     io_base = (uint16_t)(device.bar[0] & ~3U);
     irq_pin = device.irq_line;
     pci_enable_bus_mastering(&device);
+
+    if (!rx_buffer) rx_buffer = dma_alloc(RX_BUFFER_BYTES, 4096, &rx_physical);
+    if (!tx_buffer) tx_buffer = dma_alloc(4U * TX_BUFFER_BYTES, 256, &tx_physical);
+    if (!rx_buffer || !tx_buffer) return -1;
 
     outb((uint16_t)(io_base + REG_CONFIG1), 0x00U);
     outb((uint16_t)(io_base + REG_CMD), CMD_RESET);
@@ -90,12 +101,12 @@ int rtl8139_init(void) {
 
     for (unsigned index = 0; index < 6; index++)
         mac_address[index] = inb((uint16_t)(io_base + REG_IDR0 + index));
-    memset(rx_buffer, 0, sizeof(rx_buffer));
-    memset(tx_buffer, 0, sizeof(tx_buffer));
-    outl((uint16_t)(io_base + REG_RBSTART), (uint32_t)vmm_virt_to_phys_direct(rx_buffer));
+    memset(rx_buffer, 0, RX_BUFFER_BYTES);
+    memset(tx_buffer, 0, 4U * TX_BUFFER_BYTES);
+    outl((uint16_t)(io_base + REG_RBSTART), (uint32_t)rx_physical);
     for (unsigned index = 0; index < 4; index++)
         outl((uint16_t)(io_base + REG_TSAD0 + index * 4U),
-             (uint32_t)vmm_virt_to_phys_direct(tx_buffer[index]));
+             (uint32_t)(tx_physical + index * TX_BUFFER_BYTES));
     outw((uint16_t)(io_base + REG_IMR), 0U);
     outw((uint16_t)(io_base + REG_ISR), 0xFFFFU);
     outl((uint16_t)(io_base + REG_RCR), RCR_CONFIG);
@@ -105,7 +116,7 @@ int rtl8139_init(void) {
     tx_index = 0;
     rx_count = tx_count = drop_count = 0;
     available = 1;
-    return 0;
+    return net_register_adapter(&rtl8139_adapter);
 }
 
 static void drain_card(void) {
@@ -118,8 +129,7 @@ static void drain_card(void) {
             drop_count++;
             outb((uint16_t)(io_base + REG_CMD), CMD_RESET);
             if (wait_clear((uint16_t)(io_base + REG_CMD), CMD_RESET, 100000000ULL) == 0) {
-                outl((uint16_t)(io_base + REG_RBSTART),
-                     (uint32_t)vmm_virt_to_phys_direct(rx_buffer));
+                outl((uint16_t)(io_base + REG_RBSTART), (uint32_t)rx_physical);
                 outl((uint16_t)(io_base + REG_RCR), RCR_CONFIG);
                 outb((uint16_t)(io_base + REG_CMD), CMD_RX_ENABLE | CMD_TX_ENABLE);
             }
@@ -155,7 +165,7 @@ static void rtl8139_interrupt(void *context) {
     if (status & (ISR_RX_OK | ISR_RX_ERROR | ISR_RX_OVERFLOW)) drain_card();
 }
 
-void rtl8139_enable_interrupt(void) {
+static void rtl8139_enable_interrupt(void) {
     if (!available || rx_vector) return;
     if (!rx_queue) rx_queue = (struct rx_frame *)kmalloc(sizeof(*rx_queue) * RX_QUEUE_FRAMES);
     if (!rx_queue) return;
@@ -174,16 +184,10 @@ void rtl8139_enable_interrupt(void) {
     outw((uint16_t)(io_base + REG_IMR), ISR_RX_OK | ISR_RX_ERROR | ISR_RX_OVERFLOW);
 }
 
-unsigned rtl8139_interrupt_vector(void) { return rx_vector; }
-uint64_t rtl8139_queue_dropped(void) { return queue_drop_count; }
+static unsigned rtl8139_interrupt_vector(void) { return rx_vector; }
+static uint64_t rtl8139_rx_dropped(void) { return drop_count + queue_drop_count; }
 
-int rtl8139_present(void) { return available; }
-const uint8_t *rtl8139_mac(void) { return mac_address; }
-uint64_t rtl8139_rx_packets(void) { return rx_count; }
-uint64_t rtl8139_tx_packets(void) { return tx_count; }
-uint64_t rtl8139_rx_dropped(void) { return drop_count; }
-
-int rtl8139_transmit(const void *frame, size_t length) {
+static int rtl8139_transmit(const void *frame, size_t length) {
     if (!available || !frame || length < 14U || length > 1514U) return -1;
     unsigned slot = tx_index++ & 3U;
     uint16_t status_port = (uint16_t)(io_base + REG_TSD0 + slot * 4U);
@@ -192,9 +196,10 @@ int rtl8139_transmit(const void *frame, size_t length) {
         if (time_uptime_ns() >= deadline) return -1;
         cpu_relax();
     }
-    memcpy(tx_buffer[slot], frame, length);
+    uint8_t *window = tx_buffer + slot * TX_BUFFER_BYTES;
+    memcpy(window, frame, length);
     if (length < 60U) {
-        memset(tx_buffer[slot] + length, 0, 60U - length);
+        memset(window + length, 0, 60U - length);
         length = 60U;
     }
     cpu_memory_barrier();
@@ -203,7 +208,7 @@ int rtl8139_transmit(const void *frame, size_t length) {
     return 0;
 }
 
-void rtl8139_poll(rtl8139_receive_fn receive) {
+static void rtl8139_poll(rtl8139_receive_fn receive) {
     if (!available || !receive) return;
     if (!rx_vector) drain_card();
 
@@ -215,3 +220,58 @@ void rtl8139_poll(rtl8139_receive_fn receive) {
         served++;
     }
 }
+
+static const struct net_adapter rtl8139_adapter = {
+    .name = "rtl8139",
+    .mac = mac_address,
+    .transmit = rtl8139_transmit,
+    .poll = rtl8139_poll,
+    .rx_dropped = rtl8139_rx_dropped,
+    .enable_interrupts = rtl8139_enable_interrupt,
+    .interrupt_vector = rtl8139_interrupt_vector,
+};
+
+static void rtl8139_stop(const struct pci_device *device) {
+    (void)device;
+    if (!available) return;
+    outw((uint16_t)(io_base + REG_IMR), 0U);
+    outb((uint16_t)(io_base + REG_CMD), 0U);
+    available = 0;
+    net_unregister_adapter(&rtl8139_adapter);
+    if (rx_vector) {
+        irq_release(rx_vector);
+        rx_vector = 0;
+    }
+    kfree(rx_queue);
+    rx_queue = NULL;
+    dma_free(rx_buffer, RX_BUFFER_BYTES);
+    dma_free(tx_buffer, 4U * TX_BUFFER_BYTES);
+    rx_buffer = NULL;
+    tx_buffer = NULL;
+}
+
+static const struct pci_device_id rtl8139_ids[] = {
+    { RTL_VENDOR, RTL_DEVICE, PCI_ANY_ID, PCI_ANY_ID },
+};
+
+static struct pci_driver rtl8139_driver = {
+    .name = "rtl8139",
+    .ids = rtl8139_ids,
+    .id_count = sizeof(rtl8139_ids) / sizeof(rtl8139_ids[0]),
+    .probe = rtl8139_start,
+    .remove = rtl8139_stop,
+};
+
+static int rtl8139_load(void) {
+    return pci_register_driver(&rtl8139_driver);
+}
+
+static void rtl8139_unload(void) {
+    pci_unregister_driver(&rtl8139_driver);
+}
+
+MODULE_MAIN(rtl8139_load, rtl8139_unload);
+MODULE_PCI_ALIAS("10EC", "8139");
+MODULE_LICENSE("MIT");
+MODULE_DESCRIPTION("Realtek RTL8139 Ethernet controller");
+MODULE_AUTHOR("Tunix");
