@@ -45,6 +45,26 @@ fi
 esp_copy "$SYSROOT/usr/share/weston/wallpapers/tunix.png" boot/wallpaper.png
 mcopy -s -i "$WORK/esp.img" "$WORK/esp-root"/* ::
 
+if [ -n "${MODULES:-}" ]; then
+	RELEASE=${RELEASE:?image.sh: MODULES needs RELEASE}
+	TARGET=$SYSROOT/usr/lib/modules/$RELEASE
+	echo ":: installing modules into /usr/lib/modules/$RELEASE"
+	rm -rf "$TARGET"
+	mkdir -p "$TARGET/kernel"
+	for directory in $MODULES; do
+		[ -d "$directory" ] || continue
+		find "$directory" -name '*.ko' -exec cp {} "$TARGET/kernel/" \;
+	done
+	: > "$TARGET/modules.builtin"
+	: > "$TARGET/modules.builtin.modinfo"
+	: > "$TARGET/modules.order"
+	if command -v depmod >/dev/null; then
+		depmod -b "$SYSROOT" "$RELEASE"
+	else
+		echo ":: depmod is missing, so modprobe will only find modules by path" >&2
+	fi
+fi
+
 ROOT_MIB=$(( $(du -sm "$SYSROOT" | cut -f1) + ROOT_SLACK_MIB ))
 echo ":: building a ${ROOT_MIB} MiB root filesystem"
 truncate -s "${ROOT_MIB}M" "$WORK/root.img"
