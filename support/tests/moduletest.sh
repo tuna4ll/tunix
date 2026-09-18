@@ -48,7 +48,8 @@ sysroot, root = sys.argv[1], sys.argv[2]
 programs = ['bash', 'kmod', 'lsmod', 'insmod', 'rmmod', 'modprobe', 'modinfo', 'depmod',
             'lspci', 'cat', 'ls', 'grep', 'sort', 'head', 'tail', 'wc', 'awk',
             'uname', 'sleep', 'mkdir', 'udevadm', 'udevd', 'sed', 'tr', 'dmesg',
-            'basename', 'readlink', 'dirname', 'env', 'mount', 'ip', 'dhcpcd']
+            'basename', 'readlink', 'dirname', 'env', 'mount', 'ip', 'dhcpcd',
+            'modules-load', 'find', 'uniq', 'cut', 'xargs', 'rm', 'sh']
 copied = set()
 
 def needed(path):
@@ -162,7 +163,17 @@ echo "options tunix_probe number=9 text=configured" > /etc/modprobe.d/tunix.conf
 modprobe tunix_probe
 check modprobe-options "$(cat /sys/module/tunix_probe/parameters/number)" 9
 check modprobe-options-text "$(cat /sys/module/tunix_probe/parameters/text)" configured
+modprobe -r tunix_probe
+check modprobe-remove "$?" 0
+check modprobe-removed "$(lsmod | tail -n +2 | wc -l)" 0
+rm /etc/modprobe.d/tunix.conf
+
+mkdir -p /etc/modules-load.d
+echo tunix_probe > /etc/modules-load.d/probe.conf
+modules-load -v > /tmp/modules-load.log 2>&1
+check modules-load "$(lsmod | awk '$1 == "tunix_probe" {print $1}')" tunix_probe
 rmmod tunix_probe
+rm /etc/modules-load.d/probe.conf
 
 echo "MODULETEST sysfs-pci: $(ls /sys/bus/pci/devices | tr '\n' ' ')"
 lspci > /tmp/lspci.txt 2>&1
