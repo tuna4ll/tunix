@@ -4,6 +4,7 @@
 #include "../../include/dma.h"
 #include "../../include/kstring.h"
 #include "../../include/virtio.h"
+#include "../../include/net/net.h"
 #include "../../include/net/virtio_net.h"
 
 #define VIRTIO_NET_DEVICE_ID 0x1041U
@@ -23,7 +24,6 @@ struct virtio_net_header {
     uint16_t gso_size;
     uint16_t checksum_start;
     uint16_t checksum_offset;
-    /* Part of the version-1 header even without merged receive buffers. */
     uint16_t buffer_count;
 } __attribute__((packed));
 
@@ -58,10 +58,18 @@ static int post_receive(unsigned index) {
 
 static void network_interrupt(void *context) {
     (void)context;
-    /* Reading the ISR acknowledges every reason represented by this byte. The
-       stack is entered only from poll, never halfway through another call. */
     if (device.isr) (void)*device.isr;
 }
+
+static const struct net_adapter virtio_net_adapter = {
+    .name = "virtio-net",
+    .mac = mac_address,
+    .transmit = virtio_net_transmit,
+    .poll = virtio_net_poll,
+    .rx_dropped = virtio_net_rx_dropped,
+    .enable_interrupts = NULL,
+    .interrupt_vector = virtio_net_interrupt_vector,
+};
 
 int virtio_net_init(void) {
     available = 0;
@@ -82,8 +90,6 @@ int virtio_net_init(void) {
         virtio_pci_set_failed(&device);
         return -1;
     }
-    /* Receive completions wake the device vector; transmit is synchronously
-       reclaimed by its caller, so an interrupt would announce known work. */
     transmit_queue.interrupt_driven = 0;
 
     receive_slot_count = receive_queue.size;
@@ -98,8 +104,6 @@ int virtio_net_init(void) {
         return -1;
     }
 
-    /* A queue kick made before DRIVER_OK may be ignored. Publish readiness
-       first, then make every receive buffer visible and notify the device. */
     virtio_pci_set_driver_ok(&device);
     for (unsigned index = 0; index < receive_slot_count; index++) {
         if (post_receive(index) != 0) {
@@ -110,7 +114,7 @@ int virtio_net_init(void) {
 
     received_packets = transmitted_packets = dropped_packets = 0;
     available = 1;
-    return 0;
+    return net_register_adapter(&virtio_net_adapter);
 }
 
 int virtio_net_present(void) { return available; }

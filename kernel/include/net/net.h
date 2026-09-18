@@ -6,7 +6,6 @@
 
 #define NET_MTU 1500U
 
-/* 127.0.0.0/8, in host order. */
 #define NET_LOOPBACK_NETWORK 0x7F000000U
 #define NET_LOOPBACK_MASK    0xFF000000U
 #define NET_LOOPBACK_ADDRESS 0x7F000001U
@@ -33,10 +32,21 @@ struct net_arp_record {
     uint8_t mac[6];
 };
 
+struct net_adapter {
+    const char *name;
+    const uint8_t *mac;
+    int (*transmit)(const void *frame, size_t length);
+    void (*poll)(void (*deliver)(const uint8_t *frame, size_t length));
+    uint64_t (*rx_dropped)(void);
+    void (*enable_interrupts)(void);
+    unsigned (*interrupt_vector)(void);
+};
+
+int net_register_adapter(const struct net_adapter *card);
+void net_unregister_adapter(const struct net_adapter *card);
+
 void net_init(void);
 void net_poll(void);
-/* Give the adapter its interrupt. Separate from net_init() because it needs an
-   interrupt controller, and the adapter is set up before there is one. */
 void net_enable_interrupts(void);
 const struct net_config *net_get_config(void);
 void net_set_address(uint32_t address);
@@ -45,25 +55,12 @@ void net_set_gateway(uint32_t gateway);
 void net_set_dns(uint32_t dns);
 void net_set_interface_up(int up);
 uint16_t net_checksum(const void *data, size_t length);
-/* Whether an address is one this machine answers on without a wire. */
-/*
- * The interface indices, shared by every interface that reports them --
- * rtnetlink's ifi_index, SIOCGIFINDEX and SIOCGIFNAME. They have to agree:
- * a program asks netlink which interface carries the default route and then
- * asks a socket for that index's name, and if the two number the interfaces
- * differently the second question has no answer. Loopback is 1 as it is
- * everywhere.
- */
 #define NET_IFINDEX_LO 1
 #define NET_IFINDEX_ETH0 2
 
-/* index -> name, and the SIOCGIF* family generally. Not a property of any one
-   socket -- Linux answers these on whichever socket is handed to it, and musl
-   asks over an AF_UNIX one in if_indextoname() -- so it does not take one. */
 int net_interface_ioctl(unsigned long request, void *argument);
 
 int net_is_loopback(uint32_t address);
-/* The source address a packet to `destination` goes out with. */
 uint32_t net_source_for(uint32_t destination);
 uint16_t net_htons(uint16_t value);
 uint32_t net_htonl(uint32_t value);
