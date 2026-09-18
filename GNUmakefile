@@ -38,9 +38,9 @@ all: image
 kernel: $(KERNEL)
 
 check:
-	$(MAKE) kernel BUILD=$(BUILD)/check/default LIMINE_DIR=$(LIMINE_DIR)
-	$(MAKE) kernel BUILD=$(BUILD)/check/debug LIMINE_DIR=$(LIMINE_DIR) KERNEL_CFLAGS_EXTRA=-DTUNIX_DEBUG_LOGS=1
-	$(MAKE) kernel BUILD=$(BUILD)/check/timings LIMINE_DIR=$(LIMINE_DIR) KERNEL_CFLAGS_EXTRA=-DTUNIX_BOOT_TIMINGS=1
+	$(MAKE) kernel modules BUILD=$(BUILD)/check/default LIMINE_DIR=$(LIMINE_DIR)
+	$(MAKE) kernel modules BUILD=$(BUILD)/check/debug LIMINE_DIR=$(LIMINE_DIR) KERNEL_CFLAGS_EXTRA=-DTUNIX_DEBUG_LOGS=1
+	$(MAKE) kernel modules BUILD=$(BUILD)/check/timings LIMINE_DIR=$(LIMINE_DIR) KERNEL_CFLAGS_EXTRA=-DTUNIX_BOOT_TIMINGS=1
 
 $(KERNEL): $(KERNEL_OBJECTS) kernel/arch/x86_64/linker.ld
 	$(CC) $(KERNEL_LDFLAGS) $(KERNEL_OBJECTS) -o $@

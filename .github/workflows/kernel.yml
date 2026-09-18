@@ -39,5 +39,5 @@ jobs:
       - name: build
         run: make check
 
-      - name: the three kernels exist
-        run: ls -l build/check/*/kernel.elf
+      - name: the three kernels and their modules exist
+        run: ls -l build/check/*/kernel.elf build/check/*/modules/*.ko
