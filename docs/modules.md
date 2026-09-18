@@ -169,12 +169,24 @@ ARCH=aarch64 sh support/tests/moduletest.sh build/kernel-aarch64-core.img
 ```
 
 It checks `insmod` with parameters, the sysfs files, loading a second module
-that needs the first's symbols, `EBUSY` on the module in use, `modprobe`
-pulling a dependency in, `modinfo`, `lspci` and `lspci -k`, the sound card
-appearing and disappearing with its module, udev autoloading it from the
-device's modalias, and -- with `NIC=rtl8139`, which is the default where that
-module exists -- a DHCP lease over a network card whose driver was loaded by
-udev.
+that needs the first's symbols, `EBUSY` on the module in use and on the module
+whose PCM device is open, `modprobe` pulling a dependency in, `modprobe -r`,
+options from `/etc/modprobe.d`, the `modules-load.d` path Void's init uses,
+`modinfo`, `lspci` and `lspci -k`, the sound card appearing and disappearing
+with its module, udev autoloading it from the device's modalias, and -- with
+`NIC=rtl8139`, which is the default where that module exists -- a DHCP lease
+over a network card whose driver was loaded by udev.
+
+Broken modules are part of it: a truncated `.ko`, a file that is not ELF at
+all, and one whose `vermagic` has been rewritten are all refused, and the
+machine carries on.
+
+The emulated machine has two HD Audio controllers and only one of them has a
+codec, which is the shape of a real one with an onboard card and an HDMI audio
+function on the GPU. The driver binds the controller it can use and leaves the
+other alone -- and each controller gets its own register window, because the
+fixed address the driver used to map into meant the second probe would have
+been talking to the first controller.
 
 `support/tests/soundtest.sh` loads `snd_hda.ko` itself with `finit_module`
 before it opens the PCM device, which is the same path with no userland at all.
