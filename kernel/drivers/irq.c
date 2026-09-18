@@ -1,12 +1,3 @@
-/*
- * The table behind irq.h: sixteen vectors, and who answers each of them.
- *
- * There is no locking here on purpose. Every path into this file already holds
- * the kernel lock -- irq_request() is called from driver init, irq_dispatch()
- * from isr_handler() after kernel_lock_from_isr() -- so the counters are
- * ordinary increments rather than atomics, and the table is written before the
- * vector it describes is ever routed.
- */
 #include <stddef.h>
 #include <stdint.h>
 
@@ -32,12 +23,20 @@ unsigned irq_request(const char *name, const char *kind, irq_handler_fn handler,
         slots[index].name = name ? name : "device";
         slots[index].kind = kind ? kind : "unknown";
         slots[index].count = 0;
-        /* Last, and deliberately: the vector is already in the IDT, so a
-           half-filled slot is one an interrupt could arrive into. */
         slots[index].handler = handler;
         return IRQ_VECTOR_FIRST + index;
     }
     return 0;
+}
+
+void irq_release(unsigned vector) {
+    if (vector < IRQ_VECTOR_FIRST) return;
+    unsigned index = vector - IRQ_VECTOR_FIRST;
+    if (index >= IRQ_VECTOR_COUNT) return;
+    slots[index].handler = NULL;
+    slots[index].context = NULL;
+    slots[index].name = NULL;
+    slots[index].kind = NULL;
 }
 
 int irq_dispatch(unsigned vector) {
@@ -46,9 +45,6 @@ int irq_dispatch(unsigned vector) {
     if (index >= IRQ_VECTOR_COUNT) return 0;
 
     struct irq_slot *slot = &slots[index];
-    /* Counted even when nobody claimed the vector. An interrupt arriving on a
-       vector with no handler is worth being able to see, and it is the shape a
-       device left enabled by the firmware takes. */
     slot->count++;
     delivered++;
     if (!slot->handler) return 0;
