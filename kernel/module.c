@@ -176,8 +176,10 @@ static uint64_t reserve_window(uint64_t bytes) {
 }
 
 static void unmap_window(uint64_t base, uint64_t bytes) {
+    vmm_flush_batch_begin();
     for (uint64_t offset = 0; offset < bytes; offset += 4096ULL)
         (void)vmm_unmap_page_in(vmm_kernel_cr3(), base + offset);
+    vmm_flush_batch_end();
 }
 
 static int map_window(uint64_t base, uint64_t physical, uint64_t bytes) {
@@ -192,8 +194,10 @@ static int map_window(uint64_t base, uint64_t physical, uint64_t bytes) {
 }
 
 static void protect_range(uint64_t base, uint64_t bytes, uint64_t flags) {
+    vmm_flush_batch_begin();
     for (uint64_t offset = 0; offset < bytes; offset += 4096ULL)
         (void)vmm_protect_page_in(vmm_kernel_cr3(), base + offset, flags);
+    vmm_flush_batch_end();
 }
 
 static const char *modinfo_entry(const struct image *image, const char *key,
@@ -682,7 +686,7 @@ static int place_sections(struct module *module, struct image *image) {
     return 0;
 }
 
-static void protect_module(struct module *module) {
+static int protect_module(struct module *module) {
     protect_range(module->text, module->text_bytes, PAGE_PRESENT);
     protect_range(module->rodata, module->data - module->rodata,
                   PAGE_PRESENT | PAGE_NX);
@@ -690,6 +694,17 @@ static void protect_module(struct module *module) {
                   PAGE_PRESENT | PAGE_WRITE | PAGE_NX);
     for (uint64_t offset = 0; offset < module->text_bytes; offset += 4096ULL)
         vmm_arch_sync_executable(module->physical + offset);
+
+    for (uint64_t offset = 0; offset < module->text_bytes; offset += 4096ULL) {
+        uint64_t flags = 0;
+        if (vmm_translate(vmm_kernel_cr3(), module->text + offset, NULL, &flags) != 0 ||
+            (flags & PAGE_NX)) {
+            kprintf("MODULE: %s text at %p did not become executable\n",
+                    module->name, (void *)(module->text + offset));
+            return -ENOEXEC;
+        }
+    }
+    return 0;
 }
 
 static int read_tables(struct module *module, const struct image *image) {
@@ -835,7 +850,9 @@ int module_load(const void *contents, size_t bytes, const char *arguments) {
     result = apply_parameters(module);
     if (result != 0) goto failed;
 
-    protect_module(module);
+    result = protect_module(module);
+    if (result != 0) goto failed;
+
     module->exit = descriptor->exit;
     module->next = modules;
     modules = module;
