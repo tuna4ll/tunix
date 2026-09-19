@@ -218,6 +218,50 @@ been talking to the first controller.
 `support/tests/soundtest.sh` loads `snd_hda.ko` itself with `finit_module`
 before it opens the PCM device, which is the same path with no userland at all.
 
+## On a machine that is not the emulator
+
+The emulator agrees with every assumption in the loader, so the boot-time
+hardware report -- the `Tunix (hardware report)` entry in the boot menu, or
+`hwreport` on the command line -- answers the module questions too, and writes
+the answers to `/tunix-hwreport.txt` where a disk read anywhere else can find
+them:
+
+```
+modules
+  vermagic    0.1.0 x86_64
+  window      0xffffffffc0000000 + 16 MiB
+  symbols     52 exported to modules
+  file        snd_hda.ko 13544 bytes, alias pci:v*d*sv*sd*bc04sc03i*
+  file        rtl8139.ko 8680 bytes, alias pci:v000010ECd00008139sv*sd*bc*sc*i*
+  selftest    loaded at 0xffffffffc0000000, 12288 bytes, answer 0x5ad2c0debeef0007 PASS, unloaded
+pci
+  0000:00:1b.0  8086:293e class 040300 irq 11
+    modalias  pci:v00008086d0000293Esv00001028sd000002DAbc04sc03i00
+    module    snd_hda matches this device
+```
+
+Three things are being asked there, and each is something only the machine can
+answer:
+
+**Does the loader work on this processor?** `tunix_selftest.ko` is a module
+whose only job is to be loaded: its init recomputes a constant through a jump
+table, string constants, a static array and calls into the kernel, and the
+report then calls an exported function of its own and compares the result with
+an exported constant before unloading it. A relocation this CPU takes
+differently shows up as `MISMATCH` rather than as a desktop that will not start.
+
+**Will udev load anything?** Every PCI function is listed with the modalias the
+kernel will hand udev, and the report matches it against the `alias` patterns in
+the `.ko` files actually installed on this disk -- the same glob `modprobe`
+does. `module snd_hda matches this device` means the chain will fire; a sound
+controller with no matching line means it will not, and the modalias beside it
+is what a new `MODULE_PCI_ALIAS` would have to cover.
+
+**What happened once userspace ran?** `/etc/rc.local` appends `lsmod`, `lspci
+-k`, the sound nodes, the interfaces and every bound PCI driver to the same
+file, so the second half of the report says whether the match above actually
+became a driver.
+
 ## Not here
 
 The kernel never asks userspace for a module: there is no `request_module()`,

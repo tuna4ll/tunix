@@ -541,6 +541,12 @@ can go wrong and an emulated one cannot:
   second on that processor and a machine that stops; the report says so rather
   than leaving it to be guessed at.
 
+The report carries two more sections for the same reason: `modules`, which
+loads a module on the spot to prove the loader works on this processor and
+lists which installed `.ko` claims which PCI function, and `pci`, which prints
+every device with the modalias udev will be given. See
+[Modules](modules.md).
+
 ## Proving it
 
 A program that times one child doing a fixed amount of arithmetic, then four
