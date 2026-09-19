@@ -128,6 +128,27 @@ PMM: 4077 MiB managed of 4095 MiB installed, ceiling 8192 MiB
 The middle number is what the firmware said the machine has, so a kernel that is
 leaving memory on the table says so plainly instead of quietly capping.
 
+## Changing a kernel mapping
+
+The top half of every address space is the same memory: `vmm_create_address_space`
+copies the kernel's upper entries into each new table, so the directories below
+them are shared by pointer and a mapping added later is visible everywhere
+without touching any process.
+
+That sharing is also why unmapping or re-protecting one is not a local
+operation. The processor doing it is usually running some process's address
+space -- `finit_module` runs in udev's -- so a condition like "invalidate if
+this is the address space I have loaded" skips the one processor that most
+needs it, and a shootdown aimed at "everyone running this address space" finds
+nobody. `vmm.c` treats an address in the kernel half as what it is: it
+invalidates locally whatever is loaded, and asks every other processor, through
+`smp_flush_kernel_mappings()`. Both are batched by
+`vmm_flush_batch_begin/end`, so releasing a heap block or loading a module
+costs one interrupt rather than one per page.
+
+A real machine found this and an emulator could not: see
+[Modules](modules.md).
+
 ## The kernel heap
 
 The heap is the other ceiling, and the one that runs out first on a machine

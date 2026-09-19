@@ -262,6 +262,40 @@ is what a new `MODULE_PCI_ALIAS` would have to cover.
 file, so the second half of the report says whether the match above actually
 became a driver.
 
+### What the first real machine said
+
+A Core i5 M430 laptop ran the report, passed the selftest, matched `snd_hda`
+against both of its audio functions -- the Ibex Peak controller and the GPU's
+HDMI audio -- and then panicked the moment udev loaded the module:
+
+```
+Page Fault in udevd[50] at snd_hda+0x233 (RIP 0xffffffffc0000233)
+Error Code: 11  CS: 8
+```
+
+Error code `0x11` is an instruction fetch into a page marked no-execute, and
+the address is the module's init function. The page tables were right: the
+loader maps a module writable and non-executable, relocates it, and then turns
+the text read-execute. What was wrong was the *processor's* copy.
+
+`vmm_protect_page_in()` only invalidated the current processor's translation
+when the address space it was changing happened to be the one loaded, and only
+sent the shootdown interrupt to processors running that same address space.
+Loading a module happens inside `finit_module` -- in udev's address space, not
+the kernel's -- so nothing was invalidated anywhere, and the stale entry said
+non-executable. The emulator forgave it because writing to a page fills the
+data TLB and an instruction fetch then walks the tables afresh; this laptop has
+a unified second-level TLB, which is exactly where the stale entry was found.
+
+A mapping in the kernel half belongs to every address space, so the processor
+that changes one has to forget it whatever it is running, and every other
+processor has to be told. That is what `vmm.c` does now, and the module loader
+batches the shootdown so a module costs one of them rather than one per page.
+The same bug was sitting in the heap's page release, where a stale entry would
+have meant writing into memory that had been handed to somebody else. The
+selftest at boot never caught it because the kernel is its own address space
+there -- the one case the old condition got right.
+
 ## Not here
 
 The kernel never asks userspace for a module: there is no `request_module()`,
