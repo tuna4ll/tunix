@@ -102,7 +102,7 @@ int module_export_value(const struct module *module, const char *name,
 #define MODULE_MAIN(init_function, exit_function) \
     MODULE_INFO(name, TUNIX_MODULE_NAME); \
     MODULE_INFO(vermagic, MODULE_VERMAGIC); \
-    static const struct module_descriptor __this_module \
+    const struct module_descriptor __this_module \
         __attribute__((section(".tunix_module"), used, aligned(8))) = \
         { TUNIX_MODULE_NAME, init_function, exit_function }
 
