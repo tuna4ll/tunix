@@ -69,6 +69,7 @@ int module_unload(const char *name, unsigned flags);
 struct module *module_find(const char *name);
 struct module *module_list(void);
 struct module *module_active(void);
+unsigned module_kernel_symbol_count(void);
 int module_get(struct module *module);
 void module_put(struct module *module);
 const char *module_state_name(const struct module *module);
@@ -77,6 +78,10 @@ int module_param_format(const struct module *module, unsigned index,
 int module_param_set(struct module *module, unsigned index, const char *text,
                      size_t length);
 int module_address_owner(uint64_t address, const char **name, uint64_t *offset);
+int module_image_info(const void *contents, size_t bytes, const char *key,
+                      unsigned occurrence, char *out, size_t capacity);
+int module_export_value(const struct module *module, const char *name,
+                        uint64_t *value);
 
 #define MODULE_JOIN_(a, b) a##b
 #define MODULE_JOIN(a, b) MODULE_JOIN_(a, b)

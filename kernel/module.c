@@ -113,6 +113,7 @@ extern const struct module_export kernel_symbols[];
 extern const unsigned kernel_symbol_count;
 
 struct module *module_active(void) { return active; }
+unsigned module_kernel_symbol_count(void) { return kernel_symbol_count; }
 struct module *module_list(void) { return modules; }
 
 struct module *module_find(const char *name) {
@@ -195,9 +196,10 @@ static void protect_range(uint64_t base, uint64_t bytes, uint64_t flags) {
         (void)vmm_protect_page_in(vmm_kernel_cr3(), base + offset, flags);
 }
 
-static const char *modinfo_value(const struct image *image, const char *key,
-                                 char *out, size_t capacity) {
+static const char *modinfo_entry(const struct image *image, const char *key,
+                                 unsigned occurrence, char *out, size_t capacity) {
     size_t key_length = strlen(key);
+    unsigned seen = 0;
     for (unsigned index = 0; index < image->section_count; index++) {
         const struct elf64_section *section = &image->sections[index];
         if (strcmp(image->section_names + section->name, ".modinfo") != 0) continue;
@@ -209,7 +211,7 @@ static const char *modinfo_value(const struct image *image, const char *key,
             uint64_t length = 0;
             while (at + length < section->size && entry[length]) length++;
             if (length > key_length && strncmp(entry, key, key_length) == 0 &&
-                entry[key_length] == '=') {
+                entry[key_length] == '=' && seen++ == occurrence) {
                 const char *value = entry + key_length + 1;
                 size_t used = 0;
                 while (value[used] && used + 1 < capacity) {
@@ -223,6 +225,11 @@ static const char *modinfo_value(const struct image *image, const char *key,
         }
     }
     return NULL;
+}
+
+static const char *modinfo_value(const struct image *image, const char *key,
+                                 char *out, size_t capacity) {
+    return modinfo_entry(image, key, 0, out, capacity);
 }
 
 static int section_index_named(const struct image *image, const char *name) {
@@ -707,11 +714,10 @@ static int read_tables(struct module *module, const struct image *image) {
     return index;
 }
 
-int module_load(const void *contents, size_t bytes, const char *arguments) {
-    struct image image;
-    memset(&image, 0, sizeof(image));
-    image.bytes = (const uint8_t *)contents;
-    image.length = bytes;
+static int prepare_image(struct image *image, const void *contents, size_t bytes) {
+    memset(image, 0, sizeof(*image));
+    image->bytes = (const uint8_t *)contents;
+    image->length = bytes;
 
     if (bytes < sizeof(struct elf64_header)) return -ENOEXEC;
     const struct elf64_header *header = (const struct elf64_header *)contents;
@@ -724,31 +730,58 @@ int module_load(const void *contents, size_t bytes, const char *arguments) {
         header->shstrndx >= header->shnum)
         return -ENOEXEC;
 
-    image.header = header;
-    image.section_count = header->shnum;
-    if (!range_valid(&image, header->shoff,
+    image->header = header;
+    image->section_count = header->shnum;
+    if (!range_valid(image, header->shoff,
                      (uint64_t)header->shnum * sizeof(struct elf64_section)))
         return -ENOEXEC;
-    image.sections = (const struct elf64_section *)(image.bytes + header->shoff);
+    image->sections = (const struct elf64_section *)(image->bytes + header->shoff);
 
-    const struct elf64_section *names = &image.sections[header->shstrndx];
-    if (!range_valid(&image, names->offset, names->size)) return -ENOEXEC;
-    image.section_names = (const char *)(image.bytes + names->offset);
+    const struct elf64_section *names = &image->sections[header->shstrndx];
+    if (!range_valid(image, names->offset, names->size)) return -ENOEXEC;
+    image->section_names = (const char *)(image->bytes + names->offset);
 
-    for (unsigned index = 0; index < image.section_count; index++) {
-        const struct elf64_section *section = &image.sections[index];
+    for (unsigned index = 0; index < image->section_count; index++) {
+        const struct elf64_section *section = &image->sections[index];
         if (section->type != SHT_SYMTAB) continue;
-        if (section->link >= image.section_count) return -ENOEXEC;
-        const struct elf64_section *strings = &image.sections[section->link];
-        if (!range_valid(&image, section->offset, section->size) ||
-            !range_valid(&image, strings->offset, strings->size))
+        if (section->link >= image->section_count) return -ENOEXEC;
+        const struct elf64_section *strings = &image->sections[section->link];
+        if (!range_valid(image, section->offset, section->size) ||
+            !range_valid(image, strings->offset, strings->size))
             return -ENOEXEC;
-        image.symbols = (const struct elf64_symbol *)(image.bytes + section->offset);
-        image.symbol_count = (unsigned)(section->size / sizeof(struct elf64_symbol));
-        image.strings = (const char *)(image.bytes + strings->offset);
+        image->symbols = (const struct elf64_symbol *)(image->bytes + section->offset);
+        image->symbol_count = (unsigned)(section->size / sizeof(struct elf64_symbol));
+        image->strings = (const char *)(image->bytes + strings->offset);
         break;
     }
-    if (!image.symbols) return -ENOEXEC;
+    return image->symbols ? 0 : -ENOEXEC;
+}
+
+int module_image_info(const void *contents, size_t bytes, const char *key,
+                      unsigned occurrence, char *out, size_t capacity) {
+    struct image image;
+    if (!out || !capacity) return -EINVAL;
+    out[0] = '\0';
+    int status = prepare_image(&image, contents, bytes);
+    if (status != 0) return status;
+    return modinfo_entry(&image, key, occurrence, out, capacity) ? 0 : -ENOENT;
+}
+
+int module_export_value(const struct module *module, const char *name,
+                        uint64_t *value) {
+    if (!module || !name || !value) return -EINVAL;
+    for (unsigned index = 0; index < module->export_count; index++) {
+        if (strcmp(module->exports[index].name, name) != 0) continue;
+        *value = module->exports[index].value;
+        return 0;
+    }
+    return -ENOENT;
+}
+
+int module_load(const void *contents, size_t bytes, const char *arguments) {
+    struct image image;
+    int status = prepare_image(&image, contents, bytes);
+    if (status != 0) return status;
 
     char name[MODULE_NAME_MAX];
     char vermagic[64] = { 0 };
