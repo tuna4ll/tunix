@@ -53,6 +53,34 @@ re-reads the PHY twice a second and re-programs the MAC when the speed or duplex
 changes, so a cable plugged in after boot still works. Interrupts are the
 obvious next step; nothing else about the driver assumes polling.
 
+### The chip a laptop hands you is asleep
+
+A PCIe card on a laptop does not arrive in the state a datasheet describes. The
+BIOS has already put the link into ASPM, and the AR8131 wakes with its internal
+clocks gated, so a driver that programs nothing but rings and the MAC can bring
+the link up, print a speed, and then move no frames at all -- which is exactly
+what the first report from the laptop showed: `atl1c` bound, link up, every
+counter zero.
+
+Three registers decide it, and the driver writes all three before it carries
+traffic:
+
+- `PM_CTRL` (0x12F8), the MAC's own view of ASPM. With the link up the driver
+  turns L0s and L1 off, zeroes the L1 entry timer and enables the SerDes L1
+  block; with the link down it parks the chip the other way round, clock switch
+  on and the SerDes block off. It is re-written on every link change, because
+  the right setting depends on whether there is a cable.
+- `CLK_GATING_CTRL` (0x1814), which is cleared: on this part the clocks stay on.
+- `PCIE_PHYMISC` (0x1000) and `LTSSM_ID_CTRL` (0x12FC), the PCIe receiver-detect
+  and LTSSM bits, plus `MASTER_CTRL`'s clock-select bit, all set the way Linux's
+  own driver sets them at probe.
+
+None of this can be found in an emulator: QEMU has no ASPM and no clocks to
+gate. The register numbers and the bit meanings were taken from the hardware
+facts in Linux's atl1c, and the model test below now starts the chip the way a
+laptop does -- gated and in ASPM -- so a driver that skips the wake-up fails the
+test instead of the machine.
+
 ## A driver with no emulator
 
 QEMU has no AR8131, so `support/tests/atl1ctest.c` is the test: it compiles the
@@ -63,12 +91,26 @@ transmit descriptors and posts receive ones -- and the DMA arena is mapped low
 so the 32-bit addresses the driver programs are addresses the model can follow.
 
 That is enough to check the things a wrong driver gets wrong: the station
-address it read, the ring base addresses and sizes it programmed, that the MAC
-and both queues ended up enabled at the speed the PHY reported, that frames
-handed to `transmit` arrive byte for byte, that received frames come back the
-same way with their slots returned to the hardware, that a full transmit ring
-refuses work rather than overwriting it, and that a link change re-programs the
-MAC. `make atl1ctest` runs it in under a second, and CI runs it on every push.
+address it read -- from the registers, and from the EEPROM when the registers
+are empty -- the ring base addresses and sizes it programmed, that the MAC and
+both queues ended up enabled at the speed the PHY reported, that frames handed
+to `transmit` arrive byte for byte, that received frames come back the same way
+with their slots returned to the hardware, that a full transmit ring refuses
+work rather than overwriting it, and that a link change re-programs the MAC.
+`make atl1ctest` runs it in under a second, and CI runs it on every push.
+
+The model is deliberately as unforgiving as the chip. It moves no frame in
+either direction unless bus mastering is on and both the queue and the MAC half
+are enabled, so a forgotten enable is a failed test rather than a dead laptop;
+it wakes with its clocks gated and ASPM on, so the wake-up above is tested; and
+it consumes as many receive slots as the descriptor it posts claims. On top of
+that the test drives what a real cable does over an afternoon: 240 frames in and
+60 out, several times round both rings; descriptors that report a checksum
+error, an 802.3 length error, an impossible length, an index past the ring and a
+frame spanning two slots, each of which has to be dropped, counted, and leave
+the ring in step for the good frame behind it; a link that goes down and comes
+back while traffic is flowing; and a transmit attempted after the driver has
+been removed.
 
 What the model cannot check is whether those register offsets are the ones the
 real chip answers to. That part was read off a Core i5 laptop's own hardware
