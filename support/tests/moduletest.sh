@@ -217,7 +217,9 @@ echo hello > /sys/module/tunix_probe/parameters/text 2>/dev/null
 check param-write-string "$?" 1
 rmmod tunix_probe
 
-check insmod-unprivileged "$(/sbin/moduleperm | sed 's/.*finit=//')" -1
+unprivileged=$(/sbin/moduleperm)
+echo "MODULETEST $unprivileged"
+check insmod-unprivileged "${unprivileged##*finit=}" -1
 check insmod-unprivileged-clean "$(lsmod | tail -n +2 | wc -l)" 0
 
 if [ -f /foreign.ko ]; then
