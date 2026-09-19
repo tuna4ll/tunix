@@ -22,6 +22,7 @@ typedef unsigned int u32;
 #define SYS_fsync 74
 #define SYS_ftruncate 77
 #define SYS_futex 202
+#define SYS_sysinfo 99
 
 #define CLOCK_MONOTONIC 1
 #define SIGKILL 9
@@ -305,6 +306,13 @@ static void helper_body(void) {
 }
 
 #define MAX_HELPERS 3
+#define SHOOTDOWN_SLACK (1024UL * 1024UL)
+
+static u64 free_bytes(void) {
+    u64 info[14] = {0};
+    if (syscall1(SYS_sysinfo, (s64)info) != 0) return 0;
+    return info[5];
+}
 
 static void test_unmap_shootdown(u64 pages, unsigned helpers) {
     static char stacks[MAX_HELPERS][65536] __attribute__((aligned(16)));
@@ -322,6 +330,7 @@ static void test_unmap_shootdown(u64 pages, unsigned helpers) {
     while (__atomic_load_n(&helpers_running, __ATOMIC_RELAXED) < started) { }
 
     u64 length = pages * 4096UL;
+    u64 free_before = free_bytes();
     s64 base = syscall6(SYS_mmap, 0, (s64)length, PROT_READ | PROT_WRITE,
                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if ((u64)base >= (u64)-4095L) {
@@ -337,6 +346,8 @@ static void test_unmap_shootdown(u64 pages, unsigned helpers) {
 
     __atomic_store_n(&helpers_stop, 1, __ATOMIC_RELAXED);
     sleep_ns(50000000UL);
+    u64 free_after = free_bytes();
+    u64 unreturned = free_before > free_after ? free_before - free_after : 0;
 
     put("SHOOTDOWN threads=");
     put_number(started);
@@ -346,7 +357,10 @@ static void test_unmap_shootdown(u64 pages, unsigned helpers) {
     put_number(elapsed / pages);
     put(" total_us=");
     put_fixed(elapsed / 1000UL, 0);
-    put("\n");
+    put(" kib_unreturned=");
+    put_number(unreturned / 1024UL);
+    if (!free_before || !free_after) put(" UNKNOWN\n");
+    else put(unreturned <= SHOOTDOWN_SLACK ? " RETURNED\n" : " LEAKED\n");
 }
 
 #define SYS_dup 32
