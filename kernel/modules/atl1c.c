@@ -18,6 +18,26 @@ extern void kprintf(const char *fmt, ...);
 
 #define ATL1C_REGISTER_BYTES 0x2000ULL
 
+#define REG_PCIE_PHYMISC 0x1000U
+#define PCIE_PHYMISC_FORCE_RCV_DET (1U << 2)
+
+#define REG_PM_CTRL 0x12F8U
+#define PM_CTRL_MAC_ASPM_CHK (1U << 30)
+#define PM_CTRL_L1_ENTRY_TIMER_MASK 0xFU
+#define PM_CTRL_L1_ENTRY_TIMER_SHIFT 16
+#define PM_CTRL_CLK_SWH_L1 (1U << 13)
+#define PM_CTRL_ASPM_L0S_EN (1U << 12)
+#define PM_CTRL_SERDES_BUFS_RX_L1_EN (1U << 7)
+#define PM_CTRL_SERDES_PD_EX_L1 (1U << 6)
+#define PM_CTRL_SERDES_PLL_L1_EN (1U << 5)
+#define PM_CTRL_SERDES_L1_EN (1U << 4)
+#define PM_CTRL_ASPM_L1_EN (1U << 3)
+
+#define REG_LTSSM_ID_CTRL 0x12FCU
+#define LTSSM_ID_EN_WRO 0x1000U
+
+#define REG_CLK_GATING_CTRL 0x1814U
+
 #define REG_TWSI_CTRL 0x218U
 #define TWSI_CTRL_SW_LDSTART 0x800U
 #define REG_TWSI_DEBUG 0x1108U
@@ -102,6 +122,7 @@ extern void kprintf(const char *fmt, ...);
 #define RXQ_RFD_BURST_SHIFT 20
 #define RXQ_RFD_BURST_DEF 8U
 #define RXQ_CTRL_EN (1U << 31)
+#define RXQ_ASPM_THRUPUT_LIMIT_100M 3U
 
 #define REG_DMA_CTRL 0x15C0U
 #define DMA_CTRL_RORDER_MODE_OUT 4U
@@ -328,6 +349,37 @@ static int load_mac_address(void) {
     return mac_address_valid(mac_address) ? 0 : -1;
 }
 
+static void reset_pcie(void) {
+    write32(REG_LTSSM_ID_CTRL, read32(REG_LTSSM_ID_CTRL) & ~LTSSM_ID_EN_WRO);
+    write32(REG_MASTER_CTRL, read32(REG_MASTER_CTRL) & ~MASTER_CTRL_CLK_SEL_DIS);
+    write32(REG_PCIE_PHYMISC,
+            read32(REG_PCIE_PHYMISC) | PCIE_PHYMISC_FORCE_RCV_DET);
+    flush_writes();
+    delay_ns(5000000ULL);
+}
+
+static void set_aspm(int speed, int allowed) {
+    uint32_t control = read32(REG_PM_CTRL);
+    control &= ~(PM_CTRL_ASPM_L1_EN | PM_CTRL_ASPM_L0S_EN | PM_CTRL_MAC_ASPM_CHK);
+    control &= ~(PM_CTRL_L1_ENTRY_TIMER_MASK << PM_CTRL_L1_ENTRY_TIMER_SHIFT);
+    if (allowed) {
+        if (speed) control |= PM_CTRL_ASPM_L0S_EN;
+        control |= PM_CTRL_ASPM_L1_EN | PM_CTRL_MAC_ASPM_CHK;
+    }
+    if (speed) {
+        control |= PM_CTRL_SERDES_L1_EN | PM_CTRL_SERDES_PLL_L1_EN |
+                   PM_CTRL_SERDES_BUFS_RX_L1_EN;
+        control &= ~(PM_CTRL_SERDES_PD_EX_L1 | PM_CTRL_CLK_SWH_L1 |
+                     PM_CTRL_ASPM_L0S_EN | PM_CTRL_ASPM_L1_EN);
+    } else {
+        control |= PM_CTRL_CLK_SWH_L1;
+        control &= ~(PM_CTRL_SERDES_L1_EN | PM_CTRL_SERDES_PLL_L1_EN |
+                     PM_CTRL_SERDES_BUFS_RX_L1_EN | PM_CTRL_ASPM_L0S_EN);
+    }
+    write32(REG_PM_CTRL, control);
+    flush_writes();
+}
+
 static void stop_mac(void) {
     write32(REG_RXQ_CTRL, read32(REG_RXQ_CTRL) & ~RXQ_CTRL_EN);
     write32(REG_TXQ_CTRL, read32(REG_TXQ_CTRL) & ~TXQ_CTRL_EN);
@@ -423,11 +475,14 @@ static void update_link(void) {
     if (up) {
         link_speed = speed;
         link_duplex = duplex;
+        set_aspm(speed, 1);
         start_mac();
         kprintf("ATL1C: link up, %u Mbit %s duplex\n", (unsigned)link_speed,
                 link_duplex ? "full" : "half");
-    } else if (state != link_state) {
-        kprintf("ATL1C: link down, %s\n", link_reason(state));
+    } else {
+        set_aspm(0, 1);
+        if (state != link_state)
+            kprintf("ATL1C: link down, %s\n", link_reason(state));
     }
     link_state = state;
 }
@@ -462,6 +517,7 @@ static void configure_mac(void) {
                 MASTER_CTRL_CLK_SEL_DIS);
     write32(REG_ISR, 0xFFFFFFFFU);
     write32(REG_WOL_CTRL, 0);
+    write32(REG_CLK_GATING_CTRL, 0);
     write32(REG_MASTER_CTRL, master);
 
     configure_rings();
@@ -470,7 +526,8 @@ static void configure_mac(void) {
     write32(REG_TXQ_CTRL, TXQ_NUM_TPD_BURST_DEF | TXQ_CTRL_ENH_MODE |
             TXQ_CTRL_LS_8023_EN | TXQ_CTRL_IP_OPTION_EN |
             (TXQ_TXF_BURST_L1C << TXQ_TXF_BURST_SHIFT));
-    write32(REG_RXQ_CTRL, RXQ_RFD_BURST_DEF << RXQ_RFD_BURST_SHIFT);
+    write32(REG_RXQ_CTRL, (RXQ_RFD_BURST_DEF << RXQ_RFD_BURST_SHIFT) |
+            (card.device_id & 1U ? RXQ_ASPM_THRUPUT_LIMIT_100M : 0U));
     write32(REG_DMA_CTRL, DMA_CTRL_RORDER_MODE_OUT | DMA_CTRL_RREQ_PRI_DATA |
             (read_request_block() << DMA_CTRL_RREQ_BLEN_SHIFT) |
             (DMA_CTRL_RDLY_CNT_DEF << DMA_CTRL_RDLY_CNT_SHIFT) |
@@ -619,6 +676,8 @@ static int atl1c_probe(const struct pci_device *found) {
         return -1;
     }
 
+    reset_pcie();
+    set_aspm(0, 0);
     if (load_mac_address() != 0) {
         kprintf("ATL1C: no station address in the hardware\n");
         return -1;
