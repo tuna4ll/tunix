@@ -306,6 +306,13 @@ udevadm settle --timeout=30
 check udev-autoload "$(lsmod | awk '$1 == "snd_hda" {print $1}')" snd_hda
 check udev-nodes "$(ls /dev/snd | tr '\n' ' ')" "controlC0 pcmC0D0p "
 
+modprobe atl1c
+check atl1c-loads "$?" 0
+check atl1c-no-device "$(ls /sys/bus/pci/drivers/atl1c | wc -l)" 0
+check atl1c-listed "$(lsmod | awk '$1 == "atl1c" {print $1}')" atl1c
+rmmod atl1c
+check atl1c-unloads "$?" 0
+
 if [ "$(cat /nic)" = rtl8139 ]; then
 	check net-autoload "$(lsmod | awk '$1 == "rtl8139" {print $1}')" rtl8139
 fi

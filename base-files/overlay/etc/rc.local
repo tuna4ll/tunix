@@ -15,6 +15,10 @@ report=/tunix-hwreport.txt
 	lspci -k 2>/dev/null | sed 's/^/    /'
 	echo "  sound       $(ls /dev/snd 2>/dev/null | tr '\n' ' ')"
 	echo "  interfaces  $(sed -n 's/^ *\([a-z0-9]*\):.*/\1/p' /proc/net/dev | tr '\n' ' ')"
+	echo "  traffic"
+	sed 's/^/    /' /proc/net/dev
+	echo "  kernel log"
+	dmesg 2>/dev/null | tail -25 | sed 's/^/    /'
 	echo "  bound"
 	for device in /sys/bus/pci/devices/*; do
 		[ -e "$device/driver" ] || continue
