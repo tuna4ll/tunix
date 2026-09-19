@@ -10,10 +10,16 @@ extern void kprintf(const char *fmt, ...);
 
 static int number;
 static int flag;
+static unsigned count = 1;
+static int fail;
+static int crash;
 static char *text = "none";
 
 MODULE_PARAMETER(number, MODULE_PARAM_INT);
 MODULE_PARAMETER(flag, MODULE_PARAM_BOOL);
+MODULE_PARAMETER(count, MODULE_PARAM_UINT);
+MODULE_PARAMETER(fail, MODULE_PARAM_INT);
+MODULE_PARAMETER(crash, MODULE_PARAM_INT);
 MODULE_PARAMETER(text, MODULE_PARAM_STRING);
 
 static const char *const shapes[] = { "zero", "one", "two", "three" };
@@ -43,12 +49,21 @@ MODULE_EXPORT(tunix_probe_sum);
 MODULE_EXPORT(tunix_probe_shape);
 
 static int probe_init(void) {
+    if (crash) {
+        kprintf("TUNIXPROBE about to fault on purpose\n");
+        volatile uint64_t *nowhere = (volatile uint64_t *)0;
+        *nowhere = 1;
+    }
+    if (fail) {
+        kprintf("TUNIXPROBE refusing to start, fail=%d\n", fail);
+        return fail;
+    }
     char *buffer = kmalloc(32);
     if (!buffer) return -12;
     memcpy(buffer, "heap", 5);
     uint64_t now = time_uptime_ns();
-    kprintf("TUNIXPROBE loaded number=%d flag=%d text=%s sum=%u shape=%s %s=%u\n",
-            number, flag, text, (unsigned)tunix_probe_sum(8),
+    kprintf("TUNIXPROBE loaded number=%d flag=%d text=%s count=%u sum=%u shape=%s %s=%u\n",
+            number, flag, text, count, (unsigned)tunix_probe_sum(8),
             tunix_probe_shape(2), buffer, (unsigned)(now != 0ULL));
     kfree(buffer);
     return 0;

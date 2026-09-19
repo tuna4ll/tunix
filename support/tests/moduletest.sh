@@ -40,6 +40,9 @@ ln -sf usr/bin "$ROOT/bin"
 $CC -std=gnu11 -Wall -Wextra -Werror -O2 -static -nostdlib -nostartfiles \
 	-fno-stack-protector -fno-pic -fno-pie -fno-builtin -fno-asynchronous-unwind-tables \
 	-Isupport/tests support/tests/moduletest.c -o "$ROOT/sbin/init" || exit 1
+$CC -std=gnu11 -Wall -Wextra -Werror -O2 -static -nostdlib -nostartfiles \
+	-fno-stack-protector -fno-pic -fno-pie -fno-builtin -fno-asynchronous-unwind-tables \
+	-Isupport/tests support/tests/moduleperm.c -o "$ROOT/sbin/moduleperm" || exit 1
 
 python3 - "$SYSROOT" "$ROOT" <<'PY' || exit 1
 import os, re, shutil, subprocess, sys
@@ -49,7 +52,7 @@ programs = ['bash', 'kmod', 'lsmod', 'insmod', 'rmmod', 'modprobe', 'modinfo', '
             'lspci', 'cat', 'ls', 'grep', 'sort', 'head', 'tail', 'wc', 'awk',
             'uname', 'sleep', 'mkdir', 'udevadm', 'udevd', 'sed', 'tr', 'dmesg',
             'basename', 'readlink', 'dirname', 'env', 'mount', 'ip', 'dhcpcd',
-            'modules-load', 'find', 'uniq', 'cut', 'xargs', 'rm', 'sh']
+            'modules-load', 'find', 'uniq', 'cut', 'xargs', 'rm', 'sh', 'seq']
 copied = set()
 
 def needed(path):
@@ -175,6 +178,73 @@ check modules-load "$(lsmod | awk '$1 == "tunix_probe" {print $1}')" tunix_probe
 rmmod tunix_probe
 rm /etc/modules-load.d/probe.conf
 
+insmod $kernel/tunix_probe.ko fail=-19 2>/dev/null
+check init-fail "$?" 1
+check init-fail-clean "$(lsmod | tail -n +2 | wc -l)" 0
+check init-fail-sysfs "$(test -d /sys/module/tunix_probe; echo $?)" 1
+insmod $kernel/tunix_probe.ko
+check init-fail-recovers "$?" 0
+rmmod tunix_probe
+
+insmod $kernel/tunix_unknown.ko 2>/dev/null
+check unknown-symbol "$?" 1
+check unknown-symbol-clean "$(lsmod | tail -n +2 | wc -l)" 0
+
+insmod $kernel/tunix_probe.ko number=abc 2>/dev/null
+check param-not-a-number "$?" 1
+insmod $kernel/tunix_probe.ko bogus=1 2>/dev/null
+check param-unknown "$?" 1
+insmod $kernel/tunix_probe.ko count=-1 2>/dev/null
+check param-unsigned "$?" 1
+insmod $kernel/tunix_probe.ko number=-5 count=0x10 flag=y
+check param-signed "$(cat /sys/module/tunix_probe/parameters/number)" -5
+check param-hex "$(cat /sys/module/tunix_probe/parameters/count)" 16
+check param-bool-word "$(cat /sys/module/tunix_probe/parameters/flag)" 1
+
+echo 42 > /sys/module/tunix_probe/parameters/number
+check param-write "$(cat /sys/module/tunix_probe/parameters/number)" 42
+echo notanumber > /sys/module/tunix_probe/parameters/number 2>/dev/null
+check param-write-refused "$?" 1
+check param-write-unchanged "$(cat /sys/module/tunix_probe/parameters/number)" 42
+echo hello > /sys/module/tunix_probe/parameters/text 2>/dev/null
+check param-write-string "$?" 1
+rmmod tunix_probe
+
+check insmod-unprivileged "$(/sbin/moduleperm | sed 's/.*finit=//')" -1
+check insmod-unprivileged-clean "$(lsmod | tail -n +2 | wc -l)" 0
+
+insmod $kernel/tunix_probe.ko
+base=$(awk '$1 == "tunix_probe" {print $6}' /proc/modules)
+rmmod tunix_probe
+
+loaded=0
+for index in $(seq 1 8); do
+	sed "s/tunix_probe/tunix_copy$index/g" $kernel/tunix_probe.ko > /tmp/copy$index.ko
+	insmod /tmp/copy$index.ko && loaded=$((loaded + 1))
+done
+check many-loaded "$loaded" 8
+check many-listed "$(lsmod | tail -n +2 | wc -l)" 8
+check many-sysfs "$(ls /sys/module | grep -c tunix_copy)" 8
+check many-addresses "$(awk 'NR > 0 {print $6}' /proc/modules | sort -u | wc -l)" 8
+for index in $(seq 1 8); do rmmod tunix_copy$index; done
+check many-gone "$(lsmod | tail -n +2 | wc -l)" 0
+rm -f /tmp/copy*.ko
+
+insmod $kernel/tunix_probe.ko
+check window-reused "$(awk '$1 == "tunix_probe" {print $6}' /proc/modules)" "$base"
+rmmod tunix_probe
+
+free_before=$(awk '/MemFree/ {print $2}' /proc/meminfo)
+for index in $(seq 1 20); do
+	insmod $kernel/tunix_probe.ko
+	rmmod tunix_probe
+done
+free_after=$(awk '/MemFree/ {print $2}' /proc/meminfo)
+drift=$((free_before - free_after))
+[ $drift -lt 0 ] && drift=$((-drift))
+check cycle-leak "$([ $drift -le 256 ] && echo ok || echo "$drift kB")" ok
+check cycle-clean "$(lsmod | tail -n +2 | wc -l)" 0
+
 echo "MODULETEST sysfs-pci: $(ls /sys/bus/pci/devices | tr '\n' ' ')"
 lspci > /tmp/lspci.txt 2>&1
 check lspci "$?" 0
@@ -228,6 +298,9 @@ echo "MODULETEST route: $(cat /proc/net/route | tr '\t' ' ' | tr '\n' '|')"
 check net-gateway "$(awk 'NR > 1 && $2 == "00000000" && $3 != "00000000" {print "yes"}' /proc/net/route | head -1)" yes
 
 echo "MODULETEST DONE"
+
+echo "MODULETEST crash-test"
+insmod $kernel/tunix_probe.ko crash=1
 sleep 3600
 GUEST
 
@@ -274,6 +347,11 @@ for _ in $(seq "$WAIT"); do
 	kill -0 $QEMU 2>/dev/null || break
 	sleep 1
 done
+for _ in $(seq 30); do
+	grep -aq "^PANIC" "$LOG" 2>/dev/null && break
+	kill -0 $QEMU 2>/dev/null || break
+	sleep 1
+done
 sleep 1
 kill $QEMU 2>/dev/null || true
 wait $QEMU 2>/dev/null || true
@@ -291,8 +369,13 @@ for wanted in ('TUNIXPROBE loaded number=7 flag=1 text=hello',
                'TUNIXPROBEUSER loaded'):
     if wanted not in text:
         failures.append('missing kernel line: ' + wanted)
-if 'PANIC' in text or 'KERNEL EXCEPTION' in text:
+before, marker, after = text.partition('MODULETEST crash-test')
+if 'PANIC' in before or 'KERNEL EXCEPTION' in before:
     failures.append('panic')
+if not marker:
+    failures.append('the deliberate fault never ran')
+elif 'tunix_probe+' not in after:
+    failures.append('the fault report did not name the module')
 print('MODULETEST ' + ('PASS' if not failures else 'FAIL'))
 for failure in failures:
     print('  ' + failure)
