@@ -52,7 +52,10 @@ extern const struct module_descriptor __this_module;
 #define TXQ_CTRL_EN (1U << 5)
 #define RXQ_CTRL_EN (1U << 31)
 
+#define MII_BMCR 0x00U
 #define MII_BMSR 0x01U
+#define MII_ADVERTISE 0x04U
+#define MII_CTRL1000 0x09U
 #define MII_PHYSID1 0x02U
 #define MII_GIGA_PSSR 0x11U
 #define BMSR_LINK_UP 0x0004U
@@ -111,12 +114,32 @@ static void check(const char *name, int ok) {
     if (!ok) failures++;
 }
 
+static char driver_log[65536];
+static size_t driver_log_used;
+
 void kprintf(const char *fmt, ...) {
+    char line[512];
     va_list arguments;
     va_start(arguments, fmt);
-    printf("  [driver] ");
-    vprintf(fmt, arguments);
+    int length = vsnprintf(line, sizeof(line), fmt, arguments);
     va_end(arguments);
+    if (length < 0) return;
+    printf("  [driver] %s", line);
+    if (driver_log_used + (size_t)length + 1 < sizeof(driver_log)) {
+        memcpy(driver_log + driver_log_used, line, (size_t)length);
+        driver_log_used += (size_t)length;
+        driver_log[driver_log_used] = '\0';
+    }
+}
+
+static unsigned log_count(size_t from, const char *needle) {
+    unsigned seen = 0;
+    const char *at = driver_log + from;
+    while ((at = strstr(at, needle)) != NULL) {
+        seen++;
+        at += strlen(needle);
+    }
+    return seen;
 }
 
 void panic(const char *message) {
@@ -215,10 +238,12 @@ static void serve_mdio(void) {
     uint32_t control = register32(REG_MDIO_CTRL);
     if (!(control & MDIO_CTRL_START)) return;
     unsigned reg = (control >> MDIO_CTRL_REG_SHIFT) & 0x1FU;
-    if (control & MDIO_CTRL_OP_READ)
+    if (control & MDIO_CTRL_OP_READ) {
         control = (control & ~0xFFFFU) | phy_registers[reg];
-    else
+    } else {
         phy_registers[reg] = (uint16_t)control;
+        if (reg == 0U) phy_registers[0] &= ~0x8000U;
+    }
     control &= ~(MDIO_CTRL_START | MDIO_CTRL_BUSY);
     set_register32(REG_MDIO_CTRL, control);
 }
@@ -334,6 +359,10 @@ int main(void) {
 
     static const uint8_t expected_mac[6] = { 0x10, 0x69, 0x1A, 0x2B, 0x3C, 0x4D };
     check("station-address", memcmp(bound_adapter->mac, expected_mac, 6) == 0);
+    check("phy-advertised", phy_registers[MII_ADVERTISE] == 0x0DE1U &&
+                            phy_registers[MII_CTRL1000] == 0x0300U);
+    check("phy-autoneg", (phy_registers[MII_BMCR] & 0x1200U) == 0x1200U &&
+                         !(phy_registers[MII_BMCR] & 0x0800U));
     check("mac-running",
           (register32(REG_MAC_CTRL) & (MAC_CTRL_TX_EN | MAC_CTRL_RX_EN)) ==
           (MAC_CTRL_TX_EN | MAC_CTRL_RX_EN));
@@ -402,16 +431,32 @@ int main(void) {
         usleep(100);
     check("transmit-drains", sent_count == already_sent + queued);
 
+    size_t mark = driver_log_used;
     phy_registers[MII_BMSR] = 0;
-    clock_ns += 600000000ULL;
-    bound_adapter->poll(deliver);
+    for (unsigned round = 0; round < 4U; round++) {
+        clock_ns += 600000000ULL;
+        bound_adapter->poll(deliver);
+    }
+    check("link-down-said-once", log_count(mark, "link down") == 1U);
+
+    mark = driver_log_used;
     phy_registers[MII_BMSR] = BMSR_LINK_UP;
     phy_registers[MII_GIGA_PSSR] = GIGA_PSSR_RESOLVED | GIGA_PSSR_100MBS;
-    clock_ns += 600000000ULL;
-    bound_adapter->poll(deliver);
+    for (unsigned round = 0; round < 3U; round++) {
+        clock_ns += 600000000ULL;
+        bound_adapter->poll(deliver);
+    }
+    check("link-up-said-once", log_count(mark, "link up") == 1U);
     check("link-renegotiated",
           ((register32(REG_MAC_CTRL) >> MAC_CTRL_SPEED_SHIFT) & 3U) == 1U &&
           !(register32(REG_MAC_CTRL) & MAC_CTRL_DUPLX));
+
+    mark = driver_log_used;
+    phy_registers[MII_BMSR] = BMSR_LINK_UP;
+    phy_registers[MII_GIGA_PSSR] = 0;
+    clock_ns += 600000000ULL;
+    bound_adapter->poll(deliver);
+    check("link-negotiating", log_count(mark, "negotiating") == 1U);
 
     bound_driver->remove(&device);
     check("adapter-gone", bound_adapter == NULL);
