@@ -183,12 +183,14 @@ static void heap_release_pages(heap_block_t *block) {
     if (last <= first) return;
 
     uint64_t cr3 = vmm_kernel_cr3();
+    vmm_flush_batch_begin();
     for (uint64_t page = first; page < last; page += HEAP_PAGE_SIZE) {
         uint64_t physical = 0;
         if (vmm_translate(cr3, page, &physical, NULL) != 0) continue;
         if (vmm_unmap_page_in(cr3, page) != 0) continue;
         pmm_free_page((void *)physical);
     }
+    vmm_flush_batch_end();
     block->pages_released = 1;
 }
 

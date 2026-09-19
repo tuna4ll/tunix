@@ -13,6 +13,11 @@ static int vmm_map_page_in_locked(uint64_t cr3_physical, uint64_t virtual_addres
 #include "include/vmm_arch.h"
 
 #define ADDRESS_MASK PTE_ADDRESS_MASK
+#define KERNEL_HALF_BASE 0xFFFF800000000000ULL
+
+static int kernel_mapping(uint64_t virtual_address) {
+    return virtual_address >= KERNEL_HALF_BASE;
+}
 #define DIRECT_MAP_SIZE PMM_DIRECT_MAP_LIMIT
 #define MAX_ADDRESS_SPACES 256
 
@@ -343,13 +348,15 @@ static int vmm_map_page_in_locked(uint64_t cr3_physical, uint64_t virtual_addres
     pt[i1] = pte_page(physical_address & ADDRESS_MASK, flags | PAGE_PRESENT);
     if ((flags & PAGE_USER) && !(flags & (PAGE_NX | PAGE_DEVICE)))
         vmm_arch_sync_executable(physical_address);
-    if (cr3 == vmm_arch_read_root()) vmm_arch_invalidate(virtual_address);
+    if (cr3 == vmm_arch_read_root() || kernel_mapping(virtual_address))
+        vmm_arch_invalidate(virtual_address);
     return 0;
 }
 
 static unsigned flush_batch_depth;
 static uint64_t flush_batch_cr3;
 static int flush_batch_pending;
+static int flush_batch_kernel;
 
 void vmm_flush_batch_begin(void) {
     flush_batch_depth++;
@@ -357,11 +364,25 @@ void vmm_flush_batch_begin(void) {
 
 void vmm_flush_batch_end(void) {
     if (!flush_batch_depth || --flush_batch_depth) return;
+    if (flush_batch_kernel) {
+        flush_batch_kernel = 0;
+        smp_flush_kernel_mappings();
+    }
     if (!flush_batch_pending) return;
     flush_batch_pending = 0;
     uint64_t cr3 = flush_batch_cr3;
     flush_batch_cr3 = 0;
     smp_flush_address_space(cr3);
+}
+
+static void invalidate_after_change(uint64_t cr3, uint64_t virtual_address);
+
+static void flush_kernel_mapping(void) {
+    if (!flush_batch_depth) {
+        smp_flush_kernel_mappings();
+        return;
+    }
+    flush_batch_kernel = 1;
 }
 
 static void flush_others(uint64_t cr3) {
@@ -373,6 +394,15 @@ static void flush_others(uint64_t cr3) {
         smp_flush_address_space(flush_batch_cr3);
     flush_batch_cr3 = cr3;
     flush_batch_pending = 1;
+}
+
+static void invalidate_after_change(uint64_t cr3, uint64_t virtual_address) {
+    /* A kernel mapping lives in every address space, so the processor that
+       changed it has to forget it even when it is running somebody else's. */
+    if (cr3 == vmm_arch_read_root() || kernel_mapping(virtual_address))
+        vmm_arch_invalidate(virtual_address);
+    if (kernel_mapping(virtual_address)) flush_kernel_mapping();
+    else flush_others(cr3);
 }
 
 int vmm_unmap_page_in(uint64_t cr3_physical, uint64_t virtual_address) {
@@ -391,8 +421,7 @@ int vmm_unmap_page_in(uint64_t cr3_physical, uint64_t virtual_address) {
     uint64_t *pt = next_table(pd, i2, 0, 0);
     if (!pt || !pte_present(pt[i1])) return -1;
     pt[i1] = 0;
-    if (cr3 == vmm_arch_read_root()) vmm_arch_invalidate(virtual_address);
-    flush_others(cr3);
+    invalidate_after_change(cr3, virtual_address);
     return 0;
 }
 
@@ -465,8 +494,7 @@ int vmm_protect_page_in(uint64_t cr3_physical, uint64_t virtual_address,
     pt[i1] = pte_page(physical, (flags & ~ADDRESS_MASK) | PAGE_PRESENT);
     if ((flags & PAGE_USER) && !(flags & (PAGE_NX | PAGE_DEVICE)))
         vmm_arch_sync_executable(physical);
-    if (cr3 == vmm_arch_read_root()) vmm_arch_invalidate(virtual_address);
-    flush_others(cr3);
+    invalidate_after_change(cr3, virtual_address);
     return 0;
 }
 

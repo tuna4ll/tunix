@@ -46,14 +46,15 @@ void smp_flush_interrupt(void) {
     smp_service_flush();
 }
 
-void smp_flush_address_space(uint64_t cr3) {
-    if (online_cpus < 2 || !cr3) return;
+static void flush_others(uint64_t cr3, int everywhere) {
+    if (online_cpus < 2 || (!cr3 && !everywhere)) return;
 
     unsigned self = cpu_current()->index;
     int asked = 0;
     for (unsigned index = 0; index < SMP_MAX_CPUS; index++) {
         struct cpu *cpu = percpu_slot(index);
-        if (index == self || !cpu->online || cpu->address_space != cr3) continue;
+        if (index == self || !cpu->online) continue;
+        if (!everywhere && cpu->address_space != cr3) continue;
         __atomic_store_n(&cpu->flush_pending, 1, __ATOMIC_RELEASE);
         asked = 1;
     }
@@ -77,6 +78,14 @@ void smp_flush_address_space(uint64_t cr3) {
             cpu_relax();
         }
     }
+}
+
+void smp_flush_address_space(uint64_t cr3) {
+    flush_others(cr3, 0);
+}
+
+void smp_flush_kernel_mappings(void) {
+    flush_others(0, 1);
 }
 
 void aarch64_secondary_start(uint64_t index) {

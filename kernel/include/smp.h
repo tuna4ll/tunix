@@ -26,6 +26,10 @@ unsigned smp_cpu_count(void);
  * interrupts off -- answers the request in its wait loop instead.
  */
 void smp_flush_address_space(uint64_t cr3);
+
+/* The same for a mapping in the kernel half, which every address space shares:
+   every other processor is asked, whatever it happens to be running. */
+void smp_flush_kernel_mappings(void);
 /* Answer a request if one is outstanding. Called from the kernel lock's wait
    loop and from the interrupt that asks -- the two places a processor can be
    reached. */
