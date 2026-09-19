@@ -549,8 +549,8 @@ static void publish_device(const char *name, const char *devname,
 }
 
 
-static int64_t module_text_read(struct vfs_node *node, uint64_t offset, size_t size,
-                                void *output);
+static int64_t module_section_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                   void *output);
 
 static int64_t attribute_reply(const char *text, size_t length, uint64_t offset,
                                size_t size, void *output) {
@@ -668,7 +668,9 @@ void sysfs_module_added(struct module *module) {
     struct vfs_node *sections = module_directory(module->name, "sections");
     if (sections) {
         sections->mode = 0555;
-        (void)module_attribute(sections, ".text", module_text_read, module, 0);
+        (void)module_attribute(sections, ".text", module_section_read, module, 0);
+        (void)module_attribute(sections, ".rodata", module_section_read, module, 1);
+        (void)module_attribute(sections, ".data", module_section_read, module, 2);
     }
 
     if (!module->param_count) return;
@@ -685,13 +687,15 @@ void sysfs_module_added(struct module *module) {
     }
 }
 
-static int64_t module_text_read(struct vfs_node *node, uint64_t offset, size_t size,
-                                void *output) {
+static int64_t module_section_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                   void *output) {
     const struct module *module = (const struct module *)node->fs_private;
     if (!module) return 0;
+    uint64_t address = node->inode == 1 ? module->rodata
+                     : node->inode == 2 ? module->data : module->text;
     char text[32];
     size_t length = 0;
-    append_hex64(text, sizeof(text), &length, module->text);
+    append_hex64(text, sizeof(text), &length, address);
     append_string(text, sizeof(text), &length, "\n");
     return attribute_reply(text, length, offset, size, output);
 }
