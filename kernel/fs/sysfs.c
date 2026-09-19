@@ -591,6 +591,16 @@ static int64_t module_parameter_read(struct vfs_node *node, uint64_t offset, siz
     return attribute_reply(text, (size_t)length, offset, size, output);
 }
 
+static int64_t module_parameter_write(struct vfs_node *node, uint64_t offset,
+                                      size_t size, const void *buffer) {
+    (void)offset;
+    struct module *module = (struct module *)node->fs_private;
+    if (!module) return -1;
+    int status = module_param_set(module, (unsigned)node->inode,
+                                  (const char *)buffer, size);
+    return status == 0 ? (int64_t)size : (int64_t)status;
+}
+
 static struct vfs_node *module_attribute(struct vfs_node *parent, const char *name,
                                          vfs_read_fn reader, void *context,
                                          uint64_t tag) {
@@ -665,9 +675,14 @@ void sysfs_module_added(struct module *module) {
     struct vfs_node *parameters = module_directory(module->name, "parameters");
     if (!parameters) return;
     parameters->mode = 0555;
-    for (unsigned index = 0; index < module->param_count; index++)
-        (void)module_attribute(parameters, module->params[index].name,
-                               module_parameter_read, module, index);
+    for (unsigned index = 0; index < module->param_count; index++) {
+        struct vfs_node *node = module_attribute(parameters,
+                                                 module->params[index].name,
+                                                 module_parameter_read, module, index);
+        if (!node || module->params[index].type == MODULE_PARAM_STRING) continue;
+        node->mode = module->params[index].mode;
+        node->write = module_parameter_write;
+    }
 }
 
 static int64_t module_text_read(struct vfs_node *node, uint64_t offset, size_t size,

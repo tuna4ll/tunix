@@ -497,39 +497,61 @@ static int parse_number(const char *text, uint64_t *out, int *negative) {
     return 0;
 }
 
+static int assign_value(const struct module_param *param, char *value) {
+    uint64_t number = 0;
+    int negative = 0;
+    switch (param->type) {
+    case MODULE_PARAM_INT:
+        if (parse_number(value, &number, &negative) != 0) return -EINVAL;
+        *(int *)param->value = negative ? -(int)number : (int)number;
+        return 0;
+    case MODULE_PARAM_UINT:
+        if (parse_number(value, &number, &negative) != 0 || negative) return -EINVAL;
+        *(unsigned *)param->value = (unsigned)number;
+        return 0;
+    case MODULE_PARAM_BOOL:
+        if (strcmp(value, "1") == 0 || strcmp(value, "y") == 0 ||
+            strcmp(value, "Y") == 0 || strcmp(value, "on") == 0)
+            *(int *)param->value = 1;
+        else if (strcmp(value, "0") == 0 || strcmp(value, "n") == 0 ||
+                 strcmp(value, "N") == 0 || strcmp(value, "off") == 0)
+            *(int *)param->value = 0;
+        else return -EINVAL;
+        return 0;
+    case MODULE_PARAM_STRING:
+        *(char **)param->value = value;
+        return 0;
+    default:
+        return -EINVAL;
+    }
+}
+
 static int assign_parameter(struct module *module, const char *name, char *value) {
     for (unsigned index = 0; index < module->param_count; index++) {
         const struct module_param *param = &module->params[index];
-        if (strcmp(param->name, name) != 0) continue;
-        uint64_t number = 0;
-        int negative = 0;
-        switch (param->type) {
-        case MODULE_PARAM_INT:
-            if (parse_number(value, &number, &negative) != 0) return -EINVAL;
-            *(int *)param->value = negative ? -(int)number : (int)number;
-            return 0;
-        case MODULE_PARAM_UINT:
-            if (parse_number(value, &number, &negative) != 0 || negative) return -EINVAL;
-            *(unsigned *)param->value = (unsigned)number;
-            return 0;
-        case MODULE_PARAM_BOOL:
-            if (strcmp(value, "1") == 0 || strcmp(value, "y") == 0 ||
-                strcmp(value, "Y") == 0 || strcmp(value, "on") == 0)
-                *(int *)param->value = 1;
-            else if (strcmp(value, "0") == 0 || strcmp(value, "n") == 0 ||
-                     strcmp(value, "N") == 0 || strcmp(value, "off") == 0)
-                *(int *)param->value = 0;
-            else return -EINVAL;
-            return 0;
-        case MODULE_PARAM_STRING:
-            *(char **)param->value = value;
-            return 0;
-        default:
-            return -EINVAL;
-        }
+        if (strcmp(param->name, name) == 0) return assign_value(param, value);
     }
     kprintf("MODULE: %s has no parameter %s\n", module->name, name);
     return -EINVAL;
+}
+
+int module_param_set(struct module *module, unsigned index, const char *text,
+                     size_t length) {
+    if (!module || index >= module->param_count) return -EINVAL;
+    const struct module_param *param = &module->params[index];
+    /* A string would have to outlive the write, and nothing owns it. */
+    if (param->type == MODULE_PARAM_STRING) return -EINVAL;
+
+    char value[32];
+    size_t used = 0;
+    while (used < length && used + 1 < sizeof(value) && text[used] != '\n' &&
+           text[used] != '\0') {
+        value[used] = text[used];
+        used++;
+    }
+    value[used] = '\0';
+    if (!used) return -EINVAL;
+    return assign_value(param, value);
 }
 
 static int apply_parameters(struct module *module) {

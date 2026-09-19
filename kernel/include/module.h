@@ -74,6 +74,8 @@ void module_put(struct module *module);
 const char *module_state_name(const struct module *module);
 int module_param_format(const struct module *module, unsigned index,
                         char *out, size_t capacity);
+int module_param_set(struct module *module, unsigned index, const char *text,
+                     size_t length);
 int module_address_owner(uint64_t address, const char **name, uint64_t *offset);
 
 #define MODULE_JOIN_(a, b) a##b
