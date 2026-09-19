@@ -169,8 +169,10 @@ void kmain(const struct boot_info *boot) {
     timer_init();
     arch_route_timer();
     smp_init();
+    kernel_lock();
     hwreport_emit();
     if (boot_command_line_flag("klockstat")) klock_statistics_start();
+    kernel_unlock();
     kprintf("TUNIX: starting %s\n", init_path);
 #if TUNIX_BOOT_TIMINGS
     boot_log_stage("devices/process/init ELF", &stage_started);
