@@ -34,6 +34,8 @@ void klog_console(int enabled) {
 
 extern void terminal_print(const char *);
 extern int terminal_ready(void);
+extern void terminal_paint_begin(void);
+extern void terminal_paint_end(void);
 extern void terminal_paint_lock_reset(void);
 struct terminal_screen;
 extern struct terminal_screen *terminal_screen_active(void);
@@ -55,6 +57,32 @@ static void emit_char(char c) {
     klog_console_busy = 0;
 }
 
+static volatile int log_lock;
+
+static uint64_t log_acquire(void) {
+    uint64_t flags = cpu_irq_save();
+    while (__atomic_test_and_set(&log_lock, __ATOMIC_ACQUIRE)) {
+        smp_service_flush();
+        cpu_relax();
+    }
+    return flags;
+}
+
+static void log_release(uint64_t flags) {
+    __atomic_clear(&log_lock, __ATOMIC_RELEASE);
+    cpu_irq_restore(flags);
+}
+
+static int paint_begin(void) {
+    if (!terminal_ready()) return 0;
+    terminal_paint_begin();
+    return 1;
+}
+
+static void paint_end(int painting) {
+    if (painting) terminal_paint_end();
+}
+
 size_t klog_size(void) {
     return klog_count;
 }
@@ -73,7 +101,11 @@ int64_t klog_read(uint64_t offset, size_t size, void *buffer) {
 int64_t klog_write(size_t size, const void *buffer) {
     if (!buffer) return -1;
     const char *bytes = (const char *)buffer;
+    int painting = paint_begin();
+    uint64_t flags = log_acquire();
     for (size_t i = 0; i < size; i++) emit_char(bytes[i]);
+    log_release(flags);
+    paint_end(painting);
     return (int64_t)size;
 }
 
@@ -102,23 +134,8 @@ static void print_int(int64_t num, int base, int is_upper) {
     }
 }
 
-static volatile int log_lock;
-
-static uint64_t log_acquire(void) {
-    uint64_t flags = cpu_irq_save();
-    while (__atomic_test_and_set(&log_lock, __ATOMIC_ACQUIRE)) {
-        smp_service_flush();
-        cpu_relax();
-    }
-    return flags;
-}
-
-static void log_release(uint64_t flags) {
-    __atomic_clear(&log_lock, __ATOMIC_RELEASE);
-    cpu_irq_restore(flags);
-}
-
 void kprintf(const char *fmt, ...) {
+    int painting = paint_begin();
     uint64_t flags = log_acquire();
     va_list args;
     va_start(args, fmt);
@@ -153,6 +170,7 @@ void kprintf(const char *fmt, ...) {
     }
     va_end(args);
     log_release(flags);
+    paint_end(painting);
 }
 
 void klog_print_tail(unsigned lines) {
@@ -176,6 +194,7 @@ void klog_print_tail(unsigned lines) {
 void panic(const char *msg) {
     __atomic_clear(&log_lock, __ATOMIC_RELEASE);
     terminal_paint_lock_reset();
+    int painting = paint_begin();
     panic_sgr(NULL, 0);
     kprintf("PANIC: %s\n", msg);
     static const unsigned heading[] = {34U};
@@ -187,5 +206,6 @@ void panic(const char *msg) {
     panic_sgr(alarm, 2U);
     terminal_print("\n\n*** KERNEL PANIC ***\n");
     terminal_print(msg);
+    paint_end(painting);
     cpu_halt_forever();
 }
