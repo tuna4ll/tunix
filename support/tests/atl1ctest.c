@@ -21,6 +21,28 @@ extern const struct module_descriptor __this_module;
 #define ARENA_BYTES (16UL * 1024UL * 1024UL)
 #define REGISTER_BYTES 0x2000UL
 
+#define REG_PCIE_PHYMISC 0x1000U
+#define PCIE_PHYMISC_FORCE_RCV_DET (1U << 2)
+#define REG_PM_CTRL 0x12F8U
+#define PM_CTRL_MAC_ASPM_CHK (1U << 30)
+#define PM_CTRL_L1_ENTRY_TIMER_MASK 0xFU
+#define PM_CTRL_L1_ENTRY_TIMER_SHIFT 16
+#define PM_CTRL_CLK_SWH_L1 (1U << 13)
+#define PM_CTRL_ASPM_L0S_EN (1U << 12)
+#define PM_CTRL_SERDES_BUFS_RX_L1_EN (1U << 7)
+#define PM_CTRL_SERDES_PD_EX_L1 (1U << 6)
+#define PM_CTRL_SERDES_PLL_L1_EN (1U << 5)
+#define PM_CTRL_SERDES_L1_EN (1U << 4)
+#define PM_CTRL_ASPM_L1_EN (1U << 3)
+#define REG_LTSSM_ID_CTRL 0x12FCU
+#define LTSSM_ID_EN_WRO 0x1000U
+#define REG_TWSI_CTRL 0x218U
+#define TWSI_CTRL_SW_LDSTART 0x800U
+#define REG_TWSI_DEBUG 0x1108U
+#define TWSI_DEBUG_DEV_EXIST 0x20000000U
+#define REG_CLK_GATING_CTRL 0x1814U
+#define MASTER_CTRL_CLK_SEL_DIS (1U << 12)
+
 #define REG_MASTER_CTRL 0x1400U
 #define REG_IDLE_STATUS 0x1410U
 #define REG_MDIO_CTRL 0x1414U
@@ -68,6 +90,8 @@ extern const struct module_descriptor __this_module;
 #define TX_SLOTS 16U
 #define FRAME_BYTES 1536U
 #define RRS_UPDATED (1U << 31)
+#define RRS_ERR_SUM (1U << 20)
+#define RRS_LEN_ERR (1U << 30)
 
 struct model_tpd {
     uint16_t length;
@@ -93,6 +117,9 @@ static pthread_t model_thread;
 static volatile int model_running;
 static uint64_t clock_ns;
 
+static int bus_master;
+static int eeprom_present;
+static unsigned eeprom_loads;
 static uint16_t phy_registers[32];
 static uint16_t tpd_consumer;
 static volatile int transmit_paused;
@@ -182,7 +209,10 @@ uint64_t vmm_map_device(uint64_t physical, uint64_t bytes) {
     return physical;
 }
 
-void pci_enable_bus_mastering(const struct pci_device *device) { (void)device; }
+void pci_enable_bus_mastering(const struct pci_device *device) {
+    (void)device;
+    bus_master = 1;
+}
 
 uint8_t pci_find_capability(const struct pci_device *device, uint8_t id) {
     (void)device;
@@ -254,8 +284,29 @@ static void serve_reset(void) {
         set_register32(REG_MASTER_CTRL, master & ~MASTER_CTRL_SOFT_RST);
 }
 
+static int transmit_enabled(void) {
+    return bus_master && (register32(REG_TXQ_CTRL) & TXQ_CTRL_EN) &&
+           (register32(REG_MAC_CTRL) & MAC_CTRL_TX_EN);
+}
+
+static int receive_enabled(void) {
+    return bus_master && (register32(REG_RXQ_CTRL) & RXQ_CTRL_EN) &&
+           (register32(REG_MAC_CTRL) & MAC_CTRL_RX_EN);
+}
+
+static void serve_eeprom(void) {
+    uint32_t control = register32(REG_TWSI_CTRL);
+    if (!(control & TWSI_CTRL_SW_LDSTART)) return;
+    if (eeprom_present) {
+        set_register32(REG_MAC_STA_ADDR, 0x56789ABCU);
+        set_register32(REG_MAC_STA_ADDR + 4U, 0x00001234U);
+        eeprom_loads++;
+    }
+    set_register32(REG_TWSI_CTRL, control & ~TWSI_CTRL_SW_LDSTART);
+}
+
 static void serve_transmit(void) {
-    if (transmit_paused) return;
+    if (transmit_paused || !transmit_enabled()) return;
     uint16_t producer = register16(REG_TPD_PRI0_PIDX);
     while (tpd_consumer != producer && sent_count < 64U) {
         uint64_t ring = register32(REG_TPD_PRI0_ADDR_LO);
@@ -276,19 +327,20 @@ static void *model_main(void *unused) {
     while (model_running) {
         serve_mdio();
         serve_reset();
+        serve_eeprom();
         serve_transmit();
         sched_yield();
     }
     return NULL;
 }
 
-static void model_receive(const uint8_t *frame, unsigned length) {
+static int model_receive_slots(const uint8_t *frame, unsigned length,
+                               uint32_t extra_word3, uint32_t word0_override,
+                               unsigned slots) {
+    if (!receive_enabled()) return 0;
     uint16_t producer = (uint16_t)register32(REG_MB_RFD0_PROD_IDX);
-    if (model_rfd_next == producer) {
-        printf("ATL1CTEST model has no free receive slot\n");
-        failures++;
-        return;
-    }
+    for (unsigned taken = 0; taken < slots; taken++)
+        if ((uint16_t)((model_rfd_next + taken) % RX_SLOTS) == producer) return 0;
 
     uint64_t rfd_ring = register32(REG_RFD0_HEAD_ADDR_LO);
     uint64_t rrd_ring = register32(REG_RRD0_HEAD_ADDR_LO);
@@ -297,14 +349,28 @@ static void model_receive(const uint8_t *frame, unsigned length) {
 
     struct model_rrd *status =
         (struct model_rrd *)(uintptr_t)(rrd_ring + (uint64_t)model_rrd_next * sizeof(*status));
-    status->word0 = ((uint32_t)model_rfd_next << 20) | (1U << 16);
+    status->word0 = word0_override ? word0_override
+                                   : (((uint32_t)model_rfd_next << 20) | (1U << 16));
     status->hash = 0;
     status->vlan = 0;
     status->flag = 0;
-    status->word3 = RRS_UPDATED | (length + 4U);
+    status->word3 = RRS_UPDATED | (length + 4U) | extra_word3;
 
-    model_rfd_next = (uint16_t)((model_rfd_next + 1U) % RX_SLOTS);
+    model_rfd_next = (uint16_t)((model_rfd_next + slots) % RX_SLOTS);
     model_rrd_next = (uint16_t)((model_rrd_next + 1U) % RX_SLOTS);
+    return 1;
+}
+
+static int model_receive_word3(const uint8_t *frame, unsigned length,
+                               uint32_t extra_word3, uint32_t word0_override) {
+    return model_receive_slots(frame, length, extra_word3, word0_override, 1U);
+}
+
+static void model_receive(const uint8_t *frame, unsigned length) {
+    if (!model_receive_word3(frame, length, 0, 0)) {
+        printf("ATL1CTEST model could not take a frame\n");
+        failures++;
+    }
 }
 
 static void deliver(const uint8_t *frame, size_t length) {
@@ -335,6 +401,12 @@ int main(void) {
     phy_registers[MII_GIGA_PSSR] = GIGA_PSSR_RESOLVED | GIGA_PSSR_DUPLEX | GIGA_PSSR_1000MBS;
     set_register32(REG_MAC_STA_ADDR, 0x1A2B3C4DU);
     set_register32(REG_MAC_STA_ADDR + 4U, 0x00001069U);
+    set_register32(REG_CLK_GATING_CTRL, 0x3FU);
+    set_register32(REG_LTSSM_ID_CTRL, LTSSM_ID_EN_WRO);
+    set_register32(REG_MASTER_CTRL, MASTER_CTRL_CLK_SEL_DIS);
+    set_register32(REG_PM_CTRL, PM_CTRL_ASPM_L0S_EN | PM_CTRL_ASPM_L1_EN |
+                   PM_CTRL_MAC_ASPM_CHK | PM_CTRL_SERDES_PD_EX_L1 |
+                   (PM_CTRL_L1_ENTRY_TIMER_MASK << PM_CTRL_L1_ENTRY_TIMER_SHIFT));
 
     model_running = 1;
     pthread_create(&model_thread, NULL, model_main, NULL);
@@ -376,6 +448,20 @@ int main(void) {
     check("buffer-size", register32(REG_RX_BUF_SIZE) >= 1522U &&
                          register32(REG_MTU) >= 1522U);
     check("receive-slots-published", register32(REG_MB_RFD0_PROD_IDX) == RX_SLOTS - 1U);
+    check("bus-mastering", bus_master);
+    check("pcie-patched", !(register32(REG_LTSSM_ID_CTRL) & LTSSM_ID_EN_WRO) &&
+                          (register32(REG_PCIE_PHYMISC) & PCIE_PHYMISC_FORCE_RCV_DET) &&
+                          !(register32(REG_MASTER_CTRL) & MASTER_CTRL_CLK_SEL_DIS));
+    check("clock-gating-off", register32(REG_CLK_GATING_CTRL) == 0);
+    uint32_t power = register32(REG_PM_CTRL);
+    check("aspm-off-with-link",
+          !(power & (PM_CTRL_ASPM_L0S_EN | PM_CTRL_ASPM_L1_EN | PM_CTRL_CLK_SWH_L1 |
+                     PM_CTRL_SERDES_PD_EX_L1)) &&
+          (power & (PM_CTRL_SERDES_L1_EN | PM_CTRL_SERDES_PLL_L1_EN |
+                    PM_CTRL_SERDES_BUFS_RX_L1_EN)) ==
+              (PM_CTRL_SERDES_L1_EN | PM_CTRL_SERDES_PLL_L1_EN |
+               PM_CTRL_SERDES_BUFS_RX_L1_EN) &&
+          ((power >> PM_CTRL_L1_ENTRY_TIMER_SHIFT) & PM_CTRL_L1_ENTRY_TIMER_MASK) == 0U);
 
     uint8_t frame[1514];
     for (unsigned round = 0; round < 8U; round++) {
@@ -416,6 +502,81 @@ int main(void) {
     bound_adapter->poll(deliver);
     check("receive-idle", received_count == 0);
 
+    unsigned wrapped = 0;
+    int wrap_bytes_match = 1;
+    for (unsigned batch = 0; batch < 10U; batch++) {
+        received_count = 0;
+        for (unsigned index = 0; index < 24U; index++) {
+            unsigned length = 60U + (wrapped + index) % 400U;
+            fill_frame(frame, length, (uint8_t)(wrapped + index));
+            model_receive(frame, length);
+        }
+        bound_adapter->poll(deliver);
+        if (received_count != 24U) wrap_bytes_match = 0;
+        for (unsigned index = 0; index < received_count; index++) {
+            unsigned length = 60U + (wrapped + index) % 400U;
+            fill_frame(frame, length, (uint8_t)(wrapped + index));
+            if (received_lengths[index] != length ||
+                memcmp(received_frames[index], frame, length) != 0)
+                wrap_bytes_match = 0;
+        }
+        wrapped += 24U;
+    }
+    check("receive-wraps-the-ring", wrapped == 240U && wrap_bytes_match);
+    check("receive-slots-still-published",
+          register32(REG_MB_RFD0_PROD_IDX) == (RX_SLOTS - 1U + 6U + 240U) % RX_SLOTS);
+
+    sent_count = 0;
+    int tx_wrap_ok = 1;
+    for (unsigned index = 0; index < 60U; index++) {
+        fill_frame(frame, 128, (uint8_t)(0x20U + index));
+        int queued_frame = 0;
+        for (unsigned attempt = 0; attempt < 5000U && !queued_frame; attempt++) {
+            if (bound_adapter->transmit(frame, 128) == 0) queued_frame = 1;
+            else usleep(100);
+        }
+        if (!queued_frame) tx_wrap_ok = 0;
+    }
+    for (unsigned attempt = 0; attempt < 5000U && sent_count < 60U; attempt++) usleep(100);
+    for (unsigned index = 0; index < sent_count && tx_wrap_ok; index++) {
+        fill_frame(frame, 128, (uint8_t)(0x20U + index));
+        if (sent_lengths[index] != 128U ||
+            memcmp(sent_frames[index], frame, 128) != 0)
+            tx_wrap_ok = 0;
+    }
+    check("transmit-wraps-the-ring", tx_wrap_ok && sent_count == 60U);
+    sent_count = 0;
+
+    uint64_t dropped_before = bound_adapter->rx_dropped();
+    received_count = 0;
+    fill_frame(frame, 200, 0x11);
+    model_receive_word3(frame, 200, RRS_ERR_SUM, 0);
+    model_receive_word3(frame, 200, RRS_LEN_ERR, 0);
+    model_receive_word3(frame, 200, 0x3F00U, 0);
+    model_receive_word3(frame, 200, 0, (RX_SLOTS + 8U) << 20 | (1U << 16));
+    model_receive_slots(frame, 200, 0,
+                        ((uint32_t)model_rfd_next << 20) | (2U << 16), 2U);
+    bound_adapter->poll(deliver);
+    check("bad-descriptors-dropped", received_count == 0 &&
+          bound_adapter->rx_dropped() == dropped_before + 5U);
+
+    received_count = 0;
+    fill_frame(frame, 300, 0x77);
+    model_receive(frame, 300);
+    bound_adapter->poll(deliver);
+    check("good-frame-after-bad",
+          received_count == 1U && received_lengths[0] == 300U &&
+          memcmp(received_frames[0], frame, 300) == 0);
+
+    uint32_t receive_queue = register32(REG_RXQ_CTRL);
+    set_register32(REG_RXQ_CTRL, receive_queue & ~RXQ_CTRL_EN);
+    received_count = 0;
+    fill_frame(frame, 100, 0x55);
+    int refused = model_receive_word3(frame, 100, 0, 0) == 0;
+    bound_adapter->poll(deliver);
+    check("no-dma-with-the-queue-off", refused && received_count == 0);
+    set_register32(REG_RXQ_CTRL, receive_queue);
+
     unsigned already_sent = sent_count;
     transmit_paused = 1;
     usleep(2000);
@@ -438,6 +599,11 @@ int main(void) {
         bound_adapter->poll(deliver);
     }
     check("link-down-said-once", log_count(mark, "link down") == 1U);
+    power = register32(REG_PM_CTRL);
+    check("aspm-parked-without-link",
+          (power & PM_CTRL_CLK_SWH_L1) &&
+          !(power & (PM_CTRL_SERDES_L1_EN | PM_CTRL_SERDES_PLL_L1_EN |
+                     PM_CTRL_SERDES_BUFS_RX_L1_EN | PM_CTRL_ASPM_L0S_EN)));
 
     mark = driver_log_used;
     phy_registers[MII_BMSR] = BMSR_LINK_UP;
@@ -451,6 +617,14 @@ int main(void) {
           ((register32(REG_MAC_CTRL) >> MAC_CTRL_SPEED_SHIFT) & 3U) == 1U &&
           !(register32(REG_MAC_CTRL) & MAC_CTRL_DUPLX));
 
+    received_count = 0;
+    fill_frame(frame, 250, 0x33);
+    model_receive(frame, 250);
+    bound_adapter->poll(deliver);
+    check("traffic-survives-a-link-flap",
+          received_count == 1U && received_lengths[0] == 250U &&
+          memcmp(received_frames[0], frame, 250) == 0);
+
     mark = driver_log_used;
     phy_registers[MII_BMSR] = BMSR_LINK_UP;
     phy_registers[MII_GIGA_PSSR] = 0;
@@ -458,12 +632,31 @@ int main(void) {
     bound_adapter->poll(deliver);
     check("link-negotiating", log_count(mark, "negotiating") == 1U);
 
+    const struct net_adapter *gone = bound_adapter;
     bound_driver->remove(&device);
     check("adapter-gone", bound_adapter == NULL);
     check("mac-stopped",
           !(register32(REG_MAC_CTRL) & (MAC_CTRL_TX_EN | MAC_CTRL_RX_EN)));
+    fill_frame(frame, 100, 0x66);
+    check("transmit-refused-after-remove", gone->transmit(frame, 100) != 0);
     __this_module.exit();
     check("driver-gone", bound_driver == NULL);
+
+    eeprom_present = 1;
+    set_register32(REG_MAC_STA_ADDR, 0);
+    set_register32(REG_MAC_STA_ADDR + 4U, 0);
+    set_register32(REG_TWSI_DEBUG, TWSI_DEBUG_DEV_EXIST);
+    phy_registers[MII_BMSR] = BMSR_LINK_UP;
+    phy_registers[MII_GIGA_PSSR] =
+        GIGA_PSSR_RESOLVED | GIGA_PSSR_DUPLEX | GIGA_PSSR_1000MBS;
+    check("module-init-again", __this_module.init() == 0);
+    check("probe-with-eeprom-address", bound_driver->probe(&device) == 0);
+    static const uint8_t eeprom_mac[6] = { 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC };
+    check("station-address-from-eeprom",
+          eeprom_loads > 0 && bound_adapter != NULL &&
+          memcmp(bound_adapter->mac, eeprom_mac, 6) == 0);
+    bound_driver->remove(&device);
+    __this_module.exit();
 
     model_running = 0;
     pthread_join(model_thread, NULL);
