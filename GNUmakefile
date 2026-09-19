@@ -234,7 +234,7 @@ headless: $(IMAGE)
 
 SCHEDBENCH_CPUS ?= 4
 
-.PHONY: schedbench drmtest perftest inputtest soundtest testimage
+.PHONY: schedbench drmtest perftest inputtest soundtest moduletest testimage
 schedbench: $(KERNEL) $(LIMINE_EXE)
 	support/tests/schedbench.sh $(SCHEDBENCH_CPUS) $(KERNEL)
 
@@ -249,6 +249,12 @@ inputtest: $(KERNEL) $(LIMINE_EXE)
 
 soundtest: $(KERNEL) $(LIMINE_EXE)
 	support/tests/soundtest.sh $(SCHEDBENCH_CPUS) $(KERNEL)
+
+.PHONY: atl1ctest
+atl1ctest: | $(BUILD)
+	$(CC) -std=gnu11 -Wall -Wextra -Werror -O1 -DTUNIX_MODULE_NAME='"atl1c"' \
+		support/tests/atl1ctest.c kernel/modules/atl1c.c -o $(BUILD)/atl1ctest -lpthread
+	$(BUILD)/atl1ctest
 
 TEST ?= schedbench
 testimage: $(KERNEL) $(LIMINE_EXE)

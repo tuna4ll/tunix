@@ -41,3 +41,8 @@ jobs:
 
       - name: the three kernels and their modules exist
         run: ls -l build/check/*/kernel.elf build/check/*/modules/*.ko
+
+      # The Atheros driver has no emulator, so its own code is run here against
+      # a model of the chip: rings, descriptors, link handling and teardown.
+      - name: the atl1c driver passes its device model
+        run: make atl1ctest
