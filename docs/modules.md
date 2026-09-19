@@ -86,15 +86,27 @@ any of them.
 
 `int`, `unsigned`, `bool` and `char *` are the four kinds. An unknown name
 fails the load rather than being ignored, because a parameter that silently
-does nothing is worse than a module that does not load.
+does nothing is worse than a module that does not load, and so does a value
+the kind cannot hold -- `number=abc`, or a negative for an `unsigned`.
+
+A numeric parameter can also be written afterwards, which is what its `0644`
+is for:
+
+```
+# echo 42 > /sys/module/tunix_probe/parameters/number
+```
+
+A `char *` cannot: the string would have to outlive the write and nothing here
+owns it, so the file stays read-only.
 
 ## What userspace sees
 
 `/proc/modules` is the Linux format -- name, bytes, reference count, who holds
 it, state, and the address the module was mapped at -- and `lsmod` parses it
 unchanged. `/sys/module/<name>/` carries `initstate` (which is how `modprobe`
-knows a module is already in), `refcnt`, `coresize`, `sections/.text`,
-`holders/` and `parameters/`.
+knows a module is already in), `refcnt`, `coresize`, `holders/`,
+`parameters/`, and `sections/` with where `.text`, `.rodata` and `.data`
+landed.
 
 The directory disappears when the module does, and `rmmod` of a module another
 one holds fails with `EBUSY` before its exit function runs.
@@ -177,9 +189,24 @@ with its module, udev autoloading it from the device's modalias, and -- with
 `NIC=rtl8139`, which is the default where that module exists -- a DHCP lease
 over a network card whose driver was loaded by udev.
 
-Broken modules are part of it: a truncated `.ko`, a file that is not ELF at
-all, and one whose `vermagic` has been rewritten are all refused, and the
-machine carries on.
+Failing is part of it, because most of the loader is what happens when
+something is wrong. A truncated `.ko`, a file that is not ELF at all, one
+whose `vermagic` has been rewritten, one built for the other architecture, one
+that needs a symbol nobody exports, one whose parameters do not parse, and one
+whose `init` returns an error are all refused -- each leaving nothing in
+`/proc/modules` or `/sys/module` and the next load working. An unprivileged
+process gets `EPERM` from `finit_module` whatever the file is.
+
+Eight copies of one module (renamed in the file, which is all a module name
+is) load at once at eight addresses, and the window the first one had is
+handed back: after they go, the next module starts where the first did.
+Twenty load-unload cycles move `MemFree` by less than a page, which is the
+cheapest leak detector there is.
+
+A module can also crash: the test loads one that writes to address zero on
+purpose, and the fault report has to name it --
+`Page Fault in kmod[280] at tunix_probe+0x7f` -- because a module that faults
+without saying which module it was is a stack trace into nowhere.
 
 The emulated machine has two HD Audio controllers and only one of them has a
 codec, which is the shape of a real one with an onboard card and an HDMI audio
