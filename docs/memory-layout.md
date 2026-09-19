@@ -149,6 +149,28 @@ costs one interrupt rather than one per page.
 A real machine found this and an emulator could not: see
 [Modules](modules.md).
 
+### Nothing goes back to the allocator before its shootdown
+
+Batching the shootdown makes the order of the last two steps load-bearing. An
+unmap that ends with `pmm_free_page()` hands the page to whoever asks next
+while the other processors are still a few instructions away from being told,
+and each of them is holding a translation to it that says writable. What lands
+in the new owner's page is whatever the old one was still finishing.
+
+So an unmap inside a batch calls `vmm_free_page_after_flush()` instead: the
+page is parked until `settle_batch()` has sent the interrupts and waited for
+them, and only then goes back to the allocator. Sixty-four of them fit; a
+larger unmap settles the batch in the middle rather than growing the list.
+`heap_release_pages`, `munmap` and `vmm_prune_empty_tables` all free this way,
+and the last of them opens a batch of its own so the page tables it drops are
+covered too.
+
+The rule is the one-liner: **nothing goes back to `pmm_free_page` between an
+unmap and its shootdown.** An emulator cannot fail it -- QEMU has no TLB to go
+stale -- and the laptop in [Modules](modules.md) failed it twice, once as a
+root filesystem full of garbage and once as scrambled console glyphs and a dead
+init.
+
 ## The kernel heap
 
 The heap is the other ceiling, and the one that runs out first on a machine

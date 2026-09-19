@@ -102,8 +102,50 @@ produced was a processor holding the *kernel* lock for seconds at a stretch
 while it painted. `tty_write()` takes it once for the whole write, which is
 also what stops a kernel message landing in the middle of a program's line.
 
-panic() takes both back by force before it prints: the processor holding one
-may be the one that just went wrong.
+That last claim was only true of the screen. Every terminal is mirrored to the
+serial line, and kprintf() wrote its characters there before it reached the
+terminal's lock -- so the two met on the wire, a character each, and the serial
+log of a four-processor boot read
+
+```
+SMP: 4CLONE3TEST PASS
+C LONE3TEST DONE
+of 4 processors running
+```
+
+with the test's own marker no longer at the start of a line, which is how the
+kernel tests noticed. A kernel message now takes the terminal's lock for its
+whole length, before the log lock rather than after, and a write to
+`/dev/kmsg` takes both as well; the order is the same everywhere, so a
+processor painting a program's line can still print from inside it and nothing
+waits for itself.
+
+panic() takes both back by force before it prints, and then holds the painting
+lock until it halts: the processor holding one may be the one that just went
+wrong, and a lock watchdog firing on another processor twenty seconds later
+should not land in the middle of the panic.
+
+## The boot processor is not alone any more
+
+`smp_init()` returns with every other processor in its idle loop, and an idle
+processor takes the next runnable process on its own timer tick. init is
+already created by then, so it starts *there*, several milliseconds before
+`kmain` reaches `process_start_first()`. Anything the boot processor still has
+to do runs beside a running process.
+
+The hardware report is the one piece of real work left: it reads every `.ko`
+in the module directory, loads and unloads the selftest, walks the PCI bus and
+writes the report to the root filesystem, none of which has a lock of its own.
+Under an emulator the window is a few milliseconds and nothing lands in it. A
+boot with `hwreport` on four processors is enough to show what it costs:
+
+```
+  file        snd_hda.ko  UNREADABLE
+```
+
+-- a module file the report could not read while udev, on another processor,
+read it seconds later. `kmain` takes the kernel lock around the report now, and
+gives it back before the first process runs.
 
 ## Finding the processors
 
