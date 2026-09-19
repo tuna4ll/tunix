@@ -1,2 +1,23 @@
 #!/bin/sh
-# Network is managed by dhcpcd.
+
+grep -qw hwreport /proc/cmdline || exit 0
+
+report=/tunix-hwreport.txt
+[ -f "$report" ] || exit 0
+
+{
+	echo
+	echo "userland"
+	echo "  kernel      $(uname -srm)"
+	echo "  modules"
+	lsmod | sed 's/^/    /'
+	echo "  drivers"
+	lspci -k 2>/dev/null | sed 's/^/    /'
+	echo "  sound       $(ls /dev/snd 2>/dev/null | tr '\n' ' ')"
+	echo "  interfaces  $(sed -n 's/^ *\([a-z0-9]*\):.*/\1/p' /proc/net/dev | tr '\n' ' ')"
+	echo "  bound"
+	for device in /sys/bus/pci/devices/*; do
+		[ -e "$device/driver" ] || continue
+		echo "    $(basename $device) -> $(basename $(readlink $device/driver))"
+	done
+} >> "$report" 2>&1
