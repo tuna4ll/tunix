@@ -97,15 +97,6 @@ static void append_hex(char *out, size_t limit, size_t *used, uint32_t value,
     }
 }
 
-static void append_hex_upper(char *out, size_t limit, size_t *used, uint32_t value,
-                             unsigned digits) {
-    static const char alphabet[] = "0123456789ABCDEF";
-    while (digits--) {
-        if (*used + 1 >= limit) return;
-        out[(*used)++] = alphabet[(value >> (digits * 4)) & 0xFU];
-    }
-}
-
 static void publish_hex_attribute(const char *directory, const char *name,
                                   uint32_t value, unsigned digits) {
     char path[224];
@@ -146,24 +137,6 @@ static void pci_device_path(char *out, size_t limit, const struct pci_device *de
     pci_slot_name(out, limit, &used, device);
     if (suffix) append_string(out, limit, &used, suffix);
     out[used] = '\0';
-}
-
-static void pci_modalias(char *out, size_t limit, size_t *used,
-                         const struct pci_device *device, const uint8_t *config) {
-    append_string(out, limit, used, "pci:v");
-    append_hex_upper(out, limit, used, device->vendor_id, 8);
-    append_string(out, limit, used, "d");
-    append_hex_upper(out, limit, used, device->device_id, 8);
-    append_string(out, limit, used, "sv");
-    append_hex_upper(out, limit, used, (uint32_t)(config[44] | (config[45] << 8)), 8);
-    append_string(out, limit, used, "sd");
-    append_hex_upper(out, limit, used, (uint32_t)(config[46] | (config[47] << 8)), 8);
-    append_string(out, limit, used, "bc");
-    append_hex_upper(out, limit, used, device->class_code, 2);
-    append_string(out, limit, used, "sc");
-    append_hex_upper(out, limit, used, device->subclass, 2);
-    append_string(out, limit, used, "i");
-    append_hex_upper(out, limit, used, device->prog_if, 2);
 }
 
 static struct sysfs_device *register_uevent(const char *devpath, const char *file,
@@ -248,9 +221,7 @@ static void publish_pci_device(const struct pci_device *device, void *context) {
     (void)vfs_create_file(file, resource, length, 0, 1);
 
     char alias[80];
-    size_t alias_length = 0;
-    pci_modalias(alias, sizeof(alias), &alias_length, device, config);
-    alias[alias_length] = '\0';
+    pci_modalias(device, alias, sizeof(alias));
     used = 0;
     append_string(file, sizeof(file), &used, directory);
     append_string(file, sizeof(file), &used, "/modalias");

@@ -1,6 +1,7 @@
 #ifndef TUNIX_PCI_H
 #define TUNIX_PCI_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 struct pci_device {
@@ -55,6 +56,9 @@ void pci_for_each_device(void (*visit)(const struct pci_device *, void *),
 void pci_enable_bus_mastering(const struct pci_device *device);
 
 uint64_t pci_bar_address(const struct pci_device *device, unsigned index);
+
+/* The string udev hands modprobe for this device, uppercase as Linux writes it. */
+void pci_modalias(const struct pci_device *device, char *out, size_t capacity);
 
 uint8_t pci_find_capability(const struct pci_device *device, uint8_t id);
 

@@ -276,6 +276,44 @@ void pci_unregister_driver(struct pci_driver *driver) {
     sysfs_pci_driver_removed(driver->name);
 }
 
+static void alias_hex(char *out, size_t capacity, size_t *used, uint32_t value,
+                      unsigned digits) {
+    static const char alphabet[] = "0123456789ABCDEF";
+    while (digits--) {
+        if (*used + 1 >= capacity) return;
+        out[(*used)++] = alphabet[(value >> (digits * 4)) & 0xFU];
+    }
+}
+
+static void alias_text(char *out, size_t capacity, size_t *used, const char *text) {
+    while (*text && *used + 1 < capacity) out[(*used)++] = *text++;
+}
+
+void pci_modalias(const struct pci_device *device, char *out, size_t capacity) {
+    if (!out || !capacity) return;
+    out[0] = '\0';
+    if (!device) return;
+
+    uint32_t subsystem = pci_config_read32(device->bus, device->slot,
+                                           device->function, 0x2C);
+    size_t used = 0;
+    alias_text(out, capacity, &used, "pci:v");
+    alias_hex(out, capacity, &used, device->vendor_id, 8);
+    alias_text(out, capacity, &used, "d");
+    alias_hex(out, capacity, &used, device->device_id, 8);
+    alias_text(out, capacity, &used, "sv");
+    alias_hex(out, capacity, &used, subsystem & 0xFFFFU, 8);
+    alias_text(out, capacity, &used, "sd");
+    alias_hex(out, capacity, &used, (subsystem >> 16) & 0xFFFFU, 8);
+    alias_text(out, capacity, &used, "bc");
+    alias_hex(out, capacity, &used, device->class_code, 2);
+    alias_text(out, capacity, &used, "sc");
+    alias_hex(out, capacity, &used, device->subclass, 2);
+    alias_text(out, capacity, &used, "i");
+    alias_hex(out, capacity, &used, device->prog_if, 2);
+    out[used] = '\0';
+}
+
 uint64_t pci_bar_address(const struct pci_device *device, unsigned index) {
     if (!device || index >= 6U) return 0;
     uint32_t low = device->bar[index];
