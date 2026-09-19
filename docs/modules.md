@@ -145,7 +145,7 @@ opinion.
 
 ## What is a module and what is not
 
-`snd_hda` and `rtl8139` are modules. Everything the machine needs before there
+`snd_hda`, `rtl8139` and `atl1c` are modules. Everything the machine needs before there
 is a root filesystem is not: IDE, AHCI, NVMe, USB, the framebuffer, virtio-gpu
 and virtio-net are in the image. That is the same division a distribution
 kernel makes, for the same reason -- a driver that has to be loaded from the

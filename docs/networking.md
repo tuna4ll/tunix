@@ -44,6 +44,36 @@ claims a card rather than from boot. Either driver registers a `struct
 net_adapter` and the stack above them never names one. Its receive path is the
 one below.
 
+`kernel/modules/atl1c.c` drives the Atheros AR8131/AR8132 gigabit controller,
+which is the wired port on a lot of 2010-era laptops and the reason it exists
+here: it was the first card a Tunix hardware report found with no driver behind
+it. It is polled like the RTL8139 -- `net_poll()` drains it -- with 64 receive
+slots of 1536 bytes each, a 16-entry transmit ring, and a link watchdog that
+re-reads the PHY twice a second and re-programs the MAC when the speed or duplex
+changes, so a cable plugged in after boot still works. Interrupts are the
+obvious next step; nothing else about the driver assumes polling.
+
+## A driver with no emulator
+
+QEMU has no AR8131, so `support/tests/atl1ctest.c` is the test: it compiles the
+driver's own source for the host and runs it against a model of the chip. The
+model is a register window and a thread that behaves like the hardware -- it
+serves MDIO transactions from a fake PHY, clears the reset bit, consumes
+transmit descriptors and posts receive ones -- and the DMA arena is mapped low
+so the 32-bit addresses the driver programs are addresses the model can follow.
+
+That is enough to check the things a wrong driver gets wrong: the station
+address it read, the ring base addresses and sizes it programmed, that the MAC
+and both queues ended up enabled at the speed the PHY reported, that frames
+handed to `transmit` arrive byte for byte, that received frames come back the
+same way with their slots returned to the hardware, that a full transmit ring
+refuses work rather than overwriting it, and that a link change re-programs the
+MAC. `make atl1ctest` runs it in under a second, and CI runs it on every push.
+
+What the model cannot check is whether those register offsets are the ones the
+real chip answers to. That part was read off a Core i5 laptop's own hardware
+report.
+
 ## How an RTL8139 frame gets in
 
 The card interrupts, and the handler does exactly one thing: it empties the
