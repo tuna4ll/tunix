@@ -122,8 +122,17 @@ extern void kprintf(const char *fmt, ...);
 #define MII_BMCR 0x00U
 #define MII_BMSR 0x01U
 #define MII_PHYSID1 0x02U
+#define MII_PHYSID2 0x03U
+#define MII_ADVERTISE 0x04U
+#define MII_CTRL1000 0x09U
+#define ADVERTISE_ALL 0x01E1U
+#define ADVERTISE_PAUSE 0x0C00U
+#define CTRL1000_FULL 0x0200U
+#define CTRL1000_HALF 0x0100U
 #define BMCR_RESTART_ANEG 0x0200U
+#define BMCR_POWER_DOWN 0x0800U
 #define BMCR_ANEG_EN 0x1000U
+#define BMCR_RESET 0x8000U
 #define BMSR_LINK_UP 0x0004U
 #define MII_GIGA_PSSR 0x11U
 #define GIGA_PSSR_RESOLVED 0x0800U
@@ -174,10 +183,13 @@ static int available;
 static int link_speed;
 static int link_duplex;
 static int link_up;
+static int link_state;
 static uint64_t link_deadline;
 static int debug;
+static int hibernate;
 
 MODULE_PARAMETER(debug, MODULE_PARAM_INT);
+MODULE_PARAMETER(hibernate, MODULE_PARAM_INT);
 
 static uint64_t *rfd_ring;
 static uint64_t rfd_physical;
@@ -337,7 +349,9 @@ static void reset_phy(void) {
     uint32_t control = read32(REG_GPHY_CTRL);
     control &= ~(GPHY_CTRL_EXT_RESET | GPHY_CTRL_PHY_IDDQ | GPHY_CTRL_GATE_25M_EN |
                  GPHY_CTRL_PWDOWN_HW);
-    control |= GPHY_CTRL_SEL_ANA_RST | GPHY_CTRL_HIB_EN | GPHY_CTRL_HIB_PULSE;
+    control |= GPHY_CTRL_SEL_ANA_RST;
+    if (hibernate) control |= GPHY_CTRL_HIB_EN | GPHY_CTRL_HIB_PULSE;
+    else control &= ~(GPHY_CTRL_HIB_EN | GPHY_CTRL_HIB_PULSE);
     write32(REG_GPHY_CTRL, control);
     flush_writes();
     delay_ns(10000ULL);
@@ -346,22 +360,36 @@ static void reset_phy(void) {
     delay_ns(1000000ULL);
 }
 
+#define LINK_UP 0
+#define LINK_NO_PHY (-1)
+#define LINK_NO_CABLE (-2)
+#define LINK_NEGOTIATING (-3)
+
 static int read_link(int *speed, int *duplex) {
     uint16_t status = 0;
     (void)phy_read(MII_BMSR, &status);
-    if (phy_read(MII_BMSR, &status) != 0) return -1;
-    if (!(status & BMSR_LINK_UP)) return -1;
+    if (phy_read(MII_BMSR, &status) != 0) return LINK_NO_PHY;
+    if (!(status & BMSR_LINK_UP)) return LINK_NO_CABLE;
 
     uint16_t detail = 0;
-    if (phy_read(MII_GIGA_PSSR, &detail) != 0) return -1;
-    if (!(detail & GIGA_PSSR_RESOLVED)) return -1;
+    if (phy_read(MII_GIGA_PSSR, &detail) != 0) return LINK_NO_PHY;
+    if (!(detail & GIGA_PSSR_RESOLVED)) return LINK_NEGOTIATING;
     *duplex = (detail & GIGA_PSSR_DUPLEX) ? 1 : 0;
     switch (detail & GIGA_PSSR_SPEED) {
     case GIGA_PSSR_1000MBS: *speed = 1000; break;
     case GIGA_PSSR_100MBS: *speed = 100; break;
     default: *speed = 10; break;
     }
-    return 0;
+    return LINK_UP;
+}
+
+static const char *link_reason(int state) {
+    switch (state) {
+    case LINK_NO_PHY: return "the phy stopped answering";
+    case LINK_NO_CABLE: return "no cable";
+    case LINK_NEGOTIATING: return "negotiating";
+    default: return "down";
+    }
 }
 
 static void start_mac(void);
@@ -369,12 +397,21 @@ static void start_mac(void);
 static void update_link(void) {
     int speed = 0;
     int duplex = 0;
-    int up = read_link(&speed, &duplex) == 0;
-    if (debug)
-        kprintf("ATL1C: link poll up=%d speed=%u rx=%u tx=%u dropped=%u\n", up,
-                (unsigned)speed, (unsigned)rx_count, (unsigned)tx_count,
+    int state = read_link(&speed, &duplex);
+    int up = state == LINK_UP;
+    if (debug) {
+        uint16_t status = 0;
+        uint16_t detail = 0;
+        (void)phy_read(MII_BMSR, &status);
+        (void)phy_read(MII_GIGA_PSSR, &detail);
+        kprintf("ATL1C: poll bmsr %x pssr %x state %d rx %u tx %u dropped %u\n",
+                status, detail, state, (unsigned)rx_count, (unsigned)tx_count,
                 (unsigned)drop_count);
-    if (up == link_up && speed == link_speed && duplex == link_duplex) return;
+    }
+    if (up == link_up && (!up || (speed == link_speed && duplex == link_duplex))) {
+        link_state = state;
+        return;
+    }
 
     link_up = up;
     if (up) {
@@ -383,9 +420,10 @@ static void update_link(void) {
         start_mac();
         kprintf("ATL1C: link up, %u Mbit %s duplex\n", (unsigned)link_speed,
                 link_duplex ? "full" : "half");
-    } else {
-        kprintf("ATL1C: link down\n");
+    } else if (state != link_state) {
+        kprintf("ATL1C: link down, %s\n", link_reason(state));
     }
+    link_state = state;
 }
 
 static unsigned read_request_block(void) {
@@ -589,15 +627,25 @@ static int atl1c_probe(const struct pci_device *found) {
                 read32(REG_IDLE_STATUS));
 
     reset_phy();
-    if (phy_write(MII_BMCR, BMCR_ANEG_EN | BMCR_RESTART_ANEG) != 0) {
+    uint16_t identity = 0;
+    if (phy_read(MII_PHYSID1, &identity) != 0 || identity == 0xFFFFU) {
         kprintf("ATL1C: the phy does not answer\n");
         return -1;
     }
-
-    if (debug) {
-        uint16_t id = 0;
-        (void)phy_read(MII_PHYSID1, &id);
-        kprintf("ATL1C: phy id %x\n", id);
+    if (phy_write(MII_BMCR, BMCR_RESET) != 0) {
+        kprintf("ATL1C: the phy will not reset\n");
+        return -1;
+    }
+    for (unsigned attempt = 0; attempt < 100U; attempt++) {
+        uint16_t control = 0;
+        delay_ns(1000000ULL);
+        if (phy_read(MII_BMCR, &control) == 0 && !(control & BMCR_RESET)) break;
+    }
+    if (phy_write(MII_ADVERTISE, ADVERTISE_ALL | ADVERTISE_PAUSE) != 0 ||
+        phy_write(MII_CTRL1000, CTRL1000_FULL | CTRL1000_HALF) != 0 ||
+        phy_write(MII_BMCR, BMCR_ANEG_EN | BMCR_RESTART_ANEG) != 0) {
+        kprintf("ATL1C: the phy will not take a setting\n");
+        return -1;
     }
 
     if (allocate_rings() != 0) {
@@ -625,10 +673,16 @@ static int atl1c_probe(const struct pci_device *found) {
 
     available = 1;
     link_up = 0;
+    link_state = LINK_UP;
     link_deadline = 0;
-    kprintf("ATL1C: %x:%x:%x:%x:%x:%x at %x:%x.%x\n",
+    uint16_t status = 0;
+    uint16_t detail = 0;
+    (void)phy_read(MII_BMSR, &status);
+    (void)phy_read(MII_GIGA_PSSR, &detail);
+    kprintf("ATL1C: %x:%x:%x:%x:%x:%x at %x:%x.%x, phy %x bmsr %x pssr %x\n",
             mac_address[0], mac_address[1], mac_address[2], mac_address[3],
-            mac_address[4], mac_address[5], card.bus, card.slot, card.function);
+            mac_address[4], mac_address[5], card.bus, card.slot, card.function,
+            identity, status, detail);
     update_link();
     if (net_register_adapter(&atl1c_adapter) != 0) {
         kprintf("ATL1C: the stack already has an adapter\n");
