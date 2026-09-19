@@ -353,10 +353,30 @@ static int vmm_map_page_in_locked(uint64_t cr3_physical, uint64_t virtual_addres
     return 0;
 }
 
+#define DEFERRED_FREE_MAX 64
+
 static unsigned flush_batch_depth;
 static uint64_t flush_batch_cr3;
 static int flush_batch_pending;
 static int flush_batch_kernel;
+static uint64_t deferred_pages[DEFERRED_FREE_MAX];
+static unsigned deferred_count;
+
+static void settle_batch(void) {
+    if (flush_batch_kernel) {
+        flush_batch_kernel = 0;
+        smp_flush_kernel_mappings();
+    }
+    if (flush_batch_pending) {
+        flush_batch_pending = 0;
+        uint64_t cr3 = flush_batch_cr3;
+        flush_batch_cr3 = 0;
+        smp_flush_address_space(cr3);
+    }
+    for (unsigned index = 0; index < deferred_count; index++)
+        pmm_free_page((void *)deferred_pages[index]);
+    deferred_count = 0;
+}
 
 void vmm_flush_batch_begin(void) {
     flush_batch_depth++;
@@ -364,15 +384,17 @@ void vmm_flush_batch_begin(void) {
 
 void vmm_flush_batch_end(void) {
     if (!flush_batch_depth || --flush_batch_depth) return;
-    if (flush_batch_kernel) {
-        flush_batch_kernel = 0;
-        smp_flush_kernel_mappings();
+    settle_batch();
+}
+
+void vmm_free_page_after_flush(uint64_t physical) {
+    if (!physical) return;
+    if (!flush_batch_depth) {
+        pmm_free_page((void *)physical);
+        return;
     }
-    if (!flush_batch_pending) return;
-    flush_batch_pending = 0;
-    uint64_t cr3 = flush_batch_cr3;
-    flush_batch_cr3 = 0;
-    smp_flush_address_space(cr3);
+    if (deferred_count == DEFERRED_FREE_MAX) settle_batch();
+    deferred_pages[deferred_count++] = physical;
 }
 
 static void invalidate_after_change(uint64_t cr3, uint64_t virtual_address);
@@ -397,8 +419,6 @@ static void flush_others(uint64_t cr3) {
 }
 
 static void invalidate_after_change(uint64_t cr3, uint64_t virtual_address) {
-    /* A kernel mapping lives in every address space, so the processor that
-       changed it has to forget it even when it is running somebody else's. */
     if (cr3 == vmm_arch_read_root() || kernel_mapping(virtual_address))
         vmm_arch_invalidate(virtual_address);
     if (kernel_mapping(virtual_address)) flush_kernel_mapping();
@@ -438,6 +458,7 @@ void vmm_prune_empty_tables(uint64_t cr3_physical, uint64_t start, uint64_t end)
     if (!pml4) return;
 
     int freed = 0;
+    vmm_flush_batch_begin();
     for (uint64_t address = start & ~0x1FFFFFULL; address < end; address += 0x200000ULL) {
         if (address >= USER_ADDRESS_LIMIT) break;
         uint16_t i4 = (address >> 39) & 0x1FF;
@@ -454,24 +475,25 @@ void vmm_prune_empty_tables(uint64_t cr3_physical, uint64_t start, uint64_t end)
 
         uint64_t page = pte_address(pd[i2]);
         pd[i2] = 0;
-        pmm_free_page((void *)page);
+        vmm_free_page_after_flush(page);
         freed = 1;
 
         if (!table_is_empty(pd)) continue;
         page = pte_address(pdpt[i3]);
         pdpt[i3] = 0;
-        pmm_free_page((void *)page);
+        vmm_free_page_after_flush(page);
 
         if (!table_is_empty(pdpt)) continue;
         page = pte_address(pml4[i4]);
         pml4[i4] = 0;
-        pmm_free_page((void *)page);
+        vmm_free_page_after_flush(page);
     }
 
     if (freed) {
         if (cr3 == vmm_arch_read_root()) vmm_arch_write_root(cr3);
         flush_others(cr3);
     }
+    vmm_flush_batch_end();
 }
 
 int vmm_protect_page_in(uint64_t cr3_physical, uint64_t virtual_address,

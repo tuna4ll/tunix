@@ -3232,7 +3232,8 @@ static void unmap_pages(struct process *process, uint64_t start, uint64_t end) {
         uint64_t flags;
         if (vmm_translate(process->cr3, address, &physical, &flags) == 0) {
             vmm_unmap_page_in(process->cr3, address);
-            if (!(flags & PAGE_DEVICE)) pmm_free_page((void *)(physical & ~0xFFFULL));
+            if (!(flags & PAGE_DEVICE))
+                vmm_free_page_after_flush(physical & ~0xFFFULL);
         }
     }
     vmm_prune_empty_tables(process->cr3, start, end);

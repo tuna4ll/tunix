@@ -188,7 +188,7 @@ static void heap_release_pages(heap_block_t *block) {
         uint64_t physical = 0;
         if (vmm_translate(cr3, page, &physical, NULL) != 0) continue;
         if (vmm_unmap_page_in(cr3, page) != 0) continue;
-        pmm_free_page((void *)physical);
+        vmm_free_page_after_flush(physical);
     }
     vmm_flush_batch_end();
     block->pages_released = 1;

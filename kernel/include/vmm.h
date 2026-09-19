@@ -58,6 +58,7 @@ int vmm_unmap_page_in(uint64_t cr3_physical, uint64_t virtual_address);
 void vmm_prune_empty_tables(uint64_t cr3_physical, uint64_t start, uint64_t end);
 
 void vmm_flush_batch_begin(void);
+void vmm_free_page_after_flush(uint64_t physical);
 void vmm_flush_batch_end(void);
 int vmm_protect_page_in(uint64_t cr3_physical, uint64_t virtual_address, uint64_t flags);
 int vmm_translate(uint64_t cr3_physical, uint64_t virtual_address,
