@@ -100,6 +100,13 @@ for rules in ('80-drivers.rules',):
     copy(os.path.join('usr/lib/udev/rules.d', rules))
 PY
 
+if [ "$ARCH" = aarch64 ]; then
+	FOREIGN=$BUILD/test-modules/tunix_probe.ko
+else
+	FOREIGN=$BUILD/aarch64-core/test-modules/tunix_probe.ko
+fi
+[ -f "$FOREIGN" ] && cp "$FOREIGN" "$ROOT/foreign.ko"
+
 echo "$NIC" > "$ROOT/nic"
 cat > "$ROOT/moduletest.sh" <<'GUEST'
 export PATH=/usr/bin:/usr/sbin
@@ -213,8 +220,17 @@ rmmod tunix_probe
 check insmod-unprivileged "$(/sbin/moduleperm | sed 's/.*finit=//')" -1
 check insmod-unprivileged-clean "$(lsmod | tail -n +2 | wc -l)" 0
 
+if [ -f /foreign.ko ]; then
+	insmod /foreign.ko 2>/dev/null
+	check insmod-foreign-arch "$?" 1
+fi
+
 insmod $kernel/tunix_probe.ko
 base=$(awk '$1 == "tunix_probe" {print $6}' /proc/modules)
+sections=/sys/module/tunix_probe/sections
+check sections-text "$(cat $sections/.text)" "$base"
+check sections-ordered "$([ "$(cat $sections/.data)" \> "$(cat $sections/.rodata)" ] && \
+	[ "$(cat $sections/.rodata)" \> "$(cat $sections/.text)" ] && echo ok)" ok
 rmmod tunix_probe
 
 loaded=0
