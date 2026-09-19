@@ -205,9 +205,15 @@ static uint64_t tx_buffers_physical;
 static uint16_t rfd_next;
 static uint16_t rrd_next;
 static uint16_t tpd_next;
-static uint64_t rx_count;
-static uint64_t tx_count;
-static uint64_t drop_count;
+static unsigned rx_frames;
+static unsigned tx_frames;
+static unsigned rx_errors;
+static unsigned link_changes;
+
+MODULE_PARAMETER(rx_frames, MODULE_PARAM_UINT);
+MODULE_PARAMETER(tx_frames, MODULE_PARAM_UINT);
+MODULE_PARAMETER(rx_errors, MODULE_PARAM_UINT);
+MODULE_PARAMETER(link_changes, MODULE_PARAM_UINT);
 
 static const struct net_adapter atl1c_adapter;
 
@@ -405,8 +411,7 @@ static void update_link(void) {
         (void)phy_read(MII_BMSR, &status);
         (void)phy_read(MII_GIGA_PSSR, &detail);
         kprintf("ATL1C: poll bmsr %x pssr %x state %d rx %u tx %u dropped %u\n",
-                status, detail, state, (unsigned)rx_count, (unsigned)tx_count,
-                (unsigned)drop_count);
+                status, detail, state, rx_frames, tx_frames, rx_errors);
     }
     if (up == link_up && (!up || (speed == link_speed && duplex == link_duplex))) {
         link_state = state;
@@ -414,6 +419,7 @@ static void update_link(void) {
     }
 
     link_up = up;
+    link_changes++;
     if (up) {
         link_speed = speed;
         link_duplex = duplex;
@@ -545,7 +551,7 @@ static int atl1c_transmit(const void *frame, size_t length) {
     tpd_next = next;
     write16(REG_TPD_PRI0_PIDX, tpd_next);
     flush_writes();
-    tx_count++;
+    tx_frames++;
     return 0;
 }
 
@@ -571,9 +577,9 @@ static void atl1c_poll(atl1c_receive_fn receive) {
         if (count == 1U && index < RX_SLOTS && !(status->word3 & (RRS_ERR_SUM | RRS_LEN_ERR)) &&
             length > 4U && length <= FRAME_BYTES) {
             receive(rx_buffers + (size_t)index * FRAME_BYTES, length - 4U);
-            rx_count++;
+            rx_frames++;
         } else {
-            drop_count++;
+            rx_errors++;
         }
 
         status->word3 &= ~RRS_UPDATED;
@@ -590,7 +596,7 @@ static void atl1c_poll(atl1c_receive_fn receive) {
     flush_writes();
 }
 
-static uint64_t atl1c_rx_dropped(void) { return drop_count; }
+static uint64_t atl1c_rx_dropped(void) { return rx_errors; }
 
 static int atl1c_probe(const struct pci_device *found) {
     if (available) return -1;
@@ -661,7 +667,7 @@ static int atl1c_probe(const struct pci_device *found) {
     rfd_next = RX_SLOTS - 1U;
     rrd_next = 0;
     tpd_next = 0;
-    rx_count = tx_count = drop_count = 0;
+    rx_frames = tx_frames = rx_errors = link_changes = 0;
 
     write_station_address(mac_address);
     configure_mac();

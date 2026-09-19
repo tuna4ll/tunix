@@ -17,8 +17,22 @@ report=/tunix-hwreport.txt
 	echo "  interfaces  $(sed -n 's/^ *\([a-z0-9]*\):.*/\1/p' /proc/net/dev | tr '\n' ' ')"
 	echo "  traffic"
 	sed 's/^/    /' /proc/net/dev
+	echo "  addresses"
+	ip -o addr show 2>/dev/null | sed 's/^/    /'
+	echo "  routes"
+	sed 's/^/    /' /proc/net/route
+	echo "  dhcpcd      $(pgrep -c dhcpcd 2>/dev/null || echo 0) running"
+	for module in /sys/module/atl1c /sys/module/rtl8139; do
+		[ -d "$module/parameters" ] || continue
+		echo "  $(basename $module) counters"
+		for counter in "$module"/parameters/*; do
+			echo "    $(basename $counter) $(cat $counter)"
+		done
+	done
 	echo "  kernel log"
-	dmesg 2>/dev/null | tail -25 | sed 's/^/    /'
+	log=$(dmesg 2>/dev/null | grep -aE 'ATL1C|RTL8139|HDA|EXT2|NET:|MODULE:|BLOCK:' | tail -25)
+	[ -n "$log" ] || log=$(dmesg 2>/dev/null | tail -25)
+	printf '%s\n' "$log" | sed 's/^/    /'
 	echo "  bound"
 	for device in /sys/bus/pci/devices/*; do
 		[ -e "$device/driver" ] || continue
