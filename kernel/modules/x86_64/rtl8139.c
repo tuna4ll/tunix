@@ -118,6 +118,9 @@ static int rtl8139_start(const struct pci_device *found) {
     rx_offset = 0;
     tx_index = 0;
     rx_count = tx_count = drop_count = 0;
+    if (!rx_queue) rx_queue = (struct rx_frame *)kmalloc(sizeof(*rx_queue) * RX_QUEUE_FRAMES);
+    if (!rx_queue) return -1;
+    rx_queue_head = rx_queue_tail = 0;
     available = 1;
     return net_register_adapter(&rtl8139_adapter);
 }
