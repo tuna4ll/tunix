@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
+#include "../include/boot.h"
 #include "../include/cpu.h"
 #include "../include/kstring.h"
 #include "../include/time.h"
@@ -476,10 +477,22 @@ void net_init(void) {
 
 void net_enable_interrupts(void) {
     interrupts_wanted = 1;
+    if (boot_command_line_flag("nonetirq")) return;
     if (!adapter || !adapter->enable_interrupts) return;
     adapter->enable_interrupts();
     unsigned vector = adapter->interrupt_vector ? adapter->interrupt_vector() : 0;
     if (vector) kprintf("NET: %s interrupts on vector %u\n", adapter->name, vector);
+}
+
+int net_adapter_interrupts(void) {
+    if (!adapter || boot_command_line_flag("nonetirq")) return 0;
+    if (!adapter->interrupt_vector) return 0;
+    return adapter->interrupt_vector() != 0;
+}
+
+void net_tick(void) {
+    if (!adapter || net_adapter_interrupts()) return;
+    net_poll();
 }
 
 

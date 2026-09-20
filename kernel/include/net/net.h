@@ -48,6 +48,8 @@ void net_unregister_adapter(const struct net_adapter *card);
 void net_init(void);
 void net_poll(void);
 void net_enable_interrupts(void);
+int net_adapter_interrupts(void);
+void net_tick(void);
 const struct net_config *net_get_config(void);
 void net_set_address(uint32_t address);
 void net_set_netmask(uint32_t netmask);
