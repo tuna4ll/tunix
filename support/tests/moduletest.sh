@@ -321,6 +321,11 @@ dhcpcd -1 -t 30 eth0 > /tmp/dhcpcd.log 2>&1
 check net-dhcp "$?" 0
 echo "MODULETEST route: $(cat /proc/net/route | tr '\t' ' ' | tr '\n' '|')"
 check net-gateway "$(awk 'NR > 1 && $2 == "00000000" && $3 != "00000000" {print "yes"}' /proc/net/route | head -1)" yes
+leased=$(ip -o addr show dev eth0 | sed -n 's/.*inet \([0-9.]*\).*/\1/p' | head -1)
+ip addr del 192.0.2.9/24 dev eth0 2>/dev/null
+check net-address-survives-another-delete \
+	"$(ip -o addr show dev eth0 | sed -n 's/.*inet \([0-9.]*\).*/\1/p' | head -1)" "$leased"
+check net-bytes-counted "$(awk '/eth0:/ {print ($2 > 0 && $10 > 0) ? "yes" : "no"}' /proc/net/dev)" yes
 
 echo "MODULETEST DONE"
 
