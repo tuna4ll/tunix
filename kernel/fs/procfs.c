@@ -495,10 +495,12 @@ static int64_t proc_net_dev_read(struct vfs_node *node, uint64_t offset,
     struct text_buffer text = {{0}, 0};
     text_string(&text, "Inter-|   Receive                                                |  Transmit\n");
     text_string(&text, " face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n");
-    text_string(&text, "  eth0: 0 "); text_unsigned(&text, net_rx_packets());
+    text_string(&text, "  eth0: "); text_unsigned(&text, net_rx_bytes());
+    text_string(&text, " "); text_unsigned(&text, net_rx_packets());
     text_string(&text, " 0 "); text_unsigned(&text, net_rx_dropped());
-    text_string(&text, " 0 0 0 0 0 0 "); text_unsigned(&text, net_tx_packets());
-    text_string(&text, " 0 0 0 0 0 0 0\n");
+    text_string(&text, " 0 0 0 0 "); text_unsigned(&text, net_tx_bytes());
+    text_string(&text, " "); text_unsigned(&text, net_tx_packets());
+    text_string(&text, " 0 0 0 0 0 0\n");
     return text_read(&text, offset, size, output);
 }
 

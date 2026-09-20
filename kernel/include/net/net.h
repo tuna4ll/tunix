@@ -76,6 +76,8 @@ int net_send_tcp(uint32_t source, uint16_t source_port, uint32_t destination,
                  uint16_t destination_port, uint32_t seq, uint32_t ack, uint8_t flags,
                  uint16_t window, const void *payload, size_t length);
 uint64_t net_rx_packets(void);
+uint64_t net_rx_bytes(void);
+uint64_t net_tx_bytes(void);
 uint64_t net_tx_packets(void);
 uint64_t net_rx_dropped(void);
 size_t net_arp_snapshot(struct net_arp_record *records, size_t capacity);

@@ -101,7 +101,9 @@ static struct arp_entry arp_cache[ARP_CACHE_SIZE];
 static unsigned arp_replace;
 static uint16_t ipv4_identification;
 static uint64_t stack_rx;
+static uint64_t stack_rx_bytes;
 static uint64_t stack_tx;
+static uint64_t stack_tx_bytes;
 static uint64_t stack_drop;
 static int interrupts_wanted;
 
@@ -153,6 +155,7 @@ static int loopback_enqueue(const void *packet, size_t length) {
     slot->length = length;
     loopback_count++;
     stack_tx++;
+    stack_tx_bytes += length;
     return 0;
 }
 
@@ -193,6 +196,7 @@ int net_send_ethernet(const uint8_t destination[6], uint16_t type,
     memcpy(frame + sizeof(*header), payload, length);
     if (adapter_transmit(frame, sizeof(*header) + length) != 0) return -1;
     stack_tx++;
+    stack_tx_bytes += sizeof(*header) + length;
     return 0;
 }
 
@@ -200,6 +204,7 @@ int net_send_raw_ethernet(const void *frame, size_t length) {
     if (!config.interface_up || !frame || length < 14U || length > 1514U) return -1;
     if (adapter_transmit(frame, length) != 0) return -1;
     stack_tx++;
+    stack_tx_bytes += length;
     return 0;
 }
 
@@ -440,6 +445,7 @@ static void receive_frame(const uint8_t *frame, size_t length) {
     if (!mac_equal(header->destination, config.mac) && !mac_equal(header->destination, broadcast)) return;
     uint16_t type = net_htons(header->type);
     stack_rx++;
+    stack_rx_bytes += length;
     inet_socket_receive_ethernet(frame, length, type);
     const uint8_t *payload = frame + sizeof(*header);
     size_t payload_length = length - sizeof(*header);
@@ -531,6 +537,8 @@ void net_set_dns(uint32_t value) { config.dns = value; }
 void net_set_interface_up(int up) { config.interface_up = up != 0; }
 uint64_t net_rx_packets(void) { return stack_rx; }
 uint64_t net_tx_packets(void) { return stack_tx; }
+uint64_t net_rx_bytes(void) { return stack_rx_bytes; }
+uint64_t net_tx_bytes(void) { return stack_tx_bytes; }
 
 uint64_t net_rx_dropped(void) {
     uint64_t adapter_drops = adapter && adapter->rx_dropped ? adapter->rx_dropped() : 0;
