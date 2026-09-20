@@ -531,6 +531,9 @@ static int handle_addr_change(const struct nlmsghdr *request) {
     const uint32_t *value = request_attr(request, sizeof(*address), IFA_LOCAL, &value_length);
     if (!value) value = request_attr(request, sizeof(*address), IFA_ADDRESS, &value_length);
     if (request->nlmsg_type == RTM_DELADDR) {
+        const struct net_config *current = net_get_config();
+        if (value && value_length >= sizeof(*value) && *value != current->address)
+            return 0;
         net_set_address(0);
         net_set_netmask(0);
         return 0;
