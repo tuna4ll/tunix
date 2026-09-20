@@ -5,9 +5,17 @@ grep -qw hwreport /proc/cmdline || exit 0
 report=/tunix-hwreport.txt
 [ -f "$report" ] || exit 0
 
-{
+append_report() {
+	waited=0
+	while [ "$waited" -lt 60 ]; do
+		ip -o addr show dev eth0 2>/dev/null | grep -q 'inet ' && break
+		waited=$((waited + 1))
+		sleep 1
+	done
+
 	echo
 	echo "userland"
+	echo "  written     $waited s after stage 1, $(cut -d' ' -f1 /proc/uptime) s after boot"
 	echo "  kernel      $(uname -srm)"
 	echo "  modules"
 	lsmod | sed 's/^/    /'
@@ -21,7 +29,13 @@ report=/tunix-hwreport.txt
 	ip -o addr show 2>/dev/null | sed 's/^/    /'
 	echo "  routes"
 	sed 's/^/    /' /proc/net/route
-	echo "  dhcpcd      $(pgrep -c dhcpcd 2>/dev/null || echo 0) running"
+	echo "  dhcpcd      $(pgrep -c dhcpcd 2>/dev/null | head -1) running"
+	echo "  services"
+	if [ -d /etc/runit/runsvdir/default ]; then
+		sv status /etc/runit/runsvdir/default/* 2>&1 | sed 's/^/    /'
+	else
+		echo "    no runsvdir"
+	fi
 	for module in /sys/module/atl1c /sys/module/rtl8139; do
 		[ -d "$module/parameters" ] || continue
 		echo "  $(basename $module) counters"
@@ -30,12 +44,15 @@ report=/tunix-hwreport.txt
 		done
 	done
 	echo "  kernel log"
-	log=$(dmesg 2>/dev/null | grep -aE 'ATL1C|RTL8139|HDA|EXT2|NET:|MODULE:|BLOCK:' | tail -25)
-	[ -n "$log" ] || log=$(dmesg 2>/dev/null | tail -25)
+	log=$(cat /dev/kmsg 2>/dev/null | grep -aE 'ATL1C|RTL8139|HDA|EXT2|NET:|MODULE:|BLOCK:' | tail -25)
+	[ -n "$log" ] || log=$(cat /dev/kmsg 2>/dev/null | tail -25)
 	printf '%s\n' "$log" | sed 's/^/    /'
 	echo "  bound"
 	for device in /sys/bus/pci/devices/*; do
 		[ -e "$device/driver" ] || continue
 		echo "    $(basename $device) -> $(basename $(readlink $device/driver))"
 	done
-} >> "$report" 2>&1
+}
+
+append_report >> "$report" 2>&1 &
+exit 0
