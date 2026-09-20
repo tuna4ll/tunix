@@ -81,6 +81,32 @@ facts in Linux's atl1c, and the model test below now starts the chip the way a
 laptop does -- gated and in ASPM -- so a driver that skips the wake-up fails the
 test instead of the machine.
 
+### Somebody has to ask a card that cannot ask you
+
+The RTL8139 and virtio-net raise an interrupt when a frame lands; the AR8131
+driver does not use one, so the only way a frame is ever seen is somebody
+calling `poll`. Every call sat inside the stack -- a send, a receive, an ARP
+resolution, a socket becoming ready -- which means the card was serviced only
+while a process was busy with a socket. A machine where nothing has opened one
+yet still has a link to watch, a receive ring filling behind it and, in this
+driver's case, a link watchdog that never runs: the first report from the
+laptop came back with `link_changes 0`, because between udev loading the module
+and the report being written, nothing in userspace had touched the network.
+
+So `timer_irq()` calls `net_tick()`, beside the input and sound polling that
+were already there. It does nothing at all when the adapter has an interrupt
+vector, and otherwise drains the card and runs its watchdog 250 times a second,
+whether or not anybody is listening.
+
+`nonetirq` on the kernel command line makes an adapter that *does* interrupt
+behave like one that does not, which is the only way to run the polled path
+under an emulator. It found that the RTL8139's receive queue was allocated in
+`enable_interrupt()` and nowhere else, so with interrupts off the driver threw
+every frame away: dhcpcd got no lease and fell back to a link-local address,
+which is the same "no gateway" shape the laptop's report showed. The queue is
+allocated at probe now, and `EXTRA_CMDLINE=nonetirq support/tests/moduletest.sh`
+passes all 87 checks -- DHCP included -- on a card whose interrupts are gone.
+
 ## A driver with no emulator
 
 QEMU has no AR8131, so `support/tests/atl1ctest.c` is the test: it compiles the
@@ -204,6 +230,24 @@ transfer (four times the receive ring, so it only completes if the window
 opens and closes correctly), a refused connection to a dead port, and a UDP
 round trip. `python-test`'s `inet sockets` check does the same through
 CPython's own socket module.
+
+### One address, and who is allowed to take it away
+
+The stack holds a single IPv4 address, so `RTM_DELADDR` used to mean "there is
+no address any more" whatever address the message named. dhcpcd does not work
+that way: while it waits for a lease it configures a link-local address, and
+when the lease arrives it adds the real one and *then* deletes the old one. The
+delete took the new address with it, and the machine was left with a default
+route to a gateway it had learned, a route table whose link entry was
+`0.0.0.0/0.0.0.0`, and `ip addr` showing nothing on `eth0` -- which is exactly
+what the laptop's report printed after a successful DHCP exchange.
+
+A delete that names an address other than the one held is now ignored.
+`moduletest` deletes `192.0.2.9/24` from `eth0` after dhcpcd has finished and
+checks the lease is still there, which fails on a kernel without the fix.
+
+`/proc/net/dev` counts bytes as well as packets now, for the same reason: a
+report that says 40 packets and 0 bytes reads like a broken driver.
 
 ## Limits
 

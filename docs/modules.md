@@ -262,6 +262,16 @@ is what a new `MODULE_PCI_ALIAS` would have to cover.
 file, so the second half of the report says whether the match above actually
 became a driver.
 
+Runit runs `rc.local` at the end of stage 1, which is *before* stage 2 starts a
+single service. Read literally, the first reports said dhcpcd was not running
+and the interface had no address; both were true, and both were meaningless.
+The script now returns at once and leaves a background job to wait up to a
+minute for `eth0` to have an address before it writes, so the network half
+describes a booted machine rather than a half-booted one. It records how long
+it waited, what runit makes of each service, and reads the kernel log out of
+`/dev/kmsg` -- which gives whole lines where `dmesg` was handing back
+fragments of them.
+
 ### What the first real machine said
 
 A Core i5 M430 laptop ran the report, passed the selftest, matched `snd_hda`
