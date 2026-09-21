@@ -321,6 +321,8 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define SO_SNDBUF 7
 #define SO_RCVBUF 8
 #define MSG_CTRUNC 0x08
+#define IPPROTO_IP_LEVEL 0
+#define IP_TTL_OPTION 2
 #define MSG_CMSG_CLOEXEC 0x40000000
 #define SOCK_NONBLOCK O_NONBLOCK
 #define SOCK_CLOEXEC O_CLOEXEC
@@ -2163,8 +2165,22 @@ static int64_t sys_recvmsg(int fd, uint64_t user_message, int flags) {
         if (copy_to_user(message.name, address, address_length) != 0) return -EFAULT;
         message.name_length = (uint32_t)address_length;
     }
+    size_t control_room = message.control_length;
     message.control_length = 0;
     message.flags = 0;
+    if (inet_socket_wants_ttl(socket)) {
+        size_t hop_length = sizeof(struct linux_cmsghdr) + sizeof(int);
+        if (message.control && control_room >= cmsg_align(hop_length)) {
+            struct linux_cmsghdr header = {hop_length, IPPROTO_IP_LEVEL, IP_TTL_OPTION};
+            int hops = inet_socket_last_ttl(socket);
+            if (copy_to_user(message.control, &header, sizeof(header)) != 0 ||
+                copy_to_user(message.control + sizeof(header), &hops, sizeof(hops)) != 0)
+                return -EFAULT;
+            message.control_length = hop_length;
+        } else {
+            message.flags |= MSG_CTRUNC;
+        }
+    }
     if (copy_to_user(user_message, &message, sizeof(message)) != 0) return -EFAULT;
     return result;
 }

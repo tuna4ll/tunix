@@ -51,6 +51,8 @@ int64_t inet_socket_sendto(struct inet_socket *socket, const void *data, size_t 
                            const void *address, size_t address_length);
 int64_t inet_socket_recvfrom(struct inet_socket *socket, void *data, size_t length, int flags,
                              void *address, size_t *address_length);
+int inet_socket_wants_ttl(struct inet_socket *socket);
+uint8_t inet_socket_last_ttl(struct inet_socket *socket);
 int inet_socket_getsockname(struct inet_socket *socket, void *address, size_t *length);
 int inet_socket_getpeername(struct inet_socket *socket, void *address, size_t *length);
 int inet_socket_setsockopt(struct inet_socket *socket, int level, int option,

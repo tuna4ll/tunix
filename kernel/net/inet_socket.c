@@ -108,8 +108,10 @@ struct tcp_control_block {
 #define ICMP_ECHO 8
 #define IP_HDRINCL 3
 #define IP_TTL 2
+#define IP_RETOPTS 7
 #define IP_PKTINFO 8
 #define IP_RECVERR 11
+#define IP_RECVTTL 12
 #define IP_MTU_DISCOVER 10
 #define IP_RECVTOS 13
 #define SOL_UDP 17
@@ -145,6 +147,7 @@ struct queued_packet {
     uint8_t data[SOCKET_PACKET_MAX];
     uint8_t address[32];
     size_t address_length;
+    uint8_t ttl;
 };
 
 struct inet_socket {
@@ -170,6 +173,9 @@ struct inet_socket {
 
     int report_errors;
     uint32_t icmp_filter;
+    int recv_ttl;
+    int return_options;
+    uint8_t last_ttl;
     uint8_t ttl;
     int orphan;
 
@@ -853,11 +859,12 @@ void inet_socket_report_accept(struct inet_socket *socket, uint64_t pid,
         socket->peer_port);
 }
 
-static int enqueue(struct inet_socket *socket, const void *data, size_t length,
-                   const void *address, size_t address_length) {
+static int enqueue_with_ttl(struct inet_socket *socket, const void *data, size_t length,
+                            const void *address, size_t address_length, uint8_t ttl) {
     if (!socket || socket->queue_count >= SOCKET_QUEUE) return -EAGAIN;
     if (length > SOCKET_PACKET_MAX) length = SOCKET_PACKET_MAX;
     struct queued_packet *item = &socket->queue[socket->queue_tail];
+    item->ttl = ttl;
     item->length = length;
     memcpy(item->data, data, length);
     item->address_length = address_length > sizeof(item->address) ? sizeof(item->address) : address_length;
@@ -865,6 +872,11 @@ static int enqueue(struct inet_socket *socket, const void *data, size_t length,
     socket->queue_tail = (socket->queue_tail + 1U) % SOCKET_QUEUE;
     socket->queue_count++;
     return 0;
+}
+
+static int enqueue(struct inet_socket *socket, const void *data, size_t length,
+                   const void *address, size_t address_length) {
+    return enqueue_with_ttl(socket, data, length, address, address_length, 0);
 }
 
 int64_t inet_socket_sendto(struct inet_socket *socket, const void *data, size_t length, int flags,
@@ -938,11 +950,20 @@ int64_t inet_socket_recvfrom(struct inet_socket *socket, void *data, size_t leng
         memcpy(address, item->address, copy);
         *address_length = item->address_length;
     }
+    socket->last_ttl = item->ttl;
     if (!(flags & MSG_PEEK)) {
         socket->queue_head = (socket->queue_head + 1U) % SOCKET_QUEUE;
         socket->queue_count--;
     }
     return (int64_t)amount;
+}
+
+int inet_socket_wants_ttl(struct inet_socket *socket) {
+    return socket && socket->recv_ttl;
+}
+
+uint8_t inet_socket_last_ttl(struct inet_socket *socket) {
+    return socket ? socket->last_ttl : 0;
 }
 
 int inet_socket_getsockname(struct inet_socket *socket, void *address, size_t *length) {
@@ -1009,6 +1030,14 @@ int inet_socket_setsockopt(struct inet_socket *socket, int level, int option,
             socket->report_errors = *(const int *)value != 0;
             return 0;
         }
+        if (option == IP_RECVTTL && value && length >= sizeof(int)) {
+            socket->recv_ttl = *(const int *)value != 0;
+            return 0;
+        }
+        if (option == IP_RETOPTS && value && length >= sizeof(int)) {
+            socket->return_options = *(const int *)value != 0;
+            return 0;
+        }
         if (option == IP_PKTINFO || option == IP_MTU_DISCOVER || option == IP_RECVTOS) return 0;
     }
 
@@ -1040,6 +1069,8 @@ int inet_socket_getsockopt(struct inet_socket *socket, int level, int option,
     else if (level == SOL_SOCKET && option == SO_BROADCAST) result = socket->broadcast;
     else if (level == IPPROTO_IP && option == IP_TTL) result = socket->ttl;
     else if (level == IPPROTO_IP && option == IP_RECVERR) result = socket->report_errors;
+    else if (level == IPPROTO_IP && option == IP_RECVTTL) result = socket->recv_ttl;
+    else if (level == IPPROTO_IP && option == IP_RETOPTS) result = socket->return_options;
 
     else if (level == IPPROTO_TCP && option == TCP_NODELAY) result = 1;
     else if (level == SOL_RAW && option == ICMP_FILTER) result = (int)socket->icmp_filter;
@@ -1198,6 +1229,7 @@ void inet_socket_receive_udp(const uint8_t *payload, size_t length, uint32_t sou
     for (unsigned i = 0; i < MAX_INET_SOCKETS; i++) {
         struct inet_socket *socket = sockets[i];
         if (!socket || socket->domain != TUNIX_AF_INET || socket->type != TUNIX_SOCK_DGRAM) continue;
+        if (is_ping_socket(socket)) continue;
         if (socket->local_port != destination_port) continue;
         if (socket->local_address && socket->local_address != destination) continue;
         if (socket->connected && (socket->peer_address != source || socket->peer_port != source_port)) continue;
@@ -1213,6 +1245,7 @@ void inet_socket_receive_ipv4(const uint8_t *packet, size_t length, uint8_t prot
     address.family = TUNIX_AF_INET;
     address.address = source;
     unsigned header_length = length ? (unsigned)(packet[0] & 0x0FU) * 4U : 0U;
+    uint8_t hops = length > 8U ? packet[8] : 0U;
     const struct icmp_message *icmp = NULL;
     if (protocol == IPPROTO_ICMP && header_length >= 20U &&
         length >= header_length + sizeof(struct icmp_message))
@@ -1224,14 +1257,14 @@ void inet_socket_receive_ipv4(const uint8_t *packet, size_t length, uint8_t prot
         if (icmp && (socket->icmp_filter & (1U << icmp->type))) continue;
         if (socket->type == TUNIX_SOCK_RAW) {
             if (socket->protocol && socket->protocol != protocol) continue;
-            (void)enqueue(socket, packet, length, &address, sizeof(address));
+            (void)enqueue_with_ttl(socket, packet, length, &address, sizeof(address), hops);
             continue;
         }
         if (!icmp || !is_ping_socket(socket)) continue;
         if (icmp->type != ICMP_ECHO_REPLY) continue;
         if (net_htons(icmp->id) != socket->local_port) continue;
-        (void)enqueue(socket, packet + header_length, length - header_length,
-                      &address, sizeof(address));
+        (void)enqueue_with_ttl(socket, packet + header_length, length - header_length,
+                               &address, sizeof(address), hops);
     }
 }
 
