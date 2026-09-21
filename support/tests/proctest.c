@@ -24,6 +24,10 @@ typedef long s64;
 #define NR_EPOLL_CTL 233
 #define NR_GETRUSAGE 98
 #define NR_SOCKETPAIR 53
+#define NR_CAPGET 125
+#define NR_CAPSET 126
+#define NR_SETUID 105
+#define NR_SOCKET 41
 #define EPOLL_PACKED __attribute__((packed))
 #define UCONTEXT_RET_OFFSET (40 + 13 * 8)
 #define TRAP_LENGTH 2
@@ -40,6 +44,10 @@ typedef long s64;
 #define NR_EXIT 93
 #define NR_WAIT4 260
 #define NR_KILL 129
+#define NR_CAPGET 90
+#define NR_CAPSET 91
+#define NR_SETUID 146
+#define NR_SOCKET 198
 #define NR_OPENAT 56
 #define NR_PIPE2 59
 #define NR_PPOLL 73
@@ -63,6 +71,21 @@ typedef long s64;
 #define SIGUSR1 10
 #define SIGUSR2 12
 #define EINTR 4
+#define EPERM 1
+#define EPROTONOSUPPORT 93
+#define CAP_VERSION_3 0x20080522U
+#define CAP_NET_RAW_BIT (1U << 13)
+
+struct cap_header {
+    unsigned version;
+    int pid;
+};
+
+struct cap_data {
+    unsigned effective;
+    unsigned permitted;
+    unsigned inheritable;
+};
 #define O_NONBLOCK 04000
 #define EPOLLIN 0x001U
 #define EPOLLET 0x80000000U
@@ -320,6 +343,35 @@ static int state_survives_switches(u64 *block, u64 pattern) {
         if (tls_read() != (u64)block) return 2;
     }
     return 0;
+}
+
+static void test_capabilities(void) {
+    s64 pid = fork_process();
+    if (pid == 0) {
+        if (sys(NR_SETUID, 1000, 0, 0, 0, 0) != 0) exit_now(91);
+
+        struct cap_header header;
+        header.version = CAP_VERSION_3;
+        header.pid = 0;
+        struct cap_data data[2];
+        for (int index = 0; index < 2; index++)
+            data[index].effective = data[index].permitted = data[index].inheritable = 0;
+
+        if (sys(NR_CAPGET, (u64)&header, (u64)data, 0, 0, 0) != 0) exit_now(92);
+        if (data[0].effective | data[0].permitted | data[0].inheritable |
+            data[1].effective | data[1].permitted | data[1].inheritable) exit_now(93);
+        if (sys(NR_CAPSET, (u64)&header, (u64)data, 0, 0, 0) != 0) exit_now(94);
+
+        data[0].effective = CAP_NET_RAW_BIT;
+        if (sys(NR_CAPSET, (u64)&header, (u64)data, 0, 0, 0) != -EPERM) exit_now(95);
+
+        if (sys(NR_SOCKET, 2, 2, 1, 0, 0) != -EPROTONOSUPPORT) exit_now(96);
+        s64 raw = sys(NR_SOCKET, 2, 3, 1, 0, 0);
+        if (raw < 0) exit_now(97);
+        exit_now(0);
+    }
+    s64 status = wait_child(pid);
+    check("a user may drop capabilities and open an icmp socket", status == 0, status);
 }
 
 static void test_fork_and_switches(void) {
@@ -611,6 +663,7 @@ void start_c(u64 *stack) {
     test_trap_resume();
     test_blocked_read("read interrupted without SA_RESTART", 0, -EINTR);
     test_blocked_read("read restarted with SA_RESTART", SA_RESTART, 1);
+    test_capabilities();
 
     if (failures) finish();
     char *exec_argv[] = { argv[0], (char *)"exec", 0 };
