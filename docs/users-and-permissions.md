@@ -90,6 +90,34 @@ the session that holds it. Without that, `login` was refused its own first read.
 how `ttyname(3)` answers, and `su` will not run for a non-root caller whose
 terminal it cannot name.
 
+### Capabilities are root or nothing
+
+`capget`/`capset` answer, but the model behind them has two states: a process
+with euid 0 has every capability, and everybody else has none. There is no
+per-capability accounting and no file capabilities -- the `security.capability`
+xattr on a binary is carried into the image and then ignored.
+
+That last part is how it broke. Void's `ping` is not setuid; it ships with
+`cap_net_raw=p`, and on Linux the kernel puts CAP_NET_RAW into its permitted set
+at exec. Here it gets nothing, which is fine, because `ping` asks what it has
+and then writes back exactly that -- an empty set. `capset` refused it:
+
+```
+ping: cap_set_proc: Operation not permitted
+```
+
+Dropping is always allowed, on Linux and now here: a process may write any set
+it already holds, and only raising a bit it does not hold is refused. `proctest`
+runs the sequence `ping` runs -- as uid 1000, read the capabilities, write them
+back, then try to raise CAP_NET_RAW and be refused -- and a kernel without the
+fix stops at the write.
+
+What lets `ping` work after that is the other half of the looseness: `SOCK_RAW`
+is open to every user, where Linux wants CAP_NET_RAW for it. The honest fix is
+the unprivileged ICMP socket (`SOCK_DGRAM`, `IPPROTO_ICMP`) that Linux added for
+exactly this; until that exists, `socket()` refuses it with `EPROTONOSUPPORT`,
+which is the error `ping` reads as "fall back to a raw socket".
+
 ## How the image gets its permissions
 
 From the sysroot, unchanged: `mkfs.ext3 -d` copies each file's mode and owner
