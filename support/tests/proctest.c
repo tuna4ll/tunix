@@ -31,6 +31,8 @@ typedef long s64;
 #define NR_BIND 49
 #define NR_GETSOCKNAME 51
 #define NR_CONNECT 42
+#define NR_SETSOCKOPT 54
+#define NR_RECVMSG 47
 #define EPOLL_PACKED __attribute__((packed))
 #define UCONTEXT_RET_OFFSET (40 + 13 * 8)
 #define TRAP_LENGTH 2
@@ -54,6 +56,8 @@ typedef long s64;
 #define NR_BIND 200
 #define NR_GETSOCKNAME 204
 #define NR_CONNECT 203
+#define NR_SETSOCKOPT 208
+#define NR_RECVMSG 212
 #define NR_OPENAT 56
 #define NR_PIPE2 59
 #define NR_PPOLL 73
@@ -98,6 +102,29 @@ struct sockaddr_in_test {
     unsigned short port;
     unsigned address;
     unsigned char pad[8];
+};
+
+struct iovec_test {
+    void *base;
+    u64 length;
+};
+
+struct msghdr_test {
+    void *name;
+    unsigned name_length;
+    unsigned pad;
+    struct iovec_test *iov;
+    u64 iov_length;
+    void *control;
+    u64 control_length;
+    unsigned flags;
+    unsigned pad2;
+};
+
+struct cmsghdr_test {
+    u64 length;
+    int level;
+    int type;
 };
 
 struct icmp_echo {
@@ -421,10 +448,25 @@ static void test_capabilities(void) {
         if (sys(NR_WRITE, (u64)fd, (u64)&request, sizeof(request), 0, 0) !=
             (s64)sizeof(request)) exit_now(107);
 
+        int wanted = 1;
+        if (sys(NR_SETSOCKOPT, (u64)fd, 0, 12, (u64)&wanted, sizeof(wanted)) != 0)
+            exit_now(108);
+
         struct icmp_echo reply;
+        unsigned char control[64];
+        struct iovec_test piece = { &reply, sizeof(reply) };
+        struct msghdr_test message;
+        for (unsigned index = 0; index < sizeof(message); index++)
+            ((unsigned char *)&message)[index] = 0;
+        message.iov = &piece;
+        message.iov_length = 1;
+        message.control = control;
+        message.control_length = sizeof(control);
+
         s64 got = -1;
         for (unsigned attempt = 0; attempt < 200U && got < 0; attempt++) {
-            got = sys(NR_READ, (u64)fd, (u64)&reply, sizeof(reply), 0, 0);
+            message.control_length = sizeof(control);
+            got = sys(NR_RECVMSG, (u64)fd, (u64)&message, 0, 0, 0);
             if (got < 0) sleep_ms(5);
         }
         if (got != (s64)sizeof(request)) exit_now(102);
@@ -433,6 +475,13 @@ static void test_capabilities(void) {
         if (reply.sequence != 0x0100) exit_now(105);
         for (unsigned index = 8; index < sizeof(request); index++)
             if (((unsigned char *)&reply)[index] != (unsigned char)index) exit_now(106);
+
+        if (message.control_length < sizeof(struct cmsghdr_test) + sizeof(int))
+            exit_now(109);
+        struct cmsghdr_test *hop = (struct cmsghdr_test *)control;
+        if (hop->level != 0 || hop->type != 2) exit_now(110);
+        int hops = *(int *)(control + sizeof(*hop));
+        if (hops < 1 || hops > 255) exit_now(111);
         exit_now(0);
     }
     s64 status = wait_child(pid);
