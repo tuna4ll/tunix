@@ -5,6 +5,7 @@
 #include "include/apic.h"
 #include "include/boot.h"
 #include "include/cpu.h"
+#include "include/framebuffer.h"
 #include "include/heap.h"
 #include "include/hwreport.h"
 #include "include/kstring.h"
@@ -145,6 +146,33 @@ static void put_processors(void) {
         put_number(time_processor_skew(index));
         put("\n");
     }
+}
+
+static void put_framebuffer(void) {
+    if (!framebuffer_available()) return;
+    put("framebuffer\n");
+    put("  geometry    ");
+    put_number(framebuffer_width());
+    put("x");
+    put_number(framebuffer_height());
+    put(" pitch ");
+    put_number(framebuffer_pitch());
+    put("\n  mapping     ");
+    put(vmm_write_combining_available() ? "write-combining" : "uncached");
+    put("\n");
+
+    uint64_t read_rate = 0;
+    uint64_t write_rate = 0;
+    framebuffer_measure(16U, &read_rate, &write_rate);
+    put("  read        ");
+    put_number(read_rate / (1024ULL * 1024ULL));
+    put(" MiB/s\n  write       ");
+    put_number(write_rate / (1024ULL * 1024ULL));
+    put(" MiB/s\n");
+    put("  a screenful ");
+    put_number((uint64_t)framebuffer_pitch() * framebuffer_height() /
+               (1024ULL * 1024ULL));
+    put(" MiB, which the console never reads back\n");
 }
 
 static void put_memory(void) {
@@ -390,6 +418,7 @@ void hwreport_emit(void) {
     put_command_line();
     put_clock();
     put_processors();
+    put_framebuffer();
     put_memory();
 
     struct alias_table *aliases = kmalloc(sizeof(*aliases));
@@ -400,6 +429,9 @@ void hwreport_emit(void) {
         kfree(aliases);
     }
 
+    uint64_t console_started = time_uptime_ns();
     kprintf("%s", report);
+    kprintf("HWREPORT: the console took %u ms to print it\n",
+            (unsigned)((time_uptime_ns() - console_started) / 1000000ULL));
     write_to_disk();
 }
