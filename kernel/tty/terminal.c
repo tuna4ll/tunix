@@ -92,10 +92,8 @@ static void fill_background_rect(uint32_t x, uint32_t y, uint32_t width, uint32_
     uint32_t end_y = y + height;
     if (end_x > layout.screen_width) end_x = layout.screen_width;
     if (end_y > layout.screen_height) end_y = layout.screen_height;
-    for (uint32_t py = y; py < end_y; py++) {
-        for (uint32_t px = x; px < end_x; px++)
-            framebuffer_put_rgb(px, py, CONSOLE_BACKGROUND);
-    }
+    if (end_x <= x || end_y <= y) return;
+    framebuffer_fill_rect_rgb(x, y, end_x - x, end_y - y, CONSOLE_BACKGROUND);
 }
 
 static void calculate_layout(void) {
@@ -195,12 +193,14 @@ static void clear_cell_background(int row, int col) {
 static void draw_glyph_to_framebuffer(uint32_t x, uint32_t y, uint32_t codepoint,
                                       uint32_t color, uint32_t background) {
     const uint8_t *glyph = tunix_terminal_font_glyph(codepoint);
+    uint32_t solid = framebuffer_pack_rgb(color);
     for (uint32_t row = 0; row < TUNIX_TERMINAL_FONT_HEIGHT; row++) {
         for (uint32_t column = 0; column < TUNIX_TERMINAL_FONT_WIDTH; column++) {
             uint8_t alpha = glyph[row * TUNIX_TERMINAL_FONT_WIDTH + column];
             if (!alpha) continue;
-            framebuffer_put_rgb(x + column, y + row,
-                                blend_rgb(background, color, alpha));
+            if (alpha == 255U) framebuffer_put_native(x + column, y + row, solid);
+            else framebuffer_put_rgb(x + column, y + row,
+                                     blend_rgb(background, color, alpha));
         }
     }
 }
@@ -251,34 +251,34 @@ static void render_console(struct terminal_screen *screen) {
     if (screen->cursor_visible) draw_cell_overlay(screen, screen->row, screen->col, 1);
 }
 
+static void render_rows(struct terminal_screen *screen, int top, int bottom) {
+    if (!visible(screen)) return;
+    if (top < 0) top = 0;
+    if (bottom >= layout.rows) bottom = layout.rows - 1;
+    uint32_t width = (uint32_t)layout.columns * layout.cell_width;
+    for (int row = top; row <= bottom; row++) {
+        uint32_t y = layout.content_y + (uint32_t)row * layout.cell_height;
+        fill_background_rect(layout.content_x, y, width, layout.cell_height);
+        for (int col = 0; col < layout.columns; col++) {
+            struct console_cell *cell = cell_at(screen, row, col);
+            if (cell->codepoint || (cell->flags & CELL_BG_EXPLICIT))
+                draw_cell_overlay(screen, row, col, 0);
+        }
+    }
+}
+
 static void render_region_scroll_up(struct terminal_screen *screen, int top,
                                     int bottom, unsigned count) {
     if (!visible(screen)) return;
     if (!count || top < 0 || bottom >= layout.rows || top > bottom) return;
-    uint32_t x = layout.content_x;
-    uint32_t y = layout.content_y + (uint32_t)top * layout.cell_height;
-    uint32_t width = (uint32_t)layout.columns * layout.cell_width;
-    uint32_t height = (uint32_t)(bottom - top + 1) * layout.cell_height;
-    uint32_t shift = count * layout.cell_height;
-    if (shift < height) {
-        framebuffer_copy_rect(x, y, x, y + shift, width, height - shift);
-    }
-    fill_background_rect(x, y + height - shift, width, shift);
+    render_rows(screen, top, bottom);
 }
 
 static void render_region_scroll_down(struct terminal_screen *screen, int top,
                                       int bottom, unsigned count) {
     if (!visible(screen)) return;
     if (!count || top < 0 || bottom >= layout.rows || top > bottom) return;
-    uint32_t x = layout.content_x;
-    uint32_t y = layout.content_y + (uint32_t)top * layout.cell_height;
-    uint32_t width = (uint32_t)layout.columns * layout.cell_width;
-    uint32_t height = (uint32_t)(bottom - top + 1) * layout.cell_height;
-    uint32_t shift = count * layout.cell_height;
-    if (shift < height) {
-        framebuffer_copy_rect(x, y + shift, x, y, width, height - shift);
-    }
-    fill_background_rect(x, y, width, shift);
+    render_rows(screen, top, bottom);
 }
 
 static void erase_visible_cursor(struct terminal_screen *screen) {

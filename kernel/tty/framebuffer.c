@@ -3,6 +3,7 @@
 #include "../include/cpu.h"
 #include "../include/file.h"
 #include "../include/framebuffer.h"
+#include "../include/time.h"
 #include "../include/terminal.h"
 #include "../include/usercopy.h"
 #include "../include/vmm.h"
@@ -245,44 +246,46 @@ void framebuffer_put_rgb(uint32_t x, uint32_t y, uint32_t rgb) {
     framebuffer_put_native(x, y, framebuffer_pack_rgb(rgb));
 }
 
-void framebuffer_copy_rect(uint32_t destination_x, uint32_t destination_y,
-                           uint32_t source_x, uint32_t source_y,
-                           uint32_t width, uint32_t height) {
-    if (!framebuffer_console_active() || !width || !height ||
-        destination_x >= framebuffer.width || source_x >= framebuffer.width ||
-        destination_y >= framebuffer.height || source_y >= framebuffer.height)
-        return;
+#define MEASURE_BYTES 16384U
 
-    uint32_t source_width = framebuffer.width - source_x;
-    uint32_t destination_width = framebuffer.width - destination_x;
-    uint32_t source_height = framebuffer.height - source_y;
-    uint32_t destination_height = framebuffer.height - destination_y;
-    if (width > source_width) width = source_width;
-    if (width > destination_width) width = destination_width;
-    if (height > source_height) height = source_height;
-    if (height > destination_height) height = destination_height;
-    if (!width || !height ||
-        (destination_x == source_x && destination_y == source_y))
-        return;
+static uint32_t measure_buffer[MEASURE_BYTES / 4U];
 
-    int copy_bottom_up = destination_y > source_y &&
-                         destination_y < source_y + height;
-    for (uint32_t row_index = 0; row_index < height; row_index++) {
-        uint32_t row = copy_bottom_up ? height - 1U - row_index : row_index;
-        volatile uint32_t *source = (volatile uint32_t *)(framebuffer.base +
-                                    (uint64_t)(source_y + row) * framebuffer.pitch) + source_x;
-        volatile uint32_t *destination = (volatile uint32_t *)(framebuffer.base +
-                                         (uint64_t)(destination_y + row) * framebuffer.pitch) +
-                                         destination_x;
+void framebuffer_measure(unsigned rounds, uint64_t *read_rate, uint64_t *write_rate) {
+    if (read_rate) *read_rate = 0;
+    if (write_rate) *write_rate = 0;
+    if (!framebuffer.ready || framebuffer.byte_length < MEASURE_BYTES || !rounds) return;
 
-        if (destination_y + row == source_y + row &&
-            destination_x > source_x && destination_x < source_x + width) {
-            for (uint32_t column = width; column > 0; column--)
-                destination[column - 1U] = source[column - 1U];
-        } else {
-            for (uint32_t column = 0; column < width; column++)
-                destination[column] = source[column];
-        }
+    volatile uint32_t *window = (volatile uint32_t *)framebuffer.base;
+    unsigned words = MEASURE_BYTES / 4U;
+    uint64_t moved = (uint64_t)rounds * MEASURE_BYTES;
+
+    uint64_t started = time_uptime_ns();
+    for (unsigned round = 0; round < rounds; round++)
+        for (unsigned index = 0; index < words; index++)
+            measure_buffer[index] = window[index];
+    uint64_t elapsed = time_uptime_ns() - started;
+    if (read_rate && elapsed) *read_rate = moved * 1000000000ULL / elapsed;
+
+    started = time_uptime_ns();
+    for (unsigned round = 0; round < rounds; round++)
+        for (unsigned index = 0; index < words; index++)
+            window[index] = measure_buffer[index];
+    elapsed = time_uptime_ns() - started;
+    if (write_rate && elapsed) *write_rate = moved * 1000000000ULL / elapsed;
+}
+
+void framebuffer_fill_rect_rgb(uint32_t x, uint32_t y, uint32_t width, uint32_t height,
+                               uint32_t rgb) {
+    if (!framebuffer_console_active() || !width || !height) return;
+    if (x >= framebuffer.width || y >= framebuffer.height) return;
+    if (width > framebuffer.width - x) width = framebuffer.width - x;
+    if (height > framebuffer.height - y) height = framebuffer.height - y;
+
+    uint32_t native = framebuffer_pack_rgb(rgb);
+    for (uint32_t row = 0; row < height; row++) {
+        volatile uint32_t *line = (volatile uint32_t *)(framebuffer.base +
+                                  (uint64_t)(y + row) * framebuffer.pitch) + x;
+        for (uint32_t column = 0; column < width; column++) line[column] = native;
     }
 }
 
