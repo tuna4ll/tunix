@@ -28,6 +28,9 @@ typedef long s64;
 #define NR_CAPSET 126
 #define NR_SETUID 105
 #define NR_SOCKET 41
+#define NR_BIND 49
+#define NR_GETSOCKNAME 51
+#define NR_CONNECT 42
 #define EPOLL_PACKED __attribute__((packed))
 #define UCONTEXT_RET_OFFSET (40 + 13 * 8)
 #define TRAP_LENGTH 2
@@ -48,6 +51,9 @@ typedef long s64;
 #define NR_CAPSET 91
 #define NR_SETUID 146
 #define NR_SOCKET 198
+#define NR_BIND 200
+#define NR_GETSOCKNAME 204
+#define NR_CONNECT 203
 #define NR_OPENAT 56
 #define NR_PIPE2 59
 #define NR_PPOLL 73
@@ -85,6 +91,22 @@ struct cap_data {
     unsigned effective;
     unsigned permitted;
     unsigned inheritable;
+};
+
+struct sockaddr_in_test {
+    unsigned short family;
+    unsigned short port;
+    unsigned address;
+    unsigned char pad[8];
+};
+
+struct icmp_echo {
+    unsigned char type;
+    unsigned char code;
+    unsigned short checksum;
+    unsigned short id;
+    unsigned short sequence;
+    unsigned char body[24];
 };
 #define O_NONBLOCK 04000
 #define EPOLLIN 0x001U
@@ -365,13 +387,56 @@ static void test_capabilities(void) {
         data[0].effective = CAP_NET_RAW_BIT;
         if (sys(NR_CAPSET, (u64)&header, (u64)data, 0, 0, 0) != -EPERM) exit_now(95);
 
-        if (sys(NR_SOCKET, 2, 2, 1, 0, 0) != -EPROTONOSUPPORT) exit_now(96);
-        s64 raw = sys(NR_SOCKET, 2, 3, 1, 0, 0);
-        if (raw < 0) exit_now(97);
+        if (sys(NR_SOCKET, 2, 3, 1, 0, 0) != -EPERM) exit_now(96);
+
+        s64 fd = sys(NR_SOCKET, 2, 2, 1, 0, 0);
+        if (fd < 0) exit_now(97);
+
+        struct sockaddr_in_test local;
+        for (unsigned index = 0; index < sizeof(local); index++)
+            ((unsigned char *)&local)[index] = 0;
+        local.family = 2;
+        if (sys(NR_BIND, (u64)fd, (u64)&local, sizeof(local), 0, 0) != 0) exit_now(98);
+        u64 name_length = sizeof(local);
+        if (sys(NR_GETSOCKNAME, (u64)fd, (u64)&local, (u64)&name_length, 0, 0) != 0)
+            exit_now(99);
+        if (!local.port) exit_now(100);
+        unsigned short identity = local.port;
+
+        struct icmp_echo request;
+        for (unsigned index = 0; index < sizeof(request); index++)
+            ((unsigned char *)&request)[index] = (unsigned char)index;
+        request.type = 8;
+        request.code = 0;
+        request.checksum = 0;
+        request.id = 0;
+        request.sequence = 0x0100;
+
+        struct sockaddr_in_test peer;
+        for (unsigned index = 0; index < sizeof(peer); index++)
+            ((unsigned char *)&peer)[index] = 0;
+        peer.family = 2;
+        peer.address = 0x0100007FU;
+        if (sys(NR_CONNECT, (u64)fd, (u64)&peer, sizeof(peer), 0, 0) != 0) exit_now(101);
+        if (sys(NR_WRITE, (u64)fd, (u64)&request, sizeof(request), 0, 0) !=
+            (s64)sizeof(request)) exit_now(107);
+
+        struct icmp_echo reply;
+        s64 got = -1;
+        for (unsigned attempt = 0; attempt < 200U && got < 0; attempt++) {
+            got = sys(NR_READ, (u64)fd, (u64)&reply, sizeof(reply), 0, 0);
+            if (got < 0) sleep_ms(5);
+        }
+        if (got != (s64)sizeof(request)) exit_now(102);
+        if (reply.type != 0) exit_now(103);
+        if (reply.id != identity) exit_now(104);
+        if (reply.sequence != 0x0100) exit_now(105);
+        for (unsigned index = 8; index < sizeof(request); index++)
+            if (((unsigned char *)&reply)[index] != (unsigned char)index) exit_now(106);
         exit_now(0);
     }
     s64 status = wait_child(pid);
-    check("a user may drop capabilities and open an icmp socket", status == 0, status);
+    check("a user pings through an icmp socket", status == 0, status);
 }
 
 static void test_fork_and_switches(void) {
