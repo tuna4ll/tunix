@@ -4472,8 +4472,14 @@ static int64_t sys_capset(uint64_t user_header, uint64_t user_data) {
     struct process *process = process_current();
     if (header.pid && (!process || (uint64_t)header.pid != process->pid)) return -EPERM;
     if (!user_data) return 0;
+    if (cred_is_root()) return 0;
 
-    return cred_is_root() ? 0 : -EPERM;
+    struct cap_user_data data[2];
+    if (copy_from_user(data, user_data, sizeof(data)) != 0) return -EFAULT;
+    if (data[0].effective | data[0].permitted | data[0].inheritable |
+        data[1].effective | data[1].permitted | data[1].inheritable)
+        return -EPERM;
+    return 0;
 }
 
 static int64_t sys_prctl(int option, uint64_t arg2, uint64_t arg3,
