@@ -112,11 +112,11 @@ runs the sequence `ping` runs -- as uid 1000, read the capabilities, write them
 back, then try to raise CAP_NET_RAW and be refused -- and a kernel without the
 fix stops at the write.
 
-What lets `ping` work after that is the other half of the looseness: `SOCK_RAW`
-is open to every user, where Linux wants CAP_NET_RAW for it. The honest fix is
-the unprivileged ICMP socket (`SOCK_DGRAM`, `IPPROTO_ICMP`) that Linux added for
-exactly this; until that exists, `socket()` refuses it with `EPROTONOSUPPORT`,
-which is the error `ping` reads as "fall back to a raw socket".
+`ping` then wanted a raw socket, which used to be open to every user here where
+Linux wants CAP_NET_RAW for it. Rather than keep that hole to keep `ping`
+working, the stack grew the unprivileged ICMP socket Linux added for exactly
+this case (see [Networking](networking.md)), and `SOCK_RAW` and `AF_PACKET` now
+need root.
 
 ## How the image gets its permissions
 

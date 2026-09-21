@@ -249,6 +249,39 @@ checks the lease is still there, which fails on a kernel without the fix.
 `/proc/net/dev` counts bytes as well as packets now, for the same reason: a
 report that says 40 packets and 0 bytes reads like a broken driver.
 
+### Pinging without being root
+
+`ping` on the image is not setuid; it carries `cap_net_raw=p`, and Tunix has no
+file capabilities, so it runs with nothing. Linux solved that in 2011 with the
+unprivileged ICMP socket, and that is what this stack offers:
+`socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)` is open to anybody.
+
+It is not a raw socket with the checks removed. The kernel owns the identifier:
+`bind()` with port 0 allocates one, `getsockname()` reports it -- which is how
+`ping` learns what to match replies against -- and every echo request the socket
+sends has its id overwritten and its checksum recomputed before it leaves. Only
+an echo *request* may be sent, and only an echo reply carrying that id is
+delivered back, with the IP header stripped, so one program's replies cannot
+land in another's queue.
+
+With that in place `SOCK_RAW` and `AF_PACKET` now need root, where they were
+open to every user -- the looseness that made `ping` work before. dhcpcd, which
+is the other user of `AF_PACKET` on the image, runs as root.
+
+`ICMP_FILTER` works too. It is a bitmask of the ICMP types a socket does *not*
+want; `ping` sets it to everything but the replies it cares about and used to
+get a warning back:
+
+```
+ping: WARNING: setsockopt(ICMP_FILTER): Operation not supported
+```
+
+`proctest` runs the whole sequence as uid 1000: read the capabilities and write
+them back, be refused a raw socket, open an ICMP socket, bind it, learn its id,
+and ping `127.0.0.1` through the loopback path -- checking that the reply comes
+back with the kernel's id, the sequence number that was sent, and the payload
+unchanged.
+
 ## Limits
 
 - One adapter and one IPv4 address, normally configured by dhcpcd.
@@ -259,8 +292,9 @@ report that says 40 packets and 0 bytes reads like a broken driver.
 - 32 sockets in total, across every family.
 - No `MSG_ERRQUEUE`, so an ICMP error is never reported to the socket that
   caused it, and no `recvmmsg` to go with `sendmmsg`.
-- `ping` works but warns: it asks for `ICMP_FILTER` to choose which ICMP types
-  reach it, is refused, and filters in userspace instead.
+- An ICMP socket carries no errors: a destination that answers with
+  "unreachable" is silence rather than a message, because `MSG_ERRQUEUE` is not
+  modelled.
 
 ## Socket options refused on principle
 
