@@ -44,7 +44,7 @@ append_report() {
 		done
 	done
 	echo "  kernel log"
-	log=$(cat /dev/kmsg 2>/dev/null | grep -aE 'ATL1C|RTL8139|HDA|EXT2|NET:|MODULE:|BLOCK:' | tail -25)
+	log=$(cat /dev/kmsg 2>/dev/null | grep -aE 'ATL1C|RTL8139|HDA|EXT2|NET:|MODULE:|BLOCK:|HWREPORT' | tail -25)
 	[ -n "$log" ] || log=$(cat /dev/kmsg 2>/dev/null | tail -25)
 	printf '%s\n' "$log" | sed 's/^/    /'
 	echo "  bound"
