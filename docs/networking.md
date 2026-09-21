@@ -276,11 +276,19 @@ get a warning back:
 ping: WARNING: setsockopt(ICMP_FILTER): Operation not supported
 ```
 
+A program on an ICMP socket cannot see the IP header the kernel stripped, so it
+has to be told what was in it. `IP_RECVTTL` turns that on and every received
+datagram then carries a control message -- level `SOL_IP`, type `IP_TTL`, an
+`int` -- with the hop count the packet arrived with, which is where `ping` reads
+the `ttl=` it prints. Without it the line said `ttl=0`. `IP_RETOPTS` is accepted
+as well and answers with nothing, because no packet here carries IP options.
+
 `proctest` runs the whole sequence as uid 1000: read the capabilities and write
 them back, be refused a raw socket, open an ICMP socket, bind it, learn its id,
 and ping `127.0.0.1` through the loopback path -- checking that the reply comes
-back with the kernel's id, the sequence number that was sent, and the payload
-unchanged.
+back with the kernel's id, the sequence number that was sent, the payload
+unchanged, and a `SOL_IP`/`IP_TTL` control message carrying a plausible hop
+count.
 
 ## Limits
 
