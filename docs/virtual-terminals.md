@@ -105,6 +105,38 @@ A program that has `/dev/fb0` mapped is the exception: the mapping is the real
 scanout, so it goes on writing to the screen across a switch. Nothing on the
 image does that outside `fb-test`.
 
+### The console never reads the screen back
+
+A framebuffer is write-combining memory: a write is buffered and combined with
+its neighbours, and a read is a single uncached trip to the device. The two are
+not remotely the same price. The hardware report measures both, and even under
+QEMU -- where the framebuffer is ordinary host memory -- it reads
+
+```
+framebuffer
+  geometry    1280x800 pitch 5120
+  mapping     write-combining
+  read        37 MiB/s
+  write       4849 MiB/s
+  a screenful 3 MiB, which the console never reads back
+```
+
+Scrolling used to be a copy inside the framebuffer: one screenful read and
+written for every line that went past the bottom. That is 3 MiB of uncached
+reads per line, and it is why the console was quick until the first screen
+filled up and crawled from then on -- on a laptop whose framebuffer lives across
+PCIe in the GPU's own memory, a report that prints in under a second on an empty
+screen took minutes once it was scrolling.
+
+There is nothing to read: the terminal already holds every cell. A scroll now
+shifts the cell model and repaints the region from it, which touches the same
+pixels but only ever writes them. Printing the hardware report to the console,
+about three hundred lines and therefore about two hundred scrolls, went from
+**4802 ms to 84 ms** under QEMU; the real machine's ratio is worse, because its
+reads are slower and its writes are not. `framebuffer_copy_rect()` is gone
+rather than left for somebody to find, and the report prints how long the
+console took so the next machine can say for itself.
+
 ## Input
 
 Keystrokes go to the active terminal, and nowhere else.
