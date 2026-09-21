@@ -101,6 +101,11 @@ struct tcp_control_block {
 #define SO_ATTACH_FILTER 26
 #define PACKET_AUXDATA 8
 #define IPPROTO_IP 0
+#define IPPROTO_ICMP 1
+#define SOL_RAW 255
+#define ICMP_FILTER 1
+#define ICMP_ECHO_REPLY 0
+#define ICMP_ECHO 8
 #define IP_HDRINCL 3
 #define IP_TTL 2
 #define IP_PKTINFO 8
@@ -164,6 +169,7 @@ struct inet_socket {
     int header_included;
 
     int report_errors;
+    uint32_t icmp_filter;
     uint8_t ttl;
     int orphan;
 
@@ -179,8 +185,21 @@ struct inet_socket {
     unsigned queue_count;
 };
 
+struct icmp_message {
+    uint8_t type;
+    uint8_t code;
+    uint16_t checksum;
+    uint16_t id;
+    uint16_t sequence;
+};
+
 static struct inet_socket *sockets[MAX_INET_SOCKETS];
 static uint16_t next_ephemeral = 49152;
+
+static int is_ping_socket(const struct inet_socket *socket) {
+    return socket && socket->domain == TUNIX_AF_INET &&
+           socket->type == TUNIX_SOCK_DGRAM && socket->protocol == IPPROTO_ICMP;
+}
 
 static int register_socket(struct inet_socket *socket) {
     for (unsigned i = 0; i < MAX_INET_SOCKETS; i++) {
@@ -699,7 +718,7 @@ struct inet_socket *inet_socket_create(int domain, int type, int protocol) {
         if (base_type == TUNIX_SOCK_STREAM) {
             if (protocol != 0 && protocol != 6) return NULL;
         } else if (base_type == TUNIX_SOCK_DGRAM) {
-            if (protocol != 0 && protocol != 17) return NULL;
+            if (protocol != 0 && protocol != 17 && protocol != IPPROTO_ICMP) return NULL;
         } else if (base_type != TUNIX_SOCK_RAW) return NULL;
     } else if (domain == TUNIX_AF_PACKET) {
         if (base_type != TUNIX_SOCK_DGRAM && base_type != TUNIX_SOCK_RAW &&
@@ -738,6 +757,7 @@ static int local_port_conflict(struct inet_socket *socket, uint32_t address, uin
         struct inet_socket *other = sockets[i];
         if (!other || other == socket || other->domain != TUNIX_AF_INET ||
             other->type != socket->type || other->local_port != port) continue;
+        if (is_ping_socket(other) != is_ping_socket(socket)) continue;
         if (!other->local_address || !address || other->local_address == address) return 1;
     }
     return 0;
@@ -753,6 +773,7 @@ int inet_socket_bind(struct inet_socket *socket, const void *address, size_t len
         if (port && local_port_conflict(socket, in->address, port)) return -EADDRINUSE;
         socket->local_address = in->address;
         socket->local_port = port;
+        if (!port && is_ping_socket(socket)) socket->local_port = allocate_port();
         socket->bound = 1;
         return 0;
     }
@@ -867,7 +888,19 @@ int64_t inet_socket_sendto(struct inet_socket *socket, const void *data, size_t 
         if (!destination) return -EDESTADDRREQ;
         if (!link && !net_is_loopback(destination)) return -ENETDOWN;
         if (!socket->local_port) socket->local_port = allocate_port();
-        if (socket->type == TUNIX_SOCK_DGRAM) {
+        if (is_ping_socket(socket)) {
+            if (length < sizeof(struct icmp_message) || length > NET_MTU) return -EINVAL;
+            const struct icmp_message *wanted = (const struct icmp_message *)data;
+            if (wanted->type != ICMP_ECHO) return -EINVAL;
+            uint8_t message[NET_MTU];
+            memcpy(message, data, length);
+            struct icmp_message *head = (struct icmp_message *)message;
+            head->id = net_htons(socket->local_port);
+            head->checksum = 0;
+            head->checksum = net_htons(net_checksum(message, length));
+            if (net_send_ipv4(destination, IPPROTO_ICMP, message, length,
+                              socket->ttl, 0) != 0) return -EAGAIN;
+        } else if (socket->type == TUNIX_SOCK_DGRAM) {
             if (!port) return -EDESTADDRREQ;
             if (net_send_udp(socket->local_address, socket->local_port, destination, port,
                              data, length) != 0) return -EAGAIN;
@@ -981,6 +1014,11 @@ int inet_socket_setsockopt(struct inet_socket *socket, int level, int option,
 
     if (level == IPPROTO_TCP && (option == TCP_NODELAY || option == TCP_KEEPIDLE ||
                                  option == TCP_KEEPINTVL || option == TCP_KEEPCNT)) return 0;
+    if (level == SOL_RAW && option == ICMP_FILTER) {
+        if (!value || length < sizeof(uint32_t)) return -EINVAL;
+        socket->icmp_filter = *(const uint32_t *)value;
+        return 0;
+    }
     if (level == SOL_PACKET && option == PACKET_AUXDATA) return 0;
     if (level == SOL_UDP && option == UDP_GRO) return 0;
 
@@ -1004,6 +1042,7 @@ int inet_socket_getsockopt(struct inet_socket *socket, int level, int option,
     else if (level == IPPROTO_IP && option == IP_RECVERR) result = socket->report_errors;
 
     else if (level == IPPROTO_TCP && option == TCP_NODELAY) result = 1;
+    else if (level == SOL_RAW && option == ICMP_FILTER) result = (int)socket->icmp_filter;
     else {
         report_refused_option("getsockopt", level, option);
         return -EOPNOTSUPP;
@@ -1173,11 +1212,26 @@ void inet_socket_receive_ipv4(const uint8_t *packet, size_t length, uint8_t prot
     memset(&address, 0, sizeof(address));
     address.family = TUNIX_AF_INET;
     address.address = source;
+    unsigned header_length = length ? (unsigned)(packet[0] & 0x0FU) * 4U : 0U;
+    const struct icmp_message *icmp = NULL;
+    if (protocol == IPPROTO_ICMP && header_length >= 20U &&
+        length >= header_length + sizeof(struct icmp_message))
+        icmp = (const struct icmp_message *)(packet + header_length);
+
     for (unsigned i = 0; i < MAX_INET_SOCKETS; i++) {
         struct inet_socket *socket = sockets[i];
-        if (!socket || socket->domain != TUNIX_AF_INET || socket->type != TUNIX_SOCK_RAW) continue;
-        if (socket->protocol && socket->protocol != protocol) continue;
-        (void)enqueue(socket, packet, length, &address, sizeof(address));
+        if (!socket || socket->domain != TUNIX_AF_INET) continue;
+        if (icmp && (socket->icmp_filter & (1U << icmp->type))) continue;
+        if (socket->type == TUNIX_SOCK_RAW) {
+            if (socket->protocol && socket->protocol != protocol) continue;
+            (void)enqueue(socket, packet, length, &address, sizeof(address));
+            continue;
+        }
+        if (!icmp || !is_ping_socket(socket)) continue;
+        if (icmp->type != ICMP_ECHO_REPLY) continue;
+        if (net_htons(icmp->id) != socket->local_port) continue;
+        (void)enqueue(socket, packet + header_length, length - header_length,
+                      &address, sizeof(address));
     }
 }
 

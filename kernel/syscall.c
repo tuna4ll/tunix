@@ -1426,6 +1426,8 @@ static int64_t sys_socket(int domain, int type, int protocol) {
         return install_new_file(file, type_flags & SOCK_CLOEXEC);
     }
     if (domain == TUNIX_AF_INET || domain == TUNIX_AF_PACKET) {
+        if ((domain == TUNIX_AF_PACKET || base_type == TUNIX_SOCK_RAW) && !cred_is_root())
+            return -EPERM;
         struct inet_socket *socket = inet_socket_create(domain, base_type, protocol);
         if (!socket) return base_type == TUNIX_SOCK_STREAM ? -EOPNOTSUPP : -EPROTONOSUPPORT;
         struct file *file = file_create_inet_socket(socket);
