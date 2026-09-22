@@ -305,6 +305,59 @@ static void helper_body(void) {
     while (!__atomic_load_n(&helpers_stop, __ATOMIC_RELAXED)) { }
 }
 
+#define SMP_CALL_WORKERS 4
+#define SMP_CALL_ROUNDS 300000UL
+
+static volatile unsigned smp_call_next;
+static volatile unsigned smp_call_ready;
+static volatile unsigned smp_call_start;
+static volatile unsigned smp_call_done;
+
+static void smp_call_body(void) {
+    unsigned cpu = __atomic_fetch_add(&smp_call_next, 1, __ATOMIC_RELAXED);
+    pin_to_cpu(cpu);
+    __atomic_add_fetch(&smp_call_ready, 1, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&smp_call_start, __ATOMIC_ACQUIRE)) { }
+    for (u64 round = 0; round < SMP_CALL_ROUNDS; round++)
+        (void)syscall0(SYS_getpid);
+    __atomic_add_fetch(&smp_call_done, 1, __ATOMIC_RELEASE);
+}
+
+static void test_smp_syscalls(unsigned workers) {
+    static char stacks[SMP_CALL_WORKERS - 1][65536] __attribute__((aligned(16)));
+    if (workers > SMP_CALL_WORKERS) workers = SMP_CALL_WORKERS;
+    pin_to_cpu(0);
+    __atomic_store_n(&smp_call_next, 1, __ATOMIC_RELAXED);
+    __atomic_store_n(&smp_call_ready, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&smp_call_start, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&smp_call_done, 0, __ATOMIC_RELAXED);
+
+    unsigned helpers = 0;
+    for (unsigned index = 1; index < workers; index++) {
+        char *top = stacks[index - 1] + sizeof(stacks[index - 1]) - 8;
+        *(void **)top = (void *)smp_call_body;
+        if (spawn_thread(THREAD_FLAGS, top) < 0) break;
+        helpers++;
+    }
+    while (__atomic_load_n(&smp_call_ready, __ATOMIC_ACQUIRE) < helpers) { }
+
+    u64 begun = now_ns();
+    __atomic_store_n(&smp_call_start, 1, __ATOMIC_RELEASE);
+    for (u64 round = 0; round < SMP_CALL_ROUNDS; round++)
+        (void)syscall0(SYS_getpid);
+    while (__atomic_load_n(&smp_call_done, __ATOMIC_ACQUIRE) < helpers) { }
+    u64 elapsed = now_ns() - begun;
+    u64 calls = (u64)(helpers + 1) * SMP_CALL_ROUNDS;
+
+    put("SMPCALL workers=");
+    put_number(helpers + 1);
+    put(" calls_per_second=");
+    put_number(elapsed ? calls * 1000000000UL / elapsed : 0);
+    put(" elapsed_ms=");
+    put_fixed(elapsed / 1000UL, 3);
+    put("\n");
+}
+
 #define MAX_HELPERS 3
 #define SHOOTDOWN_SLACK (1024UL * 1024UL)
 
@@ -833,6 +886,8 @@ static int run_all(void) {
     test_direction_flag(200);
 #endif
     test_syscall_once(20000);
+    test_smp_syscalls(1);
+    test_smp_syscalls(SMP_CALL_WORKERS);
     test_syscall_cost();
     test_out_of_memory();
     put("PERF DONE\n");

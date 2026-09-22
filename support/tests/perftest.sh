@@ -27,7 +27,7 @@ done
 
 $CC -std=gnu11 -Wall -Wextra -Werror -O2 -static -nostdlib -nostartfiles \
 	-fno-stack-protector -fno-pic -fno-pie -fno-builtin -fno-asynchronous-unwind-tables \
-	support/tests/perftest.c -o "$WORK/root/sbin/init" || exit 1
+	-DTUNIX_BENCH_CPUS="$CPUS" support/tests/perftest.c -o "$WORK/root/sbin/init" || exit 1
 
 cat > "$WORK/limine.conf" <<CONF
 timeout: 0
@@ -80,7 +80,7 @@ done
 kill $QEMU 2>/dev/null || true
 wait $QEMU 2>/dev/null || true
 
-grep -aE "^(PERF|SYSCALL|PIPE|FAULT|FORK|FORKNOWAIT|THREAD|FILE|STARTUP|SHOOTDOWN|ONCE|ORPHAN|SYSLOG|MMAP|FUTEX|OOM|DF|KLOCK|KLOCKBOOT)" "$LOG" || {
+grep -aE "^(PERF|SYSCALL|SMPCALL|PIPE|FAULT|FORK|FORKNOWAIT|THREAD|FILE|STARTUP|SHOOTDOWN|ONCE|ORPHAN|SYSLOG|MMAP|FUTEX|OOM|DF|KLOCK|KLOCKBOOT)" "$LOG" || {
 	echo "perftest: the machine printed no results; $LOG has the boot" >&2
 	exit 1
 }
