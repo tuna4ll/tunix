@@ -42,6 +42,7 @@ void klock_note(uint32_t what) {
 static int klock_stats_on;
 static uint64_t hold_started;
 static struct klock_hold holds[KLOCK_HOLD_SLOTS];
+static volatile uint32_t shared_peak;
 
 void klock_statistics_stop(void) {
     __atomic_store_n(&klock_stats_on, 0, __ATOMIC_RELEASE);
@@ -55,7 +56,12 @@ void klock_statistics_start(void) {
         holds[index].max_ns = 0;
     }
     hold_started = 0;
+    __atomic_store_n(&shared_peak, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&klock_stats_on, 1, __ATOMIC_RELEASE);
+}
+
+unsigned klock_shared_peak(void) {
+    return __atomic_load_n(&shared_peak, __ATOMIC_ACQUIRE);
 }
 
 int klock_statistics(unsigned index, struct klock_hold *out) {
@@ -108,6 +114,16 @@ static uint32_t shared_total(void) {
         total += __atomic_load_n(&cpu_state[index].shared_holders,
                                  __ATOMIC_SEQ_CST);
     return total;
+}
+
+static void record_shared_peak(void) {
+    if (!__atomic_load_n(&klock_stats_on, __ATOMIC_RELAXED)) return;
+    uint32_t peak = __atomic_load_n(&shared_peak, __ATOMIC_RELAXED);
+    if (peak >= smp_cpu_count()) return;
+    uint32_t active = shared_total();
+    while (active > peak &&
+           !__atomic_compare_exchange_n(&shared_peak, &peak, active, 0,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED)) { }
 }
 
 static void klock_report(const char *what, uint32_t ticket) {
@@ -203,6 +219,7 @@ void kernel_lock_shared(void) {
         __atomic_store_n(&now_serving, now_serving + 1, __ATOMIC_RELEASE);
     }
     state->held_mode = KLOCK_MODE_SHARED;
+    record_shared_peak();
 }
 
 void kernel_unlock_shared(void) {

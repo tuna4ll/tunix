@@ -179,6 +179,9 @@ static int64_t proc_klock_read(struct vfs_node *node, uint64_t offset,
                                size_t size, void *output) {
     (void)node;
     struct text_buffer text = {{0}, 0};
+    text_string(&text, "shared_peak ");
+    text_unsigned(&text, klock_shared_peak());
+    text_char(&text, '\n');
     text_string(&text, "note count total_us max_us\n");
     for (unsigned index = 0; index < KLOCK_HOLD_SLOTS; index++) {
         struct klock_hold hold;

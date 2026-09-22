@@ -85,6 +85,15 @@ grep -aE "^(PERF|SYSCALL|SMPCALL|PIPE|FAULT|FORK|FORKNOWAIT|THREAD|FILE|STARTUP|
 	exit 1
 }
 
+EXPECTED_WORKERS=$CPUS
+[ "$EXPECTED_WORKERS" -le 4 ] || EXPECTED_WORKERS=4
+SHARED_PEAK=$(sed -n "s/^SMPCALL workers=$EXPECTED_WORKERS .* shared_peak=\([0-9][0-9]*\)$/\1/p" "$LOG" | tail -1)
+if [ "$EXPECTED_WORKERS" -gt 1 ] &&
+   { [ -z "$SHARED_PEAK" ] || [ "$SHARED_PEAK" -lt "$EXPECTED_WORKERS" ]; }; then
+	echo "perftest: only ${SHARED_PEAK:-0}/$EXPECTED_WORKERS processors overlapped in the kernel" >&2
+	exit 1
+fi
+
 OFFSET=$(sfdisk -d "$IMAGE" 2>/dev/null |
 	sed -n 's/^.*start= *\([0-9]*\).*type=\(83\|0FC63DAF\).*/\1/p' | head -1)
 if [ -n "$OFFSET" ]; then

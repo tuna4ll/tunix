@@ -25,6 +25,7 @@ struct klock_hold {
 void klock_statistics_start(void);
 void klock_statistics_stop(void);
 int klock_statistics(unsigned index, struct klock_hold *out);
+unsigned klock_shared_peak(void);
 
 void kernel_lock(void);
 void kernel_unlock(void);

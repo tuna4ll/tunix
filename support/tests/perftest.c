@@ -72,6 +72,8 @@ static void put_fixed(u64 value, unsigned fraction_digits) {
 
 static void put_number(u64 value) { put_fixed(value, 0); }
 
+static u64 proc_value(const char *path, const char *name);
+
 static u64 now_ns(void) {
     struct { s64 seconds, nanoseconds; } value = {0, 0};
     (void)syscall2(SYS_clock_gettime, CLOCK_MONOTONIC, (s64)&value);
@@ -308,6 +310,10 @@ static void helper_body(void) {
 #define SMP_CALL_WORKERS 4
 #define SMP_CALL_ROUNDS 300000UL
 
+#ifndef TUNIX_BENCH_CPUS
+#define TUNIX_BENCH_CPUS SMP_CALL_WORKERS
+#endif
+
 static volatile unsigned smp_call_next;
 static volatile unsigned smp_call_ready;
 static volatile unsigned smp_call_start;
@@ -341,6 +347,11 @@ static void test_smp_syscalls(unsigned workers) {
     }
     while (__atomic_load_n(&smp_call_ready, __ATOMIC_ACQUIRE) < helpers) { }
 
+    int klock = (int)syscall3(SYS_open, (s64)"/proc/klock", 1, 0);
+    if (klock >= 0) {
+        (void)syscall3(SYS_write, klock, (s64)"1", 1);
+        (void)syscall1(SYS_close, klock);
+    }
     u64 begun = now_ns();
     __atomic_store_n(&smp_call_start, 1, __ATOMIC_RELEASE);
     for (u64 round = 0; round < SMP_CALL_ROUNDS; round++)
@@ -348,6 +359,12 @@ static void test_smp_syscalls(unsigned workers) {
     while (__atomic_load_n(&smp_call_done, __ATOMIC_ACQUIRE) < helpers) { }
     u64 elapsed = now_ns() - begun;
     u64 calls = (u64)(helpers + 1) * SMP_CALL_ROUNDS;
+    u64 shared_peak = proc_value("/proc/klock", "shared_peak");
+    klock = (int)syscall3(SYS_open, (s64)"/proc/klock", 1, 0);
+    if (klock >= 0) {
+        (void)syscall3(SYS_write, klock, (s64)"0", 1);
+        (void)syscall1(SYS_close, klock);
+    }
 
     put("SMPCALL workers=");
     put_number(helpers + 1);
@@ -355,6 +372,8 @@ static void test_smp_syscalls(unsigned workers) {
     put_number(elapsed ? calls * 1000000000UL / elapsed : 0);
     put(" elapsed_ms=");
     put_fixed(elapsed / 1000UL, 3);
+    put(" shared_peak=");
+    put_number(shared_peak);
     put("\n");
 }
 
@@ -887,7 +906,7 @@ static int run_all(void) {
 #endif
     test_syscall_once(20000);
     test_smp_syscalls(1);
-    test_smp_syscalls(SMP_CALL_WORKERS);
+    test_smp_syscalls(TUNIX_BENCH_CPUS);
     test_syscall_cost();
     test_out_of_memory();
     put("PERF DONE\n");
