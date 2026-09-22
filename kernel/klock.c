@@ -10,20 +10,33 @@ extern void kprintf(const char *fmt, ...);
 
 static volatile uint32_t next_ticket;
 static volatile uint32_t now_serving;
-static volatile int32_t shared_holders;
 
 #define KLOCK_MODE_NONE 0
 #define KLOCK_MODE_EXCLUSIVE 1
 #define KLOCK_MODE_SHARED 2
 
-static volatile uint8_t held_mode[SMP_MAX_CPUS];
+/* Every shared entry writes only its processor's cache line. A single global
+   reader count would still serialize the readers in the cache-coherency
+   protocol even though the lock admitted them together. */
+struct klock_cpu_state {
+    volatile uint32_t shared_holders;
+    volatile uint8_t held_mode;
+    volatile uint8_t watchdog_reported;
+    volatile uint8_t taken_by_isr;
+    volatile uint8_t isr_depth;
+    volatile uint32_t breadcrumb;
+    uint8_t padding[52];
+} __attribute__((aligned(64)));
+
+_Static_assert(sizeof(struct klock_cpu_state) == 64,
+               "one klock state must occupy one cache line");
+
+static struct klock_cpu_state cpu_state[SMP_MAX_CPUS];
 
 #define KLOCK_WATCHDOG_NS (20ULL * 1000ULL * 1000ULL * 1000ULL)
 
-static volatile uint32_t breadcrumb[SMP_MAX_CPUS];
-
 void klock_note(uint32_t what) {
-    breadcrumb[cpu_current()->index] = what;
+    cpu_state[cpu_current()->index].breadcrumb = what;
 }
 
 static int klock_stats_on;
@@ -86,25 +99,32 @@ static void hold_end(void) {
     uint64_t now = cpu_counter();
     uint64_t held = now > hold_started ? now - hold_started : 0;
     hold_started = 0;
-    record_hold(breadcrumb[cpu_current()->index], held);
+    record_hold(cpu_state[cpu_current()->index].breadcrumb, held);
 }
 
-static volatile uint8_t watchdog_reported[SMP_MAX_CPUS];
+static uint32_t shared_total(void) {
+    uint32_t total = 0;
+    for (unsigned index = 0; index < SMP_MAX_CPUS; index++)
+        total += __atomic_load_n(&cpu_state[index].shared_holders,
+                                 __ATOMIC_SEQ_CST);
+    return total;
+}
 
 static void klock_report(const char *what, uint32_t ticket) {
     unsigned self = cpu_current()->index;
-    if (watchdog_reported[self]) return;
-    watchdog_reported[self] = 1;
+    if (cpu_state[self].watchdog_reported) return;
+    cpu_state[self].watchdog_reported = 1;
     kprintf("KLOCK: cpu %u stuck %s %u: next %u serving %u shared %d\n",
             cpu_current()->index, what, (unsigned)ticket,
             (unsigned)__atomic_load_n(&next_ticket, __ATOMIC_RELAXED),
             (unsigned)__atomic_load_n(&now_serving, __ATOMIC_RELAXED),
-            (int)__atomic_load_n(&shared_holders, __ATOMIC_RELAXED));
+            (int)shared_total());
     for (unsigned index = 0; index < SMP_MAX_CPUS; index++) {
         struct cpu *cpu = percpu_slot(index);
         if (!cpu || !cpu->online) continue;
         kprintf("KLOCK: cpu %u holds %u doing %x\n", index,
-                (unsigned)held_mode[index], (unsigned)breadcrumb[index]);
+                (unsigned)cpu_state[index].held_mode,
+                (unsigned)cpu_state[index].breadcrumb);
     }
 }
 
@@ -139,19 +159,19 @@ void kernel_lock(void) {
     uint32_t ticket = __atomic_fetch_add(&next_ticket, 1, __ATOMIC_RELAXED);
     wait_for_turn(ticket);
     struct klock_watchdog watchdog = {0, 0, 0};
-    while (__atomic_load_n(&shared_holders, __ATOMIC_ACQUIRE) != 0) {
+    while (shared_total() != 0) {
         smp_service_flush();
         cpu_relax();
         if (watchdog_expired(&watchdog))
             klock_report("waiting for shared holders to leave", ticket);
     }
-    held_mode[cpu_current()->index] = KLOCK_MODE_EXCLUSIVE;
+    cpu_state[cpu_current()->index].held_mode = KLOCK_MODE_EXCLUSIVE;
     hold_begin();
 }
 
 int kernel_lock_release_for_wait(void) {
     if (kernel_lock_in_interrupt()) return 0;
-    if (held_mode[cpu_current()->index] != KLOCK_MODE_EXCLUSIVE) return 0;
+    if (cpu_state[cpu_current()->index].held_mode != KLOCK_MODE_EXCLUSIVE) return 0;
     kernel_unlock();
     return 1;
 }
@@ -167,47 +187,48 @@ void kernel_lock_wait_tick(void) {
 
 void kernel_unlock(void) {
     hold_end();
-    held_mode[cpu_current()->index] = KLOCK_MODE_NONE;
+    cpu_state[cpu_current()->index].held_mode = KLOCK_MODE_NONE;
     __atomic_store_n(&now_serving, now_serving + 1, __ATOMIC_RELEASE);
 }
 
 void kernel_lock_shared(void) {
-    __atomic_fetch_add(&shared_holders, 1, __ATOMIC_ACQUIRE);
-    if (__atomic_load_n(&next_ticket, __ATOMIC_ACQUIRE) !=
-        __atomic_load_n(&now_serving, __ATOMIC_ACQUIRE)) {
-        __atomic_fetch_sub(&shared_holders, 1, __ATOMIC_RELEASE);
-        uint32_t ticket = __atomic_fetch_add(&next_ticket, 1, __ATOMIC_RELAXED);
+    struct klock_cpu_state *state = &cpu_state[cpu_current()->index];
+    __atomic_fetch_add(&state->shared_holders, 1, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&next_ticket, __ATOMIC_SEQ_CST) !=
+        __atomic_load_n(&now_serving, __ATOMIC_SEQ_CST)) {
+        __atomic_fetch_sub(&state->shared_holders, 1, __ATOMIC_SEQ_CST);
+        uint32_t ticket = __atomic_fetch_add(&next_ticket, 1, __ATOMIC_SEQ_CST);
         wait_for_turn(ticket);
-        __atomic_fetch_add(&shared_holders, 1, __ATOMIC_ACQUIRE);
+        __atomic_fetch_add(&state->shared_holders, 1, __ATOMIC_SEQ_CST);
         __atomic_store_n(&now_serving, now_serving + 1, __ATOMIC_RELEASE);
     }
-    held_mode[cpu_current()->index] = KLOCK_MODE_SHARED;
+    state->held_mode = KLOCK_MODE_SHARED;
 }
 
 void kernel_unlock_shared(void) {
-    held_mode[cpu_current()->index] = KLOCK_MODE_NONE;
-    __atomic_fetch_sub(&shared_holders, 1, __ATOMIC_RELEASE);
+    struct klock_cpu_state *state = &cpu_state[cpu_current()->index];
+    state->held_mode = KLOCK_MODE_NONE;
+    __atomic_fetch_sub(&state->shared_holders, 1, __ATOMIC_SEQ_CST);
 }
 
 #define ISR_LOCK_NOTHING 0U
 #define ISR_LOCK_TAKEN   1U
 #define ISR_LOCK_SHARED  2U
 
-static volatile uint8_t taken_by_isr[SMP_MAX_CPUS];
 static volatile uint32_t isr_holder;
-static volatile uint8_t isr_depth[SMP_MAX_CPUS];
 
 int kernel_lock_in_interrupt(void) {
-    return isr_depth[cpu_current()->index] != 0;
+    return cpu_state[cpu_current()->index].isr_depth != 0;
 }
 
 void kernel_lock_from_isr(void) {
     unsigned index = cpu_current()->index;
-    isr_depth[index]++;
+    struct klock_cpu_state *state = &cpu_state[index];
+    state->isr_depth++;
     if (kernel_lock_shared_here()) {
         uint32_t me = index + 1U;
         if (__atomic_load_n(&isr_holder, __ATOMIC_RELAXED) == me) {
-            taken_by_isr[index] = ISR_LOCK_NOTHING;
+            state->taken_by_isr = ISR_LOCK_NOTHING;
             return;
         }
         for (;;) {
@@ -217,36 +238,38 @@ void kernel_lock_from_isr(void) {
                 break;
             cpu_relax();
         }
-        taken_by_isr[index] = ISR_LOCK_SHARED;
+        state->taken_by_isr = ISR_LOCK_SHARED;
         return;
     }
     if (kernel_lock_held_here()) {
-        taken_by_isr[index] = ISR_LOCK_NOTHING;
+        state->taken_by_isr = ISR_LOCK_NOTHING;
         return;
     }
     kernel_lock();
-    taken_by_isr[index] = ISR_LOCK_TAKEN;
+    state->taken_by_isr = ISR_LOCK_TAKEN;
 }
 
 void kernel_unlock_from_isr(void) {
     unsigned index = cpu_current()->index;
-    if (isr_depth[index]) isr_depth[index]--;
-    uint8_t state = taken_by_isr[index];
-    taken_by_isr[index] = ISR_LOCK_NOTHING;
+    struct klock_cpu_state *cpu = &cpu_state[index];
+    if (cpu->isr_depth) cpu->isr_depth--;
+    uint8_t state = cpu->taken_by_isr;
+    cpu->taken_by_isr = ISR_LOCK_NOTHING;
     if (state == ISR_LOCK_TAKEN) kernel_unlock_current();
     else if (state == ISR_LOCK_SHARED)
         __atomic_store_n(&isr_holder, 0U, __ATOMIC_RELEASE);
 }
 
 int kernel_lock_held_here(void) {
-    return held_mode[cpu_current()->index] != KLOCK_MODE_NONE;
+    return cpu_state[cpu_current()->index].held_mode != KLOCK_MODE_NONE;
 }
 
 int kernel_lock_shared_here(void) {
-    return held_mode[cpu_current()->index] == KLOCK_MODE_SHARED;
+    return cpu_state[cpu_current()->index].held_mode == KLOCK_MODE_SHARED;
 }
 
 void kernel_unlock_current(void) {
-    if (held_mode[cpu_current()->index] == KLOCK_MODE_SHARED) kernel_unlock_shared();
+    if (cpu_state[cpu_current()->index].held_mode == KLOCK_MODE_SHARED)
+        kernel_unlock_shared();
     else kernel_unlock();
 }
