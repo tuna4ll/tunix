@@ -11,6 +11,7 @@ typedef unsigned int u32;
 #define SYS_readv 19
 #define SYS_writev 20
 #define SYS_pipe 22
+#define SYS_dup 32
 #define SYS_nanosleep 35
 #define SYS_getpid 39
 #define SYS_socketpair 53
@@ -493,6 +494,85 @@ static void test_smp_sockets(unsigned workers) {
     put("\n");
 }
 
+#define SMP_MIX_ROUNDS 20000U
+
+static volatile unsigned smp_mix_next;
+static volatile unsigned smp_mix_ready;
+static volatile unsigned smp_mix_stop;
+static volatile unsigned smp_mix_done;
+static volatile u64 smp_mix_calls;
+
+static void smp_mix_body(void) {
+    unsigned cpu = __atomic_fetch_add(&smp_mix_next, 1, __ATOMIC_RELAXED);
+    pin_to_cpu(cpu);
+    __atomic_add_fetch(&smp_mix_ready, 1, __ATOMIC_RELEASE);
+    u64 calls = 0;
+    while (!__atomic_load_n(&smp_mix_stop, __ATOMIC_ACQUIRE)) {
+        (void)syscall0(SYS_getpid);
+        calls++;
+    }
+    __atomic_add_fetch(&smp_mix_calls, calls, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&smp_mix_done, 1, __ATOMIC_RELEASE);
+}
+
+static void test_smp_mixed(unsigned workers) {
+    static char stacks[SMP_CALL_WORKERS - 1][65536] __attribute__((aligned(16)));
+    if (workers > SMP_CALL_WORKERS) workers = SMP_CALL_WORKERS;
+    unsigned wanted = workers > 0 ? workers - 1 : 0;
+    __atomic_store_n(&smp_mix_next, 1, __ATOMIC_RELAXED);
+    __atomic_store_n(&smp_mix_ready, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&smp_mix_stop, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&smp_mix_done, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&smp_mix_calls, 0, __ATOMIC_RELAXED);
+
+    unsigned helpers = 0;
+    for (unsigned worker = 0; worker < wanted; worker++) {
+        char *top = stacks[worker] + sizeof(stacks[worker]) - 8;
+        *(void **)top = (void *)smp_mix_body;
+        if (spawn_thread(THREAD_FLAGS, top) < 0) break;
+        helpers++;
+    }
+    while (__atomic_load_n(&smp_mix_ready, __ATOMIC_ACQUIRE) < helpers) { }
+
+    int klock = (int)syscall3(SYS_open, (s64)"/proc/klock", 1, 0);
+    if (klock >= 0) {
+        (void)syscall3(SYS_write, klock, (s64)"1", 1);
+        (void)syscall1(SYS_close, klock);
+    }
+    int expected = (int)syscall1(SYS_dup, 0);
+    if (expected >= 0) (void)syscall1(SYS_close, expected);
+    unsigned errors = 0;
+    u64 begun = now_ns();
+    for (unsigned round = 0; round < SMP_MIX_ROUNDS; round++) {
+        int fd = (int)syscall1(SYS_dup, 0);
+        if (fd != expected) errors++;
+        if (fd >= 0) (void)syscall1(SYS_close, fd);
+    }
+    u64 elapsed = now_ns() - begun;
+    __atomic_store_n(&smp_mix_stop, 1, __ATOMIC_RELEASE);
+    while (__atomic_load_n(&smp_mix_done, __ATOMIC_ACQUIRE) < helpers) { }
+    u64 shared_peak = proc_value("/proc/klock", "shared_peak");
+    klock = (int)syscall3(SYS_open, (s64)"/proc/klock", 1, 0);
+    if (klock >= 0) {
+        (void)syscall3(SYS_write, klock, (s64)"0", 1);
+        (void)syscall1(SYS_close, klock);
+    }
+
+    put("SMPMIX readers=");
+    put_number(helpers);
+    put(" writes=");
+    put_number(SMP_MIX_ROUNDS);
+    put(" reader_calls=");
+    put_number(__atomic_load_n(&smp_mix_calls, __ATOMIC_RELAXED));
+    put(" errors=");
+    put_number(errors);
+    put(" elapsed_ms=");
+    put_fixed(elapsed / 1000UL, 3);
+    put(" shared_peak=");
+    put_number(shared_peak);
+    put("\n");
+}
+
 #define MAX_HELPERS 3
 #define SHOOTDOWN_SLACK (1024UL * 1024UL)
 
@@ -551,7 +631,6 @@ static void test_unmap_shootdown(u64 pages, unsigned helpers) {
     else put(unreturned <= SHOOTDOWN_SLACK ? " RETURNED\n" : " LEAKED\n");
 }
 
-#define SYS_dup 32
 #define SYS_syslog 103
 
 static void test_syscall_once(unsigned rounds) {
@@ -1024,6 +1103,7 @@ static int run_all(void) {
     test_smp_syscalls(1);
     test_smp_syscalls(TUNIX_BENCH_CPUS);
     test_smp_sockets(TUNIX_BENCH_CPUS);
+    test_smp_mixed(TUNIX_BENCH_CPUS);
     test_syscall_cost();
     test_out_of_memory();
     put("PERF DONE\n");

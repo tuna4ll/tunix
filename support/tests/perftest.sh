@@ -80,7 +80,7 @@ done
 kill $QEMU 2>/dev/null || true
 wait $QEMU 2>/dev/null || true
 
-grep -aE "^(PERF|SYSCALL|SMPCALL|SMPSOCKET|PIPE|FAULT|FORK|FORKNOWAIT|THREAD|FILE|STARTUP|SHOOTDOWN|ONCE|ORPHAN|SYSLOG|MMAP|FUTEX|OOM|DF|KLOCK|KLOCKBOOT)" "$LOG" || {
+grep -aE "^(PERF|SYSCALL|SMPCALL|SMPSOCKET|SMPMIX|PIPE|FAULT|FORK|FORKNOWAIT|THREAD|FILE|STARTUP|SHOOTDOWN|ONCE|ORPHAN|SYSLOG|MMAP|FUTEX|OOM|DF|KLOCK|KLOCKBOOT)" "$LOG" || {
 	echo "perftest: the machine printed no results; $LOG has the boot" >&2
 	exit 1
 }
@@ -91,6 +91,16 @@ SHARED_PEAK=$(sed -n "s/^SMPCALL workers=$EXPECTED_WORKERS .* shared_peak=\([0-9
 if [ "$EXPECTED_WORKERS" -gt 1 ] &&
    { [ -z "$SHARED_PEAK" ] || [ "$SHARED_PEAK" -lt "$EXPECTED_WORKERS" ]; }; then
 	echo "perftest: only ${SHARED_PEAK:-0}/$EXPECTED_WORKERS processors overlapped in the kernel" >&2
+	exit 1
+fi
+
+EXPECTED_READERS=$((EXPECTED_WORKERS - 1))
+MIX_RESULT=$(sed -n "s/^SMPMIX readers=$EXPECTED_READERS .* errors=\([0-9][0-9]*\) .* shared_peak=\([0-9][0-9]*\)$/\1 \2/p" "$LOG" | tail -1)
+MIX_ERRORS=${MIX_RESULT%% *}
+MIX_PEAK=${MIX_RESULT##* }
+if [ -z "$MIX_RESULT" ] || [ "$MIX_ERRORS" -ne 0 ] ||
+   { [ "$EXPECTED_READERS" -gt 1 ] && [ "$MIX_PEAK" -lt "$EXPECTED_READERS" ]; }; then
+	echo "perftest: mixed shared/exclusive lock stress failed (${MIX_RESULT:-missing})" >&2
 	exit 1
 fi
 
