@@ -277,23 +277,55 @@ itself, immediately, exactly as before.
 
 ## The kernel lock
 
-Nothing in this kernel was written to be entered twice at once: the process
-queue is a bare linked list, the VFS tree has no locks, the page tables are
-edited in place. So kernel entry is serialised behind a single ticket lock
-(`kernel/klock.c`), taken in `syscall_dispatch` and `isr_handler` and
-dropped by the assembly that called them.
+The kernel began with one ticket lock because its process queue, VFS tree and
+page tables were all written under the assumption that only one processor could
+touch them. That lock remains the safe fallback for an unaudited path, but it is
+no longer the only way into the kernel. `kernel/klock.c` is now a fair
+reader/writer gate: audited operations enter shared, while a queued exclusive
+operation keeps its ticket and prevents a stream of new readers from starving
+it.
 
-This does not cost the parallelism that was wanted: user code is where the time
-goes and user code does not hold it. Kernel mode runs with interrupts off, so a
-processor holding the lock cannot be interrupted into wanting it again, and the
-wait is always finite. A ticket lock rather than a test-and-set so that a
-processor entering the kernel in a tight syscall loop cannot starve one that has
-been waiting.
+The reader state is per CPU and cache-line aligned. A global reader counter
+would admit several processors logically but force every entry and exit to
+write the same cache line, merely moving the serialisation into the cache
+coherency protocol. An exclusive holder scans the per-CPU counters after its
+ticket comes up; shared holders only write their own line. The ordering around
+the ticket check is sequentially consistent so a reader and writer cannot both
+miss one another and enter incompatible modes.
+
+Shared mode is deliberately an audit boundary, not a promise that every kernel
+object has suddenly become concurrent. An exclusive holder excludes all shared
+holders, so a converted path only has to be safe against the other converted
+paths. There are two kinds of protection inside that boundary:
+
+* per-object locks cover open-file offsets, pipes and Unix socket channels, so
+  traffic through unrelated objects remains independent;
+* `oplock` covers brief access to genuinely global state such as the process
+  queue and physical page allocator.
+
+The shared set currently includes pipe and Unix-stream `read`, `write`,
+`readv` and `writev`, stateless character devices, identity calls such as
+`getpid`, clock calls, `uname`, `getcpu` and `membarrier`. A blocking I/O call
+that gets `EAGAIN` gives shared mode back and restarts through the exclusive
+scheduler path. Closing descriptors, changing credentials, mapping memory and
+other unaudited operations still take the writer side.
+
+`/proc/klock` reports `shared_peak` in addition to exclusive hold times. The
+SMP part of `perftest` pins four workers to four processors, checks that the
+peak reaches four, verifies bytes sent concurrently over four independent Unix
+socket channels, and runs exclusive `dup`/`close` operations against continuous
+shared readers. The test fails if overlap, data integrity or writer progress is
+lost.
 
 One consequence shows up in `isr_dispatch`: interrupts are acknowledged before
 they are handled, not after. A tick that ends up parking the processor — the
 last process on it exited — never returns to the handler, and a controller
 still waiting to be told the last interrupt finished will not send another.
+
+An interrupt arriving over an exclusive holder is already protected by that
+holder. One arriving over a shared holder keeps the reader claim in place and
+uses a small interrupt-only lock, so interrupt handlers do not run together
+while the rest of the shared operation remains protected from writers.
 
 ### The frame the return path is standing on
 

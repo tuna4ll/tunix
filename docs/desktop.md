@@ -245,14 +245,20 @@ went from 4.0 GB/s to 4.6 GB/s.
 page takes the same time whatever the kernel does, because it is waiting on
 discord.com rather than on this machine.
 
-What is left, and what to attack next, is the kernel lock. Only `read` and
-`write` on a pipe run shared; every socket message, every `poll`, every futex
-and every page fault takes it exclusively, so the browser's ten processes
-serialise through one lock however many processors the machine has. The two
-changes that helped here both helped by taking it less often: anonymous memory
-is committed sixteen pages at a time instead of one, and a socket buffer holds
-64 KiB instead of 4, so one IPC message is one trip into the kernel rather than
-sixteen.
+The kernel lock is no longer an all-kernel serial bottleneck. Its shared side
+uses per-CPU reader state, and the common identity/time calls plus pipe and Unix
+socket stream I/O can execute on several processors at once. Unix socket data
+is protected per channel, so four independent IPC channels do not meet at a
+replacement global lock; the performance test checks both four-way kernel
+overlap and the bytes delivered. The exclusive ticket remains as the fallback
+and as the starvation-free boundary around code that has not been converted.
+
+There is still useful lock decomposition work beyond this point. Blocking
+`poll`, futex waits, Internet sockets and user page faults still enter
+exclusively; page-table and scheduler ownership need finer locks before those
+can safely join the shared set. Anonymous memory is committed sixteen pages at
+a time and socket buffers hold 64 KiB, so those remaining paths cross the
+exclusive boundary less often in the meantime.
 
 ## OpenGL, and the two things it needed
 
