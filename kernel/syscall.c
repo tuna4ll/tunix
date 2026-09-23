@@ -6128,9 +6128,14 @@ static int syscall_try_shared(struct syscall_frame *frame) {
     struct file *file = process->files->fds[fd];
     if (!file_may_share(file)) return 0;
 
-    int64_t result = number == SYS_READ
-        ? sys_read(fd, SYSCALL_ARG1(frame), (size_t)SYSCALL_ARG2(frame))
-        : sys_write(fd, SYSCALL_ARG1(frame), (size_t)SYSCALL_ARG2(frame));
+    int64_t result;
+    if (number == SYS_READ)
+        result = sys_read(fd, SYSCALL_ARG1(frame), (size_t)SYSCALL_ARG2(frame));
+    else if (number == SYS_WRITE)
+        result = sys_write(fd, SYSCALL_ARG1(frame), (size_t)SYSCALL_ARG2(frame));
+    else
+        result = sys_readv_writev(fd, SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame),
+                                  number == SYS_WRITEV);
 
     if (result == -EAGAIN && !(file->flags & O_NONBLOCK)) return 0;
     if (result == -EAGAIN) file->edge_generation++;
@@ -6143,6 +6148,8 @@ static int syscall_number_may_share(uint64_t number) {
     switch (number) {
         case SYS_READ:
         case SYS_WRITE:
+        case SYS_READV:
+        case SYS_WRITEV:
         case SYS_GETPID:
         case SYS_GETTID:
         case SYS_GETPPID:

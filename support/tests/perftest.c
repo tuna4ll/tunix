@@ -8,6 +8,8 @@ typedef unsigned int u32;
 #define SYS_close 3
 #define SYS_mmap 9
 #define SYS_munmap 11
+#define SYS_readv 19
+#define SYS_writev 20
 #define SYS_pipe 22
 #define SYS_nanosleep 35
 #define SYS_getpid 39
@@ -391,13 +393,29 @@ static volatile unsigned smp_socket_errors;
 static void smp_socket_rounds(unsigned worker) {
     char sent[SMP_SOCKET_BYTES];
     char received[SMP_SOCKET_BYTES];
+    struct {
+        s64 base;
+        u64 length;
+    } send_iov[2], receive_iov[2];
+    send_iov[0].base = (s64)sent;
+    send_iov[0].length = sizeof(sent) / 2;
+    send_iov[1].base = (s64)(sent + sizeof(sent) / 2);
+    send_iov[1].length = sizeof(sent) / 2;
+    receive_iov[0].base = (s64)received;
+    receive_iov[0].length = sizeof(received) / 2;
+    receive_iov[1].base = (s64)(received + sizeof(received) / 2);
+    receive_iov[1].length = sizeof(received) / 2;
     for (u64 round = 0; round < SMP_SOCKET_ROUNDS; round++) {
         for (unsigned at = 0; at < sizeof(sent); at++)
             sent[at] = (char)(worker * 31U + (unsigned)round + at);
-        s64 written = syscall3(SYS_write, smp_socket_fds[worker][0],
-                               (s64)sent, sizeof(sent));
-        s64 got = syscall3(SYS_read, smp_socket_fds[worker][1],
-                           (s64)received, sizeof(received));
+        s64 written = round & 1U
+            ? syscall3(SYS_writev, smp_socket_fds[worker][0], (s64)send_iov, 2)
+            : syscall3(SYS_write, smp_socket_fds[worker][0],
+                       (s64)sent, sizeof(sent));
+        s64 got = round & 1U
+            ? syscall3(SYS_readv, smp_socket_fds[worker][1], (s64)receive_iov, 2)
+            : syscall3(SYS_read, smp_socket_fds[worker][1],
+                       (s64)received, sizeof(received));
         int wrong = written != (s64)sizeof(sent) || got != (s64)sizeof(received);
         for (unsigned at = 0; !wrong && at < sizeof(sent); at++)
             if (sent[at] != received[at]) wrong = 1;
