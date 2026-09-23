@@ -6045,6 +6045,7 @@ static int file_may_share(const struct file *file) {
     if (!file) return 0;
     if (file->kind == FILE_KIND_PIPE_READ || file->kind == FILE_KIND_PIPE_WRITE)
         return 1;
+    if (file->kind == FILE_KIND_SOCKET) return 1;
     if (file->kind != FILE_KIND_VFS || !file->node) return 0;
     if ((file->node->flags & 0xFFU) != VFS_CHARDEVICE) return 0;
     return file->node->stateless != 0;

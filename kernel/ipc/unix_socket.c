@@ -6,6 +6,9 @@
 #include "../include/cred.h"
 #include "../include/pipe.h"
 #include "../include/process.h"
+#include "../include/klock.h"
+#include "../include/oplock.h"
+#include "../include/spinlock.h"
 #include "../include/unix_socket.h"
 
 #define EADDRINUSE 98
@@ -47,6 +50,7 @@ struct unix_ancillary_queue {
 };
 
 struct unix_channel {
+    spinlock_t lock;
     struct pipe_buffer to_a;
     struct pipe_buffer to_b;
     struct unix_ancillary_queue ancillary_to_a;
@@ -84,6 +88,16 @@ struct unix_socket {
     int pending_count;
     struct unix_socket *next_listener;
 };
+
+static void channel_enter(struct unix_socket *socket) {
+    if (kernel_lock_shared_here() && socket && socket->channel)
+        spinlock_acquire(&socket->channel->lock);
+}
+
+static void channel_leave(struct unix_socket *socket) {
+    if (kernel_lock_shared_here() && socket && socket->channel)
+        spinlock_release(&socket->channel->lock);
+}
 
 static struct unix_socket *listener_list;
 
@@ -296,6 +310,7 @@ int unix_socket_pair(struct unix_socket **first, struct unix_socket **second,
         return -EAGAIN;
     }
     memset(channel, 0, sizeof(*channel));
+    spinlock_init(&channel->lock);
     channel->refs = 2;
     channel->a_open = 1;
     channel->b_open = 1;
@@ -423,6 +438,7 @@ int unix_socket_connect(struct unix_socket *socket, const struct tunix_sockaddr_
         return -EAGAIN;
     }
     memset(channel, 0, sizeof(*channel));
+    spinlock_init(&channel->lock);
     channel->refs = 2;
     channel->a_open = 1;
     channel->b_open = 1;
@@ -494,13 +510,21 @@ static int64_t unix_socket_read_data(struct unix_socket *socket, size_t size,
 }
 
 int64_t unix_socket_read(struct unix_socket *socket, size_t size, void *buffer) {
+    channel_enter(socket);
     size_t consumed = 0;
     int64_t result = unix_socket_read_data(socket, size, buffer, &consumed);
-    ancillary_consume(incoming_ancillary(socket), consumed, NULL, 0, NULL);
+    struct unix_ancillary_queue *ancillary = incoming_ancillary(socket);
+    if (ancillary && ancillary->count > 0) {
+        oplock_enter();
+        ancillary_consume(ancillary, consumed, NULL, 0, NULL);
+        oplock_leave();
+    }
+    channel_leave(socket);
     return result;
 }
 
-int64_t unix_socket_write(struct unix_socket *socket, size_t size, const void *buffer) {
+static int64_t unix_socket_write_locked(struct unix_socket *socket, size_t size,
+                                        const void *buffer) {
     if (!socket || !socket->connected || !socket->channel) return -ENOTCONN;
     if (own_write_shutdown(socket) || peer_read_shutdown(socket) || !peer_open(socket)) return -EPIPE;
     struct pipe_buffer *pipe = outgoing(socket);
@@ -536,6 +560,13 @@ int64_t unix_socket_write(struct unix_socket *socket, size_t size, const void *b
     }
     pipe->count += amount;
     return (int64_t)amount;
+}
+
+int64_t unix_socket_write(struct unix_socket *socket, size_t size, const void *buffer) {
+    channel_enter(socket);
+    int64_t result = unix_socket_write_locked(socket, size, buffer);
+    channel_leave(socket);
+    return result;
 }
 
 int64_t unix_socket_send_with_rights(struct unix_socket *socket, size_t size,

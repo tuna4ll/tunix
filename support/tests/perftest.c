@@ -11,6 +11,7 @@ typedef unsigned int u32;
 #define SYS_pipe 22
 #define SYS_nanosleep 35
 #define SYS_getpid 39
+#define SYS_socketpair 53
 #define SYS_fork 57
 #define SYS_exit_group 231
 #define SYS_wait4 61
@@ -372,6 +373,103 @@ static void test_smp_syscalls(unsigned workers) {
     put_number(elapsed ? calls * 1000000000UL / elapsed : 0);
     put(" elapsed_ms=");
     put_fixed(elapsed / 1000UL, 3);
+    put(" shared_peak=");
+    put_number(shared_peak);
+    put("\n");
+}
+
+#define SMP_SOCKET_ROUNDS 20000UL
+#define SMP_SOCKET_BYTES 64
+
+static int smp_socket_fds[SMP_CALL_WORKERS][2];
+static volatile unsigned smp_socket_next;
+static volatile unsigned smp_socket_ready;
+static volatile unsigned smp_socket_start;
+static volatile unsigned smp_socket_done;
+static volatile unsigned smp_socket_errors;
+
+static void smp_socket_rounds(unsigned worker) {
+    char sent[SMP_SOCKET_BYTES];
+    char received[SMP_SOCKET_BYTES];
+    for (u64 round = 0; round < SMP_SOCKET_ROUNDS; round++) {
+        for (unsigned at = 0; at < sizeof(sent); at++)
+            sent[at] = (char)(worker * 31U + (unsigned)round + at);
+        s64 written = syscall3(SYS_write, smp_socket_fds[worker][0],
+                               (s64)sent, sizeof(sent));
+        s64 got = syscall3(SYS_read, smp_socket_fds[worker][1],
+                           (s64)received, sizeof(received));
+        int wrong = written != (s64)sizeof(sent) || got != (s64)sizeof(received);
+        for (unsigned at = 0; !wrong && at < sizeof(sent); at++)
+            if (sent[at] != received[at]) wrong = 1;
+        if (wrong) {
+            __atomic_add_fetch(&smp_socket_errors, 1, __ATOMIC_RELAXED);
+            break;
+        }
+    }
+}
+
+static void smp_socket_body(void) {
+    unsigned worker = __atomic_fetch_add(&smp_socket_next, 1, __ATOMIC_RELAXED);
+    pin_to_cpu(worker);
+    __atomic_add_fetch(&smp_socket_ready, 1, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&smp_socket_start, __ATOMIC_ACQUIRE)) { }
+    smp_socket_rounds(worker);
+    __atomic_add_fetch(&smp_socket_done, 1, __ATOMIC_RELEASE);
+}
+
+static void test_smp_sockets(unsigned workers) {
+    static char stacks[SMP_CALL_WORKERS - 1][65536] __attribute__((aligned(16)));
+    if (workers > SMP_CALL_WORKERS) workers = SMP_CALL_WORKERS;
+    for (unsigned worker = 0; worker < workers; worker++) {
+        if (syscall4(SYS_socketpair, 1, 1, 0, (s64)smp_socket_fds[worker]) != 0) {
+            put("SMPSOCKET socketpair failed\n");
+            return;
+        }
+    }
+
+    pin_to_cpu(0);
+    __atomic_store_n(&smp_socket_next, 1, __ATOMIC_RELAXED);
+    __atomic_store_n(&smp_socket_ready, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&smp_socket_start, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&smp_socket_done, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&smp_socket_errors, 0, __ATOMIC_RELAXED);
+    unsigned helpers = 0;
+    for (unsigned worker = 1; worker < workers; worker++) {
+        char *top = stacks[worker - 1] + sizeof(stacks[worker - 1]) - 8;
+        *(void **)top = (void *)smp_socket_body;
+        if (spawn_thread(THREAD_FLAGS, top) < 0) break;
+        helpers++;
+    }
+    while (__atomic_load_n(&smp_socket_ready, __ATOMIC_ACQUIRE) < helpers) { }
+
+    int klock = (int)syscall3(SYS_open, (s64)"/proc/klock", 1, 0);
+    if (klock >= 0) {
+        (void)syscall3(SYS_write, klock, (s64)"1", 1);
+        (void)syscall1(SYS_close, klock);
+    }
+    u64 begun = now_ns();
+    __atomic_store_n(&smp_socket_start, 1, __ATOMIC_RELEASE);
+    smp_socket_rounds(0);
+    while (__atomic_load_n(&smp_socket_done, __ATOMIC_ACQUIRE) < helpers) { }
+    u64 elapsed = now_ns() - begun;
+    u64 shared_peak = proc_value("/proc/klock", "shared_peak");
+    klock = (int)syscall3(SYS_open, (s64)"/proc/klock", 1, 0);
+    if (klock >= 0) {
+        (void)syscall3(SYS_write, klock, (s64)"0", 1);
+        (void)syscall1(SYS_close, klock);
+    }
+
+    for (unsigned worker = 0; worker < helpers + 1; worker++) {
+        (void)syscall1(SYS_close, smp_socket_fds[worker][0]);
+        (void)syscall1(SYS_close, smp_socket_fds[worker][1]);
+    }
+    u64 roundtrips = (u64)(helpers + 1) * SMP_SOCKET_ROUNDS;
+    put("SMPSOCKET workers=");
+    put_number(helpers + 1);
+    put(" roundtrips_per_second=");
+    put_number(elapsed ? roundtrips * 1000000000UL / elapsed : 0);
+    put(" errors=");
+    put_number(__atomic_load_n(&smp_socket_errors, __ATOMIC_RELAXED));
     put(" shared_peak=");
     put_number(shared_peak);
     put("\n");
@@ -907,6 +1005,7 @@ static int run_all(void) {
     test_syscall_once(20000);
     test_smp_syscalls(1);
     test_smp_syscalls(TUNIX_BENCH_CPUS);
+    test_smp_sockets(TUNIX_BENCH_CPUS);
     test_syscall_cost();
     test_out_of_memory();
     put("PERF DONE\n");

@@ -80,7 +80,7 @@ done
 kill $QEMU 2>/dev/null || true
 wait $QEMU 2>/dev/null || true
 
-grep -aE "^(PERF|SYSCALL|SMPCALL|PIPE|FAULT|FORK|FORKNOWAIT|THREAD|FILE|STARTUP|SHOOTDOWN|ONCE|ORPHAN|SYSLOG|MMAP|FUTEX|OOM|DF|KLOCK|KLOCKBOOT)" "$LOG" || {
+grep -aE "^(PERF|SYSCALL|SMPCALL|SMPSOCKET|PIPE|FAULT|FORK|FORKNOWAIT|THREAD|FILE|STARTUP|SHOOTDOWN|ONCE|ORPHAN|SYSLOG|MMAP|FUTEX|OOM|DF|KLOCK|KLOCKBOOT)" "$LOG" || {
 	echo "perftest: the machine printed no results; $LOG has the boot" >&2
 	exit 1
 }
@@ -91,6 +91,15 @@ SHARED_PEAK=$(sed -n "s/^SMPCALL workers=$EXPECTED_WORKERS .* shared_peak=\([0-9
 if [ "$EXPECTED_WORKERS" -gt 1 ] &&
    { [ -z "$SHARED_PEAK" ] || [ "$SHARED_PEAK" -lt "$EXPECTED_WORKERS" ]; }; then
 	echo "perftest: only ${SHARED_PEAK:-0}/$EXPECTED_WORKERS processors overlapped in the kernel" >&2
+	exit 1
+fi
+
+SOCKET_RESULT=$(sed -n "s/^SMPSOCKET workers=$EXPECTED_WORKERS .* errors=\([0-9][0-9]*\) shared_peak=\([0-9][0-9]*\)$/\1 \2/p" "$LOG" | tail -1)
+SOCKET_ERRORS=${SOCKET_RESULT%% *}
+SOCKET_PEAK=${SOCKET_RESULT##* }
+if [ -z "$SOCKET_RESULT" ] || [ "$SOCKET_ERRORS" -ne 0 ] ||
+   { [ "$EXPECTED_WORKERS" -gt 1 ] && [ "$SOCKET_PEAK" -lt "$EXPECTED_WORKERS" ]; }; then
+	echo "perftest: parallel Unix sockets failed integrity or overlap (${SOCKET_RESULT:-missing})" >&2
 	exit 1
 fi
 

@@ -2111,11 +2111,17 @@ static int send_signal(int64_t pid, int signal_number, int checked) {
 }
 
 int process_send_signal(int64_t pid, int signal_number) {
-    return send_signal(pid, signal_number, 0);
+    oplock_enter();
+    int result = send_signal(pid, signal_number, 0);
+    oplock_leave();
+    return result;
 }
 
 int process_send_signal_checked(int64_t pid, int signal_number) {
-    return send_signal(pid, signal_number, 1);
+    oplock_enter();
+    int result = send_signal(pid, signal_number, 1);
+    oplock_leave();
+    return result;
 }
 
 int process_setpgid(int64_t pid, int64_t pgid) {
