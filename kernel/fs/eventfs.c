@@ -399,7 +399,7 @@ static int attach_stream(struct vfs_node *root, const char *name,
     node->mode = 0444;
     node->data = (void *)(uintptr_t)channel;
     if (vfs_attach(root, node) == 0) return 0;
-    kfree(node);
+    vfs_free_node(node);
     return -1;
 }
 

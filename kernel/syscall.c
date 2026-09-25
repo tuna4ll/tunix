@@ -871,8 +871,8 @@ static int64_t sys_write(int fd, uint64_t user_buffer, size_t length) {
     if (completed && eventfs_interested(EVENTFS_FILES, process->cred.euid, 0) &&
         file->kind == FILE_KIND_VFS && file->node &&
         (file->node->flags & 0xFFU) == VFS_FILE) {
-        char path[256];
-        if (vfs_node_path(file->node, path, sizeof(path)) == 0)
+        VFS_PATH_SCOPED path = vfs_path_buffer();
+        if (path && vfs_node_path(file->node, path, VFS_PATH_MAX) == 0)
             eventfs_emit_file_write(process->cred.euid, process->tgid, path);
     }
     return (int64_t)completed;
@@ -1110,12 +1110,12 @@ static int64_t sys_select_once(int nfds, uint64_t user_read, uint64_t user_write
     return ready;
 }
 
-static size_t process_root_prefix(char buffer[256]) {
+static size_t process_root_prefix(char *buffer) {
     struct vfs_node *root = process_get_root();
     buffer[0] = '/';
     buffer[1] = '\0';
     if (!root || root == vfs_root) return 1;
-    if (vfs_node_path(root, buffer, 256) != 0 || !buffer[0]) {
+    if (vfs_node_path(root, buffer, VFS_PATH_MAX) != 0 || !buffer[0]) {
         buffer[0] = '/';
         buffer[1] = '\0';
         return 1;
@@ -1125,27 +1125,23 @@ static size_t process_root_prefix(char buffer[256]) {
     return length;
 }
 
-static int normalize_path(struct vfs_node *base, const char *input, char output[256]) {
+static int normalize_path(struct vfs_node *base, const char *input, char *output) {
     if (!input || !input[0]) return -ENOENT;
-    char combined[512];
-    char prefix[256];
-    size_t floor = process_root_prefix(prefix);
+    size_t floor = process_root_prefix(output);
+    VFS_PATH_SCOPED combined = (char *)kmalloc(2 * VFS_PATH_MAX);
+    if (!combined) return -ENOMEM;
     size_t at = 0;
     if (input[0] == '/') {
-        memcpy(combined, prefix, floor);
+        memcpy(combined, output, floor);
         at = floor;
         if (combined[at - 1] != '/') combined[at++] = '/';
     } else {
-        char base_path[256];
-        if (vfs_node_path(base ? base : vfs_root, base_path, sizeof(base_path)) != 0) return -EINVAL;
-        size_t length = strlen(base_path);
-        if (length + 2 >= sizeof(combined)) return -ENAMETOOLONG;
-        memcpy(combined, base_path, length);
-        at = length;
+        if (vfs_node_path(base ? base : vfs_root, combined, VFS_PATH_MAX) != 0) return -EINVAL;
+        at = strlen(combined);
         if (at == 0 || combined[at - 1] != '/') combined[at++] = '/';
     }
     size_t input_length = strlen(input);
-    if (at + input_length + 1 > sizeof(combined)) return -ENAMETOOLONG;
+    if (at + input_length + 1 > 2 * VFS_PATH_MAX) return -ENAMETOOLONG;
     memcpy(combined + at, input, input_length + 1);
 
     size_t out = 0;
@@ -1154,15 +1150,14 @@ static int normalize_path(struct vfs_node *base, const char *input, char output[
     while (*cursor) {
         while (*cursor == '/') cursor++;
         if (!*cursor) break;
-        char component[128];
+        const char *component = cursor;
         size_t length = 0;
         while (*cursor && *cursor != '/') {
-            if (length + 1 >= sizeof(component)) return -ENAMETOOLONG;
-            component[length++] = *cursor++;
+            cursor++;
+            if (++length > VFS_NAME_MAX) return -ENAMETOOLONG;
         }
-        component[length] = '\0';
-        if (strcmp(component, ".") == 0) continue;
-        if (strcmp(component, "..") == 0) {
+        if (length == 1 && component[0] == '.') continue;
+        if (length == 2 && component[0] == '.' && component[1] == '.') {
             if (out > floor) {
                 if (output[out - 1] == '/') out--;
                 while (out > floor && output[out - 1] != '/') out--;
@@ -1170,7 +1165,7 @@ static int normalize_path(struct vfs_node *base, const char *input, char output[
             continue;
         }
         if (out > 1 && output[out - 1] != '/') output[out++] = '/';
-        if (out + length + 1 > 256) return -ENAMETOOLONG;
+        if (out + length + 1 > VFS_PATH_MAX) return -ENAMETOOLONG;
         memcpy(output + out, component, length);
         out += length;
     }
@@ -1190,12 +1185,21 @@ static struct vfs_node *base_for_dirfd(int dirfd) {
     return file->node;
 }
 
-static int copy_path_at(int dirfd, uint64_t user_path, char output[256]) {
-    char input[256];
-    if (copy_string_from_user(input, sizeof(input), user_path) < 0) return -EFAULT;
+static int copy_user_path(uint64_t user_path, char *output) {
+    int copied = copy_string_from_user(output, VFS_PATH_MAX, user_path);
+    if (copied == -2) return -ENAMETOOLONG;
+    return copied < 0 ? -EFAULT : 0;
+}
+
+static int copy_path_at(int dirfd, uint64_t user_path, char **output) {
+    VFS_PATH_SCOPED input = vfs_path_buffer();
+    *output = vfs_path_buffer();
+    if (!input || !*output) return -ENOMEM;
+    int status = copy_user_path(user_path, input);
+    if (status != 0) return status;
     struct vfs_node *base = input[0] == '/' ? vfs_root : base_for_dirfd(dirfd);
     if (!base) return -EBADF;
-    return normalize_path(base, input, output);
+    return normalize_path(base, input, *output);
 }
 
 static uint32_t mode_after_umask(uint64_t mode) {
@@ -1253,8 +1257,8 @@ static int64_t open_at(int dirfd, uint64_t user_path, uint64_t flags, uint64_t m
     flags &= supported;
     if ((flags & O_PATH) && (flags & (O_CREAT | O_EXCL | O_TRUNC))) return -EINVAL;
 
-    char path[256];
-    int path_status = copy_path_at(dirfd, user_path, path);
+    VFS_PATH_SCOPED path = NULL;
+    int path_status = copy_path_at(dirfd, user_path, &path);
     if (path_status != 0) return path_status;
 
     int64_t reopened = reopen_own_descriptor(path, flags);
@@ -1412,7 +1416,6 @@ static int64_t sys_socket(int domain, int type, int protocol) {
     if (type_flags & ~(SOCK_NONBLOCK | SOCK_CLOEXEC)) return -EINVAL;
     struct process *process = process_current();
     if (domain == TUNIX_AF_UNIX) {
-
         if ((base_type != TUNIX_SOCK_STREAM && base_type != TUNIX_SOCK_SEQPACKET &&
              base_type != TUNIX_SOCK_DGRAM) || protocol != 0) return -EOPNOTSUPP;
         struct unix_socket *socket =
@@ -1438,7 +1441,6 @@ static int64_t sys_socket(int domain, int type, int protocol) {
         return install_new_file(file, type_flags & SOCK_CLOEXEC);
     }
     if (domain == TUNIX_AF_NETLINK) {
-
         if (base_type != TUNIX_SOCK_RAW && base_type != TUNIX_SOCK_DGRAM) return -EPROTONOSUPPORT;
         struct netlink_socket *socket = netlink_socket_create(protocol);
         if (!socket) return -EPROTONOSUPPORT;
@@ -1648,7 +1650,6 @@ static void accept_or_block(struct syscall_frame *frame, uint64_t syscall_number
 
 static int64_t sys_sendto(int fd, uint64_t user_data, size_t length, int flags,
                           uint64_t user_address, uint64_t address_length) {
-
     struct unix_socket *unix_value = socket_from_fd(fd);
     if (unix_value) {
         (void)flags;
@@ -1689,7 +1690,6 @@ static int64_t sys_sendto(int fd, uint64_t user_data, size_t length, int flags,
 
 static int64_t sys_recvfrom(int fd, uint64_t user_data, size_t length, int flags,
                             uint64_t user_address, uint64_t user_address_length) {
-
     struct unix_socket *unix_value = socket_from_fd(fd);
     if (unix_value) {
         (void)flags;
@@ -2241,7 +2241,6 @@ static int64_t sys_setsockopt(int fd, int level, int option,
     }
     struct netlink_socket *netlink_option = netlink_socket_from_fd(fd);
     if (netlink_option) {
-
         if (level == SOL_SOCKET && option == SO_PASSCRED && length >= sizeof(int32_t)) {
             int32_t enabled;
             if (copy_from_user(&enabled, user_value, sizeof(enabled)) != 0) return -EFAULT;
@@ -2299,7 +2298,6 @@ static int64_t sys_getsockopt(int fd, int level, int option,
         return -EOPNOTSUPP;
     }
     if (netlink_socket_from_fd(fd)) {
-
         (void)level; (void)option;
         int32_t value = 32768;
         if (supplied < sizeof(value)) return -EINVAL;
@@ -2340,7 +2338,6 @@ static int64_t sys_fallocate(int fd, int mode, uint64_t offset, uint64_t length)
     uint64_t needed = offset + length;
 
     if (file->kind == FILE_KIND_MEMFD) {
-
         if (needed <= memfd_size(file->memfd)) return 0;
         return memfd_truncate(file->memfd, needed) == 0 ? 0 : -ENOSPC;
     }
@@ -2354,8 +2351,8 @@ static int64_t sys_fallocate(int fd, int mode, uint64_t offset, uint64_t length)
 static int64_t sys_faccess_at(int dirfd, uint64_t user_path, int mode, int flags) {
     if (flags & ~(AT_EACCESS | AT_SYMLINK_NOFOLLOW)) return -EINVAL;
     if (mode & ~7) return -EINVAL;
-    char path[256];
-    int status = copy_path_at(dirfd, user_path, path);
+    VFS_PATH_SCOPED path = NULL;
+    int status = copy_path_at(dirfd, user_path, &path);
     if (status != 0) return status;
     struct vfs_node *node = (flags & AT_SYMLINK_NOFOLLOW) ? vfs_lookup_nofollow(path)
                                                           : vfs_lookup(path);
@@ -2449,7 +2446,6 @@ static int64_t sys_fcntl_lock(int fd, int command, uint64_t user_lock) {
     if (copy_from_user(&lock, user_lock, sizeof(lock)) != 0) return -EFAULT;
 
     if (command == F_GETLK) {
-
         if (file->node->posix_lock_pid && file->node->posix_lock_pid != process->tgid) {
             lock.type = file->node->posix_lock_write ? F_WRLCK : F_RDLCK;
             lock.pid = (int32_t)file->node->posix_lock_pid;
@@ -2470,7 +2466,6 @@ static int64_t sys_fsync(int fd) {
     if (file->kind != FILE_KIND_VFS || !file->node) return -EINVAL;
     uint32_t node_type = file->node->flags & 0xFFU;
     if (node_type == VFS_FILE || node_type == VFS_DIRECTORY || node_type == VFS_BLOCKDEVICE) {
-
         vfs_flush_mapped(file->node);
         if (ext2fs_owns(file->node) && ext2fs_fsync_node(file->node) != 0) return -EIO;
         return 0;
@@ -2540,7 +2535,6 @@ static int64_t sys_ioctl(int fd, unsigned long request, uint64_t user_argument) 
         return pty_ioctl(file->pty, file->kind == FILE_KIND_PTY_MASTER,
                          request, user_argument);
     if (file->kind == FILE_KIND_INPUT && file->node) {
-
         if (((request >> 8) & 0xFFU) == (unsigned)'E')
             return input_reader_ioctl(file->input_reader,
                                       (unsigned)(uintptr_t)file->node->data,
@@ -2596,7 +2590,6 @@ static void fill_stat(struct vfs_node *node, struct linux_stat *stat) {
 
     stat->st_mode = type | (node->mode & 07777U);
     if (kind == VFS_CHARDEVICE || kind == VFS_BLOCKDEVICE) {
-
         uint64_t major = node->dev_major;
         uint64_t minor = node->dev_minor;
         stat->st_rdev = ((major & 0xFFFULL) << 8) | (minor & 0xFFULL) |
@@ -2609,8 +2602,8 @@ static void fill_stat(struct vfs_node *node, struct linux_stat *stat) {
 }
 
 static int64_t stat_path(int dirfd, uint64_t user_path, uint64_t user_stat, int follow) {
-    char path[256];
-    int status = copy_path_at(dirfd, user_path, path);
+    VFS_PATH_SCOPED path = NULL;
+    int status = copy_path_at(dirfd, user_path, &path);
     if (status != 0) return status;
     struct vfs_node *node = follow ? vfs_lookup(path) : vfs_lookup_nofollow(path);
     if (!node) return -ENOENT;
@@ -2622,7 +2615,7 @@ static int64_t stat_path(int dirfd, uint64_t user_path, uint64_t user_stat, int 
 static void fill_statfs(struct vfs_node *node, struct linux_statfs *out) {
     memset(out, 0, sizeof(*out));
 
-    out->f_namelen = sizeof(node->name) - 1;
+    out->f_namelen = VFS_NAME_MAX;
 
     struct vfs_node *volatile_root = NULL;
     for (struct vfs_node *walk = node; walk; walk = walk->parent) {
@@ -2632,7 +2625,6 @@ static void fill_statfs(struct vfs_node *node, struct linux_statfs *out) {
     }
 
     if (volatile_root) {
-
         out->f_type = strcmp(volatile_root->name, "proc") == 0
                           ? PROC_SUPER_MAGIC : TMPFS_MAGIC;
         out->f_bsize = PMM_PAGE_SIZE;
@@ -2668,8 +2660,8 @@ static void fill_statfs(struct vfs_node *node, struct linux_statfs *out) {
 }
 
 static int64_t sys_statfs(uint64_t user_path, uint64_t user_buf) {
-    char path[256];
-    int status = copy_path_at(AT_FDCWD, user_path, path);
+    VFS_PATH_SCOPED path = NULL;
+    int status = copy_path_at(AT_FDCWD, user_path, &path);
     if (status != 0) return status;
     struct vfs_node *node = vfs_lookup(path);
     if (!node) return -ENOENT;
@@ -2779,8 +2771,8 @@ static int64_t sys_statx(int dirfd, uint64_t user_path, int flags,
         if (!process || dirfd >= PROCESS_MAX_FDS || !process->files->fds[dirfd]) return -EBADF;
         if (stat_from_file(process->files->fds[dirfd], &basic) != 0) return -EBADF;
     } else {
-        char path[256];
-        int status = copy_path_at(dirfd, user_path, path);
+        VFS_PATH_SCOPED path = NULL;
+        int status = copy_path_at(dirfd, user_path, &path);
         if (status != 0) return status;
         struct vfs_node *node = (flags & AT_SYMLINK_NOFOLLOW) ? vfs_lookup_nofollow(path)
                                                               : vfs_lookup(path);
@@ -2825,7 +2817,7 @@ static int64_t sys_getdents64(int fd, uint64_t user_buffer, size_t length) {
         size_t name_length = strlen(entry.name) + 1;
         size_t record_length = (19 + name_length + 7) & ~7ULL;
         if (written + record_length > length) break;
-        uint8_t record[256];
+        uint8_t record[(19 + VFS_NAME_MAX + 1 + 7) & ~7];
         if (record_length > sizeof(record)) return -EIO;
         memset(record, 0, record_length);
         *(uint64_t *)(void *)(record + 0) = entry.ino;
@@ -2845,9 +2837,10 @@ static int64_t sys_getdents64(int fd, uint64_t user_buffer, size_t length) {
 static int64_t sys_getcwd(uint64_t user_buffer, size_t size) {
     struct process *process = process_current();
     if (!process || !user_buffer || size == 0) return -EINVAL;
-    char path[256];
-    if (vfs_node_path(process->cwd, path, sizeof(path)) != 0) return -EINVAL;
-    char prefix[256];
+    VFS_PATH_SCOPED path = vfs_path_buffer();
+    VFS_PATH_SCOPED prefix = vfs_path_buffer();
+    if (!path || !prefix) return -ENOMEM;
+    if (vfs_node_path(process->cwd, path, VFS_PATH_MAX) != 0) return -ENAMETOOLONG;
     size_t floor = process_root_prefix(prefix);
     const char *visible = path;
     if (floor > 1 && strncmp(path, prefix, floor) == 0)
@@ -2858,8 +2851,8 @@ static int64_t sys_getcwd(uint64_t user_buffer, size_t size) {
 }
 
 static int64_t xattr_target_exists(uint64_t user_path, int follow) {
-    char path[256];
-    int status = copy_path_at(AT_FDCWD, user_path, path);
+    VFS_PATH_SCOPED path = NULL;
+    int status = copy_path_at(AT_FDCWD, user_path, &path);
     if (status != 0) return status;
     struct vfs_node *node = follow ? vfs_lookup(path) : vfs_lookup_nofollow(path);
     return node ? 0 : -ENOENT;
@@ -2875,8 +2868,8 @@ static int64_t sys_chroot(uint64_t user_path) {
     struct process *process = process_current();
     if (!process) return -EINVAL;
     if (process->cred.euid != 0) return -EPERM;
-    char path[256];
-    int status = copy_path_at(AT_FDCWD, user_path, path);
+    VFS_PATH_SCOPED path = NULL;
+    int status = copy_path_at(AT_FDCWD, user_path, &path);
     if (status != 0) return status;
     struct vfs_node *node = vfs_lookup(path);
     if (!node) return -ENOENT;
@@ -2899,8 +2892,8 @@ static void set_cwd(struct process *process, struct vfs_node *node) {
 }
 
 static int64_t sys_chdir(uint64_t user_path) {
-    char path[256];
-    int status = copy_path_at(AT_FDCWD, user_path, path);
+    VFS_PATH_SCOPED path = NULL;
+    int status = copy_path_at(AT_FDCWD, user_path, &path);
     if (status != 0) return status;
     struct vfs_node *node = vfs_lookup(path);
     if (!node) return -ENOENT;
@@ -2921,8 +2914,8 @@ static int64_t sys_fchdir(int fd) {
 }
 
 static int64_t sys_mkdir_at(int dirfd, uint64_t user_path, uint64_t mode) {
-    char path[256];
-    int status = copy_path_at(dirfd, user_path, path);
+    VFS_PATH_SCOPED path = NULL;
+    int status = copy_path_at(dirfd, user_path, &path);
     if (status != 0) return status;
     if (vfs_lookup(path)) return -EEXIST;
     int permitted = cred_may_write_parent(path);
@@ -2931,12 +2924,12 @@ static int64_t sys_mkdir_at(int dirfd, uint64_t user_path, uint64_t mode) {
 }
 
 static int64_t sys_readlink_at(int dirfd, uint64_t user_path, uint64_t user_buffer, size_t size) {
-    char path[256];
-    int status = copy_path_at(dirfd, user_path, path);
+    VFS_PATH_SCOPED path = NULL;
+    int status = copy_path_at(dirfd, user_path, &path);
     if (status != 0) return status;
     const char *special_target = NULL;
-    if (strcmp(path, "/proc/self/exe") == 0) special_target = process_current()->exe_path;
-    else if (strcmp(path, "/proc/thread-self/exe") == 0) special_target = process_current()->exe_path;
+    if (strcmp(path, "/proc/self/exe") == 0) special_target = process_current()->exe_path ? process_current()->exe_path : "";
+    else if (strcmp(path, "/proc/thread-self/exe") == 0) special_target = process_current()->exe_path ? process_current()->exe_path : "";
     if (special_target) {
         size_t length = strlen(special_target);
         if (length > size) length = size;
@@ -2946,17 +2939,16 @@ static int64_t sys_readlink_at(int dirfd, uint64_t user_path, uint64_t user_buff
     struct vfs_node *node = vfs_lookup_nofollow(path);
     if (!node) return -ENOENT;
     if ((node->flags & 0xFFU) != VFS_SYMLINK) return -EINVAL;
-    char target[256];
-    int64_t length = vfs_readlink(node, target, sizeof(target));
-    if (length < 0) return -EINVAL;
+    int64_t length = (int64_t)node->length;
+    if (!node->data || length < 0) return -EINVAL;
     if ((size_t)length > size) length = (int64_t)size;
-    return copy_to_user(user_buffer, target, (size_t)length) == 0 ? length : -EFAULT;
+    return copy_to_user(user_buffer, node->data, (size_t)length) == 0 ? length : -EFAULT;
 }
 
 static int64_t sys_unlink_at(int dirfd, uint64_t user_path, int flags) {
     if (flags & ~AT_REMOVEDIR) return -EINVAL;
-    char path[256];
-    int status = copy_path_at(dirfd, user_path, path);
+    VFS_PATH_SCOPED path = NULL;
+    int status = copy_path_at(dirfd, user_path, &path);
     if (status != 0) return status;
     struct vfs_node *node = vfs_lookup_nofollow(path);
     if (!node) return -ENOENT;
@@ -2977,10 +2969,11 @@ static int64_t sys_rename_at(int old_dirfd, uint64_t user_old_path,
                              int new_dirfd, uint64_t user_new_path,
                              unsigned flags) {
     if (flags != 0) return -EINVAL;
-    char old_path[256], new_path[256];
-    int status = copy_path_at(old_dirfd, user_old_path, old_path);
+    VFS_PATH_SCOPED old_path = NULL;
+    VFS_PATH_SCOPED new_path = NULL;
+    int status = copy_path_at(old_dirfd, user_old_path, &old_path);
     if (status != 0) return status;
-    status = copy_path_at(new_dirfd, user_new_path, new_path);
+    status = copy_path_at(new_dirfd, user_new_path, &new_path);
     if (status != 0) return status;
     struct vfs_node *node = vfs_lookup_nofollow(old_path);
     if (!node) return -ENOENT;
@@ -3001,10 +2994,11 @@ static int64_t sys_rename_at(int old_dirfd, uint64_t user_old_path,
 static int64_t sys_link_at(int old_dirfd, uint64_t user_old_path,
                            int new_dirfd, uint64_t user_new_path, int flags) {
     if (flags & ~AT_SYMLINK_FOLLOW) return -EINVAL;
-    char old_path[256], new_path[256];
-    int status = copy_path_at(old_dirfd, user_old_path, old_path);
+    VFS_PATH_SCOPED old_path = NULL;
+    VFS_PATH_SCOPED new_path = NULL;
+    int status = copy_path_at(old_dirfd, user_old_path, &old_path);
     if (status != 0) return status;
-    status = copy_path_at(new_dirfd, user_new_path, new_path);
+    status = copy_path_at(new_dirfd, user_new_path, &new_path);
     if (status != 0) return status;
 
     struct vfs_node *node = (flags & AT_SYMLINK_FOLLOW) ? vfs_lookup(old_path)
@@ -3026,12 +3020,15 @@ static int64_t sys_mount(uint64_t user_source, uint64_t user_target,
     if (cred && cred->euid != 0) return -EPERM;
     if (flags > 0xFFFFFFFFULL) return -EINVAL;
 
-    char source[256], target[256], type[64];
+    VFS_PATH_SCOPED source = vfs_path_buffer();
+    VFS_PATH_SCOPED target = vfs_path_buffer();
+    char type[64];
+    if (!source || !target) return -ENOMEM;
     source[0] = '\0';
     type[0] = '\0';
-    if (user_source && copy_string_from_user(source, sizeof(source), user_source) < 0)
-        return -EFAULT;
-    if (copy_string_from_user(target, sizeof(target), user_target) < 0) return -EFAULT;
+    if (user_source && copy_user_path(user_source, source) != 0) return -EFAULT;
+    int status = copy_user_path(user_target, target);
+    if (status != 0) return status;
     if (user_type && copy_string_from_user(type, sizeof(type), user_type) < 0)
         return -EFAULT;
     return vfs_mount(user_source ? source : NULL, target,
@@ -3042,16 +3039,18 @@ static int64_t sys_umount2(uint64_t user_target, int flags) {
     (void)flags;
     const struct credentials *cred = cred_current();
     if (cred && cred->euid != 0) return -EPERM;
-    char target[256];
-    if (copy_string_from_user(target, sizeof(target), user_target) < 0) return -EFAULT;
+    VFS_PATH_SCOPED target = vfs_path_buffer();
+    if (!target) return -ENOMEM;
+    int status = copy_user_path(user_target, target);
+    if (status != 0) return status;
     return vfs_umount(target);
 }
 
 static int64_t sys_mknodat(int dirfd, uint64_t user_path, uint32_t mode,
                            uint64_t device) {
     (void)device;
-    char path[256];
-    int status = copy_path_at(dirfd, user_path, path);
+    VFS_PATH_SCOPED path = NULL;
+    int status = copy_path_at(dirfd, user_path, &path);
     if (status != 0) return status;
 
     uint32_t type = mode & 0170000U;
@@ -3067,9 +3066,13 @@ static int64_t sys_mknodat(int dirfd, uint64_t user_path, uint32_t mode,
 
 static int64_t sys_symlink_at(uint64_t user_target, int new_dirfd,
                               uint64_t user_link_path) {
-    char target[256], link_path[256];
-    if (copy_string_from_user(target, sizeof(target), user_target) < 0) return -EFAULT;
-    int status = copy_path_at(new_dirfd, user_link_path, link_path);
+    VFS_PATH_SCOPED target = vfs_path_buffer();
+    VFS_PATH_SCOPED link_path = NULL;
+    if (!target) return -ENOMEM;
+    int status = copy_user_path(user_target, target);
+    if (status != 0) return status;
+    if (!target[0]) return -ENOENT;
+    status = copy_path_at(new_dirfd, user_link_path, &link_path);
     if (status != 0) return status;
     if (vfs_lookup_nofollow(link_path)) return -EEXIST;
     int permitted = cred_may_write_parent(link_path);
@@ -3110,8 +3113,8 @@ static int64_t change_owner(struct vfs_node *node, uint32_t uid, uint32_t gid) {
 
 static int64_t sys_chmod_at(int dirfd, uint64_t user_path, uint32_t mode, int flags) {
     if (flags & ~AT_SYMLINK_NOFOLLOW) return -EINVAL;
-    char path[256];
-    int status = copy_path_at(dirfd, user_path, path);
+    VFS_PATH_SCOPED path = NULL;
+    int status = copy_path_at(dirfd, user_path, &path);
     if (status != 0) return status;
     struct vfs_node *node = (flags & AT_SYMLINK_NOFOLLOW) ? vfs_lookup_nofollow(path) : vfs_lookup(path);
     if (!node) return -ENOENT;
@@ -3123,8 +3126,8 @@ static int64_t sys_chmod_at(int dirfd, uint64_t user_path, uint32_t mode, int fl
 static int64_t sys_chown_at(int dirfd, uint64_t user_path, uint32_t uid,
                             uint32_t gid, int flags) {
     if (flags & ~AT_SYMLINK_NOFOLLOW) return -EINVAL;
-    char path[256];
-    int status = copy_path_at(dirfd, user_path, path);
+    VFS_PATH_SCOPED path = NULL;
+    int status = copy_path_at(dirfd, user_path, &path);
     if (status != 0) return status;
     struct vfs_node *node = (flags & AT_SYMLINK_NOFOLLOW) ? vfs_lookup_nofollow(path) : vfs_lookup(path);
     if (!node) return -ENOENT;
@@ -3158,7 +3161,6 @@ static int64_t sys_utimens_at(int dirfd, uint64_t user_path, uint64_t user_times
 
     struct vfs_node *node = NULL;
     if (!user_path) {
-
         struct process *process = process_current();
         if (!process || dirfd < 0 || dirfd >= PROCESS_MAX_FDS || !process->files->fds[dirfd])
             return -EBADF;
@@ -3166,8 +3168,8 @@ static int64_t sys_utimens_at(int dirfd, uint64_t user_path, uint64_t user_times
         if (file->kind != FILE_KIND_VFS || !file->node) return -EBADF;
         node = file->node;
     } else {
-        char path[256];
-        int status = copy_path_at(dirfd, user_path, path);
+        VFS_PATH_SCOPED path = NULL;
+        int status = copy_path_at(dirfd, user_path, &path);
         if (status != 0) return status;
         node = (flags & AT_SYMLINK_NOFOLLOW) ? vfs_lookup_nofollow(path)
                                              : vfs_lookup(path);
@@ -3220,7 +3222,6 @@ static int map_shared_object(struct process *process, uint64_t start,
                              uint64_t file_offset, uint64_t flags, int private) {
     uint64_t extra = PAGE_SHARED;
     if (private) {
-
         extra = (flags & PAGE_WRITE) ? PAGE_COW : 0;
         flags &= ~PAGE_WRITE;
     }
@@ -3241,7 +3242,6 @@ static int map_shared_object(struct process *process, uint64_t start,
 }
 
 static void unmap_pages(struct process *process, uint64_t start, uint64_t end) {
-
     process_unmap_area(start, end);
 
     vmm_flush_batch_begin();
@@ -3476,7 +3476,6 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
         }
 
         if (mapped == shareable) {
-
             if (process_map_area(base, base + length, page_flags, VM_FILE_PAGES,
                                  file, offset) != 0) {
                 unmap_pages(process, base, base + mapped);
@@ -3646,7 +3645,6 @@ static int64_t sys_shmdt(uint64_t address) {
 }
 
 static int64_t sys_shmctl(int id, int command, uint64_t user_buffer) {
-
     command &= ~IPC_64;
     switch (command) {
         case IPC_RMID:
@@ -3887,10 +3885,12 @@ static int rewrite_script_arguments(struct exec_arguments *arguments, int argc,
 }
 
 static int64_t sys_execve(struct syscall_frame *frame, uint64_t user_path, uint64_t user_argv, uint64_t user_envp) {
-    char path[256];
-    char given[256];
-    if (copy_string_from_user(given, sizeof(given), user_path) < 0) return -EFAULT;
-    int status = copy_path_at(AT_FDCWD, user_path, path);
+    VFS_PATH_SCOPED path = NULL;
+    VFS_PATH_SCOPED given = vfs_path_buffer();
+    if (!given) return -ENOMEM;
+    int status = copy_user_path(user_path, given);
+    if (status != 0) return status;
+    status = copy_path_at(AT_FDCWD, user_path, &path);
     if (status != 0) return status;
     struct exec_arguments *arguments = (struct exec_arguments *)kmalloc(sizeof(*arguments));
     if (!arguments) return -ENOMEM;
@@ -3949,8 +3949,8 @@ static int64_t sys_execve(struct syscall_frame *frame, uint64_t user_path, uint6
         return script;
     }
     if (script > 0) {
-        char interpreter_path[256];
-        if (normalize_path(NULL, interpreter, interpreter_path) != 0) {
+        VFS_PATH_SCOPED interpreter_path = vfs_path_buffer();
+        if (!interpreter_path || normalize_path(NULL, interpreter, interpreter_path) != 0) {
             kfree(arguments);
             return -ENOENT;
         }
@@ -4035,7 +4035,6 @@ static void watch_blocked_file(struct process *process, uint64_t syscall_number,
 
 static void block_and_retry(struct syscall_frame *frame, uint64_t syscall_number,
                             struct file *file, int writing) {
-
     if (process_signal_interrupts_wait()) {
         SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINTR;
         return;
@@ -4770,8 +4769,10 @@ static int64_t sys_eventfd(uint64_t initial_value, int flags, int legacy) {
 static int64_t sys_memfd_create(uint64_t user_name, uint32_t flags) {
     if (flags & ~(uint32_t)(MFD_CLOEXEC | MFD_ALLOW_SEALING | MFD_NOEXEC_SEAL |
                             MFD_EXEC)) return -EINVAL;
-    char name[256];
-    if (copy_string_from_user(name, sizeof(name), user_name) < 0) return -EFAULT;
+    char name[250];
+    int copied = copy_string_from_user(name, sizeof(name), user_name);
+    if (copied == -2) return -EINVAL;
+    if (copied < 0) return -EFAULT;
 
     struct memfd_object *object = memfd_create_object();
     if (!object) return -ENOMEM;
@@ -4923,8 +4924,9 @@ static int64_t sys_inotify_init(int flags) {
 static int64_t sys_inotify_add_watch(int fd, uint64_t user_path, uint32_t mask) {
     struct file *file = file_from_fd(fd);
     if (!file || file->kind != FILE_KIND_INOTIFY) return -EBADF;
-    char path[256];
-    if (copy_string_from_user(path, sizeof(path), user_path) < 0) return -EFAULT;
+    VFS_PATH_SCOPED path = NULL;
+    int status = copy_path_at(AT_FDCWD, user_path, &path);
+    if (status != 0) return status;
     struct vfs_node *node = vfs_lookup(path);
     if (!node) return -ENOENT;
     return inotify_add_watch(file->inotify, node, mask);
@@ -4966,7 +4968,6 @@ static int64_t sys_reboot(uint32_t magic1, uint32_t magic2, uint32_t command) {
         return -EINVAL;
 
     switch (command) {
-
         case LINUX_REBOOT_CMD_CAD_ON:  power_set_button_handled(1); return 0;
         case LINUX_REBOOT_CMD_CAD_OFF: power_set_button_handled(0); return 0;
         case LINUX_REBOOT_CMD_RESTART:   power_restart();
@@ -5085,7 +5086,6 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
                 file->node->write_ready) {
                 block_and_retry(frame, SYS_IOCTL, file, 1);
             } else if (result == -EAGAIN && (unsigned long)SYSCALL_ARG1(frame) == VT_WAITACTIVE) {
-
                 if (process_signal_interrupts_wait()) {
                     SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINTR;
                     break;
@@ -5475,7 +5475,6 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             break;
         }
         case SYS_WAITID: {
-
             int idtype = (int)SYSCALL_ARG0(frame);
             int64_t id = (int64_t)SYSCALL_ARG1(frame);
             int options = (int)SYSCALL_ARG3(frame);
@@ -5535,10 +5534,8 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
                     SYSCALL_RET(frame) = 0;
                 }
             } else if (command == F_GETLK || command == F_SETLK || command == F_SETLKW) {
-
                 SYSCALL_RET(frame) = (uint64_t)sys_fcntl_lock(fd, command, SYSCALL_ARG2(frame));
             } else if (command == F_ADD_SEALS || command == F_GET_SEALS) {
-
                 struct file *file = process->files->fds[fd];
                 if (file->kind != FILE_KIND_MEMFD) {
                     SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINVAL;
@@ -6012,7 +6009,6 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             else {
                 if (last >= PROCESS_MAX_FDS) last = PROCESS_MAX_FDS - 1;
                 if (flags & CLOSE_RANGE_CLOEXEC) {
-
                     for (uint64_t fd = first; fd <= last; fd++)
                         if (process->files->fds[fd])
                             process_set_fd_flags(process, (int)fd, PROCESS_FD_CLOEXEC);
@@ -6189,7 +6185,6 @@ void syscall_dispatch(struct syscall_frame *frame) {
     if (syscall_number_may_share(SYSCALL_NR(frame))) {
         kernel_lock_shared();
         if (syscall_try_shared(frame)) {
-
             uint64_t top = cpu_current()->kernel_rsp;
             if (top) {
                 struct syscall_frame *resumed =

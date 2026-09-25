@@ -14,10 +14,8 @@
 
 extern void kprintf(const char *fmt, ...);
 
-#define VFS_PATH_MAX 256
-#define VFS_SYMLINK_MAX_DEPTH 16
+#define VFS_SYMLINK_MAX_DEPTH 40
 #define VFS_MOUNT_MAX_DEPTH 16
-#define VFS_TREE_MAX_DEPTH 64
 
 struct vfs_node *vfs_root;
 static uint64_t next_inode = 1;
@@ -182,11 +180,41 @@ static int valid_component(const char *name) {
     return name && name[0] && strcmp(name, ".") != 0 && strcmp(name, "..") != 0;
 }
 
+char *vfs_path_buffer(void) {
+    return (char *)kmalloc(VFS_PATH_MAX);
+}
+
+void vfs_path_release(char **buffer) {
+    if (buffer && *buffer) kfree(*buffer);
+}
+
+int vfs_set_name(struct vfs_node *node, const char *name) {
+    if (!name) name = "";
+    size_t length = strlen(name);
+    if (length > VFS_NAME_MAX) length = VFS_NAME_MAX;
+    char *copy = (char *)kmalloc(length + 1);
+    if (!copy) return -1;
+    memcpy(copy, name, length);
+    copy[length] = '\0';
+    kfree(node->name);
+    node->name = copy;
+    return 0;
+}
+
+void vfs_free_node(struct vfs_node *node) {
+    if (!node) return;
+    kfree(node->name);
+    kfree(node);
+}
+
 struct vfs_node *vfs_alloc_node(const char *name, uint32_t flags) {
     struct vfs_node *node = (struct vfs_node *)kmalloc(sizeof(*node));
     if (!node) return NULL;
     memset(node, 0, sizeof(*node));
-    strncpy(node->name, name ? name : "", sizeof(node->name) - 1);
+    if (vfs_set_name(node, name) != 0) {
+        kfree(node);
+        return NULL;
+    }
     node->flags = flags;
     node->inode = next_inode++;
     node->links = 1;
@@ -237,12 +265,12 @@ struct vfs_node *vfs_find_child(struct vfs_node *directory, const char *name) {
     return cross_mounts(node);
 }
 
-static const char *next_component(const char *path, char component[128]) {
+static const char *next_component(const char *path, char component[VFS_NAME_MAX + 1]) {
     while (*path == '/') path++;
     size_t length = 0;
     while (*path && *path != '/') {
-        if (length + 1 < 128) component[length++] = *path;
-        path++;
+        if (length >= VFS_NAME_MAX) return NULL;
+        component[length++] = *path++;
     }
     component[length] = '\0';
     while (*path == '/') path++;
@@ -254,23 +282,22 @@ int vfs_node_path(struct vfs_node *node, char *buffer, size_t capacity) {
     if (node == vfs_root) {
         buffer[0] = '/'; buffer[1] = '\0'; return 0;
     }
-    const struct vfs_node *stack[64];
-    size_t depth = 0;
-    while (node && node != vfs_root && depth < 64) {
-        stack[depth++] = node;
-        node = node->parent;
+    size_t total = 0;
+    struct vfs_node *walk = node;
+    while (walk && walk != vfs_root) {
+        total += strlen(walk->name) + 1;
+        if (total + 1 > capacity) return -1;
+        walk = walk->parent;
     }
-    if (node != vfs_root) return -1;
-    size_t at = 0;
-    buffer[at++] = '/';
-    while (depth) {
-        const char *name = stack[--depth]->name;
-        size_t length = strlen(name);
-        if (at + length + (depth ? 1 : 0) + 1 > capacity) return -1;
-        memcpy(buffer + at, name, length); at += length;
-        if (depth) buffer[at++] = '/';
-    }
+    if (walk != vfs_root) return -1;
+    size_t at = total;
     buffer[at] = '\0';
+    for (walk = node; walk != vfs_root; walk = walk->parent) {
+        size_t length = strlen(walk->name);
+        at -= length;
+        memcpy(buffer + at, walk->name, length);
+        buffer[--at] = '/';
+    }
     return 0;
 }
 
@@ -283,15 +310,44 @@ static int append_text(char *output, size_t capacity, size_t *at, const char *te
     return 0;
 }
 
-static struct vfs_node *lookup_internal(const char *path, int follow_final, unsigned depth) {
-    if (!path || path[0] != '/' || !vfs_root || depth > VFS_SYMLINK_MAX_DEPTH) return NULL;
-    if (path[1] == '\0') return cross_mounts(vfs_root);
+static int symlink_path(struct vfs_node *directory, const char *target,
+                        const char *rest, char *out) {
+    size_t at = 0;
+    out[0] = '\0';
+    if (target[0] == '/') {
+        struct vfs_node *root = process_get_root();
+        if (root && root != vfs_root) {
+            if (vfs_node_path(root, out, VFS_PATH_MAX) != 0) return -1;
+            at = strlen(out);
+            while (at > 1 && out[at - 1] == '/') out[--at] = '\0';
+            if (at == 1) at = 0;
+            out[at] = '\0';
+        }
+    } else {
+        if (vfs_node_path(directory, out, VFS_PATH_MAX) != 0) return -1;
+        at = strlen(out);
+        if (at > 1 && append_text(out, VFS_PATH_MAX, &at, "/") != 0) return -1;
+    }
+    if (append_text(out, VFS_PATH_MAX, &at, target) != 0) return -1;
+    if (*rest) {
+        if ((at == 0 || out[at - 1] != '/') && append_text(out, VFS_PATH_MAX, &at, "/") != 0)
+            return -1;
+        if (append_text(out, VFS_PATH_MAX, &at, rest) != 0) return -1;
+    }
+    return 0;
+}
 
+static struct vfs_node *lookup_internal(const char *path, int follow_final) {
+    if (!path || path[0] != '/' || !vfs_root) return NULL;
+    VFS_PATH_SCOPED spare = NULL;
+    VFS_PATH_SCOPED held = NULL;
     struct vfs_node *current = cross_mounts(vfs_root);
-    char component[128];
+    char component[VFS_NAME_MAX + 1];
     const char *cursor = path;
+    unsigned followed = 0;
     while (*cursor) {
         cursor = next_component(cursor, component);
+        if (!cursor) return NULL;
         if (!component[0] || strcmp(component, ".") == 0) continue;
         if (strcmp(component, "..") == 0) {
             if (current != process_get_root() && current->parent) current = current->parent;
@@ -303,38 +359,15 @@ static struct vfs_node *lookup_internal(const char *path, int follow_final, unsi
         int final_component = *cursor == '\0';
         if ((next->flags & 0xFFU) == VFS_SYMLINK && (follow_final || !final_component)) {
             const char *target = (const char *)next->data;
-            if (!target || !target[0]) return NULL;
-            char resolved[VFS_PATH_MAX];
-            size_t at = 0;
-            resolved[0] = '\0';
-            if (target[0] == '/') {
-                struct vfs_node *root = process_get_root();
-                if (root && root != vfs_root) {
-                    char root_path[VFS_PATH_MAX];
-                    if (vfs_node_path(root, root_path, sizeof(root_path)) != 0) return NULL;
-                    size_t root_length = strlen(root_path);
-                    while (root_length > 1 && root_path[root_length - 1] == '/')
-                        root_path[--root_length] = '\0';
-                    if (root_length > 1 &&
-                        append_text(resolved, sizeof(resolved), &at, root_path) != 0) return NULL;
-                }
-                if (append_text(resolved, sizeof(resolved), &at, target) != 0) return NULL;
-            } else {
-                char parent_path[VFS_PATH_MAX];
-                if (vfs_node_path(current, parent_path, sizeof(parent_path)) != 0) return NULL;
-                if (append_text(resolved, sizeof(resolved), &at, parent_path) != 0) return NULL;
-                if (at > 1 && resolved[at - 1] != '/') {
-                    if (append_text(resolved, sizeof(resolved), &at, "/") != 0) return NULL;
-                }
-                if (append_text(resolved, sizeof(resolved), &at, target) != 0) return NULL;
-            }
-            if (*cursor) {
-                if (at == 0 || resolved[at - 1] != '/') {
-                    if (append_text(resolved, sizeof(resolved), &at, "/") != 0) return NULL;
-                }
-                if (append_text(resolved, sizeof(resolved), &at, cursor) != 0) return NULL;
-            }
-            return lookup_internal(resolved, follow_final, depth + 1);
+            if (!target || !target[0] || ++followed > VFS_SYMLINK_MAX_DEPTH) return NULL;
+            if (!spare && !(spare = vfs_path_buffer())) return NULL;
+            if (symlink_path(current, target, cursor, spare) != 0) return NULL;
+            char *swap = held;
+            held = spare;
+            spare = swap;
+            cursor = held;
+            current = cross_mounts(vfs_root);
+            continue;
         }
         current = next;
     }
@@ -342,20 +375,21 @@ static struct vfs_node *lookup_internal(const char *path, int follow_final, unsi
 }
 
 struct vfs_node *vfs_lookup(const char *path) {
-    return lookup_internal(path, 1, 0);
+    return lookup_internal(path, 1);
 }
 
 struct vfs_node *vfs_lookup_nofollow(const char *path) {
-    return lookup_internal(path, 0, 0);
+    return lookup_internal(path, 0);
 }
 
 struct vfs_node *vfs_mkdir_p(const char *path) {
     if (!path || path[0] != '/' || !vfs_root) return NULL;
     struct vfs_node *current = vfs_root;
-    char component[128];
+    char component[VFS_NAME_MAX + 1];
     const char *cursor = path;
     while (*cursor) {
         cursor = next_component(cursor, component);
+        if (!cursor) return NULL;
         if (!component[0]) break;
         if (!valid_component(component)) continue;
         struct vfs_node *next = vfs_find_child(current, component);
@@ -365,8 +399,8 @@ struct vfs_node *vfs_mkdir_p(const char *path) {
             PERSIST(created, next);
             adopt_into_parent(next);
         } else if ((next->flags & 0xFFU) == VFS_SYMLINK) {
-            char next_path[VFS_PATH_MAX];
-            if (vfs_node_path(next, next_path, sizeof(next_path)) != 0) return NULL;
+            VFS_PATH_SCOPED next_path = vfs_path_buffer();
+            if (!next_path || vfs_node_path(next, next_path, VFS_PATH_MAX) != 0) return NULL;
             next = vfs_lookup(next_path);
             if (!next) return NULL;
         }
@@ -376,14 +410,14 @@ struct vfs_node *vfs_mkdir_p(const char *path) {
     return current;
 }
 
-static int split_parent(const char *path, char parent[256], char name[128]) {
+static int split_parent(const char *path, char *parent, char name[VFS_NAME_MAX + 1]) {
     if (!path || path[0] != '/') return -1;
     size_t length = strlen(path);
     while (length > 1 && path[length - 1] == '/') length--;
     size_t slash = length;
     while (slash > 0 && path[slash - 1] != '/') slash--;
     size_t name_length = length - slash;
-    if (!name_length || name_length >= 128) return -1;
+    if (!name_length || name_length > VFS_NAME_MAX) return -1;
     memcpy(name, path + slash, name_length);
     name[name_length] = '\0';
     if (!valid_component(name)) return -1;
@@ -392,11 +426,17 @@ static int split_parent(const char *path, char parent[256], char name[128]) {
         parent[1] = '\0';
     } else {
         size_t parent_length = slash - 1;
-        if (parent_length >= 256) return -1;
+        if (parent_length >= VFS_PATH_MAX) return -1;
         memcpy(parent, path, parent_length);
         parent[parent_length] = '\0';
     }
     return 0;
+}
+
+static struct vfs_node *parent_of(const char *path, char name[VFS_NAME_MAX + 1], int create) {
+    VFS_PATH_SCOPED parent_path = vfs_path_buffer();
+    if (!parent_path || split_parent(path, parent_path, name) != 0) return NULL;
+    return create ? vfs_mkdir_p(parent_path) : vfs_lookup(parent_path);
 }
 
 static uint64_t pages_for(uint64_t length) {
@@ -590,10 +630,8 @@ void vfs_setup_memory_file(struct vfs_node *node) {
 
 struct vfs_node *vfs_create_file(const char *path, const void *data,
                                  uint64_t length, uint32_t flags, int copy_data) {
-    char parent_path[256];
-    char name[128];
-    if (split_parent(path, parent_path, name) != 0) return NULL;
-    struct vfs_node *parent = vfs_mkdir_p(parent_path);
+    char name[VFS_NAME_MAX + 1];
+    struct vfs_node *parent = parent_of(path, name, 1);
     if (!parent || vfs_find_child(parent, name)) return NULL;
 
     struct vfs_node *node = vfs_alloc_node(name, VFS_FILE | flags);
@@ -609,7 +647,7 @@ struct vfs_node *vfs_create_file(const char *path, const void *data,
             uint8_t *page = (uint8_t *)vfs_page(node, index, 1);
             if (!page) {
                 free_node_data(node);
-                kfree(node);
+                vfs_free_node(node);
                 return NULL;
             }
             memcpy(page, (const uint8_t *)data + stored, (size_t)chunk);
@@ -622,7 +660,7 @@ struct vfs_node *vfs_create_file(const char *path, const void *data,
     if (!(flags & VFS_READONLY)) node->write = memory_write;
     if (vfs_attach(parent, node) != 0) {
         free_node_data(node);
-        kfree(node);
+        vfs_free_node(node);
         return NULL;
     }
     inotify_notify(parent, TUNIX_IN_CREATE, name, 0);
@@ -632,10 +670,8 @@ struct vfs_node *vfs_create_file(const char *path, const void *data,
 }
 
 struct vfs_node *vfs_create_file_node(const char *path, uint32_t mode) {
-    char parent_path[256];
-    char name[128];
-    if (split_parent(path, parent_path, name) != 0) return NULL;
-    struct vfs_node *parent = vfs_lookup(parent_path);
+    char name[VFS_NAME_MAX + 1];
+    struct vfs_node *parent = parent_of(path, name, 0);
     if (!parent || (parent->flags & 0xFFU) != VFS_DIRECTORY) return NULL;
     if (vfs_find_child(parent, name)) return NULL;
 
@@ -645,7 +681,7 @@ struct vfs_node *vfs_create_file_node(const char *path, uint32_t mode) {
     node->read = memory_read;
     node->write = memory_write;
     if (vfs_attach(parent, node) != 0) {
-        kfree(node);
+        vfs_free_node(node);
         return NULL;
     }
     cred_stamp_new_node(node);
@@ -656,10 +692,8 @@ struct vfs_node *vfs_create_file_node(const char *path, uint32_t mode) {
 }
 
 struct vfs_node *vfs_create_directory(const char *path, uint32_t mode) {
-    char parent_path[256];
-    char name[128];
-    if (split_parent(path, parent_path, name) != 0) return NULL;
-    struct vfs_node *parent = vfs_lookup(parent_path);
+    char name[VFS_NAME_MAX + 1];
+    struct vfs_node *parent = parent_of(path, name, 0);
     if (!parent || (parent->flags & 0xFFU) != VFS_DIRECTORY) return NULL;
     if (vfs_find_child(parent, name)) return NULL;
 
@@ -667,7 +701,7 @@ struct vfs_node *vfs_create_directory(const char *path, uint32_t mode) {
     if (!node) return NULL;
     node->mode = mode & 07777U;
     if (vfs_attach(parent, node) != 0) {
-        kfree(node);
+        vfs_free_node(node);
         return NULL;
     }
     cred_stamp_new_node(node);
@@ -680,23 +714,21 @@ struct vfs_node *vfs_create_directory(const char *path, uint32_t mode) {
 struct vfs_node *vfs_create_symlink(const char *path, const char *target,
                                     uint32_t flags) {
     if (!target || !target[0]) return NULL;
-    char parent_path[256];
-    char name[128];
-    if (split_parent(path, parent_path, name) != 0) return NULL;
-    struct vfs_node *parent = vfs_mkdir_p(parent_path);
+    char name[VFS_NAME_MAX + 1];
+    struct vfs_node *parent = parent_of(path, name, 1);
     if (!parent || vfs_find_child(parent, name)) return NULL;
 
     struct vfs_node *node = vfs_alloc_node(name, VFS_SYMLINK | flags | VFS_OWNED_DATA);
     if (!node) return NULL;
     size_t length = strlen(target);
     node->data = kmalloc(length + 1);
-    if (!node->data) { kfree(node); return NULL; }
+    if (!node->data) { vfs_free_node(node); return NULL; }
     memcpy(node->data, target, length + 1);
     node->length = length;
     node->capacity = length + 1;
     if (vfs_attach(parent, node) != 0) {
         kfree(node->data);
-        kfree(node);
+        vfs_free_node(node);
         return NULL;
     }
     cred_stamp_new_node(node);
@@ -707,10 +739,8 @@ struct vfs_node *vfs_create_symlink(const char *path, const char *target,
 }
 
 struct vfs_node *vfs_create_fifo(const char *path, uint32_t mode) {
-    char parent_path[256];
-    char name[128];
-    if (split_parent(path, parent_path, name) != 0) return NULL;
-    struct vfs_node *parent = vfs_lookup(parent_path);
+    char name[VFS_NAME_MAX + 1];
+    struct vfs_node *parent = parent_of(path, name, 0);
     if (!parent || (parent->flags & 0xFFU) != VFS_DIRECTORY) return NULL;
     if (vfs_find_child(parent, name)) return NULL;
 
@@ -718,7 +748,7 @@ struct vfs_node *vfs_create_fifo(const char *path, uint32_t mode) {
     if (!node) return NULL;
     node->mode = mode & 07777U;
     if (vfs_attach(parent, node) != 0) {
-        kfree(node);
+        vfs_free_node(node);
         return NULL;
     }
     cred_stamp_new_node(node);
@@ -728,10 +758,8 @@ struct vfs_node *vfs_create_fifo(const char *path, uint32_t mode) {
 }
 
 struct vfs_node *vfs_create_socket_node(const char *path, uint32_t mode) {
-    char parent_path[256];
-    char name[128];
-    if (split_parent(path, parent_path, name) != 0) return NULL;
-    struct vfs_node *parent = vfs_lookup(parent_path);
+    char name[VFS_NAME_MAX + 1];
+    struct vfs_node *parent = parent_of(path, name, 0);
     if (!parent || (parent->flags & 0xFFU) != VFS_DIRECTORY) return NULL;
     if (vfs_find_child(parent, name)) return NULL;
 
@@ -739,7 +767,7 @@ struct vfs_node *vfs_create_socket_node(const char *path, uint32_t mode) {
     if (!node) return NULL;
     node->mode = mode & 07777U;
     if (vfs_attach(parent, node) != 0) {
-        kfree(node);
+        vfs_free_node(node);
         return NULL;
     }
     cred_stamp_new_node(node);
@@ -755,13 +783,13 @@ struct vfs_node *vfs_attach_symlink(struct vfs_node *parent, const char *name,
     if (!node) return NULL;
     size_t length = strlen(target);
     node->data = kmalloc(length + 1);
-    if (!node->data) { kfree(node); return NULL; }
+    if (!node->data) { vfs_free_node(node); return NULL; }
     memcpy(node->data, target, length + 1);
     node->length = length;
     node->capacity = length + 1;
     if (vfs_attach(parent, node) != 0) {
         kfree(node->data);
-        kfree(node);
+        vfs_free_node(node);
         return NULL;
     }
     return node;
@@ -778,7 +806,7 @@ struct vfs_node *vfs_attach_link(struct vfs_node *parent, const char *name,
     if (!link) return NULL;
     link->link_target = target;
     if (vfs_attach(parent, link) != 0) {
-        kfree(link);
+        vfs_free_node(link);
         return NULL;
     }
     target->links++;
@@ -787,14 +815,13 @@ struct vfs_node *vfs_attach_link(struct vfs_node *parent, const char *name,
 }
 
 int vfs_link(struct vfs_node *target, const char *path) {
-    char parent_path[256];
-    char name[128];
-    if (!target || split_parent(path, parent_path, name) != 0) return -1;
+    char name[VFS_NAME_MAX + 1];
+    if (!target) return -1;
     if (target->link_target) target = target->link_target;
     if ((target->flags & 0xFFU) == VFS_DIRECTORY) return -1;
     if (target->flags & VFS_READONLY) return -1;
 
-    struct vfs_node *parent = vfs_lookup(parent_path);
+    struct vfs_node *parent = parent_of(path, name, 0);
     if (!parent || (parent->flags & 0xFFU) != VFS_DIRECTORY) return -1;
     if (vfs_find_entry(parent, name)) return -1;
     struct vfs_node *link = vfs_attach_link(parent, name, target);
@@ -819,7 +846,7 @@ static void destroy_node(struct vfs_node *node) {
     if (node->link_target) {
         struct vfs_node *target = node->link_target;
         node->link_target = NULL;
-        kfree(node);
+        vfs_free_node(node);
         if (target->links) target->links--;
         if (!target->links && (target->flags & VFS_ORPHANED))
             PERSIST(released, target);
@@ -836,7 +863,7 @@ static void destroy_node(struct vfs_node *node) {
         pipe_buffer_destroy(node->fifo);
         node->fifo = NULL;
     }
-    kfree(node);
+    vfs_free_node(node);
 }
 
 void vfs_node_ref(struct vfs_node *node) {
@@ -848,7 +875,7 @@ void vfs_node_unref(struct vfs_node *node) {
     if (--node->refs) return;
     if (!(node->flags & VFS_ORPHANED)) return;
     free_node_data(node);
-    kfree(node);
+    vfs_free_node(node);
 }
 
 static int detach_child(struct vfs_node *parent, struct vfs_node *node) {
@@ -875,10 +902,8 @@ int vfs_detach_child(struct vfs_node *parent, struct vfs_node *node) {
 }
 
 int vfs_remove(const char *path, int remove_directory) {
-    char parent_path[256];
-    char name[128];
-    if (split_parent(path, parent_path, name) != 0) return -1;
-    struct vfs_node *parent = vfs_lookup(parent_path);
+    char name[VFS_NAME_MAX + 1];
+    struct vfs_node *parent = parent_of(path, name, 0);
     if (!parent || (parent->flags & 0xFFU) != VFS_DIRECTORY) return -1;
     struct vfs_node *node = vfs_find_entry(parent, name);
     if (!node) return -1;
@@ -900,12 +925,10 @@ int vfs_remove(const char *path, int remove_directory) {
 }
 
 int vfs_rename(const char *old_path, const char *new_path) {
-    char old_parent_path[256], old_name[128];
-    char new_parent_path[256], new_name[128];
-    if (split_parent(old_path, old_parent_path, old_name) != 0 ||
-        split_parent(new_path, new_parent_path, new_name) != 0) return -1;
-    struct vfs_node *old_parent = vfs_lookup(old_parent_path);
-    struct vfs_node *new_parent = vfs_lookup(new_parent_path);
+    char old_name[VFS_NAME_MAX + 1];
+    char new_name[VFS_NAME_MAX + 1];
+    struct vfs_node *old_parent = parent_of(old_path, old_name, 0);
+    struct vfs_node *new_parent = parent_of(new_path, new_name, 0);
     if (!old_parent || !new_parent ||
         (old_parent->flags & 0xFFU) != VFS_DIRECTORY ||
         (new_parent->flags & 0xFFU) != VFS_DIRECTORY) return -1;
@@ -939,9 +962,18 @@ int vfs_rename(const char *old_path, const char *new_path) {
     inotify_notify(new_parent, TUNIX_IN_MOVED_TO, new_name, cookie);
     inotify_notify(node->link_target ? node->link_target : node,
                    TUNIX_IN_MOVE_SELF, NULL, cookie);
-    if (detach_child(old_parent, node) != 0) return -1;
-    strncpy(node->name, new_name, sizeof(node->name) - 1);
-    node->name[sizeof(node->name) - 1] = '\0';
+    char *old_stored = node->name;
+    node->name = NULL;
+    if (vfs_set_name(node, new_name) != 0) {
+        node->name = old_stored;
+        return -1;
+    }
+    if (detach_child(old_parent, node) != 0) {
+        kfree(node->name);
+        node->name = old_stored;
+        return -1;
+    }
+    kfree(old_stored);
     if (vfs_attach(new_parent, node) != 0) return -1;
     PERSIST(moved, node, old_parent, old_name);
     return 0;
@@ -994,18 +1026,22 @@ void vfs_mount_builtin(const char *source, const char *target, const char *type,
     mount_insert(entry);
 }
 
-static void free_tree(struct vfs_node *node, unsigned depth) {
-    if (!node || depth > VFS_TREE_MAX_DEPTH) return;
-    struct vfs_node *child = node->children;
-    node->children = NULL;
-    while (child) {
-        struct vfs_node *next = child->next;
-        child->next = NULL;
-        child->parent = NULL;
-        free_tree(child, depth + 1U);
-        child = next;
+static void free_tree(struct vfs_node *top) {
+    struct vfs_node *node = top;
+    while (node) {
+        struct vfs_node *child = node->children;
+        if (child) {
+            node->children = child->next;
+            child->next = NULL;
+            child->parent = node;
+            node = child;
+            continue;
+        }
+        struct vfs_node *up = node == top ? NULL : node->parent;
+        node->parent = NULL;
+        destroy_node(node);
+        node = up;
     }
-    destroy_node(node);
 }
 
 static int mount_is_pseudo(const char *type) {
@@ -1063,7 +1099,7 @@ int vfs_mount(const char *source, const char *target, const char *type,
 
     struct vfs_mount *entry = (struct vfs_mount *)kmalloc(sizeof(*entry));
     if (!entry) {
-        if (owns_root) free_tree(root, 0);
+        if (owns_root) free_tree(root);
         return -VFS_ENOMEM;
     }
     memset(entry, 0, sizeof(*entry));
@@ -1077,8 +1113,7 @@ int vfs_mount(const char *source, const char *target, const char *type,
 
     if (owns_root) {
         root->parent = at->parent;
-        strncpy(root->name, at->name, sizeof(root->name) - 1);
-        root->name[sizeof(root->name) - 1] = '\0';
+        (void)vfs_set_name(root, at->name);
     }
     at->mounted = root;
     at->flags |= VFS_MOUNTPOINT;
@@ -1102,7 +1137,7 @@ int vfs_umount(const char *target) {
     if (previous) previous->next = entry->next;
     else mount_table = entry->next;
     fatfs_unmount(entry->root);
-    if (entry->owns_root) free_tree(entry->root, 0);
+    if (entry->owns_root) free_tree(entry->root);
     kfree(entry);
     return 0;
 }

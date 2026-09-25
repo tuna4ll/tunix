@@ -35,7 +35,7 @@
 #define DEFAULT_MMAP_BASE 0x0000600000000000ULL
 #define MAX_ARGC 512
 #define MAX_ENVC 512
-#define MAX_INTERP_PATH 256
+#define MAX_INTERP_PATH VFS_PATH_MAX
 
 #define AT_NULL 0
 #define AT_PHDR 3
@@ -350,7 +350,7 @@ static int load_image(struct process *process, struct vfs_node *file,
 static int interpreter_path(struct vfs_node *file,
                             const struct elf64_header *header,
                             const struct elf64_program_header *programs,
-                            char path[MAX_INTERP_PATH]) {
+                            char *path) {
     const struct elf64_program_header *interp = NULL;
     for (uint16_t i = 0; i < header->phnum; i++) {
         if (programs[i].type != PT_INTERP) continue;
@@ -475,15 +475,13 @@ static int build_initial_stack(struct process *process,
 static struct vfs_node *lookup_under_root(const struct process *process,
                                           const char *path) {
     if (!process || !process->root) return vfs_lookup(path);
-    char prefix[256];
-    if (vfs_node_path(process->root, prefix, sizeof(prefix)) != 0) return NULL;
-    size_t length = strlen(prefix);
-    while (length > 1 && prefix[length - 1] == '/') prefix[--length] = '\0';
+    VFS_PATH_SCOPED full = (char *)kmalloc(2 * VFS_PATH_MAX);
+    if (!full || vfs_node_path(process->root, full, VFS_PATH_MAX) != 0) return NULL;
+    size_t length = strlen(full);
+    while (length > 1 && full[length - 1] == '/') full[--length] = '\0';
     if (length <= 1) return vfs_lookup(path);
-    char full[MAX_INTERP_PATH + 256];
     size_t tail = strlen(path);
-    if (length + tail + 1 > sizeof(full)) return NULL;
-    memcpy(full, prefix, length);
+    if (length + tail + 1 > 2 * VFS_PATH_MAX) return NULL;
     memcpy(full + length, path, tail + 1);
     return vfs_lookup(full);
 }
@@ -500,7 +498,8 @@ int elf_load_process(struct process *process, struct vfs_node *file,
     uint64_t main_base = probe.type == ET_DYN ? MAIN_PIE_BASE : 0;
     if (load_image(process, file, main_base, &main_image) != 0) return -1;
 
-    char interp_path[MAX_INTERP_PATH];
+    VFS_PATH_SCOPED interp_path = vfs_path_buffer();
+    if (!interp_path) { kfree(main_image.headers); return -1; }
     int interp_status = interpreter_path(file, main_image.header,
                                          main_image.programs, interp_path);
     if (interp_status < 0) { kfree(main_image.headers); return -1; }
@@ -514,8 +513,8 @@ int elf_load_process(struct process *process, struct vfs_node *file,
         struct vfs_node *interp_file = lookup_under_root(process, interp_path);
         if (!interp_file || load_image(process, interp_file, INTERP_BASE, &interpreter) != 0 ||
             interpreter.header->type != ET_DYN) { kfree(main_image.headers); return -1; }
-        char nested_path[MAX_INTERP_PATH];
-        if (interpreter_path(interp_file, interpreter.header, interpreter.programs,
+        VFS_PATH_SCOPED nested_path = vfs_path_buffer();
+        if (!nested_path || interpreter_path(interp_file, interpreter.header, interpreter.programs,
                              nested_path) != 0) {
             kfree(main_image.headers);
             kfree(interpreter.headers);

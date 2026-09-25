@@ -4,6 +4,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#define VFS_PATH_MAX 4096
+#define VFS_NAME_MAX 255
+
 #define VFS_FILE        0x01U
 #define VFS_DIRECTORY   0x02U
 #define VFS_CHARDEVICE  0x03U
@@ -68,7 +71,7 @@ struct vfs_page_map {
 };
 
 struct vfs_node {
-    char name[128];
+    char *name;
     uint32_t flags;
     uint32_t mode;
     uint32_t uid;
@@ -117,14 +120,14 @@ struct vfs_node {
 };
 
 struct dirent {
-    char name[128];
+    char name[VFS_NAME_MAX + 1];
     uint64_t ino;
     uint32_t type;
 };
 
 struct vfs_mount {
-    char source[64];
-    char target[192];
+    char source[VFS_PATH_MAX];
+    char target[VFS_PATH_MAX];
     char type[16];
     uint32_t flags;
     struct vfs_node *mountpoint;
@@ -193,6 +196,11 @@ void vfs_trim_cache(uint64_t budget);
 
 void vfs_init(void);
 struct vfs_node *vfs_alloc_node(const char *name, uint32_t flags);
+void vfs_free_node(struct vfs_node *node);
+int vfs_set_name(struct vfs_node *node, const char *name);
+char *vfs_path_buffer(void);
+void vfs_path_release(char **buffer);
+#define VFS_PATH_SCOPED __attribute__((cleanup(vfs_path_release))) char *
 int vfs_attach(struct vfs_node *parent, struct vfs_node *child);
 struct vfs_node *vfs_find_child(struct vfs_node *directory, const char *name);
 struct vfs_node *vfs_find_entry(struct vfs_node *directory, const char *name);

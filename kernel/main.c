@@ -151,7 +151,7 @@ void kmain(const struct boot_info *boot) {
     eventfs_init();
     procfs_init();
     syscall_init();
-    char init_path[128] = "/sbin/init";
+    static char init_path[VFS_PATH_MAX] = "/sbin/init";
     const char *requested = boot_command_line_value("init");
     if (requested) {
         size_t length = 0;

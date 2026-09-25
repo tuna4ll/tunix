@@ -68,7 +68,7 @@ struct process {
     uint64_t pgid;
     uint64_t sid;
     char name[64];
-    char exe_path[256];
+    char *exe_path;
     int state;
     int exit_status;
     int termination_signal;

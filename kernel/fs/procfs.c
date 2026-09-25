@@ -642,7 +642,7 @@ static int64_t proc_status_read(struct vfs_node *node, uint64_t offset,
     text_string(&text, "Threads:\t1\n");
     text_string(&text, "StartTicks:\t"); text_unsigned(&text, process->start_time_ns / 10000000ULL); text_char(&text, '\n');
     text_string(&text, "CpuTicks:\t"); text_unsigned(&text, process_runtime_ns(process) / 10000000ULL); text_char(&text, '\n');
-    text_string(&text, "Command:\t"); text_string(&text, process->exe_path); text_char(&text, '\n');
+    text_string(&text, "Command:\t"); text_string(&text, process->exe_path ? process->exe_path : ""); text_char(&text, '\n');
     return text_read(&text, offset, size, output);
 }
 
@@ -744,16 +744,16 @@ static int64_t proc_pid_maps_read(struct vfs_node *node, uint64_t offset,
     struct vm_area stack = {USER_STACK_LIMIT, USER_STACK_TOP,
                             PAGE_WRITE | PAGE_NX, VM_ANONYMOUS, NULL, 0, NULL};
 
+    VFS_PATH_SCOPED path = vfs_path_buffer();
     for (int step = 0; step < 3 && produced < size; step++) {
         struct vm_area *area = step == 0 ? (heap.end > heap.start ? &heap : NULL)
                              : step == 1 ? process->memory->areas
                              : &stack;
         for (; area && produced < size; area = step == 1 ? area->next : NULL) {
             struct text_buffer line = {{0}, 0};
-            char path[256];
             const char *name = step == 0 ? "[heap]" : step == 2 ? "[stack]" : NULL;
-            if (step == 1 && area->file && area->file->node &&
-                vfs_node_path(area->file->node, path, sizeof(path)) == 0)
+            if (step == 1 && path && area->file && area->file->node &&
+                vfs_node_path(area->file->node, path, VFS_PATH_MAX) == 0)
                 name = path;
             maps_line(&line, area->start, area->end, area->page_flags,
                       area->offset, name);
@@ -917,10 +917,10 @@ static void proc_process_refresh(struct vfs_node *directory) {
     struct process *process = process_find(node_pid(directory));
     if (!process) return;
 
-    (void)set_link_target(direct_child(directory, "exe"), process->exe_path);
+    (void)set_link_target(direct_child(directory, "exe"), process->exe_path ? process->exe_path : "/");
 
-    char path[256];
-    if (vfs_node_path(process->cwd, path, sizeof(path)) == 0)
+    VFS_PATH_SCOPED path = vfs_path_buffer();
+    if (path && vfs_node_path(process->cwd, path, VFS_PATH_MAX) == 0)
         (void)set_link_target(direct_child(directory, "cwd"), path);
 }
 
@@ -1056,7 +1056,7 @@ void procfs_register_process(struct process *process) {
         cwd[0] = '/';
         cwd[1] = '\0';
     }
-    (void)vfs_attach_symlink(directory, "exe", process->exe_path);
+    (void)vfs_attach_symlink(directory, "exe", process->exe_path ? process->exe_path : "/");
     (void)vfs_attach_symlink(directory, "cwd", cwd);
     (void)vfs_attach_symlink(directory, "root", "/");
 

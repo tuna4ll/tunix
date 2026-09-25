@@ -10,6 +10,8 @@
 #define EACCES 13
 #define EINVAL 22
 #define EROFS 30
+#define ENOMEM 12
+#define ENAMETOOLONG 36
 
 #define MODE_SETUID 04000U
 #define MODE_SETGID 02000U
@@ -58,8 +60,6 @@ int cred_may(const struct vfs_node *node, uint32_t want) {
     else allowed = node->mode & 7U;
     if ((allowed & want) == want) return 0;
 
-    /* Root overrides the bits, except that a file with no execute bit at all
-       is still not a program. */
     if (cred->fsuid == 0) {
         if (!(want & CRED_EXEC)) return 0;
         if ((node->flags & 0xFFU) == VFS_DIRECTORY) return 0;
@@ -72,9 +72,10 @@ int cred_may_search(const char *path) {
     const struct credentials *cred = cred_current();
     if (!cred || cred->fsuid == 0 || !path || path[0] != '/') return 0;
 
-    char prefix[256];
     size_t length = strlen(path);
-    if (length >= sizeof(prefix)) return -EACCES;
+    if (length >= VFS_PATH_MAX) return -ENAMETOOLONG;
+    VFS_PATH_SCOPED prefix = vfs_path_buffer();
+    if (!prefix) return -ENOMEM;
     memcpy(prefix, path, length + 1);
 
     for (size_t index = 1; index < length; index++) {
@@ -95,10 +96,10 @@ int cred_may_path(const char *path, const struct vfs_node *node, uint32_t want) 
     return cred_may(node, want);
 }
 
-/* The directory component of an absolute path, "/" when there is none. */
-static struct vfs_node *parent_of(const char *path, char buffer[256]) {
+static struct vfs_node *parent_of(const char *path) {
+    VFS_PATH_SCOPED buffer = vfs_path_buffer();
     size_t length = strlen(path);
-    if (length >= 256) return NULL;
+    if (!buffer || length >= VFS_PATH_MAX) return NULL;
     memcpy(buffer, path, length + 1);
     while (length > 1 && buffer[length - 1] != '/') length--;
     if (length > 1) length--;
@@ -110,8 +111,7 @@ int cred_may_write_parent(const char *path) {
     const struct credentials *cred = cred_current();
     int status = cred_may_search(path);
     if (status != 0) return status;
-    char buffer[256];
-    struct vfs_node *parent = parent_of(path, buffer);
+    struct vfs_node *parent = parent_of(path);
     if (!parent) return -ENOENT;
     if (parent->flags & VFS_READONLY) return -EROFS;
     if (!cred || cred->fsuid == 0) return 0;
@@ -123,8 +123,7 @@ int cred_may_remove(const char *path, const struct vfs_node *node) {
     if (status != 0) return status;
     const struct credentials *cred = cred_current();
     if (!cred || cred->fsuid == 0) return 0;
-    char buffer[256];
-    struct vfs_node *parent = parent_of(path, buffer);
+    struct vfs_node *parent = parent_of(path);
     if (!parent || !(parent->mode & MODE_STICKY)) return 0;
     if (cred->fsuid == node->uid || cred->fsuid == parent->uid) return 0;
     return -EPERM;
@@ -247,7 +246,6 @@ int64_t cred_set_resgid(uint32_t rgid, uint32_t egid, uint32_t sgid) {
     return 0;
 }
 
-/* setfsuid/setfsgid answer with the previous value and never with an error. */
 int64_t cred_set_fsuid(uint32_t fsuid) {
     struct credentials *cred = cred_current();
     if (!cred) return 0;
@@ -283,8 +281,7 @@ void cred_apply_exec(struct credentials *cred, const struct vfs_node *node,
     if (!cred) return;
     if (node && !no_new_privs) {
         if (node->mode & MODE_SETUID) cred->euid = node->uid;
-        /* A group-executable bit is what separates set-group-ID from the
-           mandatory-locking encoding, which shares the bit. */
+
         if ((node->mode & MODE_SETGID) && (node->mode & 010U)) cred->egid = node->gid;
     }
     cred->suid = cred->euid;

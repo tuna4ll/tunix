@@ -1315,12 +1315,12 @@ static int load_directory(uint32_t dir_ino, struct vfs_node *dir_node,
             uint32_t child_ino = entry->inode;
             size_t name_len = entry->name_len;
             at += entry->rec_len;
-            if (!child_ino || !name_len || name_len > 127U) continue;
+            if (!child_ino || !name_len || name_len > VFS_NAME_MAX) continue;
             if (entry->name[0] == '.' &&
                 (name_len == 1U || (name_len == 2U && entry->name[1] == '.')))
                 continue;
 
-            char name[128];
+            char name[VFS_NAME_MAX + 1];
             memcpy(name, entry->name, name_len);
             name[name_len] = '\0';
 
@@ -1340,7 +1340,7 @@ static int load_directory(uint32_t dir_ino, struct vfs_node *dir_node,
             if (format == EXT2_S_IFDIR) {
                 node = vfs_alloc_node(name, VFS_DIRECTORY);
                 if (!node || vfs_attach(dir_node, node) != 0) {
-                    if (node) kfree(node);
+                    if (node) vfs_free_node(node);
                     continue;
                 }
                 node->disk_inode = child_ino;
@@ -1355,7 +1355,7 @@ static int load_directory(uint32_t dir_ino, struct vfs_node *dir_node,
             } else if (format == EXT2_S_IFREG) {
                 node = vfs_alloc_node(name, VFS_FILE);
                 if (!node || vfs_attach(dir_node, node) != 0) {
-                    if (node) kfree(node);
+                    if (node) vfs_free_node(node);
                     continue;
                 }
                 node->length = child.i_size;
@@ -1372,7 +1372,7 @@ static int load_directory(uint32_t dir_ino, struct vfs_node *dir_node,
                 if (load_symlink_target(&child, &target) != 0) continue;
                 node = vfs_alloc_node(name, VFS_SYMLINK);
                 if (!node || vfs_attach(dir_node, node) != 0) {
-                    if (node) kfree(node);
+                    if (node) vfs_free_node(node);
                     kfree(target);
                     continue;
                 }

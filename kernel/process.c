@@ -340,6 +340,8 @@ static int allocate_kernel_stack(struct process *process) {
     return 0;
 }
 
+static void free_process_struct(struct process *process);
+
 static void destroy_process_resources(struct process *process) {
     if (!process) return;
     uint64_t pid = process->pid;
@@ -364,7 +366,7 @@ static void destroy_process_resources(struct process *process) {
         process->kernel_stack_base = 0;
         process->kernel_stack_top = 0;
     }
-    kfree(process);
+    free_process_struct(process);
     KDEBUG("process: reaped pid=%u\n", (unsigned)pid);
 }
 
@@ -434,13 +436,26 @@ static void install_console(struct process *process) {
     process->files->fds[2] = console;
 }
 
+static char *copy_text(const char *text) {
+    size_t length = strlen(text ? text : "");
+    char *copy = (char *)kmalloc(length + 1);
+    if (copy) memcpy(copy, text ? text : "", length + 1);
+    return copy;
+}
+
 static void set_exe_path(struct process *process, struct vfs_node *file,
                          const char *path) {
-    if (file && vfs_node_path(file, process->exe_path,
-                              sizeof(process->exe_path)) == 0)
-        return;
-    strncpy(process->exe_path, path, sizeof(process->exe_path) - 1);
-    process->exe_path[sizeof(process->exe_path) - 1] = '\0';
+    VFS_PATH_SCOPED resolved = vfs_path_buffer();
+    if (resolved && file && vfs_node_path(file, resolved, VFS_PATH_MAX) == 0) path = resolved;
+    char *copy = copy_text(path);
+    if (!copy) return;
+    kfree(process->exe_path);
+    process->exe_path = copy;
+}
+
+static void free_process_struct(struct process *process) {
+    kfree(process->exe_path);
+    kfree(process);
 }
 
 struct process *process_create_from_path(const char *path) {
@@ -470,7 +485,7 @@ struct process *process_create_from_path(const char *path) {
     process->files = file_table_create();
     if (!process->files) {
         kprintf("process: descriptor-table allocation failed for %s\n", path);
-        kfree(process);
+        free_process_struct(process);
         return NULL;
     }
     process->cwd = vfs_root;
@@ -482,7 +497,7 @@ struct process *process_create_from_path(const char *path) {
     if (!process->cr3) {
         kprintf("process: address-space creation failed for %s\n", path);
         process_release_files(process);
-        kfree(process);
+        free_process_struct(process);
         return NULL;
     }
     process->start_time_ns = time_uptime_ns();
@@ -501,7 +516,7 @@ struct process *process_create_from_path(const char *path) {
         kprintf("process: invalid ELF64: %s\n", path);
         vmm_destroy_address_space(process->cr3);
         process_release_files(process);
-        kfree(process);
+        free_process_struct(process);
         return NULL;
     }
     process->memory = memory_create(process->cr3, process->brk_start,
@@ -509,7 +524,7 @@ struct process *process_create_from_path(const char *path) {
     if (!process->memory) {
         vmm_destroy_address_space(process->cr3);
         process_release_files(process);
-        kfree(process);
+        free_process_struct(process);
         return NULL;
     }
 
@@ -518,7 +533,7 @@ struct process *process_create_from_path(const char *path) {
         kprintf("process: kernel stack allocation failed for %s\n", path);
         memory_unref(process->memory);
         process_release_files(process);
-        kfree(process);
+        free_process_struct(process);
         return NULL;
     }
     arch_frame_enter_user(&process->saved_frame, process->entry, process->user_stack_top);
@@ -1476,10 +1491,10 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame) {
     child->timerslack_ns = parent->timerslack_ns;
     child->thp_disable = parent->thp_disable;
     strncpy(child->name, parent->name, sizeof(child->name) - 1);
-    strncpy(child->exe_path, parent->exe_path, sizeof(child->exe_path) - 1);
+    child->exe_path = copy_text(parent->exe_path);
     child->cr3 = vmm_clone_address_space(parent->cr3);
     if (!child->cr3) {
-        kfree(child);
+        free_process_struct(child);
         return -EINVAL;
     }
     uint64_t parent_brk_start = parent->memory ? parent->memory->brk_start : parent->brk_start;
@@ -1489,7 +1504,7 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame) {
                                   parent_mmap_base);
     if (!child->memory) {
         vmm_destroy_address_space(child->cr3);
-        kfree(child);
+        free_process_struct(child);
         return -EINVAL;
     }
     memory_copy_mappings(child->memory, parent->memory);
@@ -1510,7 +1525,7 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame) {
     memcpy(child->cmdline, parent->cmdline, sizeof(child->cmdline));
     if (allocate_kernel_stack(child) != 0) {
         memory_unref(child->memory);
-        kfree(child);
+        free_process_struct(child);
         return -EINVAL;
     }
 
@@ -1523,7 +1538,7 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame) {
     if (!child->files) {
         memory_unref(child->memory);
         kfree((void *)child->kernel_stack_base);
-        kfree(child);
+        free_process_struct(child);
         return -EAGAIN;
     }
 
@@ -1574,7 +1589,7 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
     child->timerslack_ns = parent->timerslack_ns;
     child->thp_disable = parent->thp_disable;
     strncpy(child->name, parent->name, sizeof(child->name) - 1);
-    strncpy(child->exe_path, parent->exe_path, sizeof(child->exe_path) - 1);
+    child->exe_path = copy_text(parent->exe_path);
     child->memory = parent->memory;
     memory_ref(child->memory);
     sync_memory_view(child);
@@ -1590,7 +1605,7 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
     memcpy(child->cmdline, parent->cmdline, sizeof(child->cmdline));
     if (allocate_kernel_stack(child) != 0) {
         memory_unref(child->memory);
-        kfree(child);
+        free_process_struct(child);
         return -EINVAL;
     }
 
@@ -1609,7 +1624,7 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
         process_release_files(child);
         memory_unref(child->memory);
         kfree((void *)child->kernel_stack_base);
-        kfree(child);
+        free_process_struct(child);
         return -EFAULT;
     }
     if ((flags & (0x01000000ULL | 0x00200000ULL)) && child_tid_user) {
@@ -1618,7 +1633,7 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
             process_release_files(child);
             memory_unref(child->memory);
             kfree((void *)child->kernel_stack_base);
-            kfree(child);
+            free_process_struct(child);
             return -EFAULT;
         }
         if (flags & 0x00200000ULL) child->clear_child_tid_user = child_tid_user;

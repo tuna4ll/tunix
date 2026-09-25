@@ -25,5 +25,5 @@ int copy_string_from_user(char *destination, size_t capacity, uint64_t user_sour
         if (!value) return (int)i;
     }
     destination[capacity - 1] = '\0';
-    return -1;
+    return -2;
 }
