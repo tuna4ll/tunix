@@ -10,8 +10,8 @@ Everything the kernel addresses lives in the top half. Four regions matter:
 
 | Base | What | Size |
 | --- | --- | --- |
-| `0xFFFFFE8000000000` | direct map — all of physical memory | 512 GiB of room |
-| `0xFFFFFF0000000000` | kernel heap | grows on demand |
+| `0xFFFFC00000000000` | direct map — all of physical memory | 63 TiB of room |
+| `0xFFFFFF0000000000` | kernel heap | up to 512 GiB |
 | `0xFFFFFFFF80000000` | kernel image, and the first GiB of RAM | 1 GiB |
 | `0xFFFFFFFFC0000000` | loadable modules (x86-64) | 16 MiB |
 | `0xFFFFFFFFF0000000` | framebuffer | as large as the mode needs |
@@ -84,49 +84,29 @@ simply given back, and the 4 KiB device mappings can be made there. On a 2 GiB
 machine the loader's mapping ended exactly at the framebuffer, so the collision
 was invisible until there was more memory to collide with.
 
-## The new ceiling, and what it is made of
+## No ceiling of its own
 
-`PMM_DIRECT_MAP_LIMIT` is 8 GiB, and it now limits bookkeeping rather than
-address space. The allocator keeps a bitmap and a per-page reference count, both
-reserved after the kernel image by the linker script, costing about 544 KiB per
-gigabyte of RAM. 8 GiB needs 4.25 MiB of the 8 MiB reserved there. Raising one
-without the other overruns the reserve silently, which is why the two constants
-are commented against each other.
+There is no `PMM_DIRECT_MAP_LIMIT` any more. The direct map spans as many
+top-level entries as physical memory needs, up to the 63 TiB between
+`DIRECT_MAP_BASE` and the heap, and `vmm_init` only builds the gigabytes that
+hold something the architecture wants mapped.
 
-The structures span every address the firmware describes, not just the part of
-it that is RAM, and that is deliberate. They used to stop at the top of the
-highest usable region, which broke a machine with exactly 2 GiB:
+The allocator's bitmap and per-page reference counts (32-bit) used to live in
+an 8 MiB reserve after the kernel image, which is what capped the machine at
+8 GiB. `pmm_init` now sizes them from the memory map and carves them out of the
+top of the highest usable region that fits, reaching them through the loader's
+direct map until `vmm_init` calls `pmm_use_direct_map()`. The cost is one bit
+plus four bytes per page of the tracked range: about 1.1 MiB per GiB.
 
-```
-PMM: 2035 MiB usable of 2035 MiB installed, ceiling 8192 MiB
-PANIC: VMM: invalid boot CR3
-```
+The tracked range stops at the end of the last region that is RAM. Limine also
+reports reserved, bad and framebuffer ranges, and on QEMU a reserved range sits
+at 1 TiB; `limine_entry.c` drops those, because counting them would have the
+allocator track a terabyte of address space it can never hand out. Reclaimable
+regions stay in, which keeps Limine's page tables at 2046 MiB inside the range
+on a 2 GiB machine.
 
-Limine leaves its own page tables at 2046 MiB on every machine, in a region it
-reports as reclaimable rather than usable. With 3 GiB or more the usable regions
-run past that address, so the page is inside the tracked range and marked in use
-like every other non-usable page. With exactly 2 GiB the usable memory *ends*
-at 2046 MiB, the page falls outside the range, and `pmm_page_is_allocated`
-answers what it answers for any address it does not track: no. `vmm_init` reads
-that as a corrupt CR3 and stops.
-
-The direct map had the same hole from the same cause -- it is built up to
-`pmm_managed_limit()` -- so the page the kernel was about to walk was not
-mapped either.
-
-So `highest` is now the top of the last region of any kind, and only the
-counters that report how much RAM there is stay usable-only. The cost is
-bookkeeping for the whole 8 GiB on every machine, which is 4.25 MiB of a
-reserve the linker script already sets aside in full.
-
-`pmm_init` reports all of this on the console rather than behind the debug flag:
-
-```
-PMM: 4077 MiB managed of 4095 MiB installed, ceiling 8192 MiB
-```
-
-The middle number is what the firmware said the machine has, so a kernel that is
-leaving memory on the table says so plainly instead of quietly capping.
+`support/tests/limits-kerneltest.sh` with `MEMORY=10G` touches 8.4 GiB of
+anonymous memory and reads every page back.
 
 ## Changing a kernel mapping
 
@@ -231,3 +211,6 @@ nothing about how close the machine is to running out of anything.
 
 With that, `xbps-install -Sy supertuxkart` finishes: 32 packages, 782 MB of
 game data, no kernel complaint on the way through.
+
+The heap owns one top-level entry, so its extent also stops at
+`HEAP_VIRTUAL_BYTES` (512 GiB) however much memory the machine has.
