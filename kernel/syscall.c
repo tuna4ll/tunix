@@ -194,6 +194,7 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define SYS_UMASK 95
 #define SYS_GETTIMEOFDAY 96
 #define SYS_GETRLIMIT 97
+#define SYS_SETRLIMIT 160
 #define SYS_GETRUSAGE 98
 #define SYS_SYSLOG 103
 #define SYS_GETPRIORITY 140
@@ -555,10 +556,6 @@ struct linux_pollfd {
     int16_t revents;
 };
 
-struct linux_fd_set {
-    uint64_t words[16];
-};
-
 struct linux_rlimit {
     uint64_t rlim_cur;
     uint64_t rlim_max;
@@ -823,7 +820,7 @@ static int write_stages_large(const struct file *file) {
 
 static int64_t sys_write(int fd, uint64_t user_buffer, size_t length) {
     struct process *process = process_current();
-    if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) return -EBADF;
+    if (!process || fd < 0 || fd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[fd]) return -EBADF;
     struct file *file = process->files->fds[fd];
     uint8_t stage[4096];
     uint8_t *buffer = stage;
@@ -880,7 +877,7 @@ static int64_t sys_write(int fd, uint64_t user_buffer, size_t length) {
 
 static int64_t sys_read(int fd, uint64_t user_buffer, size_t length) {
     struct process *process = process_current();
-    if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) return -EBADF;
+    if (!process || fd < 0 || fd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[fd]) return -EBADF;
     uint8_t buffer[4096];
     size_t completed = 0;
     while (completed < length) {
@@ -969,19 +966,25 @@ static void io_watch_add(struct process *process, int fd, uint32_t events) {
     process->io_watch_count++;
 }
 
+static void release_pollfds(struct linux_pollfd **fds) {
+    kfree(*fds);
+}
+
 static int64_t sys_poll_once(uint64_t user_fds, uint64_t count, int commit_empty) {
-    if (count > PROCESS_MAX_FDS) return -EINVAL;
-    struct linux_pollfd fds[PROCESS_MAX_FDS];
-    size_t bytes = (size_t)count * sizeof(fds[0]);
+    struct process *process = process_current();
+    if (!process || count > process->rlimits[PROCESS_RLIMIT_NOFILE].soft) return -EINVAL;
+    size_t bytes = (size_t)count * sizeof(struct linux_pollfd);
+    __attribute__((cleanup(release_pollfds))) struct linux_pollfd *fds =
+        (struct linux_pollfd *)kmalloc(bytes ? bytes : 1);
+    if (!fds) return -ENOMEM;
     if (bytes && copy_from_user(fds, user_fds, bytes) != 0) return -EFAULT;
 
     int ready = 0;
-    struct process *process = process_current();
     for (uint64_t i = 0; i < count; i++) {
         fds[i].revents = 0;
         int fd = fds[i].fd;
         if (fd < 0) continue;
-        if (!process || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) {
+        if (fd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[fd]) {
             fds[i].revents = POLLNVAL;
             ready++;
             continue;
@@ -1053,59 +1056,68 @@ static int64_t read_timeval_timeout_ns(uint64_t user_timeout) {
     return value > (uint64_t)INT64_MAX ? INT64_MAX : (int64_t)value;
 }
 
-static int fd_set_test(const struct linux_fd_set *set, int fd) {
-    return set && (set->words[(unsigned)fd / 64U] & (1ULL << ((unsigned)fd % 64U)));
+static int bits_test(const uint64_t *bits, int fd) {
+    return (bits[(unsigned)fd / 64U] >> ((unsigned)fd % 64U)) & 1U;
 }
 
-static void fd_set_put(struct linux_fd_set *set, int fd) {
-    set->words[(unsigned)fd / 64U] |= 1ULL << ((unsigned)fd % 64U);
+static void bits_put(uint64_t *bits, int fd) {
+    bits[(unsigned)fd / 64U] |= 1ULL << ((unsigned)fd % 64U);
+}
+
+static void release_bits(uint64_t **bits) {
+    kfree(*bits);
 }
 
 static int64_t sys_select_once(int nfds, uint64_t user_read, uint64_t user_write,
                                uint64_t user_except, int commit_empty) {
-    if (nfds < 0 || nfds > PROCESS_MAX_FDS) return -EINVAL;
-    struct linux_fd_set requested_read, requested_write, result_read, result_write, result_except;
-    memset(&requested_read, 0, sizeof(requested_read));
-    memset(&requested_write, 0, sizeof(requested_write));
-    if (user_read && copy_from_user(&requested_read, user_read, sizeof(requested_read)) != 0)
+    struct process *process = process_current();
+    if (!process || nfds < 0) return -EINVAL;
+    if (nfds > PROCESS_FD_CAPACITY(process)) nfds = PROCESS_FD_CAPACITY(process);
+    size_t words = ((size_t)nfds + 63U) / 64U;
+    size_t bytes = words * sizeof(uint64_t);
+    __attribute__((cleanup(release_bits))) uint64_t *bits =
+        (uint64_t *)kmalloc(bytes ? 5 * bytes : 8);
+    if (!bits) return -ENOMEM;
+    memset(bits, 0, bytes ? 5 * bytes : 8);
+    uint64_t *requested_read = bits;
+    uint64_t *requested_write = bits + words;
+    uint64_t *result_read = bits + 2 * words;
+    uint64_t *result_write = bits + 3 * words;
+    uint64_t *result_except = bits + 4 * words;
+    if (bytes && user_read && copy_from_user(requested_read, user_read, bytes) != 0)
         return -EFAULT;
-    if (user_write && copy_from_user(&requested_write, user_write, sizeof(requested_write)) != 0)
+    if (bytes && user_write && copy_from_user(requested_write, user_write, bytes) != 0)
         return -EFAULT;
 
-    memset(&result_read, 0, sizeof(result_read));
-    memset(&result_write, 0, sizeof(result_write));
-    memset(&result_except, 0, sizeof(result_except));
     int ready = 0;
-    struct process *process = process_current();
     for (int fd = 0; fd < nfds; fd++) {
-        int requested = fd_set_test(&requested_read, fd) || fd_set_test(&requested_write, fd);
-        if (!requested) continue;
-        if (!process || !process->files->fds[fd]) return -EBADF;
+        int wants_read = bits_test(requested_read, fd);
+        int wants_write = bits_test(requested_write, fd);
+        if (!wants_read && !wants_write) continue;
+        struct file *file = process->files->fds[fd];
+        if (!file) return -EBADF;
         int this_ready = 0;
-        if (fd_set_test(&requested_read, fd) && file_read_ready(process->files->fds[fd]) > 0) {
-            fd_set_put(&result_read, fd);
+        if (wants_read && file_read_ready(file) > 0) {
+            bits_put(result_read, fd);
             this_ready = 1;
         }
-        if (fd_set_test(&requested_write, fd) && file_write_ready(process->files->fds[fd]) > 0) {
-            fd_set_put(&result_write, fd);
+        if (wants_write && file_write_ready(file) > 0) {
+            bits_put(result_write, fd);
             this_ready = 1;
         }
         if (this_ready) ready++;
     }
-    if (!ready && process) {
+    if (!ready) {
         io_watch_begin(process);
         for (int fd = 0; fd < nfds; fd++) {
-            if (fd_set_test(&requested_read, fd)) io_watch_add(process, fd, POLLIN);
-            if (fd_set_test(&requested_write, fd)) io_watch_add(process, fd, POLLOUT);
+            if (bits_test(requested_read, fd)) io_watch_add(process, fd, POLLIN);
+            if (bits_test(requested_write, fd)) io_watch_add(process, fd, POLLOUT);
         }
     }
-    if (ready || commit_empty) {
-        if (user_read && copy_to_user(user_read, &result_read, sizeof(result_read)) != 0)
-            return -EFAULT;
-        if (user_write && copy_to_user(user_write, &result_write, sizeof(result_write)) != 0)
-            return -EFAULT;
-        if (user_except && copy_to_user(user_except, &result_except, sizeof(result_except)) != 0)
-            return -EFAULT;
+    if ((ready || commit_empty) && bytes) {
+        if (user_read && copy_to_user(user_read, result_read, bytes) != 0) return -EFAULT;
+        if (user_write && copy_to_user(user_write, result_write, bytes) != 0) return -EFAULT;
+        if (user_except && copy_to_user(user_except, result_except, bytes) != 0) return -EFAULT;
     }
     return ready;
 }
@@ -1179,7 +1191,7 @@ static struct vfs_node *base_for_dirfd(int dirfd) {
     struct process *process = process_current();
     if (!process) return NULL;
     if (dirfd == AT_FDCWD) return process->cwd;
-    if (dirfd < 0 || dirfd >= PROCESS_MAX_FDS || !process->files->fds[dirfd]) return NULL;
+    if (dirfd < 0 || dirfd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[dirfd]) return NULL;
     struct file *file = process->files->fds[dirfd];
     if (file->kind != FILE_KIND_VFS || !file->node || (file->node->flags & 0xFFU) != VFS_DIRECTORY) return NULL;
     return file->node;
@@ -1227,7 +1239,7 @@ static int64_t reopen_own_descriptor(const char *path, uint64_t flags) {
     for (const char *at = rest; *at; at++) {
         if (*at < '0' || *at > '9') return -1;
         fd = fd * 10 + (*at - '0');
-        if (fd >= PROCESS_MAX_FDS) return -1;
+        if (fd >= PROCESS_FD_CAPACITY(process)) return -1;
     }
     struct file *source = process->files->fds[fd];
     if (!source || source->kind != FILE_KIND_MEMFD) return -1;
@@ -1339,8 +1351,8 @@ static int64_t sys_close(int fd) {
 
 static int64_t sys_dup(int oldfd, int minimum, int cloexec) {
     struct process *process = process_current();
-    if (!process || oldfd < 0 || oldfd >= PROCESS_MAX_FDS || !process->files->fds[oldfd]) return -EBADF;
-    if (minimum < 0 || minimum >= PROCESS_MAX_FDS) return -EINVAL;
+    if (!process || oldfd < 0 || oldfd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[oldfd]) return -EBADF;
+    if (minimum < 0 || (uint64_t)minimum >= process->rlimits[PROCESS_RLIMIT_NOFILE].soft) return -EINVAL;
     file_ref(process->files->fds[oldfd]);
     int result = process_install_file_flags(process, process->files->fds[oldfd], minimum,
         cloexec ? PROCESS_FD_CLOEXEC : 0);
@@ -1353,9 +1365,10 @@ static int64_t sys_dup(int oldfd, int minimum, int cloexec) {
 
 static int64_t sys_dup_to(int oldfd, int newfd, int cloexec, int reject_same) {
     struct process *process = process_current();
-    if (!process || oldfd < 0 || oldfd >= PROCESS_MAX_FDS || !process->files->fds[oldfd]) return -EBADF;
-    if (newfd < 0 || newfd >= PROCESS_MAX_FDS) return -EBADF;
+    if (!process || oldfd < 0 || oldfd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[oldfd]) return -EBADF;
+    if (newfd < 0 || (uint64_t)newfd >= process->rlimits[PROCESS_RLIMIT_NOFILE].soft) return -EBADF;
     if (oldfd == newfd) return reject_same ? -EINVAL : newfd;
+    if (process_reserve_fd(process, newfd) != 0) return -ENOMEM;
     if (process->files->fds[newfd]) process_close_fd(process, newfd);
     file_ref(process->files->fds[oldfd]);
     process->files->fds[newfd] = process->files->fds[oldfd];
@@ -1391,21 +1404,21 @@ static int64_t sys_pipe(uint64_t user_fds, int flags) {
 
 static struct unix_socket *socket_from_fd(int fd) {
     struct process *process = process_current();
-    if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) return NULL;
+    if (!process || fd < 0 || fd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[fd]) return NULL;
     struct file *file = process->files->fds[fd];
     return file->kind == FILE_KIND_SOCKET ? file->socket : NULL;
 }
 
 static struct inet_socket *inet_socket_from_fd(int fd) {
     struct process *process = process_current();
-    if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) return NULL;
+    if (!process || fd < 0 || fd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[fd]) return NULL;
     struct file *file = process->files->fds[fd];
     return file->kind == FILE_KIND_INET_SOCKET ? file->inet_socket : NULL;
 }
 
 static struct netlink_socket *netlink_socket_from_fd(int fd) {
     struct process *process = process_current();
-    if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) return NULL;
+    if (!process || fd < 0 || fd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[fd]) return NULL;
     struct file *file = process->files->fds[fd];
     return file->kind == FILE_KIND_NETLINK_SOCKET ? file->netlink_socket : NULL;
 }
@@ -1564,7 +1577,7 @@ static int64_t sys_connect(int fd, uint64_t user_address, uint64_t length) {
 
 static int64_t sys_shutdown(int fd, int how) {
     struct process *process = process_current();
-    if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) return -EBADF;
+    if (!process || fd < 0 || fd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[fd]) return -EBADF;
     struct file *file = process->files->fds[fd];
     if (file->kind == FILE_KIND_SOCKET) return unix_socket_shutdown(file->socket, how);
     if (file->kind == FILE_KIND_INET_SOCKET) return inet_socket_shutdown(file->inet_socket, how);
@@ -1639,7 +1652,7 @@ static void accept_or_block(struct syscall_frame *frame, uint64_t syscall_number
                             int flags) {
     int64_t result = sys_accept(fd, user_address, user_length, flags);
     struct process *process = process_current();
-    struct file *file = process && fd >= 0 && fd < PROCESS_MAX_FDS
+    struct file *file = process && fd >= 0 && fd < PROCESS_FD_CAPACITY(process)
                             ? process->files->fds[fd] : NULL;
     if (result == -EAGAIN && file && !(file->flags & O_NONBLOCK)) {
         block_and_retry(frame, syscall_number, file, 0);
@@ -2318,7 +2331,7 @@ static int64_t sys_getsockopt(int fd, int level, int option,
 
 static int64_t sys_ftruncate(int fd, uint64_t length) {
     struct process *process = process_current();
-    if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) return -EBADF;
+    if (!process || fd < 0 || fd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[fd]) return -EBADF;
     struct file *file = process->files->fds[fd];
 
     if (file->kind == FILE_KIND_MEMFD)
@@ -2329,7 +2342,7 @@ static int64_t sys_ftruncate(int fd, uint64_t length) {
 
 static int64_t sys_fallocate(int fd, int mode, uint64_t offset, uint64_t length) {
     struct process *process = process_current();
-    if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) return -EBADF;
+    if (!process || fd < 0 || fd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[fd]) return -EBADF;
     if (mode != 0) return -EOPNOTSUPP;
     if ((int64_t)offset < 0 || (int64_t)length < 0) return -EINVAL;
     if (length > UINT64_MAX - offset) return -EFBIG;
@@ -2417,7 +2430,7 @@ static int64_t sys_setgroups(int64_t size, uint64_t user_list) {
 
 static int64_t sys_flock(int fd, int operation) {
     struct process *process = process_current();
-    if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) return -EBADF;
+    if (!process || fd < 0 || fd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[fd]) return -EBADF;
     return file_flock(process->files->fds[fd], operation);
 }
 
@@ -2438,7 +2451,7 @@ static int64_t vfs_posix_lock(struct vfs_node *node, int type, uint64_t pid) {
 
 static int64_t sys_fcntl_lock(int fd, int command, uint64_t user_lock) {
     struct process *process = process_current();
-    if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) return -EBADF;
+    if (!process || fd < 0 || fd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[fd]) return -EBADF;
     struct file *file = process->files->fds[fd];
     if (file->kind != FILE_KIND_VFS || !file->node) return -EINVAL;
 
@@ -2460,7 +2473,7 @@ static int64_t sys_fcntl_lock(int fd, int command, uint64_t user_lock) {
 
 static int64_t sys_fsync(int fd) {
     struct process *process = process_current();
-    if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) return -EBADF;
+    if (!process || fd < 0 || fd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[fd]) return -EBADF;
     struct file *file = process->files->fds[fd];
     if (file->kind == FILE_KIND_FRAMEBUFFER) return 0;
     if (file->kind != FILE_KIND_VFS || !file->node) return -EINVAL;
@@ -2475,7 +2488,7 @@ static int64_t sys_fsync(int fd) {
 
 static int64_t sys_ioctl(int fd, unsigned long request, uint64_t user_argument) {
     struct process *process = process_current();
-    if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) return -EBADF;
+    if (!process || fd < 0 || fd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[fd]) return -EBADF;
 
     request &= 0xFFFFFFFFUL;
     struct file *file = process->files->fds[fd];
@@ -2672,7 +2685,7 @@ static int64_t sys_statfs(uint64_t user_path, uint64_t user_buf) {
 
 static int64_t sys_fstatfs(int fd, uint64_t user_buf) {
     struct process *process = process_current();
-    if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) return -EBADF;
+    if (!process || fd < 0 || fd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[fd]) return -EBADF;
     struct file *file = process->files->fds[fd];
     if ((file->kind != FILE_KIND_VFS && file->kind != FILE_KIND_EVENTFS) ||
         !file->node) return -EBADF;
@@ -2726,7 +2739,7 @@ static int stat_from_file(struct file *file, struct linux_stat *stat) {
 
 static int64_t sys_fstat(int fd, uint64_t user_stat) {
     struct process *process = process_current();
-    if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) return -EBADF;
+    if (!process || fd < 0 || fd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[fd]) return -EBADF;
     struct linux_stat stat;
     if (stat_from_file(process->files->fds[fd], &stat) != 0) return -EBADF;
     return copy_to_user(user_stat, &stat, sizeof(stat)) == 0 ? 0 : -EFAULT;
@@ -2768,7 +2781,7 @@ static int64_t sys_statx(int dirfd, uint64_t user_path, int flags,
     struct linux_stat basic;
     if (!first && (flags & AT_EMPTY_PATH) && dirfd >= 0) {
         struct process *process = process_current();
-        if (!process || dirfd >= PROCESS_MAX_FDS || !process->files->fds[dirfd]) return -EBADF;
+        if (!process || dirfd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[dirfd]) return -EBADF;
         if (stat_from_file(process->files->fds[dirfd], &basic) != 0) return -EBADF;
     } else {
         VFS_PATH_SCOPED path = NULL;
@@ -2787,7 +2800,7 @@ static int64_t sys_statx(int dirfd, uint64_t user_path, int flags,
 
 static int64_t sys_lseek(int fd, int64_t offset, int whence) {
     struct process *process = process_current();
-    if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) return -EBADF;
+    if (!process || fd < 0 || fd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[fd]) return -EBADF;
     struct file *file = process->files->fds[fd];
     if ((file->kind != FILE_KIND_VFS && file->kind != FILE_KIND_FRAMEBUFFER) ||
         !file->node) return -ESPIPE;
@@ -2805,7 +2818,7 @@ static int64_t sys_lseek(int fd, int64_t offset, int whence) {
 
 static int64_t sys_getdents64(int fd, uint64_t user_buffer, size_t length) {
     struct process *process = process_current();
-    if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) return -EBADF;
+    if (!process || fd < 0 || fd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[fd]) return -EBADF;
     struct file *file = process->files->fds[fd];
     if (file->kind != FILE_KIND_VFS || !file->node || (file->node->flags & 0xFFU) != VFS_DIRECTORY) return -ENOTDIR;
     size_t written = 0;
@@ -2860,7 +2873,7 @@ static int64_t xattr_target_exists(uint64_t user_path, int follow) {
 
 static int64_t xattr_descriptor_exists(int fd) {
     struct process *process = process_current();
-    if (!process || !process->files || fd < 0 || fd >= PROCESS_MAX_FDS) return -EBADF;
+    if (!process || !process->files || fd < 0 || fd >= PROCESS_FD_CAPACITY(process)) return -EBADF;
     return process->files->fds[fd] ? 0 : -EBADF;
 }
 
@@ -2906,7 +2919,7 @@ static int64_t sys_chdir(uint64_t user_path) {
 
 static int64_t sys_fchdir(int fd) {
     struct process *process = process_current();
-    if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) return -EBADF;
+    if (!process || fd < 0 || fd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[fd]) return -EBADF;
     struct file *file = process->files->fds[fd];
     if (file->kind != FILE_KIND_VFS || !file->node || (file->node->flags & 0xFFU) != VFS_DIRECTORY) return -ENOTDIR;
     set_cwd(process, file->node);
@@ -3138,7 +3151,7 @@ static int64_t sys_chown_at(int dirfd, uint64_t user_path, uint32_t uid,
 
 static int64_t sys_fchown(int fd, uint32_t uid, uint32_t gid) {
     struct process *process = process_current();
-    if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) return -EBADF;
+    if (!process || fd < 0 || fd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[fd]) return -EBADF;
     struct file *file = process->files->fds[fd];
     if (file->kind != FILE_KIND_VFS || !file->node) return 0;
     return change_owner(file->node, uid, gid);
@@ -3146,7 +3159,7 @@ static int64_t sys_fchown(int fd, uint32_t uid, uint32_t gid) {
 
 static int64_t sys_fchmod(int fd, uint32_t mode) {
     struct process *process = process_current();
-    if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) return -EBADF;
+    if (!process || fd < 0 || fd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[fd]) return -EBADF;
     struct file *file = process->files->fds[fd];
     if (file->kind != FILE_KIND_VFS || !file->node) return -EBADF;
     return change_mode(file->node, mode);
@@ -3162,7 +3175,7 @@ static int64_t sys_utimens_at(int dirfd, uint64_t user_path, uint64_t user_times
     struct vfs_node *node = NULL;
     if (!user_path) {
         struct process *process = process_current();
-        if (!process || dirfd < 0 || dirfd >= PROCESS_MAX_FDS || !process->files->fds[dirfd])
+        if (!process || dirfd < 0 || dirfd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[dirfd])
             return -EBADF;
         struct file *file = process->files->fds[dirfd];
         if (file->kind != FILE_KIND_VFS || !file->node) return -EBADF;
@@ -3378,7 +3391,7 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
 
     struct file *file = NULL;
     if (!(flags & MAP_ANONYMOUS)) {
-        if (fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) return -EBADF;
+        if (fd < 0 || fd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[fd]) return -EBADF;
         file = process->files->fds[fd];
 
         if (file->kind == FILE_KIND_MEMFD) {
@@ -4025,7 +4038,7 @@ static void watch_blocked_file(struct process *process, uint64_t syscall_number,
              syscall_number == SYS_CONNECT) events = POLLOUT;
     else return;
     if (!process || !process->files || !file) return;
-    for (int fd = 0; fd < PROCESS_MAX_FDS; fd++) {
+    for (int fd = 0; fd < process->files->capacity; fd++) {
         if (process->files->fds[fd] != file) continue;
         io_watch_begin(process);
         io_watch_add(process, fd, events);
@@ -4613,16 +4626,30 @@ static int64_t sys_get_robust_list(int pid, uint64_t user_head_pointer,
     return copy_to_user(user_length_pointer, &length, sizeof(length)) == 0 ? 0 : -EFAULT;
 }
 
-#define RLIMIT_STACK 3
-#define RLIMIT_NOFILE 7
-static int64_t sys_prlimit(uint64_t resource, uint64_t user_old_limit) {
-    if (!user_old_limit) return 0;
-
-    uint64_t lim = resource == RLIMIT_NOFILE ? PROCESS_MAX_FDS
-                 : resource == RLIMIT_STACK ? USER_STACK_MAX_PAGES * 4096ULL
-                 : UINT64_MAX;
-    struct linux_rlimit value = {lim, lim};
-    return copy_to_user(user_old_limit, &value, sizeof(value)) == 0 ? 0 : -EFAULT;
+static int64_t sys_prlimit(uint64_t pid, uint64_t resource, uint64_t user_new_limit,
+                           uint64_t user_old_limit) {
+    struct process *target = pid ? process_find(pid) : process_current();
+    if (!target) return -ESRCH;
+    if (resource >= PROCESS_RLIMITS) return -EINVAL;
+    const struct credentials *cred = cred_current();
+    int privileged = !cred || cred->euid == 0;
+    if (target != process_current() && !privileged && cred->euid != target->cred.uid)
+        return -EPERM;
+    struct linux_rlimit wanted;
+    if (user_new_limit && copy_from_user(&wanted, user_new_limit, sizeof(wanted)) != 0)
+        return -EFAULT;
+    struct process_rlimit previous = target->rlimits[resource];
+    if (user_new_limit) {
+        if (wanted.rlim_cur > wanted.rlim_max) return -EINVAL;
+        if (wanted.rlim_max > previous.hard && !privileged) return -EPERM;
+        struct process_rlimit value = {wanted.rlim_cur, wanted.rlim_max};
+        if (process_set_rlimit(target, (unsigned)resource, &value) != 0) return -EPERM;
+    }
+    if (user_old_limit) {
+        struct linux_rlimit old = {previous.soft, previous.hard};
+        if (copy_to_user(user_old_limit, &old, sizeof(old)) != 0) return -EFAULT;
+    }
+    return 0;
 }
 
 static int64_t sys_clone_fork_compat(struct syscall_frame *frame,
@@ -4735,7 +4762,7 @@ static int64_t sys_clone3_fork_compat(struct syscall_frame *frame,
 
 static struct file *file_from_fd(int fd) {
     struct process *process = process_current();
-    if (!process || fd < 0 || fd >= PROCESS_MAX_FDS) return NULL;
+    if (!process || fd < 0 || fd >= PROCESS_FD_CAPACITY(process)) return NULL;
     return process->files->fds[fd];
 }
 
@@ -4796,7 +4823,7 @@ static int64_t sys_signalfd(int fd, uint64_t user_mask, uint64_t mask_size,
     if (copy_from_user(&mask, user_mask, sizeof(mask)) != 0) return -EFAULT;
 
     if (fd >= 0) {
-        if (fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) return -EBADF;
+        if (fd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[fd]) return -EBADF;
         struct file *file = process->files->fds[fd];
         if (file->kind != FILE_KIND_SIGNALFD) return -EINVAL;
         signalfd_set_mask(file->signalfd, mask);
@@ -5009,7 +5036,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             int fd = (int)SYSCALL_ARG0(frame);
             int64_t result = sys_read(fd, SYSCALL_ARG1(frame), (size_t)SYSCALL_ARG2(frame));
             struct process *process = process_current();
-            struct file *file = process && fd >= 0 && fd < PROCESS_MAX_FDS ? process->files->fds[fd] : NULL;
+            struct file *file = process && fd >= 0 && fd < PROCESS_FD_CAPACITY(process) ? process->files->fds[fd] : NULL;
             if (result == -EAGAIN && file && !(file->flags & O_NONBLOCK)) {
                 block_and_retry(frame, SYS_READ, file, 0);
             } else {
@@ -5103,7 +5130,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         case SYS_PREAD64: {
             struct process *process = process_current();
             int fd = (int)SYSCALL_ARG0(frame);
-            if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd] || process->files->fds[fd]->kind != FILE_KIND_VFS) SYSCALL_RET(frame) = (uint64_t)-(int64_t)EBADF;
+            if (!process || fd < 0 || fd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[fd] || process->files->fds[fd]->kind != FILE_KIND_VFS) SYSCALL_RET(frame) = (uint64_t)-(int64_t)EBADF;
             else {
                 uint64_t saved = process->files->fds[fd]->offset;
                 process->files->fds[fd]->offset = SYSCALL_ARG3(frame);
@@ -5115,7 +5142,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         case SYS_PWRITE64: {
             struct process *process = process_current();
             int fd = (int)SYSCALL_ARG0(frame);
-            if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd] || process->files->fds[fd]->kind != FILE_KIND_VFS) SYSCALL_RET(frame) = (uint64_t)-(int64_t)EBADF;
+            if (!process || fd < 0 || fd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[fd] || process->files->fds[fd]->kind != FILE_KIND_VFS) SYSCALL_RET(frame) = (uint64_t)-(int64_t)EBADF;
             else {
                 uint64_t saved = process->files->fds[fd]->offset;
                 process->files->fds[fd]->offset = SYSCALL_ARG3(frame);
@@ -5130,7 +5157,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             struct process *process = process_current();
             int fd = (int)SYSCALL_ARG0(frame);
             int writing = syscall_number == SYS_PWRITEV;
-            if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd] ||
+            if (!process || fd < 0 || fd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[fd] ||
                 process->files->fds[fd]->kind != FILE_KIND_VFS)
                 SYSCALL_RET(frame) = (uint64_t)-(int64_t)EBADF;
             else {
@@ -5380,7 +5407,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             int fd = (int)SYSCALL_ARG0(frame);
             int64_t result = sys_connect(fd, SYSCALL_ARG1(frame), SYSCALL_ARG2(frame));
             struct process *process = process_current();
-            struct file *file = process && fd >= 0 && fd < PROCESS_MAX_FDS ? process->files->fds[fd] : NULL;
+            struct file *file = process && fd >= 0 && fd < PROCESS_FD_CAPACITY(process) ? process->files->fds[fd] : NULL;
 
             if (result == -EINPROGRESS && file && file->kind == FILE_KIND_INET_SOCKET &&
                 !(file->flags & O_NONBLOCK)) {
@@ -5399,7 +5426,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             int flags = (int)SYSCALL_ARG3(frame);
             int64_t result = sys_recvfrom(fd, SYSCALL_ARG1(frame), SYSCALL_ARG2(frame), flags, SYSCALL_ARG4(frame), SYSCALL_ARG5(frame));
             struct process *process = process_current();
-            struct file *file = process && fd >= 0 && fd < PROCESS_MAX_FDS ? process->files->fds[fd] : NULL;
+            struct file *file = process && fd >= 0 && fd < PROCESS_FD_CAPACITY(process) ? process->files->fds[fd] : NULL;
             if (result == -EAGAIN && file && !(file->flags & O_NONBLOCK) && !(flags & MSG_DONTWAIT)) {
                 block_and_retry(frame, SYS_RECVFROM, file, 0);
             } else {
@@ -5414,7 +5441,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             int flags = (int)SYSCALL_ARG3(frame);
             int64_t result = sys_recvmmsg(fd, SYSCALL_ARG1(frame), (unsigned)SYSCALL_ARG2(frame), flags);
             struct process *process = process_current();
-            struct file *file = process && fd >= 0 && fd < PROCESS_MAX_FDS ? process->files->fds[fd] : NULL;
+            struct file *file = process && fd >= 0 && fd < PROCESS_FD_CAPACITY(process) ? process->files->fds[fd] : NULL;
             if (result == -EAGAIN && file && !(file->flags & O_NONBLOCK) && !(flags & MSG_DONTWAIT)) {
                 block_and_retry(frame, SYS_RECVMMSG, file, 0);
             } else {
@@ -5427,7 +5454,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             int flags = (int)SYSCALL_ARG2(frame);
             int64_t result = sys_recvmsg(fd, SYSCALL_ARG1(frame), flags);
             struct process *process = process_current();
-            struct file *file = process && fd >= 0 && fd < PROCESS_MAX_FDS ? process->files->fds[fd] : NULL;
+            struct file *file = process && fd >= 0 && fd < PROCESS_FD_CAPACITY(process) ? process->files->fds[fd] : NULL;
             if (result == -EAGAIN && file && !(file->flags & O_NONBLOCK) && !(flags & MSG_DONTWAIT)) {
                 block_and_retry(frame, SYS_RECVMSG, file, 0);
             } else {
@@ -5519,7 +5546,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             struct process *process = process_current();
             int fd = (int)SYSCALL_ARG0(frame);
             int command = (int)SYSCALL_ARG1(frame);
-            if (!process || fd < 0 || fd >= PROCESS_MAX_FDS || !process->files->fds[fd]) {
+            if (!process || fd < 0 || fd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[fd]) {
                 SYSCALL_RET(frame) = (uint64_t)-(int64_t)EBADF;
             } else if (command == F_DUPFD || command == F_DUPFD_CLOEXEC) {
                 SYSCALL_RET(frame) = (uint64_t)sys_dup(fd, (int)SYSCALL_ARG2(frame),
@@ -5674,7 +5701,8 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             break;
         case SYS_UMASK: SYSCALL_RET(frame) = process_set_umask((uint32_t)SYSCALL_ARG0(frame)); break;
         case SYS_GETTIMEOFDAY: SYSCALL_RET(frame) = (uint64_t)sys_gettimeofday(SYSCALL_ARG0(frame)); break;
-        case SYS_GETRLIMIT: SYSCALL_RET(frame) = (uint64_t)sys_prlimit(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame)); break;
+        case SYS_GETRLIMIT: SYSCALL_RET(frame) = (uint64_t)sys_prlimit(0, SYSCALL_ARG0(frame), 0, SYSCALL_ARG1(frame)); break;
+        case SYS_SETRLIMIT: SYSCALL_RET(frame) = (uint64_t)sys_prlimit(0, SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), 0); break;
 
         case SYS_GETPRIORITY: {
             int nice = 0;
@@ -5987,7 +6015,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             accept_or_block(frame, SYS_ACCEPT4, (int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame), (int)SYSCALL_ARG3(frame));
             break;
         case SYS_PIPE2: SYSCALL_RET(frame) = (uint64_t)sys_pipe(SYSCALL_ARG0(frame), (int)SYSCALL_ARG1(frame)); break;
-        case SYS_PRLIMIT64: SYSCALL_RET(frame) = (uint64_t)sys_prlimit(SYSCALL_ARG1(frame), SYSCALL_ARG3(frame)); break;
+        case SYS_PRLIMIT64: SYSCALL_RET(frame) = (uint64_t)sys_prlimit(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame), SYSCALL_ARG3(frame)); break;
         case SYS_RENAMEAT2: SYSCALL_RET(frame) = (uint64_t)sys_rename_at((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame), SYSCALL_ARG3(frame), (unsigned)SYSCALL_ARG4(frame)); break;
         case SYS_GETRANDOM: SYSCALL_RET(frame) = (uint64_t)sys_getrandom(SYSCALL_ARG0(frame), (size_t)SYSCALL_ARG1(frame), (unsigned)SYSCALL_ARG2(frame)); break;
         case SYS_GETDENTS64: SYSCALL_RET(frame) = (uint64_t)sys_getdents64((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), (size_t)SYSCALL_ARG2(frame)); break;
@@ -6005,9 +6033,10 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         case SYS_CLOSE_RANGE: {
             struct process *process = process_current();
             uint64_t first = SYSCALL_ARG0(frame), last = SYSCALL_ARG1(frame), flags = SYSCALL_ARG2(frame);
-            if (!process || first >= PROCESS_MAX_FDS) SYSCALL_RET(frame) = 0;
+            if (!process || first >= (uint64_t)PROCESS_FD_CAPACITY(process)) SYSCALL_RET(frame) = 0;
             else {
-                if (last >= PROCESS_MAX_FDS) last = PROCESS_MAX_FDS - 1;
+                if (last >= (uint64_t)PROCESS_FD_CAPACITY(process))
+                    last = (uint64_t)PROCESS_FD_CAPACITY(process) - 1;
                 if (flags & CLOSE_RANGE_CLOEXEC) {
                     for (uint64_t fd = first; fd <= last; fd++)
                         if (process->files->fds[fd])
@@ -6120,7 +6149,7 @@ static int syscall_try_shared(struct syscall_frame *frame) {
 
     int fd = (int)SYSCALL_ARG0(frame);
     struct process *process = process_current();
-    if (!process || !process->files || fd < 0 || fd >= PROCESS_MAX_FDS) return 0;
+    if (!process || !process->files || fd < 0 || fd >= PROCESS_FD_CAPACITY(process)) return 0;
     struct file *file = process->files->fds[fd];
     if (!file_may_share(file)) return 0;
 

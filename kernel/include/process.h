@@ -7,7 +7,12 @@
 #include "signal.h"
 #include "syscall.h"
 
-#define PROCESS_MAX_FDS 256
+#define PROCESS_NR_OPEN 1048576
+#define PROCESS_RLIMITS 16
+#define PROCESS_RLIM_INFINITY UINT64_MAX
+#define PROCESS_RLIMIT_STACK 3
+#define PROCESS_RLIMIT_NOFILE 7
+#define PROCESS_FD_CAPACITY(p) ((p)->files ? (p)->files->capacity : 0)
 #define PROCESS_FD_CLOEXEC 1U
 #define PROCESS_READY 0
 #define PROCESS_RUNNING 1
@@ -55,8 +60,14 @@ struct process_memory {
 
 struct file_table {
     int refs;
-    struct file *fds[PROCESS_MAX_FDS];
-    uint8_t fd_flags[PROCESS_MAX_FDS];
+    int capacity;
+    struct file **fds;
+    uint8_t *fd_flags;
+};
+
+struct process_rlimit {
+    uint64_t soft;
+    uint64_t hard;
 };
 
 #define PROCESS_FPU_STATE_SIZE 2560
@@ -69,6 +80,7 @@ struct process {
     uint64_t sid;
     char name[64];
     char *exe_path;
+    struct process_rlimit rlimits[PROCESS_RLIMITS];
     int state;
     int exit_status;
     int termination_signal;
@@ -216,6 +228,9 @@ int process_install_file_flags(struct process *process, struct file *file, int m
 uint8_t process_get_fd_flags(const struct process *process, int fd);
 int process_set_fd_flags(struct process *process, int fd, uint8_t flags);
 int process_close_fd(struct process *process, int fd);
+int process_reserve_fd(struct process *process, int fd);
+int process_set_rlimit(struct process *process, unsigned resource,
+                       const struct process_rlimit *value);
 int64_t process_fork_from_syscall(struct syscall_frame *frame);
 int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
                                           uint64_t child_stack, uint64_t tls,

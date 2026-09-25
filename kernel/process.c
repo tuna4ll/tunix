@@ -251,18 +251,89 @@ struct process *process_find(uint64_t pid) {
     return NULL;
 }
 
+static uint64_t fd_limit(const struct process *process) {
+    uint64_t limit = process->rlimits[PROCESS_RLIMIT_NOFILE].soft;
+    return limit > PROCESS_NR_OPEN ? PROCESS_NR_OPEN : limit;
+}
+
+static int file_table_grow(struct file_table *table, int wanted) {
+    if (wanted <= table->capacity) return 0;
+    int capacity = table->capacity ? table->capacity : 64;
+    while (capacity < wanted) capacity *= 2;
+    struct file **fds = (struct file **)kmalloc((size_t)capacity * sizeof(*fds));
+    uint8_t *flags = (uint8_t *)kmalloc((size_t)capacity);
+    if (!fds || !flags) {
+        kfree(fds);
+        kfree(flags);
+        return -1;
+    }
+    memset(fds, 0, (size_t)capacity * sizeof(*fds));
+    memset(flags, 0, (size_t)capacity);
+    if (table->capacity) {
+        memcpy(fds, table->fds, (size_t)table->capacity * sizeof(*fds));
+        memcpy(flags, table->fd_flags, (size_t)table->capacity);
+    }
+    kfree(table->fds);
+    kfree(table->fd_flags);
+    table->fds = fds;
+    table->fd_flags = flags;
+    table->capacity = capacity;
+    return 0;
+}
+
+int process_reserve_fd(struct process *process, int fd) {
+    if (!process || !process->files || fd < 0 || (uint64_t)fd >= fd_limit(process)) return -1;
+    return file_table_grow(process->files, fd + 1);
+}
+
 int process_install_file_flags(struct process *process, struct file *file,
                                int minimum_fd, uint8_t flags) {
     if (!process || !process->files || !file) return -1;
     if (minimum_fd < 0) minimum_fd = 0;
-    for (int fd = minimum_fd; fd < PROCESS_MAX_FDS; fd++) {
-        if (!process->files->fds[fd]) {
-            process->files->fds[fd] = file;
-            process->files->fd_flags[fd] = flags & PROCESS_FD_CLOEXEC;
-            return fd;
+    struct file_table *table = process->files;
+    uint64_t limit = fd_limit(process);
+    for (uint64_t fd = (uint64_t)minimum_fd; fd < limit; fd++) {
+        if (fd >= (uint64_t)table->capacity && process_reserve_fd(process, (int)fd) != 0)
+            return -1;
+        if (!table->fds[fd]) {
+            table->fds[fd] = file;
+            table->fd_flags[fd] = flags & PROCESS_FD_CLOEXEC;
+            return (int)fd;
         }
     }
     return -1;
+}
+
+static const struct process_rlimit default_rlimits[PROCESS_RLIMITS] = {
+    [0] = {PROCESS_RLIM_INFINITY, PROCESS_RLIM_INFINITY},
+    [1] = {PROCESS_RLIM_INFINITY, PROCESS_RLIM_INFINITY},
+    [2] = {PROCESS_RLIM_INFINITY, PROCESS_RLIM_INFINITY},
+    [PROCESS_RLIMIT_STACK] = {8ULL * 1024 * 1024, PROCESS_RLIM_INFINITY},
+    [4] = {0, PROCESS_RLIM_INFINITY},
+    [5] = {PROCESS_RLIM_INFINITY, PROCESS_RLIM_INFINITY},
+    [6] = {PROCESS_RLIM_INFINITY, PROCESS_RLIM_INFINITY},
+    [PROCESS_RLIMIT_NOFILE] = {1024, PROCESS_NR_OPEN},
+    [8] = {8ULL * 1024 * 1024, 8ULL * 1024 * 1024},
+    [9] = {PROCESS_RLIM_INFINITY, PROCESS_RLIM_INFINITY},
+    [10] = {PROCESS_RLIM_INFINITY, PROCESS_RLIM_INFINITY},
+    [11] = {PROCESS_RLIM_INFINITY, PROCESS_RLIM_INFINITY},
+    [12] = {819200, 819200},
+    [13] = {0, 0},
+    [14] = {0, 0},
+    [15] = {PROCESS_RLIM_INFINITY, PROCESS_RLIM_INFINITY},
+};
+
+int process_set_rlimit(struct process *process, unsigned resource,
+                       const struct process_rlimit *value) {
+    if (!process || resource >= PROCESS_RLIMITS || !value || value->soft > value->hard) return -1;
+    if (resource == PROCESS_RLIMIT_NOFILE && value->hard > PROCESS_NR_OPEN) return -1;
+    struct process *item = queue;
+    if (!item) return -1;
+    do {
+        if (item->tgid == process->tgid) item->rlimits[resource] = *value;
+        item = item->next;
+    } while (item != queue);
+    return 0;
 }
 
 int process_install_file(struct process *process, struct file *file, int minimum_fd) {
@@ -270,20 +341,20 @@ int process_install_file(struct process *process, struct file *file, int minimum
 }
 
 uint8_t process_get_fd_flags(const struct process *process, int fd) {
-    if (!process || !process->files || fd < 0 || fd >= PROCESS_MAX_FDS ||
+    if (!process || !process->files || fd < 0 || fd >= process->files->capacity ||
         !process->files->fds[fd]) return 0;
     return process->files->fd_flags[fd];
 }
 
 int process_set_fd_flags(struct process *process, int fd, uint8_t flags) {
-    if (!process || !process->files || fd < 0 || fd >= PROCESS_MAX_FDS ||
+    if (!process || !process->files || fd < 0 || fd >= process->files->capacity ||
         !process->files->fds[fd]) return -1;
     process->files->fd_flags[fd] = flags & PROCESS_FD_CLOEXEC;
     return 0;
 }
 
 int process_close_fd(struct process *process, int fd) {
-    if (!process || !process->files || fd < 0 || fd >= PROCESS_MAX_FDS ||
+    if (!process || !process->files || fd < 0 || fd >= process->files->capacity ||
         !process->files->fds[fd]) return -1;
     struct file *file = process->files->fds[fd];
     process->files->fds[fd] = NULL;
@@ -297,13 +368,27 @@ static struct file_table *file_table_create(void) {
     if (!table) return NULL;
     memset(table, 0, sizeof(*table));
     table->refs = 1;
+    if (file_table_grow(table, 64) != 0) {
+        kfree(table);
+        return NULL;
+    }
     return table;
+}
+
+static void file_table_free(struct file_table *table) {
+    kfree(table->fds);
+    kfree(table->fd_flags);
+    kfree(table);
 }
 
 static struct file_table *file_table_clone(const struct file_table *source) {
     struct file_table *table = file_table_create();
     if (!table || !source) return table;
-    for (int fd = 0; fd < PROCESS_MAX_FDS; fd++) {
+    if (file_table_grow(table, source->capacity) != 0) {
+        file_table_free(table);
+        return NULL;
+    }
+    for (int fd = 0; fd < source->capacity; fd++) {
         if (source->fds[fd]) {
             table->fds[fd] = source->fds[fd];
             table->fd_flags[fd] = source->fd_flags[fd];
@@ -318,7 +403,7 @@ static void process_release_files(struct process *process) {
     struct file_table *table = process->files;
     process->files = NULL;
     if (--table->refs > 0) return;
-    for (int fd = 0; fd < PROCESS_MAX_FDS; fd++) {
+    for (int fd = 0; fd < table->capacity; fd++) {
         if (table->fds[fd]) {
             struct file *file = table->fds[fd];
             table->fds[fd] = NULL;
@@ -326,7 +411,7 @@ static void process_release_files(struct process *process) {
             file_unref(file);
         }
     }
-    kfree(table);
+    file_table_free(table);
 }
 
 static void fpu_save(struct process *process);
@@ -471,6 +556,7 @@ struct process *process_create_from_path(const char *path) {
         return NULL;
     }
     memset(process, 0, sizeof(*process));
+    memcpy(process->rlimits, default_rlimits, sizeof(process->rlimits));
     process->pid = next_pid++;
     process->tgid = process->pid;
     process->ppid = 0;
@@ -1492,6 +1578,7 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame) {
     child->thp_disable = parent->thp_disable;
     strncpy(child->name, parent->name, sizeof(child->name) - 1);
     child->exe_path = copy_text(parent->exe_path);
+    memcpy(child->rlimits, parent->rlimits, sizeof(child->rlimits));
     child->cr3 = vmm_clone_address_space(parent->cr3);
     if (!child->cr3) {
         free_process_struct(child);
@@ -1590,6 +1677,7 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
     child->thp_disable = parent->thp_disable;
     strncpy(child->name, parent->name, sizeof(child->name) - 1);
     child->exe_path = copy_text(parent->exe_path);
+    memcpy(child->rlimits, parent->rlimits, sizeof(child->rlimits));
     child->memory = parent->memory;
     memory_ref(child->memory);
     sync_memory_view(child);
@@ -1707,7 +1795,7 @@ static int io_waiter_ready(const struct process *item, uint64_t *now) {
     }
     for (unsigned index = 0; index < item->io_watch_count; index++) {
         int fd = item->io_watch_fd[index];
-        struct file *file = item->files && fd >= 0 && fd < PROCESS_MAX_FDS ?
+        struct file *file = item->files && fd >= 0 && fd < item->files->capacity ?
             item->files->fds[fd] : NULL;
         if (!file || file_poll_events(file, item->io_watch_events[index])) return 1;
     }
@@ -1904,7 +1992,7 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
     }
     current->signal_pending = 0;
     current->in_signal = 0;
-    for (int fd = 0; fd < PROCESS_MAX_FDS; fd++) {
+    for (int fd = 0; fd < current->files->capacity; fd++) {
         if (current->files->fds[fd] && (current->files->fd_flags[fd] & PROCESS_FD_CLOEXEC))
             process_close_fd(current, fd);
     }

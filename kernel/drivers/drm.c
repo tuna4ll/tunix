@@ -1034,7 +1034,7 @@ static int64_t ioctl_prime_fd_to_handle(uint64_t user_argument) {
     struct drm_prime_handle request;
     if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
     struct process *process = process_current();
-    if (!process || !process->files || request.fd < 0 || request.fd >= PROCESS_MAX_FDS ||
+    if (!process || !process->files || request.fd < 0 || request.fd >= process->files->capacity ||
         !process->files->fds[request.fd]) return -EBADF;
     struct file *file = process->files->fds[request.fd];
     if (file->kind != FILE_KIND_DMABUF) return -EINVAL;
@@ -1275,7 +1275,6 @@ static void drm_leave(void) {
 static int drm_is_busy(void) {
     return __atomic_load_n(&drm_busy_holder, __ATOMIC_RELAXED) != 0;
 }
-
 
 static void copy_row_span(const struct drm_framebuffer *fb, const struct drm_dumb_buffer *buffer,
                           uint8_t *destination, uint32_t row, uint32_t first, uint32_t end) {
@@ -1820,7 +1819,6 @@ int64_t drm_file_ioctl(struct file *file, unsigned long request,
 
 static int64_t drm_dispatch_ioctl(struct file *file, unsigned long request,
                                   uint64_t user_argument) {
-
     switch (IOCTL_NR(request)) {
     case DRM_NR_VERSION: return ioctl_version(user_argument);
     case DRM_NR_GET_CAP: return ioctl_get_cap(user_argument);

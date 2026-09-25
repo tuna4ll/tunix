@@ -877,11 +877,11 @@ static void proc_fd_refresh(struct vfs_node *directory) {
 
     struct process *process = process_find(node_pid(directory));
     if (process && process->files) {
-        for (int fd = 0; fd < PROCESS_MAX_FDS; fd++) {
+        VFS_PATH_SCOPED target = vfs_path_buffer();
+        for (int fd = 0; target && fd < process->files->capacity; fd++) {
             struct file *file = process->files->fds[fd];
             if (!file) continue;
-            char target[PROC_PATH_MAX];
-            describe_file(file, target, sizeof(target));
+            describe_file(file, target, VFS_PATH_MAX);
             if (!target[0]) continue;
             char name[16];
             size_t at = path_append_decimal(name, 0, (uint64_t)fd);
