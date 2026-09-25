@@ -7,6 +7,7 @@
 static int vmm_map_page_in_locked(uint64_t cr3_physical, uint64_t virtual_address,
                                   uint64_t physical_address, uint64_t flags);
 #include "include/boot.h"
+#include "include/heap.h"
 #include "include/pmm.h"
 #include "include/smp.h"
 #include "include/vmm.h"
@@ -18,7 +19,6 @@ static int vmm_map_page_in_locked(uint64_t cr3_physical, uint64_t virtual_addres
 static int kernel_mapping(uint64_t virtual_address) {
     return virtual_address >= KERNEL_HALF_BASE;
 }
-#define MAX_ADDRESS_SPACES 256
 
 extern void panic(const char *msg) __attribute__((noreturn));
 extern void kprintf(const char *fmt, ...);
@@ -32,7 +32,10 @@ extern int process_grow_user_stack(uint64_t fault_address);
 #endif
 
 static uint64_t kernel_cr3_physical;
-static uint64_t address_spaces[MAX_ADDRESS_SPACES];
+static uint64_t boot_space_slots[64];
+static uint64_t *space_slots = boot_space_slots;
+static uint64_t space_capacity = 64;
+static uint64_t space_count;
 
 static int physical_direct_range_valid(uint64_t physical, size_t length) {
     if (!length) return physical < DIRECT_MAP_BYTES;
@@ -91,29 +94,59 @@ uint64_t vmm_dma_physical(const void *pointer, uint64_t length) {
     return 0;
 }
 
-static int registry_contains(const uint64_t *registry, size_t count, uint64_t value) {
-    for (size_t index = 0; index < count; index++) {
-        if (registry[index] == value) return 1;
+static uint64_t space_home(uint64_t value, uint64_t capacity) {
+    return ((value >> 12) * 0x9E3779B97F4A7C15ULL >> 32) & (capacity - 1);
+}
+
+static int space_known(uint64_t value) {
+    uint64_t mask = space_capacity - 1;
+    for (uint64_t at = space_home(value, space_capacity);; at = (at + 1) & mask) {
+        if (space_slots[at] == value) return 1;
+        if (!space_slots[at]) return 0;
     }
+}
+
+static void space_place(uint64_t *slots, uint64_t capacity, uint64_t value) {
+    uint64_t at = space_home(value, capacity);
+    while (slots[at]) at = (at + 1) & (capacity - 1);
+    slots[at] = value;
+}
+
+static int space_add(uint64_t value) {
+    if (!value || space_known(value)) return 0;
+    if ((space_count + 1) * 2 > space_capacity) {
+        uint64_t capacity = space_capacity * 2;
+        uint64_t *slots = (uint64_t *)kmalloc(capacity * sizeof(uint64_t));
+        if (!slots) return -1;
+        memset(slots, 0, capacity * sizeof(uint64_t));
+        for (uint64_t index = 0; index < space_capacity; index++)
+            if (space_slots[index]) space_place(slots, capacity, space_slots[index]);
+        uint64_t *old = space_slots;
+        space_slots = slots;
+        space_capacity = capacity;
+        if (old != boot_space_slots) kfree(old);
+    }
+    space_place(space_slots, space_capacity, value);
+    space_count++;
     return 0;
 }
 
-static int registry_add(uint64_t *registry, size_t count, uint64_t value) {
-    if (registry_contains(registry, count, value)) return 0;
-    for (size_t index = 0; index < count; index++) {
-        if (registry[index] == 0) {
-            registry[index] = value;
-            return 0;
-        }
+static void space_remove(uint64_t value) {
+    if (!value) return;
+    uint64_t mask = space_capacity - 1;
+    uint64_t at = space_home(value, space_capacity);
+    while (space_slots[at] != value) {
+        if (!space_slots[at]) return;
+        at = (at + 1) & mask;
     }
-    return -1;
-}
-
-static void registry_remove(uint64_t *registry, size_t count, uint64_t value) {
-    for (size_t index = 0; index < count; index++) {
-        if (registry[index] == value) {
-            registry[index] = 0;
-            return;
+    space_slots[at] = 0;
+    space_count--;
+    for (uint64_t next = (at + 1) & mask; space_slots[next]; next = (next + 1) & mask) {
+        uint64_t home = space_home(space_slots[next], space_capacity);
+        if (((next - home) & mask) >= ((next - at) & mask)) {
+            space_slots[at] = space_slots[next];
+            space_slots[next] = 0;
+            at = next;
         }
     }
 }
@@ -124,7 +157,7 @@ static int address_space_registered(uint64_t cr3_physical) {
     uint64_t physical = cr3_physical & ADDRESS_MASK;
     if (!physical) return 0;
     if (physical == last_registered) return 1;
-    if (!registry_contains(address_spaces, MAX_ADDRESS_SPACES, physical)) return 0;
+    if (!space_known(physical)) return 0;
     last_registered = physical;
     return 1;
 }
@@ -207,7 +240,6 @@ static void configure_page_attributes(void) {
 int vmm_write_combining_available(void) { return write_combining; }
 
 void vmm_init(void) {
-    memset(address_spaces, 0, sizeof(address_spaces));
     configure_page_attributes();
 
     kernel_cr3_physical = vmm_arch_read_root();
@@ -249,7 +281,7 @@ void vmm_init(void) {
     pmm_use_direct_map(DIRECT_MAP_BASE);
 
     if (!pmm_page_is_allocated(kernel_cr3_physical) ||
-        registry_add(address_spaces, MAX_ADDRESS_SPACES, kernel_cr3_physical) != 0) {
+        space_add(kernel_cr3_physical) != 0) {
         panic("VMM: invalid boot CR3");
     }
     pml4 = page_table_pointer(kernel_cr3_physical);
@@ -295,14 +327,15 @@ uint64_t vmm_current_cr3(void) { return vmm_arch_read_root(); }
 
 uint64_t vmm_create_address_space(void) {
     uint64_t physical = (uint64_t)pmm_alloc_page();
-    if (registry_add(address_spaces, MAX_ADDRESS_SPACES, physical) != 0) {
+    if (!physical) return 0;
+    if (space_add(physical) != 0) {
         pmm_free_page((void *)physical);
         return 0;
     }
     uint64_t *new_pml4 = page_table_pointer(physical);
     uint64_t *kernel_pml4 = page_table_pointer(kernel_cr3_physical);
     if (!new_pml4 || !kernel_pml4) {
-        registry_remove(address_spaces, MAX_ADDRESS_SPACES, physical);
+        space_remove(physical);
         last_registered = 0;
         pmm_free_page((void *)physical);
         return 0;
@@ -878,7 +911,7 @@ void vmm_destroy_address_space(uint64_t cr3_physical) {
     }
     uint64_t *pml4 = page_table_pointer(physical);
     if (!pml4) {
-        registry_remove(address_spaces, MAX_ADDRESS_SPACES, physical);
+        space_remove(physical);
         last_registered = 0;
         return;
     }
@@ -887,8 +920,8 @@ void vmm_destroy_address_space(uint64_t cr3_physical) {
         if (pte_present(entry)) destroy_user_table(pte_address(entry), 3);
         pml4[index] = 0;
     }
-    registry_remove(address_spaces, MAX_ADDRESS_SPACES, physical);
-        last_registered = 0;
+    space_remove(physical);
+    last_registered = 0;
     if (pmm_page_is_allocated(physical)) pmm_free_page((void *)physical);
 }
 
