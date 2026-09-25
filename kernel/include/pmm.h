@@ -6,9 +6,9 @@
 #include "boot.h"
 
 #define PMM_PAGE_SIZE 4096ULL
-#define PMM_DIRECT_MAP_LIMIT (8ULL * 1024ULL * 1024ULL * 1024ULL)
 
 void pmm_init(const struct boot_memory_region *regions, uint32_t count);
+void pmm_use_direct_map(uint64_t virtual_base);
 void *pmm_alloc_page(void);
 void *pmm_alloc_pages(uint64_t count, uint64_t alignment_bytes);
 void *pmm_alloc_pages_below(uint64_t count, uint64_t alignment_bytes, uint64_t limit);

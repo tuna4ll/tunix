@@ -337,7 +337,7 @@ static void map_direct_memory(void) {
         uint64_t last = (range->base + range->size - 1U) >> 30;
         for (uint64_t gigabyte = first; gigabyte <= last; gigabyte++) {
             uint64_t physical = gigabyte << 30;
-            if (physical >= PMM_DIRECT_MAP_LIMIT) break;
+            if (physical >= DIRECT_MAP_BYTES) break;
             aarch64_early_map(DIRECT_MAP_BASE + physical, physical, attributes, 1);
         }
     }

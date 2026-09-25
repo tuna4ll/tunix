@@ -74,6 +74,8 @@ static uint32_t build_memory_map(void) {
     for (uint64_t index = 0;
          index < response->entry_count && count < BOOT_MEMORY_REGIONS; index++) {
         const struct limine_memmap_entry *entry = response->entries[index];
+        if (entry->type == LIMINE_MEMMAP_RESERVED || entry->type == LIMINE_MEMMAP_BAD_MEMORY ||
+            entry->type == LIMINE_MEMMAP_FRAMEBUFFER) continue;
         memory_regions[count].base = entry->base;
         memory_regions[count].length = entry->length;
         memory_regions[count].usable = entry->type == LIMINE_MEMMAP_USABLE;

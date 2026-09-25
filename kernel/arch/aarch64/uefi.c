@@ -179,7 +179,7 @@ static uint64_t firmware_physical(uint64_t address) {
 }
 
 const uint8_t *aarch64_physical_bytes(uint64_t physical, uint64_t bytes) {
-    if (!physical || physical + bytes > PMM_DIRECT_MAP_LIMIT || physical + bytes < physical)
+    if (!physical || physical + bytes > DIRECT_MAP_BYTES || physical + bytes < physical)
         return NULL;
     uint64_t first = physical >> 30;
     uint64_t last = (physical + bytes - 1U) >> 30;

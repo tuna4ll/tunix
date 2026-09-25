@@ -11,6 +11,7 @@ static uint64_t heap_extent_limit(void) {
     uint64_t ram = pmm_usable_page_count() * (uint64_t)PMM_PAGE_SIZE;
     limit = ram * 2ULL;
     if (limit < 2048ULL * 1024 * 1024) limit = 2048ULL * 1024 * 1024;
+    if (limit > HEAP_VIRTUAL_BYTES) limit = HEAP_VIRTUAL_BYTES;
     return limit;
 }
 

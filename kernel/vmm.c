@@ -18,7 +18,6 @@ static int vmm_map_page_in_locked(uint64_t cr3_physical, uint64_t virtual_addres
 static int kernel_mapping(uint64_t virtual_address) {
     return virtual_address >= KERNEL_HALF_BASE;
 }
-#define DIRECT_MAP_SIZE PMM_DIRECT_MAP_LIMIT
 #define MAX_ADDRESS_SPACES 256
 
 extern void panic(const char *msg) __attribute__((noreturn));
@@ -36,8 +35,8 @@ static uint64_t kernel_cr3_physical;
 static uint64_t address_spaces[MAX_ADDRESS_SPACES];
 
 static int physical_direct_range_valid(uint64_t physical, size_t length) {
-    if (!length) return physical < DIRECT_MAP_SIZE;
-    if (physical >= DIRECT_MAP_SIZE || length > DIRECT_MAP_SIZE - physical) return 0;
+    if (!length) return physical < DIRECT_MAP_BYTES;
+    if (physical >= DIRECT_MAP_BYTES || length > DIRECT_MAP_BYTES - physical) return 0;
     return pmm_physical_range_managed(physical, (uint64_t)length);
 }
 
@@ -45,7 +44,7 @@ static void report_bad_physical(const char *operation, uint64_t physical,
                                 const void *caller) {
     kprintf("VMM: %s physical=%p caller=%p managed_limit=%p direct_limit=%p\n",
             operation, (void *)physical, (void *)caller,
-            (void *)pmm_managed_limit(), (void *)DIRECT_MAP_SIZE);
+            (void *)pmm_managed_limit(), (void *)DIRECT_MAP_BYTES);
 }
 
 void *vmm_phys_to_virt(uint64_t physical) {
@@ -60,7 +59,7 @@ uint64_t vmm_virt_to_phys_direct(const void *virtual_address) {
     const struct boot_info *boot = boot_info();
     uint64_t value = (uint64_t)virtual_address;
     uint64_t physical;
-    if (value >= DIRECT_MAP_BASE && value < DIRECT_MAP_BASE + DIRECT_MAP_SIZE) {
+    if (value >= DIRECT_MAP_BASE && value < DIRECT_MAP_BASE + DIRECT_MAP_BYTES) {
         physical = value - DIRECT_MAP_BASE;
     } else if (value >= boot->kernel_virtual_base &&
                value < boot->kernel_virtual_base + boot->kernel_size) {
@@ -79,7 +78,7 @@ uint64_t vmm_dma_physical(const void *pointer, uint64_t length) {
     const struct boot_info *boot = boot_info();
     uint64_t value = (uint64_t)(uintptr_t)pointer;
 
-    if (value >= DIRECT_MAP_BASE && value < DIRECT_MAP_BASE + DIRECT_MAP_SIZE) {
+    if (value >= DIRECT_MAP_BASE && value < DIRECT_MAP_BASE + DIRECT_MAP_BYTES) {
         uint64_t physical = value - DIRECT_MAP_BASE;
         return pmm_physical_range_managed(physical, length) ? physical : 0;
     }
@@ -217,29 +216,37 @@ void vmm_init(void) {
 #define early(physical) ((uint64_t *)(hhdm + ((physical) & ADDRESS_MASK)))
     uint64_t *pml4 = early(kernel_cr3_physical);
 
-    uint16_t direct_pml4 = (uint16_t)((DIRECT_MAP_BASE >> 39) & 0x1FF);
-    uint64_t direct_pdpt_physical = (uint64_t)pmm_alloc_page();
-    if (!direct_pdpt_physical) panic("VMM: direct map PDPT unavailable");
-    uint64_t *direct_pdpt = early(direct_pdpt_physical);
-    memset(direct_pdpt, 0, 4096);
-
+    uint64_t slots[DIRECT_MAP_BYTES >> 39] = {0};
     uint64_t mapped = pmm_managed_limit();
-    if (mapped > DIRECT_MAP_SIZE) mapped = DIRECT_MAP_SIZE;
     for (uint64_t gigabyte = 0; gigabyte * 0x40000000ULL < mapped; gigabyte++) {
+        uint64_t base = gigabyte * 0x40000000ULL;
+        int wanted = 0;
+        for (uint64_t i = 0; i < 512 && !wanted; i++)
+            wanted = vmm_arch_direct_map_wanted(base + i * 0x200000ULL);
+        if (!wanted) continue;
+        uint64_t slot = base >> 39;
+        if (!slots[slot]) {
+            slots[slot] = (uint64_t)pmm_alloc_page();
+            if (!slots[slot]) panic("VMM: direct map PDPT unavailable");
+            memset(early(slots[slot]), 0, 4096);
+        }
         uint64_t table_physical = (uint64_t)pmm_alloc_page();
         if (!table_physical) panic("VMM: direct map directory unavailable");
         uint64_t *table = early(table_physical);
         memset(table, 0, 4096);
         for (uint64_t i = 0; i < 512; i++) {
-            uint64_t frame = gigabyte * 0x40000000ULL + i * 0x200000ULL;
+            uint64_t frame = base + i * 0x200000ULL;
             if (vmm_arch_direct_map_wanted(frame))
                 table[i] = pte_block(frame, PAGE_PRESENT | PAGE_WRITE);
         }
-        direct_pdpt[gigabyte] = pte_table(table_physical, PAGE_PRESENT | PAGE_WRITE);
+        early(slots[slot])[gigabyte & 0x1FF] = pte_table(table_physical, PAGE_PRESENT | PAGE_WRITE);
     }
-    pml4[direct_pml4] = pte_table(direct_pdpt_physical, PAGE_PRESENT | PAGE_WRITE);
+    uint16_t first_slot = (uint16_t)((DIRECT_MAP_BASE >> 39) & 0x1FF);
+    for (uint64_t slot = 0; slot < (DIRECT_MAP_BYTES >> 39); slot++)
+        if (slots[slot]) pml4[first_slot + slot] = pte_table(slots[slot], PAGE_PRESENT | PAGE_WRITE);
     vmm_arch_write_root(kernel_cr3_physical);
 #undef early
+    pmm_use_direct_map(DIRECT_MAP_BASE);
 
     if (!pmm_page_is_allocated(kernel_cr3_physical) ||
         registry_add(address_spaces, MAX_ADDRESS_SPACES, kernel_cr3_physical) != 0) {
@@ -260,7 +267,7 @@ void vmm_init(void) {
     vmm_arch_write_root(kernel_cr3_physical);
     KDEBUG("VMM: %u MiB direct map ready, %u MiB of room\n",
            (unsigned)(mapped / (1024 * 1024)),
-           (unsigned)(DIRECT_MAP_SIZE / (1024 * 1024)));
+           (unsigned)(DIRECT_MAP_BYTES / (1024 * 1024)));
 }
 
 uint64_t vmm_kernel_cr3(void) { return kernel_cr3_physical; }

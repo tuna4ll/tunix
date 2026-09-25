@@ -116,7 +116,7 @@ static uint64_t window_used;
 static const void *map_physical(uint64_t physical, uint32_t length) {
     if (!physical || !length) return NULL;
 #if defined(__aarch64__)
-    if (physical + length > PMM_DIRECT_MAP_LIMIT) return NULL;
+    if (physical + length > DIRECT_MAP_BYTES) return NULL;
     return (const void *)(DIRECT_MAP_BASE + physical);
 #endif
     uint64_t page = physical & ~(ACPI_PAGE_BYTES - 1);

@@ -31,7 +31,6 @@ SECTIONS
         . = ALIGN(16);
         __bss_end = .;
         kernel_end = .;
-        . += 0x800000;
         kernel_reserve_end = .;
         . = ALIGN(4096);
         boot_stack_bottom = .;
