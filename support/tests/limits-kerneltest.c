@@ -19,6 +19,19 @@ typedef unsigned int u32;
 #define NR_RENAMEAT 264
 #define NR_SYMLINKAT 266
 #define NR_READLINKAT 267
+#define NR_FORK 57
+#define NR_EXIT 60
+#define NR_WAIT4 61
+#define NR_PIPE2 293
+#define NR_DUP 32
+#define NR_DUP2_OR_3 33
+#define NR_FCNTL 72
+#define NR_POLL_OR_PPOLL 7
+#define NR_PSELECT6 270
+#define NR_PRLIMIT64 302
+#define NR_CLOSE_RANGE 436
+#define NR_SETUID 105
+
 
 static inline s64 call6(s64 n, s64 a, s64 b, s64 c, s64 d, s64 e, s64 f) {
     s64 r;
@@ -47,6 +60,19 @@ static inline s64 call6(s64 n, s64 a, s64 b, s64 c, s64 d, s64 e, s64 f) {
 #define NR_RENAMEAT 38
 #define NR_SYMLINKAT 36
 #define NR_READLINKAT 78
+#define NR_CLONE 220
+#define NR_EXIT 93
+#define NR_WAIT4 260
+#define NR_PIPE2 59
+#define NR_DUP 23
+#define NR_DUP2_OR_3 24
+#define NR_FCNTL 25
+#define NR_POLL_OR_PPOLL 73
+#define NR_PSELECT6 72
+#define NR_PRLIMIT64 261
+#define NR_CLOSE_RANGE 436
+#define NR_SETUID 146
+
 
 static inline s64 call6(s64 n, s64 a, s64 b, s64 c, s64 d, s64 e, s64 f) {
     register s64 x8 __asm__("x8") = n;
@@ -61,6 +87,12 @@ static inline s64 call6(s64 n, s64 a, s64 b, s64 c, s64 d, s64 e, s64 f) {
                      : "memory");
     return x0;
 }
+#endif
+
+#if defined(__x86_64__)
+static inline s64 do_fork(void) { return call6(NR_FORK, 0, 0, 0, 0, 0, 0); }
+#else
+static inline s64 do_fork(void) { return call6(NR_CLONE, 17, 0, 0, 0, 0, 0); }
 #endif
 
 #define call0(n) call6(n, 0, 0, 0, 0, 0, 0)
@@ -386,13 +418,159 @@ static void test_symlink_chain(void) {
     report("chain-cleanup", removed && call3(NR_UNLINKAT, AT_FDCWD, "/tmp/chain", AT_REMOVEDIR) == 0);
 }
 
+static void test_many_processes(u64 wanted) {
+    int pipe_fds[2];
+    if (call2(NR_PIPE2, pipe_fds, 0) != 0) {
+        report("processes-pipe", 0);
+        return;
+    }
+    u64 started = 0;
+    for (; started < wanted; started++) {
+        s64 pid = do_fork();
+        if (pid == 0) {
+            char byte;
+            call1(NR_CLOSE, pipe_fds[1]);
+            call3(NR_READ, pipe_fds[0], &byte, 1);
+            call1(NR_EXIT, 7);
+        }
+        if (pid < 0) break;
+    }
+    report_value("processes-alive", started == wanted, started);
+    call1(NR_CLOSE, pipe_fds[1]);
+    u64 reaped = 0;
+    int all_seven = 1;
+    for (;;) {
+        int status = 0;
+        s64 pid = call4(NR_WAIT4, -1, &status, 0, 0);
+        if (pid <= 0) break;
+        if (((status >> 8) & 0xFF) != 7) all_seven = 0;
+        reaped++;
+    }
+    call1(NR_CLOSE, pipe_fds[0]);
+    report_value("processes-reaped", reaped == started && all_seven, reaped);
+}
+
+struct rlimit_pair {
+    u64 soft;
+    u64 hard;
+};
+
+struct pollfd {
+    int fd;
+    short events;
+    short revents;
+};
+
+static s64 dup_to(int fd, int target) {
+#if defined(__x86_64__)
+    return call2(NR_DUP2_OR_3, fd, target);
+#else
+    return call3(NR_DUP2_OR_3, fd, target, 0);
+#endif
+}
+
+static s64 poll_now(struct pollfd *fds, u64 count) {
+#if defined(__x86_64__)
+    return call3(NR_POLL_OR_PPOLL, fds, count, 0);
+#else
+    u64 zero[2] = {0, 0};
+    return call4(NR_POLL_OR_PPOLL, fds, count, zero, 0);
+#endif
+}
+
+static void test_descriptors(void) {
+    struct rlimit_pair limit;
+    report("nofile-get", call4(NR_PRLIMIT64, 0, 7, 0, &limit) == 0);
+    report_value("nofile-default-soft", limit.soft == 1024, limit.soft);
+    report_value("nofile-default-hard", limit.hard == 1048576, limit.hard);
+    struct rlimit_pair raised = {6000, limit.hard};
+    report("nofile-raise", call4(NR_PRLIMIT64, 0, 7, &raised, 0) == 0);
+    int pipe_fds[2];
+    call2(NR_PIPE2, pipe_fds, 0);
+    call3(NR_WRITE, pipe_fds[1], "x", 1);
+    s64 highest = -1;
+    u64 opened = 0;
+    for (u64 index = 0; index < 5000; index++) {
+        s64 fd = call1(NR_DUP, pipe_fds[0]);
+        if (fd < 0) break;
+        highest = fd;
+        opened++;
+    }
+    report_value("fds-opened", opened == 5000, opened);
+    report_value("fds-highest", highest >= 5000, (u64)highest);
+    report("fds-dup2-inside", dup_to(pipe_fds[0], 5999) == 5999);
+    report("fds-dup2-outside", dup_to(pipe_fds[0], 6000) == -9);
+    static struct pollfd polled[4000];
+    for (int index = 0; index < 4000; index++) {
+        polled[index].fd = 1000 + index;
+        polled[index].events = 1;
+        polled[index].revents = 0;
+    }
+    s64 ready = poll_now(polled, 4000);
+    report_value("fds-poll-4000", ready == 4000 && polled[3999].revents == 1, (u64)ready);
+    static u64 read_set[6000 / 64 + 1];
+    for (u64 word = 0; word < sizeof(read_set) / 8; word++) read_set[word] = 0;
+    read_set[5999 / 64] |= 1ULL << (5999 % 64);
+    u64 zero_time[2] = {0, 0};
+    s64 selected = call6(NR_PSELECT6, 6000, (s64)read_set, 0, 0, (s64)zero_time, 0);
+    report_value("fds-select-5999", selected == 1 && (read_set[5999 / 64] >> (5999 % 64)) & 1,
+                 (u64)selected);
+    s64 pid = do_fork();
+    if (pid == 0) {
+        int ok = call3(NR_FCNTL, 5999, 1, 0) >= 0 && call3(NR_FCNTL, 4999, 1, 0) >= 0;
+        call1(NR_EXIT, ok ? 0 : 1);
+    }
+    int status = -1;
+    call4(NR_WAIT4, pid, &status, 0, 0);
+    report_value("fds-inherited-by-fork", status == 0, (u64)status);
+    report("fds-close-range", call3(NR_CLOSE_RANGE, 3, ~0U, 0) == 0 &&
+                              call3(NR_FCNTL, 5999, 1, 0) == -9 && call3(NR_FCNTL, 3, 1, 0) == -9);
+    struct rlimit_pair lowered = {10, limit.hard};
+    call4(NR_PRLIMIT64, 0, 7, &lowered, 0);
+    u64 under_low = 0;
+    for (;;) {
+        s64 fd = call1(NR_DUP, 0);
+        if (fd < 0) {
+            report_value("fds-emfile-at-soft-limit", fd == -24 && under_low == 7, under_low);
+            break;
+        }
+        under_low++;
+        if (under_low > 20) {
+            report("fds-emfile-at-soft-limit", 0);
+            break;
+        }
+    }
+    call3(NR_CLOSE_RANGE, 3, ~0U, 0);
+    pid = do_fork();
+    if (pid == 0) {
+        call1(NR_SETUID, 1000);
+        struct rlimit_pair above = {10, 2000000};
+        struct rlimit_pair within = {10, 20};
+        int ok = call4(NR_PRLIMIT64, 0, 7, &above, 0) == -1 &&
+                 call4(NR_PRLIMIT64, 0, 7, &within, 0) == 0;
+        call1(NR_EXIT, ok ? 0 : 1);
+    }
+    call4(NR_WAIT4, pid, &status, 0, 0);
+    report_value("nofile-unprivileged-hard", status == 0, (u64)status);
+    call4(NR_PRLIMIT64, 0, 7, &limit, 0);
+}
+
+#ifndef LIMITS_TESTS
+#define LIMITS_TESTS 0xFFFFFFFFU
+#endif
+#ifndef LIMITS_PROCESSES
+#define LIMITS_PROCESSES 2000
+#endif
+
 static void run(void) __attribute__((noreturn, used));
 static void run(void) {
-    test_memory();
-    test_long_names();
-    test_long_paths();
-    test_deep_tree();
-    test_symlink_chain();
+    if (LIMITS_TESTS & 0x01U) test_memory();
+    if (LIMITS_TESTS & 0x02U) test_long_names();
+    if (LIMITS_TESTS & 0x04U) test_long_paths();
+    if (LIMITS_TESTS & 0x08U) test_deep_tree();
+    if (LIMITS_TESTS & 0x10U) test_symlink_chain();
+    if (LIMITS_TESTS & 0x20U) test_many_processes(LIMITS_PROCESSES);
+    if (LIMITS_TESTS & 0x40U) test_descriptors();
     print(failures ? "LIMITSTEST FAIL\n" : "LIMITSTEST PASS\n");
     call1(NR_EXIT_GROUP, 0);
     for (;;) { }
