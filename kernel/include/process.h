@@ -175,6 +175,34 @@ struct process {
     struct tunix_sigaction signal_actions[TUNIX_NSIG];
 
     struct process *next;
+    struct process *prev;
+    struct process *pid_next;
+    struct process *dead_next;
+    struct process *ready_next;
+    struct process *ready_prev;
+    struct process *wait_next;
+    struct process *wait_prev;
+    struct process *key_next;
+    struct process *key_prev;
+    struct process *children;
+    struct process *children_tail;
+    struct process *sibling_next;
+    struct process *sibling_prev;
+    struct process *linked_parent;
+    struct process *zombie_next;
+    uint8_t on_zombie_list;
+    struct process *rq_left;
+    struct process *rq_right;
+    struct process *rq_parent;
+    uint64_t rq_weight;
+    uint32_t rq_priority;
+    int rq_level;
+    uint64_t wait_hash_value;
+    uint64_t key_hash_value;
+    uint8_t on_ready_list;
+    uint8_t on_wait_list;
+    uint8_t on_key_list;
+    uint8_t on_dead_list;
 };
 
 void process_init(void);
@@ -182,6 +210,7 @@ struct process *process_create_from_path(const char *path);
 struct process *process_current(void);
 void process_dump_all(void);
 struct process *process_find(uint64_t pid);
+void process_note_deadline(uint64_t deadline_ns);
 
 #define PROCESS_SCHED_OTHER 0
 #define PROCESS_SCHED_FIFO 1

@@ -81,11 +81,242 @@ extern void panic(const char *msg) __attribute__((noreturn));
 static struct process *queue;
 static uint64_t next_pid = 1;
 static unsigned ready_processes;
+static struct process *dead_head;
+static uint64_t live_processes;
+
+#define WAIT_BUCKETS 1024U
+static struct process *wait_buckets[WAIT_BUCKETS];
+static struct process *key_buckets[WAIT_BUCKETS];
+
+static struct process *boot_pid_buckets[64];
+static struct process **pid_buckets = boot_pid_buckets;
+static uint64_t pid_bucket_count = 64;
+
+static uint64_t earliest_deadline = UINT64_MAX;
+
+static unsigned wait_bucket_of(uint64_t value) {
+    return (unsigned)((value * 0x9E3779B97F4A7C15ULL) >> 54) & (WAIT_BUCKETS - 1U);
+}
+
+static struct process *rq_root;
+static uint64_t rq_weight_total;
+static unsigned rq_ordinary;
+static struct process *rt_heads[PROCESS_RT_PRIORITY_MAX + 1];
+static uint64_t rt_bitmap[2];
+static uint32_t rq_seed = 0x9E3779B9U;
+
+static int rq_before(const struct process *a, const struct process *b) {
+    int64_t delta = (int64_t)(a->virtual_runtime_ns - b->virtual_runtime_ns);
+    if (delta) return delta < 0;
+    return a->pid < b->pid;
+}
+
+static void rq_rotate_up(struct process *node) {
+    struct process *parent = node->rq_parent;
+    struct process *grand = parent->rq_parent;
+    if (parent->rq_left == node) {
+        parent->rq_left = node->rq_right;
+        if (node->rq_right) node->rq_right->rq_parent = parent;
+        node->rq_right = parent;
+    } else {
+        parent->rq_right = node->rq_left;
+        if (node->rq_left) node->rq_left->rq_parent = parent;
+        node->rq_left = parent;
+    }
+    parent->rq_parent = node;
+    node->rq_parent = grand;
+    if (!grand) rq_root = node;
+    else if (grand->rq_left == parent) grand->rq_left = node;
+    else grand->rq_right = node;
+}
+
+static void rq_insert(struct process *node) {
+    rq_seed ^= rq_seed << 13;
+    rq_seed ^= rq_seed >> 17;
+    rq_seed ^= rq_seed << 5;
+    node->rq_priority = rq_seed;
+    node->rq_left = node->rq_right = node->rq_parent = NULL;
+    struct process **link = &rq_root;
+    struct process *parent = NULL;
+    while (*link) {
+        parent = *link;
+        link = rq_before(node, parent) ? &parent->rq_left : &parent->rq_right;
+    }
+    *link = node;
+    node->rq_parent = parent;
+    while (node->rq_parent && node->rq_priority < node->rq_parent->rq_priority)
+        rq_rotate_up(node);
+}
+
+static void rq_remove(struct process *node) {
+    while (node->rq_left || node->rq_right) {
+        struct process *child = !node->rq_left ? node->rq_right
+                              : !node->rq_right ? node->rq_left
+                              : node->rq_left->rq_priority < node->rq_right->rq_priority
+                                    ? node->rq_left : node->rq_right;
+        rq_rotate_up(child);
+    }
+    struct process *parent = node->rq_parent;
+    if (!parent) rq_root = NULL;
+    else if (parent->rq_left == node) parent->rq_left = NULL;
+    else parent->rq_right = NULL;
+    node->rq_parent = NULL;
+}
+
+static struct process *rq_first(void) {
+    struct process *node = rq_root;
+    while (node && node->rq_left) node = node->rq_left;
+    return node;
+}
+
+static struct process *rq_next(struct process *node) {
+    if (node->rq_right) {
+        node = node->rq_right;
+        while (node->rq_left) node = node->rq_left;
+        return node;
+    }
+    while (node->rq_parent && node->rq_parent->rq_right == node) node = node->rq_parent;
+    return node->rq_parent;
+}
+
+static void ready_link(struct process *process) {
+    if (process->on_ready_list) return;
+    process->on_ready_list = 1;
+    ready_processes++;
+    if (process->rt_priority > 0) {
+        int level = process->rt_priority > PROCESS_RT_PRIORITY_MAX ? PROCESS_RT_PRIORITY_MAX
+                                                                   : process->rt_priority;
+        process->rq_level = level;
+        struct process *head = rt_heads[level];
+        if (!head) {
+            rt_heads[level] = process;
+            process->ready_next = process->ready_prev = process;
+        } else {
+            process->ready_prev = head->ready_prev;
+            process->ready_next = head;
+            head->ready_prev->ready_next = process;
+            head->ready_prev = process;
+        }
+        rt_bitmap[level / 64] |= 1ULL << (level % 64);
+        return;
+    }
+    process->rq_level = 0;
+    process->rq_weight = process_weight(process);
+    rq_weight_total += process->rq_weight;
+    rq_ordinary++;
+    rq_insert(process);
+}
+
+static void ready_unlink(struct process *process) {
+    if (!process->on_ready_list) return;
+    process->on_ready_list = 0;
+    ready_processes--;
+    int level = process->rq_level;
+    if (level > 0) {
+        if (process->ready_next == process) {
+            rt_heads[level] = NULL;
+            rt_bitmap[level / 64] &= ~(1ULL << (level % 64));
+        } else {
+            process->ready_prev->ready_next = process->ready_next;
+            process->ready_next->ready_prev = process->ready_prev;
+            if (rt_heads[level] == process) rt_heads[level] = process->ready_next;
+        }
+        process->ready_next = process->ready_prev = NULL;
+        return;
+    }
+    rq_weight_total -= process->rq_weight;
+    rq_ordinary--;
+    rq_remove(process);
+}
+
+static void wait_link(struct process *process, uint64_t value) {
+    if (process->on_wait_list) return;
+    struct process **bucket = &wait_buckets[wait_bucket_of(value)];
+    process->wait_hash_value = value;
+    process->wait_prev = NULL;
+    process->wait_next = *bucket;
+    if (*bucket) (*bucket)->wait_prev = process;
+    *bucket = process;
+    process->on_wait_list = 1;
+}
+
+static void key_link(struct process *process, uint64_t key) {
+    if (process->on_key_list || !key) return;
+    struct process **bucket = &key_buckets[wait_bucket_of(key)];
+    process->key_hash_value = key;
+    process->key_prev = NULL;
+    process->key_next = *bucket;
+    if (*bucket) (*bucket)->key_prev = process;
+    *bucket = process;
+    process->on_key_list = 1;
+}
+
+static void waits_unlink(struct process *process) {
+    if (process->on_wait_list) {
+        struct process **bucket = &wait_buckets[wait_bucket_of(process->wait_hash_value)];
+        if (process->wait_prev) process->wait_prev->wait_next = process->wait_next;
+        else *bucket = process->wait_next;
+        if (process->wait_next) process->wait_next->wait_prev = process->wait_prev;
+        process->wait_next = process->wait_prev = NULL;
+        process->on_wait_list = 0;
+    }
+    if (process->on_key_list) {
+        struct process **bucket = &key_buckets[wait_bucket_of(process->key_hash_value)];
+        if (process->key_prev) process->key_prev->key_next = process->key_next;
+        else *bucket = process->key_next;
+        if (process->key_next) process->key_next->key_prev = process->key_prev;
+        process->key_next = process->key_prev = NULL;
+        process->on_key_list = 0;
+    }
+}
 
 static void set_process_state(struct process *process, int state) {
-    if (process->state == PROCESS_READY && ready_processes) ready_processes--;
-    if (state == PROCESS_READY) ready_processes++;
+    int was_listed_ready = process->on_ready_list;
+    if (process->state == PROCESS_BLOCKED && state != PROCESS_BLOCKED) waits_unlink(process);
+    if (state == PROCESS_READY) ready_link(process);
+    else if (was_listed_ready) ready_unlink(process);
     process->state = state;
+}
+
+static void note_deadline(uint64_t deadline) {
+    if (deadline && deadline < earliest_deadline) earliest_deadline = deadline;
+}
+
+static void pid_link(struct process *process) {
+    if (live_processes + 1 > pid_bucket_count * 2) {
+        uint64_t count = pid_bucket_count * 2;
+        struct process **buckets = (struct process **)kmalloc(count * sizeof(*buckets));
+        if (buckets) {
+            memset(buckets, 0, count * sizeof(*buckets));
+            for (uint64_t index = 0; index < pid_bucket_count; index++) {
+                struct process *item = pid_buckets[index];
+                while (item) {
+                    struct process *next = item->pid_next;
+                    struct process **slot = &buckets[item->pid & (count - 1)];
+                    item->pid_next = *slot;
+                    *slot = item;
+                    item = next;
+                }
+            }
+            if (pid_buckets != boot_pid_buckets) kfree(pid_buckets);
+            pid_buckets = buckets;
+            pid_bucket_count = count;
+        }
+    }
+    struct process **slot = &pid_buckets[process->pid & (pid_bucket_count - 1)];
+    process->pid_next = *slot;
+    *slot = process;
+    live_processes++;
+}
+
+static void pid_unlink(struct process *process) {
+    struct process **slot = &pid_buckets[process->pid & (pid_bucket_count - 1)];
+    while (*slot && *slot != process) slot = &(*slot)->pid_next;
+    if (*slot) {
+        *slot = process->pid_next;
+        live_processes--;
+    }
+    process->pid_next = NULL;
 }
 static int reap_pending;
 static int zombie_memory_pending;
@@ -170,16 +401,82 @@ void process_init(void) {
     current = NULL;
 }
 
+static void sibling_unlink(struct process *process) {
+    struct process *parent = process->linked_parent;
+    if (!parent) return;
+    if (process->sibling_prev) process->sibling_prev->sibling_next = process->sibling_next;
+    else parent->children = process->sibling_next;
+    if (process->sibling_next) process->sibling_next->sibling_prev = process->sibling_prev;
+    else parent->children_tail = process->sibling_prev;
+    process->sibling_next = process->sibling_prev = NULL;
+    process->linked_parent = NULL;
+}
+
+static void sibling_attach(struct process *parent, struct process *process, int front) {
+    process->linked_parent = parent;
+    if (front) {
+        process->sibling_prev = NULL;
+        process->sibling_next = parent->children;
+        if (parent->children) parent->children->sibling_prev = process;
+        else parent->children_tail = process;
+        parent->children = process;
+    } else {
+        process->sibling_next = NULL;
+        process->sibling_prev = parent->children_tail;
+        if (parent->children_tail) parent->children_tail->sibling_next = process;
+        else parent->children = process;
+        parent->children_tail = process;
+    }
+}
+
+static void sibling_link(struct process *process) {
+    sibling_unlink(process);
+    struct process *parent = process->ppid ? process_find(process->ppid) : NULL;
+    if (!parent || parent == process) return;
+    sibling_attach(parent, process, process->state == PROCESS_ZOMBIE);
+}
+
+static void sibling_to_front(struct process *process) {
+    struct process *parent = process->linked_parent;
+    if (!parent || parent->children == process) return;
+    sibling_unlink(process);
+    sibling_attach(parent, process, 1);
+}
+
 static void enqueue(struct process *process) {
+    pid_link(process);
     if (!queue) {
         queue = process;
-        process->next = process;
+        process->next = process->prev = process;
         return;
     }
-    struct process *tail = queue;
-    while (tail->next != queue) tail = tail->next;
+    struct process *tail = queue->prev;
     tail->next = process;
+    process->prev = tail;
     process->next = queue;
+    queue->prev = process;
+    sibling_link(process);
+}
+
+static void dequeue(struct process *process) {
+    sibling_unlink(process);
+    for (struct process *child = process->children; child;) {
+        struct process *next = child->sibling_next;
+        child->sibling_next = child->sibling_prev = NULL;
+        child->linked_parent = NULL;
+        child = next;
+    }
+    process->children = NULL;
+    process->children_tail = NULL;
+    pid_unlink(process);
+    if (process->next == process) {
+        queue = NULL;
+    } else {
+        process->prev->next = process->next;
+        process->next->prev = process->prev;
+        if (queue == process) queue = process->next;
+    }
+    process->next = process->prev = NULL;
 }
 
 static const char *state_name(int state) {
@@ -243,11 +540,9 @@ void process_dump_all(void) {
 
 struct process *process_find(uint64_t pid) {
     if (!queue || pid == 0) return NULL;
-    struct process *item = queue;
-    do {
+    for (struct process *item = pid_buckets[pid & (pid_bucket_count - 1)]; item;
+         item = item->pid_next)
         if (item->pid == pid && item->state != PROCESS_DEAD) return item;
-        item = item->next;
-    } while (item != queue);
     return NULL;
 }
 
@@ -455,60 +750,67 @@ static void destroy_process_resources(struct process *process) {
     KDEBUG("process: reaped pid=%u\n", (unsigned)pid);
 }
 
+static struct process *zombie_head;
+
 static void release_zombie_memory(void) {
-    if (!queue) return;
-    int skipped = 0;
-    struct process *item = queue;
-    do {
-        if (item->state == PROCESS_ZOMBIE && item->memory) {
-            if (item == current) {
-                skipped = 1;
-            } else {
-                memory_unref(item->memory);
-                item->memory = NULL;
-                item->cr3 = 0;
-            }
+    struct process *list = zombie_head;
+    struct process *kept = NULL;
+    zombie_head = NULL;
+    while (list) {
+        struct process *item = list;
+        list = item->zombie_next;
+        if (item == current && item->memory) {
+            item->zombie_next = kept;
+            kept = item;
+            continue;
         }
-        item = item->next;
-    } while (item != queue);
-    zombie_memory_pending = skipped;
+        item->zombie_next = NULL;
+        item->on_zombie_list = 0;
+        if (item->state == PROCESS_ZOMBIE && item->memory) {
+            memory_unref(item->memory);
+            item->memory = NULL;
+            item->cr3 = 0;
+        }
+    }
+    zombie_head = kept;
+    zombie_memory_pending = kept != NULL;
+}
+
+static void zombie_forget(struct process *process) {
+    if (!process->on_zombie_list) return;
+    for (struct process **link = &zombie_head; *link; link = &(*link)->zombie_next) {
+        if (*link == process) {
+            *link = process->zombie_next;
+            break;
+        }
+    }
+    process->zombie_next = NULL;
+    process->on_zombie_list = 0;
 }
 
 void process_reap_deferred(void) {
     if (zombie_memory_pending) release_zombie_memory();
     if (!reap_pending) return;
 
-    int skipped = 0;
-    for (;;) {
-        if (!queue) break;
-
-        struct process *previous = NULL;
-        struct process *item = queue;
-        struct process *victim = NULL;
-        do {
-            if (item->state == PROCESS_DEAD) {
-                if (item == current) skipped = 1;
-                else { victim = item; break; }
-            }
-            previous = item;
-            item = item->next;
-        } while (item != queue);
-
-        if (!victim) break;
-        if (victim->next == victim) {
-            queue = NULL;
-        } else {
-            if (!previous) {
-                previous = queue;
-                while (previous->next != queue) previous = previous->next;
-            }
-            previous->next = victim->next;
-            if (queue == victim) queue = victim->next;
+    struct process *list = dead_head;
+    struct process *kept = NULL;
+    dead_head = NULL;
+    while (list) {
+        struct process *victim = list;
+        list = victim->dead_next;
+        victim->dead_next = NULL;
+        if (victim == current) {
+            victim->dead_next = kept;
+            kept = victim;
+            continue;
         }
-        victim->next = NULL;
+        victim->on_dead_list = 0;
+        zombie_forget(victim);
+        dequeue(victim);
         destroy_process_resources(victim);
     }
-    reap_pending = skipped;
+    dead_head = kept;
+    reap_pending = kept != NULL;
 }
 
 static void install_console(struct process *process) {
@@ -539,6 +841,8 @@ static void set_exe_path(struct process *process, struct vfs_node *file,
 }
 
 static void free_process_struct(struct process *process) {
+    ready_unlink(process);
+    waits_unlink(process);
     kfree(process->exe_path);
     kfree(process);
 }
@@ -562,8 +866,6 @@ struct process *process_create_from_path(const char *path) {
     process->ppid = 0;
     process->pgid = process->pid;
     process->sid = process->pid;
-    process->state = PROCESS_READY;
-    ready_processes++;
     process->umask = 022;
     process->signal_stack_flags = SS_DISABLE;
     process->dumpable = 1;
@@ -626,6 +928,7 @@ struct process *process_create_from_path(const char *path) {
     install_console(process);
 
     enqueue(process);
+    ready_link(process);
     procfs_register_process(process);
     eventfs_emit_process_exec(process->cred.euid, process->pid, process->name);
     if (process->pid == 1) tty_set_foreground_pgid(vt_tty(1U), (int)process->pgid);
@@ -671,7 +974,7 @@ static int runnable(const struct process *process) {
 static uint64_t minimum_virtual_runtime;
 
 static void place_waking_task(struct process *process) {
-    if (!process || process->rt_priority) return;
+    if (!process || process->rt_priority || process->on_ready_list) return;
     uint64_t credit = SCHED_TARGET_LATENCY_NS / 2;
     uint64_t floor = minimum_virtual_runtime > credit ? minimum_virtual_runtime - credit : 0;
     if (process->virtual_runtime_ns < floor) process->virtual_runtime_ns = floor;
@@ -680,6 +983,11 @@ static void place_waking_task(struct process *process) {
 static void mark_dead(struct process *process) {
     if (!process) return;
     set_process_state(process, PROCESS_DEAD);
+    if (!process->on_dead_list) {
+        process->on_dead_list = 1;
+        process->dead_next = dead_head;
+        dead_head = process;
+    }
     reap_pending = 1;
 }
 
@@ -692,7 +1000,8 @@ static void wake_to_ready(struct process *process) {
 static void signal_one_process(struct process *target, int signal_number);
 
 static void wake_expired_timers(uint64_t now) {
-    if (!queue) return;
+    if (!queue || now < earliest_deadline) return;
+    earliest_deadline = UINT64_MAX;
 
     struct process *item = queue;
     do {
@@ -710,6 +1019,7 @@ static void wake_expired_timers(uint64_t now) {
             }
             signal_one_process(item, SIGALRM);
         }
+        if (item->state != PROCESS_DEAD) note_deadline(item->itimer_real_deadline_ns);
         if (item->state == PROCESS_BLOCKED && item->futex_wait_active &&
             item->futex_wait_deadline_ns != UINT64_MAX &&
             now >= item->futex_wait_deadline_ns) {
@@ -719,47 +1029,58 @@ static void wake_expired_timers(uint64_t now) {
             item->futex_wait_deadline_ns = 0;
             SYSCALL_RET(&item->saved_frame) = (uint64_t)-(int64_t)ETIMEDOUT;
             wake_to_ready(item);
+        } else if (item->state == PROCESS_BLOCKED && item->futex_wait_active &&
+                   item->futex_wait_deadline_ns != UINT64_MAX) {
+            note_deadline(item->futex_wait_deadline_ns);
         }
         item = item->next;
     } while (item != queue);
 }
 
+static struct process *first_allowed_rt(int above, const struct process *skip) {
+    for (int word = 1; word >= 0; word--) {
+        uint64_t bits = rt_bitmap[word];
+        while (bits) {
+            int level = word * 64 + 63 - __builtin_clzll(bits);
+            bits &= ~(1ULL << (level % 64));
+            if (level <= above) return NULL;
+            struct process *head = rt_heads[level];
+            struct process *walk = head;
+            do {
+                if (walk != skip && runnable(walk)) return walk;
+                walk = walk->ready_next;
+            } while (walk != head);
+        }
+    }
+    return NULL;
+}
+
+static struct process *first_allowed_ordinary(const struct process *skip) {
+    for (struct process *walk = rq_first(); walk; walk = rq_next(walk))
+        if (walk != skip && runnable(walk)) return walk;
+    return NULL;
+}
+
 static int higher_priority_waiting(const struct process *than) {
-    if (!queue || !than || !ready_processes) return 0;
-    struct process *walk = queue;
-    do {
-        if (walk != than && runnable(walk) && walk->rt_priority > than->rt_priority)
-            return 1;
-        walk = walk->next;
-    } while (walk != queue);
-    return 0;
+    if (!than || !ready_processes) return 0;
+    return first_allowed_rt(than->rt_priority, than) != NULL;
 }
 
 static int ordinary_should_preempt(const struct process *running) {
-    if (!queue || !running || running->rt_priority || !ready_processes) return 0;
-    struct process *walk = queue;
-    do {
-        if (walk != running && runnable(walk) && !walk->rt_priority &&
-            (int64_t)(walk->virtual_runtime_ns + SCHED_WAKEUP_GRANULARITY_NS -
-                      running->virtual_runtime_ns) < 0)
-            return 1;
-        walk = walk->next;
-    } while (walk != queue);
-    return 0;
+    if (!running || running->rt_priority || !ready_processes) return 0;
+    struct process *walk = first_allowed_ordinary(running);
+    return walk && (int64_t)(walk->virtual_runtime_ns + SCHED_WAKEUP_GRANULARITY_NS -
+                             running->virtual_runtime_ns) < 0;
 }
 
 static uint32_t ordinary_slice_ticks(const struct process *selected) {
-    uint64_t total_weight = 0;
-    unsigned runnable_count = 0;
-    struct process *walk = queue;
-    if (!walk || !selected) return PROCESS_DEFAULT_QUANTUM_TICKS;
-    do {
-        if (runnable(walk) && !walk->rt_priority) {
-            total_weight += process_weight(walk);
-            runnable_count++;
-        }
-        walk = walk->next;
-    } while (walk != queue);
+    if (!selected) return PROCESS_DEFAULT_QUANTUM_TICKS;
+    uint64_t total_weight = rq_weight_total;
+    uint64_t runnable_count = rq_ordinary;
+    if (!selected->on_ready_list && !selected->rt_priority) {
+        total_weight += process_weight(selected);
+        runnable_count++;
+    }
 
     if (!total_weight) return PROCESS_DEFAULT_QUANTUM_TICKS;
     uint64_t period = SCHED_TARGET_LATENCY_TICKS;
@@ -775,42 +1096,18 @@ static struct process *next_runnable(struct process *after) {
     wake_expired_timers(time_uptime_ns());
     if (!ready_processes) return NULL;
 
-    int best = -1;
-    struct process *walk = queue;
-    do {
-        if (runnable(walk) && walk->rt_priority > best) best = walk->rt_priority;
-        walk = walk->next;
-    } while (walk != queue);
-    if (best < 0) return NULL;
+    struct process *realtime = first_allowed_rt(0, NULL);
+    if (realtime) return realtime;
 
-    struct process *candidate = after ? after->next : queue;
-    struct process *start = candidate;
-    if (best == 0) {
-        struct process *selected = NULL;
-        uint64_t lowest = 0;
-        int have_lowest = 0;
-        do {
-            if (!candidate->rt_priority &&
-                (candidate->state == PROCESS_READY || candidate->state == PROCESS_RUNNING) &&
-                (!have_lowest || (int64_t)(candidate->virtual_runtime_ns - lowest) < 0)) {
-                lowest = candidate->virtual_runtime_ns;
-                have_lowest = 1;
-            }
-            if (runnable(candidate) && !candidate->rt_priority &&
-                (!selected || (int64_t)(candidate->virtual_runtime_ns -
-                                        selected->virtual_runtime_ns) < 0))
-                selected = candidate;
-            candidate = candidate->next;
-        } while (candidate != start);
-        if (have_lowest && (int64_t)(lowest - minimum_virtual_runtime) > 0)
-            minimum_virtual_runtime = lowest;
-        return selected;
+    struct process *first = rq_first();
+    if (first) {
+        uint64_t lowest = first->virtual_runtime_ns;
+        if (after && after->state == PROCESS_RUNNING && !after->rt_priority &&
+            (int64_t)(after->virtual_runtime_ns - lowest) < 0)
+            lowest = after->virtual_runtime_ns;
+        if ((int64_t)(lowest - minimum_virtual_runtime) > 0) minimum_virtual_runtime = lowest;
     }
-    do {
-        if (runnable(candidate) && candidate->rt_priority == best) return candidate;
-        candidate = candidate->next;
-    } while (candidate != start);
-    return NULL;
+    return first_allowed_ordinary(NULL);
 }
 
 static struct process *scheduling_target(uint64_t tid) {
@@ -834,8 +1131,11 @@ int process_set_scheduler(uint64_t tid, int policy, int rt_priority) {
         if (rt_priority != 0) return -EINVAL;
     }
 
+    int queued = target->on_ready_list;
+    if (queued) ready_unlink(target);
     target->policy = policy;
     target->rt_priority = real_time ? rt_priority : 0;
+    if (queued) ready_link(target);
     return 0;
 }
 
@@ -853,7 +1153,10 @@ int process_set_nice(uint64_t tid, int nice) {
     if (nice < -20) nice = -20;
     if (nice > 19) nice = 19;
     if (nice < target->nice && !cred_is_root()) return -EACCES;
+    int queued = target->on_ready_list;
+    if (queued) ready_unlink(target);
     target->nice = nice;
+    if (queued) ready_link(target);
     return 0;
 }
 
@@ -1389,6 +1692,7 @@ static void notify_parent_of_exit(struct process *child) {
         mark_dead(child);
         return;
     }
+    sibling_to_front(child);
 
     parent->signal_pending |= signal_bit(SIGCHLD);
     if (parent->wait4_active && parent->state == PROCESS_BLOCKED &&
@@ -1486,17 +1790,18 @@ static void process_handle_robust_list(struct process *process) {
 
 static void notify_children_of_parent_death(struct process *parent) {
     if (!parent || !queue) return;
-    struct process *item = queue;
-    do {
-        struct process *child = item;
-        item = item->next;
-        if (child == parent || child->ppid != parent->pid ||
-            child->state == PROCESS_DEAD) continue;
-        int signal_number = child->pdeath_signal;
-        child->ppid = 1;
-        if (signal_number > 0) signal_one_process(child, signal_number);
-        if (child->state == PROCESS_ZOMBIE) notify_parent_of_exit(child);
-    } while (item != queue);
+    struct process *child = parent->children;
+    while (child) {
+        struct process *next = child->sibling_next;
+        if (child != parent && child->ppid == parent->pid && child->state != PROCESS_DEAD) {
+            int signal_number = child->pdeath_signal;
+            child->ppid = 1;
+            sibling_link(child);
+            if (signal_number > 0) signal_one_process(child, signal_number);
+            if (child->state == PROCESS_ZOMBIE) notify_parent_of_exit(child);
+        }
+        child = next;
+    }
 }
 
 static void terminate_sibling_threads(int status);
@@ -1522,7 +1827,12 @@ void process_exit_from_syscall(struct syscall_frame *frame, int status) {
     eventfs_emit_process_exit(exiting->cred.euid, exiting->pid, status);
     exiting->exit_status = status;
     set_process_state(exiting, PROCESS_ZOMBIE);
-    if (exiting->memory) zombie_memory_pending = 1;
+    if (exiting->memory && !exiting->on_zombie_list) {
+        exiting->on_zombie_list = 1;
+        exiting->zombie_next = zombie_head;
+        zombie_head = exiting;
+        zombie_memory_pending = 1;
+    }
     process_handle_robust_list(exiting);
     notify_children_of_parent_death(exiting);
     if (exiting->clear_child_tid_user) {
@@ -1555,8 +1865,6 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame) {
     child->ppid = parent->pid;
     child->pgid = parent->pgid;
     child->sid = parent->sid;
-    child->state = PROCESS_READY;
-    ready_processes++;
     child->cwd = parent->cwd;
     vfs_node_ref(child->cwd);
     child->root = parent->root;
@@ -1630,6 +1938,7 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame) {
     }
 
     enqueue(child);
+    ready_link(child);
     procfs_register_process(child);
     eventfs_emit_process_fork(parent->cred.euid, parent->pid, child->pid);
     KDEBUG("process: fork parent=%u child=%u\n", (unsigned)parent->pid, (unsigned)child->pid);
@@ -1655,8 +1964,6 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
     child->ppid = parent->ppid;
     child->pgid = parent->pgid;
     child->sid = parent->sid;
-    child->state = PROCESS_READY;
-    ready_processes++;
     child->is_thread = 1;
     child->cwd = parent->cwd;
     vfs_node_ref(child->cwd);
@@ -1728,6 +2035,7 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
     }
 
     enqueue(child);
+    ready_link(child);
     procfs_register_process(child);
     KDEBUG("process: clone thread tgid=%u tid=%u\n",
            (unsigned)child->tgid, (unsigned)child->pid);
@@ -1766,6 +2074,9 @@ int64_t process_futex_wait(struct syscall_frame *frame, uint64_t address,
     futex_note('W', address, 0, 0, expected);
     waiting->futex_wait_deadline_ns = timeout_ns < 0 ? UINT64_MAX :
         time_uptime_ns() + (uint64_t)timeout_ns;
+    wait_link(waiting, address);
+    key_link(waiting, waiting->futex_wait_key);
+    if (timeout_ns >= 0) note_deadline(waiting->futex_wait_deadline_ns);
     waiting->voluntary_switches++;
     if (switch_to_next(frame, waiting) != 0) go_idle();
     return 0;
@@ -1777,6 +2088,7 @@ int process_sleep_on(struct syscall_frame *frame, const void *channel) {
     waiting->saved_frame = *frame;
     set_process_state(waiting, PROCESS_BLOCKED);
     waiting->wait_channel = channel;
+    wait_link(waiting, (uint64_t)(uintptr_t)channel);
     waiting->voluntary_switches++;
     if (switch_to_next(frame, waiting) != 0) {
         go_idle();
@@ -1813,21 +2125,29 @@ int process_wake_all(const void *channel) {
     return woken;
 }
 
-static int process_wake_all_locked(const void *channel) {
-    if (!queue || !channel) return 0;
+static int wake_bucket(const void *channel, const void *exact, uint64_t *now) {
     int woken = 0;
-    uint64_t now = 0;
-    struct process *item = queue;
-    do {
-        if (item->state == PROCESS_BLOCKED &&
-            ((channel != &io_wait_token && item->wait_channel == channel) ||
-             (item->wait_channel == &io_wait_token && io_waiter_ready(item, &now)))) {
+    struct process *item = wait_buckets[wait_bucket_of((uint64_t)(uintptr_t)channel)];
+    while (item) {
+        struct process *next = item->wait_next;
+        if (item->state == PROCESS_BLOCKED && item->wait_channel &&
+            ((exact && item->wait_channel == exact) ||
+             (item->wait_channel == &io_wait_token && io_waiter_ready(item, now)))) {
             item->wait_channel = NULL;
             wake_to_ready(item);
             woken++;
         }
-        item = item->next;
-    } while (item != queue);
+        item = next;
+    }
+    return woken;
+}
+
+static int process_wake_all_locked(const void *channel) {
+    if (!queue || !channel) return 0;
+    uint64_t now = 0;
+    int woken = 0;
+    if (channel != &io_wait_token) woken += wake_bucket(channel, channel, &now);
+    woken += wake_bucket(&io_wait_token, NULL, &now);
     return woken;
 }
 
@@ -1862,15 +2182,12 @@ void process_dump_wakes(void) {
     }
 }
 
-int process_futex_wake(uint64_t address, int maximum, uint32_t bitset, int shared) {
-    if (!current || !queue || maximum <= 0 || !bitset) return 0;
-    uint64_t key = shared ? futex_shared_key(address) : 0;
-    int woken = 0;
-    struct process *item = queue;
-    do {
+static int futex_wake_list(struct process *item, int by_key, uint64_t address, uint64_t key,
+                           uint32_t bitset, int maximum, int woken) {
+    while (item && woken < maximum) {
+        struct process *next = by_key ? item->key_next : item->wait_next;
         int named = (key && item->futex_wait_key == key) ||
-                    (item->memory == current->memory &&
-                     item->futex_wait_address == address);
+                    (item->memory == current->memory && item->futex_wait_address == address);
         if (item->state == PROCESS_BLOCKED && item->futex_wait_active && named &&
             (item->futex_wait_bitset & bitset)) {
             item->futex_wait_active = 0;
@@ -1880,12 +2197,26 @@ int process_futex_wake(uint64_t address, int maximum, uint32_t bitset, int share
             SYSCALL_RET(&item->saved_frame) = 0;
             wake_to_ready(item);
             woken++;
-            if (woken >= maximum) break;
         }
-        item = item->next;
-    } while (item != queue);
+        item = next;
+    }
+    return woken;
+}
+
+int process_futex_wake(uint64_t address, int maximum, uint32_t bitset, int shared) {
+    if (!current || !queue || maximum <= 0 || !bitset) return 0;
+    uint64_t key = shared ? futex_shared_key(address) : 0;
+    int woken = futex_wake_list(wait_buckets[wait_bucket_of(address)], 0, address, key,
+                                bitset, maximum, 0);
+    if (key && woken < maximum)
+        woken = futex_wake_list(key_buckets[wait_bucket_of(key)], 1, address, key,
+                                bitset, maximum, woken);
     futex_note('K', address, woken, maximum, 0);
     return woken;
+}
+
+void process_note_deadline(uint64_t deadline_ns) {
+    note_deadline(deadline_ns);
 }
 
 void process_set_sigaction(int signal_number,
@@ -2015,9 +2346,8 @@ int64_t process_waitpid_from_syscall(struct syscall_frame *frame, int64_t pid,
     if (!current || !frame || (options & ~(WNOHANG | WUNTRACED | WCONTINUED))) return -EINVAL;
     struct process *parent = current;
     int has_child = 0;
-    struct process *item = queue;
-    if (item) {
-        do {
+    for (struct process *item = parent->children; item; item = item->sibling_next) {
+        {
             if (child_matches(item, parent, pid)) {
                 has_child = 1;
                 if (item->state == PROCESS_ZOMBIE) {
@@ -2038,8 +2368,7 @@ int64_t process_waitpid_from_syscall(struct syscall_frame *frame, int64_t pid,
                     return (int64_t)item->pid;
                 }
             }
-            item = item->next;
-        } while (item != queue);
+        }
     }
     if (!has_child) return -ECHILD;
     if (options & WNOHANG) return 0;
@@ -2079,9 +2408,8 @@ int64_t process_waitid_from_syscall(int64_t pid_spec, uint64_t info_user,
     memset(&info, 0, sizeof(info));
 
     int has_child = 0;
-    struct process *item = queue;
-    if (item) {
-        do {
+    for (struct process *item = parent->children; item; item = item->sibling_next) {
+        {
             if (child_matches(item, parent, pid_spec)) {
                 has_child = 1;
                 if ((options & WEXITED) && item->state == PROCESS_ZOMBIE) {
@@ -2121,8 +2449,7 @@ int64_t process_waitid_from_syscall(int64_t pid_spec, uint64_t info_user,
                     return 0;
                 }
             }
-            item = item->next;
-        } while (item != queue);
+        }
     }
     if (!has_child) return -ECHILD;
     if (options & WNOHANG) {

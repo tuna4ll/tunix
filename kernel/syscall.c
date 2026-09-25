@@ -5363,6 +5363,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
                                 (uint64_t)new_value[1].tv_usec * 1000ULL;
             process->itimer_real_interval_ns = interval_ns;
             process->itimer_real_deadline_ns = value_ns ? now + value_ns : 0;
+            process_note_deadline(process->itimer_real_deadline_ns);
             SYSCALL_RET(frame) = 0;
             break;
         }
@@ -5380,6 +5381,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             if (remaining_ns % 1000000000ULL) remaining_sec++;
             process->itimer_real_interval_ns = 0;
             process->itimer_real_deadline_ns = seconds ? now + seconds * 1000000000ULL : 0;
+            process_note_deadline(process->itimer_real_deadline_ns);
             SYSCALL_RET(frame) = remaining_sec;
             break;
         }
