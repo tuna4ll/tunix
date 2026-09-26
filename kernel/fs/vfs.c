@@ -201,8 +201,59 @@ int vfs_set_name(struct vfs_node *node, const char *name) {
     return 0;
 }
 
+static struct vfs_node *cursor_directory;
+static struct vfs_node *cursor_node;
+static uint64_t cursor_index;
+
+static void cursor_forget(struct vfs_node *directory) {
+    if (!directory || cursor_directory == directory) cursor_directory = NULL;
+}
+
+static uint32_t name_hash(const char *name) {
+    uint32_t hash = 2166136261U;
+    while (*name) hash = (hash ^ (uint8_t)*name++) * 16777619U;
+    return hash;
+}
+
+static void index_drop(struct vfs_node *directory) {
+    kfree(directory->child_index);
+    directory->child_index = NULL;
+    directory->index_buckets = 0;
+}
+
+static void index_insert(struct vfs_node *directory, struct vfs_node *child) {
+    struct vfs_node **slot =
+        &directory->child_index[name_hash(child->name) & (directory->index_buckets - 1U)];
+    child->hash_next = *slot;
+    *slot = child;
+}
+
+static void index_remove(struct vfs_node *directory, struct vfs_node *child) {
+    if (!directory->child_index) return;
+    struct vfs_node **slot =
+        &directory->child_index[name_hash(child->name) & (directory->index_buckets - 1U)];
+    while (*slot && *slot != child) slot = &(*slot)->hash_next;
+    if (*slot) *slot = child->hash_next;
+    child->hash_next = NULL;
+}
+
+static void index_rebuild(struct vfs_node *directory) {
+    uint32_t buckets = 64;
+    while (buckets < directory->child_count) buckets *= 2;
+    struct vfs_node **table = (struct vfs_node **)kmalloc(buckets * sizeof(*table));
+    if (!table) return;
+    memset(table, 0, buckets * sizeof(*table));
+    index_drop(directory);
+    directory->child_index = table;
+    directory->index_buckets = buckets;
+    for (struct vfs_node *child = directory->children; child; child = child->next)
+        index_insert(directory, child);
+}
+
 void vfs_free_node(struct vfs_node *node) {
     if (!node) return;
+    cursor_forget(node);
+    index_drop(node);
     kfree(node->name);
     kfree(node);
 }
@@ -234,18 +285,28 @@ int vfs_attach(struct vfs_node *parent, struct vfs_node *child) {
     if (vfs_find_child(parent, child->name)) return -2;
     child->parent = parent;
     child->next = NULL;
-    if (!parent->children) parent->children = child;
-    else {
-        struct vfs_node *tail = parent->children;
-        while (tail->next) tail = tail->next;
-        tail->next = child;
-    }
+    child->prev = parent->last_child;
+    if (parent->last_child) parent->last_child->next = child;
+    else parent->children = child;
+    parent->last_child = child;
+    parent->child_count++;
+    if (parent->child_index && parent->child_count <= parent->index_buckets * 2U)
+        index_insert(parent, child);
+    else if (parent->child_count > 32U)
+        index_rebuild(parent);
     return 0;
 }
 
 struct vfs_node *vfs_find_entry(struct vfs_node *directory, const char *name) {
     if (!directory || !name || (directory->flags & 0xFFU) != VFS_DIRECTORY) return NULL;
     if (directory->refresh) directory->refresh(directory);
+    if (directory->child_index) {
+        for (struct vfs_node *node =
+                 directory->child_index[name_hash(name) & (directory->index_buckets - 1U)];
+             node; node = node->hash_next)
+            if (strcmp(node->name, name) == 0) return node;
+        return NULL;
+    }
     for (struct vfs_node *node = directory->children; node; node = node->next) {
         if (strcmp(node->name, name) == 0) return node;
     }
@@ -879,19 +940,18 @@ void vfs_node_unref(struct vfs_node *node) {
 }
 
 static int detach_child(struct vfs_node *parent, struct vfs_node *node) {
-    if (!parent || !node) return -1;
-    struct vfs_node *previous = NULL;
-    for (struct vfs_node *item = parent->children; item; item = item->next) {
-        if (item == node) {
-            if (previous) previous->next = item->next;
-            else parent->children = item->next;
-            item->next = NULL;
-            item->parent = NULL;
-            return 0;
-        }
-        previous = item;
-    }
-    return -1;
+    if (!parent || !node || node->parent != parent) return -1;
+    cursor_forget(parent);
+    index_remove(parent, node);
+    if (node->prev) node->prev->next = node->next;
+    else parent->children = node->next;
+    if (node->next) node->next->prev = node->prev;
+    else parent->last_child = node->prev;
+    node->next = NULL;
+    node->prev = NULL;
+    node->parent = NULL;
+    if (parent->child_count) parent->child_count--;
+    return 0;
 }
 
 int vfs_detach_child(struct vfs_node *parent, struct vfs_node *node) {
@@ -962,18 +1022,11 @@ int vfs_rename(const char *old_path, const char *new_path) {
     inotify_notify(new_parent, TUNIX_IN_MOVED_TO, new_name, cookie);
     inotify_notify(node->link_target ? node->link_target : node,
                    TUNIX_IN_MOVE_SELF, NULL, cookie);
-    char *old_stored = node->name;
-    node->name = NULL;
+    if (detach_child(old_parent, node) != 0) return -1;
     if (vfs_set_name(node, new_name) != 0) {
-        node->name = old_stored;
+        (void)vfs_attach(old_parent, node);
         return -1;
     }
-    if (detach_child(old_parent, node) != 0) {
-        kfree(node->name);
-        node->name = old_stored;
-        return -1;
-    }
-    kfree(old_stored);
     if (vfs_attach(new_parent, node) != 0) return -1;
     PERSIST(moved, node, old_parent, old_name);
     return 0;
@@ -1031,8 +1084,14 @@ static void free_tree(struct vfs_node *top) {
     while (node) {
         struct vfs_node *child = node->children;
         if (child) {
+            cursor_forget(node);
+            index_drop(node);
             node->children = child->next;
+            if (child->next) child->next->prev = NULL;
+            else node->last_child = NULL;
+            if (node->child_count) node->child_count--;
             child->next = NULL;
+            child->prev = NULL;
             child->parent = node;
             node = child;
             continue;
@@ -1187,9 +1246,21 @@ int64_t vfs_write(struct vfs_node *node, uint64_t offset, size_t size, const voi
 int vfs_readdir(struct vfs_node *directory, uint64_t index, struct dirent *out) {
     if (!directory || !out || (directory->flags & 0xFFU) != VFS_DIRECTORY) return -1;
     if (directory->refresh) directory->refresh(directory);
-    struct vfs_node *node = directory->children;
-    while (node && index--) node = node->next;
+    struct vfs_node *node;
+    if (cursor_directory == directory && index == cursor_index + 1U && cursor_node &&
+        cursor_node->parent == directory) {
+        node = cursor_node->next;
+    } else if (cursor_directory == directory && index == cursor_index && cursor_node &&
+               cursor_node->parent == directory) {
+        node = cursor_node;
+    } else {
+        node = directory->children;
+        for (uint64_t step = index; node && step; step--) node = node->next;
+    }
     if (!node) return 0;
+    cursor_directory = directory;
+    cursor_node = node;
+    cursor_index = index;
     memset(out, 0, sizeof(*out));
     strncpy(out->name, node->name, sizeof(out->name) - 1);
     out->ino = node->link_target ? node->link_target->inode : node->inode;

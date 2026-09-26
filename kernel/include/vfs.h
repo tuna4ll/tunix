@@ -105,6 +105,12 @@ struct vfs_node {
     struct vfs_node *parent;
     struct vfs_node *children;
     struct vfs_node *next;
+    struct vfs_node *prev;
+    struct vfs_node *last_child;
+    struct vfs_node *hash_next;
+    struct vfs_node **child_index;
+    uint32_t index_buckets;
+    uint32_t child_count;
     struct vfs_node *link_target;
     uint32_t links;
     struct vfs_node *mounted;
