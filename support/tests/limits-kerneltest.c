@@ -31,6 +31,7 @@ typedef unsigned int u32;
 #define NR_PRLIMIT64 302
 #define NR_CLOSE_RANGE 436
 #define NR_SETUID 105
+#define NR_CLOCK_GETTIME 228
 
 
 static inline s64 call6(s64 n, s64 a, s64 b, s64 c, s64 d, s64 e, s64 f) {
@@ -72,6 +73,7 @@ static inline s64 call6(s64 n, s64 a, s64 b, s64 c, s64 d, s64 e, s64 f) {
 #define NR_PRLIMIT64 261
 #define NR_CLOSE_RANGE 436
 #define NR_SETUID 146
+#define NR_CLOCK_GETTIME 113
 
 
 static inline s64 call6(s64 n, s64 a, s64 b, s64 c, s64 d, s64 e, s64 f) {
@@ -418,7 +420,14 @@ static void test_symlink_chain(void) {
     report("chain-cleanup", removed && call3(NR_UNLINKAT, AT_FDCWD, "/tmp/chain", AT_REMOVEDIR) == 0);
 }
 
+static u64 now_ms(void) {
+    u64 time[2];
+    call2(NR_CLOCK_GETTIME, 1, time);
+    return time[0] * 1000 + time[1] / 1000000;
+}
+
 static void test_many_processes(u64 wanted) {
+    u64 started_ms = now_ms();
     int pipe_fds[2];
     if (call2(NR_PIPE2, pipe_fds, 0) != 0) {
         report("processes-pipe", 0);
@@ -436,6 +445,7 @@ static void test_many_processes(u64 wanted) {
         if (pid < 0) break;
     }
     report_value("processes-alive", started == wanted, started);
+    u64 forked_ms = now_ms();
     call1(NR_CLOSE, pipe_fds[1]);
     u64 reaped = 0;
     int all_seven = 1;
@@ -448,6 +458,8 @@ static void test_many_processes(u64 wanted) {
     }
     call1(NR_CLOSE, pipe_fds[0]);
     report_value("processes-reaped", reaped == started && all_seven, reaped);
+    report_value("processes-fork-ms", 1, forked_ms - started_ms);
+    report_value("processes-reap-ms", 1, now_ms() - forked_ms);
 }
 
 struct rlimit_pair {
