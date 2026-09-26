@@ -26,6 +26,7 @@ int epoll_ctl_add(struct epoll_context *context, int fd, struct file *file,
 int epoll_ctl_mod(struct epoll_context *context, int fd, struct file *file,
                   const struct tunix_epoll_event *event);
 int epoll_ctl_del(struct epoll_context *context, int fd, struct file *file);
+int epoll_entry_count(const struct epoll_context *context);
 #define EPOLL_MAX_NESTING 5
 
 int epoll_collect(struct epoll_context *context,

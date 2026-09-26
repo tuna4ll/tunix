@@ -4904,14 +4904,21 @@ static int64_t sys_epoll_ctl(int epoll_fd, int operation, int target_fd,
     return -EINVAL;
 }
 
+static void release_events(struct tunix_epoll_event **events) {
+    kfree(*events);
+}
+
 static int64_t sys_epoll_wait_once(int epoll_fd, uint64_t user_events,
                                    int maximum, int commit_empty) {
     if (!user_events || maximum <= 0) return -EINVAL;
 
-    if (maximum > 128) maximum = 128;
     struct file *file = file_from_fd(epoll_fd);
     if (!file || file->kind != FILE_KIND_EPOLL) return -EBADF;
-    struct tunix_epoll_event events[128];
+    int entries = epoll_entry_count(file->epoll);
+    if (maximum > entries) maximum = entries > 0 ? entries : 1;
+    __attribute__((cleanup(release_events))) struct tunix_epoll_event *events =
+        (struct tunix_epoll_event *)kmalloc((size_t)maximum * sizeof(*events));
+    if (!events) return -ENOMEM;
     int ready = epoll_collect(file->epoll, events, maximum, 0);
     if (ready < 0) return ready;
     if (!ready) {
