@@ -8,8 +8,6 @@ struct file;
 struct pty_pair;
 struct vfs_node;
 
-#define PTY_MAX_PAIRS 8
-
 void pty_init(void);
 struct file *pty_open_master(struct vfs_node *node, uint32_t flags);
 struct file *pty_open_slave(struct vfs_node *node, uint32_t flags);

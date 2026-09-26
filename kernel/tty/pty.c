@@ -3,6 +3,7 @@
 #include "../include/cred.h"
 #include "../include/devnum.h"
 #include "../include/file.h"
+#include "../include/heap.h"
 #include "../include/kstring.h"
 #include "../include/process.h"
 #include "../include/pty.h"
@@ -28,9 +29,6 @@
 #define TIOCPKT     0x5420UL
 #define FIONREAD    0x541BUL
 
-/* Packet-mode status byte prefixed to master reads once TIOCPKT is on. We only
- * ever report ordinary data; the control flags (flush/stop/start/ioctl) are
- * optional and readers such as VTE tolerate never seeing them. */
 #define TIOCPKT_DATA 0x00
 
 #define PTY_QUEUE_CAPACITY 8192U
@@ -72,7 +70,9 @@ struct pty_pair {
     struct vfs_node *slave_node;
 };
 
-static struct pty_pair pairs[PTY_MAX_PAIRS];
+static struct pty_pair **pairs;
+static int pair_capacity;
+static struct vfs_node *pts_directory;
 static struct vfs_node *ptmx_node;
 static struct vfs_node *tty_node;
 
@@ -225,10 +225,7 @@ static size_t master_feed_input(struct pty_pair *pty, const uint8_t *bytes,
 void pty_init(void) {
     struct vfs_node *dev = vfs_mkdir_p("/dev");
     struct vfs_node *pts = vfs_mkdir_p("/dev/pts");
-    /* Declared as a mount even though the tree below it is made here rather
-       than by a filesystem: init scripts check `mountpoint -q /dev/pts` and
-       mount devpts over it when the answer is no, which this kernel cannot do
-       and which would hide the terminals if it could. */
+
     if (pts) vfs_mount_builtin("devpts", "/dev/pts", "devpts", pts);
     ptmx_node = vfs_alloc_node("ptmx", VFS_CHARDEVICE);
     if (ptmx_node) {
@@ -240,31 +237,53 @@ void pty_init(void) {
         tty_node->mode = 0666;
         (void)vfs_attach(dev, tty_node);
     }
-    for (int index = 0; index < PTY_MAX_PAIRS; index++) {
-        struct pty_pair *pty = &pairs[index];
-        memset(pty, 0, sizeof(*pty));
-        pty->number = index;
-        char name[4];
-        name[0] = (char)('0' + index);
-        name[1] = '\0';
-        pty->slave_node = vfs_alloc_node(name, VFS_CHARDEVICE);
-        if (pty->slave_node) {
-            pty->slave_node->mode = 0620;
-            pty->slave_node->data = pty;
-            (void)vfs_attach(pts, pty->slave_node);
-        }
+    pts_directory = pts;
+}
+
+static struct pty_pair *new_pair(void) {
+    if (pair_capacity % 8 == 0) {
+        struct pty_pair **grown =
+            (struct pty_pair **)kmalloc((size_t)(pair_capacity + 8) * sizeof(*grown));
+        if (!grown) return NULL;
+        if (pair_capacity) memcpy(grown, pairs, (size_t)pair_capacity * sizeof(*grown));
+        kfree(pairs);
+        pairs = grown;
     }
+    struct pty_pair *pty = (struct pty_pair *)kmalloc(sizeof(*pty));
+    if (!pty) return NULL;
+    memset(pty, 0, sizeof(*pty));
+    pty->number = pair_capacity;
+    char name[12];
+    int length = 0;
+    char digits[12];
+    int value = pty->number;
+    do {
+        digits[length++] = (char)('0' + value % 10);
+        value /= 10;
+    } while (value);
+    for (int index = 0; index < length; index++) name[index] = digits[length - 1 - index];
+    name[length] = '\0';
+    pty->slave_node = vfs_alloc_node(name, VFS_CHARDEVICE);
+    if (!pty->slave_node) {
+        kfree(pty);
+        return NULL;
+    }
+    pty->slave_node->mode = 0620;
+    pty->slave_node->data = pty;
+    if (pts_directory) (void)vfs_attach(pts_directory, pty->slave_node);
+    pairs[pair_capacity++] = pty;
+    return pty;
 }
 
 struct file *pty_open_master(struct vfs_node *node, uint32_t flags) {
     if (!node || node != ptmx_node) return NULL;
-    for (int index = 0; index < PTY_MAX_PAIRS; index++) {
-        struct pty_pair *pty = &pairs[index];
+    for (int index = 0; index <= pair_capacity; index++) {
+        struct pty_pair *pty = index < pair_capacity ? pairs[index] : new_pair();
+        if (!pty) return NULL;
         if (pty->allocated) continue;
         pty->allocated = 1;
         reset_pair(pty);
-        /* What devpts does for grantpt(): the slave belongs to whoever opened
-           the master, or no unprivileged terminal emulator could use it. */
+
         if (pty->slave_node) {
             const struct credentials *cred = cred_current();
             pty->slave_node->uid = cred ? cred->euid : 0;
@@ -292,7 +311,6 @@ struct file *pty_open_slave(struct vfs_node *node, uint32_t flags) {
     pty->slave_ever_opened = 1;
     return file;
 }
-
 
 struct file *pty_open_controlling(struct vfs_node *node, uint32_t flags) {
     struct process *process = process_current();
@@ -350,11 +368,6 @@ int64_t pty_read(struct pty_pair *pty, int master, size_t size, void *buffer) {
     uint8_t *out = (uint8_t *)buffer;
     size_t completed = 0;
     if (master && pty->packet_mode) {
-        /* Packet mode: emit a leading status byte, then the data. The reader
-         * (VTE) does read(fd, bp-1, rem+1) and strips one header per read, so a
-         * single read() must carry exactly one packet -- keep the total under
-         * `size` so sys_read's short-read check stops after this one call
-         * instead of concatenating a second header mid-stream. */
         if (size < 2) return -EAGAIN;
         out[completed++] = TIOCPKT_DATA;
         while (completed + 1 < size && queue->count)
