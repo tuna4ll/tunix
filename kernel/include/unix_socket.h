@@ -13,7 +13,7 @@ struct unix_credentials {
     uint32_t gid;
 };
 
-#define UNIX_MAX_RIGHTS 64
+#define UNIX_MAX_RIGHTS 253
 
 #define TUNIX_AF_UNIX 1
 #define TUNIX_SOCK_STREAM 1
@@ -36,10 +36,10 @@ int unix_socket_pair(struct unix_socket **first, struct unix_socket **second,
 void unix_socket_ref(struct unix_socket *socket);
 void unix_socket_unref(struct unix_socket *socket);
 int unix_socket_bind(struct unix_socket *socket, const struct tunix_sockaddr_un *address,
-                     size_t length);
+                     size_t length, const char *resolved);
 int unix_socket_listen(struct unix_socket *socket, int backlog);
 int unix_socket_connect(struct unix_socket *socket, const struct tunix_sockaddr_un *address,
-                        size_t length);
+                        size_t length, const char *resolved);
 struct unix_socket *unix_socket_accept(struct unix_socket *socket);
 int64_t unix_socket_read(struct unix_socket *socket, size_t size, void *buffer);
 int64_t unix_socket_write(struct unix_socket *socket, size_t size, const void *buffer);

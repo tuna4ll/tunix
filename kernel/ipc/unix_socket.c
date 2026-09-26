@@ -23,30 +23,31 @@
 
 #define EMSGSIZE 90
 
-#define UNIX_PENDING_MAX 8
+#define UNIX_PENDING_MAX 4096
 #define UNIX_RIGHTS_MAX UNIX_MAX_RIGHTS
-#define UNIX_ANCILLARY_MAX 16
-#define UNIX_RECORDS_MAX 64
+#define UNIX_QUEUE_MAX 4096
 
 struct unix_record_queue {
-    uint32_t lengths[UNIX_RECORDS_MAX];
-    struct unix_credentials senders[UNIX_RECORDS_MAX];
+    uint32_t *lengths;
+    struct unix_credentials *senders;
     int head;
     int tail;
     int count;
+    int capacity;
 };
 
 struct unix_ancillary {
-    struct file *files[UNIX_RIGHTS_MAX];
     size_t file_count;
     size_t offset;
+    struct file *files[];
 };
 
 struct unix_ancillary_queue {
-    struct unix_ancillary entries[UNIX_ANCILLARY_MAX];
+    struct unix_ancillary **entries;
     int head;
     int tail;
     int count;
+    int capacity;
 };
 
 struct unix_channel {
@@ -81,10 +82,11 @@ struct unix_socket {
     struct unix_credentials credentials;
     struct unix_credentials last_sender;
     char path[108];
+    char *key;
     struct unix_channel *channel;
-    struct unix_socket *pending[UNIX_PENDING_MAX];
-    int pending_head;
-    int pending_tail;
+    struct unix_socket *pending_head;
+    struct unix_socket *pending_tail;
+    struct unix_socket *pending_next;
     int pending_count;
     struct unix_socket *next_listener;
 };
@@ -137,19 +139,42 @@ static struct unix_ancillary_queue *outgoing_ancillary(struct unix_socket *socke
 static void ancillary_release(struct unix_ancillary *message) {
     if (!message) return;
     for (size_t index = 0; index < message->file_count; index++)
-        file_unref(message->files[index]);
-    memset(message, 0, sizeof(*message));
+        if (message->files[index]) file_unref(message->files[index]);
+    kfree(message);
+}
+
+static struct unix_ancillary *ancillary_at(const struct unix_ancillary_queue *queue, int step) {
+    return queue->entries[(queue->head + step) % queue->capacity];
 }
 
 static void ancillary_queue_clear(struct unix_ancillary_queue *queue) {
     if (!queue) return;
     while (queue->count > 0) {
-        ancillary_release(&queue->entries[queue->head]);
-        queue->head = (queue->head + 1) % UNIX_ANCILLARY_MAX;
+        ancillary_release(ancillary_at(queue, 0));
+        queue->head = (queue->head + 1) % queue->capacity;
         queue->count--;
     }
-    queue->head = 0;
-    queue->tail = 0;
+    kfree(queue->entries);
+    memset(queue, 0, sizeof(*queue));
+}
+
+static int ancillary_push(struct unix_ancillary_queue *queue, struct unix_ancillary *message) {
+    if (queue->count == queue->capacity) {
+        if (queue->capacity >= UNIX_QUEUE_MAX) return -EAGAIN;
+        int capacity = queue->capacity ? queue->capacity * 2 : 8;
+        struct unix_ancillary **entries = kmalloc((size_t)capacity * sizeof(*entries));
+        if (!entries) return -EAGAIN;
+        for (int step = 0; step < queue->count; step++) entries[step] = ancillary_at(queue, step);
+        kfree(queue->entries);
+        queue->entries = entries;
+        queue->capacity = capacity;
+        queue->head = 0;
+        queue->tail = queue->count;
+    }
+    queue->entries[queue->tail] = message;
+    queue->tail = (queue->tail + 1) % queue->capacity;
+    queue->count++;
+    return 0;
 }
 
 static void ancillary_consume(struct unix_ancillary_queue *queue,
@@ -158,32 +183,58 @@ static void ancillary_consume(struct unix_ancillary_queue *queue,
     if (file_count) *file_count = 0;
     if (!queue || !consumed) return;
     while (queue->count > 0) {
-        struct unix_ancillary *message = &queue->entries[queue->head];
+        struct unix_ancillary *message = ancillary_at(queue, 0);
         if (message->offset >= consumed) break;
         for (size_t index = 0; index < message->file_count; index++) {
             if (files && file_count && *file_count < maximum_files) {
                 files[(*file_count)++] = message->files[index];
                 message->files[index] = NULL;
-            } else {
-                file_unref(message->files[index]);
             }
         }
-        memset(message, 0, sizeof(*message));
-        queue->head = (queue->head + 1) % UNIX_ANCILLARY_MAX;
+        ancillary_release(message);
+        queue->head = (queue->head + 1) % queue->capacity;
         queue->count--;
     }
-    for (int index = 0, at = queue->head; index < queue->count; index++) {
-        queue->entries[at].offset -= consumed;
-        at = (at + 1) % UNIX_ANCILLARY_MAX;
-    }
+    for (int step = 0; step < queue->count; step++) ancillary_at(queue, step)->offset -= consumed;
 }
 
 static size_t ancillary_read_limit(const struct unix_ancillary_queue *queue,
                                    size_t requested) {
     if (!queue || queue->count < 2) return requested;
-    int second = (queue->head + 1) % UNIX_ANCILLARY_MAX;
-    size_t boundary = queue->entries[second].offset;
+    size_t boundary = ancillary_at(queue, 1)->offset;
     return boundary < requested ? boundary : requested;
+}
+
+static int record_reserve(struct unix_record_queue *records) {
+    if (records->count < records->capacity) return 0;
+    if (records->capacity >= UNIX_QUEUE_MAX) return -EAGAIN;
+    int capacity = records->capacity ? records->capacity * 2 : 16;
+    uint32_t *lengths = kmalloc((size_t)capacity * sizeof(*lengths));
+    struct unix_credentials *senders = kmalloc((size_t)capacity * sizeof(*senders));
+    if (!lengths || !senders) {
+        kfree(lengths);
+        kfree(senders);
+        return -EAGAIN;
+    }
+    for (int step = 0; step < records->count; step++) {
+        int from = (records->head + step) % records->capacity;
+        lengths[step] = records->lengths[from];
+        senders[step] = records->senders[from];
+    }
+    kfree(records->lengths);
+    kfree(records->senders);
+    records->lengths = lengths;
+    records->senders = senders;
+    records->capacity = capacity;
+    records->head = 0;
+    records->tail = records->count;
+    return 0;
+}
+
+static void record_queue_free(struct unix_record_queue *records) {
+    kfree(records->lengths);
+    kfree(records->senders);
+    memset(records, 0, sizeof(*records));
 }
 
 static int peer_open(struct unix_socket *socket) {
@@ -236,7 +287,7 @@ struct unix_socket *unix_socket_create(int seqpacket) {
     memset(socket, 0, sizeof(*socket));
     socket->refs = 1;
     socket->seqpacket = seqpacket ? 1 : 0;
-    socket->backlog = UNIX_PENDING_MAX;
+    socket->backlog = 128;
     return socket;
 }
 
@@ -310,6 +361,14 @@ int unix_socket_pair(struct unix_socket **first, struct unix_socket **second,
         return -EAGAIN;
     }
     memset(channel, 0, sizeof(*channel));
+    if (pipe_buffer_init(&channel->to_a, PIPE_CAPACITY) != 0 ||
+        pipe_buffer_init(&channel->to_b, PIPE_CAPACITY) != 0) {
+        pipe_buffer_fini(&channel->to_a);
+        kfree(channel);
+        unix_socket_unref(a);
+        unix_socket_unref(b);
+        return -EAGAIN;
+    }
     spinlock_init(&channel->lock);
     channel->refs = 2;
     channel->a_open = 1;
@@ -337,12 +396,14 @@ void unix_socket_unref(struct unix_socket *socket) {
     if (socket->refs != 0) return;
 
     listener_unregister(socket);
-    while (socket->pending_count > 0) {
-        struct unix_socket *pending = socket->pending[socket->pending_head];
-        socket->pending_head = (socket->pending_head + 1) % UNIX_PENDING_MAX;
+    while (socket->pending_head) {
+        struct unix_socket *pending = socket->pending_head;
+        socket->pending_head = pending->pending_next;
+        pending->pending_next = NULL;
         socket->pending_count--;
         unix_socket_unref(pending);
     }
+    socket->pending_tail = NULL;
 
     if (socket->channel) {
         if (socket->side == 0) {
@@ -356,9 +417,14 @@ void unix_socket_unref(struct unix_socket *socket) {
         if (socket->channel->refs == 0) {
             ancillary_queue_clear(&socket->channel->ancillary_to_a);
             ancillary_queue_clear(&socket->channel->ancillary_to_b);
+            record_queue_free(&socket->channel->records_to_a);
+            record_queue_free(&socket->channel->records_to_b);
+            pipe_buffer_fini(&socket->channel->to_a);
+            pipe_buffer_fini(&socket->channel->to_b);
             kfree(socket->channel);
         }
     }
+    kfree(socket->key);
     kfree(socket);
 }
 
@@ -386,14 +452,19 @@ static int copy_path(char destination[108], const struct tunix_sockaddr_un *addr
 }
 
 int unix_socket_bind(struct unix_socket *socket, const struct tunix_sockaddr_un *address,
-                     size_t length) {
+                     size_t length, const char *resolved) {
     if (!socket || socket->connected || socket->listening || socket->path[0]) return -EINVAL;
     char path[108];
     int status = copy_path(path, address, length);
     if (status < 0) return status;
+    const char *key = path[0] == '\x01' || !resolved ? path : resolved;
     for (struct unix_socket *bound = listener_list; bound; bound = bound->next_listener) {
-        if (strcmp(bound->path, path) == 0) return -EADDRINUSE;
+        if (bound->key && strcmp(bound->key, key) == 0) return -EADDRINUSE;
     }
+    size_t key_length = strlen(key);
+    socket->key = (char *)kmalloc(key_length + 1);
+    if (!socket->key) return -EAGAIN;
+    memcpy(socket->key, key, key_length + 1);
     strncpy(socket->path, path, sizeof(socket->path) - 1);
     return 0;
 }
@@ -413,21 +484,21 @@ int unix_socket_listen(struct unix_socket *socket, int backlog) {
     return 0;
 }
 
-static struct unix_socket *find_listener(const char *path) {
+static struct unix_socket *find_listener(const char *key) {
     for (struct unix_socket *bound = listener_list; bound; bound = bound->next_listener) {
-        if (bound->listening && strcmp(bound->path, path) == 0) return bound;
+        if (bound->listening && bound->key && strcmp(bound->key, key) == 0) return bound;
     }
     return NULL;
 }
 
 int unix_socket_connect(struct unix_socket *socket, const struct tunix_sockaddr_un *address,
-                        size_t length) {
+                        size_t length, const char *resolved) {
     if (!socket) return -EINVAL;
     if (socket->connected) return -EALREADY;
     char path[108];
     int status = copy_path(path, address, length);
     if (status < 0) return status;
-    struct unix_socket *listener = find_listener(path);
+    struct unix_socket *listener = find_listener(path[0] == '\x01' || !resolved ? path : resolved);
     if (!listener || listener->pending_count >= listener->backlog) return -ECONNREFUSED;
 
     struct unix_channel *channel = (struct unix_channel *)kmalloc(sizeof(*channel));
@@ -438,6 +509,13 @@ int unix_socket_connect(struct unix_socket *socket, const struct tunix_sockaddr_
         return -EAGAIN;
     }
     memset(channel, 0, sizeof(*channel));
+    if (pipe_buffer_init(&channel->to_a, PIPE_CAPACITY) != 0 ||
+        pipe_buffer_init(&channel->to_b, PIPE_CAPACITY) != 0) {
+        pipe_buffer_fini(&channel->to_a);
+        kfree(channel);
+        unix_socket_unref(server);
+        return -EAGAIN;
+    }
     spinlock_init(&channel->lock);
     channel->refs = 2;
     channel->a_open = 1;
@@ -456,17 +534,20 @@ int unix_socket_connect(struct unix_socket *socket, const struct tunix_sockaddr_
     server->side = 1;
     server->connected = 1;
 
-    listener->pending[listener->pending_tail] = server;
-    listener->pending_tail = (listener->pending_tail + 1) % UNIX_PENDING_MAX;
+    server->pending_next = NULL;
+    if (listener->pending_tail) listener->pending_tail->pending_next = server;
+    else listener->pending_head = server;
+    listener->pending_tail = server;
     listener->pending_count++;
     return 0;
 }
 
 struct unix_socket *unix_socket_accept(struct unix_socket *socket) {
     if (!socket || !socket->listening || socket->pending_count == 0) return NULL;
-    struct unix_socket *accepted = socket->pending[socket->pending_head];
-    socket->pending[socket->pending_head] = NULL;
-    socket->pending_head = (socket->pending_head + 1) % UNIX_PENDING_MAX;
+    struct unix_socket *accepted = socket->pending_head;
+    socket->pending_head = accepted->pending_next;
+    if (!socket->pending_head) socket->pending_tail = NULL;
+    accepted->pending_next = NULL;
     socket->pending_count--;
     return accepted;
 }
@@ -486,12 +567,12 @@ static int64_t unix_socket_read_data(struct unix_socket *socket, size_t size,
         if (records->count == 0) return peer_write_open(socket) ? -EAGAIN : 0;
         size_t record = records->lengths[records->head];
         socket->last_sender = records->senders[records->head];
-        records->head = (records->head + 1) % UNIX_RECORDS_MAX;
+        records->head = (records->head + 1) % records->capacity;
         records->count--;
         size_t deliver = size < record ? size : record;
         for (size_t index = 0; index < record; index++) {
             if (index < deliver) out[index] = pipe->data[pipe->read_pos];
-            pipe->read_pos = (pipe->read_pos + 1) % PIPE_CAPACITY;
+            pipe->read_pos = (pipe->read_pos + 1) % pipe->capacity;
         }
         pipe->count -= record;
         if (consumed) *consumed = record;
@@ -502,7 +583,7 @@ static int64_t unix_socket_read_data(struct unix_socket *socket, size_t size,
     size_t amount = size < pipe->count ? size : pipe->count;
     for (size_t index = 0; index < amount; index++) {
         out[index] = pipe->data[pipe->read_pos];
-        pipe->read_pos = (pipe->read_pos + 1) % PIPE_CAPACITY;
+        pipe->read_pos = (pipe->read_pos + 1) % pipe->capacity;
     }
     pipe->count -= amount;
     if (consumed) *consumed = amount;
@@ -528,17 +609,17 @@ static int64_t unix_socket_write_locked(struct unix_socket *socket, size_t size,
     if (!socket || !socket->connected || !socket->channel) return -ENOTCONN;
     if (own_write_shutdown(socket) || peer_read_shutdown(socket) || !peer_open(socket)) return -EPIPE;
     struct pipe_buffer *pipe = outgoing(socket);
-    size_t available = PIPE_CAPACITY - pipe->count;
+    size_t available = pipe->capacity - pipe->count;
     const uint8_t *in = (const uint8_t *)buffer;
 
     if (socket->seqpacket) {
         struct unix_record_queue *records = outgoing_records(socket);
         if (!records) return -ENOTCONN;
-        if (size > PIPE_CAPACITY) return -EMSGSIZE;
-        if (size > available || records->count >= UNIX_RECORDS_MAX) return -EAGAIN;
+        if (size > pipe->capacity) return -EMSGSIZE;
+        if (size > available || record_reserve(records) != 0) return -EAGAIN;
         for (size_t index = 0; index < size; index++) {
             pipe->data[pipe->write_pos] = in[index];
-            pipe->write_pos = (pipe->write_pos + 1) % PIPE_CAPACITY;
+            pipe->write_pos = (pipe->write_pos + 1) % pipe->capacity;
         }
         pipe->count += size;
         records->lengths[records->tail] = (uint32_t)size;
@@ -547,7 +628,7 @@ static int64_t unix_socket_write_locked(struct unix_socket *socket, size_t size,
         sender->pid = (int32_t)process_current_pid();
         sender->uid = self ? self->euid : 0U;
         sender->gid = self ? self->egid : 0U;
-        records->tail = (records->tail + 1) % UNIX_RECORDS_MAX;
+        records->tail = (records->tail + 1) % records->capacity;
         records->count++;
         return (int64_t)size;
     }
@@ -556,7 +637,7 @@ static int64_t unix_socket_write_locked(struct unix_socket *socket, size_t size,
     size_t amount = size < available ? size : available;
     for (size_t index = 0; index < amount; index++) {
         pipe->data[pipe->write_pos] = in[index];
-        pipe->write_pos = (pipe->write_pos + 1) % PIPE_CAPACITY;
+        pipe->write_pos = (pipe->write_pos + 1) % pipe->capacity;
     }
     pipe->count += amount;
     return (int64_t)amount;
@@ -574,19 +655,28 @@ int64_t unix_socket_send_with_rights(struct unix_socket *socket, size_t size,
                                      size_t file_count) {
     if (file_count > UNIX_RIGHTS_MAX) return -EINVAL;
     struct unix_ancillary_queue *queue = outgoing_ancillary(socket);
-    if (file_count && (!queue || queue->count >= UNIX_ANCILLARY_MAX)) return -EAGAIN;
+    if (file_count && (!queue || queue->count >= UNIX_QUEUE_MAX)) return -EAGAIN;
+    struct unix_ancillary *message = NULL;
+    if (file_count) {
+        message = kmalloc(sizeof(*message) + file_count * sizeof(struct file *));
+        if (!message) return -EAGAIN;
+    }
     struct pipe_buffer *pipe = outgoing(socket);
     size_t offset = pipe ? pipe->count : 0;
     int64_t result = unix_socket_write(socket, size, buffer);
-    if (result < 0) return result;
-    if (file_count) {
-        struct unix_ancillary *message = &queue->entries[queue->tail];
-        memset(message, 0, sizeof(*message));
+    if (result < 0) {
+        kfree(message);
+        return result;
+    }
+    if (message) {
         message->file_count = file_count;
         message->offset = offset;
         for (size_t index = 0; index < file_count; index++) message->files[index] = files[index];
-        queue->tail = (queue->tail + 1) % UNIX_ANCILLARY_MAX;
-        queue->count++;
+        if (ancillary_push(queue, message) != 0) {
+            message->file_count = 0;
+            kfree(message);
+            for (size_t index = 0; index < file_count; index++) file_unref(files[index]);
+        }
     }
     return result;
 }

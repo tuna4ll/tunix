@@ -381,6 +381,8 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define F_GETFL 3
 #define F_SETFL 4
 #define F_ADD_SEALS 1033
+#define F_SETPIPE_SZ 1031
+#define F_GETPIPE_SZ 1032
 #define F_GET_SEALS 1034
 #define FIONBIO 0x5421UL
 #define FIONREAD 0x541BUL
@@ -1378,6 +1380,20 @@ static int64_t sys_dup_to(int oldfd, int newfd, int cloexec, int reject_same) {
     return newfd;
 }
 
+static int64_t pipe_size_control(struct file *file, int set, uint64_t wanted) {
+    if (!file || (file->kind != FILE_KIND_PIPE_READ && file->kind != FILE_KIND_PIPE_WRITE) ||
+        !file->pipe) return -EBADF;
+    if (!set) return (int64_t)file->pipe->capacity;
+    const struct credentials *cred = cred_current();
+    uint64_t ceiling = cred && cred->euid ? PIPE_MAX_CAPACITY : PIPE_ROOT_MAX_CAPACITY;
+    if (wanted > ceiling) return -EPERM;
+    uint64_t capacity = 4096;
+    while (capacity < wanted) capacity *= 2;
+    if (capacity < file->pipe->count) return -EBUSY;
+    if (pipe_resize(file->pipe, capacity) != 0) return -ENOMEM;
+    return (int64_t)capacity;
+}
+
 static int64_t sys_pipe(uint64_t user_fds, int flags) {
     if (flags & ~(O_CLOEXEC | O_NONBLOCK)) return -EINVAL;
     struct file *read_end;
@@ -1523,6 +1539,17 @@ static int copy_sockaddr_un(uint64_t user_address, uint64_t length,
     return copy_from_user(address, user_address, (size_t)length) == 0 ? 0 : -EFAULT;
 }
 
+static int resolve_socket_path(const struct tunix_sockaddr_un *address, char **resolved) {
+    char path[sizeof(address->path) + 1];
+    memcpy(path, address->path, sizeof(address->path));
+    path[sizeof(address->path)] = '\0';
+    *resolved = vfs_path_buffer();
+    if (!*resolved) return -ENOMEM;
+    struct process *process = process_current();
+    return normalize_path(path[0] == '/' ? vfs_root : (process ? process->cwd : vfs_root),
+                          path, *resolved);
+}
+
 static int64_t sys_bind(int fd, uint64_t user_address, uint64_t length) {
     struct unix_socket *unix_value = socket_from_fd(fd);
     if (unix_value) {
@@ -1531,12 +1558,17 @@ static int64_t sys_bind(int fd, uint64_t user_address, uint64_t length) {
         if (status < 0) return status;
 
         int named = address.path[0] != 0;
-        if (named && vfs_lookup_nofollow(address.path)) return -EADDRINUSE;
-        status = unix_socket_bind(unix_value, &address, (size_t)length);
+        VFS_PATH_SCOPED resolved = NULL;
+        if (named) {
+            status = resolve_socket_path(&address, &resolved);
+            if (status != 0) return status;
+            if (vfs_lookup_nofollow(resolved)) return -EADDRINUSE;
+        }
+        status = unix_socket_bind(unix_value, &address, (size_t)length, resolved);
         if (status == 0 && named) {
             struct process *self = process_current();
             uint32_t mode = 0777U & ~(self ? self->umask : 0U);
-            (void)vfs_create_socket_node(address.path, mode);
+            (void)vfs_create_socket_node(resolved, mode);
         }
         return status;
     }
@@ -1566,7 +1598,13 @@ static int64_t sys_connect(int fd, uint64_t user_address, uint64_t length) {
     if (unix_value) {
         struct tunix_sockaddr_un address;
         int status = copy_sockaddr_un(user_address, length, &address);
-        return status < 0 ? status : unix_socket_connect(unix_value, &address, (size_t)length);
+        if (status < 0) return status;
+        VFS_PATH_SCOPED resolved = NULL;
+        if (address.path[0]) {
+            status = resolve_socket_path(&address, &resolved);
+            if (status != 0) return status;
+        }
+        return unix_socket_connect(unix_value, &address, (size_t)length, resolved);
     }
     struct inet_socket *inet_value = inet_socket_from_fd(fd);
     if (!inet_value || !user_address || length < 2 || length > 32) return -EBADF;
@@ -5560,6 +5598,10 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
                 }
             } else if (command == F_GETLK || command == F_SETLK || command == F_SETLKW) {
                 SYSCALL_RET(frame) = (uint64_t)sys_fcntl_lock(fd, command, SYSCALL_ARG2(frame));
+            } else if (command == F_SETPIPE_SZ || command == F_GETPIPE_SZ) {
+                struct file *file = process->files->fds[fd];
+                SYSCALL_RET(frame) = (uint64_t)pipe_size_control(file, command == F_SETPIPE_SZ,
+                                                                 SYSCALL_ARG2(frame));
             } else if (command == F_ADD_SEALS || command == F_GET_SEALS) {
                 struct file *file = process->files->fds[fd];
                 if (file->kind != FILE_KIND_MEMFD) {

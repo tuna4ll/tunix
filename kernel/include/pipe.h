@@ -6,12 +6,14 @@
 #include "spinlock.h"
 
 #define PIPE_CAPACITY 65536
-_Static_assert((PIPE_CAPACITY & (PIPE_CAPACITY - 1)) == 0, "pipe capacity must be a power of two");
+#define PIPE_MAX_CAPACITY (1024U * 1024U)
+#define PIPE_ROOT_MAX_CAPACITY (64U * 1024U * 1024U)
 
 struct file;
 
 struct pipe_buffer {
-    uint8_t data[PIPE_CAPACITY];
+    uint8_t *data;
+    size_t capacity;
     size_t read_pos;
     size_t write_pos;
     size_t count;
@@ -23,6 +25,9 @@ struct pipe_buffer {
     spinlock_t lock;
 };
 
+int pipe_buffer_init(struct pipe_buffer *pipe, size_t capacity);
+void pipe_buffer_fini(struct pipe_buffer *pipe);
+int pipe_resize(struct pipe_buffer *pipe, size_t capacity);
 int pipe_create(struct file **read_end, struct file **write_end);
 struct pipe_buffer *pipe_buffer_create_named(void);
 void pipe_buffer_destroy(struct pipe_buffer *pipe);

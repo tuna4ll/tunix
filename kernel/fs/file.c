@@ -7,7 +7,7 @@
 static int64_t file_read_locked(struct file *file, size_t size, void *buffer);
 static int64_t file_write_locked(struct file *file, size_t size, const void *buffer);
 #include "../include/heap.h"
-/* Only the owning process id is needed here, not the whole process interface. */
+
 extern uint64_t process_current_pid(void);
 #include "../include/kstring.h"
 #include "../include/drm.h"
@@ -31,7 +31,7 @@ extern uint64_t process_current_pid(void);
 #define EAGAIN 11
 #define EBADF 9
 #define EINVAL 22
-/* EWOULDBLOCK is EAGAIN on Linux, and flock reports contention with it. */
+
 #define EWOULDBLOCK EAGAIN
 #define EPIPE 32
 
@@ -44,11 +44,9 @@ struct file *file_open_node(struct vfs_node *node, uint32_t flags) {
     file->kind = FILE_KIND_VFS;
     file->flags = flags;
     file->node = node;
-    /* An open file keeps its node alive, so unlink does not free the
-       contents underneath it. */
+
     vfs_node_ref(node);
-    /* A FIFO is not read through the node at all: both ends are pipe
-       descriptors onto one buffer. */
+
     if ((node->flags & 0xFFU) == VFS_PIPE) {
         int write_end = (flags & 3U) != 0;
         if (!node->fifo) {
@@ -104,7 +102,6 @@ struct file *file_create_pipe_end(struct pipe_buffer *pipe, int write_end) {
     else pipe->readers++;
     return file;
 }
-
 
 struct file *file_create_socket(struct unix_socket *socket) {
     if (!socket) return NULL;
@@ -176,7 +173,6 @@ struct file *file_create_signalfd(struct signalfd_context *context, uint32_t fla
     return file;
 }
 
-/* The caller has already taken the buffer's reference; closing gives it back. */
 struct file *file_create_dmabuf(uint32_t handle, uint32_t flags) {
     struct file *file = file_create_special(FILE_KIND_DMABUF, flags);
     if (file) file->dmabuf_handle = handle;
@@ -206,7 +202,7 @@ struct file *file_create_pty_endpoint(struct pty_pair *pty, int master,
     file->flags = flags;
     file->node = node;
     file->pty = pty;
-    vfs_node_ref(node);          /* as in file_open_node, and dropped alike */
+    vfs_node_ref(node);
     return file;
 }
 
@@ -215,8 +211,7 @@ const void *file_read_wait_channel(struct file *file) {
         return eventfs_wait_channel(file->eventfs);
     if (file && file->kind == FILE_KIND_PIPE_READ && file->pipe)
         return &file->pipe->data_wait;
-    /* A virtual terminal, which the keyboard wakes, so a login prompt is
-       not rewound and retried. */
+
     if (file && file->kind == FILE_KIND_VFS && file->node &&
         file->node->read == vt_node_read)
         return vt_input_wait_channel();
@@ -229,8 +224,6 @@ const void *file_write_wait_channel(struct file *file) {
     return NULL;
 }
 
-/* Advisory whole-file locking, held by the open file description rather
-   than the descriptor. */
 void file_flock_release(struct file *file) {
     if (!file || !file->flock_type || !file->node) {
         if (file) file->flock_type = 0;
@@ -246,8 +239,7 @@ void file_flock_release(struct file *file) {
 
 int file_flock(struct file *file, int operation) {
     if (!file) return -EBADF;
-    /* Only node-backed descriptors carry a lockable identity here; a pipe or
-       socket has no shared object for a second opener to contend with. */
+
     if (file->kind != FILE_KIND_VFS || !file->node) return -EINVAL;
 
     int mode = operation & ~FILE_LOCK_NB;
@@ -259,11 +251,9 @@ int file_flock(struct file *file, int operation) {
     }
     if (mode != FILE_LOCK_SH && mode != FILE_LOCK_EX) return -EINVAL;
 
-    /* Someone else's exclusive lock blocks both kinds of request. */
     if (node->flock_exclusive && node->flock_exclusive != file) return -EWOULDBLOCK;
 
     if (mode == FILE_LOCK_EX) {
-        /* Any shared holder other than ourselves blocks an exclusive lock. */
         uint32_t others = node->flock_shared;
         if (file->flock_type == FILE_LOCK_SH && others) others--;
         if (others) return -EWOULDBLOCK;
@@ -273,8 +263,6 @@ int file_flock(struct file *file, int operation) {
         return 0;
     }
 
-    /* Shared: re-taking it is a no-op, and downgrading from exclusive is
-       allowed without ever dropping the lock in between. */
     if (file->flock_type == FILE_LOCK_SH) return 0;
     file_flock_release(file);
     node->flock_shared++;
@@ -290,11 +278,9 @@ void file_unref(struct file *file) {
     if (!file || file->refs <= 0) return;
     file->refs--;
     if (file->refs != 0) return;
-    /* The last descriptor referring to this open file description is going
-       away, which is exactly when flock releases its lock. */
+
     file_flock_release(file);
-    /* POSIX locks belong to the process, so closing any descriptor on the
-       file drops them. */
+
     if (file->kind == FILE_KIND_VFS && file->node &&
         file->node->posix_lock_pid == process_current_pid()) {
         file->node->posix_lock_pid = 0;
@@ -302,7 +288,7 @@ void file_unref(struct file *file) {
     }
     if ((file->kind == FILE_KIND_PIPE_READ || file->kind == FILE_KIND_PIPE_WRITE) && file->pipe)
         pipe_release(file->pipe, file->kind == FILE_KIND_PIPE_WRITE);
-    /* Before the node's close, so the driver still knows whose objects these were. */
+
     if (file->kind == FILE_KIND_VFS && file->node &&
         file->node->file_ioctl == drm_file_ioctl)
         drm_file_close(file);
@@ -336,14 +322,11 @@ void file_unref(struct file *file) {
         netlink_socket_unref(file->netlink_socket);
     if ((file->kind == FILE_KIND_PTY_MASTER || file->kind == FILE_KIND_PTY_SLAVE) && file->pty)
         pty_close_endpoint(file->pty, file->kind == FILE_KIND_PTY_MASTER);
-    /* The other half of the reference the open took, and last because the
-       close still wants it. */
+
     vfs_node_unref(file->node);
     kfree(file);
 }
 
-/* The offset below is shared by every descriptor onto this open file, so a
-   shared-mode read has to have it to itself. Exclusive holders are alone. */
 static void file_enter(struct file *file) {
     if (kernel_lock_shared_here()) spinlock_acquire(&file->lock);
 }
@@ -382,8 +365,7 @@ static int64_t file_read_locked(struct file *file, size_t size, void *buffer) {
         return signalfd_read(file->signalfd, size, buffer);
     if (file->kind == FILE_KIND_EVENTFS)
         return eventfs_read(file->eventfs, size, buffer);
-    /* A memfd carries a file offset like a regular file, so that reading it
-       without mapping it behaves the way any other descriptor would. */
+
     if (file->kind == FILE_KIND_MEMFD) {
         int64_t moved = memfd_read(file->memfd, file->offset, size, buffer);
         if (moved > 0) file->offset += (uint64_t)moved;
@@ -447,7 +429,7 @@ uint32_t file_poll_events_nested(struct file *file, uint32_t requested,
         if (file->pipe && file->pipe->writers == 0) events |= pollhup;
     } else if (file->kind == FILE_KIND_PIPE_WRITE) {
         if (!file->pipe || file->pipe->readers == 0) events |= pollerr;
-        else if (file->pipe->count < PIPE_CAPACITY) events |= pollout;
+        else if (file->pipe->count < file->pipe->capacity) events |= pollout;
     } else if (file->kind == FILE_KIND_SOCKET) {
         if (unix_socket_read_ready(file->socket)) events |= pollin;
         if (unix_socket_write_ready(file->socket)) events |= pollout;
