@@ -127,8 +127,8 @@ struct process {
     uint64_t affinity_mask;
     uint64_t involuntary_switches;
     uint64_t voluntary_switches;
-    char cmdline[512];
-    uint64_t cmdline_length;
+    uint64_t arg_start;
+    uint64_t arg_end;
     struct vfs_node *cwd;
     struct vfs_node *root;
     struct pty_pair *controlling_pty;
@@ -211,6 +211,8 @@ struct process *process_current(void);
 void process_dump_all(void);
 struct process *process_find(uint64_t pid);
 void process_note_deadline(uint64_t deadline_ns);
+uint64_t process_stack_floor(const struct process *process);
+uint64_t process_arg_limit(const struct process *process);
 
 #define PROCESS_SCHED_OTHER 0
 #define PROCESS_SCHED_FIFO 1

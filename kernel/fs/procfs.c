@@ -741,7 +741,7 @@ static int64_t proc_pid_maps_read(struct vfs_node *node, uint64_t offset,
 
     struct vm_area heap = {process->memory->brk_start, process->memory->brk_end,
                            PAGE_WRITE | PAGE_NX, VM_ANONYMOUS, NULL, 0, NULL};
-    struct vm_area stack = {USER_STACK_LIMIT, USER_STACK_TOP,
+    struct vm_area stack = {process_stack_floor(process), USER_STACK_TOP,
                             PAGE_WRITE | PAGE_NX, VM_ANONYMOUS, NULL, 0, NULL};
 
     VFS_PATH_SCOPED path = vfs_path_buffer();
@@ -786,10 +786,12 @@ static int64_t proc_pid_comm_read(struct vfs_node *node, uint64_t offset,
 static int64_t proc_cmdline_read(struct vfs_node *node, uint64_t offset,
                                  size_t size, void *output) {
     struct process *process = process_find(node_pid(node));
-    if (!process || offset >= process->cmdline_length) return 0;
-    size_t available = (size_t)(process->cmdline_length - offset);
-    if (size > available) size = available;
-    memcpy(output, process->cmdline + offset, size);
+    if (!process || !process->cr3 || process->arg_end <= process->arg_start ||
+        offset >= process->arg_end - process->arg_start) return 0;
+    uint64_t available = process->arg_end - process->arg_start - offset;
+    if (size > available) size = (size_t)available;
+    if (vmm_copy_from_space(process->cr3, output, process->arg_start + offset, size) != 0)
+        return 0;
     return (int64_t)size;
 }
 

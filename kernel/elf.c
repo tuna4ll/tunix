@@ -33,8 +33,6 @@
 #define MAIN_PIE_BASE 0x0000550000000000ULL
 #define INTERP_BASE 0x00007F0000000000ULL
 #define DEFAULT_MMAP_BASE 0x0000600000000000ULL
-#define MAX_ARGC 512
-#define MAX_ENVC 512
 #define MAX_INTERP_PATH VFS_PATH_MAX
 
 #define AT_NULL 0
@@ -401,11 +399,14 @@ static int place_initial_stack(struct process *process,
         if (push_bytes(process, &sp, envp[i - 1], length) != 0) return -1;
         env_addresses[i - 1] = sp;
     }
+    uint64_t arg_end = sp;
     for (size_t i = argc; i > 0; i--) {
         size_t length = strlen(argv[i - 1]) + 1;
         if (push_bytes(process, &sp, argv[i - 1], length) != 0) return -1;
         argv_addresses[i - 1] = sp;
     }
+    process->arg_start = argc ? argv_addresses[0] : arg_end;
+    process->arg_end = arg_end;
 
     sp &= ~15ULL;
     uint64_t execfn = argc ? argv_addresses[0] : 0;
@@ -455,19 +456,13 @@ static int build_initial_stack(struct process *process,
                                uint64_t interpreter_base,
                                const char *const argv[], const char *const envp[]) {
     size_t argc = 0, envc = 0;
-    while (argv && argv[argc]) {
-        if (argc >= MAX_ARGC) return -1;
-        argc++;
-    }
-    while (envp && envp[envc]) {
-        if (envc >= MAX_ENVC) return -1;
-        envc++;
-    }
+    while (argv && argv[argc]) argc++;
+    while (envp && envp[envc]) envc++;
 
-    uint64_t *addresses = (uint64_t *)kmalloc((MAX_ARGC + MAX_ENVC) * sizeof(uint64_t));
+    uint64_t *addresses = (uint64_t *)kmalloc((argc + envc + 1) * sizeof(uint64_t));
     if (!addresses) return -1;
     int status = place_initial_stack(process, main_image, interpreter_base, argv, envp,
-                                     argc, envc, addresses, addresses + MAX_ARGC);
+                                     argc, envc, addresses, addresses + argc);
     kfree(addresses);
     return status;
 }
@@ -525,7 +520,12 @@ int elf_load_process(struct process *process, struct vfs_node *file,
     }
 
     int status = -1;
-    uint64_t stack_bottom = USER_STACK_TOP - USER_STACK_INITIAL_PAGES * 4096ULL;
+    uint64_t stack_bytes = 4096ULL;
+    for (size_t index = 0; argv && argv[index]; index++) stack_bytes += strlen(argv[index]) + 1 + 8;
+    for (size_t index = 0; envp && envp[index]; index++) stack_bytes += strlen(envp[index]) + 1 + 8;
+    uint64_t stack_pages = (stack_bytes + 4095ULL) / 4096ULL + USER_STACK_INITIAL_PAGES;
+    uint64_t stack_bottom = USER_STACK_TOP - stack_pages * 4096ULL;
+    if (stack_bottom < process_stack_floor(process)) goto done;
     for (uint64_t address = stack_bottom; address < USER_STACK_TOP; address += 4096) {
         uint64_t physical = (uint64_t)pmm_alloc_page();
         if (!physical) goto done;

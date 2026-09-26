@@ -369,26 +369,18 @@ static void sync_memory_view(struct process *process) {
     process->mmap_base = process->memory->mmap_base;
 }
 
-static void set_process_cmdline(struct process *process, const char *path,
-                                const char *const argv[]) {
-    process->cmdline_length = 0;
-    if (argv) {
-        for (size_t index = 0; argv[index] && process->cmdline_length + 1 < sizeof(process->cmdline); index++) {
-            size_t length = strlen(argv[index]);
-            size_t available = sizeof(process->cmdline) - process->cmdline_length - 1;
-            if (length > available) length = available;
-            memcpy(process->cmdline + process->cmdline_length, argv[index], length);
-            process->cmdline_length += length;
-            process->cmdline[process->cmdline_length++] = '\0';
-        }
-    }
-    if (!process->cmdline_length && path) {
-        size_t length = strlen(path);
-        if (length >= sizeof(process->cmdline)) length = sizeof(process->cmdline) - 1;
-        memcpy(process->cmdline, path, length);
-        process->cmdline[length] = '\0';
-        process->cmdline_length = length + 1;
-    }
+uint64_t process_stack_floor(const struct process *process) {
+    uint64_t reserve = process ? process->rlimits[PROCESS_RLIMIT_STACK].soft : 0;
+    if (reserve < USER_STACK_RESERVE_MIN) reserve = USER_STACK_RESERVE_MIN;
+    if (reserve > USER_STACK_RESERVE_MAX) reserve = USER_STACK_RESERVE_MAX;
+    return (USER_STACK_TOP - reserve) & ~4095ULL;
+}
+
+uint64_t process_arg_limit(const struct process *process) {
+    uint64_t limit = process ? process->rlimits[PROCESS_RLIMIT_STACK].soft / 4 : 0;
+    if (limit > 6ULL * 1024 * 1024) limit = 6ULL * 1024 * 1024;
+    if (limit < 128ULL * 1024) limit = 128ULL * 1024;
+    return limit;
 }
 
 static uint64_t signal_bit(int signal_number) {
@@ -899,7 +891,6 @@ struct process *process_create_from_path(const char *path) {
         "USER=root",
         NULL
     };
-    set_process_cmdline(process, path, argv);
     if (elf_load_process(process, file, argv, envp) != 0) {
         kprintf("process: invalid ELF64: %s\n", path);
         vmm_destroy_address_space(process->cr3);
@@ -1524,7 +1515,7 @@ static int areas_copy(struct process_memory *destination,
 
 int process_grow_user_stack(uint64_t fault_address) {
     if (!current || current->state != PROCESS_RUNNING || !current->cr3) return 0;
-    if (fault_address >= USER_STACK_TOP || fault_address < USER_STACK_LIMIT) return 0;
+    if (fault_address >= USER_STACK_TOP || fault_address < process_stack_floor(current)) return 0;
 
     uint64_t page = fault_address & ~4095ULL;
     uint64_t existing_physical = 0;
@@ -1916,8 +1907,8 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame) {
     child->start_time_ns = time_uptime_ns();
     child->runtime_ns = 0;
     child->last_scheduled_ns = 0;
-    child->cmdline_length = parent->cmdline_length;
-    memcpy(child->cmdline, parent->cmdline, sizeof(child->cmdline));
+    child->arg_start = parent->arg_start;
+    child->arg_end = parent->arg_end;
     if (allocate_kernel_stack(child) != 0) {
         memory_unref(child->memory);
         free_process_struct(child);
@@ -1996,8 +1987,8 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
     child->fs_base = (flags & 0x00080000ULL) ? tls : parent->fs_base;
     child->gs_base = parent->gs_base;
     child->start_time_ns = time_uptime_ns();
-    child->cmdline_length = parent->cmdline_length;
-    memcpy(child->cmdline, parent->cmdline, sizeof(child->cmdline));
+    child->arg_start = parent->arg_start;
+    child->arg_end = parent->arg_end;
     if (allocate_kernel_stack(child) != 0) {
         memory_unref(child->memory);
         free_process_struct(child);
@@ -2281,6 +2272,7 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
     memset(&image, 0, sizeof(image));
     image.cr3 = new_cr3;
     image.root = current->root;
+    memcpy(image.rlimits, current->rlimits, sizeof(image.rlimits));
     if (elf_load_process(&image, file, argv, envp) != 0) {
         vmm_destroy_address_space(new_cr3);
         return -1;
@@ -2305,6 +2297,8 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
     current->brk_start = image.brk_start;
     current->brk_end = image.brk_end;
     current->mmap_base = image.mmap_base;
+    current->arg_start = image.arg_start;
+    current->arg_end = image.arg_end;
     current->fs_base = 0;
     current->gs_base = 0;
     current->signal_stack_pointer = 0;
@@ -2317,7 +2311,6 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
                          current->cred.egid == current->cred.gid);
     strncpy(current->name, file->name, sizeof(current->name) - 1);
     set_exe_path(current, file, path);
-    set_process_cmdline(current, path, argv);
     for (int sig = 0; sig < TUNIX_NSIG; sig++) {
         if (current->signal_actions[sig].handler != SIG_IGN) memset(&current->signal_actions[sig], 0, sizeof(current->signal_actions[sig]));
     }

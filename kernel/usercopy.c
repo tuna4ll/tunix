@@ -18,11 +18,15 @@ int copy_to_user(uint64_t user_destination, const void *source, size_t length) {
 
 int copy_string_from_user(char *destination, size_t capacity, uint64_t user_source) {
     if (!destination || capacity == 0) return -1;
-    for (size_t i = 0; i < capacity; i++) {
-        char value;
-        if (copy_from_user(&value, user_source + i, 1) != 0) return -1;
-        destination[i] = value;
-        if (!value) return (int)i;
+    size_t copied = 0;
+    while (copied < capacity) {
+        uint64_t address = user_source + copied;
+        size_t chunk = 4096U - (size_t)(address & 4095U);
+        if (chunk > capacity - copied) chunk = capacity - copied;
+        if (copy_from_user(destination + copied, address, chunk) != 0) return -1;
+        for (size_t index = 0; index < chunk; index++)
+            if (!destination[copied + index]) return (int)(copied + index);
+        copied += chunk;
     }
     destination[capacity - 1] = '\0';
     return -2;

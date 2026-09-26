@@ -532,11 +532,7 @@ struct linux_clone_args {
 #define FUTEX_CLOCK_REALTIME 256
 #define FUTEX_CMD_MASK 0x7F
 
-#define MAX_EXEC_ITEMS 512
-
-#define MAX_EXEC_STRING 4096
-
-#define EXEC_STRING_POOL (256U * 1024U)
+#define MAX_ARG_STRLEN (128U * 1024U)
 
 #define MAX_SHEBANG_LINE 256
 
@@ -754,11 +750,17 @@ struct linux_winsize {
     uint16_t ypixel;
 };
 
+struct exec_vector {
+    const char **items;
+    size_t count;
+    size_t capacity;
+};
+
 struct exec_arguments {
-    char pool[EXEC_STRING_POOL];
+    size_t budget;
     size_t used;
-    const char *argv[MAX_EXEC_ITEMS + 1];
-    const char *envp[MAX_EXEC_ITEMS + 1];
+    struct exec_vector argv;
+    struct exec_vector envp;
 };
 
 static int nx_enabled;
@@ -3302,14 +3304,16 @@ static int mapping_range_free(struct process *process, uint64_t base, uint64_t l
 static int find_mapping_range(struct process *process, uint64_t start,
                               uint64_t length, uint64_t *base_out) {
     uint64_t base = align_up(start, 4096);
-    while (base < USER_ADDRESS_LIMIT && length <= USER_ADDRESS_LIMIT - base) {
+    uint64_t ceiling = process_stack_floor(process) - 4096ULL;
+    while (base < ceiling && length <= ceiling - base) {
         uint64_t candidate;
         if (process_find_free_range(base, length, &candidate) != 0) return -1;
+        if (candidate > ceiling || length > ceiling - candidate) break;
         if (mapping_range_free(process, candidate, length)) {
             *base_out = candidate;
             return 0;
         }
-        if (USER_ADDRESS_LIMIT - candidate < length + 4096ULL) break;
+        if (ceiling - candidate < length + 4096ULL) break;
         base = candidate + 4096;
     }
     return -1;
@@ -3805,38 +3809,69 @@ static int64_t sys_mprotect(uint64_t address, uint64_t length, int prot) {
     return failed ? -ENOMEM : 0;
 }
 
-static char *exec_pool_add(struct exec_arguments *arguments, const char *text) {
+static int vector_reserve(struct exec_vector *vector, size_t wanted) {
+    if (wanted <= vector->capacity) return 0;
+    size_t capacity = vector->capacity ? vector->capacity * 2 : 16;
+    while (capacity < wanted) capacity *= 2;
+    const char **items = (const char **)kmalloc(capacity * sizeof(*items));
+    if (!items) return -ENOMEM;
+    if (vector->count) memcpy(items, vector->items, vector->count * sizeof(*items));
+    kfree(vector->items);
+    vector->items = items;
+    vector->capacity = capacity;
+    return 0;
+}
+
+static void vector_free(struct exec_vector *vector) {
+    for (size_t index = 0; index < vector->count; index++) kfree((void *)vector->items[index]);
+    kfree(vector->items);
+    vector->items = NULL;
+    vector->count = vector->capacity = 0;
+}
+
+static void release_exec_arguments(struct exec_arguments **arguments) {
+    if (!*arguments) return;
+    vector_free(&(*arguments)->argv);
+    vector_free(&(*arguments)->envp);
+    kfree(*arguments);
+}
+
+static int vector_insert(struct exec_arguments *arguments, struct exec_vector *vector,
+                         size_t at, const char *text) {
     size_t length = strlen(text);
-    if (arguments->used + length + 1 > sizeof(arguments->pool)) return NULL;
-    char *slot = arguments->pool + arguments->used;
-    memcpy(slot, text, length);
-    slot[length] = '\0';
-    arguments->used += length + 1;
-    return slot;
+    if (arguments->used + length + 1 + sizeof(char *) > arguments->budget) return -E2BIG;
+    if (vector_reserve(vector, vector->count + 2) != 0) return -ENOMEM;
+    char *copy = (char *)kmalloc(length + 1);
+    if (!copy) return -ENOMEM;
+    memcpy(copy, text, length + 1);
+    for (size_t index = vector->count; index > at; index--)
+        vector->items[index] = vector->items[index - 1];
+    vector->items[at] = copy;
+    vector->count++;
+    vector->items[vector->count] = NULL;
+    arguments->used += length + 1 + sizeof(char *);
+    return 0;
 }
 
 static int copy_exec_vector(struct exec_arguments *arguments, uint64_t user_vector,
-                            const char *pointers[MAX_EXEC_ITEMS + 1]) {
-    if (!user_vector) {
-        pointers[0] = NULL;
-        return 0;
-    }
-    for (int index = 0; index < MAX_EXEC_ITEMS; index++) {
+                            struct exec_vector *vector) {
+    if (vector_reserve(vector, 1) != 0) return -ENOMEM;
+    vector->items[0] = NULL;
+    if (!user_vector) return 0;
+    VFS_PATH_SCOPED scratch = (char *)kmalloc(MAX_ARG_STRLEN);
+    if (!scratch) return -ENOMEM;
+    for (uint64_t index = 0;; index++) {
         uint64_t user_string;
-        if (copy_from_user(&user_string, user_vector + (uint64_t)index * sizeof(uint64_t), sizeof(user_string)) != 0) return -EFAULT;
-        if (!user_string) {
-            pointers[index] = NULL;
-            return index;
-        }
-        size_t room = sizeof(arguments->pool) - arguments->used;
-        if (room > MAX_EXEC_STRING) room = MAX_EXEC_STRING;
-        if (room == 0) return -E2BIG;
-        char *slot = arguments->pool + arguments->used;
-        if (copy_string_from_user(slot, room, user_string) < 0) return -EFAULT;
-        arguments->used += strlen(slot) + 1;
-        pointers[index] = slot;
+        if (copy_from_user(&user_string, user_vector + index * sizeof(uint64_t),
+                           sizeof(user_string)) != 0) return -EFAULT;
+        if (!user_string) return (int)vector->count;
+        int copied = copy_string_from_user(scratch, MAX_ARG_STRLEN, user_string);
+        if (copied == -2) return -E2BIG;
+        if (copied < 0) return -EFAULT;
+        int status = vector_insert(arguments, vector, vector->count, scratch);
+        if (status != 0) return status;
+        if (vector->count > 0x7FFFFFFFU) return -E2BIG;
     }
-    return -E2BIG;
 }
 
 static int parse_shebang(struct vfs_node *file, char interpreter[MAX_SHEBANG_LINE],
@@ -3869,32 +3904,21 @@ static int parse_shebang(struct vfs_node *file, char interpreter[MAX_SHEBANG_LIN
     return 1;
 }
 
-static int rewrite_script_arguments(struct exec_arguments *arguments, int argc,
+static int rewrite_script_arguments(struct exec_arguments *arguments,
                                     const char *script_path, const char *interpreter,
                                     const char *optional_argument) {
-    int has_optional = optional_argument && optional_argument[0];
-    int prefix = has_optional ? 3 : 2;
-    int original_tail = argc > 0 ? argc - 1 : 0;
-    int new_argc = prefix + original_tail;
-    if (new_argc > MAX_EXEC_ITEMS) return -E2BIG;
-
-    const char *interpreter_slot = exec_pool_add(arguments, interpreter);
-    const char *optional_slot = has_optional ? exec_pool_add(arguments, optional_argument) : NULL;
-    const char *script_slot = exec_pool_add(arguments, script_path);
-    if (!interpreter_slot || (has_optional && !optional_slot) || !script_slot) return -E2BIG;
-
-    for (int index = original_tail - 1; index >= 0; index--)
-        arguments->argv[prefix + index] = arguments->argv[index + 1];
-
-    arguments->argv[0] = interpreter_slot;
-    int script_index = 1;
-    if (has_optional) {
-        arguments->argv[1] = optional_slot;
-        script_index = 2;
+    struct exec_vector *argv = &arguments->argv;
+    if (argv->count) {
+        kfree((void *)argv->items[0]);
+        for (size_t index = 1; index <= argv->count; index++)
+            argv->items[index - 1] = argv->items[index];
+        argv->count--;
     }
-    arguments->argv[script_index] = script_slot;
-    arguments->argv[new_argc] = NULL;
-    return new_argc;
+    int status = vector_insert(arguments, argv, 0, script_path);
+    if (status == 0 && optional_argument && optional_argument[0])
+        status = vector_insert(arguments, argv, 0, optional_argument);
+    if (status == 0) status = vector_insert(arguments, argv, 0, interpreter);
+    return status != 0 ? status : (int)argv->count;
 }
 
 static int64_t sys_execve(struct syscall_frame *frame, uint64_t user_path, uint64_t user_argv, uint64_t user_envp) {
@@ -3905,94 +3929,59 @@ static int64_t sys_execve(struct syscall_frame *frame, uint64_t user_path, uint6
     if (status != 0) return status;
     status = copy_path_at(AT_FDCWD, user_path, &path);
     if (status != 0) return status;
-    struct exec_arguments *arguments = (struct exec_arguments *)kmalloc(sizeof(*arguments));
+    __attribute__((cleanup(release_exec_arguments))) struct exec_arguments *arguments =
+        (struct exec_arguments *)kmalloc(sizeof(*arguments));
     if (!arguments) return -ENOMEM;
     memset(arguments, 0, sizeof(*arguments));
-    int argc = copy_exec_vector(arguments, user_argv, arguments->argv);
-    int envc = copy_exec_vector(arguments, user_envp, arguments->envp);
-    if (argc < 0 || envc < 0) {
-        kfree(arguments);
-        return argc < 0 ? argc : envc;
-    }
+    arguments->budget = process_arg_limit(process_current());
+    int argc = copy_exec_vector(arguments, user_argv, &arguments->argv);
+    if (argc < 0) return argc;
+    int envc = copy_exec_vector(arguments, user_envp, &arguments->envp);
+    if (envc < 0) return envc;
     if (argc == 0) {
-        arguments->argv[0] = exec_pool_add(arguments, path);
-        arguments->argv[1] = NULL;
-        if (!arguments->argv[0]) {
-            kfree(arguments);
-            return -E2BIG;
-        }
+        int status = vector_insert(arguments, &arguments->argv, 0, path);
+        if (status != 0) return status;
         argc = 1;
     }
     if (envc == 0) {
         const char *defaults[] = {"PATH=/usr/bin:/usr/sbin:/bin:/sbin", "HOME=/", "TERM=tunix", "USER=root", NULL};
         for (int i = 0; defaults[i]; i++) {
-            arguments->envp[i] = exec_pool_add(arguments, defaults[i]);
-            arguments->envp[i + 1] = NULL;
-            if (!arguments->envp[i]) {
-                kfree(arguments);
-                return -E2BIG;
-            }
+            int status = vector_insert(arguments, &arguments->envp, (size_t)i, defaults[i]);
+            if (status != 0) return status;
         }
     }
 
     struct vfs_node *file = vfs_lookup(path);
-    if (!file) {
-        kfree(arguments);
-        return -ENOENT;
-    }
-    if ((file->flags & 0xFFU) != VFS_FILE) {
-        kfree(arguments);
-        return -EACCES;
-    }
-    if ((file->mode & 0111U) == 0) {
-        kfree(arguments);
-        return -EACCES;
-    }
+    if (!file) return -ENOENT;
+    if ((file->flags & 0xFFU) != VFS_FILE) return -EACCES;
+    if ((file->mode & 0111U) == 0) return -EACCES;
     int permitted = cred_may_path(path, file, CRED_EXEC);
-    if (permitted != 0) {
-        kfree(arguments);
-        return permitted;
-    }
+    if (permitted != 0) return permitted;
 
     char interpreter[MAX_SHEBANG_LINE];
     char optional_argument[MAX_SHEBANG_LINE];
     int script = parse_shebang(file, interpreter, optional_argument);
-    if (script < 0) {
-        kfree(arguments);
-        return script;
-    }
+    if (script < 0) return script;
     if (script > 0) {
         VFS_PATH_SCOPED interpreter_path = vfs_path_buffer();
-        if (!interpreter_path || normalize_path(NULL, interpreter, interpreter_path) != 0) {
-            kfree(arguments);
+        if (!interpreter_path || normalize_path(NULL, interpreter, interpreter_path) != 0)
             return -ENOENT;
-        }
         struct vfs_node *interpreter_file = vfs_lookup(interpreter_path);
         if (!interpreter_file || (interpreter_file->flags & 0xFFU) != VFS_FILE ||
-            (interpreter_file->mode & 0111U) == 0) {
-            kfree(arguments);
-            return -ENOENT;
-        }
+            (interpreter_file->mode & 0111U) == 0) return -ENOENT;
         permitted = cred_may_path(interpreter_path, interpreter_file, CRED_EXEC);
-        if (permitted != 0) {
-            kfree(arguments);
-            return permitted;
-        }
-        int rewritten = rewrite_script_arguments(arguments, argc, given, interpreter,
+        if (permitted != 0) return permitted;
+        int rewritten = rewrite_script_arguments(arguments, given, interpreter,
                                                  optional_argument);
-        if (rewritten < 0) {
-            kfree(arguments);
-            return rewritten;
-        }
+        if (rewritten < 0) return rewritten;
         int64_t result = process_exec_from_syscall(frame, interpreter_path,
-                                                   arguments->argv, arguments->envp, NULL);
-        kfree(arguments);
+                                                   arguments->argv.items, arguments->envp.items,
+                                                   NULL);
         return result == -1 ? -ENOEXEC : result;
     }
 
-    int64_t result = process_exec_from_syscall(frame, path, arguments->argv,
-                                               arguments->envp, file);
-    kfree(arguments);
+    int64_t result = process_exec_from_syscall(frame, path, arguments->argv.items,
+                                               arguments->envp.items, file);
     return result == -1 ? -ENOEXEC : result;
 }
 
