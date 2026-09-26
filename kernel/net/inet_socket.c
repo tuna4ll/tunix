@@ -1,4 +1,3 @@
-
 #include <stddef.h>
 #include <stdint.h>
 #include "../include/heap.h"
@@ -10,7 +9,6 @@
 
 extern void kprintf(const char *fmt, ...);
 
-#define MAX_INET_SOCKETS 32
 #define SOCKET_QUEUE 8
 #define SOCKET_PACKET_MAX 2048
 #define EAGAIN 11
@@ -45,7 +43,7 @@ extern void kprintf(const char *fmt, ...);
 #define TCP_TIME_WAIT_NS 10000000000ULL
 #define TCP_ORPHAN_NS    30000000000ULL
 
-#define TCP_BACKLOG_MAX 16
+#define TCP_BACKLOG_MAX 4096
 
 enum tcp_state {
     TCP_CLOSED = 0,
@@ -199,7 +197,8 @@ struct icmp_message {
     uint16_t sequence;
 };
 
-static struct inet_socket *sockets[MAX_INET_SOCKETS];
+static struct inet_socket **sockets;
+static unsigned socket_capacity;
 static uint16_t next_ephemeral = 49152;
 
 static int is_ping_socket(const struct inet_socket *socket) {
@@ -208,14 +207,23 @@ static int is_ping_socket(const struct inet_socket *socket) {
 }
 
 static int register_socket(struct inet_socket *socket) {
-    for (unsigned i = 0; i < MAX_INET_SOCKETS; i++) {
+    for (unsigned i = 0; i < socket_capacity; i++) {
         if (!sockets[i]) { sockets[i] = socket; return 0; }
     }
-    return -1;
+    unsigned capacity = socket_capacity ? socket_capacity * 2 : 64;
+    struct inet_socket **grown = (struct inet_socket **)kmalloc(capacity * sizeof(*grown));
+    if (!grown) return -1;
+    memset(grown, 0, capacity * sizeof(*grown));
+    if (socket_capacity) memcpy(grown, sockets, socket_capacity * sizeof(*grown));
+    kfree(sockets);
+    grown[socket_capacity] = socket;
+    sockets = grown;
+    socket_capacity = capacity;
+    return 0;
 }
 
 static void unregister_socket(struct inet_socket *socket) {
-    for (unsigned i = 0; i < MAX_INET_SOCKETS; i++)
+    for (unsigned i = 0; i < socket_capacity; i++)
         if (sockets[i] == socket) sockets[i] = NULL;
 }
 
@@ -246,7 +254,7 @@ static uint16_t allocate_port(void) {
         uint16_t candidate = next_ephemeral++;
         if (next_ephemeral < 49152) next_ephemeral = 49152;
         int used = 0;
-        for (unsigned i = 0; i < MAX_INET_SOCKETS; i++)
+        for (unsigned i = 0; i < socket_capacity; i++)
             if (sockets[i] && sockets[i]->domain == TUNIX_AF_INET &&
                 sockets[i]->local_port == candidate) used = 1;
         if (!used) return candidate;
@@ -391,7 +399,6 @@ static void tcp_begin_close(struct inet_socket *s) {
 static int tcp_connect(struct inet_socket *socket, uint32_t address, uint16_t port) {
     struct tcp_control_block *tcp = socket->tcp;
     if (tcp) {
-
         net_poll();
         if (tcp->pending_error) { int e = tcp->pending_error; tcp->pending_error = 0; return e; }
         if (tcp->state == TCP_ESTABLISHED || tcp->state >= TCP_FIN_WAIT_1) {
@@ -537,7 +544,6 @@ static void tcp_input(struct inet_socket *s, uint32_t seq, uint32_t ack, uint8_t
         tcp->rcv_nxt += (uint32_t)take;
         tcp_send_ack(s);
     } else if (length > 0) {
-
         tcp_send_ack(s);
     }
 
@@ -624,7 +630,7 @@ static void tcp_retransmit(struct inet_socket *s) {
 
 void inet_socket_tcp_timer_poll(void) {
     uint64_t now = time_uptime_ns();
-    for (unsigned i = 0; i < MAX_INET_SOCKETS; i++) {
+    for (unsigned i = 0; i < socket_capacity; i++) {
         struct inet_socket *s = sockets[i];
         if (!s || !s->tcp) continue;
         struct tcp_control_block *tcp = s->tcp;
@@ -686,7 +692,7 @@ static struct inet_socket *tcp_open_child(struct inet_socket *listener, uint32_t
 void inet_socket_receive_tcp(uint32_t source, uint16_t source_port, uint32_t destination,
                              uint16_t destination_port, uint32_t seq, uint32_t ack, uint8_t flags,
                              uint16_t window, const uint8_t *payload, size_t length) {
-    for (unsigned i = 0; i < MAX_INET_SOCKETS; i++) {
+    for (unsigned i = 0; i < socket_capacity; i++) {
         struct inet_socket *s = sockets[i];
         if (!s || !s->tcp || s->type != TUNIX_SOCK_STREAM) continue;
         if (s->local_port != destination_port) continue;
@@ -697,7 +703,7 @@ void inet_socket_receive_tcp(uint32_t source, uint16_t source_port, uint32_t des
     }
 
     if ((flags & (TCP_SYN | TCP_ACK | TCP_RST)) == TCP_SYN) {
-        for (unsigned i = 0; i < MAX_INET_SOCKETS; i++) {
+        for (unsigned i = 0; i < socket_capacity; i++) {
             struct inet_socket *s = sockets[i];
             if (!s || !s->listening || s->type != TUNIX_SOCK_STREAM) continue;
             if (s->local_port != destination_port) continue;
@@ -759,7 +765,7 @@ void inet_socket_unref(struct inet_socket *socket) {
 }
 
 static int local_port_conflict(struct inet_socket *socket, uint32_t address, uint16_t port) {
-    for (unsigned i = 0; i < MAX_INET_SOCKETS; i++) {
+    for (unsigned i = 0; i < socket_capacity; i++) {
         struct inet_socket *other = sockets[i];
         if (!other || other == socket || other->domain != TUNIX_AF_INET ||
             other->type != socket->type || other->local_port != port) continue;
@@ -1060,7 +1066,6 @@ int inet_socket_getsockopt(struct inet_socket *socket, int level, int option,
     if (!socket || !value || !length || *length < sizeof(int)) return -EINVAL;
     int result = 0;
     if (level == SOL_SOCKET && option == SO_ERROR) {
-
         if (socket->tcp && socket->tcp->pending_error) {
             result = -socket->tcp->pending_error;
             socket->tcp->pending_error = 0;
@@ -1226,7 +1231,7 @@ void inet_socket_receive_udp(const uint8_t *payload, size_t length, uint32_t sou
     address.family = TUNIX_AF_INET;
     address.port = net_htons(source_port);
     address.address = source;
-    for (unsigned i = 0; i < MAX_INET_SOCKETS; i++) {
+    for (unsigned i = 0; i < socket_capacity; i++) {
         struct inet_socket *socket = sockets[i];
         if (!socket || socket->domain != TUNIX_AF_INET || socket->type != TUNIX_SOCK_DGRAM) continue;
         if (is_ping_socket(socket)) continue;
@@ -1251,7 +1256,7 @@ void inet_socket_receive_ipv4(const uint8_t *packet, size_t length, uint8_t prot
         length >= header_length + sizeof(struct icmp_message))
         icmp = (const struct icmp_message *)(packet + header_length);
 
-    for (unsigned i = 0; i < MAX_INET_SOCKETS; i++) {
+    for (unsigned i = 0; i < socket_capacity; i++) {
         struct inet_socket *socket = sockets[i];
         if (!socket || socket->domain != TUNIX_AF_INET) continue;
         if (icmp && (socket->icmp_filter & (1U << icmp->type))) continue;
@@ -1278,7 +1283,7 @@ void inet_socket_receive_ethernet(const uint8_t *frame, size_t length, uint16_t 
     address.hatype = 1;
     address.halen = 6;
     memcpy(address.address, frame + 6, 6);
-    for (unsigned i = 0; i < MAX_INET_SOCKETS; i++) {
+    for (unsigned i = 0; i < socket_capacity; i++) {
         struct inet_socket *socket = sockets[i];
         if (!socket || socket->domain != TUNIX_AF_PACKET) continue;
         uint16_t filter = net_htons((uint16_t)socket->protocol);
@@ -1308,7 +1313,7 @@ static void text_hex8(char *buffer, size_t capacity, size_t *length, uint32_t va
 void inet_socket_proc_udp(char *buffer, size_t capacity, size_t *length) {
     text_string(buffer, capacity, length, "  sl  local_address rem_address   st\n");
     unsigned slot = 0;
-    for (unsigned i = 0; i < MAX_INET_SOCKETS; i++) {
+    for (unsigned i = 0; i < socket_capacity; i++) {
         struct inet_socket *s = sockets[i];
         if (!s || s->domain != TUNIX_AF_INET || s->type != TUNIX_SOCK_DGRAM) continue;
         text_char(buffer, capacity, length, ' '); text_hex4(buffer, capacity, length, (uint16_t)slot++);
@@ -1322,7 +1327,7 @@ void inet_socket_proc_udp(char *buffer, size_t capacity, size_t *length) {
 void inet_socket_proc_raw(char *buffer, size_t capacity, size_t *length) {
     text_string(buffer, capacity, length, "  sl  local_address rem_address   st\n");
     unsigned slot = 0;
-    for (unsigned i = 0; i < MAX_INET_SOCKETS; i++) {
+    for (unsigned i = 0; i < socket_capacity; i++) {
         struct inet_socket *s = sockets[i];
         if (!s || s->domain != TUNIX_AF_INET || s->type != TUNIX_SOCK_RAW) continue;
         text_char(buffer, capacity, length, ' '); text_hex4(buffer, capacity, length, (uint16_t)slot++);
@@ -1331,13 +1336,12 @@ void inet_socket_proc_raw(char *buffer, size_t capacity, size_t *length) {
     }
 }
 void inet_socket_proc_tcp(char *buffer, size_t capacity, size_t *length) {
-
     static const char *const codes[] = {
         "07", "02", "03", "01", "04", "05", "0B", "06", "08", "09"
     };
     text_string(buffer, capacity, length, "  sl  local_address rem_address   st\n");
     unsigned slot = 0;
-    for (unsigned i = 0; i < MAX_INET_SOCKETS; i++) {
+    for (unsigned i = 0; i < socket_capacity; i++) {
         struct inet_socket *s = sockets[i];
         if (!s || s->type != TUNIX_SOCK_STREAM) continue;
         if (!s->tcp && !s->listening) continue;
