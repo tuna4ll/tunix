@@ -32,6 +32,7 @@ typedef unsigned int u32;
 #define NR_CLOSE_RANGE 436
 #define NR_SETUID 105
 #define NR_CLOCK_GETTIME 228
+#define NR_EXECVE 59
 
 
 static inline s64 call6(s64 n, s64 a, s64 b, s64 c, s64 d, s64 e, s64 f) {
@@ -74,6 +75,7 @@ static inline s64 call6(s64 n, s64 a, s64 b, s64 c, s64 d, s64 e, s64 f) {
 #define NR_CLOSE_RANGE 436
 #define NR_SETUID 146
 #define NR_CLOCK_GETTIME 113
+#define NR_EXECVE 221
 
 
 static inline s64 call6(s64 n, s64 a, s64 b, s64 c, s64 d, s64 e, s64 f) {
@@ -567,6 +569,88 @@ static void test_descriptors(void) {
     call4(NR_PRLIMIT64, 0, 7, &limit, 0);
 }
 
+static char big_argument_area[7 * 1024 * 1024];
+static const char *exec_vector[70000];
+
+static u64 fill_arguments(u64 count, u64 each, char letter) {
+    char *at = big_argument_area;
+    exec_vector[0] = "/sbin/init";
+    exec_vector[1] = "argcheck";
+    for (u64 index = 0; index < count; index++) {
+        exec_vector[index + 2] = at;
+        for (u64 byte = 0; byte < each; byte++) at[byte] = letter;
+        at[each] = 0;
+        at += each + 1;
+    }
+    exec_vector[count + 2] = 0;
+    return count + 2;
+}
+
+static int exec_child(u64 stack_limit) {
+    s64 pid = do_fork();
+    if (pid == 0) {
+        if (stack_limit) {
+            struct rlimit_pair value = {stack_limit, ~0UL};
+            call4(NR_PRLIMIT64, 0, 3, &value, 0);
+        }
+        static const char *environment[] = {"LIMITS=1", 0};
+        s64 result = call3(NR_EXECVE, "/sbin/init", exec_vector, environment);
+        call1(NR_EXIT, result == -7 ? 77 : 99);
+    }
+    int status = -1;
+    call4(NR_WAIT4, pid, &status, 0, 0);
+    return (status >> 8) & 0xFF;
+}
+
+static int argument_check(u64 *stack) {
+    u64 argc = stack[0];
+    const char **argv = (const char **)(stack + 1);
+    u64 total = 0;
+    for (u64 index = 0; index < argc; index++) total += length_of(argv[index]) + 1;
+    static char cmdline[8 * 1024 * 1024];
+    s64 fd = call4(NR_OPENAT, AT_FDCWD, "/proc/self/cmdline", O_RDONLY, 0);
+    u64 got = 0;
+    for (;;) {
+        s64 amount = call3(NR_READ, fd, cmdline + got, sizeof(cmdline) - got);
+        if (amount <= 0) break;
+        got += (u64)amount;
+    }
+    call1(NR_CLOSE, fd);
+    if (got != total) return 3;
+    const char *last = argv[argc - 1];
+    if (argc > 2 && last[0] != argv[2][0]) return 4;
+    return 0;
+}
+
+static int deep(int levels) {
+    volatile char frame[4096];
+    frame[0] = (char)levels;
+    frame[4095] = (char)levels;
+    if (levels == 0) return frame[0];
+    return deep(levels - 1) + frame[4095] - frame[4095];
+}
+
+static void test_exec_arguments(void) {
+    fill_arguments(5000, 100, 'a');
+    report_value("exec-5000-arguments", exec_child(0) == 0, 5000);
+    fill_arguments(1, 100 * 1024, 'b');
+    report_value("exec-100k-argument", exec_child(0) == 0, 100 * 1024);
+    fill_arguments(1, 200 * 1024, 'c');
+    report_value("exec-200k-argument-refused", exec_child(0) == 77, 200 * 1024);
+    fill_arguments(60000, 40, 'd');
+    report_value("exec-2.4m-refused-at-8m-stack", exec_child(0) == 77, 60000);
+    report_value("exec-2.4m-with-64m-stack", exec_child(64ULL * 1024 * 1024) == 0, 60000);
+    s64 pid = do_fork();
+    if (pid == 0) {
+        struct rlimit_pair value = {64ULL * 1024 * 1024, ~0UL};
+        call4(NR_PRLIMIT64, 0, 3, &value, 0);
+        call1(NR_EXIT, deep(8000) == 0 ? 0 : 1);
+    }
+    int status = -1;
+    call4(NR_WAIT4, pid, &status, 0, 0);
+    report_value("stack-32m-deep", status == 0, (u64)status);
+}
+
 #ifndef LIMITS_TESTS
 #define LIMITS_TESTS 0xFFFFFFFFU
 #endif
@@ -574,8 +658,10 @@ static void test_descriptors(void) {
 #define LIMITS_PROCESSES 2000
 #endif
 
-static void run(void) __attribute__((noreturn, used));
-static void run(void) {
+static void run(u64 *stack) __attribute__((noreturn, used));
+static void run(u64 *stack) {
+    if (stack[0] >= 2 && text_equal(((const char **)(stack + 1))[1], "argcheck"))
+        call1(NR_EXIT_GROUP, argument_check(stack));
     if (LIMITS_TESTS & 0x01U) test_memory();
     if (LIMITS_TESTS & 0x02U) test_long_names();
     if (LIMITS_TESTS & 0x04U) test_long_paths();
@@ -583,6 +669,7 @@ static void run(void) {
     if (LIMITS_TESTS & 0x10U) test_symlink_chain();
     if (LIMITS_TESTS & 0x20U) test_many_processes(LIMITS_PROCESSES);
     if (LIMITS_TESTS & 0x40U) test_descriptors();
+    if (LIMITS_TESTS & 0x80U) test_exec_arguments();
     print(failures ? "LIMITSTEST FAIL\n" : "LIMITSTEST PASS\n");
     call1(NR_EXIT_GROUP, 0);
     for (;;) { }
@@ -593,6 +680,7 @@ __asm__(".text\n"
         ".globl _start\n"
         "_start:\n"
         "    xor %ebp, %ebp\n"
+        "    mov %rsp, %rdi\n"
         "    and $-16, %rsp\n"
         "    call run\n"
         "    hlt\n");
@@ -601,6 +689,7 @@ __asm__(".text\n"
         ".globl _start\n"
         "_start:\n"
         "    mov x29, #0\n"
+        "    mov x0, sp\n"
         "    bl run\n"
         "    b .\n");
 #endif
