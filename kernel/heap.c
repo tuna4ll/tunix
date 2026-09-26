@@ -25,12 +25,14 @@ static uint64_t heap_pressure_size(void) {
 #define HEAP_MAGIC 0x1234ABCD
 
 #define HEAP_ALIGN 16ULL
+#define HEAP_BINS 64
 
 typedef struct heap_block {
     uint32_t magic;
-    uint32_t size;
     uint8_t is_free;
     uint8_t pages_released;
+    uint16_t bin;
+    uint64_t size;
     struct heap_block* next;
     struct heap_block* prev;
     struct heap_block* free_prev;
@@ -42,8 +44,8 @@ _Static_assert(sizeof(heap_block_t) % HEAP_ALIGN == 0,
 
 static heap_block_t* head = NULL;
 static heap_block_t* tail = NULL;
-static heap_block_t* free_head = NULL;
-static heap_block_t* free_tail = NULL;
+static heap_block_t* bins[HEAP_BINS];
+static uint64_t bin_mask;
 static uint64_t heap_size = 0;
 static uint64_t heap_allocated = 0;
 static spinlock_t heap_lock;
@@ -51,49 +53,28 @@ static spinlock_t heap_lock;
 extern void kprintf(const char *fmt, ...);
 extern void panic(const char *msg);
 
-static void free_insert_after(heap_block_t *anchor, heap_block_t *block) {
-    block->free_prev = anchor;
-    block->free_next = anchor ? anchor->free_next : free_head;
-    if (block->free_next) block->free_next->free_prev = block;
-    else free_tail = block;
-    if (anchor) anchor->free_next = block;
-    else free_head = block;
-}
-
-static void free_remove(heap_block_t *block) {
-    if (block->free_prev) block->free_prev->free_next = block->free_next;
-    else free_head = block->free_next;
-    if (block->free_next) block->free_next->free_prev = block->free_prev;
-    else free_tail = block->free_prev;
-    block->free_prev = NULL;
-    block->free_next = NULL;
-}
-
-static void free_replace(heap_block_t *old, heap_block_t *block) {
-    block->free_prev = old->free_prev;
-    block->free_next = old->free_next;
-    if (block->free_prev) block->free_prev->free_next = block;
-    else free_head = block;
-    if (block->free_next) block->free_next->free_prev = block;
-    else free_tail = block;
-    old->free_prev = NULL;
-    old->free_next = NULL;
+static unsigned bin_of(uint64_t size) {
+    return size ? 63U - (unsigned)__builtin_clzll(size) : 0U;
 }
 
 static void free_insert(heap_block_t *block) {
-    heap_block_t *left = block->prev;
-    heap_block_t *right = block->next;
-    while (left || right) {
-        if (left) {
-            if (left->is_free) { free_insert_after(left, block); return; }
-            left = left->prev;
-        }
-        if (right) {
-            if (right->is_free) { free_insert_after(right->free_prev, block); return; }
-            right = right->next;
-        }
-    }
-    free_insert_after(NULL, block);
+    unsigned bin = bin_of(block->size);
+    block->bin = (uint16_t)bin;
+    block->free_prev = NULL;
+    block->free_next = bins[bin];
+    if (bins[bin]) bins[bin]->free_prev = block;
+    bins[bin] = block;
+    bin_mask |= 1ULL << bin;
+}
+
+static void free_remove(heap_block_t *block) {
+    unsigned bin = block->bin;
+    if (block->free_prev) block->free_prev->free_next = block->free_next;
+    else bins[bin] = block->free_next;
+    if (block->free_next) block->free_next->free_prev = block->free_prev;
+    if (!bins[bin]) bin_mask &= ~(1ULL << bin);
+    block->free_prev = NULL;
+    block->free_next = NULL;
 }
 
 void heap_init(void) {
@@ -116,8 +97,7 @@ void heap_init(void) {
     head->free_prev = NULL;
     head->free_next = NULL;
     tail = head;
-    free_head = head;
-    free_tail = head;
+    free_insert(head);
 }
 
 static int heap_grow(size_t min_size) {
@@ -155,7 +135,7 @@ static int heap_grow(size_t min_size) {
 
     heap_block_t *new_block = (heap_block_t *)base;
     new_block->magic = HEAP_MAGIC;
-    new_block->size = (uint32_t)(growth - sizeof(heap_block_t));
+    new_block->size = growth - sizeof(heap_block_t);
     new_block->is_free = 1;
     new_block->pages_released = 0;
     new_block->next = NULL;
@@ -163,11 +143,13 @@ static int heap_grow(size_t min_size) {
 
     if (tail->is_free &&
         (uint64_t)tail + sizeof(heap_block_t) + tail->size == base) {
-        tail->size += (uint32_t)growth;
+        free_remove(tail);
+        tail->size += growth;
+        free_insert(tail);
     } else {
         tail->next = new_block;
         tail = new_block;
-        free_insert_after(free_tail, new_block);
+        free_insert(new_block);
     }
 
     heap_size += growth;
@@ -231,16 +213,29 @@ static heap_block_t *split_for_page_alignment(heap_block_t *block, uint64_t size
 
     heap_block_t *carved = (heap_block_t *)(aligned - sizeof(heap_block_t));
     carved->magic = HEAP_MAGIC;
-    carved->size = (uint32_t)(block->size - lead);
+    free_remove(block);
+    carved->size = block->size - lead;
     carved->is_free = 1;
+    carved->pages_released = 0;
     carved->next = block->next;
     carved->prev = block;
-    free_insert_after(block, carved);
     if (carved->next) carved->next->prev = carved;
     else tail = carved;
-    block->size = (uint32_t)(lead - sizeof(heap_block_t));
+    block->size = lead - sizeof(heap_block_t);
     block->next = carved;
+    free_insert(block);
+    free_insert(carved);
     return carved;
+}
+
+static heap_block_t *find_fit(uint64_t size, int page_aligned) {
+    uint64_t wanted = page_aligned ? size + HEAP_PAGE_SIZE + sizeof(heap_block_t) + HEAP_ALIGN
+                                   : size;
+    unsigned first = bin_of(wanted);
+    for (heap_block_t *curr = bins[first]; curr; curr = curr->free_next)
+        if (curr->size >= wanted) return curr;
+    uint64_t larger = first + 1U < HEAP_BINS ? bin_mask & ~((2ULL << first) - 1ULL) : 0;
+    return larger ? bins[__builtin_ctzll(larger)] : NULL;
 }
 
 void* kmalloc(size_t size) {
@@ -251,50 +246,50 @@ void* kmalloc(size_t size) {
     spinlock_acquire(&heap_lock);
 
     for (;;) {
-        heap_block_t* next_free;
-        for (heap_block_t* curr = free_head; curr != NULL; curr = next_free) {
-            next_free = curr->free_next;
-            if (curr->size < size) continue;
-            if (heap_reacquire_pages(curr, size) != 0) continue;
-            uint8_t released = curr->pages_released;
-
-            heap_block_t* chosen = curr;
-            if (page_aligned) {
-                chosen = split_for_page_alignment(curr, size);
-                if (!chosen) continue;
-                curr->pages_released = 0;
-                chosen->pages_released = released;
+        heap_block_t *curr = find_fit(size, page_aligned);
+        if (!curr) {
+            if (heap_grow(page_aligned ? size + HEAP_PAGE_SIZE + sizeof(heap_block_t) : size) != 0) {
+                spinlock_release(&heap_lock);
+                return NULL;
             }
-            if (chosen->size > size + sizeof(heap_block_t) + 16) {
-                heap_block_t* new_block = (heap_block_t*)((uint8_t*)chosen + sizeof(heap_block_t) + size);
-                new_block->magic = HEAP_MAGIC;
-                new_block->size = chosen->size - size - sizeof(heap_block_t);
-                new_block->is_free = 1;
-                new_block->pages_released = released;
-                new_block->next = chosen->next;
-                new_block->prev = chosen;
-                if (new_block->next) new_block->next->prev = new_block;
-                else tail = new_block;
-
-                chosen->size = size;
-                chosen->next = new_block;
-                free_replace(chosen, new_block);
-            } else {
-                free_remove(chosen);
-            }
-
-            chosen->pages_released = 0;
-            chosen->is_free = 0;
-            heap_allocated += chosen->size;
-            spinlock_release(&heap_lock);
-            return (void*)((uint8_t*)chosen + sizeof(heap_block_t));
+            continue;
         }
-
-        if (heap_grow(page_aligned ? size + HEAP_PAGE_SIZE + sizeof(heap_block_t)
-                                   : size) != 0) {
+        if (heap_reacquire_pages(curr, size + (page_aligned ? HEAP_PAGE_SIZE : 0)) != 0) {
             spinlock_release(&heap_lock);
             return NULL;
         }
+        uint8_t released = curr->pages_released;
+        heap_block_t *chosen = curr;
+        if (page_aligned) {
+            chosen = split_for_page_alignment(curr, size);
+            if (!chosen) {
+                spinlock_release(&heap_lock);
+                return NULL;
+            }
+            curr->pages_released = 0;
+            chosen->pages_released = released;
+        }
+        free_remove(chosen);
+        if (chosen->size > size + sizeof(heap_block_t) + 16) {
+            heap_block_t *new_block = (heap_block_t *)((uint8_t *)chosen + sizeof(heap_block_t) + size);
+            new_block->magic = HEAP_MAGIC;
+            new_block->size = chosen->size - size - sizeof(heap_block_t);
+            new_block->is_free = 1;
+            new_block->pages_released = released;
+            new_block->next = chosen->next;
+            new_block->prev = chosen;
+            if (new_block->next) new_block->next->prev = new_block;
+            else tail = new_block;
+            chosen->size = size;
+            chosen->next = new_block;
+            free_insert(new_block);
+        }
+
+        chosen->pages_released = 0;
+        chosen->is_free = 0;
+        heap_allocated += chosen->size;
+        spinlock_release(&heap_lock);
+        return (void *)((uint8_t *)chosen + sizeof(heap_block_t));
     }
 }
 
@@ -317,28 +312,26 @@ void kfree(void* ptr) {
     block->is_free = 1;
     heap_release_pages(block);
 
-    int listed = 0;
-    heap_block_t* next = block->next;
+    heap_block_t *next = block->next;
     if (next && next->is_free) {
+        free_remove(next);
         block->size += next->size + sizeof(heap_block_t);
         block->pages_released |= next->pages_released;
         block->next = next->next;
         if (block->next) block->next->prev = block;
         else tail = block;
-        free_replace(next, block);
-        listed = 1;
     }
-    heap_block_t* previous = block->prev;
+    heap_block_t *previous = block->prev;
     if (previous && previous->is_free) {
+        free_remove(previous);
         previous->size += block->size + sizeof(heap_block_t);
         previous->pages_released |= block->pages_released;
         previous->next = block->next;
         if (previous->next) previous->next->prev = previous;
         else tail = previous;
-        if (listed) free_remove(block);
-        listed = 1;
+        block = previous;
     }
-    if (!listed) free_insert(block);
+    free_insert(block);
 
     spinlock_release(&heap_lock);
 }
