@@ -246,6 +246,12 @@ void isr_handler(struct interrupt_frame *regs) {
         }
         panic("double fault");
     }
+    if (regs->int_no == SMP_TIMER_VECTOR && !cpu_current()->current &&
+        !process_ready_pending()) {
+        apic_send_eoi();
+        smp_service_flush();
+        return;
+    }
     klock_note(KLOCK_NOTE_INTERRUPT | (uint32_t)regs->int_no);
     kernel_lock_from_isr();
     isr_dispatch(regs);

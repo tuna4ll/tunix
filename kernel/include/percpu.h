@@ -3,7 +3,25 @@
 
 #include <stdint.h>
 
-#define SMP_MAX_CPUS 8
+#define SMP_MAX_CPUS 256
+
+struct cpu_mask {
+    uint64_t bits[SMP_MAX_CPUS / 64];
+};
+
+static inline int cpu_mask_test(const struct cpu_mask *mask, unsigned index) {
+    return index < SMP_MAX_CPUS && ((mask->bits[index / 64] >> (index % 64)) & 1U);
+}
+
+static inline void cpu_mask_set(struct cpu_mask *mask, unsigned index) {
+    if (index < SMP_MAX_CPUS) mask->bits[index / 64] |= 1ULL << (index % 64);
+}
+
+static inline int cpu_mask_empty(const struct cpu_mask *mask) {
+    for (unsigned word = 0; word < SMP_MAX_CPUS / 64; word++)
+        if (mask->bits[word]) return 0;
+    return 1;
+}
 
 struct process;
 

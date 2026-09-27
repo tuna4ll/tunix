@@ -1,5 +1,7 @@
 #include <stdint.h>
 #include "../../include/gdt.h"
+#include "../../include/heap.h"
+#include "../../include/kstring.h"
 #include "../../include/percpu.h"
 
 struct gdt_entry {
@@ -28,26 +30,6 @@ struct gdt_ptr {
     uint64_t base;
 } __attribute__((packed));
 
-/*
- * A GDT and a TSS per processor.
- *
- * The descriptors are identical everywhere and could be shared, but the TSS
- * cannot be: rsp0 is the kernel stack the processor switches to when an
- * interrupt arrives from user mode, and that is whichever process *this*
- * processor is running. One shared TSS would send two processors into the same
- * kernel stack the moment they both took an interrupt. The task register also
- * marks its TSS descriptor busy, and a second `ltr` on the same descriptor
- * faults, so the descriptor has to be private as well.
- *
- * The double-fault stack is here for the same reason and travels with them.
- *
- * A double fault is what the processor raises when it cannot deliver a fault,
- * and the usual reason for that is the stack it would have to push onto. If it
- * cannot deliver the double fault either, it gives up and resets -- which
- * looks like nothing at all: no message, no register dump, a machine that
- * silently reboots. Handing vector 8 a stack of its own through the IST is
- * what turns that into a diagnosis.
- */
 #define FAULT_STACK_BYTES 8192
 #define FAULT_STACK_IST 1
 
@@ -58,13 +40,24 @@ struct cpu_tables {
     uint8_t fault_stack[FAULT_STACK_BYTES] __attribute__((aligned(16)));
 };
 
-static struct cpu_tables tables[SMP_MAX_CPUS];
+static struct cpu_tables boot_tables;
+static struct cpu_tables *tables[SMP_MAX_CPUS] = {&boot_tables};
+
+int gdt_prepare_cpu(unsigned index) {
+    if (index >= SMP_MAX_CPUS) return -1;
+    if (!tables[index]) {
+        tables[index] = (struct cpu_tables *)kmalloc(sizeof(struct cpu_tables));
+        if (!tables[index]) return -1;
+        memset(tables[index], 0, sizeof(struct cpu_tables));
+    }
+    return 0;
+}
 
 extern void gdt_flush(uint64_t);
 extern void tss_flush(void);
 
 void set_kernel_stack(uint64_t stack) {
-    tables[cpu_current()->index].tss.rsp0 = stack;
+    tables[cpu_current()->index]->tss.rsp0 = stack;
 }
 
 static void gdt_set_gate(struct gdt_entry *gdt, int num, uint64_t base,
@@ -90,8 +83,8 @@ static void gdt_set_tss(struct gdt_entry *gdt, int num, uint64_t base, uint32_t 
 }
 
 void gdt_init_cpu(unsigned index) {
-    if (index >= SMP_MAX_CPUS) return;
-    struct cpu_tables *self = &tables[index];
+    if (gdt_prepare_cpu(index) != 0) return;
+    struct cpu_tables *self = tables[index];
     struct gdt_entry *gdt = self->gdt;
 
     self->pointer.limit = (sizeof(struct gdt_entry) * 7) - 1;
@@ -107,13 +100,12 @@ void gdt_init_cpu(unsigned index) {
     self->tss.iopb_offset = sizeof(self->tss);
     self->tss.ist[FAULT_STACK_IST - 1] =
         (uint64_t)(self->fault_stack + FAULT_STACK_BYTES);
-    /* The limit covers the TSS only: the fault stack sits after it in this
-       struct and must not be inside the segment the processor is told about. */
+
     gdt_set_tss(gdt, 5, (uint64_t)&self->tss, sizeof(self->tss) - 1);
 
     gdt_flush((uint64_t)&self->pointer);
     tss_flush();
-    /* After the flush, not before: a segment load clears the GS base. */
+
     percpu_activate(index);
 }
 

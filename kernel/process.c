@@ -958,8 +958,7 @@ uint32_t process_set_umask(uint32_t mask) {
 
 static int allowed_on_this_cpu(const struct process *process) {
     if (!process) return 0;
-    uint64_t mask = process->affinity_mask ? process->affinity_mask : ~0ULL;
-    return (mask & (1ULL << cpu_current()->index)) != 0;
+    return !process->affinity_set || cpu_mask_test(&process->affinity, cpu_current()->index);
 }
 
 static int runnable(const struct process *process) {
@@ -1162,25 +1161,34 @@ int process_get_nice(uint64_t tid, int *nice) {
     return 0;
 }
 
-static uint64_t online_cpu_mask(void) {
+static void online_cpu_mask(struct cpu_mask *mask) {
+    memset(mask, 0, sizeof(*mask));
     unsigned cpus = smp_cpu_count();
-    return cpus >= 64 ? ~0ULL : (1ULL << cpus) - 1ULL;
+    for (unsigned index = 0; index < cpus && index < SMP_MAX_CPUS; index++) cpu_mask_set(mask, index);
 }
 
-int process_set_affinity(uint64_t tid, uint64_t mask) {
+int process_set_affinity(uint64_t tid, const struct cpu_mask *mask) {
     struct process *target = scheduling_target(tid);
-    if (!target) return -ESRCH;
-    mask &= online_cpu_mask();
-    if (!mask) return -EINVAL;
-    target->affinity_mask = mask;
+    if (!target || !mask) return -ESRCH;
+    struct cpu_mask online;
+    online_cpu_mask(&online);
+    struct cpu_mask wanted;
+    for (unsigned word = 0; word < SMP_MAX_CPUS / 64; word++)
+        wanted.bits[word] = mask->bits[word] & online.bits[word];
+    if (cpu_mask_empty(&wanted)) return -EINVAL;
+    target->affinity = wanted;
+    target->affinity_set = 1;
     return 0;
 }
 
-int process_get_affinity(uint64_t tid, uint64_t *mask) {
+int process_get_affinity(uint64_t tid, struct cpu_mask *mask) {
     struct process *target = scheduling_target(tid);
     if (!target) return -ESRCH;
-    if (mask) *mask = (target->affinity_mask ? target->affinity_mask : ~0ULL) &
-                      online_cpu_mask();
+    if (!mask) return 0;
+    online_cpu_mask(mask);
+    if (target->affinity_set)
+        for (unsigned word = 0; word < SMP_MAX_CPUS / 64; word++)
+            mask->bits[word] &= target->affinity.bits[word];
     return 0;
 }
 
@@ -1649,6 +1657,7 @@ void process_yield_from_syscall(struct syscall_frame *frame) {
     set_process_state(yielding, PROCESS_READY);
     struct process *next = next_runnable(yielding);
     if (!next || next == yielding) {
+        if (!allowed_on_this_cpu(yielding)) go_idle();
         set_process_state(yielding, PROCESS_RUNNING);
         return;
     }
@@ -1893,7 +1902,8 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame) {
     child->rt_priority = parent->rt_priority;
     child->nice = parent->nice;
     child->virtual_runtime_ns = parent->virtual_runtime_ns;
-    child->affinity_mask = parent->affinity_mask;
+    child->affinity = parent->affinity;
+    child->affinity_set = parent->affinity_set;
     child->signal_stack_pointer = parent->signal_stack_pointer;
     child->signal_stack_size = parent->signal_stack_size;
     child->signal_stack_flags = parent->signal_stack_flags;
@@ -1994,7 +2004,8 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
     child->rt_priority = parent->rt_priority;
     child->nice = parent->nice;
     child->virtual_runtime_ns = parent->virtual_runtime_ns;
-    child->affinity_mask = parent->affinity_mask;
+    child->affinity = parent->affinity;
+    child->affinity_set = parent->affinity_set;
     child->signal_stack_flags = SS_DISABLE;
     child->dumpable = parent->dumpable;
     child->no_new_privs = parent->no_new_privs;
@@ -2231,6 +2242,12 @@ int process_futex_wake(uint64_t address, int maximum, uint32_t bitset, int share
                                 bitset, maximum, woken);
     futex_note('K', address, woken, maximum, 0);
     return woken;
+}
+
+int process_ready_pending(void) {
+    if (__atomic_load_n(&ready_processes, __ATOMIC_RELAXED)) return 1;
+    uint64_t deadline = __atomic_load_n(&earliest_deadline, __ATOMIC_RELAXED);
+    return deadline != UINT64_MAX && time_uptime_ns() >= deadline;
 }
 
 void process_note_deadline(uint64_t deadline_ns) {

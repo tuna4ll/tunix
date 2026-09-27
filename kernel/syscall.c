@@ -4407,13 +4407,13 @@ static int64_t sys_sched_getaffinity(uint64_t tid, size_t size, uint64_t user_ma
     if (!user_mask) return -EFAULT;
     if (size < sizeof(uint64_t) || (size & (sizeof(uint64_t) - 1))) return -EINVAL;
 
-    uint64_t mask = 0;
+    struct cpu_mask mask;
     int result = process_get_affinity(tid, &mask);
     if (result != 0) return result;
 
-    size_t bytes = size > sizeof(uint64_t) ? sizeof(uint64_t) : size;
+    size_t bytes = size > sizeof(mask) ? sizeof(mask) : size;
     if (copy_to_user(user_mask, &mask, bytes) != 0) return -EFAULT;
-    for (size_t offset = sizeof(uint64_t); offset < size; offset += sizeof(uint64_t)) {
+    for (size_t offset = bytes; offset < size; offset += sizeof(uint64_t)) {
         uint64_t zero = 0;
         if (copy_to_user(user_mask + offset, &zero, sizeof(zero)) != 0) return -EFAULT;
     }
@@ -4422,10 +4422,12 @@ static int64_t sys_sched_getaffinity(uint64_t tid, size_t size, uint64_t user_ma
 
 static int64_t sys_sched_setaffinity(uint64_t tid, size_t size, uint64_t user_mask) {
     if (!user_mask) return -EFAULT;
-    if (size < sizeof(uint64_t) || (size & (sizeof(uint64_t) - 1))) return -EINVAL;
-    uint64_t mask = 0;
-    if (copy_from_user(&mask, user_mask, sizeof(mask)) != 0) return -EFAULT;
-    return process_set_affinity(tid, mask);
+    if (size < sizeof(uint64_t)) return -EINVAL;
+    struct cpu_mask mask;
+    memset(&mask, 0, sizeof(mask));
+    size_t bytes = size > sizeof(mask) ? sizeof(mask) : size;
+    if (copy_from_user(&mask, user_mask, bytes) != 0) return -EFAULT;
+    return process_set_affinity(tid, &mask);
 }
 
 static int64_t sys_arch_prctl(int code, uint64_t address) {
@@ -5315,9 +5317,9 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             SYSCALL_RET(frame) = (uint64_t)sys_sched_setaffinity(SYSCALL_ARG0(frame),
                                                         (size_t)SYSCALL_ARG1(frame), SYSCALL_ARG2(frame));
             if ((int64_t)SYSCALL_RET(frame) == 0) {
-                uint64_t mask = 0;
+                struct cpu_mask mask;
                 if (process_get_affinity(0, &mask) == 0 &&
-                    !(mask & (1ULL << cpu_current()->index)))
+                    !cpu_mask_test(&mask, cpu_current()->index))
                     process_yield_from_syscall(frame);
             }
             break;

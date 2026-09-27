@@ -152,6 +152,7 @@ static int start_processor(unsigned index, uint32_t apic_id) {
     if (!cpu) return -1;
 
     write_parameter(DATA_CR3, vmm_kernel_cr3());
+    if (gdt_prepare_cpu((unsigned)index) != 0 || !percpu_boot_stack(index)) return -1;
     write_parameter(DATA_STACK, percpu_boot_stack(index));
     write_parameter(DATA_ENTRY, (uint64_t)smp_ap_entry);
     write_parameter(DATA_INDEX, index);

@@ -134,6 +134,11 @@ int aarch64_irq(struct interrupt_frame *frame) {
     int timer = intid == aarch64_platform.timer_interrupt;
     if (timer) aarch64_timer_rearm();
     gic_end_of_interrupt(intid);
+    if (timer && cpu_current()->index != 0 && !cpu_current()->current &&
+        !process_ready_pending()) {
+        smp_service_flush();
+        return 0;
+    }
     klock_note(KLOCK_NOTE_INTERRUPT | (intid & 0xFFFFU));
     kernel_lock_from_isr();
     if (timer) {

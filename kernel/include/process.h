@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include "cred.h"
+#include "percpu.h"
 #include "file.h"
 #include "signal.h"
 #include "syscall.h"
@@ -125,7 +126,8 @@ struct process {
     int policy;
     int rt_priority;
     int nice;
-    uint64_t affinity_mask;
+    struct cpu_mask affinity;
+    uint8_t affinity_set;
     uint64_t involuntary_switches;
     uint64_t voluntary_switches;
     uint64_t arg_start;
@@ -213,6 +215,7 @@ struct process *process_current(void);
 void process_dump_all(void);
 struct process *process_find(uint64_t pid);
 void process_note_deadline(uint64_t deadline_ns);
+int process_ready_pending(void);
 uint64_t process_stack_floor(const struct process *process);
 uint64_t process_arg_limit(const struct process *process);
 
@@ -228,8 +231,8 @@ int process_set_scheduler(uint64_t tid, int policy, int rt_priority);
 int process_get_scheduler(uint64_t tid, int *policy, int *rt_priority);
 int process_set_nice(uint64_t tid, int nice);
 int process_get_nice(uint64_t tid, int *nice);
-int process_set_affinity(uint64_t tid, uint64_t mask);
-int process_get_affinity(uint64_t tid, uint64_t *mask);
+int process_set_affinity(uint64_t tid, const struct cpu_mask *mask);
+int process_get_affinity(uint64_t tid, struct cpu_mask *mask);
 uint64_t process_current_pid(void);
 uint64_t process_current_tid(void);
 uint64_t process_current_ppid(void);
