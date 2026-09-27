@@ -145,8 +145,9 @@ struct process {
     uint64_t io_wait_deadline_ns;
     int io_watch_armed;
     unsigned io_watch_count;
-    int io_watch_fd[PROCESS_IO_WATCHES];
-    uint32_t io_watch_events[PROCESS_IO_WATCHES];
+    unsigned io_watch_capacity;
+    int *io_watch_fd;
+    uint32_t *io_watch_events;
 
     int syscall_rewound;
 

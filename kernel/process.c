@@ -833,6 +833,8 @@ static void set_exe_path(struct process *process, struct vfs_node *file,
 }
 
 static void free_process_struct(struct process *process) {
+    kfree(process->io_watch_fd);
+    kfree(process->io_watch_events);
     ready_unlink(process);
     waits_unlink(process);
     kfree(process->exe_path);

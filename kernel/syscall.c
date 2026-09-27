@@ -961,9 +961,26 @@ static void io_watch_begin(struct process *process) {
 
 static void io_watch_add(struct process *process, int fd, uint32_t events) {
     if (!process || !process->io_watch_armed) return;
-    if (process->io_watch_count >= PROCESS_IO_WATCHES) {
-        process->io_watch_armed = 0;
-        return;
+    if (process->io_watch_count >= process->io_watch_capacity) {
+        unsigned capacity = process->io_watch_capacity ? process->io_watch_capacity * 2 : 16;
+        int *fds = (int *)kmalloc(capacity * sizeof(*fds));
+        uint32_t *events_list = (uint32_t *)kmalloc(capacity * sizeof(*events_list));
+        if (!fds || !events_list) {
+            kfree(fds);
+            kfree(events_list);
+            process->io_watch_armed = 0;
+            return;
+        }
+        if (process->io_watch_count) {
+            memcpy(fds, process->io_watch_fd, process->io_watch_count * sizeof(*fds));
+            memcpy(events_list, process->io_watch_events,
+                   process->io_watch_count * sizeof(*events_list));
+        }
+        kfree(process->io_watch_fd);
+        kfree(process->io_watch_events);
+        process->io_watch_fd = fds;
+        process->io_watch_events = events_list;
+        process->io_watch_capacity = capacity;
     }
     process->io_watch_fd[process->io_watch_count] = fd;
     process->io_watch_events[process->io_watch_count] = events;
