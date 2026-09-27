@@ -54,6 +54,10 @@ typedef unsigned int u32;
 #define NR_SHMGET 29
 #define NR_PWRITE 18
 #define NR_PREAD 17
+#define NR_SCHED_SETAFFINITY 203
+#define NR_SCHED_GETAFFINITY 204
+#define NR_GETCPU 309
+#define NR_SCHED_YIELD 24
 
 
 static inline s64 call6(s64 n, s64 a, s64 b, s64 c, s64 d, s64 e, s64 f) {
@@ -118,6 +122,10 @@ static inline s64 call6(s64 n, s64 a, s64 b, s64 c, s64 d, s64 e, s64 f) {
 #define NR_SHMGET 194
 #define NR_PWRITE 68
 #define NR_PREAD 67
+#define NR_SCHED_SETAFFINITY 122
+#define NR_SCHED_GETAFFINITY 123
+#define NR_GETCPU 168
+#define NR_SCHED_YIELD 124
 
 
 static inline s64 call6(s64 n, s64 a, s64 b, s64 c, s64 d, s64 e, s64 f) {
@@ -880,6 +888,27 @@ static void test_pools(void) {
     call4(NR_PRLIMIT64, 0, 7, &limit, 0);
 }
 
+static void test_cpus(void) {
+    static u64 mask[4];
+    s64 size = call3(NR_SCHED_GETAFFINITY, 0, sizeof(mask), mask);
+    unsigned count = 0;
+    unsigned highest = 0;
+    for (unsigned index = 0; index < 256; index++)
+        if ((mask[index / 64] >> (index % 64)) & 1) {
+            count++;
+            highest = index;
+        }
+    report_value("cpus-online", size == sizeof(mask) && count >= 1, count);
+    static u64 only[4];
+    only[highest / 64] = 1ULL << (highest % 64);
+    s64 set = call3(NR_SCHED_SETAFFINITY, 0, sizeof(only), only);
+    for (int spin = 0; spin < 20; spin++) call1(NR_SCHED_YIELD, 0);
+    unsigned cpu = 999;
+    call3(NR_GETCPU, &cpu, 0, 0);
+    report_value("cpus-pinned-to-highest", set == 0 && cpu == highest, cpu);
+    call3(NR_SCHED_SETAFFINITY, 0, sizeof(mask), mask);
+}
+
 #ifndef LIMITS_TESTS
 #define LIMITS_TESTS 0xFFFFFFFFU
 #endif
@@ -900,6 +929,7 @@ static void run(u64 *stack) {
     if (LIMITS_TESTS & 0x40U) test_descriptors();
     if (LIMITS_TESTS & 0x80U) test_exec_arguments();
     if (LIMITS_TESTS & 0x100U) test_pools();
+    if (LIMITS_TESTS & 0x200U) test_cpus();
     print(failures ? "LIMITSTEST FAIL\n" : "LIMITSTEST PASS\n");
     call1(NR_EXIT_GROUP, 0);
     for (;;) { }

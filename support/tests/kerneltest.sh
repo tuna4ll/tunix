@@ -36,6 +36,7 @@ $compiler -std=gnu11 -Wall -Wextra -Werror -O2 -static -nostdlib -nostartfiles \
     echo '    protocol: limine'
     echo '    path: boot():/boot/kernel.elf'
     echo '    cmdline: root=LABEL=tunix-root'
+    [ -n "${RESOLUTION:-}" ] && echo "    resolution: $RESOLUTION"
 } > "$work/limine.conf"
 
 ARCH="$arch" TABLE=gpt ROOT_SLACK_MIB=16 support/image.sh "$work/tunix.img" "$kernel" \
