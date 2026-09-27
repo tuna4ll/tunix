@@ -287,6 +287,14 @@ void vmm_init(void) {
     pml4 = page_table_pointer(kernel_cr3_physical);
     if (!pml4) panic("VMM: boot PML4 unavailable");
 
+    uint16_t device_pml4 = (uint16_t)((DEVICE_ARENA_BASE >> 39) & 0x1FF);
+    if (!pte_present(pml4[device_pml4])) {
+        uint64_t device_pdpt = (uint64_t)pmm_alloc_page();
+        uint64_t *table = page_table_pointer(device_pdpt);
+        if (!table) panic("VMM: device PDPT unavailable");
+        memset(table, 0, 4096);
+        pml4[device_pml4] = pte_table(device_pdpt, PAGE_PRESENT | PAGE_WRITE);
+    }
     uint16_t heap_pml4 = (uint16_t)((HEAP_VIRTUAL_BASE >> 39) & 0x1FF);
     if (!pte_present(pml4[heap_pml4])) {
         uint64_t heap_pdpt = (uint64_t)pmm_alloc_page();
@@ -311,10 +319,9 @@ uint64_t vmm_map_device(uint64_t physical, uint64_t bytes) {
     uint64_t page_offset = physical & 0xFFFULL;
     uint64_t first = physical - page_offset;
     uint64_t span = (bytes + page_offset + 0xFFFULL) & ~0xFFFULL;
-    if (DEVICE_MMIO_ARENA_OFFSET + arena_used + span > DEVICE_MMIO_VIRTUAL_BYTES)
-        return 0;
+    if (arena_used + span > DEVICE_ARENA_BYTES) return 0;
 
-    uint64_t base = DEVICE_MMIO_VIRTUAL_BASE + DEVICE_MMIO_ARENA_OFFSET + arena_used;
+    uint64_t base = DEVICE_ARENA_BASE + arena_used;
     for (uint64_t offset = 0; offset < span; offset += 4096ULL) {
         if (vmm_map_page_in(kernel_cr3_physical, base + offset, first + offset,
                             PAGE_WRITE | PAGE_DEVICE | PAGE_UNCACHED | PAGE_NX) != 0)

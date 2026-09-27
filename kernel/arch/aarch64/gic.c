@@ -145,6 +145,8 @@ void gic_init(void) {
 
         redistributor_frames = aarch64_platform.gic_redistributor_size / GICR_FRAME_BYTES;
         if (redistributor_frames > SMP_MAX_CPUS) redistributor_frames = SMP_MAX_CPUS;
+        if (aarch64_platform.cpu_count && redistributor_frames > aarch64_platform.cpu_count)
+            redistributor_frames = aarch64_platform.cpu_count;
         if (!redistributor_frames) redistributor_frames = 1;
         redistributor_base = vmm_map_device(aarch64_platform.gic_redistributor,
                                             redistributor_frames * GICR_FRAME_BYTES);
