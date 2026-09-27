@@ -33,6 +33,27 @@ typedef unsigned int u32;
 #define NR_SETUID 105
 #define NR_CLOCK_GETTIME 228
 #define NR_EXECVE 59
+#define NR_SOCKET 41
+#define NR_BIND 49
+#define NR_LISTEN 50
+#define NR_CONNECT 42
+#define NR_ACCEPT4 288
+#define NR_SENDMSG 46
+#define NR_RECVMSG 47
+#define NR_SOCKETPAIR 53
+#define NR_IOCTL 16
+#define NR_EPOLL_CREATE1 291
+#define NR_EPOLL_CTL 233
+#define NR_EPOLL_PWAIT 281
+#define NR_INOTIFY_INIT1 294
+#define NR_INOTIFY_ADD_WATCH 254
+#define NR_SETGROUPS 116
+#define NR_GETGROUPS 115
+#define NR_MEMFD_CREATE 319
+#define NR_FTRUNCATE 77
+#define NR_SHMGET 29
+#define NR_PWRITE 18
+#define NR_PREAD 17
 
 
 static inline s64 call6(s64 n, s64 a, s64 b, s64 c, s64 d, s64 e, s64 f) {
@@ -76,6 +97,27 @@ static inline s64 call6(s64 n, s64 a, s64 b, s64 c, s64 d, s64 e, s64 f) {
 #define NR_SETUID 146
 #define NR_CLOCK_GETTIME 113
 #define NR_EXECVE 221
+#define NR_SOCKET 198
+#define NR_BIND 200
+#define NR_LISTEN 201
+#define NR_CONNECT 203
+#define NR_ACCEPT4 242
+#define NR_SENDMSG 211
+#define NR_RECVMSG 212
+#define NR_SOCKETPAIR 199
+#define NR_IOCTL 29
+#define NR_EPOLL_CREATE1 20
+#define NR_EPOLL_CTL 21
+#define NR_EPOLL_PWAIT 22
+#define NR_INOTIFY_INIT1 26
+#define NR_INOTIFY_ADD_WATCH 27
+#define NR_SETGROUPS 159
+#define NR_GETGROUPS 158
+#define NR_MEMFD_CREATE 279
+#define NR_FTRUNCATE 46
+#define NR_SHMGET 194
+#define NR_PWRITE 68
+#define NR_PREAD 67
 
 
 static inline s64 call6(s64 n, s64 a, s64 b, s64 c, s64 d, s64 e, s64 f) {
@@ -651,6 +693,193 @@ static void test_exec_arguments(void) {
     report_value("stack-32m-deep", status == 0, (u64)status);
 }
 
+#if defined(__x86_64__)
+struct epoll_event { u32 events; u64 data; } __attribute__((packed));
+#else
+struct epoll_event { u32 events; u64 data; };
+#endif
+
+struct sockaddr_un_test {
+    unsigned short family;
+    char path[108];
+};
+
+struct iovec_test { u64 base; u64 length; };
+
+struct msghdr_test {
+    u64 name;
+    u32 name_length;
+    u32 padding;
+    u64 iov;
+    u64 iov_length;
+    u64 control;
+    u64 control_length;
+    int flags;
+    int padding2;
+};
+
+static void close_from(int first) {
+    call3(NR_CLOSE_RANGE, first, ~0U, 0);
+}
+
+static void test_pools(void) {
+    struct rlimit_pair limit;
+    call4(NR_PRLIMIT64, 0, 7, 0, &limit);
+    struct rlimit_pair raised = {20000, limit.hard};
+    call4(NR_PRLIMIT64, 0, 7, &raised, 0);
+
+    u64 sockets = 0;
+    for (; sockets < 300; sockets++) {
+        s64 fd = call3(NR_SOCKET, 2, 1, 0);
+        if (fd < 0) break;
+    }
+    report_value("pool-tcp-sockets", sockets == 300, sockets);
+    close_from(3);
+
+    u64 ptys = 0;
+    int highest_pty = -1;
+    for (; ptys < 40; ptys++) {
+        s64 fd = call4(NR_OPENAT, AT_FDCWD, "/dev/ptmx", 2, 0);
+        if (fd < 0) break;
+        int number = -1;
+        call3(NR_IOCTL, fd, 0x80045430UL, &number);
+        if (number > highest_pty) highest_pty = number;
+        int unlock = 0;
+        call3(NR_IOCTL, fd, 0x40045431UL, &unlock);
+    }
+    s64 slave = call4(NR_OPENAT, AT_FDCWD, "/dev/pts/35", 2, 0);
+    report_value("pool-ptys", ptys == 40 && highest_pty >= 39 && slave >= 0, ptys);
+    close_from(3);
+
+    s64 epoll = call1(NR_EPOLL_CREATE1, 0);
+    int pipes[2];
+    call2(NR_PIPE2, pipes, 0);
+    call3(NR_WRITE, pipes[1], "e", 1);
+    u64 added = 0;
+    for (; added < 3000; added++) {
+        s64 fd = call1(NR_DUP, pipes[0]);
+        struct epoll_event event = {1, (u64)fd};
+        if (fd < 0 || call4(NR_EPOLL_CTL, epoll, 1, fd, &event) != 0) break;
+    }
+    static struct epoll_event events[4000];
+    s64 ready = call6(NR_EPOLL_PWAIT, epoll, (s64)events, 4000, 0, 0, 8);
+    report_value("pool-epoll-3000", added == 3000 && ready == 3000, (u64)ready);
+    ready = call6(NR_EPOLL_PWAIT, epoll, (s64)events, 7, 0, 0, 8);
+    u64 first = events[0].data;
+    ready = call6(NR_EPOLL_PWAIT, epoll, (s64)events, 7, 0, 0, 8);
+    report_value("pool-epoll-rotates", ready == 7 && events[0].data != first, events[0].data);
+    close_from(3);
+
+    call3(NR_MKDIRAT, AT_FDCWD, "/tmp/watch", 0755);
+    s64 inotify = call1(NR_INOTIFY_INIT1, 0);
+    u64 watches = 0;
+    char name[32];
+    for (; watches < 500; watches++) {
+        u64 at = append(name, 0, "/tmp/watch/w");
+        char digits[8];
+        int count = 0;
+        u64 value = watches;
+        do { digits[count++] = (char)('0' + value % 10); value /= 10; } while (value);
+        while (count) name[at++] = digits[--count];
+        name[at] = 0;
+        call3(NR_MKDIRAT, AT_FDCWD, name, 0755);
+        if (call3(NR_INOTIFY_ADD_WATCH, inotify, name, 0x100) <= 0) break;
+    }
+    call3(NR_MKDIRAT, AT_FDCWD, "/tmp/watch/w499/child", 0755);
+    static char inotify_buffer[4096];
+    s64 got = call3(NR_READ, inotify, inotify_buffer, sizeof(inotify_buffer));
+    report_value("pool-inotify-500", watches == 500 && got > 16, watches);
+    close_from(3);
+
+    call1(NR_CHDIR, "/tmp");
+    s64 listener = call3(NR_SOCKET, 1, 1, 0);
+    struct sockaddr_un_test address = {1, "listen.sock"};
+    int bound = call3(NR_BIND, listener, &address, sizeof(address)) == 0 &&
+                call2(NR_LISTEN, listener, 500) == 0;
+    u64 connected = 0;
+    struct sockaddr_un_test absolute = {1, "/tmp/listen.sock"};
+    for (; connected < 300; connected++) {
+        s64 client = call3(NR_SOCKET, 1, 1, 0);
+        if (client < 0 || call3(NR_CONNECT, client, &absolute, sizeof(absolute)) != 0) break;
+    }
+    u64 accepted = 0;
+    for (; accepted < connected; accepted++)
+        if (call4(NR_ACCEPT4, listener, 0, 0, 04000) < 0) break;
+    report_value("pool-unix-backlog", bound && connected == 300 && accepted == 300, connected);
+    close_from(3);
+    call3(NR_UNLINKAT, AT_FDCWD, "/tmp/listen.sock", 0);
+    call1(NR_CHDIR, "/");
+
+    int pair[2];
+    call4(NR_SOCKETPAIR, 1, 1, 0, pair);
+    static u64 control[(16 + 200 * 4 + 7) / 8 + 1];
+    control[0] = 16 + 200 * 4;
+    ((int *)control)[2] = 1;
+    ((int *)control)[3] = 1;
+    for (int index = 0; index < 200; index++) ((int *)control)[4 + index] = 0;
+    char byte = 'r';
+    struct iovec_test vector = {(u64)&byte, 1};
+    struct msghdr_test message = {0, 0, 0, (u64)&vector, 1, (u64)control, 16 + 200 * 4, 0, 0};
+    s64 sent = call3(NR_SENDMSG, pair[0], &message, 0);
+    static u64 received_control[(16 + 253 * 4 + 7) / 8 + 1];
+    struct msghdr_test incoming = {0, 0, 0, (u64)&vector, 1, (u64)received_control,
+                                   sizeof(received_control), 0, 0};
+    s64 received = call3(NR_RECVMSG, pair[1], &incoming, 0);
+    u64 rights = incoming.control_length > 16 ? (incoming.control_length - 16) / 4 : 0;
+    report_value("pool-scm-rights-200", sent == 1 && received == 1 && rights == 200, rights);
+    close_from(3);
+
+    static unsigned groups[1000];
+    for (unsigned index = 0; index < 1000; index++) groups[index] = 5000 + index;
+    s64 set = call2(NR_SETGROUPS, 1000, groups);
+    static unsigned back[1000];
+    s64 count = call2(NR_GETGROUPS, 1000, back);
+    report_value("pool-groups-1000", set == 0 && count == 1000 && back[999] == 5999, (u64)count);
+    call2(NR_SETGROUPS, 0, 0);
+
+    u64 before = meminfo_kib("MemFree");
+    s64 memfd = call2(NR_MEMFD_CREATE, "limits", 0);
+    s64 sized = call2(NR_FTRUNCATE, memfd, 2ULL * 1024 * 1024 * 1024);
+    u64 after = meminfo_kib("MemFree");
+    call4(NR_PWRITE, memfd, "tail", 4, 2ULL * 1024 * 1024 * 1024 - 4);
+    char tail[4] = {0, 0, 0, 0};
+    char hole[4] = {1, 1, 1, 1};
+    call4(NR_PREAD, memfd, tail, 4, 2ULL * 1024 * 1024 * 1024 - 4);
+    call4(NR_PREAD, memfd, hole, 4, 1024 * 1024 * 1024);
+    report_value("pool-memfd-2g-sparse", sized == 0 && before - after < 64 * 1024 &&
+                 tail[0] == 't' && tail[3] == 'l' && !hole[0] && !hole[3], before - after);
+    s64 mapped = call6(NR_MMAP, 0, 2ULL * 1024 * 1024 * 1024, PROT_READ | PROT_WRITE, 1, memfd, 0);
+    int shared_ok = 0;
+    if (mapped > 0) {
+        volatile char *view = (volatile char *)mapped;
+        view[1536ULL * 1024 * 1024] = 'm';
+        s64 pid = do_fork();
+        if (pid == 0) call1(NR_EXIT, view[1536ULL * 1024 * 1024] == 'm' &&
+                                     view[2ULL * 1024 * 1024 * 1024 - 4] == 't' ? 0 : 1);
+        int status = -1;
+        call4(NR_WAIT4, pid, &status, 0, 0);
+        char check = 0;
+        call4(NR_PREAD, memfd, &check, 1, 1536ULL * 1024 * 1024);
+        shared_ok = status == 0 && check == 'm';
+        call2(NR_MUNMAP, mapped, 2ULL * 1024 * 1024 * 1024);
+    }
+    report("pool-memfd-2g-mapped", shared_ok);
+    close_from(3);
+
+    u64 segments = 0;
+    for (; segments < 300; segments++)
+        if (call3(NR_SHMGET, 0, 4096, 01000 | 0600) < 0) break;
+    report_value("pool-shm-segments", segments == 300, segments);
+
+    call2(NR_PIPE2, pipes, 04000);
+    s64 resized = call3(NR_FCNTL, pipes[1], 1031, 1024 * 1024);
+    static char megabyte[1024 * 1024];
+    s64 wrote = call3(NR_WRITE, pipes[1], megabyte, sizeof(megabyte));
+    report_value("pool-pipe-1m", resized == 1024 * 1024 && wrote == 1024 * 1024, (u64)wrote);
+    close_from(3);
+    call4(NR_PRLIMIT64, 0, 7, &limit, 0);
+}
+
 #ifndef LIMITS_TESTS
 #define LIMITS_TESTS 0xFFFFFFFFU
 #endif
@@ -670,6 +899,7 @@ static void run(u64 *stack) {
     if (LIMITS_TESTS & 0x20U) test_many_processes(LIMITS_PROCESSES);
     if (LIMITS_TESTS & 0x40U) test_descriptors();
     if (LIMITS_TESTS & 0x80U) test_exec_arguments();
+    if (LIMITS_TESTS & 0x100U) test_pools();
     print(failures ? "LIMITSTEST FAIL\n" : "LIMITSTEST PASS\n");
     call1(NR_EXIT_GROUP, 0);
     for (;;) { }
