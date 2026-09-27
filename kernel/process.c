@@ -5,6 +5,7 @@
 #include "include/elf.h"
 #include "include/eventfs.h"
 #include "include/file.h"
+#include "include/memfd.h"
 #include "include/gdt.h"
 #include "include/heap.h"
 #include "include/interrupt.h"
@@ -1474,10 +1475,31 @@ static int commit_one(struct vm_area *area, uint64_t page) {
     return 1;
 }
 
+static int commit_memfd(struct vm_area *area, uint64_t page) {
+    if (!area->file || area->file->kind != FILE_KIND_MEMFD) return 0;
+    if (vmm_translate(current->cr3, page, NULL, NULL) == 0) return 1;
+    uint64_t index = (page - area->start + area->offset) / 4096ULL;
+    if (index * 4096ULL >= memfd_size(area->file->memfd)) return 0;
+    uint64_t physical = memfd_page_ensure(area->file->memfd, index);
+    if (!physical || pmm_page_ref(physical) != 0) return 0;
+    uint64_t flags = area->page_flags | PAGE_USER | PAGE_PRESENT;
+    if (area->kind & VM_PRIVATE) {
+        if (flags & PAGE_WRITE) flags = (flags & ~PAGE_WRITE) | PAGE_COW;
+    } else {
+        flags |= PAGE_SHARED;
+    }
+    if (vmm_map_page_in(current->cr3, page, physical, flags) != 0) {
+        pmm_free_page((void *)physical);
+        return 0;
+    }
+    return 1;
+}
+
 int process_commit_area(uint64_t fault_address) {
     if (!current || current->state != PROCESS_RUNNING || !current->cr3) return 0;
     uint64_t page = fault_address & ~4095ULL;
     struct vm_area *area = process_find_area(page);
+    if (area && (area->kind & VM_MEMFD)) return commit_memfd(area, page);
     if (!area || !(area->kind & VM_ANONYMOUS)) return 0;
     if (!commit_one(area, page)) return 0;
 

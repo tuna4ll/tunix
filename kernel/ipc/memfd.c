@@ -6,7 +6,6 @@
 #include "../include/pmm.h"
 #include "../include/vmm.h"
 
-#define MEMFD_MAX_BYTES (256ULL * 1024ULL * 1024ULL)
 #define MEMFD_PAGE_SIZE 4096ULL
 
 struct memfd_object {
@@ -89,21 +88,26 @@ static int reserve_pages(struct memfd_object *object, uint64_t needed) {
     return 0;
 }
 
+uint64_t memfd_page_ensure(struct memfd_object *object, uint64_t index) {
+    if (!object || index >= object->count) return 0;
+    if (!object->pages[index]) {
+        uint64_t physical = (uint64_t)pmm_alloc_page();
+        if (!physical) return 0;
+        memset(vmm_phys_to_virt(physical), 0, MEMFD_PAGE_SIZE);
+        object->pages[index] = physical;
+    }
+    return object->pages[index];
+}
+
 int memfd_truncate(struct memfd_object *object, uint64_t size) {
     if (!object) return -1;
-    if (size > MEMFD_MAX_BYTES) return -1;
     if (size < object->size && (object->seals & MEMFD_SEAL_SHRINK)) return -1;
     if (size > object->size && (object->seals & MEMFD_SEAL_GROW)) return -1;
 
     uint64_t wanted = pages_for(size);
     if (wanted > object->count) {
         if (reserve_pages(object, wanted) != 0) return -1;
-        while (object->count < wanted) {
-            uint64_t physical = (uint64_t)pmm_alloc_page();
-            if (!physical) return -1;
-            memset(vmm_phys_to_virt(physical), 0, MEMFD_PAGE_SIZE);
-            object->pages[object->count++] = physical;
-        }
+        object->count = wanted;
     } else {
         while (object->count > wanted) {
             uint64_t physical = object->pages[--object->count];
@@ -125,10 +129,15 @@ static int64_t transfer(struct memfd_object *object, uint64_t offset,
     while (moved < length) {
         uint64_t index = (offset + moved) / MEMFD_PAGE_SIZE;
         uint64_t within = (offset + moved) % MEMFD_PAGE_SIZE;
-        uint64_t physical = memfd_page(object, index);
-        if (!physical) break;
         size_t chunk = (size_t)(MEMFD_PAGE_SIZE - within);
         if (chunk > length - moved) chunk = length - moved;
+        uint64_t physical = out ? memfd_page(object, index) : memfd_page_ensure(object, index);
+        if (!physical && out) {
+            memset((uint8_t *)out + moved, 0, chunk);
+            moved += chunk;
+            continue;
+        }
+        if (!physical) break;
         uint8_t *page = (uint8_t *)vmm_phys_to_virt(physical) + within;
         if (out) memcpy((uint8_t *)out + moved, page, chunk);
         else memcpy(page, (const uint8_t *)in + moved, chunk);

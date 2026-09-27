@@ -26,6 +26,7 @@ uint32_t memfd_seals(const struct memfd_object *object);
 int memfd_add_seals(struct memfd_object *object, uint32_t seals);
 int memfd_truncate(struct memfd_object *object, uint64_t size);
 uint64_t memfd_page(const struct memfd_object *object, uint64_t index);
+uint64_t memfd_page_ensure(struct memfd_object *object, uint64_t index);
 
 int64_t memfd_read(struct memfd_object *object, uint64_t offset,
                    size_t length, void *out);

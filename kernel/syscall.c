@@ -369,7 +369,6 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define MAP_ANONYMOUS 0x20
 #define MAP_NORESERVE 0x4000
 
-#define SHARED_MAP_MAX_BYTES (256ULL * 1024 * 1024)
 #define MAP_FIXED_NOREPLACE 0x100000
 #define MS_ASYNC 1
 #define MS_INVALIDATE 2
@@ -3463,7 +3462,8 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
                 return -ENOMEM;
             }
 
-            (void)process_map_area(base, base + length, page_flags, 0,
+            (void)process_map_area(base, base + length, page_flags,
+                                   VM_MEMFD | ((flags & MAP_PRIVATE) ? VM_PRIVATE : 0),
                                    file, offset);
             if (advance_mmap_base) {
                 process->mmap_base = base + length + 4096;
@@ -3519,7 +3519,6 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
                         (file && (file->flags & O_ACCMODE) != O_RDONLY));
     if (file && file->kind == FILE_KIND_VFS && file->node &&
         (file->node->flags & 0xFFU) == VFS_FILE && (share_private || share_shared) &&
-        file->node->length <= SHARED_MAP_MAX_BYTES &&
         offset < file->node->length && (offset & 0xFFFULL) == 0) {
         uint64_t shareable = align_up(file->node->length - offset, 4096);
         if (shareable > length) shareable = length;
@@ -3691,7 +3690,7 @@ static int64_t sys_shmat(int id, uint64_t address, int flags) {
         file_unref(file);
         return -ENOMEM;
     }
-    if (process_map_area(base, base + length, page_flags, 0, file, 0) != 0) {
+    if (process_map_area(base, base + length, page_flags, VM_MEMFD, file, 0) != 0) {
         unmap_pages(process, base, base + length);
         file_unref(file);
         return -ENOMEM;
@@ -5183,7 +5182,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         case SYS_PREAD64: {
             struct process *process = process_current();
             int fd = (int)SYSCALL_ARG0(frame);
-            if (!process || fd < 0 || fd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[fd] || process->files->fds[fd]->kind != FILE_KIND_VFS) SYSCALL_RET(frame) = (uint64_t)-(int64_t)EBADF;
+            if (!process || fd < 0 || fd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[fd] || (process->files->fds[fd]->kind != FILE_KIND_VFS && process->files->fds[fd]->kind != FILE_KIND_MEMFD)) SYSCALL_RET(frame) = (uint64_t)-(int64_t)EBADF;
             else {
                 uint64_t saved = process->files->fds[fd]->offset;
                 process->files->fds[fd]->offset = SYSCALL_ARG3(frame);
@@ -5195,7 +5194,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         case SYS_PWRITE64: {
             struct process *process = process_current();
             int fd = (int)SYSCALL_ARG0(frame);
-            if (!process || fd < 0 || fd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[fd] || process->files->fds[fd]->kind != FILE_KIND_VFS) SYSCALL_RET(frame) = (uint64_t)-(int64_t)EBADF;
+            if (!process || fd < 0 || fd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[fd] || (process->files->fds[fd]->kind != FILE_KIND_VFS && process->files->fds[fd]->kind != FILE_KIND_MEMFD)) SYSCALL_RET(frame) = (uint64_t)-(int64_t)EBADF;
             else {
                 uint64_t saved = process->files->fds[fd]->offset;
                 process->files->fds[fd]->offset = SYSCALL_ARG3(frame);
@@ -5211,7 +5210,8 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
             int fd = (int)SYSCALL_ARG0(frame);
             int writing = syscall_number == SYS_PWRITEV;
             if (!process || fd < 0 || fd >= PROCESS_FD_CAPACITY(process) || !process->files->fds[fd] ||
-                process->files->fds[fd]->kind != FILE_KIND_VFS)
+                (process->files->fds[fd]->kind != FILE_KIND_VFS &&
+                 process->files->fds[fd]->kind != FILE_KIND_MEMFD))
                 SYSCALL_RET(frame) = (uint64_t)-(int64_t)EBADF;
             else {
                 uint64_t saved = process->files->fds[fd]->offset;

@@ -8,15 +8,7 @@
 #include "../include/sysvshm.h"
 #include "../include/time.h"
 
-/*
- * See include/sysvshm.h for what this is for. A fixed table of segments, each
- * holding one reference to a memfd-backed struct file; the attach count is read
- * back out of that file's reference count rather than tracked here, so a
- * process that exits without shmdt() cannot leave the number wrong.
- */
-
-#define SHM_MAX_SEGMENTS 128
-#define SHM_MAX_BYTES (64ULL * 1024ULL * 1024ULL)
+#define SHM_MAX_BYTES 0x00007FFFFFFFFFFFULL
 
 #define EPERM  1
 #define ENOENT 2
@@ -38,7 +30,8 @@ struct shm_segment {
     struct file *file;
 };
 
-static struct shm_segment segments[SHM_MAX_SEGMENTS];
+static struct shm_segment *segments;
+static int segment_capacity;
 static int next_id = 1;
 
 static int64_t now_seconds(void) {
@@ -47,20 +40,19 @@ static int64_t now_seconds(void) {
 
 static struct shm_segment *find_by_id(int id) {
     if (id <= 0) return NULL;
-    for (int i = 0; i < SHM_MAX_SEGMENTS; i++)
+    for (int i = 0; i < segment_capacity; i++)
         if (segments[i].used && segments[i].id == id) return &segments[i];
     return NULL;
 }
 
 static struct shm_segment *find_by_key(int32_t key) {
     if (key == IPC_PRIVATE) return NULL;
-    for (int i = 0; i < SHM_MAX_SEGMENTS; i++)
+    for (int i = 0; i < segment_capacity; i++)
         if (segments[i].used && !segments[i].destroyed && segments[i].key == key)
             return &segments[i];
     return NULL;
 }
 
-/* One reference is the table's own, the rest are attached mappings. */
 static uint64_t attach_count(const struct shm_segment *segment) {
     return segment->file->refs > 1 ? (uint64_t)(segment->file->refs - 1) : 0;
 }
@@ -71,7 +63,7 @@ static void release(struct shm_segment *segment) {
 }
 
 void sysvshm_reap(void) {
-    for (int i = 0; i < SHM_MAX_SEGMENTS; i++)
+    for (int i = 0; i < segment_capacity; i++)
         if (segments[i].used && segments[i].destroyed && attach_count(&segments[i]) == 0)
             release(&segments[i]);
 }
@@ -81,8 +73,7 @@ int sysvshm_get(int32_t key, uint64_t size, int flags, uint32_t pid) {
     struct shm_segment *existing = find_by_key(key);
     if (existing) {
         if ((flags & IPC_CREAT) && (flags & IPC_EXCL)) return -EEXIST;
-        /* A size of 0 means "whatever it already is"; anything larger than the
-           segment is a request this one cannot satisfy. */
+
         if (size && size > existing->size) return -EINVAL;
         return existing->id;
     }
@@ -90,9 +81,20 @@ int sysvshm_get(int32_t key, uint64_t size, int flags, uint32_t pid) {
     if (!size || size > SHM_MAX_BYTES) return -EINVAL;
 
     struct shm_segment *slot = NULL;
-    for (int i = 0; i < SHM_MAX_SEGMENTS; i++)
+    for (int i = 0; i < segment_capacity; i++)
         if (!segments[i].used) { slot = &segments[i]; break; }
-    if (!slot) return -ENOSPC;
+    if (!slot) {
+        int capacity = segment_capacity ? segment_capacity * 2 : 32;
+        struct shm_segment *grown = kmalloc((size_t)capacity * sizeof(*grown));
+        if (!grown) return -ENOSPC;
+        memset(grown, 0, (size_t)capacity * sizeof(*grown));
+        if (segment_capacity)
+            memcpy(grown, segments, (size_t)segment_capacity * sizeof(*grown));
+        kfree(segments);
+        slot = &grown[segment_capacity];
+        segments = grown;
+        segment_capacity = capacity;
+    }
 
     struct memfd_object *object = memfd_create_object();
     if (!object) return -ENOMEM;
@@ -174,9 +176,7 @@ int sysvshm_set(int id, uint32_t mode, uint32_t uid, uint32_t gid) {
 int sysvshm_remove(int id) {
     struct shm_segment *segment = find_by_id(id);
     if (!segment) return -EINVAL;
-    /* While anything is attached the id has to keep resolving, because a caller
-       is allowed to remove a segment before handing the id to whoever attaches
-       next -- see the note in sysvshm.h. */
+
     if (attach_count(segment) > 0) {
         segment->destroyed = 1;
         segment->ctime = now_seconds();

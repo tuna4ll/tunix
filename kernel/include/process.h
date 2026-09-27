@@ -17,7 +17,6 @@
 #define PROCESS_READY 0
 #define PROCESS_RUNNING 1
 #define PROCESS_BLOCKED 2
-#define PROCESS_IO_WATCHES 64
 #define PROCESS_ZOMBIE 3
 #define PROCESS_DEAD 4
 #define PROCESS_STOPPED 5
@@ -38,6 +37,8 @@ struct interrupt_frame;
 
 #define VM_ANONYMOUS 0x1U
 #define VM_FILE_PAGES 0x2U
+#define VM_MEMFD 0x4U
+#define VM_PRIVATE 0x8U
 
 struct vm_area {
     uint64_t start;
