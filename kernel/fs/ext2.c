@@ -27,7 +27,6 @@ extern void kprintf(const char *fmt, ...);
 #define EXT2_ROOT_INO 2U
 #define EXT2_FIRST_INO 11U
 
-#define EXT2_MAX_GROUPS 128U
 #define EXT2_GD_PER_BLOCK (EXT2_BLOCK_SIZE / 32U)
 
 #define EXT2_POINTERS_PER_BLOCK (EXT2_BLOCK_SIZE / 4U)
@@ -48,7 +47,6 @@ extern void kprintf(const char *fmt, ...);
 #define EXT2_FEATURE_RO_COMPAT_LARGE_FILE 0x0002U
 #define EXT2_RO_COMPAT_READABLE (EXT2_FEATURE_RO_COMPAT_SPARSE_SUPER | \
                                  EXT2_FEATURE_RO_COMPAT_LARGE_FILE)
-#define EXT2_MAX_DEPTH 64U
 #define EXT2_RUN_BLOCKS 32U
 
 struct ext2_superblock {
@@ -143,10 +141,10 @@ typedef char ext2_inode_size_check[(sizeof(struct ext2_inode) == 128) ? 1 : -1];
 
 static int ext2_mounted_flag;
 static int ext2_loading;
-static uint32_t ext2_region_lba;
+static uint64_t ext2_region_lba;
 static struct vfs_node *ext2_root;
 static struct ext2_superblock sb;
-static struct ext2_group_desc gds[EXT2_MAX_GROUPS];
+static struct ext2_group_desc *gds;
 static uint32_t group_count;
 static uint32_t first_data_block;
 static uint32_t blocks_per_group;
@@ -197,7 +195,7 @@ static void restore_times(struct vfs_node *node, const struct ext2_inode *inode)
 }
 
 static int read_blocks_raw(uint32_t block, uint32_t count, void *out) {
-    uint32_t lba = ext2_region_lba + block * EXT2_SECTORS_PER_BLOCK;
+    uint64_t lba = ext2_region_lba + (uint64_t)block * EXT2_SECTORS_PER_BLOCK;
     uint32_t sectors = count * EXT2_SECTORS_PER_BLOCK;
     return block_read(lba, sectors, out);
 }
@@ -214,7 +212,7 @@ static int read_blocks(uint32_t block, uint32_t count, void *out) {
 }
 
 static int write_blocks(uint32_t block, uint32_t count, const void *data) {
-    uint32_t lba = ext2_region_lba + block * EXT2_SECTORS_PER_BLOCK;
+    uint64_t lba = ext2_region_lba + (uint64_t)block * EXT2_SECTORS_PER_BLOCK;
     uint32_t sectors = count * EXT2_SECTORS_PER_BLOCK;
     return block_write(lba, sectors, data);
 }
@@ -1011,51 +1009,75 @@ static int remove_one(struct vfs_node *node, uint32_t parent_ino,
 
 static int seed_errors;
 
-static void persist_subtree(struct vfs_node *node, unsigned depth) {
-    if (depth > EXT2_MAX_DEPTH) {
-        seed_errors++;
-        return;
-    }
-    int status = create_one(node);
-    if (status) {
+static struct vfs_node *next_in_subtree(struct vfs_node *node, struct vfs_node *top) {
+    while (node != top && !node->next) node = node->parent;
+    return node == top ? NULL : node->next;
+}
+
+static void persist_subtree(struct vfs_node *top) {
+    struct vfs_node *node = top;
+    while (node) {
+        int status = create_one(node);
         if (status < 0) seed_errors++;
-        return;
-    }
-    if ((node->flags & 0xFFU) != VFS_DIRECTORY) return;
-    for (struct vfs_node *child = node->children; child; child = child->next)
-        persist_subtree(child, depth + 1U);
-}
-
-static void persist_links(struct vfs_node *node, unsigned depth) {
-    if (depth > EXT2_MAX_DEPTH) return;
-    for (struct vfs_node *child = node->children; child; child = child->next) {
-        if (child->link_target) {
-            if (link_one(child) != 0) seed_errors++;
-        } else if ((child->flags & 0xFFU) == VFS_DIRECTORY &&
-                   !(child->flags & VFS_VOLATILE)) {
-            persist_links(child, depth + 1U);
+        if (status == 0 && (node->flags & 0xFFU) == VFS_DIRECTORY && node->children) {
+            node = node->children;
+            continue;
         }
+        node = next_in_subtree(node, top);
     }
 }
 
-static void unpersist_subtree(struct vfs_node *node, uint32_t parent_ino,
-                              const char *name, unsigned depth) {
+static void persist_links(struct vfs_node *top) {
+    struct vfs_node *node = top->children;
+    while (node) {
+        if (node->link_target) {
+            if (link_one(node) != 0) seed_errors++;
+        } else if ((node->flags & 0xFFU) == VFS_DIRECTORY && !(node->flags & VFS_VOLATILE) &&
+                   node->children) {
+            node = node->children;
+            continue;
+        }
+        node = next_in_subtree(node, top);
+    }
+}
+
+static int unpersist_descends(const struct vfs_node *node) {
+    return !node->link_target && node->disk_inode && node->links <= 1 &&
+           (node->flags & 0xFFU) == VFS_DIRECTORY && node->children;
+}
+
+static void unpersist_one(struct vfs_node *node, uint32_t parent_ino, const char *name) {
     if (node->link_target) {
         unlink_one(node->link_target, parent_ino, name);
         return;
     }
-    if (!node->disk_inode || depth > EXT2_MAX_DEPTH) return;
+    if (!node->disk_inode) return;
     if (node->links > 1) {
         unlink_one(node, parent_ino, name);
         return;
     }
-    if ((node->flags & 0xFFU) == VFS_DIRECTORY) {
-        for (struct vfs_node *child = node->children; child; child = child->next)
-            unpersist_subtree(child, node->disk_inode, child->name, depth + 1U);
-    } else {
-        vfs_fault_in(node);
-    }
+    if ((node->flags & 0xFFU) != VFS_DIRECTORY) vfs_fault_in(node);
     remove_one(node, parent_ino, name);
+}
+
+static void unpersist_subtree(struct vfs_node *top, uint32_t parent_ino, const char *name) {
+    struct vfs_node *node = top;
+    while (unpersist_descends(node)) node = node->children;
+    for (;;) {
+        if (node == top) {
+            unpersist_one(node, parent_ino, name);
+            return;
+        }
+        struct vfs_node *parent = node->parent;
+        struct vfs_node *next = node->next;
+        unpersist_one(node, parent->disk_inode, node->name);
+        if (next) {
+            node = next;
+            while (unpersist_descends(node)) node = node->children;
+        } else {
+            node = parent;
+        }
+    }
 }
 
 static void ext2_event_created(struct vfs_node *node) {
@@ -1133,11 +1155,11 @@ static void ext2_event_moved(struct vfs_node *node, struct vfs_node *old_parent,
         }
         flush_meta();
     } else if (node->disk_inode && old_parent_ino && !new_parent_ino) {
-        unpersist_subtree(node, old_parent_ino, old_name, 0);
+        unpersist_subtree(node, old_parent_ino, old_name);
         flush_meta();
     } else if (!node->disk_inode && new_parent_ino) {
-        persist_subtree(node, 0);
-        if ((node->flags & 0xFFU) == VFS_DIRECTORY) persist_links(node, 0);
+        persist_subtree(node);
+        if ((node->flags & 0xFFU) == VFS_DIRECTORY) persist_links(node);
         flush_meta();
     }
 }
@@ -1290,9 +1312,38 @@ static void links_seen_reset(void) {
     links_seen_count = 0;
 }
 
+struct load_item {
+    uint32_t ino;
+    struct vfs_node *node;
+};
+
+struct load_queue {
+    struct load_item *items;
+    size_t head;
+    size_t count;
+    size_t capacity;
+};
+
+static int load_queue_push(struct load_queue *queue, uint32_t ino, struct vfs_node *node) {
+    if (queue->head + queue->count == queue->capacity) {
+        size_t capacity = queue->capacity ? queue->capacity * 2 : 64;
+        struct load_item *items = (struct load_item *)kmalloc(capacity * sizeof(*items));
+        if (!items) return -1;
+        if (queue->count)
+            memcpy(items, queue->items + queue->head, queue->count * sizeof(*items));
+        kfree(queue->items);
+        queue->items = items;
+        queue->capacity = capacity;
+        queue->head = 0;
+    }
+    queue->items[queue->head + queue->count].ino = ino;
+    queue->items[queue->head + queue->count].node = node;
+    queue->count++;
+    return 0;
+}
+
 static int load_directory(uint32_t dir_ino, struct vfs_node *dir_node,
-                          unsigned depth) {
-    if (depth > EXT2_MAX_DEPTH) return -1;
+                          struct load_queue *queue) {
     struct ext2_inode dir;
     if (inode_read(dir_ino, &dir) != 0) return -1;
     uint8_t *block_data = (uint8_t *)kmalloc(EXT2_BLOCK_SIZE);
@@ -1349,9 +1400,7 @@ static int load_directory(uint32_t dir_ino, struct vfs_node *dir_node,
                 node->gid = child.i_gid;
                 restore_times(node, &child);
                 restored++;
-                int below = load_directory(child_ino, node, depth + 1U);
-                if (below < 0) goto fail;
-                restored += below;
+                if (load_queue_push(queue, child_ino, node) != 0) goto fail;
             } else if (format == EXT2_S_IFREG) {
                 node = vfs_alloc_node(name, VFS_FILE);
                 if (!node || vfs_attach(dir_node, node) != 0) {
@@ -1397,6 +1446,24 @@ static int load_directory(uint32_t dir_ino, struct vfs_node *dir_node,
 fail:
     kfree(block_data);
     return -1;
+}
+
+static int load_tree(uint32_t root_ino, struct vfs_node *root) {
+    struct load_queue queue = {NULL, 0, 0, 0};
+    int restored = 0;
+    if (load_queue_push(&queue, root_ino, root) != 0) return -1;
+    while (queue.count) {
+        struct load_item item = queue.items[queue.head++];
+        queue.count--;
+        int loaded = load_directory(item.ino, item.node, &queue);
+        if (loaded < 0) {
+            restored = -1;
+            break;
+        }
+        restored += loaded;
+    }
+    kfree(queue.items);
+    return restored;
 }
 
 int ext2fs_mounted(void) {
@@ -1502,13 +1569,19 @@ int ext2fs_sync(void) {
     return block_flush();
 }
 
-static uint32_t region_usable_blocks(uint32_t region_lba) {
-    uint32_t disk_sectors = (uint32_t)block_sectors();
+static uint32_t region_usable_blocks(uint64_t region_lba) {
+    uint64_t disk_sectors = block_sectors();
     if (!disk_sectors || region_lba >= disk_sectors) return 0;
-    uint32_t blocks = (disk_sectors - region_lba) / EXT2_SECTORS_PER_BLOCK;
-    if (blocks > EXT2_MAX_GROUPS * EXT2_GROUP_MAX_BITS)
-        blocks = EXT2_MAX_GROUPS * EXT2_GROUP_MAX_BITS;
-    return blocks;
+    uint64_t blocks = (disk_sectors - region_lba) / EXT2_SECTORS_PER_BLOCK;
+    return blocks > 0xFFFFFFFFULL ? 0xFFFFFFFFU : (uint32_t)blocks;
+}
+
+static int allocate_groups(void) {
+    kfree(gds);
+    gds = (struct ext2_group_desc *)kmalloc((size_t)group_count * sizeof(*gds));
+    if (!gds) return -1;
+    memset(gds, 0, (size_t)group_count * sizeof(*gds));
+    return 0;
 }
 
 static int superblock_usable(uint32_t usable_blocks) {
@@ -1527,7 +1600,7 @@ static int superblock_usable(uint32_t usable_blocks) {
 
     uint32_t groups = (sb.s_blocks_count - sb.s_first_data_block +
                        sb.s_blocks_per_group - 1U) / sb.s_blocks_per_group;
-    if (!groups || groups > EXT2_MAX_GROUPS) return 0;
+    if (!groups) return 0;
     if (sb.s_inodes_count != groups * sb.s_inodes_per_group) return 0;
     return 1;
 }
@@ -1567,7 +1640,7 @@ static void mark_volatile_dirs(void) {
     }
 }
 
-int ext2fs_probe(uint32_t region_lba) {
+int ext2fs_probe(uint64_t region_lba) {
     uint32_t usable_blocks = region_usable_blocks(region_lba);
     if (!usable_blocks) return -1;
     ext2_region_lba = region_lba;
@@ -1595,7 +1668,7 @@ int ext2fs_find_label(const char *label) {
     return -1;
 }
 
-int ext2fs_mount_root(uint32_t region_lba) {
+int ext2fs_mount_root(uint64_t region_lba) {
     if (ext2_mounted_flag || !vfs_root) return -1;
     uint32_t usable_blocks = region_usable_blocks(region_lba);
     if (!usable_blocks) return -1;
@@ -1606,6 +1679,7 @@ int ext2fs_mount_root(uint32_t region_lba) {
     memcpy(&sb, meta_buf + 1024, sizeof(sb));
     if (!superblock_usable(usable_blocks)) return -1;
     adopt_geometry();
+    if (allocate_groups() != 0) return -1;
 
     for (uint32_t index = 0; index < gd_blocks; index++) {
         if (read_block(first_data_block + 1U + index, meta_buf) != 0) return -1;
@@ -1629,6 +1703,7 @@ int ext2fs_mount_root(uint32_t region_lba) {
     memcpy(&sb, meta_buf + 1024, sizeof(sb));
     if (!superblock_usable(usable_blocks)) return -1;
     adopt_geometry();
+    if (allocate_groups() != 0) return -1;
     for (uint32_t index = 0; index < gd_blocks; index++) {
         if (read_blocks(first_data_block + 1U + index, 1, meta_buf) != 0) return -1;
         uint32_t start = index * EXT2_GD_PER_BLOCK;
@@ -1644,7 +1719,7 @@ int ext2fs_mount_root(uint32_t region_lba) {
         ext2_root->mode = root.i_mode & 07777U;
 
     ext2_loading = 1;
-    int restored = load_directory(EXT2_ROOT_INO, ext2_root, 0);
+    int restored = load_tree(EXT2_ROOT_INO, ext2_root);
     ext2_loading = 0;
     links_seen_reset();
     if (restored < 0) {
