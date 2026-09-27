@@ -14,6 +14,7 @@
 extern void kprintf(const char *fmt, ...);
 
 #define FRAMEBUFFER_VIRTUAL_BASE 0xFFFFFFFFF0000000ULL
+#define FRAMEBUFFER_WINDOW_BYTES (DEVICE_MMIO_VIRTUAL_BASE - FRAMEBUFFER_VIRTUAL_BASE)
 
 #define EACCES 13
 #define EBUSY 16
@@ -148,8 +149,6 @@ int framebuffer_init(const struct boot_framebuffer_info *boot_info) {
         boot_info->size < sizeof(*boot_info)) return -1;
     if (boot_info->bits_per_pixel != 32U || !boot_info->physical_address ||
         boot_info->width < 640U || boot_info->height < 480U ||
-        boot_info->width > TUNIX_FRAMEBUFFER_MAX_WIDTH ||
-        boot_info->height > TUNIX_FRAMEBUFFER_MAX_HEIGHT ||
         boot_info->pitch < (uint32_t)boot_info->width * 4U) return -1;
     if (!boot_info->red_mask_size || !boot_info->green_mask_size ||
         !boot_info->blue_mask_size) return -1;
@@ -159,6 +158,7 @@ int framebuffer_init(const struct boot_framebuffer_info *boot_info) {
     uint64_t framebuffer_bytes = (uint64_t)boot_info->pitch * boot_info->height;
     if (framebuffer_bytes > UINT64_MAX - page_offset) return -1;
     uint64_t mapped_size = align_up_page(framebuffer_bytes + page_offset);
+    if (mapped_size > FRAMEBUFFER_WINDOW_BYTES) return -1;
     uint64_t cache_flags = vmm_write_combining_available() ? PAGE_WRITE_COMBINING
                                                           : PAGE_UNCACHED;
     for (uint64_t offset = 0; offset < mapped_size; offset += 4096ULL) {

@@ -10,8 +10,6 @@
 #include "../include/terminal.h"
 #include "../include/terminal_font.h"
 
-#define MAX_CONSOLE_COLS 224
-#define MAX_CONSOLE_ROWS 80
 #define CELL_BG_EXPLICIT 0x01U
 #define CONSOLE_BACKGROUND 0x1A1B26U
 #define CONSOLE_FOREGROUND 0xC0CAF5U
@@ -106,8 +104,6 @@ static void calculate_layout(void) {
     layout.cell_height = TUNIX_TERMINAL_FONT_HEIGHT;
     uint32_t columns = (layout.screen_width - margin * 2U) / layout.cell_width;
     uint32_t rows = (layout.screen_height - margin * 2U) / layout.cell_height;
-    if (columns > MAX_CONSOLE_COLS) columns = MAX_CONSOLE_COLS;
-    if (rows > MAX_CONSOLE_ROWS) rows = MAX_CONSOLE_ROWS;
     if (columns < 40U) columns = 40U;
     if (rows < 16U) rows = 16U;
     layout.columns = (uint16_t)columns;

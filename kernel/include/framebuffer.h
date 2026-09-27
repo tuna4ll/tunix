@@ -5,9 +5,6 @@
 #include <stdint.h>
 #include "boot_framebuffer.h"
 
-#define TUNIX_FRAMEBUFFER_MAX_WIDTH 1920U
-#define TUNIX_FRAMEBUFFER_MAX_HEIGHT 1080U
-
 struct file;
 struct vfs_node;
 
@@ -35,26 +32,16 @@ void framebuffer_fill_rect_rgb(uint32_t x, uint32_t y, uint32_t width, uint32_t 
                                uint32_t rgb);
 void framebuffer_measure(unsigned rounds, uint64_t *read_rate, uint64_t *write_rate);
 void framebuffer_fill_rgb(uint32_t rgb);
-/* Kernel-side view of the scanout, for software compositing (see drm.c). */
+
 uint8_t *framebuffer_scanout(void);
 void framebuffer_present(void);
-/*
- * Display arbitration. Only one owner draws at a time; while there is one the
- * text console holds off entirely. The owner is an opaque token compared by
- * identity -- /dev/fb0 uses its open file description, DRM uses a token of its
- * own -- so the two cannot end up painting over each other.
- */
+
 int framebuffer_claim_graphics(const void *owner);
 int framebuffer_release_graphics(const void *owner, int fail_if_not_owner);
-/*
- * Switching to another virtual terminal does not take the claim away -- the
- * owner is still running and still owns its buffers -- it only stops the owner
- * reaching the screen and lets the text console draw again. Resuming is the
- * other half, and the owner is expected to put its last frame back.
- */
+
 void framebuffer_suspend_graphics(void);
 void framebuffer_resume_graphics(void);
-/* True while this owner both holds the display and is the one in front. */
+
 int framebuffer_graphics_foreground(const void *owner);
 const uint8_t *framebuffer_font(void);
 uint32_t framebuffer_font_width(void);

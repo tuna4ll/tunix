@@ -1,22 +1,3 @@
-/*
- * virtio-gpu.
- *
- * Every command is a request buffer the device reads and a response buffer it
- * writes, submitted on the control queue and waited out. The one command that
- * carries a payload is RESOURCE_ATTACH_BACKING, whose list of guest pages goes
- * in a descriptor of its own.
- *
- * The device is asked for VIRGL when it is attached. Where the host grants it
- * there is a second, much larger interface behind the same queue: contexts,
- * resources with a real format and target, and command buffers that are
- * OpenGL work for the host to do. What the host can do with them is not
- * guessed at -- it is read out of a capset, a blob virglrenderer fills in and
- * mesa parses to learn which GL version and extensions it may use.
- *
- * Where the host does not grant it, everything past the capset query is unused
- * and the display works exactly as it did. 2D is not a fallback bolted on
- * underneath; it is the same set of commands either way.
- */
 #include <stddef.h>
 #include <stdint.h>
 
@@ -44,8 +25,6 @@ extern void kprintf(const char *fmt, ...);
 #define VIRTIO_GPU_CMD_GET_CAPSET_INFO 0x0108U
 #define VIRTIO_GPU_CMD_GET_CAPSET 0x0109U
 
-/* The 3D half. Every one of these is refused outright by a host that did not
-   grant VIRGL, so nothing below is reachable without it. */
 #define VIRTIO_GPU_CMD_CTX_CREATE 0x0200U
 #define VIRTIO_GPU_CMD_CTX_DESTROY 0x0201U
 #define VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE 0x0202U
@@ -59,50 +38,25 @@ extern void kprintf(const char *fmt, ...);
 #define VIRTIO_GPU_RESP_OK_DISPLAY_INFO 0x1101U
 #define VIRTIO_GPU_RESP_OK_CAPSET_INFO 0x1102U
 #define VIRTIO_GPU_RESP_OK_CAPSET 0x1103U
-/* Every ok response is 0x11xx and every error 0x12xx, so one comparison sorts
-   them without having to name each. */
+
 #define VIRTIO_GPU_RESP_ERR_BASE 0x1200U
 
-/* Feature bit 0: the host will accept 3D commands, and has a capset that says
-   what it can do with them. */
 #define VIRTIO_GPU_F_VIRGL 0U
 
-/* virglrenderer publishes two: the original, and the one every mesa since 2018
-   actually asks for. Which exist is the host's answer, not ours. */
 #define VIRTIO_GPU_CAPSET_VIRGL 1U
 #define VIRTIO_GPU_CAPSET_VIRGL2 2U
 
-/* struct virtio_gpu_config, whose fourth word is the number of capsets. */
 #define VIRTIO_GPU_CONFIG_NUM_CAPSETS 12U
 
-/* A virgl2 capset is a couple of kilobytes today. The device is asked how big
-   its own is before it is fetched, so this is a ceiling on what can be
-   accepted rather than a guess at the size. */
 #define MAX_CAPSET_BYTES 4096U
 
-/*
- * Command buffers are staged through a buffer of our own rather than handed to
- * the device where they lie.
- *
- * The device is given physical addresses, and the heap only promises virtually
- * contiguous memory -- a buffer that spans a page boundary can be anywhere in
- * physical memory on the other side of it. A static buffer is in the kernel
- * window, where contiguous means contiguous.
- *
- * A megabyte, because mesa batches texture uploads into the command stream and
- * a track loading in SuperTuxKart was measured at 266224 bytes. Keep this and
- * DRM_MAX_COMMAND_BYTES the same: the one is copied into the other.
- */
 #define MAX_COMMAND_BYTES (1024U * 1024U)
 
-/* XRGB8888 in memory is B, G, R, unused -- which is what this format names. */
 #define VIRTIO_GPU_FORMAT_B8G8R8X8 2U
 
 #define VIRTIO_GPU_MAX_SCANOUTS 16U
 
-/* 2048 pages is 8 MiB, one pixel more than a 1920x1080 scanout needs and the
-   largest buffer the framebuffer layer will ever hand over. */
-#define MAX_BACKING_PAGES 2048U
+#define BACKING_ENTRIES 4096U
 
 struct virtio_gpu_ctrl_hdr {
     uint32_t type;
@@ -243,16 +197,11 @@ struct virtio_gpu_get_capset {
     uint32_t capset_version;
 };
 
-/* The capset data follows the header with nothing between, so a single
-   device-writable buffer describes the whole reply. */
 struct virtio_gpu_resp_capset {
     struct virtio_gpu_ctrl_hdr hdr;
     uint8_t capset_data[MAX_CAPSET_BYTES];
 };
 
-/* Static, so the physical addresses handed to the device come straight out of
-   the kernel window and are contiguous without an allocator that can promise
-   it. Statically sized for the same reason. */
 static union {
     struct virtio_gpu_resource_create_2d create;
     struct virtio_gpu_resource_unref unref;
@@ -269,24 +218,14 @@ static union {
     struct virtio_gpu_cmd_submit submit_3d;
     struct virtio_gpu_ctrl_hdr hdr;
 } request;
-/* Likewise one buffer for the reply, sized for the largest of them, which is a
-   capset. Every reply begins with the same header, so the type can be checked
-   before anything knows which shape arrived. */
+
 static union {
     struct virtio_gpu_resp_display_info display;
     struct virtio_gpu_resp_capset_info capset_info;
     struct virtio_gpu_resp_capset capset;
     struct virtio_gpu_ctrl_hdr hdr;
 } response;
-/*
- * The two buffers the device is pointed at, rather than two static arrays.
- *
- * Between them they are a megabyte and a half of the kernel image, reserved on
- * every machine including the ones with no virtio-gpu in them at all. They have
- * to be contiguous, which is the only reason they were static; dma_alloc()
- * makes that available at run time, so now they cost nothing until the device
- * turns out to be there.
- */
+
 static struct virtio_gpu_mem_entry *backing;
 static uint8_t *commands;
 
@@ -298,34 +237,11 @@ static uint32_t display_width;
 static uint32_t display_height;
 static int ready;
 
-/* Whether the host agreed to VIRGL, and the best capset it published. A zero
-   id means there is no 3D to be had: either the device never offered the
-   feature, or it offered it and then described no capset, which is a host
-   built without virglrenderer. */
 static int virgl;
 static uint32_t capset_id;
 static uint32_t capset_version;
 static uint32_t capset_size;
 
-
-/*
- * Requests the host is left to finish on its own.
- *
- * Everything here used to be handed over and then waited out, one at a time.
- * Measured while SuperTuxKart ran: 1300 to 1600 requests a second, and 609 to
- * 734 milliseconds of every second spent inside that wait -- with the kernel
- * lock held, so nothing else on any processor could move either. The host was
- * not slow; the round trip was, and there were seventeen of them per frame.
- *
- * A request that carries no answer does not need waiting for. What stops it
- * being posted and forgotten is memory: the device reads the request out of
- * guest memory *after* the call returns, so the buffers cannot be the single
- * staging pair every caller shares. Each one in flight gets its own.
- *
- * The resources a command touches are a separate promise, and it is mesa that
- * keeps it: it marks a resource busy when a submission mentions it and asks
- * DRM_IOCTL_VIRTGPU_WAIT before touching it again, which drains this queue.
- */
 #define ASYNC_SLOTS 32U
 #define ASYNC_REQUEST_BYTES 128U
 #define ASYNC_PAYLOAD_BYTES (32U * 1024U)
@@ -335,8 +251,7 @@ static uint32_t capset_size;
 struct async_slot {
     uint8_t *base;
     uint64_t physical;
-    /* Which submission this slot went out as, so its memory can be reused once
-       the device has got that far. 0 while the slot has never been used. */
+
     uint64_t sequence;
 };
 
@@ -347,16 +262,12 @@ static unsigned async_errors_reported;
 
 static int async_ready(void) { return async_arena != NULL; }
 
-/* A slot whose submission the device has finished with, or NULL. */
 static struct async_slot *async_take_slot(void) {
     virtio_queue_reclaim(&control);
     for (unsigned index = 0; index < ASYNC_SLOTS; index++) {
         struct async_slot *slot = &async_slots[index];
         if (slot->sequence > control.completed) continue;
         if (slot->sequence) {
-            /* Its answer arrived while nobody was looking. Reading it now is
-               late, but a host refusing every command is worth saying out loud
-               once rather than never. */
             const struct virtio_gpu_ctrl_hdr *answer =
                 (const struct virtio_gpu_ctrl_hdr *)(slot->base + ASYNC_REQUEST_BYTES +
                                                      ASYNC_PAYLOAD_BYTES);
@@ -371,10 +282,6 @@ static struct async_slot *async_take_slot(void) {
     return NULL;
 }
 
-/*
- * Post without waiting. -1 when there is no slot free or the payload will not
- * fit one, which is the caller's cue to use the waiting path instead.
- */
 static int submit_async(uint32_t request_bytes, const void *payload,
                         uint32_t payload_bytes) {
     if (!async_ready() || request_bytes > ASYNC_REQUEST_BYTES) return -1;
@@ -409,7 +316,6 @@ static int submit_async(uint32_t request_bytes, const void *payload,
     return 0;
 }
 
-/* Everything posted, finished. What DRM_IOCTL_VIRTGPU_WAIT is. */
 int virtgpu_flush_pending(void) {
     if (!ready) return 0;
     return virtio_queue_drain(&control);
@@ -444,51 +350,48 @@ static void begin(uint32_t type) {
     request.hdr.type = type;
 }
 
-/*
- * Tell the host which guest pages are a resource's storage.
- *
- * A resource is created empty: it exists on the host as a description with no
- * bytes behind it, and this is what says where the bytes are. The pages stay
- * the guest's -- the host reads them when a transfer says to, and nothing here
- * copies anything.
- *
- * `bytes` is the resource's real size, which is not the size of the pages
- * holding it: a 250x250 texture is 250000 bytes and lives in 62 pages of
- * 253952. Describing all of that as backing makes the host refuse every
- * transfer -- "IOV data size exceeds resource capacity" -- because it is being
- * handed more storage than the resource it belongs to can hold. So the last
- * page is described by the part of it that is actually the resource.
- */
 static int attach_backing(uint32_t resource, const uint64_t *pages,
                           uint64_t page_count, uint64_t bytes) {
-    if (!page_count || page_count > MAX_BACKING_PAGES) return -1;
+    if (!page_count || page_count > 0xFFFFFFFFULL) return -1;
     if (!bytes || bytes > page_count * 4096ULL) bytes = page_count * 4096ULL;
+    uint64_t entries = 1;
+    for (uint64_t index = 1; index < page_count; index++)
+        if (pages[index] != pages[index - 1] + 4096ULL) entries++;
+    struct virtio_gpu_mem_entry *table = backing;
+    uint64_t discarded = 0;
+    if (entries > BACKING_ENTRIES) {
+        table = (struct virtio_gpu_mem_entry *)dma_alloc(entries * sizeof(*table), 0, &discarded);
+        if (!table) return -1;
+    }
     uint64_t remaining = bytes;
-    for (uint64_t index = 0; index < page_count; index++) {
-        backing[index].address = pages[index];
-        backing[index].length = remaining > 4096ULL ? 4096U : (uint32_t)remaining;
-        backing[index].padding = 0;
-        remaining -= backing[index].length;
+    uint64_t used = 0;
+    for (uint64_t index = 0; index < page_count && remaining; index++) {
+        uint32_t length = remaining > 4096ULL ? 4096U : (uint32_t)remaining;
+        if (used && table[used - 1].address + table[used - 1].length == pages[index] &&
+            table[used - 1].length <= 0xFFFFFFFFU - length) {
+            table[used - 1].length += length;
+        } else {
+            table[used].address = pages[index];
+            table[used].length = length;
+            table[used].padding = 0;
+            used++;
+        }
+        remaining -= length;
     }
     begin(VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING);
     request.attach.resource_id = resource;
-    request.attach.nr_entries = (uint32_t)page_count;
-    if (submit_async(sizeof(request.attach), backing,
-                     (uint32_t)(page_count * sizeof(backing[0]))) == 0) return 0;
-    return submit(sizeof(request.attach), backing,
-                  (uint32_t)(page_count * sizeof(backing[0])),
-                  sizeof(struct virtio_gpu_ctrl_hdr));
+    request.attach.nr_entries = (uint32_t)used;
+    int status;
+    if (table == backing && submit_async(sizeof(request.attach), table,
+                                         (uint32_t)(used * sizeof(table[0]))) == 0)
+        status = 0;
+    else
+        status = submit(sizeof(request.attach), table, (uint32_t)(used * sizeof(table[0])),
+                        sizeof(struct virtio_gpu_ctrl_hdr));
+    if (table != backing) dma_free(table, entries * sizeof(*table));
+    return status;
 }
 
-/*
- * Round-trip the queue and read back the size the host says the display is.
- *
- * That size is not the mode: the host answers with its own window once
- * something has told it how big that is, so it moves when a window is dragged
- * and disagrees with the mode the bootloader set. Nothing here scans out at it
- * -- the scanout rect is the framebuffer's -- so this is a probe that the
- * device answers at all, and the size is kept only to be asked for.
- */
 static int query_display_info(void) {
     begin(VIRTIO_GPU_CMD_GET_DISPLAY_INFO);
     if (submit(sizeof(request.hdr), NULL, 0, sizeof(response)) != 0) return -1;
@@ -501,19 +404,6 @@ static int query_display_info(void) {
     return -1;
 }
 
-/*
- * Ask the host what its 3D can do.
- *
- * The device says how many capsets it has in its configuration space and
- * describes them one at a time by index; the id is what a capset turns out to
- * be, not something to ask for. virgl2 is preferred wherever it appears
- * because it is what mesa asks for, and having only the original means a host
- * too old for anything current.
- *
- * The contents are not read here. They are a blob mesa parses and the kernel
- * only has to hand over intact, so this records which one to fetch and how big
- * it is; fetching waits until something asks.
- */
 static void query_capsets(void) {
     uint32_t count = virtio_config_read32(&device, VIRTIO_GPU_CONFIG_NUM_CAPSETS);
     for (uint32_t index = 0; index < count; index++) {
@@ -524,9 +414,7 @@ static void query_capsets(void) {
 
         uint32_t id = response.capset_info.capset_id;
         if (id != VIRTIO_GPU_CAPSET_VIRGL && id != VIRTIO_GPU_CAPSET_VIRGL2) continue;
-        /* One that will not fit in the reply buffer cannot be handed over, and
-           a capset that arrives truncated is worse than one that never
-           arrives: mesa would read capabilities out of uninitialised bytes. */
+
         if (response.capset_info.capset_max_size > MAX_CAPSET_BYTES) continue;
         if (capset_id == VIRTIO_GPU_CAPSET_VIRGL2 && id == VIRTIO_GPU_CAPSET_VIRGL)
             continue;
@@ -559,9 +447,7 @@ int virtgpu_get_capset(uint32_t id, uint32_t version, void *out, uint32_t bytes)
     begin(VIRTIO_GPU_CMD_GET_CAPSET);
     request.capset.capset_id = id;
     request.capset.capset_version = version;
-    /* The device is told how much room the reply has, header included, and
-       fills what fits. Asking for less than the whole capset is how mesa reads
-       the prefix it understands of a newer one than it knows. */
+
     if (submit(sizeof(request.capset), NULL, 0,
                (uint32_t)sizeof(struct virtio_gpu_ctrl_hdr) + bytes) != 0) return -1;
     if (response.hdr.type != VIRTIO_GPU_RESP_OK_CAPSET) return -1;
@@ -569,24 +455,12 @@ int virtgpu_get_capset(uint32_t id, uint32_t version, void *out, uint32_t bytes)
     return 0;
 }
 
-/* --- 3D -------------------------------------------------------------------
- *
- * Everything below speaks for a context, which is one client's view of the
- * host's renderer: its own resources, its own GL state. mesa makes one per
- * screen and puts every command through it, so contexts live as long as the
- * process does and are not something to be economical with.
- *
- * Every command carries its context in the header, so there is no current
- * context to get wrong -- each one says whose it is.
- */
-
 int virtgpu_context_create(uint32_t context, const char *name) {
     if (!virtgpu_virgl_available() || !context) return -1;
 
     begin(VIRTIO_GPU_CMD_CTX_CREATE);
     request.ctx_create.hdr.ctx_id = context;
-    /* The name is for the host's own log when something goes wrong inside this
-       context, and is the only thing that tells two of them apart there. */
+
     uint32_t length = 0;
     if (name) {
         while (name[length] &&
@@ -607,12 +481,6 @@ void virtgpu_context_destroy(uint32_t context) {
     (void)submit(sizeof(request.hdr), NULL, 0, sizeof(struct virtio_gpu_ctrl_hdr));
 }
 
-/*
- * A resource is created outside any context and then attached to the ones
- * allowed to name it. A command buffer that refers to a resource its context
- * was never given is how virglrenderer gets asked to touch something it should
- * not, and it refuses -- so this is a permission, not a formality.
- */
 int virtgpu_context_attach(uint32_t context, uint32_t resource, int attach) {
     if (!virtgpu_virgl_available() || !context || !resource) return -1;
     begin(attach ? VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE
@@ -624,18 +492,6 @@ int virtgpu_context_attach(uint32_t context, uint32_t resource, int attach) {
                   sizeof(struct virtio_gpu_ctrl_hdr));
 }
 
-/*
- * A 3D resource: a texture, a vertex buffer, a render target.
- *
- * Unlike the 2D kind it has no fixed shape -- the target says whether it is a
- * buffer or an image or an array of them, the bind flags say what it may be
- * used as, and the host allocates to suit. Those values are mesa's and are
- * passed through untouched; nothing here interprets a format.
- *
- * Backing is optional in a way it is not for 2D. A resource the guest never
- * reads or writes -- a depth buffer, a render target -- lives only on the host
- * and wants no guest pages behind it at all.
- */
 uint32_t virtgpu_resource_create_3d(const struct virtgpu_resource_3d *spec,
                                     const uint64_t *pages, uint64_t page_count,
                                     uint64_t bytes) {
@@ -668,13 +524,6 @@ uint32_t virtgpu_resource_create_3d(const struct virtgpu_resource_3d *spec,
     return resource;
 }
 
-/*
- * Move part of a resource between the guest pages and the host's copy.
- *
- * Both directions happen: a texture is uploaded, and a buffer the shader wrote
- * is read back. The box is in the resource's own units, which for a buffer
- * means x and w are bytes rather than pixels.
- */
 int virtgpu_transfer_3d(uint32_t context, uint32_t resource,
                         const struct virtgpu_box *box, uint64_t offset,
                         uint32_t level, uint32_t stride, uint32_t layer_stride,
@@ -690,29 +539,16 @@ int virtgpu_transfer_3d(uint32_t context, uint32_t resource,
     request.transfer_3d.level = level;
     request.transfer_3d.stride = stride;
     request.transfer_3d.layer_stride = layer_stride;
-    /* Only the direction that hands data over. A transfer *from* the host is a
-       read the caller is about to make: posting it and returning would have
-       the caller read whatever was in the pages before. */
+
     if (to_host && submit_async(sizeof(request.transfer_3d), NULL, 0) == 0) return 0;
     return submit(sizeof(request.transfer_3d), NULL, 0,
                   sizeof(struct virtio_gpu_ctrl_hdr));
 }
 
-/*
- * Hand the host a command buffer to execute. This is where the rendering
- * actually happens.
- *
- * The buffer is virglrenderer's own encoding of GL work, built by mesa; the
- * kernel does not read a word of it beyond checking that it will fit.
- * Submitting is synchronous because the queue is -- by the time the device
- * hands the descriptor back the host has done the work. That is what makes a
- * fence unnecessary here, and a frame slower than it has to be.
- */
 int virtgpu_submit_3d(uint32_t context, const void *buffer, uint32_t bytes) {
     if (!virtgpu_virgl_available() || !context || !buffer) return -1;
     if (!bytes || bytes > MAX_COMMAND_BYTES) return -1;
-    /* The encoding is a stream of 32-bit words. A length that is not a whole
-       number of them would leave the host reading past the last one. */
+
     if (bytes % 4U) return -1;
 
     memcpy(commands, buffer, bytes);
@@ -724,19 +560,6 @@ int virtgpu_submit_3d(uint32_t context, const void *buffer, uint32_t bytes) {
                   sizeof(struct virtio_gpu_ctrl_hdr));
 }
 
-/*
- * What the device raises when it has put something on the used ring.
- *
- * It does not do the waiting -- submit() still watches the ring, because that
- * is where the answer is -- so all this does today is count. That is on
- * purpose: an interrupt arriving at all is the thing being proven here, and a
- * handler that also did the work would make a delivery failure look like a
- * hang rather than a number that stays at zero.
- *
- * It runs inside whatever the interrupted processor was doing, including a
- * submit() that is holding the kernel lock, so it must not touch anything
- * submit() is in the middle of.
- */
 static uint64_t completions;
 
 static void control_queue_interrupt(void *context) {
@@ -747,21 +570,13 @@ static void control_queue_interrupt(void *context) {
 uint64_t virtgpu_interrupt_count(void) { return completions; }
 
 int virtgpu_init(void) {
-    /* Asking for a feature the device does not offer is not an error -- what
-       is negotiated is the intersection -- so this is simply how the question
-       gets asked. */
     uint64_t granted = 0;
     if (virtio_pci_attach(&device, VIRTIO_GPU_DEVICE_ID,
                           1ULL << VIRTIO_GPU_F_VIRGL, &granted) != 0) return -1;
 
-    /* After the device is known to be there, and before anything is submitted
-       through them. */
-    /* The physical addresses are asked for and then dropped: submit() derives
-       them from the pointer, the same way it does for every other buffer it is
-       handed, and one path for that is better than two. */
     uint64_t discarded = 0;
     backing = (struct virtio_gpu_mem_entry *)dma_alloc(
-        sizeof(*backing) * MAX_BACKING_PAGES, 0, &discarded);
+        sizeof(*backing) * BACKING_ENTRIES, 0, &discarded);
     commands = (uint8_t *)dma_alloc(MAX_COMMAND_BYTES, 0, &discarded);
     async_arena = (uint8_t *)dma_alloc((uint64_t)ASYNC_SLOTS * ASYNC_SLOT_BYTES, 0,
                                        &async_arena_physical);
@@ -773,7 +588,7 @@ int virtgpu_init(void) {
             async_slots[index].sequence = 0;
         }
     if (!backing || !commands) {
-        if (backing) dma_free(backing, sizeof(*backing) * MAX_BACKING_PAGES);
+        if (backing) dma_free(backing, sizeof(*backing) * BACKING_ENTRIES);
         if (commands) dma_free(commands, MAX_COMMAND_BYTES);
         backing = NULL;
         commands = NULL;
@@ -781,10 +596,7 @@ int virtgpu_init(void) {
         return -1;
     }
     virgl = (granted & (1ULL << VIRTIO_GPU_F_VIRGL)) != 0;
-    /* Before the queue, because a queue is pointed at the device's vector as it
-       is set up and there is no second chance afterwards. A device that cannot
-       give one is not a failure: this driver polled from the day it was written
-       and still does. */
+
     virtio_pci_request_irq(&device, "virtio-gpu", control_queue_interrupt, NULL);
     if (virtio_pci_setup_queue(&device, &control, VIRTIO_GPU_CONTROL_QUEUE) != 0) {
         virtio_pci_set_failed(&device);
@@ -815,7 +627,7 @@ uint32_t virtgpu_display_height(void) { return display_height; }
 uint32_t virtgpu_resource_create(uint32_t width, uint32_t height,
                                  const uint64_t *pages, uint64_t page_count) {
     if (!ready || !width || !height || !pages) return 0;
-    if (!page_count || page_count > MAX_BACKING_PAGES) return 0;
+    if (!page_count) return 0;
 
     uint32_t resource = next_resource_id;
     begin(VIRTIO_GPU_CMD_RESOURCE_CREATE_2D);
@@ -826,8 +638,6 @@ uint32_t virtgpu_resource_create(uint32_t width, uint32_t height,
     if (submit(sizeof(request.create), NULL, 0, sizeof(struct virtio_gpu_ctrl_hdr)) != 0)
         return 0;
 
-    /* A 2D resource is exactly its pixels, and the caller sized the pages to
-       hold them. */
     if (attach_backing(resource, pages, page_count,
                        (uint64_t)width * 4ULL * height) != 0) {
         virtgpu_resource_destroy(resource);
@@ -870,14 +680,6 @@ int virtgpu_present(uint32_t resource, uint32_t width, uint32_t height,
         scanout_resource = resource;
     }
 
-    /*
-     * Whether the guest pages are the picture, or stale.
-     *
-     * A resource the CPU drew into has to be sent to the host before it can be
-     * shown. One the host itself rendered into is already right, and copying
-     * the guest's pages over it would replace the frame with whatever those
-     * pages last held -- which is nothing, so the screen would go black.
-     */
     if (upload) {
         begin(VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D);
         set_rect(&request.transfer.r, width, height);
@@ -894,8 +696,6 @@ int virtgpu_present(uint32_t resource, uint32_t width, uint32_t height,
     return submit(sizeof(request.flush), NULL, 0, sizeof(struct virtio_gpu_ctrl_hdr));
 }
 
-/* Created once, over the framebuffer the bootloader set up, and kept: the
-   pages never move and the resource costs nothing while it is not scanned out. */
 static uint32_t console_resource;
 
 int virtgpu_console_present(uint64_t physical, uint32_t stride_pixels,
