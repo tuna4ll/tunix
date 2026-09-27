@@ -833,6 +833,7 @@ static void set_exe_path(struct process *process, struct vfs_node *file,
 }
 
 static void free_process_struct(struct process *process) {
+    cred_groups_release(&process->cred);
     kfree(process->io_watch_fd);
     kfree(process->io_watch_events);
     ready_unlink(process);
@@ -1865,6 +1866,7 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame) {
     child->controlling_pty = parent->controlling_pty;
     child->umask = parent->umask;
     child->cred = parent->cred;
+    cred_groups_share(&child->cred);
     child->policy = parent->policy;
     child->rt_priority = parent->rt_priority;
     child->nice = parent->nice;
@@ -1965,6 +1967,7 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
     child->controlling_pty = parent->controlling_pty;
     child->umask = parent->umask;
     child->cred = parent->cred;
+    cred_groups_share(&child->cred);
     child->policy = parent->policy;
     child->rt_priority = parent->rt_priority;
     child->nice = parent->nice;

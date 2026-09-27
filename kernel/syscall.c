@@ -2479,10 +2479,12 @@ static int64_t sys_getgroups(int64_t size, uint64_t user_list) {
 
 static int64_t sys_setgroups(int64_t size, uint64_t user_list) {
     if (size < 0 || size > CRED_MAX_GROUPS) return -EINVAL;
-    uint32_t groups[CRED_MAX_GROUPS];
+    __attribute__((cleanup(release_bits))) uint64_t *groups =
+        (uint64_t *)kmalloc((size_t)size * sizeof(uint32_t) + 8U);
+    if (!groups) return -ENOMEM;
     if (size && copy_from_user(groups, user_list, (size_t)size * sizeof(uint32_t)) != 0)
         return -EFAULT;
-    return cred_set_groups((uint32_t)size, groups);
+    return cred_set_groups((uint32_t)size, (const uint32_t *)groups);
 }
 
 static int64_t sys_flock(int fd, int operation) {

@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "include/cred.h"
+#include "include/heap.h"
 #include "include/kstring.h"
 #include "include/process.h"
 #include "include/vfs.h"
@@ -266,12 +267,36 @@ int64_t cred_set_fsgid(uint32_t fsgid) {
     return previous;
 }
 
+static uint32_t *groups_references(uint32_t *groups) {
+    return groups - 2;
+}
+
+void cred_groups_share(struct credentials *cred) {
+    if (cred && cred->groups) groups_references(cred->groups)[0]++;
+}
+
+void cred_groups_release(struct credentials *cred) {
+    if (!cred || !cred->groups) return;
+    uint32_t *block = groups_references(cred->groups);
+    if (--block[0] == 0) kfree(block);
+    cred->groups = NULL;
+    cred->group_count = 0;
+}
+
 int64_t cred_set_groups(uint32_t count, const uint32_t *groups) {
     struct credentials *cred = cred_current();
     if (!cred) return -EPERM;
     if (count > CRED_MAX_GROUPS) return -EINVAL;
     if (!privileged(cred)) return -EPERM;
-    for (uint32_t index = 0; index < count; index++) cred->groups[index] = groups[index];
+    uint32_t *block = NULL;
+    if (count) {
+        block = (uint32_t *)kmalloc(((size_t)count + 2U) * sizeof(uint32_t));
+        if (!block) return -ENOMEM;
+        block[0] = 1;
+        memcpy(block + 2, groups, (size_t)count * sizeof(uint32_t));
+    }
+    cred_groups_release(cred);
+    cred->groups = block ? block + 2 : NULL;
     cred->group_count = count;
     return 0;
 }
