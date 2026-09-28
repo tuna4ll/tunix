@@ -10,7 +10,6 @@
 
 #define EAGAIN 11
 #define EMSGSIZE 90
-#define EVENTFS_MAX_SUBSCRIBERS 64U
 
 struct eventfs_subscriber {
     struct eventfs_subscriber *next;
@@ -162,7 +161,7 @@ static struct event_builder begin(const char *action) {
 
 struct eventfs_subscriber *eventfs_subscribe(enum eventfs_channel channel) {
     if (!initialized || channel <= 0 || channel >= EVENTFS_CHANNEL_COUNT ||
-        subscriber_count >= EVENTFS_MAX_SUBSCRIBERS || kernel_lock_shared_here())
+        kernel_lock_shared_here())
         return NULL;
     struct eventfs_subscriber *subscriber = kmalloc(sizeof(*subscriber));
     if (!subscriber) return NULL;
