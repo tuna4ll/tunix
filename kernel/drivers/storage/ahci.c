@@ -3,6 +3,8 @@
 #include "../../include/ahci.h"
 #include "../../include/block.h"
 #include "../../include/cpu.h"
+#include "../../include/dma.h"
+#include "../../include/heap.h"
 #include "../../include/kstring.h"
 #include "../../include/pci.h"
 #include "../../include/vmm.h"
@@ -56,7 +58,6 @@ extern void kprintf(const char *fmt, ...);
 
 #define AHCI_PRDT_ENTRIES 32U
 #define AHCI_MAX_SECTORS ((AHCI_PRDT_ENTRIES - 1U) * 4096U / BLOCK_SECTOR_SIZE)
-#define AHCI_MAX_PORTS 8U
 #define AHCI_WAIT_SPINS 40000000U
 
 #define PORT_PAGE_CL 0x000U
@@ -105,16 +106,7 @@ struct ahci_port {
     char name[16];
 };
 
-static uint64_t hba_base;
-static uint64_t hba_physical;
-static struct ahci_port ports[AHCI_MAX_PORTS];
 static unsigned port_count;
-
-static uint8_t port_dma[AHCI_MAX_PORTS][4096] __attribute__((aligned(4096)));
-
-static uint64_t static_physical(const void *address) {
-    return vmm_dma_physical(address, 4096);
-}
 
 static uint64_t buffer_physical(uint64_t address) {
     uint64_t cr3 = vmm_kernel_cr3();
@@ -282,22 +274,28 @@ static uint64_t identify_sectors(struct ahci_port *port) {
     return ((uint64_t)words[61] << 16) | words[60];
 }
 
-static void bring_up_port(unsigned index) {
-    if (port_count == AHCI_MAX_PORTS) return;
-    uint64_t registers = hba_base + PORT_BASE + (uint64_t)index * PORT_STRIDE;
+static void bring_up_port(uint64_t hba, unsigned index) {
+    uint64_t registers = hba + PORT_BASE + (uint64_t)index * PORT_STRIDE;
 
     uint32_t status = read32(registers + PORT_SSTS);
     if ((status & 0x0FU) != 3U || ((status >> 8) & 0x0FU) != 1U) return;
     if (read32(registers + PORT_SIG) != SIG_SATA) return;
 
-    struct ahci_port *port = &ports[port_count];
+    struct ahci_port *port = kmalloc(sizeof(*port));
+    if (!port) return;
     memset(port, 0, sizeof(*port));
     port->registers = registers;
 
-    if (stop_port(port) != 0) return;
+    if (stop_port(port) != 0) {
+        kfree(port);
+        return;
+    }
 
-    port->page = port_dma[port_count];
-    port->page_physical = static_physical(port->page);
+    port->page = dma_alloc_below(4096, 4096, DMA_LIMIT_32BIT, &port->page_physical);
+    if (!port->page) {
+        kfree(port);
+        return;
+    }
     memset(port->page, 0, 4096);
 
     uint64_t list_physical = port->page_physical + PORT_PAGE_CL;
@@ -314,44 +312,60 @@ static void bring_up_port(unsigned index) {
     port->sectors = identify_sectors(port);
     if (!port->sectors) {
         stop_port(port);
+        dma_free(port->page, 4096);
+        kfree(port);
         return;
     }
 
     struct block_device device;
     memset(&device, 0, sizeof(device));
     device.name[0] = 'a'; device.name[1] = 'h'; device.name[2] = 'c';
-    device.name[3] = 'i'; device.name[4] = (char)('0' + port_count);
+    device.name[3] = 'i';
+    unsigned at = 4;
+    char digits[8];
+    unsigned count = 0;
+    unsigned value = port_count;
+    do {
+        digits[count++] = (char)('0' + value % 10U);
+        value /= 10U;
+    } while (value);
+    while (count && at + 1 < sizeof(device.name)) device.name[at++] = digits[--count];
     device.sectors = port->sectors;
     device.read = ahci_read;
     device.write = ahci_write;
     device.flush = ahci_flush;
     device.context = port;
-    if (block_register(&device) < 0) return;
+    if (block_register(&device) < 0) {
+        stop_port(port);
+        dma_free(port->page, 4096);
+        kfree(port);
+        return;
+    }
     port_count++;
 }
 
 void ahci_init(void) {
     struct pci_device pci;
-    if (pci_find_class(AHCI_CLASS, AHCI_SUBCLASS, &pci) != 0) return;
-    if (pci.prog_if != AHCI_PROG_IF) return;
+    unsigned controllers = 0;
+    for (unsigned nth = 0; pci_find_nth_class(AHCI_CLASS, AHCI_SUBCLASS, nth, &pci) == 0; nth++) {
+        if (pci.prog_if != AHCI_PROG_IF) continue;
+        uint64_t abar = pci.bar[5] & ~0xFULL;
+        if (!abar) continue;
 
-    uint64_t abar = pci.bar[5] & ~0xFULL;
-    if (!abar) return;
+        pci_enable_bus_mastering(&pci);
+        uint64_t hba = vmm_map_device(abar, 0x2000U);
+        if (!hba) {
+            kprintf("AHCI: register window unavailable\n");
+            continue;
+        }
+        controllers++;
+        write32(hba + HBA_GHC, read32(hba + HBA_GHC) | HBA_GHC_AE);
 
-    pci_enable_bus_mastering(&pci);
-    hba_physical = abar;
-    hba_base = vmm_map_device(abar, 0x2000U);
-    if (!hba_base) {
-        kprintf("AHCI: register window unavailable\n");
-        return;
+        uint32_t implemented = read32(hba + HBA_PI);
+        for (unsigned index = 0; index < 32U; index++) {
+            if (!(implemented & (1U << index))) continue;
+            bring_up_port(hba, index);
+        }
     }
-
-    write32(hba_base + HBA_GHC, read32(hba_base + HBA_GHC) | HBA_GHC_AE);
-
-    uint32_t implemented = read32(hba_base + HBA_PI);
-    for (unsigned index = 0; index < 32U; index++) {
-        if (!(implemented & (1U << index))) continue;
-        bring_up_port(index);
-    }
-    if (!port_count) kprintf("AHCI: controller present, no disks\n");
+    if (controllers && !port_count) kprintf("AHCI: controller present, no disks\n");
 }
