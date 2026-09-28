@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #define IRQ_VECTOR_FIRST 0x40U
-#define IRQ_VECTOR_COUNT 16U
+#define IRQ_VECTOR_COUNT 128U
 
 typedef void (*irq_handler_fn)(void *context);
 

@@ -2,6 +2,8 @@
 
 #include "../../include/cpu.h"
 #include "../../include/dma.h"
+#include "../../include/heap.h"
+#include "../../include/kstring.h"
 #include "../../include/vmm.h"
 #include "aarch64.h"
 
@@ -37,18 +39,19 @@ extern void kprintf(const char *fmt, ...);
 #define LPI_ID_BITS 14U
 #define LPI_COUNT 8192U
 #define LPI_ENABLED_PRIORITY 0xA1U
-#define EVENT_BITS 4U
+#define EVENT_BITS_WANTED 7U
 #define MAX_DEVICE_BITS 16U
-#define MAX_DEVICES 32U
 
 static uint64_t its;
 static uint64_t command_queue;
 static uint64_t command_offset;
 static unsigned itt_entry_bytes;
 static unsigned device_bits;
+static unsigned event_bits;
 static uint8_t *lpi_properties;
-static uint32_t devices[MAX_DEVICES];
+static uint32_t *devices;
 static unsigned device_count;
+static unsigned device_capacity;
 static int ready;
 
 static uint32_t read32(uint64_t base, uint32_t offset) {
@@ -120,6 +123,8 @@ void its_init(void) {
     if (!(typer & 1ULL)) return;
     itt_entry_bytes = (unsigned)((typer >> 4) & 0xFULL) + 1U;
     device_bits = (unsigned)((typer >> 13) & 0x1FULL) + 1U;
+    event_bits = (unsigned)((typer >> 8) & 0x1FULL) + 1U;
+    if (event_bits > EVENT_BITS_WANTED) event_bits = EVENT_BITS_WANTED;
     if (device_bits > MAX_DEVICE_BITS) device_bits = MAX_DEVICE_BITS;
     if (allocate_tables() != 0) return;
 
@@ -155,15 +160,23 @@ int its_ready(void) {
 }
 
 int its_bind_msi(uint32_t device_id, uint32_t event, uint64_t *address) {
-    if (!ready || event >= (1U << EVENT_BITS) || device_id >= (1U << device_bits)) return -1;
+    if (!ready || event >= (1U << event_bits) || device_id >= (1U << device_bits)) return -1;
     unsigned known = 0;
     while (known < device_count && devices[known] != device_id) known++;
     if (known == device_count) {
-        if (device_count >= MAX_DEVICES) return -1;
+        if (device_count == device_capacity) {
+            unsigned capacity = device_capacity ? device_capacity * 2 : 32;
+            uint32_t *grown = (uint32_t *)kmalloc(capacity * sizeof(*grown));
+            if (!grown) return -1;
+            if (device_count) memcpy(grown, devices, device_count * sizeof(*grown));
+            kfree(devices);
+            devices = grown;
+            device_capacity = capacity;
+        }
         uint64_t table_physical;
-        if (!dma_alloc((uint64_t)itt_entry_bytes << EVENT_BITS, 4096ULL, &table_physical))
+        if (!dma_alloc((uint64_t)itt_entry_bytes << event_bits, 4096ULL, &table_physical))
             return -1;
-        if (send_command(COMMAND_MAPD | ((uint64_t)device_id << 32), EVENT_BITS - 1U,
+        if (send_command(COMMAND_MAPD | ((uint64_t)device_id << 32), event_bits - 1U,
                          TABLE_VALID | table_physical) != 0)
             return -1;
         devices[device_count++] = device_id;

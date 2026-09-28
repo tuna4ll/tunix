@@ -7,9 +7,8 @@
 .extern kernel_unlock_from_isr
 .extern smp_flush_interrupt
 
-/* struct cpu, as percpu.h lays it out. */
 .set CPU_KERNEL_RSP, 0
-/* struct interrupt_frame, as interrupt.h lays it out. */
+
 .set FRAME_BYTES, 184
 .set FRAME_CS, 152
 
@@ -253,25 +252,8 @@ isr31:
     push 31
     jmp isr_common_stub
 
-/*
- * Whether GS has to be swapped is decided by the privilege the frame came
- * from, and on the way out by the privilege it is going to -- which are not
- * always the same frame. An interrupt taken in the idle loop arrives at CPL 0
- * with the block already in GS, and leaves through a process's frame at CPL 3,
- * so it swaps on the way out and not on the way in. Reading each end's own CS
- * is what makes that work without a special case.
- */
 isr_common_stub:
-    /*
-     * The direction flag belongs to whoever was interrupted, and the C below
-     * assumes it is clear -- the ABI says so, and the compiler acts on it: a
-     * struct assignment or a memset is a `rep movs`/`rep stos`, which walks
-     * backwards when DF is set and writes over whatever lies *before* the
-     * destination. User code sets it legitimately (musl's memmove does, for an
-     * overlapping copy) and an interrupt landing in that window used to hand
-     * the flag straight to the kernel. The syscall path never had the problem:
-     * FMASK clears DF on the way in. This is the interrupt path's FMASK.
-     */
+
     cld
     test byte ptr [rsp + 24], 3
     jz 1f
@@ -301,16 +283,13 @@ isr_common_stub:
     sub rsp, 8
     call isr_handler
     add rsp, 8
-    /* isr_handler may have moved the frame onto the kernel stack of a
-       different process; follow it. cs sits at offset 152 of the frame, and a
-       user cs is what says the move happened. */
+
     test byte ptr [rsp + FRAME_CS], 3
     jz 3f
     mov rsp, qword ptr gs:[CPU_KERNEL_RSP]
     sub rsp, FRAME_BYTES
 3:
-    /* Only now: isr_handler came back with the lock still held, because its
-       own return address was on the stack this may have just moved off. */
+
     sub rsp, 8
     call kernel_unlock_from_isr
     add rsp, 8
@@ -339,7 +318,6 @@ isr_common_stub:
 2:
     iretq
 
-/* Legacy 8259 PIC IRQ0 timer, remapped to IDT vector 0x20. */
 .global irq0
 irq0:
     cli
@@ -347,7 +325,6 @@ irq0:
     push 32
     jmp isr_common_stub
 
-/* Legacy 8259 PIC IRQ1, remapped to IDT vector 0x21. */
 .global irq1
 irq1:
     cli
@@ -355,7 +332,6 @@ irq1:
     push 33
     jmp isr_common_stub
 
-/* Legacy 8259 PIC IRQ12 PS/2 auxiliary device, remapped to IDT vector 0x2c. */
 .global irq12
 irq12:
     cli
@@ -363,9 +339,6 @@ irq12:
     push 44
     jmp isr_common_stub
 
-/* The ACPI system control interrupt, on IDT vector 0x30. Where the firmware
-   actually raises it is a global interrupt number the FADT names, so unlike
-   the legacy lines above it there is no fixed IRQ to call this. */
 .global irq_sci
 irq_sci:
     cli
@@ -373,8 +346,6 @@ irq_sci:
     push 0x30
     jmp isr_common_stub
 
-/* The local APIC timer, which is what preempts every processor the PIT is not
-   wired to. */
 .global irq_lapic_timer
 irq_lapic_timer:
     cli
@@ -382,15 +353,6 @@ irq_lapic_timer:
     push 0xF0
     jmp isr_common_stub
 
-/*
- * One processor asking the others to drop their cached translations.
- *
- * A stub of its own rather than a case in the common one, because it must not
- * go near the kernel lock: the processor that sent it is holding the lock and
- * waiting for this answer, so taking the lock here would be waiting for the
- * waiter. Only the caller-saved registers are spilled -- the C it calls
- * preserves the rest.
- */
 .global irq_invalidate_tlb
 irq_invalidate_tlb:
     cli
@@ -424,18 +386,7 @@ irq_invalidate_tlb:
 2:
     iretq
 
-/*
- * The device vectors, 0x40 through 0x4F.
- *
- * Unlike every stub above, these are not one device each: a driver asks irq.c
- * for one and is given whichever is free, so what a vector means is decided at
- * boot rather than here. They are otherwise ordinary interrupts and go through
- * the common stub, which is what puts them under the kernel lock.
- *
- * Generated rather than written out sixteen times, and collected into a table
- * so idt.c can install them in a loop instead of naming each one.
- */
-.irp number, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+.irp number, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127
 .global irq_device\number
 irq_device\number:
     cli
@@ -447,7 +398,7 @@ irq_device\number:
 .section .rodata
 .global irq_device_stubs
 irq_device_stubs:
-.irp number, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+.irp number, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127
     .quad irq_device\number
 .endr
 .section .text
