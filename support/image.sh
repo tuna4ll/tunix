@@ -97,7 +97,7 @@ fi
 dd if="$WORK/esp.img" of="$IMAGE" bs=4M oflag=seek_bytes \
 	seek=$(( ESP_START * 512 )) conv=notrunc status=none
 dd if="$WORK/root.img" of="$IMAGE" bs=4M oflag=seek_bytes \
-	seek=$(( ROOT_START * 512 )) conv=notrunc status=none
+	seek=$(( ROOT_START * 512 )) conv=notrunc,sparse status=none
 
 [ "$ARCH" != x86_64 ] || "$LIMINE_DIR/limine" bios-install "$IMAGE"
 

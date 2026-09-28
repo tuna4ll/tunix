@@ -39,8 +39,12 @@ $compiler -std=gnu11 -Wall -Wextra -Werror -O2 -static -nostdlib -nostartfiles \
     [ -n "${RESOLUTION:-}" ] && echo "    resolution: $RESOLUTION"
 } > "$work/limine.conf"
 
-ARCH="$arch" TABLE=gpt ROOT_SLACK_MIB=16 support/image.sh "$work/tunix.img" "$kernel" \
-    "$limine" "$work/limine.conf" "$work/root" >/dev/null
+if [ -n "${KEEP_IMAGE:-}" ] && [ -f "$KEEP_IMAGE" ]; then
+    cp "$KEEP_IMAGE" "$work/tunix.img"
+else
+    ARCH="$arch" TABLE=gpt ROOT_SLACK_MIB="${ROOT_SLACK_MIB:-16}" support/image.sh "$work/tunix.img" \
+        "$kernel" "$limine" "$work/limine.conf" "$work/root" >/dev/null
+fi
 
 if [ "$arch" = aarch64 ]; then
     timeout "$wait" qemu-system-aarch64 -M virt,gic-version=3 -cpu cortex-a72 \
@@ -74,4 +78,5 @@ if ! grep -a "^$show" "$work/serial.log"; then
     tail -80 "$work/serial.log"
     exit 1
 fi
+[ -n "${KEEP_IMAGE:-}" ] && cp "$work/tunix.img" "$KEEP_IMAGE"
 grep -aq "^$marker PASS" "$work/serial.log"
