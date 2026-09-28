@@ -50,7 +50,7 @@ static int scan_gpt(int disk, const struct block_device *device) {
     uint32_t entry_bytes = read_le32(header + 84);
     if (!entry_bytes || entry_bytes > BLOCK_SECTOR_SIZE ||
         BLOCK_SECTOR_SIZE % entry_bytes != 0) return -1;
-    if (entries > 128U) entries = 128U;
+    if (entries > 65536U) entries = 65536U;
 
     uint32_t per_sector = BLOCK_SECTOR_SIZE / entry_bytes;
     uint8_t sector[BLOCK_SECTOR_SIZE];
