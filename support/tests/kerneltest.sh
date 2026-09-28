@@ -61,7 +61,7 @@ else
     [ "$accel" = kvm ] && cpu=host
     timeout "$wait" qemu-system-x86_64 -machine "q35,accel=$accel" -cpu "$cpu" \
         -smp "${CPUS:-1}" -m "${MEMORY:-4G}" -drive "format=raw,file=$work/tunix.img,if=none,id=disk0" \
-        -device ide-hd,drive=disk0,bus=ide.0 -display none -no-reboot ${QEMU_EXTRA:-} \
+        -device ide-hd,drive=disk0,bus=ide.0,bootindex=0 -display none -no-reboot ${QEMU_EXTRA:-} \
         -serial "file:$work/serial.log" >/dev/null 2>&1 &
 fi
 qemu_pid=$!

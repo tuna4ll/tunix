@@ -952,6 +952,43 @@ static void test_persistence(void) {
                  (u64)got);
 }
 
+static void test_devices(void) {
+    static char entries[65536];
+    s64 fd = call4(NR_OPENAT, AT_FDCWD, "/dev", O_RDONLY | O_DIRECTORY, 0);
+    u64 disks = 0, partitions = 0;
+    int twelfth = 0;
+    for (;;) {
+        s64 length = call3(NR_GETDENTS64, fd, entries, sizeof(entries));
+        if (length <= 0) break;
+        for (s64 at = 0; at < length;) {
+            unsigned short record = *(unsigned short *)(entries + at + 16);
+            const char *name = entries + at + 19;
+            if (name[0] == 's' && name[1] == 'd' && name[2] >= 'a' && name[2] <= 'z') {
+                u64 end = 2;
+                while (name[end] >= 'a' && name[end] <= 'z') end++;
+                if (!name[end]) disks++;
+                else partitions++;
+                if (name[end] == '1' && name[end + 1] == '2' && !name[end + 2]) twelfth = 1;
+            }
+            at += record;
+        }
+    }
+    call1(NR_CLOSE, fd);
+    report_value("devices-disks", disks >= 30, disks);
+    report_value("devices-partitions", partitions >= 12 && twelfth, partitions);
+    static char sector[512];
+    fd = call4(NR_OPENAT, AT_FDCWD, "/dev/sdac", O_RDONLY, 0);
+    s64 got = fd >= 0 ? call3(NR_READ, fd, sector, sizeof(sector)) : -1;
+    report_value("devices-read-sdac", got == 512 && sector[0] == 'T' && sector[5] == 'U', (u64)got);
+    call1(NR_CLOSE, fd);
+    fd = call4(NR_OPENAT, AT_FDCWD, "/proc/interrupts", O_RDONLY, 0);
+    got = call3(NR_READ, fd, entries, sizeof(entries) - 1);
+    u64 lines = 0;
+    for (s64 at = 0; at < got; at++) if (entries[at] == '\n') lines++;
+    call1(NR_CLOSE, fd);
+    report_value("devices-interrupt-lines", lines > 17, lines);
+}
+
 #ifndef LIMITS_TESTS
 #define LIMITS_TESTS 0x3FFU
 #endif
@@ -974,6 +1011,7 @@ static void run(u64 *stack) {
     if (LIMITS_TESTS & 0x100U) test_pools();
     if (LIMITS_TESTS & 0x200U) test_cpus();
     if (LIMITS_TESTS & 0x400U) test_persistence();
+    if (LIMITS_TESTS & 0x800U) test_devices();
     print(failures ? "LIMITSTEST FAIL\n" : "LIMITSTEST PASS\n");
     call1(NR_EXIT_GROUP, 0);
     for (;;) { }
