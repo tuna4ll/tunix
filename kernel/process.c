@@ -106,10 +106,12 @@ static struct process *rt_heads[PROCESS_RT_PRIORITY_MAX + 1];
 static uint64_t rt_bitmap[2];
 static uint32_t rq_seed = 0x9E3779B9U;
 
+static uint64_t rq_sequence;
+
 static int rq_before(const struct process *a, const struct process *b) {
     int64_t delta = (int64_t)(a->virtual_runtime_ns - b->virtual_runtime_ns);
     if (delta) return delta < 0;
-    return a->pid < b->pid;
+    return (int64_t)(a->rq_order - b->rq_order) < 0;
 }
 
 static void rq_rotate_up(struct process *node) {
@@ -136,6 +138,7 @@ static void rq_insert(struct process *node) {
     rq_seed ^= rq_seed >> 17;
     rq_seed ^= rq_seed << 5;
     node->rq_priority = rq_seed;
+    node->rq_order = ++rq_sequence;
     node->rq_left = node->rq_right = node->rq_parent = NULL;
     struct process **link = &rq_root;
     struct process *parent = NULL;
@@ -1093,14 +1096,23 @@ static struct process *next_runnable(struct process *after) {
     struct process *realtime = first_allowed_rt(0, NULL);
     if (realtime) return realtime;
 
+    (void)after;
     struct process *first = rq_first();
-    if (first) {
-        uint64_t lowest = first->virtual_runtime_ns;
-        if (after && after->state == PROCESS_RUNNING && !after->rt_priority &&
-            (int64_t)(after->virtual_runtime_ns - lowest) < 0)
-            lowest = after->virtual_runtime_ns;
-        if ((int64_t)(lowest - minimum_virtual_runtime) > 0) minimum_virtual_runtime = lowest;
+    uint64_t lowest = first ? first->virtual_runtime_ns : 0;
+    int have_lowest = first != NULL;
+    unsigned cpus = smp_cpu_count();
+    for (unsigned index = 0; index < cpus && index < SMP_MAX_CPUS; index++) {
+        struct cpu *cpu = percpu_slot(index);
+        if (!cpu || !cpu->online) continue;
+        struct process *running = cpu_running(cpu);
+        if (!running || running->state != PROCESS_RUNNING || running->rt_priority) continue;
+        if (!have_lowest || (int64_t)(running->virtual_runtime_ns - lowest) < 0) {
+            lowest = running->virtual_runtime_ns;
+            have_lowest = 1;
+        }
     }
+    if (have_lowest && (int64_t)(lowest - minimum_virtual_runtime) > 0)
+        minimum_virtual_runtime = lowest;
     return first_allowed_ordinary(NULL);
 }
 

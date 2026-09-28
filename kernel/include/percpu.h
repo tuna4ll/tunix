@@ -57,6 +57,10 @@ static inline struct cpu *cpu_current(void) {
 #endif
 
 struct cpu *percpu_slot(unsigned index);
+
+static inline struct process *cpu_running(const struct cpu *cpu) {
+    return cpu->current;
+}
 void percpu_activate(unsigned index);
 unsigned percpu_online_count(void);
 void percpu_mark_online(unsigned index);

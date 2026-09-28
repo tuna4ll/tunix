@@ -199,6 +199,7 @@ struct process {
     struct process *rq_right;
     struct process *rq_parent;
     uint64_t rq_weight;
+    uint64_t rq_order;
     uint32_t rq_priority;
     int rq_level;
     uint64_t wait_hash_value;
