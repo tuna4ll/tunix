@@ -58,6 +58,7 @@ typedef unsigned int u32;
 #define NR_SCHED_GETAFFINITY 204
 #define NR_GETCPU 309
 #define NR_SCHED_YIELD 24
+#define NR_SYNC 162
 
 
 static inline s64 call6(s64 n, s64 a, s64 b, s64 c, s64 d, s64 e, s64 f) {
@@ -126,6 +127,7 @@ static inline s64 call6(s64 n, s64 a, s64 b, s64 c, s64 d, s64 e, s64 f) {
 #define NR_SCHED_GETAFFINITY 123
 #define NR_GETCPU 168
 #define NR_SCHED_YIELD 124
+#define NR_SYNC 81
 
 
 static inline s64 call6(s64 n, s64 a, s64 b, s64 c, s64 d, s64 e, s64 f) {
@@ -909,8 +911,49 @@ static void test_cpus(void) {
     call3(NR_SCHED_SETAFFINITY, 0, sizeof(mask), mask);
 }
 
+static int persisted_path(u64 depth, char *out) {
+    u64 at = append(out, 0, "/persist");
+    for (u64 level = 0; level < depth; level++) at = append(out, at, "/d");
+    return (int)at;
+}
+
+static void test_persistence(void) {
+    static char path[8192];
+    char name[256];
+    fill(name, 'p', 255);
+    s64 done = call4(NR_OPENAT, AT_FDCWD, "/persist/done", O_RDONLY, 0);
+    if (done < 0) {
+        call3(NR_MKDIRAT, AT_FDCWD, "/persist", 0755);
+        int made = 1;
+        for (u64 level = 1; level <= 200; level++) {
+            persisted_path(level, path);
+            if (call3(NR_MKDIRAT, AT_FDCWD, path, 0755) != 0) made = 0;
+        }
+        u64 at = persisted_path(200, path);
+        at = append(path, at, "/");
+        append(path, at, name);
+        s64 fd = call4(NR_OPENAT, AT_FDCWD, path, O_WRONLY | O_CREAT, 0644);
+        if (fd < 0 || call3(NR_WRITE, fd, "deep", 4) != 4) made = 0;
+        call1(NR_CLOSE, fd);
+        fd = call4(NR_OPENAT, AT_FDCWD, "/persist/done", O_WRONLY | O_CREAT, 0644);
+        call1(NR_CLOSE, fd);
+        call0(NR_SYNC);
+        report_value("persist-written", made && fd >= 0, (u64)at);
+        return;
+    }
+    call1(NR_CLOSE, done);
+    u64 at = persisted_path(200, path);
+    at = append(path, at, "/");
+    append(path, at, name);
+    s64 fd = call4(NR_OPENAT, AT_FDCWD, path, O_RDONLY, 0);
+    char back[8] = {0};
+    s64 got = fd >= 0 ? call3(NR_READ, fd, back, sizeof(back)) : -1;
+    report_value("persist-deep-long-read-back", got == 4 && back[0] == 'd' && back[3] == 'p',
+                 (u64)got);
+}
+
 #ifndef LIMITS_TESTS
-#define LIMITS_TESTS 0xFFFFFFFFU
+#define LIMITS_TESTS 0x3FFU
 #endif
 #ifndef LIMITS_PROCESSES
 #define LIMITS_PROCESSES 2000
@@ -930,6 +973,7 @@ static void run(u64 *stack) {
     if (LIMITS_TESTS & 0x80U) test_exec_arguments();
     if (LIMITS_TESTS & 0x100U) test_pools();
     if (LIMITS_TESTS & 0x200U) test_cpus();
+    if (LIMITS_TESTS & 0x400U) test_persistence();
     print(failures ? "LIMITSTEST FAIL\n" : "LIMITSTEST PASS\n");
     call1(NR_EXIT_GROUP, 0);
     for (;;) { }
