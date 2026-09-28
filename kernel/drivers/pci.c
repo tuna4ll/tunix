@@ -5,8 +5,10 @@
 #endif
 #if defined(__aarch64__)
 #include "../arch/aarch64/aarch64.h"
+#include "../include/heap.h"
 #include "../include/irq.h"
 #endif
+#include "../include/heap.h"
 #include "../include/kstring.h"
 #include "../include/pci.h"
 #include "../include/sysfs.h"
@@ -184,10 +186,7 @@ static void fill_device(struct pci_device *out, uint8_t bus, uint8_t slot, uint8
     }
 }
 
-
 static void fill_device(struct pci_device *out, uint8_t bus, uint8_t slot, uint8_t function);
-
-#define PCI_MAX_BINDINGS 24
 
 struct pci_binding {
     uint8_t bus;
@@ -196,11 +195,12 @@ struct pci_binding {
     struct pci_driver *driver;
 };
 
-static struct pci_binding bindings[PCI_MAX_BINDINGS];
+static struct pci_binding *bindings;
+static unsigned binding_capacity;
 static struct pci_driver *drivers;
 
 static struct pci_binding *binding_of(uint8_t bus, uint8_t slot, uint8_t function) {
-    for (unsigned index = 0; index < PCI_MAX_BINDINGS; index++) {
+    for (unsigned index = 0; index < binding_capacity; index++) {
         struct pci_binding *binding = &bindings[index];
         if (binding->driver && binding->bus == bus && binding->slot == slot &&
             binding->function == function)
@@ -225,15 +225,23 @@ static int identifier_matches(const struct pci_device_id *id,
 }
 
 static void bind_device(const struct pci_device *device, struct pci_driver *driver) {
-    for (unsigned index = 0; index < PCI_MAX_BINDINGS; index++) {
-        if (bindings[index].driver) continue;
-        bindings[index].bus = device->bus;
-        bindings[index].slot = device->slot;
-        bindings[index].function = device->function;
-        bindings[index].driver = driver;
-        sysfs_pci_bound(device, driver->name);
-        return;
+    unsigned index = 0;
+    while (index < binding_capacity && bindings[index].driver) index++;
+    if (index == binding_capacity) {
+        unsigned capacity = binding_capacity ? binding_capacity * 2 : 32;
+        struct pci_binding *grown = kmalloc(capacity * sizeof(*grown));
+        if (!grown) return;
+        memset(grown, 0, capacity * sizeof(*grown));
+        if (binding_capacity) memcpy(grown, bindings, binding_capacity * sizeof(*grown));
+        kfree(bindings);
+        bindings = grown;
+        binding_capacity = capacity;
     }
+    bindings[index].bus = device->bus;
+    bindings[index].slot = device->slot;
+    bindings[index].function = device->function;
+    bindings[index].driver = driver;
+    sysfs_pci_bound(device, driver->name);
 }
 
 static void probe_one(const struct pci_device *device, void *context) {
@@ -260,7 +268,7 @@ int pci_register_driver(struct pci_driver *driver) {
 
 void pci_unregister_driver(struct pci_driver *driver) {
     if (!driver) return;
-    for (unsigned index = 0; index < PCI_MAX_BINDINGS; index++) {
+    for (unsigned index = 0; index < binding_capacity; index++) {
         struct pci_binding *binding = &bindings[index];
         if (binding->driver != driver) continue;
         struct pci_device device;

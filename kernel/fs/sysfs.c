@@ -5,6 +5,7 @@
 #include "../include/pci.h"
 #include "../include/virtgpu.h"
 
+#include "../include/heap.h"
 #include "../include/kstring.h"
 #include "../include/module.h"
 #include "../include/net/netlink.h"
@@ -27,16 +28,15 @@ static void append_number(char *out, size_t limit, size_t *used, uint32_t value)
     while (count-- > 0 && *used + 1 < limit) out[(*used)++] = digits[count];
 }
 
-#define SYSFS_MAX_DEVICES 64
-
 struct sysfs_device {
     char devpath[64];
     char properties[256];
     size_t properties_length;
 };
 
-static struct sysfs_device sysfs_devices[SYSFS_MAX_DEVICES];
+static struct sysfs_device **sysfs_devices;
 static size_t sysfs_device_count;
+static size_t sysfs_device_capacity;
 static uint32_t sysfs_sequence;
 
 static void uevent_send(const struct sysfs_device *device, const char *action) {
@@ -142,9 +142,20 @@ static void pci_device_path(char *out, size_t limit, const struct pci_device *de
 static struct sysfs_device *register_uevent(const char *devpath, const char *file,
                                             const char *properties, size_t length) {
     struct vfs_node *node = vfs_create_file(file, properties, length, 0, 1);
-    if (!node || sysfs_device_count >= SYSFS_MAX_DEVICES) return NULL;
-
-    struct sysfs_device *device = &sysfs_devices[sysfs_device_count++];
+    if (!node) return NULL;
+    if (sysfs_device_count == sysfs_device_capacity) {
+        size_t capacity = sysfs_device_capacity ? sysfs_device_capacity * 2 : 32;
+        struct sysfs_device **grown = kmalloc(capacity * sizeof(*grown));
+        if (!grown) return NULL;
+        if (sysfs_device_count) memcpy(grown, sysfs_devices, sysfs_device_count * sizeof(*grown));
+        kfree(sysfs_devices);
+        sysfs_devices = grown;
+        sysfs_device_capacity = capacity;
+    }
+    struct sysfs_device *device = kmalloc(sizeof(*device));
+    if (!device) return NULL;
+    memset(device, 0, sizeof(*device));
+    sysfs_devices[sysfs_device_count++] = device;
     size_t at = 0;
     append_string(device->devpath, sizeof(device->devpath), &at, devpath);
     device->devpath[at] = '\0';
@@ -343,7 +354,7 @@ void sysfs_pci_bound(const struct pci_device *device, const char *driver) {
     append_string(devpath, sizeof(devpath), &used, slot);
     devpath[used] = '\0';
     for (size_t index = 0; index < sysfs_device_count; index++) {
-        struct sysfs_device *entry = &sysfs_devices[index];
+        struct sysfs_device *entry = sysfs_devices[index];
         if (strcmp(entry->devpath, devpath) != 0) continue;
         size_t at = 0;
         append_string(entry->properties, sizeof(entry->properties), &at, "DRIVER=");
@@ -519,7 +530,6 @@ static void publish_device(const char *name, const char *devname,
     (void)vfs_create_symlink(devnum, target, 0);
 }
 
-
 static int64_t module_section_read(struct vfs_node *node, uint64_t offset, size_t size,
                                    void *output);
 
@@ -691,17 +701,17 @@ static void remove_published(const char *name) {
     if (node && node->parent) (void)vfs_detach_child(node->parent, node);
 
     for (size_t index = 0; index < sysfs_device_count; index++) {
-        if (strcmp(sysfs_devices[index].devpath + 9, name) != 0) continue;
-        uevent_send(&sysfs_devices[index], "remove");
-        sysfs_devices[index].devpath[0] = '\0';
+        if (strcmp(sysfs_devices[index]->devpath + 9, name) != 0) continue;
+        uevent_send(sysfs_devices[index], "remove");
+        sysfs_devices[index]->devpath[0] = '\0';
         break;
     }
 }
 
 static void announce(const char *name) {
     for (size_t index = 0; index < sysfs_device_count; index++) {
-        if (strcmp(sysfs_devices[index].devpath + 9, name) != 0) continue;
-        uevent_send(&sysfs_devices[index], "add");
+        if (strcmp(sysfs_devices[index]->devpath + 9, name) != 0) continue;
+        uevent_send(sysfs_devices[index], "add");
         return;
     }
 }
