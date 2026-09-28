@@ -9,6 +9,7 @@
 #include "../../include/pmm.h"
 #include "../../include/vmm.h"
 #include "../../include/time.h"
+#include "../../include/heap.h"
 #include "../../include/kstring.h"
 #include "../../include/input.h"
 #include "../../include/usb.h"
@@ -224,11 +225,8 @@ extern void kprintf(const char *fmt, ...);
 #define HUB_MAX_PORTS 15U
 #define HUB_MAX_DEPTH 5U
 
-
-#define MAX_CONTROLLERS 4U
-#define MAX_DEVICES 32U
-#define MAX_HID 4U
-#define MAX_STORAGE 16U
+#define MAX_DEVICES 255U
+#define MAX_HID 16U
 #define MAX_PORTS 256U
 #define RECOVERY_LIMIT 8U
 
@@ -371,7 +369,7 @@ struct xhci_host {
     int command_done;
     uint32_t command_code;
     uint32_t command_slot;
-    struct usb_device devices[MAX_DEVICES];
+    struct usb_device *devices;
     struct usb_device *by_slot[256];
     uint64_t root_changed[4];
     uint64_t root_seen[MAX_PORTS];
@@ -385,10 +383,12 @@ struct storage_entry {
     struct usb_device *device;
 };
 
-static struct xhci_host hosts[MAX_CONTROLLERS];
+static struct xhci_host **hosts;
 static unsigned host_count;
-static struct storage_entry storage_table[MAX_STORAGE];
+static unsigned host_capacity;
+static struct storage_entry *storage_table;
 static int storage_entries;
+static int storage_capacity;
 static int servicing;
 static int booted;
 
@@ -529,14 +529,14 @@ static int completed(uint32_t code) {
 
 static void mark_subtree(struct xhci_host *host, struct usb_device *device) {
     device->disconnected = 1;
-    for (unsigned index = 0; index < MAX_DEVICES; index++) {
+    for (unsigned index = 0; index < host->max_slots; index++) {
         struct usb_device *child = &host->devices[index];
         if (child->used && child->parent == device && !child->disconnected) mark_subtree(host, child);
     }
 }
 
 static void mark_hub_ports(struct xhci_host *host, struct usb_device *hub, uint32_t changed) {
-    for (unsigned index = 0; index < MAX_DEVICES; index++) {
+    for (unsigned index = 0; index < host->max_slots; index++) {
         struct usb_device *child = &host->devices[index];
         if (child->used && child->started && child->parent == hub &&
             child->parent_port < 32U && (changed & (1U << child->parent_port)))
@@ -593,7 +593,7 @@ static void transfer_event(struct xhci_host *host, const struct trb *event) {
 }
 
 static void mark_disconnected(struct xhci_host *host, uint32_t port) {
-    for (unsigned index = 0; index < MAX_DEVICES; index++) {
+    for (unsigned index = 0; index < host->max_slots; index++) {
         struct usb_device *device = &host->devices[index];
         if (device->used && device->started && device->root_port == port) device->disconnected = 1;
     }
@@ -827,7 +827,7 @@ static void name_device(struct usb_device *device) {
 }
 
 static struct usb_device *allocate_device(struct xhci_host *host) {
-    for (unsigned index = 0; index < MAX_DEVICES; index++) {
+    for (unsigned index = 0; index < host->max_slots; index++) {
         struct usb_device *device = &host->devices[index];
         if (device->used) continue;
         memset(device, 0, sizeof(*device));
@@ -856,7 +856,7 @@ static void release_device_memory(struct usb_device *device) {
 static void remove_device(struct usb_device *device) {
     if (!device || !device->used) return;
     struct xhci_host *host = device->host;
-    for (unsigned index = 0; index < MAX_DEVICES; index++) {
+    for (unsigned index = 0; index < host->max_slots; index++) {
         struct usb_device *child = &host->devices[index];
         if (child->used && child->parent == device) remove_device(child);
     }
@@ -1020,7 +1020,15 @@ static int start_hid(struct usb_device *device) {
 }
 
 static int start_storage(struct usb_device *device) {
-    if (storage_entries >= (int)MAX_STORAGE) return -1;
+    if (storage_entries == storage_capacity) {
+        int capacity = storage_capacity ? storage_capacity * 2 : 8;
+        struct storage_entry *grown = kmalloc((size_t)capacity * sizeof(*grown));
+        if (!grown) return -1;
+        if (storage_entries) memcpy(grown, storage_table, (size_t)storage_entries * sizeof(*grown));
+        kfree(storage_table);
+        storage_table = grown;
+        storage_capacity = capacity;
+    }
     device->bulk_in_dci = (uint32_t)(device->bulk_in_address & ENDPOINT_NUMBER_MASK) * 2U + 1U;
     device->bulk_out_dci = (uint32_t)(device->bulk_out_address & ENDPOINT_NUMBER_MASK) * 2U;
     if (ring_create(device->host, &device->bulk_in) != 0 ||
@@ -1209,7 +1217,7 @@ fail:
 
 static struct usb_device *child_on(struct xhci_host *host, struct usb_device *parent,
                                    uint32_t port) {
-    for (unsigned index = 0; index < MAX_DEVICES; index++) {
+    for (unsigned index = 0; index < host->max_slots; index++) {
         struct usb_device *device = &host->devices[index];
         if (!device->used || device->parent != parent) continue;
         if (parent ? device->parent_port == port : device->root_port == port) return device;
@@ -1361,7 +1369,7 @@ static void recover_hub(struct usb_device *device) {
 
 static void service(struct xhci_host *host) {
     if (!host->present || host->failed) return;
-    for (unsigned index = 0; index < MAX_DEVICES; index++) {
+    for (unsigned index = 0; index < host->max_slots; index++) {
         struct usb_device *device = &host->devices[index];
         if (!device->used) continue;
         for (unsigned function = 0; function < device->hid_count; function++)
@@ -1374,7 +1382,7 @@ static void service(struct xhci_host *host) {
         host->root_changed[port / 64U] &= ~bit;
         service_root_port(host, port);
     }
-    for (unsigned index = 0; index < MAX_DEVICES; index++) {
+    for (unsigned index = 0; index < host->max_slots; index++) {
         struct usb_device *device = &host->devices[index];
         if (!device->used || !device->hub || !device->hub_changed) continue;
         uint32_t changed = device->hub_changed;
@@ -1387,7 +1395,7 @@ static void service(struct xhci_host *host) {
 static int any_work(struct xhci_host *host) {
     for (unsigned word = 0; word < 4U; word++)
         if (host->root_changed[word]) return 1;
-    for (unsigned index = 0; index < MAX_DEVICES; index++) {
+    for (unsigned index = 0; index < host->max_slots; index++) {
         struct usb_device *device = &host->devices[index];
         if (!device->used) continue;
         if (device->hub && (device->hub_changed || device->hub_needs_recovery)) return 1;
@@ -1398,11 +1406,11 @@ static int any_work(struct xhci_host *host) {
 }
 
 void xhci_poll(void) {
-    for (unsigned index = 0; index < host_count; index++) pump(&hosts[index]);
+    for (unsigned index = 0; index < host_count; index++) pump(hosts[index]);
     if (servicing || !booted) return;
     servicing = 1;
     for (unsigned index = 0; index < host_count; index++)
-        if (any_work(&hosts[index])) service(&hosts[index]);
+        if (any_work(hosts[index])) service(hosts[index]);
     servicing = 0;
 }
 
@@ -1426,9 +1434,10 @@ static void interrupt(void *context) {
 }
 
 static int hid_present(uint8_t protocol) {
-    for (unsigned host = 0; host < host_count; host++) {
-        for (unsigned index = 0; index < MAX_DEVICES; index++) {
-            struct usb_device *device = &hosts[host].devices[index];
+    for (unsigned number = 0; number < host_count; number++) {
+        struct xhci_host *host = hosts[number];
+        for (unsigned index = 0; index < host->max_slots; index++) {
+            struct usb_device *device = &host->devices[index];
             if (!device->used) continue;
             for (unsigned function = 0; function < device->hid_count; function++)
                 if (device->hid[function].protocol == protocol) return 1;
@@ -1629,7 +1638,10 @@ static int bring_up(struct xhci_host *host) {
         kprintf("XHCI%u: controller reports no slots or no ports\n", host->index);
         return -1;
     }
-    if (host->max_slots > 255U) host->max_slots = 255U;
+    if (host->max_slots > MAX_DEVICES) host->max_slots = MAX_DEVICES;
+    host->devices = kmalloc(host->max_slots * sizeof(struct usb_device));
+    if (!host->devices) return -1;
+    memset(host->devices, 0, host->max_slots * sizeof(struct usb_device));
 
     take_from_firmware(host);
     if (reset_host(host) != 0) return -1;
@@ -1648,28 +1660,39 @@ static int bring_up(struct xhci_host *host) {
 
 int xhci_init(void) {
     struct pci_device device;
-    for (unsigned nth = 0; host_count < MAX_CONTROLLERS; nth++) {
+    for (unsigned nth = 0;; nth++) {
         if (pci_find_nth_class(PCI_CLASS_SERIAL_BUS, PCI_SUBCLASS_USB, nth, &device) != 0) break;
         if (device.prog_if != PCI_PROG_IF_XHCI) continue;
-        struct xhci_host *host = &hosts[host_count];
+        if (host_count == host_capacity) {
+            unsigned capacity = host_capacity ? host_capacity * 2 : 4;
+            struct xhci_host **grown = kmalloc(capacity * sizeof(*grown));
+            if (!grown) break;
+            if (host_count) memcpy(grown, hosts, host_count * sizeof(*grown));
+            kfree(hosts);
+            hosts = grown;
+            host_capacity = capacity;
+        }
+        struct xhci_host *host = kmalloc(sizeof(*host));
+        if (!host) break;
         memset(host, 0, sizeof(*host));
         host->index = host_count;
         host->pci = device;
         if (bring_up(host) != 0) {
-            host->present = 0;
+            kfree(host->devices);
+            kfree(host);
             continue;
         }
-        host_count++;
+        hosts[host_count++] = host;
     }
     if (!host_count) return -1;
 
     uint64_t settle = now() + FIRST_SCAN_NS;
     while (now() < settle) {
-        for (unsigned index = 0; index < host_count; index++) pump(&hosts[index]);
+        for (unsigned index = 0; index < host_count; index++) pump(hosts[index]);
         cpu_relax();
     }
     for (unsigned index = 0; index < host_count; index++) {
-        struct xhci_host *host = &hosts[index];
+        struct xhci_host *host = hosts[index];
         for (uint32_t port = 1; port <= host->max_ports && port < MAX_PORTS; port++) {
             if (!(read32(port_register(host, port)) & PORTSC_CONNECTED)) continue;
             host->root_seen[port] = now() - DEBOUNCE_NS;
@@ -1677,7 +1700,7 @@ int xhci_init(void) {
         }
         for (unsigned round = 0; round < HUB_MAX_DEPTH + 1U; round++) {
             int pending = 0;
-            for (unsigned slot = 0; slot < MAX_DEVICES; slot++) {
+            for (unsigned slot = 0; slot < host->max_slots; slot++) {
                 struct usb_device *hub = &host->devices[slot];
                 if (!hub->used || !hub->hub || !hub->hub_changed) continue;
                 pending = 1;
@@ -1694,8 +1717,8 @@ int xhci_init(void) {
     }
     int devices = 0;
     for (unsigned index = 0; index < host_count; index++)
-        for (unsigned slot = 0; slot < MAX_DEVICES; slot++)
-            if (hosts[index].devices[slot].used) devices++;
+        for (unsigned slot = 0; slot < hosts[index]->max_slots; slot++)
+            if (hosts[index]->devices[slot].used) devices++;
     if (!devices) kprintf("XHCI: no devices attached\n");
     usb_register_host(&xhci_usb_host);
     booted = 1;

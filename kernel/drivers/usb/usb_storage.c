@@ -4,6 +4,7 @@
 #include "../../include/devfs.h"
 #include "../../include/partition.h"
 #include "../../include/dma.h"
+#include "../../include/heap.h"
 #include "../../include/kstring.h"
 #include "../../include/pmm.h"
 #include "../../include/usb_storage.h"
@@ -23,7 +24,6 @@ extern void kprintf(const char *fmt, ...);
 #define SCSI_READ_10 0x28U
 #define SCSI_WRITE_10 0x2AU
 
-#define USB_STORAGE_MAX 4
 #define STAGING_BYTES 16384U
 #define STAGING_SECTORS (STAGING_BYTES / BLOCK_SECTOR_SIZE)
 #define STAGING_WRITE_SECTORS (4096U / BLOCK_SECTOR_SIZE)
@@ -54,7 +54,6 @@ struct usb_disk {
     char name[16];
 };
 
-static struct usb_disk disks[USB_STORAGE_MAX];
 static int disk_count;
 
 static uint8_t *wrapper_page;
@@ -256,8 +255,9 @@ static int ensure_pages(void) {
 }
 
 static int attach_disk(int index) {
-    if (disk_count >= USB_STORAGE_MAX || ensure_pages() != 0) return -1;
-    struct usb_disk *disk = &disks[disk_count];
+    if (ensure_pages() != 0) return -1;
+    struct usb_disk *disk = kmalloc(sizeof(*disk));
+    if (!disk) return -1;
     memset(disk, 0, sizeof(*disk));
     disk->controller_index = index;
     disk->sectors_per_block = 1;
@@ -268,14 +268,17 @@ static int attach_disk(int index) {
     command[4] = 36;
     if (run_command(disk, command, sizeof(command), 1, 36) != 0) {
         kprintf("USB-STORAGE: device %d did not answer INQUIRY\n", index);
+        kfree(disk);
         return -1;
     }
     if (wait_until_ready(disk) != 0) {
         kprintf("USB-STORAGE: device %d never became ready\n", index);
+        kfree(disk);
         return -1;
     }
     if (read_capacity(disk) != 0) {
         kprintf("USB-STORAGE: device %d has no readable capacity\n", index);
+        kfree(disk);
         return -1;
     }
 
@@ -283,7 +286,15 @@ static int attach_disk(int index) {
     struct block_device device;
     memset(&device, 0, sizeof(device));
     device.name[0] = 'u'; device.name[1] = 's'; device.name[2] = 'b';
-    device.name[3] = (char)('0' + disk_count);
+    unsigned at = 3;
+    char digits[8];
+    unsigned count = 0;
+    unsigned value = (unsigned)disk_count;
+    do {
+        digits[count++] = (char)('0' + value % 10U);
+        value /= 10U;
+    } while (value);
+    while (count && at + 1 < sizeof(device.name)) device.name[at++] = digits[--count];
     device.sectors = disk->sectors;
     device.read = usb_read;
     device.write = usb_write;
@@ -291,7 +302,7 @@ static int attach_disk(int index) {
     device.context = disk;
     int registered = block_register(&device);
     if (registered < 0) {
-        disk->used = 0;
+        kfree(disk);
         return -1;
     }
     disk_count++;
