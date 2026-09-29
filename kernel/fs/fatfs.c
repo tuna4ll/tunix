@@ -7,28 +7,6 @@
 #include "../include/time.h"
 #include "../include/vfs.h"
 
-/*
- * FAT12/16/32, read and write.
- *
- * The tree is built once at mount from the directory entries; file contents
- * stay where they are and move through the cluster chain on demand. A file's
- * node carries a `struct fat_file` in fs_private saying which volume it is on
- * and where its chain starts, which is all a read or a write needs.
- *
- * Three things about FAT are worth stating rather than discovering:
- *
- *  - Cluster numbers start at 2. Cluster 0 and 1 are not storage, they hold the
- *    media descriptor, so the first data cluster is 2 and every offset
- *    calculation subtracts it.
- *  - FAT12 packs entries into 12 bits, so an entry can straddle a sector. It is
- *    read as two bytes from a byte offset of cluster + cluster/2 and then
- *    shifted or masked depending on whether the cluster is odd.
- *  - A long name is stored *before* the 8.3 entry it belongs to, in reverse
- *    order, as a run of entries with attribute 0x0F. Reading a directory
- *    forwards therefore means collecting the pieces and only using them when
- *    the short entry finally arrives.
- */
-
 extern void kprintf(const char *fmt, ...);
 
 #define EINVAL 22
@@ -46,7 +24,6 @@ extern void kprintf(const char *fmt, ...);
 
 #define FAT_ENTRY_FREE 0xE5U
 #define FAT_ENTRY_END 0x00U
-#define FAT_MAX_VOLUMES 4
 #define FAT_MAX_NAME 255
 
 struct fat_volume {
@@ -55,33 +32,28 @@ struct fat_volume {
     uint32_t bytes_per_sector;
     uint32_t sectors_per_cluster;
     uint32_t cluster_bytes;
-    uint32_t fat_start;          /* first FAT, in sectors */
+    uint32_t fat_start;
     uint32_t fat_sectors;
     uint32_t fat_count;
-    uint32_t root_start;         /* FAT12/16 fixed root, in sectors */
+    uint32_t root_start;
     uint32_t root_sectors;
-    uint32_t data_start;         /* first sector of cluster 2 */
+    uint32_t data_start;
     uint32_t cluster_count;
-    uint32_t root_cluster;       /* FAT32 */
-    int bits;                    /* 12, 16 or 32 */
+    uint32_t root_cluster;
+    int bits;
     struct vfs_node *root;
 };
 
-/* What a FAT node needs to find itself again. Directories carry one too, so a
-   file created inside one knows where to write its entry. */
 struct fat_file {
     struct fat_volume *volume;
     uint32_t first_cluster;
-    /* Where this file's 8.3 directory entry lives, so a size change can be
-       written back: the cluster holding it (0 for a fixed root) and the byte
-       offset of the entry within that directory. */
+
     uint32_t entry_cluster;
     uint32_t entry_offset;
 };
 
-static struct fat_volume volumes[FAT_MAX_VOLUMES];
-
-/* --- raw access ---------------------------------------------------------- */
+static struct fat_volume **volumes;
+static int volume_capacity;
 
 static int read_sectors(struct fat_volume *volume, uint64_t sector,
                         uint32_t count, void *out) {
@@ -105,8 +77,6 @@ static int cluster_is_end(struct fat_volume *volume, uint32_t value) {
     return value >= 0x0FFFFFF8U;
 }
 
-/* --- the allocation table ------------------------------------------------ */
-
 static int fat_entry_read(struct fat_volume *volume, uint32_t cluster, uint32_t *out) {
     uint8_t sector[BLOCK_SECTOR_SIZE * 2];
     uint64_t offset;
@@ -125,7 +95,7 @@ static int fat_entry_read(struct fat_volume *volume, uint32_t cluster, uint32_t 
 
     uint64_t sector_index = offset / volume->bytes_per_sector;
     uint32_t within = (uint32_t)(offset % volume->bytes_per_sector);
-    /* Two sectors, because a FAT12 entry is allowed to straddle the boundary. */
+
     if (read_sectors(volume, volume->fat_start + sector_index, 2, sector) != 0)
         return -1;
 
@@ -153,9 +123,6 @@ static int fat_entry_write(struct fat_volume *volume, uint32_t cluster, uint32_t
     uint64_t sector_index = offset / volume->bytes_per_sector;
     uint32_t within = (uint32_t)(offset % volume->bytes_per_sector);
 
-    /* Every copy of the table is updated, which is the point of there being
-       more than one: a reader that trusts the second copy must not find it
-       describing a different filesystem. */
     for (uint32_t copy = 0; copy < volume->fat_count; copy++) {
         uint64_t base = volume->fat_start + (uint64_t)copy * volume->fat_sectors;
         if (read_sectors(volume, base + sector_index, 2, sector) != 0) return -1;
@@ -173,7 +140,7 @@ static int fat_entry_write(struct fat_volume *volume, uint32_t cluster, uint32_t
             uint32_t existing = 0;
             for (uint32_t index = 0; index < 4U; index++)
                 existing |= (uint32_t)sector[within + index] << (index * 8U);
-            /* The top four bits are reserved and must be carried through. */
+
             uint32_t merged = (existing & 0xF0000000U) | (value & 0x0FFFFFFFU);
             for (uint32_t index = 0; index < 4U; index++)
                 sector[within + index] = (uint8_t)(merged >> (index * 8U));
@@ -197,13 +164,6 @@ static uint32_t fat_allocate_cluster(struct fat_volume *volume) {
     return 0;
 }
 
-/* --- walking a chain ----------------------------------------------------- */
-
-/*
- * The cluster holding byte `offset` of a chain that starts at `first`, or 0
- * past the end. When `grow` is set a chain that runs out is extended instead,
- * which is what makes a write past the end of a file work.
- */
 static uint32_t cluster_at(struct fat_volume *volume, uint32_t first,
                            uint64_t offset, int grow) {
     if (first < 2U) return 0;
@@ -222,8 +182,6 @@ static uint32_t cluster_at(struct fat_volume *volume, uint32_t first,
     }
     return cluster;
 }
-
-/* --- reading and writing a file ------------------------------------------ */
 
 static int64_t fat_node_read(struct vfs_node *node, uint64_t offset,
                              size_t size, void *buffer) {
@@ -257,7 +215,6 @@ static int64_t fat_node_read(struct vfs_node *node, uint64_t offset,
 static int fat_write_directory_entry(struct fat_file *file, uint32_t size,
                                      uint32_t first_cluster);
 
-/* Free every cluster of a chain from `cluster` on. */
 static int release_chain(struct fat_volume *volume, uint32_t cluster) {
     while (cluster >= 2U && !cluster_is_end(volume, cluster)) {
         uint32_t next = 0;
@@ -268,13 +225,6 @@ static int release_chain(struct fat_volume *volume, uint32_t cluster) {
     return 0;
 }
 
-/*
- * Resize a file on the medium. Growing is left to the write path, which
- * allocates as it goes; shrinking has to happen here, because nothing else
- * would ever free the clusters past the new end. Leaving them attached is not
- * harmless -- the chain then says the file is longer than its own size, which
- * is exactly what fsck calls a cross-linked file.
- */
 static int fat_node_truncate(struct vfs_node *node, uint64_t length) {
     struct fat_file *file = (struct fat_file *)node->fs_private;
     if (!file) return -1;
@@ -283,7 +233,6 @@ static int fat_node_truncate(struct vfs_node *node, uint64_t length) {
     if (length > 0xFFFFFFFFULL) return -1;
 
     if (length >= node->length) {
-        /* Nothing to give back; the size in the entry is all that changes. */
         return fat_write_directory_entry(file, (uint32_t)length, file->first_cluster);
     }
 
@@ -294,7 +243,6 @@ static int fat_node_truncate(struct vfs_node *node, uint64_t length) {
         return fat_write_directory_entry(file, 0, 0);
     }
 
-    /* The last cluster the new length still needs, then everything after it. */
     uint32_t last = cluster_at(volume, first, length - 1U, 0);
     if (!last) return -1;
     uint32_t next = 0;
@@ -317,7 +265,6 @@ static int64_t fat_node_write(struct vfs_node *node, uint64_t offset,
     size_t moved = 0;
     uint8_t staging[BLOCK_SECTOR_SIZE];
 
-    /* An empty file has no chain yet, so the first write makes one. */
     if (file->first_cluster < 2U && size) {
         uint32_t cluster = fat_allocate_cluster(volume);
         if (!cluster) return -1;
@@ -335,7 +282,6 @@ static int64_t fat_node_write(struct vfs_node *node, uint64_t offset,
         if (chunk > size - moved) chunk = size - moved;
 
         if (chunk != volume->bytes_per_sector) {
-            /* A partial sector keeps whatever is either side of the change. */
             if (read_sectors(volume, sector, 1, staging) != 0) return -1;
         }
         memcpy(staging + sector_offset, in + moved, chunk);
@@ -351,12 +297,6 @@ static int64_t fat_node_write(struct vfs_node *node, uint64_t offset,
     return (int64_t)moved;
 }
 
-/* --- directory entries --------------------------------------------------- */
-
-/*
- * Read `count` bytes from a directory, which is a chain like any other except
- * that the fixed root of a FAT12/16 volume is a flat run of sectors instead.
- */
 static int directory_read(struct fat_volume *volume, uint32_t cluster,
                           uint64_t offset, uint32_t count, void *out) {
     if (!cluster) {
@@ -385,7 +325,6 @@ static int directory_write(struct fat_volume *volume, uint32_t cluster,
                          count, in);
 }
 
-/* Put a file's size and starting cluster back into its 8.3 entry. */
 static int fat_write_directory_entry(struct fat_file *file, uint32_t size,
                                      uint32_t first_cluster) {
     struct fat_volume *volume = file->volume;
@@ -406,7 +345,6 @@ static int fat_write_directory_entry(struct fat_file *file, uint32_t size,
     return directory_write(volume, file->entry_cluster, sector_offset, 1, sector);
 }
 
-/* An 8.3 name as a normal string: trailing pad removed, the dot put back. */
 static void short_name(const uint8_t *entry, char *out) {
     size_t length = 0;
     for (int index = 0; index < 8; index++) {
@@ -421,8 +359,7 @@ static void short_name(const uint8_t *entry, char *out) {
         }
     }
     out[length] = '\0';
-    /* A name stored entirely in upper case is displayed in lower, which is what
-       every other FAT driver does and what makes paths typed by hand work. */
+
     int upper = 1;
     for (size_t index = 0; index < length; index++)
         if (out[index] >= 'a' && out[index] <= 'z') upper = 0;
@@ -431,9 +368,6 @@ static void short_name(const uint8_t *entry, char *out) {
             if (out[index] >= 'A' && out[index] <= 'Z') out[index] += 32;
 }
 
-/* The thirteen UTF-16 units a long-name entry carries, as far as they are
-   representable here; anything above Latin-1 becomes '_' rather than a name
-   that cannot be typed. */
 static void long_name_piece(const uint8_t *entry, char *out) {
     static const int offsets[13] = {1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30};
     for (int index = 0; index < 13; index++) {
@@ -483,11 +417,6 @@ static int attach_entry(struct fat_volume *volume, struct vfs_node *directory,
     return 0;
 }
 
-/*
- * Walk one directory and build its subtree. Depth is capped because a corrupt
- * or hostile volume can point a directory at itself, and the recursion has a
- * kernel stack under it.
- */
 static struct vfs_node *build_directory(struct fat_volume *volume, uint32_t cluster,
                                         const char *name, struct vfs_node *parent,
                                         int depth) {
@@ -524,8 +453,6 @@ static struct vfs_node *build_directory(struct fat_volume *volume, uint32_t clus
             if (entry[0] == FAT_ENTRY_FREE) { have_long = 0; continue; }
 
             if ((entry[11] & FAT_ATTR_LONG_NAME) == FAT_ATTR_LONG_NAME) {
-                /* Pieces arrive last-first, so each one is put in front of
-                   whatever has been collected so far. */
                 char piece[16];
                 long_name_piece(entry, piece);
                 char merged[FAT_MAX_NAME + 16];
@@ -555,19 +482,6 @@ static struct vfs_node *build_directory(struct fat_volume *volume, uint32_t clus
     return directory;
 }
 
-
-/* --- creating a file ----------------------------------------------------- */
-
-/*
- * Turn a name into the 8.3 form a directory entry stores. Anything FAT cannot
- * hold -- lower case, spaces, a second dot, more than eleven characters -- is
- * folded or dropped, and the result is only ever the *short* name: the long one
- * the caller asked for is what the VFS node keeps, and what a reader of this
- * volume on another system sees is the short one. That is a real limitation and
- * it is here rather than hidden, because writing long-name entries means
- * checksums over the short name and a run of entries that has to stay in step
- * with it.
- */
 static void make_short_name(const char *name, uint8_t *out) {
     memset(out, ' ', 11);
     const char *dot = NULL;
@@ -593,18 +507,10 @@ static void make_short_name(const char *name, uint8_t *out) {
     }
 }
 
-/*
- * The creation date and time in the two packed fields a directory entry uses:
- * a date of day, month and year-since-1980, and a time whose seconds field
- * counts twos. Zero is not a neutral value here -- it is month 0 of day 0,
- * which every tool that reads the volume reports as an invalid date -- so the
- * clock is asked, and a machine whose clock predates 1980 gets 1980 rather than
- * a field that underflows.
- */
 static void entry_timestamp(uint16_t *date_out, uint16_t *time_out) {
     struct tunix_rtc_time now;
     if (time_get_rtc(&now) != 0 || now.year < 1980) {
-        *date_out = (uint16_t)((1U << 5) | 1U);   /* 1980-01-01 */
+        *date_out = (uint16_t)((1U << 5) | 1U);
         *time_out = 0;
         return;
     }
@@ -614,7 +520,6 @@ static void entry_timestamp(uint16_t *date_out, uint16_t *time_out) {
                            ((uint32_t)now.minute << 5) | ((uint32_t)now.second / 2U));
 }
 
-/* The first entry in a directory that is free or has never been used. */
 static int find_free_entry(struct fat_volume *volume, uint32_t cluster,
                            uint64_t *offset_out) {
     uint8_t sector[BLOCK_SECTOR_SIZE];
@@ -635,16 +540,10 @@ static int find_free_entry(struct fat_volume *volume, uint32_t cluster,
     return -1;
 }
 
-/*
- * A node the VFS has just created inside a FAT directory. It arrives with no
- * contents and no place on the medium; this gives it both, and swaps its
- * handlers over so every later read and write goes to the disk instead of to
- * the memory buffer it would otherwise have used.
- */
 static int fat_adopt_child(struct vfs_node *directory, struct vfs_node *child) {
     struct fat_file *parent = (struct fat_file *)directory->fs_private;
     if (!parent || !child) return -1;
-    if (child->fs_private) return 0;             /* already ours */
+    if (child->fs_private) return 0;
     if ((child->flags & 0xFFU) != VFS_FILE) return -1;
     struct fat_volume *volume = parent->volume;
     if (!volume->device->write) return -1;
@@ -662,24 +561,22 @@ static int fat_adopt_child(struct vfs_node *directory, struct vfs_node *child) {
     int was_last = entry[0] == FAT_ENTRY_END;
     memset(entry, 0, 32);
     make_short_name(child->name, entry);
-    entry[11] = 0;                                /* a plain file */
+    entry[11] = 0;
     uint16_t date = 0, stamp = 0;
     entry_timestamp(&date, &stamp);
-    entry[14] = (uint8_t)stamp;                   /* created */
+    entry[14] = (uint8_t)stamp;
     entry[15] = (uint8_t)(stamp >> 8);
     entry[16] = (uint8_t)date;
     entry[17] = (uint8_t)(date >> 8);
-    entry[18] = (uint8_t)date;                    /* last accessed */
+    entry[18] = (uint8_t)date;
     entry[19] = (uint8_t)(date >> 8);
-    entry[22] = (uint8_t)stamp;                   /* last modified */
+    entry[22] = (uint8_t)stamp;
     entry[23] = (uint8_t)(stamp >> 8);
     entry[24] = (uint8_t)date;
     entry[25] = (uint8_t)(date >> 8);
     if (directory_write(volume, parent->first_cluster, sector_offset, 1, sector) != 0)
         return -1;
 
-    /* An entry taken from the end of the directory has to be followed by a new
-       end marker, or every reader stops at the entry that used to be last. */
     if (was_last && within + 64U <= volume->bytes_per_sector) {
         sector[within + 32U] = FAT_ENTRY_END;
         if (directory_write(volume, parent->first_cluster, sector_offset, 1, sector) != 0)
@@ -693,8 +590,6 @@ static int fat_adopt_child(struct vfs_node *directory, struct vfs_node *child) {
     file->entry_cluster = parent->first_cluster;
     file->entry_offset = (uint32_t)offset;
 
-    /* The VFS gave it a memory buffer and the handlers that use one; both go,
-       because from here the medium is where the contents live. */
     child->fs_private = file;
     child->length = 0;
     child->read = fat_node_read;
@@ -703,16 +598,10 @@ static int fat_adopt_child(struct vfs_node *directory, struct vfs_node *child) {
     return 0;
 }
 
-/* --- mount --------------------------------------------------------------- */
-
 static const struct block_device *device_from_source(const char *source) {
     if (!source) return NULL;
-    /* "/dev/sdX" and nothing else: the letter is the block layer's index. */
-    const char *prefix = "/dev/sd";
-    size_t length = strlen(prefix);
-    if (strncmp(source, prefix, length) != 0) return NULL;
-    if (!source[length] || source[length + 1]) return NULL;
-    return block_device_at(source[length] - 'a');
+    int index = block_device_index_by_name(source);
+    return index < 0 ? NULL : block_device_at(index);
 }
 
 int fatfs_mount(const char *source, const char *mount_name, struct vfs_node **root_out) {
@@ -720,9 +609,24 @@ int fatfs_mount(const char *source, const char *mount_name, struct vfs_node **ro
     if (!device) return -ENODEV;
 
     struct fat_volume *volume = NULL;
-    for (int index = 0; index < FAT_MAX_VOLUMES; index++)
-        if (!volumes[index].used) { volume = &volumes[index]; break; }
-    if (!volume) return -ENOSPC;
+    int slot = 0;
+    while (slot < volume_capacity && volumes[slot] && volumes[slot]->used) slot++;
+    if (slot == volume_capacity) {
+        int capacity = volume_capacity ? volume_capacity * 2 : 4;
+        struct fat_volume **grown = kmalloc((size_t)capacity * sizeof(*grown));
+        if (!grown) return -ENOSPC;
+        memset(grown, 0, (size_t)capacity * sizeof(*grown));
+        if (volume_capacity) memcpy(grown, volumes, (size_t)volume_capacity * sizeof(*grown));
+        kfree(volumes);
+        volumes = grown;
+        volume_capacity = capacity;
+    }
+    if (!volumes[slot]) {
+        volumes[slot] = kmalloc(sizeof(struct fat_volume));
+        if (!volumes[slot]) return -ENOSPC;
+        memset(volumes[slot], 0, sizeof(struct fat_volume));
+    }
+    volume = volumes[slot];
 
     uint8_t boot[BLOCK_SECTOR_SIZE];
     if (device->read(device->context, 0, 1, boot) != 0) return -EIO;
@@ -758,8 +662,6 @@ int fatfs_mount(const char *source, const char *mount_name, struct vfs_node **ro
     if (total <= volume->data_start) return -EINVAL;
     volume->cluster_count = (total - volume->data_start) / volume->sectors_per_cluster;
 
-    /* The cluster count is what decides the width, not anything written down:
-       that is how the format defines itself. */
     if (volume->cluster_count < 4085U) volume->bits = 12;
     else if (volume->cluster_count < 65525U) volume->bits = 16;
     else volume->bits = 32;
@@ -791,8 +693,8 @@ int fatfs_mount(const char *source, const char *mount_name, struct vfs_node **ro
 
 int fatfs_owns(const struct vfs_node *node) {
     if (!node) return 0;
-    for (int index = 0; index < FAT_MAX_VOLUMES; index++)
-        if (volumes[index].used && volumes[index].root == node) return 1;
+    for (int index = 0; index < volume_capacity; index++)
+        if (volumes[index] && volumes[index]->used && volumes[index]->root == node) return 1;
     return 0;
 }
 
@@ -809,11 +711,11 @@ static void free_subtree(struct vfs_node *node) {
 }
 
 void fatfs_unmount(struct vfs_node *root) {
-    for (int index = 0; index < FAT_MAX_VOLUMES; index++) {
-        if (!volumes[index].used || volumes[index].root != root) continue;
+    for (int index = 0; index < volume_capacity; index++) {
+        if (!volumes[index] || !volumes[index]->used || volumes[index]->root != root) continue;
         free_subtree(root);
-        volumes[index].used = 0;
-        volumes[index].root = NULL;
+        volumes[index]->used = 0;
+        volumes[index]->root = NULL;
         return;
     }
 }
