@@ -16,7 +16,7 @@ extern void kprintf(const char *fmt, ...);
 #define ETHERTYPE_ARP 0x0806U
 #define IPPROTO_ICMP 1U
 #define IPPROTO_UDP 17U
-#define ARP_CACHE_SIZE 16
+#define ARP_CACHE_SIZE 256
 
 struct ethernet_header {
     uint8_t destination[6];
@@ -81,8 +81,6 @@ struct arp_entry {
     uint64_t updated_ns;
 };
 
-
-
 #define LOOPBACK_QUEUE 40
 #define LOOPBACK_BURST 128
 
@@ -135,7 +133,6 @@ uint16_t net_checksum(const void *data, size_t length) {
 int net_is_loopback(uint32_t address) {
     return (net_htonl(address) & NET_LOOPBACK_MASK) == NET_LOOPBACK_NETWORK;
 }
-
 
 static int address_is_local(uint32_t address) {
     return net_is_loopback(address) || (config.address && address == config.address);
@@ -501,7 +498,6 @@ void net_tick(void) {
     net_poll();
 }
 
-
 static void loopback_drain(void) {
     static int draining;
     if (draining) return;
@@ -517,7 +513,6 @@ static void loopback_drain(void) {
 }
 
 void net_poll(void) {
-
     loopback_drain();
     if (!adapter) return;
     adapter->poll(receive_frame);
