@@ -13,7 +13,6 @@
 #endif
 
 #define MODULE_NAME_MAX 56
-#define MODULE_MAX_USES 8
 
 #define MODULE_PARAM_INT 1
 #define MODULE_PARAM_UINT 2
@@ -59,7 +58,8 @@ struct module {
     unsigned export_count;
     const struct module_param *params;
     unsigned param_count;
-    struct module *uses[MODULE_MAX_USES];
+    struct module **uses;
+    unsigned use_capacity;
     unsigned use_count;
     struct module *next;
 };
@@ -95,7 +95,6 @@ int module_export_value(const struct module *module, const char *name,
 #define MODULE_DESCRIPTION(text) MODULE_INFO(description, text)
 #define MODULE_ALIAS(text) MODULE_INFO(alias, text)
 
-/* What udev hands modprobe for a PCI device, with every wildcard it fills in. */
 #define MODULE_PCI_ALIAS(vendor, device) \
     MODULE_ALIAS("pci:v0000" vendor "d0000" device "sv*sd*bc*sc*i*")
 

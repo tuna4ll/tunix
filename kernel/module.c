@@ -256,7 +256,15 @@ static int lookup_kernel_symbol(const char *name, uint64_t *value) {
 static int note_use(struct module *module, struct module *provider) {
     for (unsigned index = 0; index < module->use_count; index++)
         if (module->uses[index] == provider) return 0;
-    if (module->use_count >= MODULE_MAX_USES) return -1;
+    if (module->use_count == module->use_capacity) {
+        unsigned capacity = module->use_capacity ? module->use_capacity * 2 : 8;
+        struct module **grown = kmalloc(capacity * sizeof(*grown));
+        if (!grown) return -1;
+        if (module->use_count) memcpy(grown, module->uses, module->use_count * sizeof(*grown));
+        kfree(module->uses);
+        module->uses = grown;
+        module->use_capacity = capacity;
+    }
     if (module_get(provider) != 0) return -1;
     module->uses[module->use_count++] = provider;
     return 0;
@@ -550,7 +558,7 @@ int module_param_set(struct module *module, unsigned index, const char *text,
                      size_t length) {
     if (!module || index >= module->param_count) return -EINVAL;
     const struct module_param *param = &module->params[index];
-    /* A string would have to outlive the write, and nothing owns it. */
+
     if (param->type == MODULE_PARAM_STRING) return -EINVAL;
 
     char value[32];
@@ -619,6 +627,7 @@ int module_param_format(const struct module *module, unsigned index, char *out,
 static void release_module(struct module *module) {
     for (unsigned index = 0; index < module->use_count; index++)
         module_put(module->uses[index]);
+    kfree(module->uses);
     if (module->base) unmap_window(module->base, module->bytes);
     if (module->physical)
         pmm_free_pages((void *)module->physical, module->bytes / 4096ULL);
