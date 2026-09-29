@@ -459,8 +459,6 @@ typedef char drm_create_dumb_size_check[
     (sizeof(struct drm_mode_create_dumb) == 32) ? 1 : -1];
 
 #define DRM_MAX_DIMENSION 16384U
-#define DRM_MAX_BUFFERS 4096
-#define DRM_MAX_FRAMEBUFFERS 64
 
 struct drm_dumb_buffer {
     uint32_t handle;
@@ -487,7 +485,7 @@ struct drm_framebuffer {
 };
 
 #define DRM_EVENT_FLIP_COMPLETE 0x02
-#define DRM_MAX_EVENTS 16
+#define DRM_MAX_EVENTS 256
 
 struct drm_event {
     uint32_t type;
@@ -512,23 +510,46 @@ static uint32_t flip_sequence;
 static const char drm_display_owner;
 static uint32_t open_count;
 
-static struct drm_dumb_buffer buffers[DRM_MAX_BUFFERS];
-static struct drm_framebuffer framebuffers[DRM_MAX_FRAMEBUFFERS];
-#define DRM_MAX_BLOBS 32
+static struct drm_dumb_buffer **buffers;
+static uint32_t buffer_capacity;
+static struct drm_framebuffer *framebuffers;
+static int framebuffer_capacity;
 #define DRM_MAX_DAMAGE_RECTS 16
 #define DRM_MAX_BLOB_BYTES 65536
 struct drm_property_blob {
     uint32_t id; const struct file *owner;
     uint32_t length; uint8_t *data;
 };
-static struct drm_property_blob blobs[DRM_MAX_BLOBS];
+static struct drm_property_blob *blobs;
+static unsigned blob_capacity;
 static uint32_t next_blob_id = 1;
 static uint32_t next_handle = 1;
-#define DRM_MAX_CONTEXTS 8
-static struct {
+struct drm_render_context {
     uint64_t pid;
     uint32_t context;
-} render_contexts[DRM_MAX_CONTEXTS];
+};
+static struct drm_render_context *render_contexts;
+static int context_capacity;
+
+static void *grow_table(void *table, size_t element, size_t *capacity) {
+    size_t grown_capacity = *capacity ? *capacity * 2 : 16;
+    uint8_t *grown = kmalloc(grown_capacity * element);
+    if (!grown) return NULL;
+    memset(grown, 0, grown_capacity * element);
+    if (*capacity) memcpy(grown, table, *capacity * element);
+    kfree(table);
+    *capacity = grown_capacity;
+    return grown;
+}
+
+static int grow_int_table(void **table, size_t element, int *capacity) {
+    size_t value = (size_t)*capacity;
+    void *grown = grow_table(*table, element, &value);
+    if (!grown) return -1;
+    *table = grown;
+    *capacity = (int)value;
+    return 0;
+}
 static uint32_t next_render_context = 1;
 static void render_contexts_release(void);
 static uint32_t render_context(void);
@@ -539,9 +560,6 @@ static int drm_ready;
 #define DRM_MAP_OFFSET_BASE 0x100000000ULL
 
 void drm_init(void) {
-    memset(buffers, 0, sizeof(buffers));
-    memset(framebuffers, 0, sizeof(framebuffers));
-    memset(blobs, 0, sizeof(blobs));
     next_handle = 1;
     next_fb_id = 1;
     next_blob_id = 1;
@@ -549,22 +567,45 @@ void drm_init(void) {
     event_head = event_tail = event_count = 0;
     flip_sequence = 0;
     open_count = 0;
-    memset(render_contexts, 0, sizeof(render_contexts));
     next_render_context = 1;
     drm_ready = framebuffer_available();
 }
 
 int drm_available(void) { return drm_ready; }
 
+static struct drm_dumb_buffer *buffer_slot(uint32_t *handle_out) {
+    for (uint32_t step = 0; step < buffer_capacity; step++) {
+        uint32_t index = (next_handle - 1U + step) % buffer_capacity;
+        if (!buffers[index] || !buffers[index]->handle) {
+            if (!buffers[index]) {
+                buffers[index] = kmalloc(sizeof(struct drm_dumb_buffer));
+                if (!buffers[index]) return NULL;
+                memset(buffers[index], 0, sizeof(struct drm_dumb_buffer));
+            }
+            *handle_out = index + 1U;
+            next_handle = index + 2U > buffer_capacity ? 1U : index + 2U;
+            return buffers[index];
+        }
+    }
+    size_t capacity = buffer_capacity;
+    struct drm_dumb_buffer **grown = grow_table(buffers, sizeof(*buffers), &capacity);
+    if (!grown) return NULL;
+    buffers = grown;
+    uint32_t first = buffer_capacity;
+    buffer_capacity = (uint32_t)capacity;
+    next_handle = first + 1U;
+    return buffer_slot(handle_out);
+}
+
 static struct drm_dumb_buffer *buffer_find(uint32_t handle) {
-    if (!handle || handle > (uint32_t)DRM_MAX_BUFFERS) return NULL;
-    struct drm_dumb_buffer *buffer = &buffers[handle - 1U];
+    if (!handle || handle > buffer_capacity || !buffers[handle - 1U]) return NULL;
+    struct drm_dumb_buffer *buffer = buffers[handle - 1U];
     return buffer->handle == handle ? buffer : NULL;
 }
 
 static struct drm_framebuffer *framebuffer_find(uint32_t id) {
     if (!id) return NULL;
-    for (int index = 0; index < DRM_MAX_FRAMEBUFFERS; index++) {
+    for (int index = 0; index < framebuffer_capacity; index++) {
         if (framebuffers[index].id == id) return &framebuffers[index];
     }
     return NULL;
@@ -572,7 +613,7 @@ static struct drm_framebuffer *framebuffer_find(uint32_t id) {
 
 static struct drm_property_blob *blob_find(uint32_t id) {
     if (!id) return NULL;
-    for (unsigned index = 0; index < DRM_MAX_BLOBS; index++)
+    for (unsigned index = 0; index < blob_capacity; index++)
         if (blobs[index].id == id) return &blobs[index];
     return NULL;
 }
@@ -602,7 +643,16 @@ static int64_t ioctl_create_blob(const struct file *client, uint64_t user_argume
     struct drm_mode_create_blob request;
     if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
     if (request.length > DRM_MAX_BLOB_BYTES || (request.length && !request.data)) return -EINVAL;
-    for (unsigned index = 0; index < DRM_MAX_BLOBS; index++) {
+    unsigned free_blob = 0;
+    while (free_blob < blob_capacity && blobs[free_blob].id) free_blob++;
+    if (free_blob == blob_capacity) {
+        size_t capacity = blob_capacity;
+        struct drm_property_blob *grown = grow_table(blobs, sizeof(*blobs), &capacity);
+        if (!grown) return -ENOMEM;
+        blobs = grown;
+        blob_capacity = (unsigned)capacity;
+    }
+    for (unsigned index = free_blob; index < blob_capacity; index++) {
         if (blobs[index].id) continue;
         uint8_t *data = NULL;
         if (request.length) {
@@ -1442,19 +1492,10 @@ static int64_t ioctl_create_dumb(const struct file *client, uint64_t user_argume
     uint64_t size = pitch * request.height;
     size = (size + 4095ULL) & ~4095ULL;
     uint64_t page_count = size / 4096ULL;
-    if (!page_count || page_count > (256ULL * 1024ULL * 1024ULL) / 4096ULL) return -EINVAL;
+    if (!page_count || page_count > (1024ULL * 1024ULL * 1024ULL) / 4096ULL) return -EINVAL;
 
-    struct drm_dumb_buffer *slot = NULL;
     uint32_t handle = 0;
-    for (int step = 0; step < DRM_MAX_BUFFERS; step++) {
-        uint32_t index = (next_handle - 1U + (uint32_t)step) % (uint32_t)DRM_MAX_BUFFERS;
-        if (!buffers[index].handle) {
-            slot = &buffers[index];
-            handle = index + 1U;
-            next_handle = (index + 2U) > (uint32_t)DRM_MAX_BUFFERS ? 1U : index + 2U;
-            break;
-        }
-    }
+    struct drm_dumb_buffer *slot = buffer_slot(&handle);
     if (!slot) return -ENOMEM;
 
     slot->pages = (uint64_t *)kmalloc(page_count * sizeof(uint64_t));
@@ -1512,10 +1553,15 @@ static int64_t ioctl_add_framebuffer(const struct file *client, uint32_t handle,
     struct drm_dumb_buffer *buffer = buffer_of(client, handle);
     if (!buffer) return -ENOENT;
     struct drm_framebuffer *slot = NULL;
-    for (int index = 0; index < DRM_MAX_FRAMEBUFFERS; index++) {
+    for (int index = 0; index < framebuffer_capacity; index++) {
         if (!framebuffers[index].id) { slot = &framebuffers[index]; break; }
     }
-    if (!slot) return -ENOMEM;
+    if (!slot) {
+        int first = framebuffer_capacity;
+        if (grow_int_table((void **)&framebuffers, sizeof(*framebuffers), &framebuffer_capacity) != 0)
+            return -ENOMEM;
+        slot = &framebuffers[first];
+    }
     if (buffer->refs == 0xFFFFFFFFU) return -EMFILE;
     buffer->refs++;
     slot->id = next_fb_id++;
@@ -1575,12 +1621,12 @@ static uint32_t render_context(void) {
     struct process *process = process_current();
     if (!process) return 0;
 
-    for (int index = 0; index < DRM_MAX_CONTEXTS; index++) {
+    for (int index = 0; index < context_capacity; index++) {
         if (render_contexts[index].context &&
             render_contexts[index].pid == process->pid)
             return render_contexts[index].context;
     }
-    for (int index = 0; index < DRM_MAX_CONTEXTS; index++) {
+    for (int index = 0; index < context_capacity; index++) {
         if (render_contexts[index].context) continue;
         uint32_t context = next_render_context;
         if (virtgpu_context_create(context, "tunix") != 0) return 0;
@@ -1589,11 +1635,19 @@ static uint32_t render_context(void) {
         render_contexts[index].context = context;
         return context;
     }
-    return 0;
+    int first = context_capacity;
+    if (grow_int_table((void **)&render_contexts, sizeof(*render_contexts), &context_capacity) != 0)
+        return 0;
+    uint32_t context = next_render_context;
+    if (virtgpu_context_create(context, "tunix") != 0) return 0;
+    next_render_context++;
+    render_contexts[first].pid = process->pid;
+    render_contexts[first].context = context;
+    return context;
 }
 
 static void render_contexts_release(void) {
-    for (int index = 0; index < DRM_MAX_CONTEXTS; index++) {
+    for (int index = 0; index < context_capacity; index++) {
         if (!render_contexts[index].context) continue;
         virtgpu_context_destroy(render_contexts[index].context);
         render_contexts[index].context = 0;
@@ -1604,19 +1658,10 @@ static void render_contexts_release(void) {
 static struct drm_dumb_buffer *buffer_new(const struct file *client, uint64_t size) {
     size = (size + 4095ULL) & ~4095ULL;
     uint64_t page_count = size / 4096ULL;
-    if (!page_count || page_count > (256ULL * 1024ULL * 1024ULL) / 4096ULL) return NULL;
+    if (!page_count || page_count > (1024ULL * 1024ULL * 1024ULL) / 4096ULL) return NULL;
 
-    struct drm_dumb_buffer *slot = NULL;
     uint32_t handle = 0;
-    for (int step = 0; step < DRM_MAX_BUFFERS; step++) {
-        uint32_t index = (next_handle - 1U + (uint32_t)step) % (uint32_t)DRM_MAX_BUFFERS;
-        if (!buffers[index].handle) {
-            slot = &buffers[index];
-            handle = index + 1U;
-            next_handle = (index + 2U) > (uint32_t)DRM_MAX_BUFFERS ? 1U : index + 2U;
-            break;
-        }
-    }
+    struct drm_dumb_buffer *slot = buffer_slot(&handle);
     if (!slot) return NULL;
 
     slot->pages = (uint64_t *)kmalloc(page_count * sizeof(uint64_t));
@@ -1947,19 +1992,19 @@ void drm_device_close(struct vfs_node *node) {
 void drm_file_close(struct file *file) {
     if (!file) return;
     drm_enter();
-    for (int index = 0; index < DRM_MAX_FRAMEBUFFERS; index++) {
+    for (int index = 0; index < framebuffer_capacity; index++) {
         if (!framebuffers[index].id || framebuffers[index].owner != file) continue;
         if (active_fb_id == framebuffers[index].id) active_fb_id = 0;
         struct drm_dumb_buffer *buffer = buffer_find(framebuffers[index].handle);
         memset(&framebuffers[index], 0, sizeof(framebuffers[index]));
         if (buffer) buffer_release(buffer);
     }
-    for (unsigned index = 0; index < DRM_MAX_BLOBS; index++)
+    for (unsigned index = 0; index < blob_capacity; index++)
         if (blobs[index].id && blobs[index].owner == file)
             blob_release(&blobs[index]);
-    for (int index = 0; index < DRM_MAX_BUFFERS; index++)
-        if (buffers[index].handle && buffers[index].owner == file)
-            buffer_release(&buffers[index]);
+    for (uint32_t index = 0; index < buffer_capacity; index++)
+        if (buffers[index] && buffers[index]->handle && buffers[index]->owner == file)
+            buffer_release(buffers[index]);
     drm_leave();
 }
 
