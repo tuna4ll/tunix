@@ -989,6 +989,29 @@ static void test_devices(void) {
     report_value("devices-interrupt-lines", lines > 17, lines);
 }
 
+struct drm_create_dumb { u32 height, width, bpp, flags, handle, pitch; u64 size; };
+struct drm_fb_cmd { u32 fb_id, width, height, pitch, bpp, depth, handle; };
+
+static void test_drm(void) {
+    s64 card = call4(NR_OPENAT, AT_FDCWD, "/dev/dri/card0", 2, 0);
+    if (card < 0) {
+        report("drm-card", 0);
+        return;
+    }
+    u64 buffers = 0, framebuffers = 0;
+    for (int index = 0; index < 300; index++) {
+        struct drm_create_dumb dumb = {16, 16, 32, 0, 0, 0, 0};
+        if (call3(NR_IOCTL, card, 0xC02064B2UL, &dumb) != 0) break;
+        buffers++;
+        struct drm_fb_cmd fb = {0, 16, 16, dumb.pitch, 32, 24, dumb.handle};
+        if (call3(NR_IOCTL, card, 0xC01C64AEUL, &fb) != 0) continue;
+        framebuffers++;
+    }
+    report_value("drm-dumb-buffers", buffers == 300, buffers);
+    report_value("drm-framebuffers", framebuffers == 300, framebuffers);
+    call1(NR_CLOSE, card);
+}
+
 #ifndef LIMITS_TESTS
 #define LIMITS_TESTS 0x3FFU
 #endif
@@ -1012,6 +1035,7 @@ static void run(u64 *stack) {
     if (LIMITS_TESTS & 0x200U) test_cpus();
     if (LIMITS_TESTS & 0x400U) test_persistence();
     if (LIMITS_TESTS & 0x800U) test_devices();
+    if (LIMITS_TESTS & 0x1000U) test_drm();
     print(failures ? "LIMITSTEST FAIL\n" : "LIMITSTEST PASS\n");
     call1(NR_EXIT_GROUP, 0);
     for (;;) { }
