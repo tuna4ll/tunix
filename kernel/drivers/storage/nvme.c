@@ -2,6 +2,8 @@
 #include <stdint.h>
 #include "../../include/block.h"
 #include "../../include/cpu.h"
+#include "../../include/dma.h"
+#include "../../include/heap.h"
 #include "../../include/kstring.h"
 #include "../../include/nvme.h"
 #include "../../include/pci.h"
@@ -72,26 +74,30 @@ struct nvme_queue {
     uint64_t completion_doorbell;
 };
 
-static uint64_t registers;
-static uint64_t registers_physical;
-static uint32_t doorbell_stride;
+struct nvme_controller {
+    uint64_t registers;
+    uint32_t doorbell_stride;
+    uint8_t *pages;
+    uint64_t pages_physical;
+    struct nvme_queue admin_queue;
+    struct nvme_queue io_queue;
+    uint64_t *prp_list;
+    uint64_t prp_list_physical;
+    uint16_t next_command_id;
+    unsigned index;
+};
+
+struct nvme_namespace {
+    struct nvme_controller *controller;
+    uint32_t nsid;
+    uint64_t blocks;
+    uint32_t block_bytes;
+    uint32_t sectors_per_block;
+};
 
 #define NVME_DMA_PAGES 6U
-static uint8_t nvme_dma[NVME_DMA_PAGES][4096] __attribute__((aligned(4096)));
 
-static uint64_t static_physical(const void *address) {
-    return vmm_dma_physical(address, 4096);
-}
-static struct nvme_queue admin_queue;
-static struct nvme_queue io_queue;
-static uint64_t prp_list_physical;
-static uint64_t *prp_list;
-static uint16_t next_command_id = 1;
-
-static uint64_t namespace_blocks;
-static uint32_t namespace_block_bytes;
-static uint32_t sectors_per_block;
-
+static unsigned controller_count;
 
 static uint64_t buffer_physical(uint64_t address) {
     uint64_t cr3 = vmm_kernel_cr3();
@@ -110,36 +116,40 @@ static void write64(uint64_t address, uint64_t value) {
     write32(address + 4U, (uint32_t)(value >> 32));
 }
 
-static void pause_cpu(void) { cpu_relax(); }
+static uint8_t *page_of(struct nvme_controller *controller, unsigned page) {
+    return controller->pages + (size_t)page * 4096U;
+}
 
-static uint64_t doorbell_of(uint32_t queue, int completion) {
+static uint64_t page_physical(struct nvme_controller *controller, unsigned page) {
+    return controller->pages_physical + (uint64_t)page * 4096U;
+}
+
+static uint64_t doorbell_of(struct nvme_controller *controller, uint32_t queue, int completion) {
     uint32_t index = queue * 2U + (completion ? 1U : 0U);
-    return 0x1000U + (uint64_t)index * (4ULL << doorbell_stride);
+    return 0x1000U + (uint64_t)index * (4ULL << controller->doorbell_stride);
 }
 
-static int allocate_queue(struct nvme_queue *queue, uint32_t id,
-                          unsigned submission_page, unsigned completion_page) {
+static void allocate_queue(struct nvme_controller *controller, struct nvme_queue *queue,
+                           uint32_t id, unsigned submission_page, unsigned completion_page) {
     memset(queue, 0, sizeof(*queue));
-    queue->submission = (struct nvme_command *)nvme_dma[submission_page];
-    queue->completion = (struct nvme_completion *)nvme_dma[completion_page];
-    queue->submission_physical = static_physical(queue->submission);
-    queue->completion_physical = static_physical(queue->completion);
-    memset(queue->submission, 0, 4096);
-    memset(queue->completion, 0, 4096);
+    queue->submission = (struct nvme_command *)page_of(controller, submission_page);
+    queue->completion = (struct nvme_completion *)page_of(controller, completion_page);
+    queue->submission_physical = page_physical(controller, submission_page);
+    queue->completion_physical = page_physical(controller, completion_page);
     queue->phase = 1;
-    queue->submission_doorbell = doorbell_of(id, 0);
-    queue->completion_doorbell = doorbell_of(id, 1);
-    return 0;
+    queue->submission_doorbell = doorbell_of(controller, id, 0);
+    queue->completion_doorbell = doorbell_of(controller, id, 1);
 }
 
-static int submit(struct nvme_queue *queue, struct nvme_command *command) {
-    uint16_t id = next_command_id++;
-    if (!next_command_id) next_command_id = 1;
+static int submit(struct nvme_controller *controller, struct nvme_queue *queue,
+                  struct nvme_command *command) {
+    uint16_t id = controller->next_command_id++;
+    if (!controller->next_command_id) controller->next_command_id = 1;
     command->dword0 = (command->dword0 & 0xFFFFU) | ((uint32_t)id << 16);
 
     queue->submission[queue->submission_tail] = *command;
     queue->submission_tail = (queue->submission_tail + 1U) % QUEUE_ENTRIES;
-    write32(registers + queue->submission_doorbell, queue->submission_tail);
+    write32(controller->registers + queue->submission_doorbell, queue->submission_tail);
 
     for (uint32_t spin = 0; spin < NVME_WAIT_SPINS; spin++) {
         volatile struct nvme_completion *entry = &queue->completion[queue->completion_head];
@@ -147,15 +157,16 @@ static int submit(struct nvme_queue *queue, struct nvme_command *command) {
         if ((status & 1U) == queue->phase && entry->command_id == id) {
             queue->completion_head = (queue->completion_head + 1U) % QUEUE_ENTRIES;
             if (!queue->completion_head) queue->phase ^= 1U;
-            write32(registers + queue->completion_doorbell, queue->completion_head);
+            write32(controller->registers + queue->completion_doorbell, queue->completion_head);
             return (int)(status >> 1);
         }
-        pause_cpu();
+        cpu_relax();
     }
     return -1;
 }
 
-static int build_prp(struct nvme_command *command, const void *buffer, uint32_t bytes) {
+static int build_prp(struct nvme_controller *controller, struct nvme_command *command,
+                     const void *buffer, uint32_t bytes) {
     uint64_t address = (uint64_t)(uintptr_t)buffer;
     uint64_t physical = buffer_physical(address);
     if (!physical) return -1;
@@ -180,45 +191,45 @@ static int build_prp(struct nvme_command *command, const void *buffer, uint32_t 
     for (uint32_t index = 0; index < pages; index++) {
         physical = buffer_physical(next + (uint64_t)index * 4096ULL);
         if (!physical) return -1;
-        prp_list[index] = physical;
+        controller->prp_list[index] = physical;
     }
-    command->prp2 = prp_list_physical;
+    command->prp2 = controller->prp_list_physical;
     return 0;
 }
 
-static int transfer(uint64_t lba, uint32_t count, void *buffer, int write) {
-    if (count % sectors_per_block || lba % sectors_per_block) return -1;
-    uint64_t block = lba / sectors_per_block;
-    uint32_t blocks = count / sectors_per_block;
+static int transfer(struct nvme_namespace *space, uint64_t lba, uint32_t count,
+                    void *buffer, int write) {
+    if (count % space->sectors_per_block || lba % space->sectors_per_block) return -1;
+    uint64_t block = lba / space->sectors_per_block;
+    uint32_t blocks = count / space->sectors_per_block;
 
     struct nvme_command command;
     memset(&command, 0, sizeof(command));
     command.dword0 = write ? IO_WRITE : IO_READ;
-    command.nsid = 1;
-    if (build_prp(&command, buffer, count * BLOCK_SECTOR_SIZE) != 0) return -1;
+    command.nsid = space->nsid;
+    if (build_prp(space->controller, &command, buffer, count * BLOCK_SECTOR_SIZE) != 0) return -1;
     command.dword10 = (uint32_t)block;
     command.dword11 = (uint32_t)(block >> 32);
     command.dword12 = blocks - 1U;
-    return submit(&io_queue, &command) == 0 ? 0 : -1;
+    return submit(space->controller, &space->controller->io_queue, &command) == 0 ? 0 : -1;
 }
 
 static int nvme_read(void *context, uint64_t lba, uint32_t count, void *destination) {
-    (void)context;
+    struct nvme_namespace *space = context;
     uint8_t *out = (uint8_t *)destination;
     while (count) {
-        uint64_t aligned = lba - (lba % sectors_per_block);
+        uint64_t aligned = lba - (lba % space->sectors_per_block);
         uint32_t within = (uint32_t)(lba - aligned);
         uint32_t chunk = count;
         uint32_t limit = NVME_MAX_PAGES * 4096U / BLOCK_SECTOR_SIZE;
         if (chunk > limit) chunk = limit;
 
-        if (!within && chunk % sectors_per_block == 0) {
-            if (transfer(lba, chunk, out, 0) != 0) return -1;
+        if (!within && chunk % space->sectors_per_block == 0) {
+            if (transfer(space, lba, chunk, out, 0) != 0) return -1;
         } else {
-            uint8_t *staging = (uint8_t *)prp_list;
-            if (namespace_block_bytes > 4096U) return -1;
-            if (transfer(aligned, sectors_per_block, staging, 0) != 0) return -1;
-            uint32_t available = sectors_per_block - within;
+            uint8_t *staging = page_of(space->controller, 5);
+            if (transfer(space, aligned, space->sectors_per_block, staging, 0) != 0) return -1;
+            uint32_t available = space->sectors_per_block - within;
             if (chunk > available) chunk = available;
             memcpy(out, staging + (size_t)within * BLOCK_SECTOR_SIZE,
                    (size_t)chunk * BLOCK_SECTOR_SIZE);
@@ -231,26 +242,25 @@ static int nvme_read(void *context, uint64_t lba, uint32_t count, void *destinat
 }
 
 static int nvme_write(void *context, uint64_t lba, uint32_t count, const void *source) {
-    (void)context;
+    struct nvme_namespace *space = context;
     const uint8_t *in = (const uint8_t *)source;
     while (count) {
-        uint64_t aligned = lba - (lba % sectors_per_block);
+        uint64_t aligned = lba - (lba % space->sectors_per_block);
         uint32_t within = (uint32_t)(lba - aligned);
         uint32_t chunk = count;
         uint32_t limit = NVME_MAX_PAGES * 4096U / BLOCK_SECTOR_SIZE;
         if (chunk > limit) chunk = limit;
 
-        if (!within && chunk % sectors_per_block == 0) {
-            if (transfer(lba, chunk, (void *)(uintptr_t)in, 1) != 0) return -1;
+        if (!within && chunk % space->sectors_per_block == 0) {
+            if (transfer(space, lba, chunk, (void *)(uintptr_t)in, 1) != 0) return -1;
         } else {
-            uint8_t *staging = (uint8_t *)prp_list;
-            if (namespace_block_bytes > 4096U) return -1;
-            if (transfer(aligned, sectors_per_block, staging, 0) != 0) return -1;
-            uint32_t available = sectors_per_block - within;
+            uint8_t *staging = page_of(space->controller, 5);
+            if (transfer(space, aligned, space->sectors_per_block, staging, 0) != 0) return -1;
+            uint32_t available = space->sectors_per_block - within;
             if (chunk > available) chunk = available;
             memcpy(staging + (size_t)within * BLOCK_SECTOR_SIZE, in,
                    (size_t)chunk * BLOCK_SECTOR_SIZE);
-            if (transfer(aligned, sectors_per_block, staging, 1) != 0) return -1;
+            if (transfer(space, aligned, space->sectors_per_block, staging, 1) != 0) return -1;
         }
         in += (size_t)chunk * BLOCK_SECTOR_SIZE;
         lba += chunk;
@@ -260,129 +270,166 @@ static int nvme_write(void *context, uint64_t lba, uint32_t count, const void *s
 }
 
 static int nvme_flush(void *context) {
-    (void)context;
+    struct nvme_namespace *space = context;
     struct nvme_command command;
     memset(&command, 0, sizeof(command));
     command.dword0 = IO_FLUSH;
-    command.nsid = 1;
-    return submit(&io_queue, &command) == 0 ? 0 : -1;
+    command.nsid = space->nsid;
+    return submit(space->controller, &space->controller->io_queue, &command) == 0 ? 0 : -1;
 }
 
-static int wait_ready(int wanted) {
+static int wait_ready(struct nvme_controller *controller, int wanted) {
     for (uint32_t spin = 0; spin < NVME_WAIT_SPINS; spin++) {
-        uint32_t status = read32(registers + REG_CSTS);
+        uint32_t status = read32(controller->registers + REG_CSTS);
         if (status & CSTS_FATAL) return -1;
         if (!!(status & CSTS_READY) == !!wanted) return 0;
-        pause_cpu();
+        cpu_relax();
     }
     return -1;
 }
 
-static int identify_namespace(void) {
-    uint8_t *data = nvme_dma[5];
-    uint64_t page = static_physical(data);
-    memset(data, 0, 4096);
-
+static int identify(struct nvme_controller *controller, uint32_t nsid, uint32_t structure) {
+    memset(page_of(controller, 5), 0, 4096);
     struct nvme_command command;
     memset(&command, 0, sizeof(command));
     command.dword0 = ADMIN_IDENTIFY;
-    command.nsid = 1;
-    command.prp1 = page;
-    command.dword10 = 0;
-    if (submit(&admin_queue, &command) != 0) return -1;
+    command.nsid = nsid;
+    command.prp1 = page_physical(controller, 5);
+    command.dword10 = structure;
+    return submit(controller, &controller->admin_queue, &command) == 0 ? 0 : -1;
+}
 
+static int create_io_queues(struct nvme_controller *controller) {
+    struct nvme_command command;
+
+    memset(&command, 0, sizeof(command));
+    command.dword0 = ADMIN_CREATE_CQ;
+    command.prp1 = controller->io_queue.completion_physical;
+    command.dword10 = ((QUEUE_ENTRIES - 1U) << 16) | 1U;
+    command.dword11 = 1U;
+    if (submit(controller, &controller->admin_queue, &command) != 0) return -1;
+
+    memset(&command, 0, sizeof(command));
+    command.dword0 = ADMIN_CREATE_SQ;
+    command.prp1 = controller->io_queue.submission_physical;
+    command.dword10 = ((QUEUE_ENTRIES - 1U) << 16) | 1U;
+    command.dword11 = (1U << 16) | 1U;
+    return submit(controller, &controller->admin_queue, &command) == 0 ? 0 : -1;
+}
+
+static void name_device(struct block_device *device, unsigned controller, uint32_t nsid) {
+    char text[24];
+    unsigned at = 0;
+    const char prefix[] = "nvme";
+    for (unsigned index = 0; prefix[index]; index++) text[at++] = prefix[index];
+    char digits[12];
+    unsigned count = 0;
+    unsigned value = controller;
+    do { digits[count++] = (char)('0' + value % 10U); value /= 10U; } while (value);
+    while (count) text[at++] = digits[--count];
+    text[at++] = 'n';
+    value = nsid;
+    do { digits[count++] = (char)('0' + value % 10U); value /= 10U; } while (value);
+    while (count) text[at++] = digits[--count];
+    text[at] = '\0';
+    size_t limit = sizeof(device->name) - 1;
+    for (size_t index = 0; index <= at && index < limit; index++) device->name[index] = text[index];
+    device->name[limit] = '\0';
+}
+
+static void register_namespace(struct nvme_controller *controller, uint32_t nsid) {
+    if (identify(controller, nsid, 0) != 0) return;
+    const uint8_t *data = page_of(controller, 5);
     uint64_t size = 0;
     memcpy(&size, data, sizeof(size));
     uint8_t formatted = data[26] & 0x0FU;
     uint32_t format = 0;
     memcpy(&format, data + 128 + (size_t)formatted * 4U, sizeof(format));
     uint8_t shift = (uint8_t)((format >> 16) & 0xFFU);
+    if (shift < 9U || shift > 12U || !size) return;
 
-    if (shift < 9U || shift > 12U || !size) return -1;
-    namespace_blocks = size;
-    namespace_block_bytes = 1U << shift;
-    sectors_per_block = namespace_block_bytes / BLOCK_SECTOR_SIZE;
-    return 0;
+    struct nvme_namespace *space = kmalloc(sizeof(*space));
+    if (!space) return;
+    space->controller = controller;
+    space->nsid = nsid;
+    space->blocks = size;
+    space->block_bytes = 1U << shift;
+    space->sectors_per_block = space->block_bytes / BLOCK_SECTOR_SIZE;
+
+    struct block_device device;
+    memset(&device, 0, sizeof(device));
+    name_device(&device, controller->index, nsid);
+    device.sectors = space->blocks * space->sectors_per_block;
+    device.read = nvme_read;
+    device.write = nvme_write;
+    device.flush = nvme_flush;
+    device.context = space;
+    if (block_register(&device) < 0) {
+        kfree(space);
+        return;
+    }
+    if (space->block_bytes != BLOCK_SECTOR_SIZE)
+        kprintf("NVME: %u byte blocks, staged through as 512 byte sectors\n",
+                (unsigned)space->block_bytes);
 }
 
-static int create_io_queues(void) {
-    struct nvme_command command;
+static void bring_up(const struct pci_device *pci) {
+    uint64_t base = ((uint64_t)pci->bar[0] & ~0xFULL);
+    if ((pci->bar[0] & 0x6U) == 0x4U) base |= (uint64_t)pci->bar[1] << 32;
+    if (!base) return;
 
-    memset(&command, 0, sizeof(command));
-    command.dword0 = ADMIN_CREATE_CQ;
-    command.prp1 = io_queue.completion_physical;
-    command.dword10 = ((QUEUE_ENTRIES - 1U) << 16) | 1U;
-    command.dword11 = 1U;
-    if (submit(&admin_queue, &command) != 0) return -1;
+    struct pci_device device = *pci;
+    pci_enable_bus_mastering(&device);
+    struct nvme_controller *controller = kmalloc(sizeof(*controller));
+    if (!controller) return;
+    memset(controller, 0, sizeof(*controller));
+    controller->next_command_id = 1;
+    controller->index = controller_count;
+    controller->registers = vmm_map_device(base, 0x2000U);
+    controller->pages = dma_alloc(NVME_DMA_PAGES * 4096ULL, 4096ULL, &controller->pages_physical);
+    if (!controller->registers || !controller->pages) {
+        kprintf("NVME: controller could not be mapped\n");
+        if (controller->pages) dma_free(controller->pages, NVME_DMA_PAGES * 4096ULL);
+        kfree(controller);
+        return;
+    }
+    memset(controller->pages, 0, NVME_DMA_PAGES * 4096U);
 
-    memset(&command, 0, sizeof(command));
-    command.dword0 = ADMIN_CREATE_SQ;
-    command.prp1 = io_queue.submission_physical;
-    command.dword10 = ((QUEUE_ENTRIES - 1U) << 16) | 1U;
-    command.dword11 = (1U << 16) | 1U;
-    return submit(&admin_queue, &command) == 0 ? 0 : -1;
+    uint32_t capability_high = read32(controller->registers + REG_CAP + 4U);
+    controller->doorbell_stride = capability_high & 0x0FU;
+
+    write32(controller->registers + REG_CC, read32(controller->registers + REG_CC) & ~CC_ENABLE);
+    if (wait_ready(controller, 0) != 0) return;
+
+    allocate_queue(controller, &controller->admin_queue, 0, 0, 1);
+    allocate_queue(controller, &controller->io_queue, 1, 2, 3);
+    controller->prp_list = (uint64_t *)page_of(controller, 4);
+    controller->prp_list_physical = page_physical(controller, 4);
+
+    write32(controller->registers + REG_AQA, ((QUEUE_ENTRIES - 1U) << 16) | (QUEUE_ENTRIES - 1U));
+    write64(controller->registers + REG_ASQ, controller->admin_queue.submission_physical);
+    write64(controller->registers + REG_ACQ, controller->admin_queue.completion_physical);
+
+    write32(controller->registers + REG_CC, CC_ENABLE | (6U << 16) | (4U << 20));
+    if (wait_ready(controller, 1) != 0) {
+        kprintf("NVME: controller did not become ready\n");
+        return;
+    }
+    if (create_io_queues(controller) != 0) {
+        kprintf("NVME: I/O queue creation failed\n");
+        return;
+    }
+    uint32_t namespaces = 1;
+    if (identify(controller, 0, 1) == 0) {
+        memcpy(&namespaces, page_of(controller, 5) + 516, sizeof(namespaces));
+        if (!namespaces) namespaces = 1;
+    }
+    controller_count++;
+    for (uint32_t nsid = 1; nsid <= namespaces; nsid++) register_namespace(controller, nsid);
 }
 
 void nvme_init(void) {
     struct pci_device pci;
-    if (pci_find_class(NVME_CLASS, NVME_SUBCLASS, &pci) != 0) return;
-
-    uint64_t base = ((uint64_t)pci.bar[0] & ~0xFULL);
-    if ((pci.bar[0] & 0x6U) == 0x4U) base |= (uint64_t)pci.bar[1] << 32;
-    if (!base) return;
-
-    pci_enable_bus_mastering(&pci);
-    registers_physical = base;
-    registers = vmm_map_device(base, 0x2000U);
-    if (!registers) {
-        kprintf("NVME: register window unavailable\n");
-        return;
-    }
-
-    uint32_t capability_high = read32(registers + REG_CAP + 4U);
-    doorbell_stride = capability_high & 0x0FU;
-
-    write32(registers + REG_CC, read32(registers + REG_CC) & ~CC_ENABLE);
-    if (wait_ready(0) != 0) return;
-
-    if (allocate_queue(&admin_queue, 0, 0, 1) != 0) return;
-    if (allocate_queue(&io_queue, 1, 2, 3) != 0) return;
-
-    prp_list = (uint64_t *)nvme_dma[4];
-    prp_list_physical = static_physical(prp_list);
-    memset(prp_list, 0, 4096);
-
-    write32(registers + REG_AQA, ((QUEUE_ENTRIES - 1U) << 16) | (QUEUE_ENTRIES - 1U));
-    write64(registers + REG_ASQ, admin_queue.submission_physical);
-    write64(registers + REG_ACQ, admin_queue.completion_physical);
-
-    uint32_t configuration = CC_ENABLE | (6U << 16) | (4U << 20);
-    write32(registers + REG_CC, configuration);
-    if (wait_ready(1) != 0) {
-        kprintf("NVME: controller did not become ready\n");
-        return;
-    }
-
-    if (create_io_queues() != 0) {
-        kprintf("NVME: I/O queue creation failed\n");
-        return;
-    }
-    if (identify_namespace() != 0) {
-        kprintf("NVME: no usable namespace\n");
-        return;
-    }
-
-    struct block_device device;
-    memset(&device, 0, sizeof(device));
-    device.name[0] = 'n'; device.name[1] = 'v'; device.name[2] = 'm';
-    device.name[3] = 'e'; device.name[4] = '0';
-    device.sectors = namespace_blocks * sectors_per_block;
-    device.read = nvme_read;
-    device.write = nvme_write;
-    device.flush = nvme_flush;
-    device.context = NULL;
-    block_register(&device);
-    if (namespace_block_bytes != BLOCK_SECTOR_SIZE)
-        kprintf("NVME: %u byte blocks, staged through as 512 byte sectors\n",
-                (unsigned)namespace_block_bytes);
+    for (unsigned nth = 0; pci_find_nth_class(NVME_CLASS, NVME_SUBCLASS, nth, &pci) == 0; nth++)
+        bring_up(&pci);
 }
