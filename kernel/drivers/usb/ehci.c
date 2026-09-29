@@ -8,6 +8,7 @@
 #include "../../include/pmm.h"
 #include "../../include/vmm.h"
 #include "../../include/time.h"
+#include "../../include/heap.h"
 #include "../../include/kstring.h"
 #include "../../include/usb.h"
 #include "../../include/ehci.h"
@@ -127,8 +128,7 @@ extern void kprintf(const char *fmt, ...);
 
 #define EHCI_REGISTER_BYTES 0x1000U
 #define MAX_PORTS 15U
-#define MAX_DEVICES 8U
-#define MAX_CONTROLLERS 4U
+#define MAX_DEVICES 127U
 #define CONFIGURATION_BYTES 512U
 #define BULK_FAILURES_REPORTED 8U
 #define BULK_FAILURE_INTERVAL 64U
@@ -195,7 +195,6 @@ struct ehci {
     int periodic_running;
 };
 
-#define MAX_PIPES 8U
 #define FRAME_LIST_ENTRIES 1024U
 #define PIPE_QTD_OFFSET 0x100U
 #define PIPE_BUFFER_OFFSET 0x200U
@@ -219,10 +218,12 @@ struct ehci_pipe {
     unsigned failures;
 };
 
-static struct ehci_pipe pipes[MAX_PIPES];
+static struct ehci_pipe **pipes;
+static unsigned pipe_capacity;
 static int transfer_busy;
 
-static struct ehci controllers[MAX_CONTROLLERS];
+static struct ehci **controllers;
+static unsigned controller_capacity;
 static unsigned controller_count;
 
 static uint8_t *dma_page;
@@ -301,8 +302,7 @@ static void *dma_alloc_page(uint64_t *physical_out) {
 }
 
 static uint32_t physical_of(const void *within_dma_page) {
-    uint64_t offset = (uint64_t)((const uint8_t *)within_dma_page - dma_page);
-    return (uint32_t)(dma_physical + offset);
+    return (uint32_t)vmm_virt_to_phys_direct(within_dma_page);
 }
 
 static void release_from_firmware(const struct pci_device *device,
@@ -700,13 +700,27 @@ static void queue_report(struct ehci_pipe *pipe) {
 
 static struct ehci_pipe *open_pipe(struct ehci *host, struct ehci_device *device,
                                    uint8_t endpoint, uint16_t packet) {
+    if (packet > 4096U - PIPE_BUFFER_OFFSET) return NULL;
     struct ehci_pipe *pipe = NULL;
-    for (unsigned index = 0; index < MAX_PIPES; index++)
-        if (!pipes[index].used) {
-            pipe = &pipes[index];
-            break;
-        }
-    if (!pipe || packet > 4096U - PIPE_BUFFER_OFFSET) return NULL;
+    unsigned slot = 0;
+    for (; slot < pipe_capacity; slot++)
+        if (!pipes[slot] || !pipes[slot]->used) break;
+    if (slot == pipe_capacity) {
+        unsigned capacity = pipe_capacity ? pipe_capacity * 2 : 8;
+        struct ehci_pipe **grown = kmalloc(capacity * sizeof(*grown));
+        if (!grown) return NULL;
+        memset(grown, 0, capacity * sizeof(*grown));
+        if (pipe_capacity) memcpy(grown, pipes, pipe_capacity * sizeof(*grown));
+        kfree(pipes);
+        pipes = grown;
+        pipe_capacity = capacity;
+    }
+    if (!pipes[slot]) {
+        pipes[slot] = kmalloc(sizeof(struct ehci_pipe));
+        if (!pipes[slot]) return NULL;
+        memset(pipes[slot], 0, sizeof(struct ehci_pipe));
+    }
+    pipe = pipes[slot];
     if (!host->frame_list) {
         host->frame_list = dma_alloc_page(&host->frame_list_physical);
         if (!host->frame_list) return NULL;
@@ -1059,7 +1073,7 @@ static void enumerate_ports(struct ehci *host) {
 static struct ehci_device *storage_device(int index, struct ehci **host_out) {
     int seen = 0;
     for (unsigned which = 0; which < controller_count; which++) {
-        struct ehci *host = &controllers[which];
+        struct ehci *host = controllers[which];
         for (unsigned at = 0; at < MAX_DEVICES; at++) {
             if (!host->devices[at].used || !host->devices[at].is_storage) continue;
             if (seen == index) {
@@ -1076,8 +1090,8 @@ static int ehci_storage_count(void) {
     int count = 0;
     for (unsigned which = 0; which < controller_count; which++)
         for (unsigned at = 0; at < MAX_DEVICES; at++)
-            if (controllers[which].devices[at].used &&
-                controllers[which].devices[at].is_storage) count++;
+            if (controllers[which]->devices[at].used &&
+                controllers[which]->devices[at].is_storage) count++;
     return count;
 }
 
@@ -1116,8 +1130,8 @@ static void service_pipe(struct ehci_pipe *pipe) {
 }
 
 void ehci_poll(void) {
-    for (unsigned index = 0; index < MAX_PIPES; index++)
-        if (pipes[index].used) service_pipe(&pipes[index]);
+    for (unsigned index = 0; index < pipe_capacity; index++)
+        if (pipes[index] && pipes[index]->used) service_pipe(pipes[index]);
 }
 
 static int ehci_bulk_transfer(int index, int in, uint64_t physical,
@@ -1253,29 +1267,43 @@ int ehci_init(void) {
         kprintf("EHCI: no DMA memory below 4 GiB\n");
         return -1;
     }
-    for (unsigned which = 0; which < MAX_CONTROLLERS; which++) {
-        controllers[which].async_head =
-            (struct ehci_qh *)(dma_page + which * 0x100);
-        controllers[which].work_qh =
-            (struct ehci_qh *)(dma_page + 0x400 + which * 0x100);
-    }
     qtds = (struct ehci_qtd *)(dma_page + 0x800);
     setup_buffer = dma_page + 0x900;
     descriptor_buffer = dma_page + 0xA00;
 
-    for (unsigned nth = 0; controller_count < MAX_CONTROLLERS; nth++) {
+    for (unsigned nth = 0;; nth++) {
         if (pci_find_nth_class(PCI_CLASS_SERIAL_BUS, PCI_SUBCLASS_USB, nth,
                                &device) != 0) break;
         if (device.prog_if != PCI_PROG_IF_EHCI) continue;
-        if (start_one(&device, &controllers[controller_count]) == 0) controller_count++;
-        else memset(&controllers[controller_count], 0, sizeof(struct ehci));
+        if (controller_count == controller_capacity) {
+            unsigned capacity = controller_capacity ? controller_capacity * 2 : 4;
+            struct ehci **grown = kmalloc(capacity * sizeof(*grown));
+            if (!grown) break;
+            if (controller_count) memcpy(grown, controllers, controller_count * sizeof(*grown));
+            kfree(controllers);
+            controllers = grown;
+            controller_capacity = capacity;
+        }
+        struct ehci *host = kmalloc(sizeof(*host));
+        if (!host) break;
+        memset(host, 0, sizeof(*host));
+        uint64_t queue_physical;
+        uint8_t *queues = dma_alloc_page(&queue_physical);
+        if (!queues) {
+            kfree(host);
+            break;
+        }
+        host->async_head = (struct ehci_qh *)queues;
+        host->work_qh = (struct ehci_qh *)(queues + 0x100);
+        if (start_one(&device, host) == 0) controllers[controller_count++] = host;
+        else kfree(host);
     }
 
     if (!controller_count) return -1;
 
     delay_ns(PORT_POWER_SETTLE_NS);
     for (unsigned which = 0; which < controller_count; which++)
-        enumerate_ports(&controllers[which]);
+        enumerate_ports(controllers[which]);
 
     if (ehci_storage_count()) usb_register_host(&ehci_host);
     return 0;
