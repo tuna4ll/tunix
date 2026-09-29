@@ -59,6 +59,8 @@ typedef unsigned int u32;
 #define NR_GETCPU 309
 #define NR_SCHED_YIELD 24
 #define NR_SYNC 162
+#define NR_MOUNT 165
+#define NR_UMOUNT2 166
 
 
 static inline s64 call6(s64 n, s64 a, s64 b, s64 c, s64 d, s64 e, s64 f) {
@@ -128,6 +130,8 @@ static inline s64 call6(s64 n, s64 a, s64 b, s64 c, s64 d, s64 e, s64 f) {
 #define NR_GETCPU 168
 #define NR_SCHED_YIELD 124
 #define NR_SYNC 81
+#define NR_MOUNT 40
+#define NR_UMOUNT2 39
 
 
 static inline s64 call6(s64 n, s64 a, s64 b, s64 c, s64 d, s64 e, s64 f) {
@@ -1012,8 +1016,20 @@ static void test_drm(void) {
     call1(NR_CLOSE, card);
 }
 
+static void test_misc(void) {
+    call3(NR_MKDIRAT, AT_FDCWD, "/tmp/esp", 0755);
+    s64 mounted = call6(NR_MOUNT, (s64)"/dev/sda1", (s64)"/tmp/esp", (s64)"vfat", 0, 0, 0);
+    int found = mounted == 0 && (directory_lists("/tmp/esp", "boot") || directory_lists("/tmp/esp", "BOOT") ||
+                                 directory_lists("/tmp/esp", "EFI") || directory_lists("/tmp/esp", "limine.conf"));
+    report_value("fat-partition-mount", found, (u64)-mounted);
+    if (mounted == 0) call2(NR_UMOUNT2, "/tmp/esp", 0);
+    s64 tty = call4(NR_OPENAT, AT_FDCWD, "/dev/tty63", O_RDONLY, 0);
+    report("vt-63", tty >= 0);
+    if (tty >= 0) call1(NR_CLOSE, tty);
+}
+
 #ifndef LIMITS_TESTS
-#define LIMITS_TESTS 0x3FFU
+#define LIMITS_TESTS 0x33FFU
 #endif
 #ifndef LIMITS_PROCESSES
 #define LIMITS_PROCESSES 2000
@@ -1036,6 +1052,7 @@ static void run(u64 *stack) {
     if (LIMITS_TESTS & 0x400U) test_persistence();
     if (LIMITS_TESTS & 0x800U) test_devices();
     if (LIMITS_TESTS & 0x1000U) test_drm();
+    if (LIMITS_TESTS & 0x2000U) test_misc();
     print(failures ? "LIMITSTEST FAIL\n" : "LIMITSTEST PASS\n");
     call1(NR_EXIT_GROUP, 0);
     for (;;) { }
