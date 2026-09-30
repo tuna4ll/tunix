@@ -7,6 +7,7 @@
 #include "../include/inotify.h"
 #include "../include/kstring.h"
 #include "../include/time.h"
+#include "../include/ext2.h"
 #include "../include/fatfs.h"
 #include "../include/pipe.h"
 #include "../include/process.h"
@@ -1186,6 +1187,13 @@ int vfs_mount(const char *source, const char *target, const char *type,
         int status = fatfs_mount(source, at->name, &root);
         if (status != 0) return status;
         owns_root = 1;
+    } else if (strcmp(type, "ext2") == 0 || strcmp(type, "ext3") == 0) {
+        int status = ext2fs_mount(source, at->name, &root);
+        if (status != 0) {
+            if (root) free_tree(root);
+            return status;
+        }
+        owns_root = 1;
     } else if (mount_is_pseudo(type)) {
         return -VFS_EBUSY;
     } else {
@@ -1194,7 +1202,11 @@ int vfs_mount(const char *source, const char *target, const char *type,
 
     struct vfs_mount *entry = (struct vfs_mount *)kmalloc(sizeof(*entry));
     if (!entry) {
-        if (owns_root) free_tree(root);
+        if (owns_root) {
+            fatfs_unmount(root);
+            ext2fs_unmount(root);
+            free_tree(root);
+        }
         return -VFS_ENOMEM;
     }
     memset(entry, 0, sizeof(*entry));
@@ -1233,6 +1245,7 @@ int vfs_umount(const char *target) {
     if (previous) previous->next = entry->next;
     else mount_table = entry->next;
     fatfs_unmount(entry->root);
+    ext2fs_unmount(entry->root);
     if (entry->owns_root) free_tree(entry->root);
     kfree(entry);
     return 0;

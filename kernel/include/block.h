@@ -44,11 +44,6 @@ int block_device_read(const struct block_device *device, uint64_t lba,
 int block_device_write(const struct block_device *device, uint64_t lba,
                        uint32_t count, const void *source);
 int block_device_flush(const struct block_device *device);
-int block_read(uint64_t lba, uint32_t count, void *destination);
-int block_write(uint64_t lba, uint32_t count, const void *source);
-int block_read_bytes(uint64_t offset, size_t size, void *destination);
-int block_flush(void);
-uint64_t block_sectors(void);
 
 void block_probe(void);
 

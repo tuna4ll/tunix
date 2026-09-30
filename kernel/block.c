@@ -221,27 +221,6 @@ int block_device_flush(const struct block_device *device) {
     return device->flush ? device->flush(device->context) : 0;
 }
 
-int block_read(uint64_t lba, uint32_t count, void *destination) {
-    return block_device_read(block_root(), lba, count, destination);
-}
-
-int block_write(uint64_t lba, uint32_t count, const void *source) {
-    return block_device_write(block_root(), lba, count, source);
-}
-
-int block_flush(void) {
-    return block_device_flush(block_root());
-}
-
-uint64_t block_sectors(void) {
-    const struct block_device *device = block_root();
-    return device ? device->sectors : 0;
-}
-
-int block_read_bytes(uint64_t offset, size_t size, void *destination) {
-    return block_device_read_bytes(block_root(), offset, size, destination);
-}
-
 int block_device_write_bytes(const struct block_device *device, uint64_t offset,
                              size_t size, const void *source) {
     if (!device || !device->write || !source) return -1;

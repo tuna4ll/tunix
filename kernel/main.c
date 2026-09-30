@@ -118,7 +118,7 @@ void kmain(const struct boot_info *boot) {
     block_select_root(root_device_index());
 
     vfs_init();
-    if (ext2fs_mount_root(0) != 0) {
+    if (ext2fs_mount_root() != 0) {
         terminal_print("\nblock devices:");
         int found = block_device_count();
         for (int index = 0; index < found; index++) {
@@ -134,7 +134,7 @@ void kmain(const struct boot_info *boot) {
     char source[5 + BLOCK_NAME_BYTES] = "/dev/";
     if (root) memcpy(source + 5, root->dev_name, sizeof root->dev_name);
     vfs_mount_builtin(root ? source : "none", "/",
-                      ext2fs_journalled() ? "ext3" : "ext2", vfs_root);
+                      ext2fs_journalled(vfs_root) ? "ext3" : "ext2", vfs_root);
 #if TUNIX_BOOT_TIMINGS
     boot_log_stage("root filesystem mount", &stage_started);
 #endif

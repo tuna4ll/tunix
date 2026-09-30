@@ -2709,7 +2709,7 @@ static void fill_statfs(struct vfs_node *node, struct linux_statfs *out) {
     }
 
     struct ext2_fs_stats stats;
-    if (ext2fs_stats(&stats) == 0) {
+    if (ext2fs_stats(node, &stats) == 0) {
         out->f_type = EXT2_SUPER_MAGIC;
         out->f_bsize = stats.block_size;
         out->f_frsize = stats.block_size;
