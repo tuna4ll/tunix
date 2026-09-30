@@ -59,10 +59,30 @@ static int cacheable(const struct vfs_node *node) {
 
 uint64_t vfs_cached_bytes(void) { return cached_bytes; }
 
+static uint64_t pages_for(uint64_t length);
+
 int vfs_fault_in(struct vfs_node *node) {
     if (!node) return -1;
+    if ((node->flags & 0xFFU) == VFS_FILE && node->disk_inode) {
+        uint64_t span = pages_for(node->length);
+        for (uint64_t index = 0; index < span; index++)
+            if (!vfs_page(node, index, 0)) return -1;
+    }
     node->flags &= ~VFS_LAZY_DATA;
     return 0;
+}
+
+void vfs_forget_backing(struct vfs_node *node) {
+    if (!node || !node->disk_inode) return;
+    struct vfs_page_map *map = node->pages;
+    if (map) {
+        uint64_t held = map->resident * VFS_PAGE_SIZE;
+        cached_bytes -= cached_bytes >= held ? held : cached_bytes;
+        for (uint64_t index = 0; index < map->count; index++)
+            if (map->page[index])
+                map->dirty[index / 64ULL] |= 1ULL << (index % 64ULL);
+    }
+    node->disk_inode = 0;
 }
 
 void vfs_map_ref(struct vfs_node *node) {
@@ -935,6 +955,7 @@ void vfs_node_unref(struct vfs_node *node) {
     if (!node || !node->refs) return;
     if (--node->refs) return;
     if (!(node->flags & VFS_ORPHANED)) return;
+    PERSIST(released, node);
     free_node_data(node);
     vfs_free_node(node);
 }
@@ -1103,6 +1124,21 @@ static void free_tree(struct vfs_node *top) {
     }
 }
 
+static int tree_busy(struct vfs_node *top) {
+    struct vfs_node *node = top;
+    while (node) {
+        uint32_t link_refs = node->links > 1 ? node->links - 1U : 0;
+        if (node->refs > link_refs || node->mapped_refs || node->mounted) return 1;
+        if (node->children) {
+            node = node->children;
+            continue;
+        }
+        while (node != top && !node->next) node = node->parent;
+        node = node == top ? NULL : node->next;
+    }
+    return 0;
+}
+
 static int mount_is_pseudo(const char *type) {
     return strcmp(type, "proc") == 0 || strcmp(type, "sysfs") == 0 ||
            strcmp(type, "devtmpfs") == 0 || strcmp(type, "devfs") == 0 ||
@@ -1190,6 +1226,7 @@ int vfs_umount(const char *target) {
     }
     if (!entry) return -VFS_EINVAL;
     if (!entry->mountpoint) return -VFS_EPERM;
+    if (entry->owns_root && tree_busy(entry->root)) return -VFS_EBUSY;
 
     entry->mountpoint->mounted = NULL;
     entry->mountpoint->flags &= ~VFS_MOUNTPOINT;

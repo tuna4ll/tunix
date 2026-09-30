@@ -167,6 +167,7 @@ void vfs_set_persist_ops(const struct vfs_persist_ops *ops);
 void vfs_notify_meta_changed(struct vfs_node *node);
 
 int vfs_fault_in(struct vfs_node *node);
+void vfs_forget_backing(struct vfs_node *node);
 #define VFS_PAGE_SIZE 4096ULL
 
 void *vfs_page(struct vfs_node *node, uint64_t index, int for_write);
