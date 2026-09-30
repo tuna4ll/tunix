@@ -3291,9 +3291,9 @@ static int map_zero_pages(struct process *process, uint64_t start, uint64_t end,
 static int map_shared_object(struct process *process, uint64_t start,
                              uint64_t end, struct memfd_object *object,
                              uint64_t file_offset, uint64_t flags, int private) {
-    uint64_t extra = PAGE_SHARED;
+    uint64_t extra = PAGE_SHARED | PAGE_FILEBACKED;
     if (private) {
-        extra = (flags & PAGE_WRITE) ? PAGE_COW : 0;
+        extra = PAGE_FILEBACKED | ((flags & PAGE_WRITE) ? PAGE_COW : 0);
         flags &= ~PAGE_WRITE;
     }
     for (uint64_t address = start; address < end; address += 4096) {
@@ -3373,39 +3373,6 @@ static int find_mapping_range(struct process *process, uint64_t start,
         base = candidate + 4096;
     }
     return -1;
-}
-
-static int copy_file_tail(struct process *process, struct file *file,
-                          uint64_t base, uint64_t start, uint64_t end,
-                          uint64_t offset, uint64_t page_flags, int prot) {
-    if (map_zero_pages(process, base + start, base + end,
-                       page_flags | PAGE_WRITE) != 0) return -1;
-    uint8_t buffer[256];
-    uint64_t copied = start;
-    while (copied < end) {
-        size_t chunk = end - copied > sizeof(buffer) ? sizeof(buffer)
-                                                     : (size_t)(end - copied);
-        int64_t amount = vfs_read(file->node, offset + copied, chunk, buffer);
-        if (amount <= 0) break;
-        if (vmm_copy_to_space(process->cr3, base + copied, buffer,
-                              (size_t)amount) != 0) return -1;
-        copied += (uint64_t)amount;
-        if ((size_t)amount < chunk) break;
-    }
-    if (!(prot & PROT_WRITE)) {
-        uint64_t final_flags = PAGE_USER | PAGE_PRESENT | page_flags;
-        int failed = 0;
-        vmm_flush_batch_begin();
-        for (uint64_t page = base + start; page < base + end; page += 4096) {
-            if (vmm_protect_page_in(process->cr3, page, final_flags) != 0) {
-                failed = 1;
-                break;
-            }
-        }
-        vmm_flush_batch_end();
-        if (failed) return -1;
-    }
-    return 0;
 }
 
 static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, int fd, uint64_t offset) {
@@ -3513,61 +3480,18 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
         return (int64_t)base;
     }
 
-    int share_private = (flags & MAP_PRIVATE) && !(prot & PROT_WRITE);
-    int share_shared = (flags & MAP_SHARED) &&
-                       (!(prot & PROT_WRITE) ||
-                        (file && (file->flags & O_ACCMODE) != O_RDONLY));
     if (file && file->kind == FILE_KIND_VFS && file->node &&
-        (file->node->flags & 0xFFU) == VFS_FILE && (share_private || share_shared) &&
-        offset < file->node->length && (offset & 0xFFFULL) == 0) {
-        uint64_t shareable = align_up(file->node->length - offset, 4096);
-        if (shareable > length) shareable = length;
-        uint64_t shared_flags = PAGE_USER | PAGE_PRESENT | PAGE_FILEBACKED;
-        if (flags & MAP_SHARED) {
-            shared_flags |= PAGE_SHARED;
-            if (prot & PROT_WRITE) shared_flags |= PAGE_WRITE;
-        } else {
-            shared_flags |= PAGE_COW;
+        (file->node->flags & 0xFFU) == VFS_FILE) {
+        if ((flags & MAP_SHARED) && (prot & PROT_WRITE) &&
+            (file->flags & O_ACCMODE) == O_RDONLY) return -EACCES;
+        uint32_t kind = VM_FILE_PAGES | ((flags & MAP_PRIVATE) ? VM_PRIVATE : 0);
+        if (process_map_area(base, base + length, page_flags, kind, file, offset) != 0)
+            return -ENOMEM;
+        if (advance_mmap_base) {
+            process->mmap_base = base + length + 4096;
+            if (process->memory) process->memory->mmap_base = process->mmap_base;
         }
-        if (nx_enabled && !(prot & PROT_EXEC)) shared_flags |= PAGE_NX;
-
-        uint64_t mapped = 0;
-        while (mapped < shareable) {
-            uint64_t physical = vfs_page_physical(file->node,
-                                                  (offset + mapped) / 4096ULL);
-            if (!physical) break;
-            physical &= ~0xFFFULL;
-
-            if (pmm_page_refcount(physical) == 0 && pmm_page_ref(physical) != 0) break;
-            if (pmm_page_ref(physical) != 0) break;
-            if (vmm_map_page_in(process->cr3, base + mapped, physical,
-                                shared_flags) != 0) {
-                pmm_free_page((void *)physical);
-                break;
-            }
-            mapped += 4096;
-        }
-
-        if (mapped == shareable) {
-            if (process_map_area(base, base + length, page_flags, VM_FILE_PAGES,
-                                 file, offset) != 0) {
-                unmap_pages(process, base, base + mapped);
-                return -ENOMEM;
-            }
-            if (mapped < length &&
-                copy_file_tail(process, file, base, mapped, length, offset,
-                               page_flags, prot) != 0) {
-                unmap_pages(process, base, base + length);
-                return -ENOMEM;
-            }
-            if (advance_mmap_base) {
-                process->mmap_base = base + length + 4096;
-                if (process->memory) process->memory->mmap_base = process->mmap_base;
-            }
-            return (int64_t)base;
-        }
-
-        unmap_pages(process, base, base + mapped);
+        return (int64_t)base;
     }
 
     uint64_t allocation_flags = file ? (page_flags | PAGE_WRITE) : page_flags;
@@ -3744,12 +3668,14 @@ static int64_t sys_shmctl(int id, int command, uint64_t user_buffer) {
 static int64_t mremap_backed(struct process *process, uint64_t address,
                              uint64_t old_length, uint64_t new_length,
                              int flags, struct file *backing,
-                             uint64_t backing_offset, uint32_t kind) {
+                             uint64_t backing_offset, uint32_t kind,
+                             uint64_t area_flags) {
+    int lazy = backing && (kind & VM_FILE_PAGES);
     if (new_length < old_length) {
         unmap_pages(process, address + new_length, address + old_length);
 
         if (backing)
-            (void)process_map_area(address, address + new_length, PAGE_WRITE,
+            (void)process_map_area(address, address + new_length, area_flags,
                                    kind, backing, backing_offset);
         return (int64_t)address;
     }
@@ -3758,10 +3684,12 @@ static int64_t mremap_backed(struct process *process, uint64_t address,
     uint64_t extra = new_length - old_length;
     if (mapping_range_free(process, tail, extra)) {
         int ok;
-        if (backing && backing->kind == FILE_KIND_MEMFD) {
+        if (lazy) {
+            ok = 1;
+        } else if (backing && backing->kind == FILE_KIND_MEMFD) {
             ok = map_shared_object(process, tail, tail + extra, backing->memfd,
                                    backing_offset + old_length,
-                                   PAGE_WRITE, 0) == 0;
+                                   area_flags, (kind & VM_PRIVATE) != 0) == 0;
         } else if (!backing) {
             ok = map_zero_pages(process, tail, tail + extra, PAGE_WRITE) == 0;
         } else {
@@ -3769,7 +3697,7 @@ static int64_t mremap_backed(struct process *process, uint64_t address,
         }
         if (ok) {
             if (backing)
-                (void)process_map_area(address, address + new_length, PAGE_WRITE,
+                (void)process_map_area(address, address + new_length, area_flags,
                                        kind, backing, backing_offset);
             return (int64_t)address;
         }
@@ -3778,7 +3706,9 @@ static int64_t mremap_backed(struct process *process, uint64_t address,
 
     if (!(flags & MREMAP_MAYMOVE)) return -ENOMEM;
 
-    if (!backing || backing->kind != FILE_KIND_MEMFD) return -ENOMEM;
+    int movable = backing && (backing->kind == FILE_KIND_MEMFD ||
+                              (lazy && !(kind & VM_PRIVATE)));
+    if (!movable) return -ENOMEM;
 
     uint64_t destination;
     uint64_t search_start = process->memory ? process->memory->mmap_base :
@@ -3786,14 +3716,16 @@ static int64_t mremap_backed(struct process *process, uint64_t address,
     if (find_mapping_range(process, search_start, new_length, &destination) != 0)
         return -ENOMEM;
 
-    if (map_shared_object(process, destination, destination + new_length,
-                          backing->memfd, backing_offset, PAGE_WRITE, 0) != 0) {
+    if (!lazy &&
+        map_shared_object(process, destination, destination + new_length,
+                          backing->memfd, backing_offset, area_flags,
+                          (kind & VM_PRIVATE) != 0) != 0) {
         unmap_pages(process, destination, destination + new_length);
         return -ENOMEM;
     }
 
     unmap_pages(process, address, address + old_length);
-    (void)process_map_area(destination, destination + new_length, PAGE_WRITE,
+    (void)process_map_area(destination, destination + new_length, area_flags,
                            kind, backing, backing_offset);
 
     process->mmap_base = destination + new_length + 4096;
@@ -3815,7 +3747,8 @@ static int64_t sys_mremap(uint64_t address, uint64_t old_length,
     new_length = align_up(new_length, 4096);
     if (address >= USER_ADDRESS_LIMIT ||
         new_length > USER_ADDRESS_LIMIT - address) return -EINVAL;
-    if (vmm_translate(process->cr3, address, NULL, NULL) != 0) return -EFAULT;
+    if (vmm_translate(process->cr3, address, NULL, NULL) != 0 &&
+        !process_find_area(address)) return -EFAULT;
 
     if (new_length == old_length) return (int64_t)address;
 
@@ -3823,10 +3756,11 @@ static int64_t sys_mremap(uint64_t address, uint64_t old_length,
     struct file *backing = area ? area->file : NULL;
     uint64_t backing_offset = area ? area->offset : 0;
     uint32_t kind = area ? area->kind : 0;
+    uint64_t area_flags = area ? area->page_flags : PAGE_WRITE;
 
     if (backing) file_ref(backing);
     int64_t result = mremap_backed(process, address, old_length, new_length,
-                                   flags, backing, backing_offset, kind);
+                                   flags, backing, backing_offset, kind, area_flags);
     if (backing) file_unref(backing);
     return result;
 }
@@ -3850,12 +3784,14 @@ static int64_t sys_mprotect(uint64_t address, uint64_t length, int prot) {
             failed = 1;
             break;
         }
-        uint64_t effective_flags = flags | (old_flags & (PAGE_DEVICE | PAGE_SHARED));
+        uint64_t effective_flags =
+            flags | (old_flags & (PAGE_DEVICE | PAGE_SHARED | PAGE_FILEBACKED));
         if (nx_enabled && (old_flags & PAGE_DEVICE)) effective_flags |= PAGE_NX;
 
-        if (old_flags & PAGE_COW) {
-            if (prot & PROT_WRITE) effective_flags = (effective_flags & ~PAGE_WRITE) | PAGE_COW;
-        }
+        int private_copy = (old_flags & PAGE_COW) ||
+                           ((old_flags & PAGE_FILEBACKED) && !(old_flags & PAGE_SHARED));
+        if (private_copy && (prot & PROT_WRITE))
+            effective_flags = (effective_flags & ~PAGE_WRITE) | PAGE_COW;
         if (vmm_protect_page_in(process->cr3, page, effective_flags) != 0) {
             failed = 1;
             break;

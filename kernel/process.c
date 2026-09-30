@@ -1286,6 +1286,10 @@ static struct vm_area **area_list(void) {
     return current && current->memory ? &current->memory->areas : NULL;
 }
 
+static int area_writes_file(const struct vm_area *area) {
+    return (area->page_flags & PAGE_WRITE) && !(area->kind & VM_PRIVATE);
+}
+
 static struct vm_area *area_alloc(uint64_t start, uint64_t end,
                                   uint64_t page_flags, uint32_t kind,
                                   struct file *file, uint64_t offset) {
@@ -1301,7 +1305,7 @@ static struct vm_area *area_alloc(uint64_t start, uint64_t end,
     if (file) file_ref(file);
     if ((kind & VM_FILE_PAGES) && file) {
         vfs_map_ref(file->node);
-        if (page_flags & PAGE_WRITE)
+        if (area_writes_file(area))
             vfs_map_write_ref(file->node, offset, end - start);
     }
     return area;
@@ -1310,7 +1314,7 @@ static struct vm_area *area_alloc(uint64_t start, uint64_t end,
 static void area_free(struct vm_area *area) {
     if (!area) return;
     if ((area->kind & VM_FILE_PAGES) && area->file) {
-        if (area->page_flags & PAGE_WRITE) vfs_map_write_unref(area->file->node);
+        if (area_writes_file(area)) vfs_map_write_unref(area->file->node);
         vfs_map_unref(area->file->node);
     }
     if (area->file) file_unref(area->file);
@@ -1434,8 +1438,7 @@ int process_sync_file_areas(uint64_t start, uint64_t end) {
         if (area->start >= end) break;
         if (area->end <= start) continue;
         covered = 1;
-        if ((area->kind & VM_FILE_PAGES) && area->file &&
-            (area->page_flags & PAGE_WRITE))
+        if ((area->kind & VM_FILE_PAGES) && area->file && area_writes_file(area))
             vfs_flush_mapped(area->file->node);
     }
     return covered;
@@ -1483,16 +1486,50 @@ static uint64_t alloc_user_page(void) {
 
 #define COMMIT_AHEAD_PAGES 16ULL
 
-static int commit_one(struct vm_area *area, uint64_t page) {
+static int commit_zero(uint64_t page, uint64_t flags) {
     if (vmm_translate(current->cr3, page, NULL, NULL) == 0) return 1;
     uint64_t physical = alloc_user_page();
     if (!physical) return 0;
     memset(vmm_phys_to_virt(physical), 0, 4096);
-    if (vmm_map_page_in(current->cr3, page, physical, area->page_flags) != 0) {
+    if (vmm_map_page_in(current->cr3, page, physical, flags) != 0) {
         pmm_free_page((void *)physical);
         return 0;
     }
     return 1;
+}
+
+static int commit_one(struct vm_area *area, uint64_t page) {
+    return commit_zero(page, area->page_flags);
+}
+
+static uint64_t shared_page_flags(const struct vm_area *area) {
+    uint64_t flags = area->page_flags | PAGE_USER | PAGE_PRESENT | PAGE_FILEBACKED;
+    if (!(area->kind & VM_PRIVATE)) return flags | PAGE_SHARED;
+    if (flags & PAGE_WRITE) flags = (flags & ~PAGE_WRITE) | PAGE_COW;
+    return flags;
+}
+
+static int map_shared_page(uint64_t page, uint64_t physical, uint64_t flags) {
+    if (pmm_page_ref(physical) != 0) return 0;
+    if (vmm_map_page_in(current->cr3, page, physical, flags) != 0) {
+        pmm_free_page((void *)physical);
+        return 0;
+    }
+    return 1;
+}
+
+static int commit_file(struct vm_area *area, uint64_t page) {
+    struct file *file = area->file;
+    if (!file || file->kind != FILE_KIND_VFS || !file->node) return 0;
+    if (vmm_translate(current->cr3, page, NULL, NULL) == 0) return 1;
+    struct vfs_node *node = file->node;
+    uint64_t index = (page - area->start + area->offset) / 4096ULL;
+    if (index >= (node->length + 4095ULL) / 4096ULL)
+        return commit_zero(page, area->page_flags | PAGE_USER | PAGE_PRESENT);
+    uint64_t physical = vfs_page_physical(node, index) & ~0xFFFULL;
+    if (!physical) return 0;
+    if (pmm_page_refcount(physical) == 0 && pmm_page_ref(physical) != 0) return 0;
+    return map_shared_page(page, physical, shared_page_flags(area));
 }
 
 static int commit_memfd(struct vm_area *area, uint64_t page) {
@@ -1501,18 +1538,8 @@ static int commit_memfd(struct vm_area *area, uint64_t page) {
     uint64_t index = (page - area->start + area->offset) / 4096ULL;
     if (index * 4096ULL >= memfd_size(area->file->memfd)) return 0;
     uint64_t physical = memfd_page_ensure(area->file->memfd, index);
-    if (!physical || pmm_page_ref(physical) != 0) return 0;
-    uint64_t flags = area->page_flags | PAGE_USER | PAGE_PRESENT;
-    if (area->kind & VM_PRIVATE) {
-        if (flags & PAGE_WRITE) flags = (flags & ~PAGE_WRITE) | PAGE_COW;
-    } else {
-        flags |= PAGE_SHARED;
-    }
-    if (vmm_map_page_in(current->cr3, page, physical, flags) != 0) {
-        pmm_free_page((void *)physical);
-        return 0;
-    }
-    return 1;
+    if (!physical) return 0;
+    return map_shared_page(page, physical, shared_page_flags(area));
 }
 
 int process_commit_area(uint64_t fault_address) {
@@ -1520,6 +1547,7 @@ int process_commit_area(uint64_t fault_address) {
     uint64_t page = fault_address & ~4095ULL;
     struct vm_area *area = process_find_area(page);
     if (area && (area->kind & VM_MEMFD)) return commit_memfd(area, page);
+    if (area && (area->kind & VM_FILE_PAGES)) return commit_file(area, page);
     if (!area || !(area->kind & VM_ANONYMOUS)) return 0;
     if (!commit_one(area, page)) return 0;
 
