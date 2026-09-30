@@ -297,7 +297,8 @@ count.
 - TCP has no MSS option, no window scaling, no selective acknowledgement, and
   no out-of-order reassembly — a segment arriving early is re-acknowledged and
   dropped rather than held.
-- 32 sockets in total, across every family.
+- Sockets are demultiplexed by a linear scan of an unbounded table, so a busy
+  machine with thousands of sockets pays for each packet in proportion.
 - No `MSG_ERRQUEUE`, so an ICMP error is never reported to the socket that
   caused it, and no `recvmmsg` to go with `sendmmsg`.
 - An ICMP socket carries no errors: a destination that answers with

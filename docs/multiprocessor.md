@@ -155,8 +155,12 @@ the socket is filled. The APIC id is what a startup message is addressed to and
 it is **not** the index — firmware numbers processors however it likes, and a
 machine with hyperthreading disabled in its BIOS leaves gaps.
 
-`SMP_MAX_CPUS` (8, `kernel/include/percpu.h`) is the ceiling. A table that
-lists more says so on the console rather than silently rounding down.
+`SMP_MAX_CPUS` (256, `kernel/include/percpu.h`) is the ceiling: the xAPIC id
+space. Only small per-processor scalars are sized by it; idle stacks and the
+GDT, TSS and fault stack are allocated for processors that exist, and affinity
+is a 256-bit `struct cpu_mask`. Idle processors skip the kernel lock on their
+tick when nothing is ready, so a machine with many cores does not queue every
+idle tick behind the ticket lock.
 
 ## Bringing one up
 

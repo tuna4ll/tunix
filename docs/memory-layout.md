@@ -10,12 +10,13 @@ Everything the kernel addresses lives in the top half. Four regions matter:
 
 | Base | What | Size |
 | --- | --- | --- |
-| `0xFFFFC00000000000` | direct map — all of physical memory | 63 TiB of room |
+| `0xFFFFC00000000000` | direct map — all of physical memory | 62.5 TiB of room |
+| `0xFFFFFE8000000000` | device registers mapped with `vmm_map_device` | 512 GiB |
 | `0xFFFFFF0000000000` | kernel heap | up to 512 GiB |
 | `0xFFFFFFFF80000000` | kernel image, and the first GiB of RAM | 1 GiB |
 | `0xFFFFFFFFC0000000` | loadable modules (x86-64) | 16 MiB |
 | `0xFFFFFFFFF0000000` | framebuffer | as large as the mode needs |
-| `0xFFFFFFFFFF000000` | device registers | 16 MiB |
+| `0xFFFFFFFFFF000000` | early device registers (APIC, ACPI window) | 16 MiB |
 
 The last four share one PML4 entry — the top 2 GiB — because that is where
 `-mcmodel=kernel` requires every symbol to be. The first two have entries of
@@ -87,8 +88,8 @@ was invisible until there was more memory to collide with.
 ## No ceiling of its own
 
 There is no `PMM_DIRECT_MAP_LIMIT` any more. The direct map spans as many
-top-level entries as physical memory needs, up to the 63 TiB between
-`DIRECT_MAP_BASE` and the heap, and `vmm_init` only builds the gigabytes that
+top-level entries as physical memory needs, up to the 62.5 TiB between
+`DIRECT_MAP_BASE` and the device window, and `vmm_init` only builds the gigabytes that
 hold something the architecture wants mapped.
 
 The allocator's bitmap and per-page reference counts (32-bit) used to live in
