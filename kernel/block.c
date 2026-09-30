@@ -191,35 +191,46 @@ static int device_read_counted(const struct block_device *device, uint64_t lba,
     return status;
 }
 
-int block_read(uint64_t lba, uint32_t count, void *destination) {
-    const struct block_device *device = block_root();
-    if (!device || !count || !destination) return -1;
+int block_device_read(const struct block_device *device, uint64_t lba,
+                      uint32_t count, void *destination) {
+    if (!device || !device->read || !count || !destination) return -1;
     if (lba + count > device->sectors) return -1;
     return device_read_counted(device, lba, count, destination);
 }
 
 #define WRITE_FAILURE_REPORT_LIMIT 8U
 
-int block_write(uint64_t lba, uint32_t count, const void *source) {
-    const struct block_device *device = block_root();
+int block_device_write(const struct block_device *device, uint64_t lba,
+                       uint32_t count, const void *source) {
     if (!device || !device->write || !count || !source) return -1;
     if (lba + count > device->sectors) return -1;
     int status = device->write(device->context, lba, count, source);
     if (status != 0) {
         block_write_failures++;
         if (block_write_failures <= WRITE_FAILURE_REPORT_LIMIT)
-            kprintf("BLOCK: write of %u sectors at lba %u failed (%d)%s\n",
-                    (unsigned)count, (unsigned)lba, status,
+            kprintf("BLOCK: write of %u sectors at lba %u on %s failed (%d)%s\n",
+                    (unsigned)count, (unsigned)lba, device->dev_name, status,
                     block_write_failures == WRITE_FAILURE_REPORT_LIMIT
                         ? ", further failures counted in /proc/blockstat" : "");
     }
     return status;
 }
 
-int block_flush(void) {
-    const struct block_device *device = block_root();
+int block_device_flush(const struct block_device *device) {
     if (!device) return -1;
     return device->flush ? device->flush(device->context) : 0;
+}
+
+int block_read(uint64_t lba, uint32_t count, void *destination) {
+    return block_device_read(block_root(), lba, count, destination);
+}
+
+int block_write(uint64_t lba, uint32_t count, const void *source) {
+    return block_device_write(block_root(), lba, count, source);
+}
+
+int block_flush(void) {
+    return block_device_flush(block_root());
 }
 
 uint64_t block_sectors(void) {
