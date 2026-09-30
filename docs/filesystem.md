@@ -22,31 +22,55 @@ one points inside the filesystem.
 
 ## What the driver can mount
 
-`superblock_usable()` in `kernel/fs/ext2.c` refuses anything it genuinely cannot
-read:
+`superblock_usable()` in `kernel/fs/ext2.c` takes what mke2fs makes for ext2 and
+ext3 by default, and refuses only what it genuinely cannot write correctly:
 
-- a block size other than 4 KiB -- every buffer in the file is sized to it
-- an inode larger than the classic 128 bytes
-- a group whose bitmap would not fit in one block
-- any incompatible feature but `filetype` -- extents and 64-bit block numbers
-  above all
-- any read-only-compatible feature but `sparse_super` and `large_file`. The
-  name says what the rule is: a driver that does not understand one of these
-  may still read the filesystem, but must not write to it. This one writes, so
-  it refuses instead of quietly corrupting.
+- blocks of 1, 2 or 4 KiB. A 4 KiB page is read and written as the blocks that
+  cover it, so a smaller block only means more of them per page.
+- inodes of any power-of-two size from 128 bytes up. The first 128 are the
+  classic inode; a new inode gets its extra space zeroed and `i_extra_isize`
+  set, which is what `extra_isize` asks for.
+- files through triple-indirect blocks, and sizes past 4 GiB through
+  `i_size_high`, setting `large_file` the first time a file needs it.
+- `dir_index` directories are read as the linear directories they also are.
+  The first change to one clears its index flag, so the directory stays valid
+  and Linux simply stops using the hash for it.
+- `ext_attr` blocks are released, or their reference count dropped, when the
+  inode goes. `resize_inode` needs nothing: its blocks are already allocated.
+- `dir_nlink`: a directory past 65000 subdirectories has its link count pinned
+  to 1, as Linux does.
+- any other incompatible feature -- extents and 64-bit block numbers above all
+  -- and any other read-only-compatible one (`huge_file`, `metadata_csum`) stop
+  the mount. A driver that does not understand one of those may still read the
+  filesystem, but must not write to it.
 
-Which is why `support/image.sh` makes the filesystem with an explicit feature
-set and an explicit revision rather than mke2fs's defaults:
+So `support/image.sh` asks only for what mke2fs would otherwise add on a
+system whose `mke2fs.conf` leans towards ext4:
 
 ```sh
-mkfs.ext3 -r 1 -b 4096 -I 128 \
-    -O ^resize_inode,^dir_index,^ext_attr,^metadata_csum,^64bit,^huge_file,^dir_nlink,^extra_isize
+mkfs.ext3 -r 1 -b 4096 -I 256 -O ^metadata_csum,^64bit,^huge_file
 ```
 
-`dir_index` is off because the driver reads linear directory entries and writing
-into a hashed directory without maintaining the tree would corrupt it for Linux.
-`metadata_csum` is off for the same reason: a write that does not update the
-checksum makes e2fsck complain about a filesystem that is otherwise fine.
+## More than one filesystem
+
+Every mounted ext2 or ext3 filesystem is a volume of its own: its block device,
+superblock, group descriptors, block caches, allocation cursors and journal.
+`mount -t ext2 /dev/sdb /mnt` (or `ext3`) reads it into a tree the way the root
+is read at boot, and the nodes it creates remember their volume, so every
+change goes to the disk it came from.
+
+A rename between two volumes becomes what `mv` would do by hand: the contents
+are read in, the inode is released on the old disk and created on the new one.
+A file that is still open when its last name goes keeps its inode, with a link
+count of zero, until the last descriptor closes; that is also when its blocks
+are freed. `umount` refuses with `EBUSY` while anything under the mount point is
+open, mapped, used as a working directory or mounted on, and otherwise commits
+the journal and marks the filesystem clean.
+
+`support/tests/ext2-kerneltest.sh` makes three filesystems with 1, 2 and 4 KiB
+blocks, indexed directories and attribute blocks, mounts them next to the root,
+writes, links, truncates, renames across them, unmounts and remounts, and then
+runs `e2fsck -fn` on each image on the host.
 
 ## The journal
 
@@ -79,7 +103,8 @@ create, unlink and rename -- commits whatever is staged as one transaction:
 Step 3 is the only part that existed before. The rest is the price: everything
 is written twice, and there are four cache flushes where there used to be none.
 
-The staging area is 256 blocks, so a transaction carries up to a megabyte, and
+The staging area is 256 blocks -- fewer with 1 KiB blocks, whose descriptor
+holds only 126 tags -- so a transaction carries up to a megabyte, and
 both halves of the doubled write go out in runs rather than a block at a time.
 The blocks of a file are usually consecutive on the disk and always consecutive
 in the log, so a megabyte of file contents is a handful of calls at each end.
@@ -180,8 +205,13 @@ GPT so that one disk boots either firmware.
   metadata block and reuses it without recording that the old contents must not
   come back. Nothing here reuses a block within one transaction, which is the
   case that would need it.
-- **No extents, no 64-bit block numbers.** 16 GiB is the ceiling.
-- **No `dir_index`.** A directory is a linear scan.
+- **No extents, no 64-bit block numbers.** Block numbers are 32 bits, so a
+  filesystem ends at 16 TiB with 4 KiB blocks, and `i_blocks` counts sectors in
+  32 bits, so a single file ends at 2 TiB.
+- **No hashed lookups on disk.** The tree is in memory and hashed there; on the
+  disk a directory is written linearly.
+- **No orphan list.** A file deleted while open is freed when it closes; if the
+  machine dies first, `e2fsck` finds the inode and frees it.
 - **The cache is not bounded in advance.** It grows until an allocation fails
   and only then drops clean pages, so a long write leaves the machine near
   full even though nothing is lost.

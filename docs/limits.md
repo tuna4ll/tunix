@@ -3,7 +3,7 @@
 What used to be a fixed number in the kernel, what it is now, and how it is
 tested. The test is `support/tests/limits-kerneltest.sh`; its sections are
 selected with `CFLAGS_EXTRA=-DLIMITS_TESTS=<mask>` and the defaults run on
-both architectures.
+both architectures. Filesystems have their own, `support/tests/ext2-kerneltest.sh`.
 
 ## Removed
 
@@ -23,6 +23,7 @@ both architectures.
 | Processors | 8 | 256, with full affinity masks |
 | Framebuffer | 1920x1080, else panic | anything that fits the 240 MiB window |
 | ext2 | 128 groups (~16 GiB), 32-bit sector math | any group count, 64-bit sectors |
+| ext2 / ext3 volumes | the root only, 4 KiB blocks, 128-byte inodes, files to 4 GiB | any number mounted, 1–4 KiB blocks, any inode size, files to 2 TiB, `dir_index` and `ext_attr` |
 | TCP/UDP sockets | 32 system-wide, backlog 16 | unbounded, backlog 4096 |
 | Terminals | 8 PTYs, 8 VTs | PTYs on demand, 63 VTs |
 | epoll | 128 fds per instance, 128 events per wait | unbounded, scanned round robin |
@@ -51,6 +52,6 @@ space for processors.
 
 - One kernel lock. With more virtual processors than host cores the ticket
   lock convoys; on real cores it does not.
-- ext2 is one mounted instance with 4 KiB blocks only.
+- ext2 has no extents or 64-bit block numbers: 16 TiB per filesystem.
 - File mappings of VFS files are mapped eagerly rather than on fault.
 - Inet sockets are demultiplexed by a linear scan.
