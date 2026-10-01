@@ -2,12 +2,11 @@
 #include <stdint.h>
 #include "../include/boot.h"
 #include "../include/cpu.h"
+#include "../include/heap.h"
 #include "../include/kstring.h"
 #include "../include/time.h"
 #include "../include/net/inet_socket.h"
 #include "../include/net/net.h"
-#if defined(__x86_64__)
-#endif
 #include "../include/net/virtio_net.h"
 
 extern void kprintf(const char *fmt, ...);
@@ -81,18 +80,42 @@ struct arp_entry {
     uint64_t updated_ns;
 };
 
-#define LOOPBACK_QUEUE 40
+#define LOOPBACK_BUDGET (16U << 20)
 #define LOOPBACK_BURST 128
+#define REASSEMBLY_LIMIT 64U
+#define REASSEMBLY_TIMEOUT_NS 30000000000ULL
+#define IPV4_MORE_FRAGMENTS 0x2000U
+#define IPV4_DONT_FRAGMENT 0x4000U
+#define IPV4_OFFSET_MASK 0x1FFFU
 
 struct loopback_packet {
+    struct loopback_packet *next;
     size_t length;
-    uint8_t data[NET_MTU];
+    uint8_t data[];
 };
 
-static struct loopback_packet loopback_ring[LOOPBACK_QUEUE];
-static unsigned loopback_head;
-static unsigned loopback_count;
+static struct loopback_packet *loopback_first;
+static struct loopback_packet *loopback_last;
+static size_t loopback_bytes;
 static uint64_t loopback_dropped;
+
+struct reassembly {
+    struct reassembly *next;
+    uint32_t source;
+    uint32_t destination;
+    uint16_t identification;
+    uint8_t protocol;
+    uint8_t header_length;
+    uint64_t deadline_ns;
+    size_t total;
+    size_t received;
+    uint8_t header[60];
+    uint8_t filled[NET_IPV4_MAX / 64U + 1U];
+    uint8_t data[NET_IPV4_MAX];
+};
+
+static struct reassembly *reassemblies;
+static unsigned reassembly_count;
 
 static struct net_config config;
 static struct arp_entry arp_cache[ARP_CACHE_SIZE];
@@ -143,17 +166,43 @@ uint32_t net_source_for(uint32_t destination) {
     return config.address;
 }
 
-static int loopback_enqueue(const void *packet, size_t length) {
-    if (!length || length > NET_MTU) return -1;
-    if (loopback_count >= LOOPBACK_QUEUE) { loopback_dropped++; return -1; }
+static uint8_t *loopback_reserve(size_t length, struct loopback_packet **out) {
+    if (!length || length > NET_IPV4_MAX || loopback_bytes + length > LOOPBACK_BUDGET) {
+        loopback_dropped++;
+        return NULL;
+    }
     struct loopback_packet *slot =
-        &loopback_ring[(loopback_head + loopback_count) % LOOPBACK_QUEUE];
-    memcpy(slot->data, packet, length);
+        (struct loopback_packet *)kmalloc(sizeof(*slot) + length);
+    if (!slot) {
+        loopback_dropped++;
+        return NULL;
+    }
+    slot->next = NULL;
     slot->length = length;
-    loopback_count++;
+    *out = slot;
+    return slot->data;
+}
+
+static void loopback_commit(struct loopback_packet *slot) {
+    if (loopback_last) loopback_last->next = slot;
+    else loopback_first = slot;
+    loopback_last = slot;
+    loopback_bytes += slot->length;
     stack_tx++;
-    stack_tx_bytes += length;
+    stack_tx_bytes += slot->length;
+}
+
+static int loopback_enqueue(const void *packet, size_t length) {
+    struct loopback_packet *slot;
+    uint8_t *data = loopback_reserve(length, &slot);
+    if (!data) return -1;
+    memcpy(data, packet, length);
+    loopback_commit(slot);
     return 0;
+}
+
+size_t net_path_mtu(uint32_t destination) {
+    return address_is_local(destination) ? NET_LOOPBACK_MTU : NET_MTU;
 }
 
 static int mac_equal(const uint8_t *left, const uint8_t *right) {
@@ -241,37 +290,77 @@ static const uint8_t *resolve_mac(uint32_t destination) {
     return NULL;
 }
 
-int net_send_ipv4(uint32_t destination, uint8_t protocol, const void *payload, size_t length,
-                  uint8_t ttl, int header_included) {
-    if (!payload) return -1;
-    if (header_included) {
-        if (length < sizeof(struct ipv4_header) || length > NET_MTU) return -1;
-        const struct ipv4_header *provided = (const struct ipv4_header *)payload;
-        if (address_is_local(provided->destination))
-            return loopback_enqueue(payload, length);
-        if (!config.interface_up) return -1;
-        const uint8_t *mac = resolve_mac(provided->destination);
-        return mac ? net_send_ethernet(mac, ETHERTYPE_IPV4, payload, length) : -1;
-    }
-    if (length + sizeof(struct ipv4_header) > NET_MTU) return -1;
-    int local = address_is_local(destination);
-    if (!local && !config.interface_up) return -1;
-    uint8_t packet[NET_MTU];
-    struct ipv4_header *header = (struct ipv4_header *)packet;
+static void fill_ipv4_header(struct ipv4_header *header, uint32_t destination,
+                             uint8_t protocol, size_t length, uint16_t identification,
+                             uint16_t fragment, uint8_t ttl) {
     memset(header, 0, sizeof(*header));
     header->version_ihl = 0x45U;
     header->total_length = net_htons((uint16_t)(sizeof(*header) + length));
-    header->identification = net_htons(++ipv4_identification);
-    header->fragment = net_htons(0x4000U);
+    header->identification = net_htons(identification);
+    header->fragment = net_htons(fragment);
     header->ttl = ttl ? ttl : 64U;
     header->protocol = protocol;
     header->source = net_source_for(destination);
     header->destination = destination;
     header->checksum = net_htons(net_checksum(header, sizeof(*header)));
-    memcpy(packet + sizeof(*header), payload, length);
-    if (local) return loopback_enqueue(packet, sizeof(*header) + length);
+}
+
+static int send_fragments(const uint8_t *mac, uint32_t destination, uint8_t protocol,
+                          const uint8_t *payload, size_t length, uint16_t identification,
+                          uint8_t ttl) {
+    size_t chunk = (NET_MTU - sizeof(struct ipv4_header)) & ~7U;
+    uint8_t packet[NET_MTU];
+    for (size_t offset = 0; offset < length; offset += chunk) {
+        size_t part = length - offset < chunk ? length - offset : chunk;
+        uint16_t fragment = (uint16_t)(offset / 8U);
+        if (offset + part < length) fragment |= IPV4_MORE_FRAGMENTS;
+        struct ipv4_header *header = (struct ipv4_header *)packet;
+        fill_ipv4_header(header, destination, protocol, part, identification, fragment, ttl);
+        memcpy(packet + sizeof(*header), payload + offset, part);
+        if (net_send_ethernet(mac, ETHERTYPE_IPV4, packet, sizeof(*header) + part) != 0)
+            return -1;
+    }
+    return 0;
+}
+
+int net_send_ipv4(uint32_t destination, uint8_t protocol, const void *payload, size_t length,
+                  uint8_t ttl, int header_included) {
+    if (!payload) return -1;
+    if (header_included) {
+        if (length < sizeof(struct ipv4_header) || length > NET_IPV4_MAX) return -1;
+        const struct ipv4_header *provided = (const struct ipv4_header *)payload;
+        if (address_is_local(provided->destination))
+            return loopback_enqueue(payload, length);
+        if (!config.interface_up || length > NET_MTU) return -1;
+        const uint8_t *mac = resolve_mac(provided->destination);
+        return mac ? net_send_ethernet(mac, ETHERTYPE_IPV4, payload, length) : -1;
+    }
+    if (length > NET_IPV4_MAX - sizeof(struct ipv4_header)) return -1;
+    uint16_t identification = ++ipv4_identification;
+    size_t total = sizeof(struct ipv4_header) + length;
+    if (address_is_local(destination)) {
+        struct loopback_packet *slot;
+        uint8_t *packet = loopback_reserve(total, &slot);
+        if (!packet) return -1;
+        fill_ipv4_header((struct ipv4_header *)packet, destination, protocol, length,
+                         identification, IPV4_DONT_FRAGMENT, ttl);
+        memcpy(packet + sizeof(struct ipv4_header), payload, length);
+        loopback_commit(slot);
+        return 0;
+    }
+    if (!config.interface_up) return -1;
     const uint8_t *mac = resolve_mac(destination);
-    return mac ? net_send_ethernet(mac, ETHERTYPE_IPV4, packet, sizeof(*header) + length) : -1;
+    if (!mac) return -1;
+    if (total > NET_MTU) {
+        if (protocol == IPPROTO_TCP) return -1;
+        return send_fragments(mac, destination, protocol, (const uint8_t *)payload, length,
+                              identification, ttl);
+    }
+    uint8_t packet[NET_MTU];
+    fill_ipv4_header((struct ipv4_header *)packet, destination, protocol, length,
+                     identification, IPV4_DONT_FRAGMENT, ttl);
+    memcpy(packet + sizeof(struct ipv4_header), payload, length);
+    return net_send_ethernet(mac, ETHERTYPE_IPV4, packet, total);
 }
 
 static uint16_t udp_checksum(uint32_t source, uint32_t destination,
@@ -298,19 +387,22 @@ static uint16_t udp_checksum(uint32_t source, uint32_t destination,
 
 int net_send_udp(uint32_t source, uint16_t source_port, uint32_t destination,
                  uint16_t destination_port, const void *payload, size_t length) {
-    if (length + sizeof(struct udp_header) > NET_MTU - sizeof(struct ipv4_header)) return -1;
-    uint8_t packet[NET_MTU];
+    (void)source;
+    size_t total = sizeof(struct udp_header) + length;
+    if (total > NET_IPV4_MAX - sizeof(struct ipv4_header)) return -1;
+    uint8_t *packet = (uint8_t *)kmalloc(total);
+    if (!packet) return -1;
     struct udp_header *header = (struct udp_header *)packet;
     header->source_port = net_htons(source_port);
     header->destination_port = net_htons(destination_port);
-    header->length = net_htons((uint16_t)(sizeof(*header) + length));
+    header->length = net_htons((uint16_t)total);
     header->checksum = 0;
     memcpy(packet + sizeof(*header), payload, length);
-
-    (void)source;
-    header->checksum = net_htons(udp_checksum(net_source_for(destination), destination, packet,
-                                              sizeof(*header) + length));
-    return net_send_ipv4(destination, IPPROTO_UDP, packet, sizeof(*header) + length, 64, 0);
+    header->checksum = net_htons(udp_checksum(net_source_for(destination), destination,
+                                              packet, total));
+    int status = net_send_ipv4(destination, IPPROTO_UDP, packet, total, 64, 0);
+    kfree(packet);
+    return status;
 }
 
 static uint16_t tcp_checksum(uint32_t source, uint32_t destination,
@@ -335,28 +427,79 @@ static uint16_t tcp_checksum(uint32_t source, uint32_t destination,
     return (uint16_t)~sum;
 }
 
+static size_t put_tcp_options(uint8_t *out, const struct net_tcp_options *options) {
+    size_t length = 0;
+    if (!options) return 0;
+    if (options->has_mss) {
+        out[length++] = 2;
+        out[length++] = 4;
+        out[length++] = (uint8_t)(options->mss >> 8);
+        out[length++] = (uint8_t)options->mss;
+    }
+    if (options->has_window_scale) {
+        out[length++] = 1;
+        out[length++] = 3;
+        out[length++] = 3;
+        out[length++] = options->window_scale;
+    }
+    return length;
+}
+
 int net_send_tcp(uint32_t source, uint16_t source_port, uint32_t destination,
                  uint16_t destination_port, uint32_t seq, uint32_t ack, uint8_t flags,
-                 uint16_t window, const void *payload, size_t length) {
-    if (length > 1024U) return -1;
-    if (length + sizeof(struct tcp_header) > NET_MTU - sizeof(struct ipv4_header)) return -1;
-    uint8_t packet[sizeof(struct tcp_header) + 1024U];
+                 uint16_t window, const struct net_tcp_options *options,
+                 const void *payload, size_t length) {
+    (void)source;
+    uint8_t option_bytes[8];
+    size_t option_length = put_tcp_options(option_bytes, options);
+    size_t header_length = sizeof(struct tcp_header) + option_length;
+    size_t total = header_length + length;
+    if (total > net_path_mtu(destination) - sizeof(struct ipv4_header) ||
+        total > NET_IPV4_MAX - sizeof(struct ipv4_header)) return -1;
+    uint8_t small[NET_MTU];
+    uint8_t *packet = total <= sizeof(small) ? small : (uint8_t *)kmalloc(total);
+    if (!packet) return -1;
     struct tcp_header *header = (struct tcp_header *)packet;
     memset(header, 0, sizeof(*header));
     header->source_port = net_htons(source_port);
     header->destination_port = net_htons(destination_port);
     header->seq = net_htonl(seq);
     header->ack = net_htonl(ack);
-    header->data_offset = (uint8_t)((sizeof(struct tcp_header) / 4U) << 4);
+    header->data_offset = (uint8_t)((header_length / 4U) << 4);
     header->flags = flags;
     header->window = net_htons(window);
-    header->checksum = 0;
-    if (length) memcpy(packet + sizeof(*header), payload, length);
+    memcpy(packet + sizeof(*header), option_bytes, option_length);
+    if (length) memcpy(packet + header_length, payload, length);
+    header->checksum = net_htons(tcp_checksum(net_source_for(destination), destination,
+                                              packet, total));
+    int status = net_send_ipv4(destination, IPPROTO_TCP, packet, total, 64, 0);
+    if (packet != small) kfree(packet);
+    return status;
+}
 
-    (void)source;
-    header->checksum = net_htons(tcp_checksum(net_source_for(destination), destination, packet,
-                                              sizeof(*header) + length));
-    return net_send_ipv4(destination, IPPROTO_TCP, packet, sizeof(*header) + length, 64, 0);
+static void parse_tcp_options(const uint8_t *at, size_t length,
+                              struct net_tcp_options *options) {
+    memset(options, 0, sizeof(*options));
+    size_t index = 0;
+    while (index < length) {
+        uint8_t kind = at[index];
+        if (kind == 0) break;
+        if (kind == 1) {
+            index++;
+            continue;
+        }
+        if (index + 1U >= length) break;
+        uint8_t size = at[index + 1U];
+        if (size < 2U || index + size > length) break;
+        if (kind == 2 && size == 4U) {
+            options->mss = (uint16_t)((at[index + 2U] << 8) | at[index + 3U]);
+            options->has_mss = 1;
+        } else if (kind == 3 && size == 3U) {
+            options->window_scale = at[index + 2U] > 14U ? 14U : at[index + 2U];
+            options->has_window_scale = 1;
+        }
+        index += size;
+    }
 }
 
 static void handle_arp(const uint8_t *data, size_t length) {
@@ -385,14 +528,113 @@ static void handle_icmp(const struct ipv4_header *ip, const uint8_t *data, size_
     inet_socket_receive_ipv4((const uint8_t *)ip, (size_t)net_htons(ip->total_length),
                              IPPROTO_ICMP, ip->source, ip->destination);
     if (icmp->type == 8 && icmp->code == 0 && address_is_local(ip->destination)) {
-        uint8_t reply[NET_MTU];
+        uint8_t *reply = (uint8_t *)kmalloc(length);
+        if (!reply) return;
         memcpy(reply, data, length);
         struct icmp_header *response = (struct icmp_header *)reply;
         response->type = 0;
         response->checksum = 0;
         response->checksum = net_htons(net_checksum(reply, length));
         (void)net_send_ipv4(ip->source, IPPROTO_ICMP, reply, length, 64, 0);
+        kfree(reply);
     }
+}
+
+static void handle_ipv4(const uint8_t *data, size_t length);
+
+static void reassembly_drop(struct reassembly **link) {
+    struct reassembly *entry = *link;
+    *link = entry->next;
+    kfree(entry);
+    reassembly_count--;
+}
+
+static void reassembly_expire(uint64_t now) {
+    struct reassembly **link = &reassemblies;
+    while (*link) {
+        if ((*link)->deadline_ns <= now) {
+            stack_drop++;
+            reassembly_drop(link);
+        } else {
+            link = &(*link)->next;
+        }
+    }
+}
+
+static struct reassembly *reassembly_find(const struct ipv4_header *ip) {
+    uint64_t now = time_uptime_ns();
+    reassembly_expire(now);
+    uint16_t identification = net_htons(ip->identification);
+    for (struct reassembly *entry = reassemblies; entry; entry = entry->next)
+        if (entry->source == ip->source && entry->destination == ip->destination &&
+            entry->identification == identification && entry->protocol == ip->protocol)
+            return entry;
+    if (reassembly_count >= REASSEMBLY_LIMIT) {
+        struct reassembly **oldest = &reassemblies;
+        while ((*oldest)->next) oldest = &(*oldest)->next;
+        stack_drop++;
+        reassembly_drop(oldest);
+    }
+    struct reassembly *entry = (struct reassembly *)kmalloc(sizeof(*entry));
+    if (!entry) return NULL;
+    memset(entry, 0, offsetof(struct reassembly, data));
+    entry->source = ip->source;
+    entry->destination = ip->destination;
+    entry->identification = identification;
+    entry->protocol = ip->protocol;
+    entry->deadline_ns = now + REASSEMBLY_TIMEOUT_NS;
+    entry->next = reassemblies;
+    reassemblies = entry;
+    reassembly_count++;
+    return entry;
+}
+
+static void reassemble(const struct ipv4_header *ip, size_t header_length,
+                       const uint8_t *payload, size_t length) {
+    uint16_t fragment = net_htons(ip->fragment);
+    size_t offset = (size_t)(fragment & IPV4_OFFSET_MASK) * 8U;
+    int last = !(fragment & IPV4_MORE_FRAGMENTS);
+    if ((!last && (length & 7U)) || !length ||
+        offset + length + header_length > NET_IPV4_MAX) {
+        stack_drop++;
+        return;
+    }
+    struct reassembly *entry = reassembly_find(ip);
+    if (!entry) return;
+    memcpy(entry->data + offset, payload, length);
+    for (size_t unit = offset / 8U; unit * 8U < offset + length; unit++) {
+        uint8_t bit = (uint8_t)(1U << (unit & 7U));
+        if (entry->filled[unit / 8U] & bit) continue;
+        entry->filled[unit / 8U] |= bit;
+        size_t end = unit * 8U + 8U;
+        entry->received += (end < offset + length ? end : offset + length) - unit * 8U;
+    }
+    if (last) entry->total = offset + length;
+    if (!offset) {
+        entry->header_length = (uint8_t)header_length;
+        memcpy(entry->header, ip, header_length);
+    }
+    if (!entry->total || !entry->header_length || entry->received != entry->total) return;
+
+    size_t whole = entry->header_length + entry->total;
+    uint8_t *packet = (uint8_t *)kmalloc(whole);
+    if (packet) {
+        memcpy(packet, entry->header, entry->header_length);
+        memcpy(packet + entry->header_length, entry->data, entry->total);
+        struct ipv4_header *header = (struct ipv4_header *)packet;
+        header->total_length = net_htons((uint16_t)whole);
+        header->fragment = 0;
+        header->checksum = 0;
+        header->checksum = net_htons(net_checksum(header, entry->header_length));
+    }
+    for (struct reassembly **link = &reassemblies; *link; link = &(*link)->next) {
+        if (*link != entry) continue;
+        reassembly_drop(link);
+        break;
+    }
+    if (!packet) return;
+    handle_ipv4(packet, whole);
+    kfree(packet);
 }
 
 static void handle_ipv4(const uint8_t *data, size_t length) {
@@ -405,7 +647,10 @@ static void handle_ipv4(const uint8_t *data, size_t length) {
         stack_drop++; return;
     }
     if (!address_accept(ip->destination)) return;
-    if (net_htons(ip->fragment) & 0x3FFFU) { stack_drop++; return; }
+    if (net_htons(ip->fragment) & (IPV4_MORE_FRAGMENTS | IPV4_OFFSET_MASK)) {
+        reassemble(ip, header_length, data + header_length, total_length - header_length);
+        return;
+    }
     const uint8_t *payload = data + header_length;
     size_t payload_length = total_length - header_length;
     if (ip->protocol == IPPROTO_ICMP) {
@@ -426,10 +671,13 @@ static void handle_ipv4(const uint8_t *data, size_t length) {
         if (tcp_checksum(ip->source, ip->destination, payload, payload_length) != 0) {
             stack_drop++; return;
         }
+        struct net_tcp_options options;
+        parse_tcp_options(payload + sizeof(struct tcp_header),
+                          data_offset - sizeof(struct tcp_header), &options);
         inet_socket_receive_tcp(ip->source, net_htons(tcp->source_port), ip->destination,
                                 net_htons(tcp->destination_port), net_htonl(tcp->seq),
                                 net_htonl(tcp->ack), tcp->flags, net_htons(tcp->window),
-                                payload + data_offset, payload_length - data_offset);
+                                &options, payload + data_offset, payload_length - data_offset);
     } else {
         inet_socket_receive_ipv4(data, total_length, ip->protocol, ip->source, ip->destination);
     }
@@ -502,12 +750,14 @@ static void loopback_drain(void) {
     static int draining;
     if (draining) return;
     draining = 1;
-    for (unsigned served = 0; served < LOOPBACK_BURST && loopback_count; served++) {
-        struct loopback_packet *slot = &loopback_ring[loopback_head];
-        loopback_head = (loopback_head + 1U) % LOOPBACK_QUEUE;
-        loopback_count--;
+    for (unsigned served = 0; served < LOOPBACK_BURST && loopback_first; served++) {
+        struct loopback_packet *slot = loopback_first;
+        loopback_first = slot->next;
+        if (!loopback_first) loopback_last = NULL;
+        loopback_bytes -= slot->length;
         stack_rx++;
         handle_ipv4(slot->data, slot->length);
+        kfree(slot);
     }
     draining = 0;
 }

@@ -9,8 +9,6 @@
 
 extern void kprintf(const char *fmt, ...);
 
-#define SOCKET_QUEUE 8
-#define SOCKET_PACKET_MAX 2048
 #define EAGAIN 11
 #define ENOMEM 12
 #define EFAULT 14
@@ -33,10 +31,15 @@ extern void kprintf(const char *fmt, ...);
 #define ECONNREFUSED 111
 #define EINPROGRESS 115
 
-#define TCP_RING 16384U
-#define TCP_MSS 1024U
+#define DATAGRAM_BUFFER_DEFAULT 212992U
+#define STREAM_BUFFER_DEFAULT (256U << 10)
+#define SOCKET_BUFFER_MIN 2048U
+#define SOCKET_BUFFER_MAX (16U << 20)
+#define TCP_BUFFER_INITIAL 16384U
+#define TCP_DEFAULT_MSS 536U
+#define TCP_MAX_WINDOW_SCALE 14U
+#define TCP_DUP_ACK_LIMIT 3U
 
-#define TCP_PEER_MSS_INIT 1460U
 #define TCP_RTO_INIT_NS   200000000ULL
 #define TCP_RTO_MAX_NS   4000000000ULL
 #define TCP_MAX_RETRIES  8
@@ -63,21 +66,28 @@ struct tcp_control_block {
     uint32_t iss;
     uint32_t snd_una;
     uint32_t snd_nxt;
-    uint16_t snd_wnd;
+    uint32_t snd_wnd;
     uint32_t irs;
     uint32_t rcv_nxt;
+    int fin_queued;
     int fin_sent;
     int fin_acked;
     int peer_fin;
     int pending_error;
-    uint8_t tx[TCP_RING];
+    uint8_t *tx;
+    size_t tx_capacity;
     size_t tx_len;
     size_t tx_sent;
-    uint8_t rx[TCP_RING];
+    uint8_t *rx;
+    size_t rx_capacity;
     size_t rx_head;
     size_t rx_len;
-    uint16_t rcv_wnd_adv;
-    uint16_t peer_mss;
+    uint32_t rcv_wnd_adv;
+    uint32_t send_mss;
+    uint8_t snd_wscale;
+    uint8_t rcv_wscale;
+    uint8_t scaling;
+    unsigned dup_acks;
     uint64_t rto_ns;
     uint64_t rto_deadline_ns;
     unsigned retransmit_count;
@@ -140,12 +150,13 @@ struct tcp_control_block {
 #define IFF_RUNNING 0x0040
 #define IFF_MULTICAST 0x1000
 
-struct queued_packet {
+struct datagram {
+    struct datagram *next;
     size_t length;
-    uint8_t data[SOCKET_PACKET_MAX];
     uint8_t address[32];
     size_t address_length;
     uint8_t ttl;
+    uint8_t data[];
 };
 
 struct inet_socket {
@@ -176,17 +187,35 @@ struct inet_socket {
     uint8_t last_ttl;
     uint8_t ttl;
     int orphan;
+    size_t receive_buffer;
+    size_t send_buffer;
 
     int listening;
     unsigned backlog;
+    unsigned pending_total;
     struct inet_socket *pending;
+    struct inet_socket *pending_last;
     struct inet_socket *listener;
     struct inet_socket *sibling;
     struct tcp_control_block *tcp;
-    struct queued_packet queue[SOCKET_QUEUE];
-    unsigned queue_head;
-    unsigned queue_tail;
-    unsigned queue_count;
+
+    struct datagram *queue_first;
+    struct datagram *queue_last;
+    size_t queue_bytes;
+
+    struct inet_socket *all_next;
+    struct inet_socket *all_prev;
+    struct inet_socket *class_next;
+    struct inet_socket *class_prev;
+    struct inet_socket *port_next;
+    struct inet_socket *connection_next;
+    struct inet_socket *timer_next;
+    struct inet_socket *timer_prev;
+    uint32_t port_key;
+    uint32_t connection_key;
+    uint8_t in_ports;
+    uint8_t in_connections;
+    uint8_t in_timers;
 };
 
 struct icmp_message {
@@ -197,34 +226,214 @@ struct icmp_message {
     uint16_t sequence;
 };
 
-static struct inet_socket **sockets;
-static unsigned socket_capacity;
+struct socket_table {
+    struct inet_socket **buckets;
+    uint32_t mask;
+    uint32_t count;
+};
+
+static struct inet_socket *all_sockets;
+static struct inet_socket *raw_sockets;
+static struct inet_socket *packet_sockets;
+static struct inet_socket *timed_sockets;
+static struct inet_socket *timer_cursor;
+static struct socket_table ports;
+static struct socket_table connections;
 static uint16_t next_ephemeral = 49152;
+
+static size_t socket_total;
+
+size_t inet_socket_count(void) {
+    return socket_total;
+}
 
 static int is_ping_socket(const struct inet_socket *socket) {
     return socket && socket->domain == TUNIX_AF_INET &&
            socket->type == TUNIX_SOCK_DGRAM && socket->protocol == IPPROTO_ICMP;
 }
 
-static int register_socket(struct inet_socket *socket) {
-    for (unsigned i = 0; i < socket_capacity; i++) {
-        if (!sockets[i]) { sockets[i] = socket; return 0; }
+static struct inet_socket **class_list(const struct inet_socket *socket) {
+    if (socket->domain == TUNIX_AF_PACKET) return &packet_sockets;
+    if (socket->type == TUNIX_SOCK_RAW || is_ping_socket(socket)) return &raw_sockets;
+    return NULL;
+}
+
+static uint32_t mix(uint32_t value) {
+    value ^= value >> 16;
+    value *= 0x7FEB352DU;
+    value ^= value >> 15;
+    value *= 0x846CA68BU;
+    return value ^ (value >> 16);
+}
+
+static uint32_t port_key_of(uint16_t port) {
+    return mix(port);
+}
+
+static uint32_t connection_key_of(uint16_t local_port, uint32_t peer, uint16_t peer_port) {
+    return mix(peer ^ mix(((uint32_t)local_port << 16) | peer_port));
+}
+
+static struct inet_socket **chain_next(struct inet_socket *socket, int by_connection) {
+    return by_connection ? &socket->connection_next : &socket->port_next;
+}
+
+static uint32_t chain_key(const struct inet_socket *socket, int by_connection) {
+    return by_connection ? socket->connection_key : socket->port_key;
+}
+
+static void table_link(struct socket_table *table, int by_connection,
+                       struct inet_socket *socket) {
+    struct inet_socket **bucket = &table->buckets[chain_key(socket, by_connection) & table->mask];
+    *chain_next(socket, by_connection) = *bucket;
+    *bucket = socket;
+}
+
+static int table_grow(struct socket_table *table, int by_connection) {
+    uint32_t size = table->buckets ? (table->mask + 1U) * 2U : 64U;
+    struct inet_socket **buckets =
+        (struct inet_socket **)kmalloc(size * sizeof(*buckets));
+    if (!buckets) return table->buckets ? 0 : -1;
+    memset(buckets, 0, size * sizeof(*buckets));
+    struct inet_socket **old = table->buckets;
+    uint32_t old_size = old ? table->mask + 1U : 0;
+    table->buckets = buckets;
+    table->mask = size - 1U;
+    for (uint32_t index = 0; index < old_size; index++) {
+        struct inet_socket *socket = old[index];
+        while (socket) {
+            struct inet_socket *next = *chain_next(socket, by_connection);
+            table_link(table, by_connection, socket);
+            socket = next;
+        }
     }
-    unsigned capacity = socket_capacity ? socket_capacity * 2 : 64;
-    struct inet_socket **grown = (struct inet_socket **)kmalloc(capacity * sizeof(*grown));
-    if (!grown) return -1;
-    memset(grown, 0, capacity * sizeof(*grown));
-    if (socket_capacity) memcpy(grown, sockets, socket_capacity * sizeof(*grown));
-    kfree(sockets);
-    grown[socket_capacity] = socket;
-    sockets = grown;
-    socket_capacity = capacity;
+    kfree(old);
     return 0;
 }
 
+static int table_insert(struct socket_table *table, int by_connection,
+                        struct inet_socket *socket) {
+    if ((!table->buckets || table->count >= (table->mask + 1U) * 2U) &&
+        table_grow(table, by_connection) != 0) return -1;
+    table_link(table, by_connection, socket);
+    table->count++;
+    return 0;
+}
+
+static void table_remove(struct socket_table *table, int by_connection,
+                         struct inet_socket *socket) {
+    struct inet_socket **at = &table->buckets[chain_key(socket, by_connection) & table->mask];
+    while (*at && *at != socket) at = chain_next(*at, by_connection);
+    if (!*at) return;
+    *at = *chain_next(socket, by_connection);
+    *chain_next(socket, by_connection) = NULL;
+    table->count--;
+}
+
+static struct inet_socket *port_bucket(uint16_t port) {
+    if (!ports.buckets) return NULL;
+    return ports.buckets[port_key_of(port) & ports.mask];
+}
+
+static void ports_leave(struct inet_socket *socket) {
+    if (!socket->in_ports) return;
+    table_remove(&ports, 0, socket);
+    socket->in_ports = 0;
+}
+
+static int set_local_port(struct inet_socket *socket, uint16_t port) {
+    ports_leave(socket);
+    socket->local_port = port;
+    if (!port || socket->domain != TUNIX_AF_INET || socket->listener) return 0;
+    socket->port_key = port_key_of(port);
+    if (table_insert(&ports, 0, socket) != 0) return -1;
+    socket->in_ports = 1;
+    return 0;
+}
+
+static int connections_enter(struct inet_socket *socket) {
+    socket->connection_key = connection_key_of(socket->local_port, socket->peer_address,
+                                               socket->peer_port);
+    if (table_insert(&connections, 1, socket) != 0) return -1;
+    socket->in_connections = 1;
+    return 0;
+}
+
+static void connections_leave(struct inet_socket *socket) {
+    if (!socket->in_connections) return;
+    table_remove(&connections, 1, socket);
+    socket->in_connections = 0;
+}
+
+static void timer_watch(struct inet_socket *socket) {
+    if (socket->in_timers || !socket->tcp) return;
+    socket->timer_prev = NULL;
+    socket->timer_next = timed_sockets;
+    if (timed_sockets) timed_sockets->timer_prev = socket;
+    timed_sockets = socket;
+    socket->in_timers = 1;
+}
+
+static void timer_unwatch(struct inet_socket *socket) {
+    if (!socket->in_timers) return;
+    if (timer_cursor == socket) timer_cursor = socket->timer_next;
+    if (socket->timer_prev) socket->timer_prev->timer_next = socket->timer_next;
+    else timed_sockets = socket->timer_next;
+    if (socket->timer_next) socket->timer_next->timer_prev = socket->timer_prev;
+    socket->timer_next = socket->timer_prev = NULL;
+    socket->in_timers = 0;
+}
+
+static void register_socket(struct inet_socket *socket) {
+    socket_total++;
+    socket->all_prev = NULL;
+    socket->all_next = all_sockets;
+    if (all_sockets) all_sockets->all_prev = socket;
+    all_sockets = socket;
+    struct inet_socket **list = class_list(socket);
+    if (!list) return;
+    socket->class_prev = NULL;
+    socket->class_next = *list;
+    if (*list) (*list)->class_prev = socket;
+    *list = socket;
+}
+
 static void unregister_socket(struct inet_socket *socket) {
-    for (unsigned i = 0; i < socket_capacity; i++)
-        if (sockets[i] == socket) sockets[i] = NULL;
+    socket_total--;
+    if (socket->all_prev) socket->all_prev->all_next = socket->all_next;
+    else if (all_sockets == socket) all_sockets = socket->all_next;
+    if (socket->all_next) socket->all_next->all_prev = socket->all_prev;
+    struct inet_socket **list = class_list(socket);
+    if (list) {
+        if (socket->class_prev) socket->class_prev->class_next = socket->class_next;
+        else if (*list == socket) *list = socket->class_next;
+        if (socket->class_next) socket->class_next->class_prev = socket->class_prev;
+    }
+    ports_leave(socket);
+    connections_leave(socket);
+    timer_unwatch(socket);
+}
+
+static void queue_clear(struct inet_socket *socket) {
+    struct datagram *item = socket->queue_first;
+    while (item) {
+        struct datagram *next = item->next;
+        kfree(item);
+        item = next;
+    }
+    socket->queue_first = socket->queue_last = NULL;
+    socket->queue_bytes = 0;
+}
+
+static void destroy_socket(struct inet_socket *socket) {
+    unregister_socket(socket);
+    queue_clear(socket);
+    if (socket->tcp) {
+        kfree(socket->tcp->tx);
+        kfree(socket->tcp->rx);
+        kfree(socket->tcp);
+    }
+    kfree(socket);
 }
 
 static const char *event_protocol(const struct inet_socket *socket) {
@@ -249,21 +458,30 @@ static void report_close(struct inet_socket *socket) {
         socket->peer_address, socket->peer_port);
 }
 
+static int port_in_use(uint16_t port) {
+    for (struct inet_socket *other = port_bucket(port); other; other = other->port_next)
+        if (other->local_port == port) return 1;
+    return 0;
+}
+
 static uint16_t allocate_port(void) {
     for (unsigned attempt = 0; attempt < 16384; attempt++) {
         uint16_t candidate = next_ephemeral++;
         if (next_ephemeral < 49152) next_ephemeral = 49152;
-        int used = 0;
-        for (unsigned i = 0; i < socket_capacity; i++)
-            if (sockets[i] && sockets[i]->domain == TUNIX_AF_INET &&
-                sockets[i]->local_port == candidate) used = 1;
-        if (!used) return candidate;
+        if (!port_in_use(candidate)) return candidate;
     }
+    return 0;
+}
+
+static int bind_ephemeral(struct inet_socket *socket) {
+    uint16_t port = allocate_port();
+    if (!port || set_local_port(socket, port) != 0) return -1;
     return 0;
 }
 
 static uint32_t tcp_iss_salt;
 
+static int seq_lt(uint32_t a, uint32_t b) { return (int32_t)(a - b) < 0; }
 static int seq_le(uint32_t a, uint32_t b) { return (int32_t)(a - b) <= 0; }
 static int seq_gt(uint32_t a, uint32_t b) { return (int32_t)(a - b) > 0; }
 
@@ -272,23 +490,76 @@ static uint32_t tcp_generate_iss(void) {
     return (uint32_t)(time_uptime_ns() >> 6) ^ tcp_iss_salt;
 }
 
-static uint16_t tcp_rx_window(const struct tcp_control_block *tcp) {
-    size_t space = TCP_RING - tcp->rx_len;
-    return space > 0xFFFFU ? 0xFFFFU : (uint16_t)space;
+static size_t buffer_limit(size_t wanted) {
+    if (wanted < SOCKET_BUFFER_MIN) return SOCKET_BUFFER_MIN;
+    return wanted > SOCKET_BUFFER_MAX ? SOCKET_BUFFER_MAX : wanted;
 }
 
-static void tcp_arm_rto(struct tcp_control_block *tcp) {
+static uint8_t window_scale_for(size_t buffer) {
+    uint8_t shift = 0;
+    while (shift < TCP_MAX_WINDOW_SCALE && ((size_t)0xFFFFU << shift) < buffer) shift++;
+    return shift;
+}
+
+static uint32_t own_mss(uint32_t peer) {
+    size_t mtu = net_path_mtu(peer);
+    if (mtu > NET_IPV4_MAX) mtu = NET_IPV4_MAX;
+    return (uint32_t)(mtu - NET_IPV4_HEADER - NET_TCP_HEADER);
+}
+
+static void tcp_adopt_options(struct inet_socket *s, const struct net_tcp_options *options) {
+    struct tcp_control_block *tcp = s->tcp;
+    uint32_t limit = own_mss(s->peer_address);
+    uint32_t mss = options && options->has_mss && options->mss ? options->mss : TCP_DEFAULT_MSS;
+    tcp->send_mss = mss < limit ? mss : limit;
+    if (options && options->has_window_scale) {
+        tcp->scaling = 1;
+        tcp->snd_wscale = options->window_scale;
+    } else {
+        tcp->scaling = 0;
+        tcp->snd_wscale = 0;
+        tcp->rcv_wscale = 0;
+    }
+}
+
+static size_t tcp_rx_space(const struct inet_socket *s) {
+    return s->receive_buffer > s->tcp->rx_len ? s->receive_buffer - s->tcp->rx_len : 0;
+}
+
+static uint16_t tcp_window_field(struct inet_socket *s, int syn) {
+    struct tcp_control_block *tcp = s->tcp;
+    size_t space = tcp_rx_space(s);
+    uint8_t shift = (!syn && tcp->scaling) ? tcp->rcv_wscale : 0;
+    size_t field = space >> shift;
+    if (field > 0xFFFFU) field = 0xFFFFU;
+    tcp->rcv_wnd_adv = (uint32_t)(field << shift);
+    return (uint16_t)field;
+}
+
+static void tcp_arm_rto(struct inet_socket *s) {
+    struct tcp_control_block *tcp = s->tcp;
     if (!tcp->rto_ns) tcp->rto_ns = TCP_RTO_INIT_NS;
     tcp->rto_deadline_ns = time_uptime_ns() + tcp->rto_ns;
+    timer_watch(s);
 }
 
 static void tcp_transmit(struct inet_socket *s, uint32_t seq, uint8_t flags,
                          const uint8_t *data, size_t length) {
     struct tcp_control_block *tcp = s->tcp;
-
-    tcp->rcv_wnd_adv = tcp_rx_window(tcp);
+    int syn = (flags & TCP_SYN) != 0;
+    struct net_tcp_options options;
+    memset(&options, 0, sizeof(options));
+    if (syn) {
+        options.has_mss = 1;
+        options.mss = (uint16_t)own_mss(s->peer_address);
+        if (!(flags & TCP_ACK) || tcp->scaling) {
+            options.has_window_scale = 1;
+            options.window_scale = tcp->rcv_wscale;
+        }
+    }
+    uint16_t window = tcp_window_field(s, syn);
     net_send_tcp(s->local_address, s->local_port, s->peer_address, s->peer_port,
-                 seq, tcp->rcv_nxt, flags, tcp->rcv_wnd_adv, data, length);
+                 seq, tcp->rcv_nxt, flags, window, syn ? &options : NULL, data, length);
 }
 
 static void tcp_send_ack(struct inet_socket *s) {
@@ -297,58 +568,73 @@ static void tcp_send_ack(struct inet_socket *s) {
 
 static void tcp_send_window_update(struct inet_socket *s) {
     struct tcp_control_block *tcp = s->tcp;
-    if (tcp->state != TCP_ESTABLISHED && tcp->state != TCP_CLOSE_WAIT) return;
-    size_t window = TCP_RING - tcp->rx_len;
+    if (tcp->state != TCP_ESTABLISHED && tcp->state != TCP_FIN_WAIT_1 &&
+        tcp->state != TCP_FIN_WAIT_2) return;
+    size_t window = tcp_rx_space(s);
     if (window <= tcp->rcv_wnd_adv) return;
     size_t opened = window - tcp->rcv_wnd_adv;
-    size_t threshold = 2U * (size_t)(tcp->peer_mss ? tcp->peer_mss : TCP_PEER_MSS_INIT);
-    if (threshold > TCP_RING / 2U) threshold = TCP_RING / 2U;
-
-    if (opened >= threshold ||
-        (tcp->rcv_wnd_adv < (tcp->peer_mss ? tcp->peer_mss : TCP_PEER_MSS_INIT) &&
-         window >= (size_t)(tcp->peer_mss ? tcp->peer_mss : TCP_PEER_MSS_INIT)))
+    size_t threshold = 2U * (size_t)tcp->send_mss;
+    if (threshold > s->receive_buffer / 2U) threshold = s->receive_buffer / 2U;
+    if (opened >= threshold || (tcp->rcv_wnd_adv < tcp->send_mss && window >= tcp->send_mss))
         tcp_send_ack(s);
+}
+
+static int sending_state(int state) {
+    return state == TCP_ESTABLISHED || state == TCP_CLOSE_WAIT ||
+           state == TCP_FIN_WAIT_1 || state == TCP_CLOSING || state == TCP_LAST_ACK;
 }
 
 static void tcp_output(struct inet_socket *s) {
     struct tcp_control_block *tcp = s->tcp;
-    if (tcp->state != TCP_ESTABLISHED && tcp->state != TCP_CLOSE_WAIT) return;
+    if (!sending_state(tcp->state)) return;
     while (tcp->tx_sent < tcp->tx_len) {
         uint32_t window = tcp->snd_wnd ? tcp->snd_wnd : 1U;
         if (tcp->tx_sent >= window) break;
         size_t room = (size_t)window - tcp->tx_sent;
         size_t chunk = tcp->tx_len - tcp->tx_sent;
-        if (chunk > TCP_MSS) chunk = TCP_MSS;
+        if (chunk > tcp->send_mss) chunk = tcp->send_mss;
         if (chunk > room) chunk = room;
         if (!chunk) break;
         uint32_t seq = tcp->snd_una + (uint32_t)tcp->tx_sent;
         tcp_transmit(s, seq, TCP_ACK | TCP_PSH, tcp->tx + tcp->tx_sent, chunk);
         tcp->tx_sent += chunk;
-        tcp->snd_nxt = tcp->snd_una + (uint32_t)tcp->tx_sent;
-        tcp_arm_rto(tcp);
+        uint32_t end = tcp->snd_una + (uint32_t)tcp->tx_sent;
+        if (seq_gt(end, tcp->snd_nxt)) tcp->snd_nxt = end;
+        tcp_arm_rto(s);
     }
-}
-
-static unsigned pending_count(const struct inet_socket *listener) {
-    unsigned count = 0;
-    for (const struct inet_socket *s = listener->pending; s; s = s->sibling) count++;
-    return count;
+    if (tcp->fin_queued && !tcp->fin_sent && tcp->tx_sent == tcp->tx_len) {
+        uint32_t seq = tcp->snd_una + (uint32_t)tcp->tx_len;
+        tcp_transmit(s, seq, TCP_ACK | TCP_FIN, NULL, 0);
+        tcp->fin_sent = 1;
+        tcp->snd_nxt = seq + 1U;
+        tcp_arm_rto(s);
+    }
 }
 
 static void pending_append(struct inet_socket *listener, struct inet_socket *child) {
     child->listener = listener;
     child->sibling = NULL;
-    struct inet_socket **at = &listener->pending;
-    while (*at) at = &(*at)->sibling;
-    *at = child;
+    if (listener->pending_last) listener->pending_last->sibling = child;
+    else listener->pending = child;
+    listener->pending_last = child;
+    listener->pending_total++;
 }
 
 static void pending_detach(struct inet_socket *child) {
     struct inet_socket *listener = child->listener;
     if (!listener) return;
-    struct inet_socket **at = &listener->pending;
-    while (*at && *at != child) at = &(*at)->sibling;
-    if (*at) *at = child->sibling;
+    struct inet_socket *previous = NULL;
+    struct inet_socket *at = listener->pending;
+    while (at && at != child) {
+        previous = at;
+        at = at->sibling;
+    }
+    if (at) {
+        if (previous) previous->sibling = child->sibling;
+        else listener->pending = child->sibling;
+        if (listener->pending_last == child) listener->pending_last = previous;
+        listener->pending_total--;
+    }
     child->listener = NULL;
     child->sibling = NULL;
 }
@@ -356,44 +642,47 @@ static void pending_detach(struct inet_socket *child) {
 static void tcp_reset_peer(struct inet_socket *s) {
     if (!s->tcp) return;
     net_send_tcp(s->local_address, s->local_port, s->peer_address, s->peer_port,
-                 s->tcp->snd_nxt, s->tcp->rcv_nxt, TCP_RST | TCP_ACK, 0, NULL, 0);
+                 s->tcp->snd_nxt, s->tcp->rcv_nxt, TCP_RST | TCP_ACK, 0, NULL, NULL, 0);
 }
 
 static void tcp_free(struct inet_socket *socket) {
     pending_detach(socket);
 
     struct inet_socket *child = socket->pending;
-    socket->pending = NULL;
+    socket->pending = socket->pending_last = NULL;
+    socket->pending_total = 0;
     while (child) {
         struct inet_socket *next = child->sibling;
         child->listener = NULL;
         child->sibling = NULL;
         if (child->tcp && child->tcp->state != TCP_CLOSED) tcp_reset_peer(child);
-        unregister_socket(child);
-        if (child->tcp) kfree(child->tcp);
-        kfree(child);
+        destroy_socket(child);
         child = next;
     }
-    unregister_socket(socket);
-    if (socket->tcp) kfree(socket->tcp);
-    kfree(socket);
+    destroy_socket(socket);
 }
 
 static void tcp_begin_close(struct inet_socket *s) {
     struct tcp_control_block *tcp = s->tcp;
-    if (!tcp || tcp->fin_sent) return;
+    if (!tcp || tcp->fin_queued) return;
     if (tcp->state == TCP_ESTABLISHED || tcp->state == TCP_CLOSE_WAIT) {
-        tcp_output(s);
-        uint32_t seq = tcp->snd_una + (uint32_t)tcp->tx_sent;
-        tcp_transmit(s, seq, TCP_ACK | TCP_FIN, NULL, 0);
-        tcp->fin_sent = 1;
-        tcp->snd_nxt = seq + 1U;
+        tcp->fin_queued = 1;
         tcp->state = (tcp->state == TCP_ESTABLISHED) ? TCP_FIN_WAIT_1 : TCP_LAST_ACK;
-        tcp_arm_rto(tcp);
+        tcp_output(s);
     } else if (tcp->state == TCP_SYN_SENT) {
         tcp->state = TCP_CLOSED;
         tcp->rto_deadline_ns = 0;
     }
+}
+
+static struct tcp_control_block *tcp_create(struct inet_socket *socket) {
+    struct tcp_control_block *tcp = (struct tcp_control_block *)kmalloc(sizeof(*tcp));
+    if (!tcp) return NULL;
+    memset(tcp, 0, sizeof(*tcp));
+    tcp->send_mss = TCP_DEFAULT_MSS;
+    tcp->rcv_wscale = window_scale_for(socket->receive_buffer);
+    socket->tcp = tcp;
+    return tcp;
 }
 
 static int tcp_connect(struct inet_socket *socket, uint32_t address, uint16_t port) {
@@ -413,23 +702,23 @@ static int tcp_connect(struct inet_socket *socket, uint32_t address, uint16_t po
 
     if (!net_is_loopback(address) && (!config->link_up || !config->interface_up))
         return -ENETDOWN;
-    tcp = (struct tcp_control_block *)kmalloc(sizeof(*tcp));
+    if (!socket->local_port && bind_ephemeral(socket) != 0) return -EADDRINUSE;
+    tcp = tcp_create(socket);
     if (!tcp) return -ENOMEM;
-    memset(tcp, 0, sizeof(*tcp));
-    socket->tcp = tcp;
-    if (!socket->local_port) socket->local_port = allocate_port();
-    if (!socket->local_port) { socket->tcp = NULL; kfree(tcp); return -EADDRINUSE; }
-
     if (!socket->local_address) socket->local_address = net_source_for(address);
     socket->peer_address = address;
     socket->peer_port = port;
-    tcp->peer_mss = TCP_PEER_MSS_INIT;
+    if (connections_enter(socket) != 0) {
+        kfree(tcp);
+        socket->tcp = NULL;
+        return -ENOMEM;
+    }
     tcp->iss = tcp_generate_iss();
     tcp->snd_una = tcp->iss;
     tcp->snd_nxt = tcp->iss + 1U;
     tcp->state = TCP_SYN_SENT;
     tcp_transmit(socket, tcp->iss, TCP_SYN, NULL, 0);
-    tcp_arm_rto(tcp);
+    tcp_arm_rto(socket);
     return -EINPROGRESS;
 }
 
@@ -438,10 +727,22 @@ static void tcp_enter_time_wait(struct inet_socket *s) {
     tcp->state = TCP_TIME_WAIT;
     tcp->rto_deadline_ns = 0;
     tcp->time_wait_deadline_ns = time_uptime_ns() + TCP_TIME_WAIT_NS;
+    timer_watch(s);
 }
 
-static void tcp_process_ack(struct inet_socket *s, uint32_t ack) {
+static void tcp_go_back(struct inet_socket *s) {
     struct tcp_control_block *tcp = s->tcp;
+    tcp->tx_sent = 0;
+    tcp->dup_acks = 0;
+    tcp_output(s);
+}
+
+static void tcp_process_ack(struct inet_socket *s, uint32_t ack, int duplicate) {
+    struct tcp_control_block *tcp = s->tcp;
+    if (ack == tcp->snd_una) {
+        if (duplicate && tcp->tx_sent && ++tcp->dup_acks == TCP_DUP_ACK_LIMIT) tcp_go_back(s);
+        return;
+    }
     if (!seq_gt(ack, tcp->snd_una) || !seq_le(ack, tcp->snd_nxt)) return;
     uint32_t acked = ack - tcp->snd_una;
     uint32_t data_acked = acked;
@@ -449,17 +750,18 @@ static void tcp_process_ack(struct inet_socket *s, uint32_t ack) {
         tcp->fin_acked = 1;
         if (data_acked > 0) data_acked -= 1U;
     }
-    if (data_acked > tcp->tx_sent) data_acked = (uint32_t)tcp->tx_sent;
+    if (data_acked > tcp->tx_len) data_acked = (uint32_t)tcp->tx_len;
     if (data_acked > 0) {
         memmove(tcp->tx, tcp->tx + data_acked, tcp->tx_len - data_acked);
         tcp->tx_len -= data_acked;
-        tcp->tx_sent -= data_acked;
+        tcp->tx_sent = tcp->tx_sent > data_acked ? tcp->tx_sent - data_acked : 0;
     }
     tcp->snd_una = ack;
+    tcp->dup_acks = 0;
     tcp->retransmit_count = 0;
     tcp->rto_ns = TCP_RTO_INIT_NS;
     if (tcp->snd_una == tcp->snd_nxt) tcp->rto_deadline_ns = 0;
-    else tcp_arm_rto(tcp);
+    else tcp_arm_rto(s);
 }
 
 static void tcp_advance_close(struct inet_socket *s) {
@@ -486,8 +788,49 @@ static void tcp_advance_close(struct inet_socket *s) {
     }
 }
 
+static int buffer_reserve(uint8_t **buffer, size_t *capacity, size_t *head, size_t used,
+                          size_t wanted, size_t limit) {
+    if (wanted <= *capacity) return 0;
+    size_t grown = *capacity ? *capacity * 2U : TCP_BUFFER_INITIAL;
+    while (grown < wanted) grown *= 2U;
+    if (grown > limit) grown = limit;
+    if (grown < wanted) return -1;
+    uint8_t *fresh = (uint8_t *)kmalloc(grown);
+    if (!fresh) return -1;
+    if (used) {
+        size_t first = used < *capacity - *head ? used : *capacity - *head;
+        memcpy(fresh, *buffer + *head, first);
+        memcpy(fresh + first, *buffer, used - first);
+    }
+    kfree(*buffer);
+    *buffer = fresh;
+    *capacity = grown;
+    *head = 0;
+    return 0;
+}
+
+static size_t tcp_store(struct inet_socket *s, const uint8_t *payload, size_t length) {
+    struct tcp_control_block *tcp = s->tcp;
+    size_t take = tcp_rx_space(s);
+    if (take > length) take = length;
+    if (!take) return 0;
+    if (buffer_reserve(&tcp->rx, &tcp->rx_capacity, &tcp->rx_head, tcp->rx_len,
+                       tcp->rx_len + take, s->receive_buffer) != 0) {
+        take = tcp->rx_capacity - tcp->rx_len;
+        if (!take) return 0;
+    }
+    size_t tail = (tcp->rx_head + tcp->rx_len) % tcp->rx_capacity;
+    size_t first = tcp->rx_capacity - tail;
+    if (first > take) first = take;
+    memcpy(tcp->rx + tail, payload, first);
+    memcpy(tcp->rx, payload + first, take - first);
+    tcp->rx_len += take;
+    return take;
+}
+
 static void tcp_input(struct inet_socket *s, uint32_t seq, uint32_t ack, uint8_t flags,
-                      uint16_t window, const uint8_t *payload, size_t length) {
+                      uint16_t window, const struct net_tcp_options *options,
+                      const uint8_t *payload, size_t length) {
     struct tcp_control_block *tcp = s->tcp;
     if (!tcp) return;
 
@@ -496,14 +839,18 @@ static void tcp_input(struct inet_socket *s, uint32_t seq, uint32_t ack, uint8_t
         tcp->state = TCP_CLOSED;
         tcp->rto_deadline_ns = 0;
         tcp->peer_fin = 1;
+        timer_watch(s);
         return;
     }
 
-    tcp->snd_wnd = window;
+    uint32_t previous_window = tcp->snd_wnd;
+    if (flags & TCP_SYN) tcp->snd_wnd = window;
+    else tcp->snd_wnd = (uint32_t)window << (tcp->scaling ? tcp->snd_wscale : 0);
 
     if (tcp->state == TCP_SYN_SENT) {
         if ((flags & TCP_SYN) && (flags & TCP_ACK)) {
             if (ack != tcp->iss + 1U) return;
+            tcp_adopt_options(s, options);
             tcp->irs = seq;
             tcp->rcv_nxt = seq + 1U;
             tcp->snd_una = ack;
@@ -513,6 +860,7 @@ static void tcp_input(struct inet_socket *s, uint32_t seq, uint32_t ack, uint8_t
             s->connected = 1;
             report_connect(s);
             tcp_send_ack(s);
+            tcp_output(s);
         }
         return;
     }
@@ -531,18 +879,24 @@ static void tcp_input(struct inet_socket *s, uint32_t seq, uint32_t ack, uint8_t
         s->connect_reported = 1;
     }
 
-    if (flags & TCP_ACK) tcp_process_ack(s, ack);
+    if (flags & TCP_ACK)
+        tcp_process_ack(s, ack, !length && !(flags & (TCP_SYN | TCP_FIN)) &&
+                                tcp->snd_wnd == previous_window);
 
-    if (length > tcp->peer_mss) tcp->peer_mss = (uint16_t)length;
-
+    if (length > 0 && seq_lt(seq, tcp->rcv_nxt) && seq_gt(seq + (uint32_t)length, tcp->rcv_nxt)) {
+        uint32_t skip = tcp->rcv_nxt - seq;
+        payload += skip;
+        length -= skip;
+        seq = tcp->rcv_nxt;
+    }
     if (length > 0 && seq == tcp->rcv_nxt && !tcp->peer_fin) {
-        size_t space = TCP_RING - tcp->rx_len;
-        size_t take = length < space ? length : space;
-        for (size_t i = 0; i < take; i++)
-            tcp->rx[(tcp->rx_head + tcp->rx_len + i) % TCP_RING] = payload[i];
-        tcp->rx_len += take;
+        size_t take = tcp_store(s, payload, length);
         tcp->rcv_nxt += (uint32_t)take;
         tcp_send_ack(s);
+        if (take < length) {
+            length = take;
+            flags &= (uint8_t)~TCP_FIN;
+        }
     } else if (length > 0) {
         tcp_send_ack(s);
     }
@@ -555,19 +909,26 @@ static void tcp_input(struct inet_socket *s, uint32_t seq, uint32_t ack, uint8_t
 
     tcp_output(s);
     tcp_advance_close(s);
+    if (tcp->state == TCP_CLOSED || tcp->state == TCP_TIME_WAIT) timer_watch(s);
 }
 
 static int64_t tcp_send(struct inet_socket *s, const void *data, size_t length) {
     struct tcp_control_block *tcp = s->tcp;
     if (!tcp) return -ENOTCONN;
     if (tcp->pending_error) { int e = tcp->pending_error; tcp->pending_error = 0; return e; }
-    if (s->write_shutdown || tcp->fin_sent) return -EPIPE;
+    if (s->write_shutdown || tcp->fin_queued) return -EPIPE;
     if (tcp->state == TCP_SYN_SENT) return -EAGAIN;
     if (tcp->state != TCP_ESTABLISHED && tcp->state != TCP_CLOSE_WAIT) return -ENOTCONN;
     if (!length) return 0;
-    size_t space = TCP_RING - tcp->tx_len;
+    size_t space = s->send_buffer > tcp->tx_len ? s->send_buffer - tcp->tx_len : 0;
     if (!space) { net_poll(); return -EAGAIN; }
     size_t take = length < space ? length : space;
+    size_t head = 0;
+    if (buffer_reserve(&tcp->tx, &tcp->tx_capacity, &head, tcp->tx_len,
+                       tcp->tx_len + take, s->send_buffer) != 0) {
+        take = tcp->tx_capacity - tcp->tx_len;
+        if (!take) return -ENOMEM;
+    }
     memcpy(tcp->tx + tcp->tx_len, data, take);
     tcp->tx_len += take;
     tcp_output(s);
@@ -586,12 +947,15 @@ static int64_t tcp_recv(struct inet_socket *s, void *data, size_t length, int fl
     if (!length) return 0;
     size_t take = length < tcp->rx_len ? length : tcp->rx_len;
     uint8_t *out = (uint8_t *)data;
-    for (size_t i = 0; i < take; i++)
-        out[i] = tcp->rx[(tcp->rx_head + i) % TCP_RING];
+    size_t first = tcp->rx_capacity - tcp->rx_head;
+    if (first > take) first = take;
+    memcpy(out, tcp->rx + tcp->rx_head, first);
+    memcpy(out + first, tcp->rx, take - first);
     if (!(flags & MSG_PEEK)) {
-        tcp->rx_head = (tcp->rx_head + take) % TCP_RING;
+        tcp->rx_head = (tcp->rx_head + take) % tcp->rx_capacity;
         tcp->rx_len -= take;
-        if (take > 0) tcp_send_window_update(s);
+        if (!tcp->rx_len) tcp->rx_head = 0;
+        tcp_send_window_update(s);
     }
     return (int64_t)take;
 }
@@ -605,54 +969,65 @@ static void tcp_retransmit(struct inet_socket *s) {
         tcp->peer_fin = 1;
         return;
     }
+    if (tcp->snd_una == tcp->snd_nxt) {
+        tcp->rto_deadline_ns = 0;
+        tcp->retransmit_count = 0;
+        return;
+    }
     tcp->rto_ns = tcp->rto_ns ? tcp->rto_ns * 2U : TCP_RTO_INIT_NS;
     if (tcp->rto_ns > TCP_RTO_MAX_NS) tcp->rto_ns = TCP_RTO_MAX_NS;
+    tcp->rto_deadline_ns = time_uptime_ns() + tcp->rto_ns;
     switch (tcp->state) {
         case TCP_SYN_SENT:
             tcp_transmit(s, tcp->iss, TCP_SYN, NULL, 0);
             break;
-        case TCP_ESTABLISHED:
-        case TCP_CLOSE_WAIT:
-        case TCP_FIN_WAIT_1:
-        case TCP_CLOSING:
-        case TCP_LAST_ACK:
-            if (tcp->tx_sent > 0) {
-                size_t chunk = tcp->tx_sent < TCP_MSS ? tcp->tx_sent : TCP_MSS;
-                tcp_transmit(s, tcp->snd_una, TCP_ACK | TCP_PSH, tcp->tx, chunk);
-            } else if (tcp->fin_sent) {
-                tcp_transmit(s, tcp->snd_nxt - 1U, TCP_ACK | TCP_FIN, NULL, 0);
-            }
+        case TCP_SYN_RECEIVED:
+            tcp_transmit(s, tcp->iss, TCP_SYN | TCP_ACK, NULL, 0);
             break;
-        default: break;
+        default:
+            if (!sending_state(tcp->state)) break;
+            if (tcp->tx_len)
+                tcp_go_back(s);
+            else if (tcp->fin_sent && !tcp->fin_acked)
+                tcp_transmit(s, tcp->snd_nxt - 1U, TCP_ACK | TCP_FIN, NULL, 0);
+            break;
     }
-    tcp->rto_deadline_ns = time_uptime_ns() + tcp->rto_ns;
+}
+
+static int timer_pending(const struct inet_socket *s) {
+    const struct tcp_control_block *tcp = s->tcp;
+    return tcp->rto_deadline_ns || tcp->state == TCP_TIME_WAIT || s->orphan ||
+           (s->listener && tcp->state == TCP_CLOSED);
 }
 
 void inet_socket_tcp_timer_poll(void) {
     uint64_t now = time_uptime_ns();
-    for (unsigned i = 0; i < socket_capacity; i++) {
-        struct inet_socket *s = sockets[i];
-        if (!s || !s->tcp) continue;
+    struct inet_socket *s = timed_sockets;
+    while (s) {
+        timer_cursor = s->timer_next;
         struct tcp_control_block *tcp = s->tcp;
         if (tcp->state == TCP_TIME_WAIT && now >= tcp->time_wait_deadline_ns) {
             tcp->state = TCP_CLOSED;
             tcp->rto_deadline_ns = 0;
         }
         if (tcp->rto_deadline_ns && now >= tcp->rto_deadline_ns) tcp_retransmit(s);
-        if (s->orphan && (tcp->state == TCP_CLOSED || now >= tcp->orphan_deadline_ns)) {
+        if ((s->orphan && (tcp->state == TCP_CLOSED || now >= tcp->orphan_deadline_ns)) ||
+            (s->listener && tcp->state == TCP_CLOSED)) {
             tcp_free(s);
-            continue;
+        } else if (!timer_pending(s)) {
+            timer_unwatch(s);
         }
-
-        if (s->listener && tcp->state == TCP_CLOSED) tcp_free(s);
+        s = timer_cursor;
     }
+    timer_cursor = NULL;
 }
 
 static struct inet_socket *tcp_open_child(struct inet_socket *listener, uint32_t source,
                                           uint16_t source_port, uint32_t destination,
                                           uint16_t destination_port, uint32_t seq,
-                                          uint16_t window) {
-    if (pending_count(listener) >= listener->backlog) return NULL;
+                                          uint16_t window,
+                                          const struct net_tcp_options *options) {
+    if (listener->pending_total >= listener->backlog) return NULL;
     struct inet_socket *child = (struct inet_socket *)kmalloc(sizeof(*child));
     if (!child) return NULL;
     memset(child, 0, sizeof(*child));
@@ -661,21 +1036,24 @@ static struct inet_socket *tcp_open_child(struct inet_socket *listener, uint32_t
     child->type = TUNIX_SOCK_STREAM;
     child->protocol = listener->protocol;
     child->ttl = 64;
+    child->receive_buffer = listener->receive_buffer;
+    child->send_buffer = listener->send_buffer;
     child->local_address = destination;
     child->local_port = destination_port;
     child->peer_address = source;
     child->peer_port = source_port;
-    child->tcp = (struct tcp_control_block *)kmalloc(sizeof(*child->tcp));
-    if (!child->tcp) { kfree(child); return NULL; }
-    memset(child->tcp, 0, sizeof(*child->tcp));
-    if (register_socket(child) != 0) {
-        kfree(child->tcp);
+    if (!tcp_create(child)) {
         kfree(child);
+        return NULL;
+    }
+    register_socket(child);
+    if (connections_enter(child) != 0) {
+        destroy_socket(child);
         return NULL;
     }
 
     struct tcp_control_block *tcp = child->tcp;
-    tcp->peer_mss = TCP_PEER_MSS_INIT;
+    tcp_adopt_options(child, options);
     tcp->snd_wnd = window;
     tcp->irs = seq;
     tcp->rcv_nxt = seq + 1U;
@@ -685,32 +1063,34 @@ static struct inet_socket *tcp_open_child(struct inet_socket *listener, uint32_t
     tcp->state = TCP_SYN_RECEIVED;
     pending_append(listener, child);
     tcp_transmit(child, tcp->iss, TCP_SYN | TCP_ACK, NULL, 0);
-    tcp_arm_rto(tcp);
+    tcp_arm_rto(child);
     return child;
 }
 
 void inet_socket_receive_tcp(uint32_t source, uint16_t source_port, uint32_t destination,
                              uint16_t destination_port, uint32_t seq, uint32_t ack, uint8_t flags,
-                             uint16_t window, const uint8_t *payload, size_t length) {
-    for (unsigned i = 0; i < socket_capacity; i++) {
-        struct inet_socket *s = sockets[i];
-        if (!s || !s->tcp || s->type != TUNIX_SOCK_STREAM) continue;
-        if (s->local_port != destination_port) continue;
-        if (s->local_address && s->local_address != destination) continue;
-        if (s->peer_port != source_port || s->peer_address != source) continue;
-        tcp_input(s, seq, ack, flags, window, payload, length);
-        return;
+                             uint16_t window, const struct net_tcp_options *options,
+                             const uint8_t *payload, size_t length) {
+    if (connections.buckets) {
+        uint32_t key = connection_key_of(destination_port, source, source_port);
+        for (struct inet_socket *s = connections.buckets[key & connections.mask]; s;
+             s = s->connection_next) {
+            if (!s->tcp || s->local_port != destination_port) continue;
+            if (s->local_address && s->local_address != destination) continue;
+            if (s->peer_port != source_port || s->peer_address != source) continue;
+            tcp_input(s, seq, ack, flags, window, options, payload, length);
+            return;
+        }
     }
 
     if ((flags & (TCP_SYN | TCP_ACK | TCP_RST)) == TCP_SYN) {
-        for (unsigned i = 0; i < socket_capacity; i++) {
-            struct inet_socket *s = sockets[i];
-            if (!s || !s->listening || s->type != TUNIX_SOCK_STREAM) continue;
+        for (struct inet_socket *s = port_bucket(destination_port); s; s = s->port_next) {
+            if (!s->listening || s->type != TUNIX_SOCK_STREAM) continue;
             if (s->local_port != destination_port) continue;
             if (s->local_address && s->local_address != destination) continue;
 
             (void)tcp_open_child(s, source, source_port, destination,
-                                 destination_port, seq, window);
+                                 destination_port, seq, window, options);
             return;
         }
     }
@@ -720,7 +1100,7 @@ void inet_socket_receive_tcp(uint32_t source, uint16_t source_port, uint32_t des
         uint32_t rst_ack = seq + (uint32_t)length + ((flags & (TCP_SYN | TCP_FIN)) ? 1U : 0U);
         uint8_t rst_flags = (flags & TCP_ACK) ? TCP_RST : (TCP_RST | TCP_ACK);
         net_send_tcp(destination, destination_port, source, source_port,
-                     rst_seq, rst_ack, rst_flags, 0, NULL, 0);
+                     rst_seq, rst_ack, rst_flags, 0, NULL, NULL, 0);
     }
 }
 
@@ -744,7 +1124,11 @@ struct inet_socket *inet_socket_create(int domain, int type, int protocol) {
     socket->type = base_type;
     socket->protocol = protocol;
     socket->ttl = 64;
-    if (register_socket(socket) != 0) { kfree(socket); return NULL; }
+    size_t buffer = base_type == TUNIX_SOCK_STREAM ? STREAM_BUFFER_DEFAULT
+                                                   : DATAGRAM_BUFFER_DEFAULT;
+    socket->receive_buffer = buffer;
+    socket->send_buffer = buffer;
+    register_socket(socket);
     return socket;
 }
 
@@ -758,6 +1142,7 @@ void inet_socket_unref(struct inet_socket *socket) {
         if (socket->tcp->state != TCP_CLOSED) {
             socket->orphan = 1;
             socket->tcp->orphan_deadline_ns = time_uptime_ns() + TCP_ORPHAN_NS;
+            timer_watch(socket);
             return;
         }
     }
@@ -765,9 +1150,8 @@ void inet_socket_unref(struct inet_socket *socket) {
 }
 
 static int local_port_conflict(struct inet_socket *socket, uint32_t address, uint16_t port) {
-    for (unsigned i = 0; i < socket_capacity; i++) {
-        struct inet_socket *other = sockets[i];
-        if (!other || other == socket || other->domain != TUNIX_AF_INET ||
+    for (struct inet_socket *other = port_bucket(port); other; other = other->port_next) {
+        if (other == socket || other->domain != TUNIX_AF_INET ||
             other->type != socket->type || other->local_port != port) continue;
         if (is_ping_socket(other) != is_ping_socket(socket)) continue;
         if (!other->local_address || !address || other->local_address == address) return 1;
@@ -784,8 +1168,11 @@ int inet_socket_bind(struct inet_socket *socket, const void *address, size_t len
         uint16_t port = net_htons(in->port);
         if (port && local_port_conflict(socket, in->address, port)) return -EADDRINUSE;
         socket->local_address = in->address;
-        socket->local_port = port;
-        if (!port && is_ping_socket(socket)) socket->local_port = allocate_port();
+        if (!port && is_ping_socket(socket)) {
+            if (bind_ephemeral(socket) != 0) return -EADDRINUSE;
+        } else if (set_local_port(socket, port) != 0) {
+            return -ENOMEM;
+        }
         socket->bound = 1;
         return 0;
     }
@@ -802,6 +1189,10 @@ int inet_socket_bind(struct inet_socket *socket, const void *address, size_t len
     return -EAFNOSUPPORT;
 }
 
+int inet_socket_is_stream(const struct inet_socket *socket) {
+    return socket && socket->type == TUNIX_SOCK_STREAM;
+}
+
 int inet_socket_is_listener(struct inet_socket *socket) {
     return socket && socket->listening;
 }
@@ -810,10 +1201,7 @@ int inet_socket_listen(struct inet_socket *socket, int backlog) {
     if (!socket || socket->domain != TUNIX_AF_INET ||
         socket->type != TUNIX_SOCK_STREAM) return -EOPNOTSUPP;
     if (socket->tcp) return -EINVAL;
-    if (!socket->local_port) {
-        socket->local_port = allocate_port();
-        if (!socket->local_port) return -EADDRINUSE;
-    }
+    if (!socket->local_port && bind_ephemeral(socket) != 0) return -EADDRINUSE;
     unsigned wanted = backlog <= 0 ? 1U : (unsigned)backlog;
     socket->backlog = wanted > TCP_BACKLOG_MAX ? TCP_BACKLOG_MAX : wanted;
     socket->listening = 1;
@@ -845,8 +1233,7 @@ int inet_socket_connect(struct inet_socket *socket, const void *address, size_t 
     socket->event_uid = uid;
     if (socket->type == TUNIX_SOCK_STREAM)
         return tcp_connect(socket, in->address, net_htons(in->port));
-    if (!socket->local_port) socket->local_port = allocate_port();
-    if (!socket->local_port) return -EADDRINUSE;
+    if (!socket->local_port && bind_ephemeral(socket) != 0) return -EADDRINUSE;
     socket->peer_address = in->address;
     socket->peer_port = net_htons(in->port);
     socket->connected = 1;
@@ -867,16 +1254,20 @@ void inet_socket_report_accept(struct inet_socket *socket, uint64_t pid,
 
 static int enqueue_with_ttl(struct inet_socket *socket, const void *data, size_t length,
                             const void *address, size_t address_length, uint8_t ttl) {
-    if (!socket || socket->queue_count >= SOCKET_QUEUE) return -EAGAIN;
-    if (length > SOCKET_PACKET_MAX) length = SOCKET_PACKET_MAX;
-    struct queued_packet *item = &socket->queue[socket->queue_tail];
+    if (!socket || socket->read_shutdown) return -EAGAIN;
+    if (socket->queue_bytes + length > socket->receive_buffer) return -EAGAIN;
+    struct datagram *item = (struct datagram *)kmalloc(sizeof(*item) + length);
+    if (!item) return -ENOMEM;
+    item->next = NULL;
     item->ttl = ttl;
     item->length = length;
     memcpy(item->data, data, length);
     item->address_length = address_length > sizeof(item->address) ? sizeof(item->address) : address_length;
     if (address && item->address_length) memcpy(item->address, address, item->address_length);
-    socket->queue_tail = (socket->queue_tail + 1U) % SOCKET_QUEUE;
-    socket->queue_count++;
+    if (socket->queue_last) socket->queue_last->next = item;
+    else socket->queue_first = item;
+    socket->queue_last = item;
+    socket->queue_bytes += length;
     return 0;
 }
 
@@ -905,19 +1296,23 @@ int64_t inet_socket_sendto(struct inet_socket *socket, const void *data, size_t 
         }
         if (!destination) return -EDESTADDRREQ;
         if (!link && !net_is_loopback(destination)) return -ENETDOWN;
-        if (!socket->local_port) socket->local_port = allocate_port();
+        if (length > NET_IPV4_MAX - NET_IPV4_HEADER - 8U) return -EMSGSIZE;
+        if (!socket->local_port && bind_ephemeral(socket) != 0) return -EADDRINUSE;
         if (is_ping_socket(socket)) {
-            if (length < sizeof(struct icmp_message) || length > NET_MTU) return -EINVAL;
+            if (length < sizeof(struct icmp_message)) return -EINVAL;
             const struct icmp_message *wanted = (const struct icmp_message *)data;
             if (wanted->type != ICMP_ECHO) return -EINVAL;
-            uint8_t message[NET_MTU];
+            uint8_t *message = (uint8_t *)kmalloc(length);
+            if (!message) return -ENOMEM;
             memcpy(message, data, length);
             struct icmp_message *head = (struct icmp_message *)message;
             head->id = net_htons(socket->local_port);
             head->checksum = 0;
             head->checksum = net_htons(net_checksum(message, length));
-            if (net_send_ipv4(destination, IPPROTO_ICMP, message, length,
-                              socket->ttl, 0) != 0) return -EAGAIN;
+            int status = net_send_ipv4(destination, IPPROTO_ICMP, message, length,
+                                       socket->ttl, 0);
+            kfree(message);
+            if (status != 0) return -EAGAIN;
         } else if (socket->type == TUNIX_SOCK_DGRAM) {
             if (!port) return -EDESTADDRREQ;
             if (net_send_udp(socket->local_address, socket->local_port, destination, port,
@@ -947,8 +1342,8 @@ int64_t inet_socket_recvfrom(struct inet_socket *socket, void *data, size_t leng
     if (socket->type == TUNIX_SOCK_STREAM) return tcp_recv(socket, data, length, flags);
     if (socket->read_shutdown) return 0;
     net_poll();
-    if (!socket->queue_count) return -EAGAIN;
-    struct queued_packet *item = &socket->queue[socket->queue_head];
+    struct datagram *item = socket->queue_first;
+    if (!item) return -EAGAIN;
     size_t amount = length < item->length ? length : item->length;
     memcpy(data, item->data, amount);
     if (address && address_length) {
@@ -958,8 +1353,10 @@ int64_t inet_socket_recvfrom(struct inet_socket *socket, void *data, size_t leng
     }
     socket->last_ttl = item->ttl;
     if (!(flags & MSG_PEEK)) {
-        socket->queue_head = (socket->queue_head + 1U) % SOCKET_QUEUE;
-        socket->queue_count--;
+        socket->queue_first = item->next;
+        if (!socket->queue_first) socket->queue_last = NULL;
+        socket->queue_bytes -= item->length;
+        kfree(item);
     }
     return (int64_t)amount;
 }
@@ -1018,8 +1415,17 @@ int inet_socket_setsockopt(struct inet_socket *socket, int level, int option,
         if (option == SO_BROADCAST && value && length >= sizeof(int)) {
             socket->broadcast = *(const int *)value != 0; return 0;
         }
-        if (option == SO_BINDTODEVICE || option == SO_ATTACH_FILTER || option == SO_RCVBUF ||
-            option == SO_SNDBUF || option == SO_RCVTIMEO || option == SO_SNDTIMEO) return 0;
+        if ((option == SO_RCVBUF || option == SO_SNDBUF) && value && length >= sizeof(int)) {
+            int wanted = *(const int *)value;
+            size_t size = buffer_limit(wanted > 0 ? (size_t)wanted * 2U : 0);
+            if (option == SO_RCVBUF) socket->receive_buffer = size;
+            else socket->send_buffer = size;
+            if (socket->tcp && option == SO_RCVBUF && socket->tcp->state == TCP_ESTABLISHED)
+                tcp_send_window_update(socket);
+            return 0;
+        }
+        if (option == SO_BINDTODEVICE || option == SO_ATTACH_FILTER ||
+            option == SO_RCVTIMEO || option == SO_SNDTIMEO) return 0;
         return 0;
     }
     if (level == IPPROTO_IP) {
@@ -1072,6 +1478,8 @@ int inet_socket_getsockopt(struct inet_socket *socket, int level, int option,
         }
     }
     else if (level == SOL_SOCKET && option == SO_BROADCAST) result = socket->broadcast;
+    else if (level == SOL_SOCKET && option == SO_RCVBUF) result = (int)socket->receive_buffer;
+    else if (level == SOL_SOCKET && option == SO_SNDBUF) result = (int)socket->send_buffer;
     else if (level == IPPROTO_IP && option == IP_TTL) result = socket->ttl;
     else if (level == IPPROTO_IP && option == IP_RECVERR) result = socket->report_errors;
     else if (level == IPPROTO_IP && option == IP_RECVTTL) result = socket->recv_ttl;
@@ -1182,7 +1590,7 @@ int inet_socket_read_ready(struct inet_socket *socket) {
         return tcp->rx_len > 0 || tcp->peer_fin || tcp->pending_error ||
                tcp->state == TCP_CLOSED || socket->read_shutdown;
     }
-    return socket->read_shutdown || socket->queue_count;
+    return socket->read_shutdown || socket->queue_first != NULL;
 }
 int inet_socket_write_ready(struct inet_socket *socket) {
     const struct net_config *cfg = net_get_config();
@@ -1190,7 +1598,7 @@ int inet_socket_write_ready(struct inet_socket *socket) {
     if (socket->tcp) {
         struct tcp_control_block *tcp = socket->tcp;
         if (tcp->state == TCP_ESTABLISHED || tcp->state == TCP_CLOSE_WAIT)
-            return tcp->tx_len < TCP_RING;
+            return tcp->tx_len < socket->send_buffer;
 
         return tcp->state == TCP_CLOSED || tcp->pending_error != 0;
     }
@@ -1210,9 +1618,7 @@ int inet_socket_shutdown(struct inet_socket *socket, int how) {
     if (!socket->connected) return -ENOTCONN;
     if (how == 0 || how == 2) {
         socket->read_shutdown = 1;
-        socket->queue_head = 0;
-        socket->queue_tail = 0;
-        socket->queue_count = 0;
+        queue_clear(socket);
     }
     if (how == 1 || how == 2) socket->write_shutdown = 1;
     return 0;
@@ -1231,9 +1637,9 @@ void inet_socket_receive_udp(const uint8_t *payload, size_t length, uint32_t sou
     address.family = TUNIX_AF_INET;
     address.port = net_htons(source_port);
     address.address = source;
-    for (unsigned i = 0; i < socket_capacity; i++) {
-        struct inet_socket *socket = sockets[i];
-        if (!socket || socket->domain != TUNIX_AF_INET || socket->type != TUNIX_SOCK_DGRAM) continue;
+    for (struct inet_socket *socket = port_bucket(destination_port); socket;
+         socket = socket->port_next) {
+        if (socket->domain != TUNIX_AF_INET || socket->type != TUNIX_SOCK_DGRAM) continue;
         if (is_ping_socket(socket)) continue;
         if (socket->local_port != destination_port) continue;
         if (socket->local_address && socket->local_address != destination) continue;
@@ -1256,17 +1662,14 @@ void inet_socket_receive_ipv4(const uint8_t *packet, size_t length, uint8_t prot
         length >= header_length + sizeof(struct icmp_message))
         icmp = (const struct icmp_message *)(packet + header_length);
 
-    for (unsigned i = 0; i < socket_capacity; i++) {
-        struct inet_socket *socket = sockets[i];
-        if (!socket || socket->domain != TUNIX_AF_INET) continue;
+    for (struct inet_socket *socket = raw_sockets; socket; socket = socket->class_next) {
         if (icmp && (socket->icmp_filter & (1U << icmp->type))) continue;
         if (socket->type == TUNIX_SOCK_RAW) {
             if (socket->protocol && socket->protocol != protocol) continue;
             (void)enqueue_with_ttl(socket, packet, length, &address, sizeof(address), hops);
             continue;
         }
-        if (!icmp || !is_ping_socket(socket)) continue;
-        if (icmp->type != ICMP_ECHO_REPLY) continue;
+        if (!icmp || icmp->type != ICMP_ECHO_REPLY) continue;
         if (net_htons(icmp->id) != socket->local_port) continue;
         (void)enqueue_with_ttl(socket, packet + header_length, length - header_length,
                                &address, sizeof(address), hops);
@@ -1274,7 +1677,7 @@ void inet_socket_receive_ipv4(const uint8_t *packet, size_t length, uint8_t prot
 }
 
 void inet_socket_receive_ethernet(const uint8_t *frame, size_t length, uint16_t ethertype) {
-    if (length < 14) return;
+    if (length < 14 || !packet_sockets) return;
     struct tunix_sockaddr_ll address;
     memset(&address, 0, sizeof(address));
     address.family = TUNIX_AF_PACKET;
@@ -1283,9 +1686,7 @@ void inet_socket_receive_ethernet(const uint8_t *frame, size_t length, uint16_t 
     address.hatype = 1;
     address.halen = 6;
     memcpy(address.address, frame + 6, 6);
-    for (unsigned i = 0; i < socket_capacity; i++) {
-        struct inet_socket *socket = sockets[i];
-        if (!socket || socket->domain != TUNIX_AF_PACKET) continue;
+    for (struct inet_socket *socket = packet_sockets; socket; socket = socket->class_next) {
         uint16_t filter = net_htons((uint16_t)socket->protocol);
         if (filter && filter != 3U && filter != ethertype) continue;
         if (socket->type == TUNIX_SOCK_DGRAM)
@@ -1313,9 +1714,8 @@ static void text_hex8(char *buffer, size_t capacity, size_t *length, uint32_t va
 void inet_socket_proc_udp(char *buffer, size_t capacity, size_t *length) {
     text_string(buffer, capacity, length, "  sl  local_address rem_address   st\n");
     unsigned slot = 0;
-    for (unsigned i = 0; i < socket_capacity; i++) {
-        struct inet_socket *s = sockets[i];
-        if (!s || s->domain != TUNIX_AF_INET || s->type != TUNIX_SOCK_DGRAM) continue;
+    for (struct inet_socket *s = all_sockets; s; s = s->all_next) {
+        if (s->domain != TUNIX_AF_INET || s->type != TUNIX_SOCK_DGRAM) continue;
         text_char(buffer, capacity, length, ' '); text_hex4(buffer, capacity, length, (uint16_t)slot++);
         text_string(buffer, capacity, length, ": "); text_hex8(buffer, capacity, length, s->local_address);
         text_char(buffer, capacity, length, ':'); text_hex4(buffer, capacity, length, s->local_port);
@@ -1327,9 +1727,8 @@ void inet_socket_proc_udp(char *buffer, size_t capacity, size_t *length) {
 void inet_socket_proc_raw(char *buffer, size_t capacity, size_t *length) {
     text_string(buffer, capacity, length, "  sl  local_address rem_address   st\n");
     unsigned slot = 0;
-    for (unsigned i = 0; i < socket_capacity; i++) {
-        struct inet_socket *s = sockets[i];
-        if (!s || s->domain != TUNIX_AF_INET || s->type != TUNIX_SOCK_RAW) continue;
+    for (struct inet_socket *s = all_sockets; s; s = s->all_next) {
+        if (s->domain != TUNIX_AF_INET || s->type != TUNIX_SOCK_RAW) continue;
         text_char(buffer, capacity, length, ' '); text_hex4(buffer, capacity, length, (uint16_t)slot++);
         text_string(buffer, capacity, length, ": "); text_hex8(buffer, capacity, length, s->local_address);
         text_string(buffer, capacity, length, ":0000 00000000:0000 07\n");
@@ -1341,9 +1740,8 @@ void inet_socket_proc_tcp(char *buffer, size_t capacity, size_t *length) {
     };
     text_string(buffer, capacity, length, "  sl  local_address rem_address   st\n");
     unsigned slot = 0;
-    for (unsigned i = 0; i < socket_capacity; i++) {
-        struct inet_socket *s = sockets[i];
-        if (!s || s->type != TUNIX_SOCK_STREAM) continue;
+    for (struct inet_socket *s = all_sockets; s; s = s->all_next) {
+        if (s->type != TUNIX_SOCK_STREAM) continue;
         if (!s->tcp && !s->listening) continue;
         text_char(buffer, capacity, length, ' '); text_hex4(buffer, capacity, length, (uint16_t)slot++);
         text_string(buffer, capacity, length, ": "); text_hex8(buffer, capacity, length, s->local_address);

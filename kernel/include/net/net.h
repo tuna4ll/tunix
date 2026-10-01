@@ -5,6 +5,10 @@
 #include <stdint.h>
 
 #define NET_MTU 1500U
+#define NET_LOOPBACK_MTU 65536U
+#define NET_IPV4_MAX 65535U
+#define NET_IPV4_HEADER 20U
+#define NET_TCP_HEADER 20U
 
 #define NET_LOOPBACK_NETWORK 0x7F000000U
 #define NET_LOOPBACK_MASK    0xFF000000U
@@ -16,6 +20,13 @@
 #define TCP_RST 0x04U
 #define TCP_PSH 0x08U
 #define TCP_ACK 0x10U
+
+struct net_tcp_options {
+    uint16_t mss;
+    uint8_t window_scale;
+    uint8_t has_mss;
+    uint8_t has_window_scale;
+};
 
 struct net_config {
     uint8_t mac[6];
@@ -74,7 +85,9 @@ int net_send_udp(uint32_t source, uint16_t source_port, uint32_t destination,
                  uint16_t destination_port, const void *payload, size_t length);
 int net_send_tcp(uint32_t source, uint16_t source_port, uint32_t destination,
                  uint16_t destination_port, uint32_t seq, uint32_t ack, uint8_t flags,
-                 uint16_t window, const void *payload, size_t length);
+                 uint16_t window, const struct net_tcp_options *options,
+                 const void *payload, size_t length);
+size_t net_path_mtu(uint32_t destination);
 uint64_t net_rx_packets(void);
 uint64_t net_rx_bytes(void);
 uint64_t net_tx_bytes(void);
