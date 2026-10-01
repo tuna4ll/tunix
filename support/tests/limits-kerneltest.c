@@ -8,6 +8,9 @@ typedef unsigned int u32;
 #define NR_CLOSE 3
 #define NR_MMAP 9
 #define NR_MUNMAP 11
+#define NR_MPROTECT 10
+#define NR_MREMAP 25
+#define NR_MSYNC 26
 #define NR_EXIT_GROUP 231
 #define NR_OPENAT 257
 #define NR_GETCWD 79
@@ -79,6 +82,9 @@ static inline s64 call6(s64 n, s64 a, s64 b, s64 c, s64 d, s64 e, s64 f) {
 #define NR_CLOSE 57
 #define NR_MMAP 222
 #define NR_MUNMAP 215
+#define NR_MPROTECT 226
+#define NR_MREMAP 216
+#define NR_MSYNC 227
 #define NR_EXIT_GROUP 94
 #define NR_OPENAT 56
 #define NR_GETCWD 17
@@ -173,6 +179,11 @@ static inline s64 do_fork(void) { return call6(NR_CLONE, 17, 0, 0, 0, 0, 0); }
 #define PROT_WRITE 2
 #define MAP_PRIVATE 2
 #define MAP_ANONYMOUS 0x20
+#define MAP_SHARED 1
+#define O_RDWR 2
+#define EACCES 13
+#define MREMAP_MAYMOVE 1
+#define MS_SYNC 4
 
 static int failures;
 
@@ -1028,8 +1039,79 @@ static void test_misc(void) {
     if (tty >= 0) call1(NR_CLOSE, tty);
 }
 
+static int map_failed(s64 address) {
+    return address < 0 && address > -4096;
+}
+
+static void test_mappings(void) {
+    const u64 gib = 1024ULL * 1024 * 1024;
+    s64 fd = call4(NR_OPENAT, AT_FDCWD, "/tmp/mapped-8g", O_RDWR | O_CREAT, 0644);
+    s64 status = call2(NR_FTRUNCATE, fd, 8 * gib);
+    s64 map = call6(NR_MMAP, 0, (s64)(8 * gib), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    report_value("map-8g-sparse-file", status == 0 && !map_failed(map), (u64)-map);
+    if (!map_failed(map)) {
+        *(volatile u64 *)(map + 6 * gib) = 0x5AFE5AFE5AFE5AFEULL;
+        u64 back = 0;
+        s64 got = call4(NR_PREAD, fd, &back, 8, 6 * gib);
+        report_value("map-shared-write-reaches-file", got == 8 && back == 0x5AFE5AFE5AFE5AFEULL, back);
+        call2(NR_MUNMAP, map, 8 * gib);
+    }
+    call1(NR_CLOSE, fd);
+    call3(NR_UNLINKAT, AT_FDCWD, "/tmp/mapped-8g", 0);
+
+    static char page[4096];
+    for (int index = 0; index < 4096; index++) page[index] = 'f';
+    fd = call4(NR_OPENAT, AT_FDCWD, "/mapped-file", O_RDWR | O_CREAT, 0644);
+    call3(NR_WRITE, fd, page, 4096);
+    map = call6(NR_MMAP, 0, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+    int private_ok = !map_failed(map) && *(volatile char *)map == 'f';
+    if (!map_failed(map)) {
+        *(volatile char *)map = 'p';
+        private_ok = private_ok && *(volatile char *)(map + 4096) == 0;
+        call2(NR_MUNMAP, map, 8192);
+    }
+    char first = 0;
+    call4(NR_PREAD, fd, &first, 1, 0);
+    report("map-private-write-stays-private", private_ok && first == 'f');
+
+    map = call6(NR_MMAP, 0, 4096, PROT_READ, MAP_PRIVATE, fd, 0);
+    status = map_failed(map) ? map : call3(NR_MPROTECT, map, 4096, PROT_READ | PROT_WRITE);
+    if (status == 0) {
+        *(volatile char *)map = 'q';
+        call2(NR_MUNMAP, map, 4096);
+    }
+    call4(NR_PREAD, fd, &first, 1, 0);
+    report_value("map-mprotect-private-stays-private", status == 0 && first == 'f', (u64)-status);
+
+    map = call6(NR_MMAP, 0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    s64 grown = map_failed(map) ? map : call6(NR_MREMAP, map, 4096, 3 * 4096, MREMAP_MAYMOVE, 0, 0);
+    if (!map_failed(grown)) {
+        *(volatile char *)grown = 's';
+        status = call3(NR_MSYNC, grown, 3 * 4096, MS_SYNC);
+        call2(NR_MUNMAP, grown, 3 * 4096);
+    }
+    call4(NR_PREAD, fd, &first, 1, 0);
+    report_value("map-shared-mremap-grow", !map_failed(grown) && status == 0 && first == 's',
+                 (u64)-grown);
+    call1(NR_CLOSE, fd);
+
+    fd = call4(NR_OPENAT, AT_FDCWD, "/mapped-file", O_RDONLY, 0);
+    map = call6(NR_MMAP, 0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    report_value("map-shared-write-needs-writable-fd", map == -EACCES, (u64)-map);
+    map = call6(NR_MMAP, 0, 4096, PROT_READ, MAP_SHARED, fd, 0);
+    report("map-shared-read-only", !map_failed(map) && *(volatile char *)map == 's');
+    if (!map_failed(map)) call2(NR_MUNMAP, map, 4096);
+    call1(NR_CLOSE, fd);
+    char back[1] = {0};
+    fd = call4(NR_OPENAT, AT_FDCWD, "/mapped-file", O_RDONLY, 0);
+    s64 got = call3(NR_READ, fd, back, 1);
+    call1(NR_CLOSE, fd);
+    report("map-visible-to-read", got == 1 && back[0] == 's');
+    call3(NR_UNLINKAT, AT_FDCWD, "/mapped-file", 0);
+}
+
 #ifndef LIMITS_TESTS
-#define LIMITS_TESTS 0x33FFU
+#define LIMITS_TESTS 0x73FFU
 #endif
 #ifndef LIMITS_PROCESSES
 #define LIMITS_PROCESSES 2000
@@ -1053,6 +1135,7 @@ static void run(u64 *stack) {
     if (LIMITS_TESTS & 0x800U) test_devices();
     if (LIMITS_TESTS & 0x1000U) test_drm();
     if (LIMITS_TESTS & 0x2000U) test_misc();
+    if (LIMITS_TESTS & 0x4000U) test_mappings();
     print(failures ? "LIMITSTEST FAIL\n" : "LIMITSTEST PASS\n");
     call1(NR_EXIT_GROUP, 0);
     for (;;) { }
