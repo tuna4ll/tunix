@@ -29,12 +29,35 @@
 #define PROC_BUFFER_SIZE 4096
 
 struct text_buffer {
-    char data[PROC_BUFFER_SIZE];
+    char *data;
     size_t length;
+    size_t capacity;
 };
 
+static void text_release(struct text_buffer *buffer) {
+    kfree(buffer->data);
+    buffer->data = NULL;
+    buffer->length = buffer->capacity = 0;
+}
+
+#define TEXT_BUFFER __attribute__((cleanup(text_release))) struct text_buffer
+
+static int text_reserve(struct text_buffer *buffer, size_t extra) {
+    size_t wanted = buffer->length + extra;
+    if (wanted <= buffer->capacity) return 0;
+    size_t capacity = buffer->capacity ? buffer->capacity * 2U : PROC_BUFFER_SIZE;
+    while (capacity < wanted) capacity *= 2U;
+    char *data = (char *)kmalloc(capacity);
+    if (!data) return -1;
+    if (buffer->length) memcpy(data, buffer->data, buffer->length);
+    kfree(buffer->data);
+    buffer->data = data;
+    buffer->capacity = capacity;
+    return 0;
+}
+
 static void text_char(struct text_buffer *buffer, char value) {
-    if (buffer->length + 1 < sizeof(buffer->data)) buffer->data[buffer->length++] = value;
+    if (text_reserve(buffer, 1) == 0) buffer->data[buffer->length++] = value;
 }
 
 static void text_string(struct text_buffer *buffer, const char *value) {
@@ -73,7 +96,7 @@ static int64_t text_read(const struct text_buffer *text, uint64_t offset,
 static int64_t proc_cpuinfo_read(struct vfs_node *node, uint64_t offset,
                                  size_t size, void *output) {
     (void)node;
-    struct text_buffer text = {{0}, 0};
+    TEXT_BUFFER text = {0};
     struct cpu_identity identity;
     cpu_identify(&identity);
     const char *vendor = identity.vendor;
@@ -110,7 +133,7 @@ static int64_t proc_cpuinfo_read(struct vfs_node *node, uint64_t offset,
 static int64_t proc_meminfo_read(struct vfs_node *node, uint64_t offset,
                                  size_t size, void *output) {
     (void)node;
-    struct text_buffer text = {{0}, 0};
+    TEXT_BUFFER text = {0};
     uint64_t total = pmm_usable_page_count() * 4ULL;
     uint64_t free = pmm_free_page_count() * 4ULL;
     uint64_t used = total >= free ? total - free : 0;
@@ -136,7 +159,7 @@ static int64_t proc_meminfo_read(struct vfs_node *node, uint64_t offset,
 static int64_t proc_blockstat_read(struct vfs_node *node, uint64_t offset,
                                    size_t size, void *output) {
     (void)node;
-    struct text_buffer text = {{0}, 0};
+    TEXT_BUFFER text = {0};
     uint64_t reads = 0, sectors = 0, nanoseconds = 0, write_failures = 0;
     block_statistics(&reads, &sectors, &nanoseconds, &write_failures);
     text_string(&text, "reads ");
@@ -154,7 +177,7 @@ static int64_t proc_blockstat_read(struct vfs_node *node, uint64_t offset,
 static int64_t proc_inputlog_read(struct vfs_node *node, uint64_t offset,
                                   size_t size, void *output) {
     (void)node;
-    struct text_buffer text = {{0}, 0};
+    TEXT_BUFFER text = {0};
     text_string(&text, "ms code value readers\n");
     unsigned total = input_key_history_count();
     unsigned first = total > INPUT_KEY_HISTORY ? total - INPUT_KEY_HISTORY : 0;
@@ -178,7 +201,7 @@ static void text_hex32(struct text_buffer *text, uint32_t value);
 static int64_t proc_klock_read(struct vfs_node *node, uint64_t offset,
                                size_t size, void *output) {
     (void)node;
-    struct text_buffer text = {{0}, 0};
+    TEXT_BUFFER text = {0};
     text_string(&text, "shared_peak ");
     text_unsigned(&text, klock_shared_peak());
     text_char(&text, '\n');
@@ -211,7 +234,7 @@ static int64_t proc_klock_write(struct vfs_node *node, uint64_t offset,
 static int64_t proc_abi_gaps_read(struct vfs_node *node, uint64_t offset,
                                   size_t size, void *output) {
     (void)node;
-    struct text_buffer text = {{0}, 0};
+    TEXT_BUFFER text = {0};
     int found = 0;
     for (unsigned index = 0; index < ABI_GAP_SLOTS; index++) {
         struct abi_gap gap;
@@ -249,7 +272,7 @@ static int64_t proc_abi_gaps_write(struct vfs_node *node, uint64_t offset,
 static int64_t proc_uptime_read(struct vfs_node *node, uint64_t offset,
                                 size_t size, void *output) {
     (void)node;
-    struct text_buffer text = {{0}, 0};
+    TEXT_BUFFER text = {0};
     uint64_t centiseconds = time_uptime_ns() / 10000000ULL;
     text_unsigned(&text, centiseconds / 100ULL);
     text_char(&text, '.');
@@ -263,7 +286,7 @@ static int64_t proc_uptime_read(struct vfs_node *node, uint64_t offset,
 static int64_t proc_interrupts_read(struct vfs_node *node, uint64_t offset,
                                     size_t size, void *output) {
     (void)node;
-    struct text_buffer text = {{0}, 0};
+    TEXT_BUFFER text = {0};
     text_string(&text, "           CPU0\n");
     for (unsigned slot = 0; slot < IRQ_VECTOR_COUNT; slot++) {
         unsigned vector = 0;
@@ -288,7 +311,7 @@ static int64_t proc_interrupts_read(struct vfs_node *node, uint64_t offset,
 static int64_t proc_cmdline_line_read(struct vfs_node *node, uint64_t offset,
                                       size_t size, void *output) {
     (void)node;
-    struct text_buffer text = {{0}, 0};
+    TEXT_BUFFER text = {0};
     text_string(&text, boot_info()->command_line);
     text_char(&text, '\n');
     return text_read(&text, offset, size, output);
@@ -297,7 +320,7 @@ static int64_t proc_cmdline_line_read(struct vfs_node *node, uint64_t offset,
 static int64_t proc_hostname_read(struct vfs_node *node, uint64_t offset,
                                   size_t size, void *output) {
     (void)node;
-    struct text_buffer text = {{0}, 0};
+    TEXT_BUFFER text = {0};
     text_string(&text, uts_hostname());
     text_char(&text, '\n');
     return text_read(&text, offset, size, output);
@@ -313,7 +336,7 @@ static int64_t proc_hostname_write(struct vfs_node *node, uint64_t offset,
 
 static int64_t proc_knob_read(struct vfs_node *node, uint64_t offset,
                               size_t size, void *output) {
-    struct text_buffer text = {{0}, 0};
+    TEXT_BUFFER text = {0};
     text_unsigned(&text, (uint64_t)(uintptr_t)node->data);
     text_char(&text, '\n');
     return text_read(&text, offset, size, output);
@@ -344,7 +367,7 @@ static void knob(struct vfs_node *parent, const char *name, uint64_t value) {
 static int64_t proc_ostype_read(struct vfs_node *node, uint64_t offset,
                                 size_t size, void *output) {
     (void)node;
-    struct text_buffer text = {{0}, 0};
+    TEXT_BUFFER text = {0};
     text_string(&text, UTS_SYSNAME "\n");
     return text_read(&text, offset, size, output);
 }
@@ -352,7 +375,7 @@ static int64_t proc_ostype_read(struct vfs_node *node, uint64_t offset,
 static int64_t proc_osrelease_read(struct vfs_node *node, uint64_t offset,
                                    size_t size, void *output) {
     (void)node;
-    struct text_buffer text = {{0}, 0};
+    TEXT_BUFFER text = {0};
     text_string(&text, UTS_RELEASE "\n");
     return text_read(&text, offset, size, output);
 }
@@ -380,7 +403,7 @@ static void create_boot_id(void) {
 static int64_t proc_boot_id_read(struct vfs_node *node, uint64_t offset,
                                  size_t size, void *output) {
     (void)node;
-    struct text_buffer text = {{0}, 0};
+    TEXT_BUFFER text = {0};
     text_string(&text, boot_id);
     text_char(&text, '\n');
     return text_read(&text, offset, size, output);
@@ -389,7 +412,7 @@ static int64_t proc_boot_id_read(struct vfs_node *node, uint64_t offset,
 static int64_t proc_version_read(struct vfs_node *node, uint64_t offset,
                                  size_t size, void *output) {
     (void)node;
-    struct text_buffer text = {{0}, 0};
+    TEXT_BUFFER text = {0};
     text_string(&text, UTS_SYSNAME " version " UTS_RELEASE " #1 " SYSCALL_UTS_MACHINE "\n");
     return text_read(&text, offset, size, output);
 }
@@ -403,7 +426,7 @@ static void text_hex64(struct text_buffer *text, uint64_t value) {
 static int64_t proc_modules_read(struct vfs_node *node, uint64_t offset,
                                  size_t size, void *output) {
     (void)node;
-    struct text_buffer text = {{0}, 0};
+    TEXT_BUFFER text = {0};
     for (struct module *module = module_list(); module; module = module->next) {
         text_string(&text, module->name);
         text_char(&text, ' ');
@@ -432,7 +455,7 @@ static int64_t proc_modules_read(struct vfs_node *node, uint64_t offset,
 static int64_t proc_mounts_read(struct vfs_node *node, uint64_t offset,
                                 size_t size, void *output) {
     (void)node;
-    struct text_buffer text = {{0}, 0};
+    TEXT_BUFFER text = {0};
     for (const struct vfs_mount *mount = vfs_mounts(); mount; mount = mount->next) {
         text_string(&text, mount->source[0] ? mount->source : "none");
         text_char(&text, ' ');
@@ -452,7 +475,7 @@ static int64_t proc_mounts_read(struct vfs_node *node, uint64_t offset,
 static int64_t proc_stat_read(struct vfs_node *node, uint64_t offset,
                               size_t size, void *output) {
     (void)node;
-    struct text_buffer text = {{0}, 0};
+    TEXT_BUFFER text = {0};
     uint64_t uptime_ticks = time_uptime_ns() / 10000000ULL;
     uint64_t runtime_ticks = process_total_runtime_ns() / 10000000ULL;
     uint64_t idle_ticks = uptime_ticks > runtime_ticks ? uptime_ticks - runtime_ticks : 0;
@@ -481,7 +504,7 @@ static int64_t proc_stat_read(struct vfs_node *node, uint64_t offset,
 static int64_t proc_loadavg_read(struct vfs_node *node, uint64_t offset,
                                  size_t size, void *output) {
     (void)node;
-    struct text_buffer text = {{0}, 0};
+    TEXT_BUFFER text = {0};
     uint64_t runnable = process_runnable_count();
     uint64_t total = process_count();
     text_unsigned(&text, runnable); text_string(&text, ".00 ");
@@ -495,7 +518,7 @@ static int64_t proc_loadavg_read(struct vfs_node *node, uint64_t offset,
 static int64_t proc_net_dev_read(struct vfs_node *node, uint64_t offset,
                                   size_t size, void *output) {
     (void)node;
-    struct text_buffer text = {{0}, 0};
+    TEXT_BUFFER text = {0};
     text_string(&text, "Inter-|   Receive                                                |  Transmit\n");
     text_string(&text, " face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n");
     text_string(&text, "  eth0: "); text_unsigned(&text, net_rx_bytes());
@@ -531,7 +554,7 @@ static int64_t proc_net_route_read(struct vfs_node *node, uint64_t offset,
                                     size_t size, void *output) {
     (void)node;
     const struct net_config *cfg = net_get_config();
-    struct text_buffer text = {{0}, 0};
+    TEXT_BUFFER text = {0};
     text_string(&text, "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n");
     text_string(&text, "eth0\t00000000\t"); text_hex32(&text, cfg->gateway);
     text_string(&text, "\t0003\t0\t0\t0\t00000000\t0\t0\t0\n");
@@ -544,7 +567,7 @@ static int64_t proc_net_route_read(struct vfs_node *node, uint64_t offset,
 static int64_t proc_net_arp_read(struct vfs_node *node, uint64_t offset,
                                   size_t size, void *output) {
     (void)node;
-    struct text_buffer text = {{0}, 0};
+    TEXT_BUFFER text = {0};
     text_string(&text, "IP address       HW type     Flags       HW address            Mask     Device\n");
     struct net_arp_record records[16];
     size_t count = net_arp_snapshot(records, sizeof(records) / sizeof(records[0]));
@@ -564,24 +587,27 @@ static int64_t proc_net_arp_read(struct vfs_node *node, uint64_t offset,
 static int64_t proc_net_udp_read(struct vfs_node *node, uint64_t offset,
                                   size_t size, void *output) {
     (void)node;
-    struct text_buffer text = {{0}, 0};
-    inet_socket_proc_udp(text.data, sizeof(text.data), &text.length);
+    TEXT_BUFFER text = {0};
+    if (text_reserve(&text, inet_socket_count() * 160U + 128U) == 0)
+        inet_socket_proc_udp(text.data, text.capacity, &text.length);
     return text_read(&text, offset, size, output);
 }
 
 static int64_t proc_net_raw_read(struct vfs_node *node, uint64_t offset,
                                   size_t size, void *output) {
     (void)node;
-    struct text_buffer text = {{0}, 0};
-    inet_socket_proc_raw(text.data, sizeof(text.data), &text.length);
+    TEXT_BUFFER text = {0};
+    if (text_reserve(&text, inet_socket_count() * 160U + 128U) == 0)
+        inet_socket_proc_raw(text.data, text.capacity, &text.length);
     return text_read(&text, offset, size, output);
 }
 
 static int64_t proc_net_tcp_read(struct vfs_node *node, uint64_t offset,
                                   size_t size, void *output) {
     (void)node;
-    struct text_buffer text = {{0}, 0};
-    inet_socket_proc_tcp(text.data, sizeof(text.data), &text.length);
+    TEXT_BUFFER text = {0};
+    if (text_reserve(&text, inet_socket_count() * 160U + 128U) == 0)
+        inet_socket_proc_tcp(text.data, text.capacity, &text.length);
     return text_read(&text, offset, size, output);
 }
 
@@ -610,7 +636,7 @@ static int64_t proc_status_read(struct vfs_node *node, uint64_t offset,
                                 size_t size, void *output) {
     struct process *process = process_find(node_pid(node));
     if (!process) return 0;
-    struct text_buffer text = {{0}, 0};
+    TEXT_BUFFER text = {0};
     uint64_t pages = vmm_count_user_pages(process->cr3);
     uint64_t memory_kb = pages * 4ULL;
 
@@ -650,7 +676,7 @@ static int64_t proc_pid_stat_read(struct vfs_node *node, uint64_t offset,
                                   size_t size, void *output) {
     struct process *process = process_find(node_pid(node));
     if (!process) return 0;
-    struct text_buffer text = {{0}, 0};
+    TEXT_BUFFER text = {0};
     uint64_t rss_pages = vmm_count_user_pages(process->cr3);
     uint64_t ticks = process_runtime_ns(process) / 10000000ULL;
     uint64_t start = process->start_time_ns / 10000000ULL;
@@ -690,7 +716,7 @@ static int64_t proc_pid_statm_read(struct vfs_node *node, uint64_t offset,
                                    size_t size, void *output) {
     struct process *process = process_find(node_pid(node));
     if (!process) return 0;
-    struct text_buffer text = {{0}, 0};
+    TEXT_BUFFER text = {0};
     uint64_t pages = vmm_count_user_pages(process->cr3);
 
     text_unsigned(&text, pages); text_char(&text, ' ');
@@ -750,7 +776,7 @@ static int64_t proc_pid_maps_read(struct vfs_node *node, uint64_t offset,
                              : step == 1 ? process->memory->areas
                              : &stack;
         for (; area && produced < size; area = step == 1 ? area->next : NULL) {
-            struct text_buffer line = {{0}, 0};
+            TEXT_BUFFER line = {0};
             const char *name = step == 0 ? "[heap]" : step == 2 ? "[stack]" : NULL;
             if (step == 1 && path && area->file && area->file->node &&
                 vfs_node_path(area->file->node, path, VFS_PATH_MAX) == 0)
@@ -777,7 +803,7 @@ static int64_t proc_pid_comm_read(struct vfs_node *node, uint64_t offset,
                                   size_t size, void *output) {
     struct process *process = process_find(node_pid(node));
     if (!process) return 0;
-    struct text_buffer text = {{0}, 0};
+    TEXT_BUFFER text = {0};
     text_string(&text, process->name);
     text_char(&text, '\n');
     return text_read(&text, offset, size, output);
