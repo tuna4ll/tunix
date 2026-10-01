@@ -32,6 +32,7 @@ both architectures. Filesystems have their own, `support/tests/ext2-kerneltest.s
 | Pipes | 64 KiB fixed | `F_SETPIPE_SZ`, 1 MiB for users |
 | Supplementary groups | 32 | 65536 |
 | memfd / SysV shm / shared file maps | 256 MiB / 128 × 64 MiB / 256 MiB | sparse, paged in on fault, no caps |
+| File mappings | every page read and mapped at `mmap`, private writable maps copied | mapped on first touch, private pages copied on first write |
 | Device interrupts | 16 vectors | 128 |
 | Device register window | 9 MiB | 512 GiB |
 | Block devices | 32, disks `sda`–`sdz`, partitions 1–9 | unbounded, `sdaa` onward, any partition number |
@@ -53,5 +54,4 @@ space for processors.
 - One kernel lock. With more virtual processors than host cores the ticket
   lock convoys; on real cores it does not.
 - ext2 has no extents or 64-bit block numbers: 16 TiB per filesystem.
-- File mappings of VFS files are mapped eagerly rather than on fault.
 - Inet sockets are demultiplexed by a linear scan.
