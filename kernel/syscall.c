@@ -1717,6 +1717,10 @@ static void accept_or_block(struct syscall_frame *frame, uint64_t syscall_number
     SYSCALL_RET(frame) = (uint64_t)result;
 }
 
+static uint8_t *stage_message(size_t length) {
+    return (uint8_t *)kmalloc(length ? length : 1U);
+}
+
 static int64_t sys_sendto(int fd, uint64_t user_data, size_t length, int flags,
                           uint64_t user_address, uint64_t address_length) {
     struct unix_socket *unix_value = socket_from_fd(fd);
@@ -1724,10 +1728,13 @@ static int64_t sys_sendto(int fd, uint64_t user_data, size_t length, int flags,
         (void)flags;
         (void)user_address;
         (void)address_length;
-        if (length > 4096U) length = 4096U;
-        uint8_t data[4096];
-        if (length && copy_from_user(data, user_data, length) != 0) return -EFAULT;
-        return unix_socket_write(unix_value, length, data);
+        if (length > SOCKET_MESSAGE_MAX) length = SOCKET_MESSAGE_MAX;
+        uint8_t *data = stage_message(length);
+        if (!data) return -ENOMEM;
+        int64_t result = length && copy_from_user(data, user_data, length) != 0
+                             ? -EFAULT : unix_socket_write(unix_value, length, data);
+        kfree(data);
+        return result;
     }
     struct netlink_socket *netlink = netlink_socket_from_fd(fd);
     if (netlink) {
@@ -1744,17 +1751,25 @@ static int64_t sys_sendto(int fd, uint64_t user_data, size_t length, int flags,
     }
     struct inet_socket *socket = inet_socket_from_fd(fd);
     if (!socket) return -EBADF;
-    if (length > 2048U) return -EMSGSIZE;
-    uint8_t data[2048];
+    if (length > SOCKET_MESSAGE_MAX) {
+        if (!inet_socket_is_stream(socket)) return -EMSGSIZE;
+        length = SOCKET_MESSAGE_MAX;
+    }
     uint8_t address[32];
-    if (length && copy_from_user(data, user_data, length) != 0) return -EFAULT;
     const void *address_pointer = NULL;
     if (user_address) {
         if (address_length < 2 || address_length > sizeof(address)) return -EINVAL;
         if (copy_from_user(address, user_address, (size_t)address_length) != 0) return -EFAULT;
         address_pointer = address;
     }
-    return inet_socket_sendto(socket, data, length, flags, address_pointer, (size_t)address_length);
+    uint8_t *data = stage_message(length);
+    if (!data) return -ENOMEM;
+    int64_t result = length && copy_from_user(data, user_data, length) != 0
+                         ? -EFAULT
+                         : inet_socket_sendto(socket, data, length, flags, address_pointer,
+                                              (size_t)address_length);
+    kfree(data);
+    return result;
 }
 
 static int64_t sys_recvfrom(int fd, uint64_t user_data, size_t length, int flags,
@@ -1762,11 +1777,13 @@ static int64_t sys_recvfrom(int fd, uint64_t user_data, size_t length, int flags
     struct unix_socket *unix_value = socket_from_fd(fd);
     if (unix_value) {
         (void)flags;
-        if (length > 4096U) length = 4096U;
-        uint8_t data[4096];
+        if (length > SOCKET_MESSAGE_MAX) length = SOCKET_MESSAGE_MAX;
+        uint8_t *data = stage_message(length);
+        if (!data) return -ENOMEM;
         int64_t result = unix_socket_read(unix_value, length, data);
+        if (result > 0 && copy_to_user(user_data, data, (size_t)result) != 0) result = -EFAULT;
+        kfree(data);
         if (result < 0) return result;
-        if (result && copy_to_user(user_data, data, (size_t)result) != 0) return -EFAULT;
         if (user_address_length) {
             uint32_t zero = 0;
             if (copy_to_user(user_address_length, &zero, sizeof(zero)) != 0) return -EFAULT;
@@ -1795,8 +1812,7 @@ static int64_t sys_recvfrom(int fd, uint64_t user_data, size_t length, int flags
     }
     struct inet_socket *socket = inet_socket_from_fd(fd);
     if (!socket) return -EBADF;
-    if (length > 2048U) length = 2048U;
-    uint8_t data[2048];
+    if (length > SOCKET_MESSAGE_MAX) length = SOCKET_MESSAGE_MAX;
     uint8_t address[32];
     size_t address_length = sizeof(address);
     if (user_address_length) {
@@ -1804,11 +1820,14 @@ static int64_t sys_recvfrom(int fd, uint64_t user_data, size_t length, int flags
         if (copy_from_user(&supplied, user_address_length, sizeof(supplied)) != 0) return -EFAULT;
         address_length = supplied < sizeof(address) ? supplied : sizeof(address);
     }
+    uint8_t *data = stage_message(length);
+    if (!data) return -ENOMEM;
     int64_t result = inet_socket_recvfrom(socket, data, length, flags,
                                            user_address ? address : NULL,
                                            user_address ? &address_length : NULL);
+    if (result > 0 && copy_to_user(user_data, data, (size_t)result) != 0) result = -EFAULT;
+    kfree(data);
     if (result < 0) return result;
-    if (result && copy_to_user(user_data, data, (size_t)result) != 0) return -EFAULT;
     if (user_address) {
         if (copy_to_user(user_address, address, address_length) != 0) return -EFAULT;
         if (user_address_length) {
