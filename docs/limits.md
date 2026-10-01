@@ -24,7 +24,10 @@ both architectures. Filesystems have their own, `support/tests/ext2-kerneltest.s
 | Framebuffer | 1920x1080, else panic | anything that fits the 240 MiB window |
 | ext2 | 128 groups (~16 GiB), 32-bit sector math | any group count, 64-bit sectors |
 | ext2 / ext3 volumes | the root only, 4 KiB blocks, 128-byte inodes, files to 4 GiB | any number mounted, 1–4 KiB blocks, any inode size, files to 2 TiB, `dir_index` and `ext_attr` |
-| TCP/UDP sockets | 32 system-wide, backlog 16 | unbounded, backlog 4096 |
+| TCP/UDP sockets | 32 system-wide, backlog 16 | unbounded, backlog 4096, hashed lookups |
+| Datagrams | 8 queued, 2 KiB each, 1472 bytes sent | receive buffer bytes, 65507 bytes, IPv4 fragmentation |
+| TCP | 16 KiB buffers, 1 KiB segments, 64 KiB window | buffers to `SO_RCVBUF`, MSS option, window scaling |
+| Loopback | 40 packets of 1500 bytes | 16 MiB of packets, MTU 65536 |
 | Terminals | 8 PTYs, 8 VTs | PTYs on demand, 63 VTs |
 | epoll | 128 fds per instance, 128 events per wait | unbounded, scanned round robin |
 | inotify | 64 watches, 8 KiB queue | unbounded watches hashed by node, queue grows to 1 MiB |
@@ -54,4 +57,3 @@ space for processors.
 - One kernel lock. With more virtual processors than host cores the ticket
   lock convoys; on real cores it does not.
 - ext2 has no extents or 64-bit block numbers: 16 TiB per filesystem.
-- Inet sockets are demultiplexed by a linear scan.

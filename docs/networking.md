@@ -14,10 +14,11 @@ hands them back to the receive path.
 The queue is the whole design. Delivering a local packet inline would recurse
 — handling a SYN sends a SYN-ACK, which is another local packet, from inside
 the handler still running — and no depth limit makes that safe. A queue breaks
-the cycle instead of bounding it. It holds 40 packets because a sender fills
-the peer's window before waiting for an acknowledgement (16 segments at a
-16 KiB window and 1 KiB MSS), and a queue shorter than a window drops what a
-wire would have carried, turning every burst into a retransmit timeout.
+the cycle instead of bounding it. Each queued packet is its own allocation and
+the queue is bounded by 16 MiB of payload rather than a packet count, so a
+sender that fills a window never outruns it. Loopback's MTU is 65536, as on
+Linux: a TCP segment over `lo` carries up to 65495 bytes, and a UDP datagram
+up to 65507 goes through whole.
 
 Loopback is drained before the link is checked, so it works on a machine with
 no adapter at all.
@@ -186,7 +187,7 @@ any other connection. That socket joins a list on the listener and becomes
 visible to `accept()` only once the handshake completes; `accept()` hands it
 over with the reference the stack was holding.
 
-- The backlog caps how many connections a listener may hold un-accepted (16 at
+- The backlog caps how many connections a listener may hold un-accepted (4096 at
   most). A SYN arriving at a full backlog is dropped, not refused, so the peer
   retransmits into a queue that may have drained by then.
 - A blocking `accept()` waits; only a non-blocking socket answers `EAGAIN`.
@@ -290,15 +291,35 @@ back with the kernel's id, the sequence number that was sent, the payload
 unchanged, and a `SOL_IP`/`IP_TTL` control message carrying a plausible hop
 count.
 
+## Sizes
+
+- IPv4 datagrams larger than the link are fragmented on the way out and
+  reassembled on the way in. Up to 64 datagrams may be half-assembled at once;
+  one that is not complete within 30 seconds is dropped.
+- TCP announces its MSS (the path MTU less 40) and a window scale in the SYN,
+  and uses the peer's. A connection's buffers start at 16 KiB and grow on
+  demand to `SO_RCVBUF`/`SO_SNDBUF`, 256 KiB by default; setting either doubles
+  the value asked for, as Linux does, up to 16 MiB.
+- A datagram socket queues whole datagrams up to its receive buffer (212992
+  bytes by default) instead of eight packets of at most 2 KiB.
+- Connections are found through a hash of their four-tuple, listeners and UDP
+  sockets through a hash of their port, and only sockets with a pending
+  retransmission or timeout are visited by the timer, so the cost of a packet
+  does not grow with the number of sockets.
+
+`support/tests/net-kerneltest.sh` moves 32 MiB over loopback TCP, a 60000-byte
+UDP datagram, 3000 simultaneous connections, and -- through QEMU's user network
+to an echo server on the host -- an 8000-byte datagram that is fragmented both
+ways and 4 MiB of TCP.
+
 ## Limits
 
 - One adapter and one IPv4 address, normally configured by dhcpcd.
 - No IPv6.
-- TCP has no MSS option, no window scaling, no selective acknowledgement, and
-  no out-of-order reassembly — a segment arriving early is re-acknowledged and
-  dropped rather than held.
-- Sockets are demultiplexed by a linear scan of an unbounded table, so a busy
-  machine with thousands of sockets pays for each packet in proportion.
+- TCP has no selective acknowledgement, no congestion control and no
+  out-of-order reassembly — a segment arriving early is re-acknowledged and
+  dropped rather than held, and a loss is repaired by sending again from the
+  first unacknowledged byte.
 - No `MSG_ERRQUEUE`, so an ICMP error is never reported to the socket that
   caused it, and no `recvmmsg` to go with `sendmmsg`.
 - An ICMP socket carries no errors: a destination that answers with
