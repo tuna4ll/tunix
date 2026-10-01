@@ -1,26 +1,20 @@
 #ifndef SPINLOCK_H
 #define SPINLOCK_H
 
-#include <stdint.h>
+#include "lock.h"
 
-#include "cpu.h"
+typedef struct lock spinlock_t;
 
-typedef struct {
-    volatile uint32_t lock;
-} spinlock_t;
-
-static inline void spinlock_init(spinlock_t* sl) {
-    sl->lock = 0;
+static inline void spinlock_init(spinlock_t *sl) {
+    lock_init(sl, "object", LOCK_RANK_OBJECT);
 }
 
-static inline void spinlock_acquire(spinlock_t* sl) {
-    while (__sync_lock_test_and_set(&sl->lock, 1)) {
-        cpu_relax();
-    }
+static inline void spinlock_acquire(spinlock_t *sl) {
+    lock_acquire(sl);
 }
 
-static inline void spinlock_release(spinlock_t* sl) {
-    __sync_lock_release(&sl->lock);
+static inline void spinlock_release(spinlock_t *sl) {
+    lock_release(sl);
 }
 
 #endif
