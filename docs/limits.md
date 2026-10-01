@@ -36,6 +36,7 @@ both architectures. Filesystems have their own, `support/tests/ext2-kerneltest.s
 | Supplementary groups | 32 | 65536 |
 | memfd / SysV shm / shared file maps | 256 MiB / 128 × 64 MiB / 256 MiB | sparse, paged in on fault, no caps |
 | File mappings | every page read and mapped at `mmap`, private writable maps copied | mapped on first touch, private pages copied on first write |
+| `/proc` files | 4 KiB, silently cut | grow as needed (`cpuinfo` on 256 CPUs, `net/tcp` with thousands of sockets) |
 | Device interrupts | 16 vectors | 128 |
 | Device register window | 9 MiB | 512 GiB |
 | Block devices | 32, disks `sda`–`sdz`, partitions 1–9 | unbounded, `sdaa` onward, any partition number |
