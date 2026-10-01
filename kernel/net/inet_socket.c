@@ -1524,7 +1524,7 @@ int net_interface_ioctl(unsigned long request, void *argument) {
     if (request == SIOCADDRT || request == SIOCDELRT) {
         if (request == SIOCADDRT) {
             uint32_t gateway;
-            memcpy(&gateway, arg + 20, 4);
+            memcpy(&gateway, arg + 28, 4);
             if (gateway) net_set_gateway(gateway);
         }
         return 0;
