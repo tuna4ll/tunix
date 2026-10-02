@@ -1,8 +1,9 @@
 #include "include/build_config.h"
 #include <stddef.h>
 #include <stdint.h>
-#include "include/oplock.h"
+#include "include/lock.h"
 
+static struct lock pages_lock = LOCK_INITIALIZER("pages", LOCK_RANK_PAGES);
 static void *pmm_alloc_page_locked(void);
 static void pmm_free_page_locked(void *physical_address);
 #include "include/pmm.h"
@@ -135,15 +136,15 @@ void pmm_init(const struct boot_memory_region *regions, uint32_t count) {
 }
 
 void pmm_use_direct_map(uint64_t virtual_base) {
-    oplock_enter();
+    lock_acquire(&pages_lock);
     point_tracking(virtual_base);
-    oplock_leave();
+    lock_release(&pages_lock);
 }
 
 void *pmm_alloc_page(void) {
-    oplock_enter();
+    lock_acquire(&pages_lock);
     void *taken = pmm_alloc_page_locked();
-    oplock_leave();
+    lock_release(&pages_lock);
     return taken;
 }
 
@@ -178,7 +179,7 @@ void *pmm_alloc_pages_below(uint64_t count, uint64_t alignment_bytes, uint64_t l
     uint64_t last = limit ? limit / PMM_PAGE_SIZE : total_pages;
     if (last > total_pages) last = total_pages;
 
-    oplock_enter();
+    lock_acquire(&pages_lock);
     void *found = NULL;
     if (free_pages >= count) {
         for (uint64_t first = stride; first + count <= last; first += stride) {
@@ -197,7 +198,7 @@ void *pmm_alloc_pages_below(uint64_t count, uint64_t alignment_bytes, uint64_t l
             break;
         }
     }
-    oplock_leave();
+    lock_release(&pages_lock);
     return found;
 }
 
@@ -208,16 +209,16 @@ void *pmm_alloc_pages(uint64_t count, uint64_t alignment_bytes) {
 void pmm_free_pages(void *physical_address, uint64_t count) {
     if (!physical_address || !count) return;
     uint64_t physical = (uint64_t)physical_address;
-    oplock_enter();
+    lock_acquire(&pages_lock);
     for (uint64_t index = 0; index < count; index++)
         pmm_free_page_locked((void *)(physical + index * PMM_PAGE_SIZE));
-    oplock_leave();
+    lock_release(&pages_lock);
 }
 
 void pmm_free_page(void *physical_address) {
-    oplock_enter();
+    lock_acquire(&pages_lock);
     pmm_free_page_locked(physical_address);
-    oplock_leave();
+    lock_release(&pages_lock);
 }
 
 static void pmm_free_page_locked(void *physical_address) {
@@ -239,11 +240,15 @@ static void pmm_free_page_locked(void *physical_address) {
 }
 
 int pmm_page_ref(uint64_t physical) {
-    if (!pmm_page_is_allocated(physical)) return -1;
+    lock_acquire(&pages_lock);
+    int status = -1;
     uint64_t page = physical / PMM_PAGE_SIZE;
-    if (refcounts[page] == UINT32_MAX) return -1;
-    refcounts[page]++;
-    return 0;
+    if (pmm_page_is_allocated(physical) && refcounts[page] != UINT32_MAX) {
+        refcounts[page]++;
+        status = 0;
+    }
+    lock_release(&pages_lock);
+    return status;
 }
 
 uint32_t pmm_page_refcount(uint64_t physical) {
@@ -261,6 +266,7 @@ uint64_t pmm_release_reserved(uint64_t physical, uint64_t length) {
     uint64_t last = (physical + length + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
     if (last > total_pages) last = total_pages;
     uint64_t released = 0;
+    lock_acquire(&pages_lock);
     for (uint64_t page = first; page < last; page++) {
         if (!bit_test(page) || refcounts[page]) continue;
         bit_clear(page);
@@ -268,6 +274,7 @@ uint64_t pmm_release_reserved(uint64_t physical, uint64_t length) {
         released++;
         if (page < next_hint) next_hint = page;
     }
+    lock_release(&pages_lock);
     return released;
 }
 uint64_t pmm_managed_limit(void) { return total_pages * PMM_PAGE_SIZE; }

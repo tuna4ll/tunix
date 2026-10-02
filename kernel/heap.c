@@ -1,7 +1,7 @@
 #include "include/heap.h"
 #include "include/vmm.h"
 #include "include/pmm.h"
-#include "include/spinlock.h"
+#include "include/lock.h"
 
 #define HEAP_START HEAP_VIRTUAL_BASE
 #define HEAP_INITIAL_SIZE (1024 * 1024)
@@ -48,7 +48,7 @@ static heap_block_t* bins[HEAP_BINS];
 static uint64_t bin_mask;
 static uint64_t heap_size = 0;
 static uint64_t heap_allocated = 0;
-static spinlock_t heap_lock;
+static struct lock heap_lock = LOCK_INITIALIZER("heap", LOCK_RANK_HEAP);
 
 extern void kprintf(const char *fmt, ...);
 extern void panic(const char *msg);
@@ -78,8 +78,6 @@ static void free_remove(heap_block_t *block) {
 }
 
 void heap_init(void) {
-    spinlock_init(&heap_lock);
-
     for (uint64_t i = 0; i < HEAP_INITIAL_SIZE; i += HEAP_PAGE_SIZE) {
         void* phys = pmm_alloc_page();
         if (!phys) panic("HEAP: PMM out of memory!");
@@ -243,19 +241,19 @@ void* kmalloc(size_t size) {
     size = (size + (HEAP_ALIGN - 1)) & ~(HEAP_ALIGN - 1);
     int page_aligned = size >= HEAP_PAGE_ALIGN_MIN;
 
-    spinlock_acquire(&heap_lock);
+    lock_acquire(&heap_lock);
 
     for (;;) {
         heap_block_t *curr = find_fit(size, page_aligned);
         if (!curr) {
             if (heap_grow(page_aligned ? size + HEAP_PAGE_SIZE + sizeof(heap_block_t) : size) != 0) {
-                spinlock_release(&heap_lock);
+                lock_release(&heap_lock);
                 return NULL;
             }
             continue;
         }
         if (heap_reacquire_pages(curr, size + (page_aligned ? HEAP_PAGE_SIZE : 0)) != 0) {
-            spinlock_release(&heap_lock);
+            lock_release(&heap_lock);
             return NULL;
         }
         uint8_t released = curr->pages_released;
@@ -263,7 +261,7 @@ void* kmalloc(size_t size) {
         if (page_aligned) {
             chosen = split_for_page_alignment(curr, size);
             if (!chosen) {
-                spinlock_release(&heap_lock);
+                lock_release(&heap_lock);
                 return NULL;
             }
             curr->pages_released = 0;
@@ -288,7 +286,7 @@ void* kmalloc(size_t size) {
         chosen->pages_released = 0;
         chosen->is_free = 0;
         heap_allocated += chosen->size;
-        spinlock_release(&heap_lock);
+        lock_release(&heap_lock);
         return (void *)((uint8_t *)chosen + sizeof(heap_block_t));
     }
 }
@@ -296,16 +294,16 @@ void* kmalloc(size_t size) {
 void kfree(void* ptr) {
     if (!ptr) return;
 
-    spinlock_acquire(&heap_lock);
+    lock_acquire(&heap_lock);
 
     heap_block_t* block = (heap_block_t*)((uint8_t*)ptr - sizeof(heap_block_t));
     if (block->magic != HEAP_MAGIC) {
-        spinlock_release(&heap_lock);
+        lock_release(&heap_lock);
         panic("HEAP: Invalid kfree magic!");
     }
 
     if (block->is_free) {
-        spinlock_release(&heap_lock);
+        lock_release(&heap_lock);
         return;
     }
     heap_allocated -= block->size;
@@ -333,20 +331,20 @@ void kfree(void* ptr) {
     }
     free_insert(block);
 
-    spinlock_release(&heap_lock);
+    lock_release(&heap_lock);
 }
 
 int heap_under_pressure(void) {
-    spinlock_acquire(&heap_lock);
+    lock_acquire(&heap_lock);
     int pressed = heap_allocated >= heap_pressure_size();
-    spinlock_release(&heap_lock);
+    lock_release(&heap_lock);
     return pressed || pmm_free_page_count() < HEAP_FREE_PAGES_FLOOR;
 }
 
 void heap_stats(uint64_t *reserved, uint64_t *allocated, uint64_t *limit) {
-    spinlock_acquire(&heap_lock);
+    lock_acquire(&heap_lock);
     if (reserved) *reserved = heap_size;
     if (allocated) *allocated = heap_allocated;
-    spinlock_release(&heap_lock);
+    lock_release(&heap_lock);
     if (limit) *limit = heap_extent_limit();
 }
