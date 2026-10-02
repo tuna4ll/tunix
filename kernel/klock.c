@@ -4,6 +4,7 @@
 #include "include/klock.h"
 #include "include/percpu.h"
 #include "include/process.h"
+#include "include/defer.h"
 #include "include/smp.h"
 #include "include/time.h"
 
@@ -237,6 +238,7 @@ int kernel_lock_in_interrupt(void) {
 }
 
 void kernel_lock_from_isr(void) {
+    defer_kernel_enter();
     unsigned index = cpu_current()->index;
     struct klock_cpu_state *state = &cpu_state[index];
     state->isr_depth++;
@@ -270,9 +272,13 @@ void kernel_unlock_from_isr(void) {
     if (cpu->isr_depth) cpu->isr_depth--;
     uint8_t state = cpu->taken_by_isr;
     cpu->taken_by_isr = ISR_LOCK_NOTHING;
+    defer_kernel_leave();
+    int leaving = !defer_in_kernel();
+    if (leaving && kernel_lock_held_here()) process_io_recheck();
     if (state == ISR_LOCK_TAKEN) kernel_unlock_current();
     else if (state == ISR_LOCK_SHARED)
         __atomic_store_n(&isr_holder, 0U, __ATOMIC_RELEASE);
+    if (leaving) defer_poll();
 }
 
 int kernel_lock_held_here(void) {
@@ -293,10 +299,11 @@ void kernel_exit(void) {
     process_finish_switch();
     process_io_recheck();
     kernel_unlock_current();
+    defer_kernel_leave();
+    defer_poll();
 }
 
 void kernel_exit_from_isr(void) {
     process_finish_switch();
-    process_io_recheck();
     kernel_unlock_from_isr();
 }

@@ -18,6 +18,7 @@
 #include "include/klock.h"
 #include "include/klog.h"
 #include "include/percpu.h"
+#include "include/defer.h"
 #include "include/smp.h"
 #include "include/kstring.h"
 #include "include/pipe.h"
@@ -6288,6 +6289,7 @@ static int syscall_number_may_share(uint64_t number) {
 
 void syscall_dispatch(struct syscall_frame *frame) {
     uint64_t syscall_number = SYSCALL_NR(frame);
+    defer_kernel_enter();
     klock_note(KLOCK_NOTE_SYSCALL | (uint32_t)SYSCALL_NR(frame));
     process_note_syscall_entry();
 

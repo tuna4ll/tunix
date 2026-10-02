@@ -23,6 +23,7 @@ void timer_irq(struct interrupt_frame *frame) {
         drm_console_present();
     sound_tick();
     process_wake_io();
+    process_io_recheck();
     process_timer_interrupt(frame);
 }
 
