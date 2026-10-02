@@ -31,17 +31,11 @@ struct linux_winsize {
     uint16_t pixel_height;
 };
 
-/*
- * One virtual terminal. The line discipline and the screen are the terminal
- * itself; the rest is what a program that drives the display has told us about
- * how it wants to be treated when the terminal is switched away from.
- */
 struct vt {
     struct tty *tty;
     struct terminal_screen *screen;
     struct tunix_vt_mode mode;
-    /* The process that asked for VT_PROCESS. Signals go to it, and its exit is
-       what releases a switch that is waiting for an answer. */
+
     uint64_t owner_pid;
     int kd_mode;
     int kb_mode;
@@ -50,19 +44,9 @@ struct vt {
 
 static struct vt terminals[VT_COUNT + 1U];
 static unsigned active_index = 1U;
-/*
- * A switch that has been asked for but not finished: the terminal being left
- * runs a program that wanted to be told first (VT_SETMODE with VT_PROCESS), so
- * it has been signalled and the switch happens when it answers with VT_RELDISP.
- */
+
 static unsigned pending_index;
-/*
- * Which terminal the display belongs to while something other than the text
- * console is drawing on it. Set from the terminal that was active when the
- * claim was made -- an X server does not announce which terminal it is on, it
- * simply starts presenting, and the one in front of the user at that moment is
- * the one it is presenting to.
- */
+
 static unsigned display_owner_index;
 static int display_suspended;
 static char switch_channel;
@@ -122,14 +106,6 @@ const void *vt_input_wait_channel(void) { return &input_channel; }
 
 void vt_input_arrived(void) { (void)process_wake_all(&input_channel); }
 
-/*
- * Hand the display over.
- *
- * A graphics client keeps its claim across a switch -- it is still running, it
- * still owns its buffers -- but while another terminal is in front it must not
- * reach the screen, and the console must be allowed to. Suspending is what
- * separates the two: the claim stands, the drawing stops.
- */
 static void display_to_console(void) {
     if (!display_owner_index || display_suspended) return;
     drm_display_suspend();
@@ -141,9 +117,7 @@ static void display_to_owner(void) {
     if (!display_owner_index || !display_suspended) return;
     framebuffer_resume_graphics();
     display_suspended = 0;
-    /* The client has been drawing into its own buffer all along and has no
-       reason to think anything changed, so the last frame it presented is put
-       back on the screen for it. */
+
     drm_display_resume();
 }
 
@@ -151,12 +125,6 @@ static void finish_switch(unsigned target) {
     struct vt *to = vt_ensure(target);
     if (!to) return;
 
-    /* Both terminals' idea of which modifiers are held is stale: the Ctrl and
-       Alt that did the switching are released while the other one is in front,
-       and a terminal that thinks Ctrl is still down turns the next keystroke
-       into a control character. What was *typed* at the terminal being left
-       stays in it -- coming back to a half-written command line is the point of
-       having several. */
     tty_reset_keyboard_state();
 
     active_index = target;
@@ -182,11 +150,9 @@ int vt_switch(unsigned index) {
     if (index == active_index && !pending_index) return 0;
 
     struct vt *from = &terminals[active_index];
-    /* A program that asked to be told has to be told, and has to answer, before
-       the display moves. Xorg drops its DRM master and stops drawing in that
-       window; a compositor does the same. */
+
     if (from->mode.mode == TUNIX_VT_PROCESS && from->mode.relsig &&
-        from->owner_pid && process_find(from->owner_pid)) {
+        from->owner_pid && process_exists(from->owner_pid)) {
         pending_index = index;
         (void)process_send_signal((int64_t)from->owner_pid, from->mode.relsig);
         return 0;
@@ -195,9 +161,6 @@ int vt_switch(unsigned index) {
     return 0;
 }
 
-/* VT_RELDISP: 1 (or 2, which is "and I am done with it") allows the pending
-   switch, 0 refuses it. Anything else is a program answering a question that
-   was never asked. */
 static int vt_release_display(int allow) {
     if (!pending_index) return allow ? 0 : -EINVAL;
     if (!allow) {
@@ -212,7 +175,7 @@ static int vt_release_display(int allow) {
 int vt_wait_active(unsigned index) {
     if (!index_valid(index)) return -EINVAL;
     if (index == active_index) return 0;
-    /* Nothing is on its way there, so waiting would be waiting forever. */
+
     if (pending_index != index) return -EINVAL;
     return -EAGAIN;
 }
@@ -225,18 +188,11 @@ void vt_process_exited(uint64_t pid, uint64_t sid) {
         if (vt->owner_pid != pid) continue;
         vt->owner_pid = 0;
         vt->mode.mode = TUNIX_VT_AUTO;
-        /* It died holding up a switch. Nobody is left to answer for it, and
-           leaving the machine on a terminal whose owner is gone is worse than
-           completing the move it was asked about. */
+
         if (pending_index && index == active_index) finish_switch(pending_index);
     }
 }
 
-/*
- * Whether what the user is looking at is a text console rather than a graphics
- * client's buffer. Either nobody has claimed the display, or whoever has is
- * suspended behind another terminal.
- */
 int vt_console_in_front(void) {
     return !display_owner_index || display_suspended;
 }
@@ -258,15 +214,6 @@ const void *vt_graphics_mode_owner(void) {
     return vt;
 }
 
-/*
- * Ctrl+Alt+F1..F8, ahead of everything else.
- *
- * This is deliberately above the input readers rather than below them: a
- * compositor with the keyboard grabbed must not be able to keep the user from
- * leaving it, which is exactly the situation where switching terminals matters
- * most. It is also above the console's own cooking, so the combination never
- * arrives at a shell as three separate keys.
- */
 int vt_handle_hotkey(uint16_t keycode, int pressed, int ctrl_held, int alt_held) {
     if (!ctrl_held || !alt_held) return 0;
     if (keycode == TUNIX_KEY_D) {
@@ -281,8 +228,7 @@ int vt_handle_hotkey(uint16_t keycode, int pressed, int ctrl_held, int alt_held)
     else return 0;
     if (!index_valid(target)) return 0;
     if (pressed) (void)vt_switch(target);
-    /* The release is swallowed too: a program that saw only half of a key it
-       never saw pressed is a program that thinks the key is stuck. */
+
     return 1;
 }
 
@@ -294,15 +240,10 @@ int vt_input_delivered_to(unsigned index) {
     return index == 0U || index == active_index;
 }
 
-/* One byte off the serial line, or nothing. The serial port is a keyboard like
-   any other as far as the terminals are concerned, and it types at whichever
-   one is active. */
 void vt_poll_serial(void) {
     struct tty *tty = terminals[active_index].tty;
     if (!tty || !serial_present()) return;
-    /* Bounded. A port that answers every read with a byte -- which is what an
-       absent one does, and what a wedged one does -- would otherwise be read
-       for ever, inside the tick, holding the kernel lock. */
+
     unsigned limit = serial_read_limit();
     for (unsigned taken = 0; taken < limit; taken++) {
         int value = serial_read_char();
@@ -327,7 +268,6 @@ void vt_init(void) {
     terminal_screen_activate(first->screen);
 }
 
-/* Which terminal a device node names. */
 static struct vt *vt_from_node(struct vfs_node *node) {
     unsigned index = node ? (unsigned)(uintptr_t)node->data : VT_NODE_ACTIVE;
     if (index == VT_NODE_ACTIVE) index = active_index;
@@ -356,15 +296,10 @@ int vt_node_ready(struct vfs_node *node) {
     return vt ? tty_input_ready(vt->tty) : 0;
 }
 
-/* KD_GRAPHICS is a program announcing it will paint the screen itself, so the
-   console stands down -- the same handover DRM performs when a client presents
-   its first frame. KD_TEXT gives the display back and the console redraws. */
 static int64_t set_kd_mode(struct vt *vt, int mode) {
     if (mode != TUNIX_KD_TEXT && mode != TUNIX_KD_GRAPHICS) return -EINVAL;
     if (mode == vt->kd_mode) return 0;
     if (mode == TUNIX_KD_GRAPHICS) {
-        /* Only the terminal in front may take the display: a claim from one
-           the user cannot see would black out the one they are looking at. */
         if (vt != &terminals[active_index]) return -EBUSY;
         if (framebuffer_claim_graphics(vt) != 0) return -EBUSY;
     } else {
@@ -427,8 +362,7 @@ int64_t vt_node_ioctl(struct vfs_node *node, unsigned long request,
                 return -EFAULT;
             return 0;
         }
-        /* login(1) claims a terminal as its session's controlling terminal
-           before handing it to the user's shell; su(1) gives it up again. */
+
         case TIOCSCTTY: {
             struct process *process = process_current();
             if (!process) return -ENOTTY;
@@ -462,7 +396,7 @@ int64_t vt_node_ioctl(struct vfs_node *node, unsigned long request,
             if (tty_ioctl(vt->tty, request, &type) != 0) return -ENOTTY;
             return copy_to_user(user_argument, &type, sizeof(type)) == 0 ? 0 : -EFAULT;
         }
-        /* The argument of these is the value itself, not a pointer to it. */
+
         case KDSETMODE:
             return set_kd_mode(vt, (int)user_argument);
         case KDSKBMODE: {
@@ -512,9 +446,7 @@ int64_t vt_node_ioctl(struct vfs_node *node, unsigned long request,
             return vt_wait_active((unsigned)user_argument);
         case VT_RELDISP:
             return vt_release_display((int)user_argument);
-        /* VT_DISALLOCATE frees a terminal nobody is using. Refusing to free the
-           active one is what Linux does; freeing the rest is a courtesy, and a
-           terminal comes back the moment anything opens it again. */
+
         case VT_DISALLOCATE: {
             unsigned index = (unsigned)user_argument;
             if (!index) return 0;

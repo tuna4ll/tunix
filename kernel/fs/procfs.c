@@ -625,6 +625,12 @@ static const char *state_name(const struct process *process) {
     }
 }
 
+static void put_process(struct process **process) {
+    process_put(*process);
+}
+
+#define PROCESS_REF __attribute__((cleanup(put_process))) struct process *
+
 static char state_code(const struct process *process) {
     if (process->state == PROCESS_BLOCKED) return 'S';
     if (process->state == PROCESS_ZOMBIE) return 'Z';
@@ -634,7 +640,7 @@ static char state_code(const struct process *process) {
 
 static int64_t proc_status_read(struct vfs_node *node, uint64_t offset,
                                 size_t size, void *output) {
-    struct process *process = process_find(node_pid(node));
+    PROCESS_REF process = process_get(node_pid(node));
     if (!process) return 0;
     TEXT_BUFFER text = {0};
     uint64_t pages = vmm_count_user_pages(process->cr3);
@@ -674,7 +680,7 @@ static int64_t proc_status_read(struct vfs_node *node, uint64_t offset,
 
 static int64_t proc_pid_stat_read(struct vfs_node *node, uint64_t offset,
                                   size_t size, void *output) {
-    struct process *process = process_find(node_pid(node));
+    PROCESS_REF process = process_get(node_pid(node));
     if (!process) return 0;
     TEXT_BUFFER text = {0};
     uint64_t rss_pages = vmm_count_user_pages(process->cr3);
@@ -714,7 +720,7 @@ static int64_t proc_pid_stat_read(struct vfs_node *node, uint64_t offset,
 
 static int64_t proc_pid_statm_read(struct vfs_node *node, uint64_t offset,
                                    size_t size, void *output) {
-    struct process *process = process_find(node_pid(node));
+    PROCESS_REF process = process_get(node_pid(node));
     if (!process) return 0;
     TEXT_BUFFER text = {0};
     uint64_t pages = vmm_count_user_pages(process->cr3);
@@ -758,7 +764,7 @@ static void maps_line(struct text_buffer *text, uint64_t start, uint64_t end,
 
 static int64_t proc_pid_maps_read(struct vfs_node *node, uint64_t offset,
                                   size_t size, void *output) {
-    struct process *process = process_find(node_pid(node));
+    PROCESS_REF process = process_get(node_pid(node));
     if (!process || !process->memory) return 0;
 
     uint8_t *out = (uint8_t *)output;
@@ -801,7 +807,7 @@ static int64_t proc_pid_maps_read(struct vfs_node *node, uint64_t offset,
 
 static int64_t proc_pid_comm_read(struct vfs_node *node, uint64_t offset,
                                   size_t size, void *output) {
-    struct process *process = process_find(node_pid(node));
+    PROCESS_REF process = process_get(node_pid(node));
     if (!process) return 0;
     TEXT_BUFFER text = {0};
     text_string(&text, process->name);
@@ -811,7 +817,7 @@ static int64_t proc_pid_comm_read(struct vfs_node *node, uint64_t offset,
 
 static int64_t proc_cmdline_read(struct vfs_node *node, uint64_t offset,
                                  size_t size, void *output) {
-    struct process *process = process_find(node_pid(node));
+    PROCESS_REF process = process_get(node_pid(node));
     if (!process || !process->cr3 || process->arg_end <= process->arg_start ||
         offset >= process->arg_end - process->arg_start) return 0;
     uint64_t available = process->arg_end - process->arg_start - offset;
@@ -903,19 +909,22 @@ static void proc_fd_refresh(struct vfs_node *directory) {
     while (directory->children)
         (void)vfs_detach_child(directory, directory->children);
 
-    struct process *process = process_find(node_pid(directory));
-    if (process && process->files) {
+    PROCESS_REF process = process_get(node_pid(directory));
+    struct file_table *table = process_files_get(process);
+    if (table) {
         VFS_PATH_SCOPED target = vfs_path_buffer();
-        for (int fd = 0; target && fd < process->files->capacity; fd++) {
-            struct file *file = process->files->fds[fd];
+        for (int fd = 0; target && fd < table->capacity; fd++) {
+            struct file *file = file_table_get(table, fd);
             if (!file) continue;
             describe_file(file, target, VFS_PATH_MAX);
+            file_unref(file);
             if (!target[0]) continue;
             char name[16];
             size_t at = path_append_decimal(name, 0, (uint64_t)fd);
             name[at] = '\0';
             (void)vfs_attach_symlink(directory, name, target);
         }
+        file_table_unref(table);
     }
     busy = 0;
 }
@@ -942,7 +951,7 @@ static int set_link_target(struct vfs_node *link, const char *target) {
 }
 
 static void proc_process_refresh(struct vfs_node *directory) {
-    struct process *process = process_find(node_pid(directory));
+    PROCESS_REF process = process_get(node_pid(directory));
     if (!process) return;
 
     (void)set_link_target(direct_child(directory, "exe"), process->exe_path ? process->exe_path : "/");
