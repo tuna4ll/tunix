@@ -9,6 +9,7 @@
 #include "include/sysfs.h"
 #include "include/vmm.h"
 #include "include/vmm_arch.h"
+#include "include/lock.h"
 
 extern void kprintf(const char *fmt, ...);
 
@@ -108,6 +109,25 @@ struct image {
 
 static struct module *modules;
 static struct module *active;
+static struct lock module_lock = LOCK_INITIALIZER("modules", LOCK_RANK_MODULES);
+
+#define MODULE_DYING 0x80000000U
+
+static void module_guard_release(int *unused) {
+    (void)unused;
+    lock_release(&module_lock);
+}
+
+#define MODULES_LOCKED \
+    __attribute__((cleanup(module_guard_release))) int module_guard = (lock_acquire(&module_lock), 0)
+
+void module_lock_acquire(void) {
+    lock_acquire(&module_lock);
+}
+
+void module_lock_release(void) {
+    lock_release(&module_lock);
+}
 
 extern const struct module_export kernel_symbols[];
 extern const unsigned kernel_symbol_count;
@@ -117,6 +137,7 @@ unsigned module_kernel_symbol_count(void) { return kernel_symbol_count; }
 struct module *module_list(void) { return modules; }
 
 struct module *module_find(const char *name) {
+    MODULES_LOCKED;
     for (struct module *module = modules; module; module = module->next)
         if (strcmp(module->name, name) == 0) return module;
     return NULL;
@@ -124,13 +145,17 @@ struct module *module_find(const char *name) {
 
 int module_get(struct module *module) {
     if (!module) return 0;
-    if (module->state == MODULE_STATE_UNLOADING) return -EBUSY;
-    module->refs++;
+    uint32_t refs = __atomic_load_n(&module->refs, __ATOMIC_ACQUIRE);
+    do {
+        if (refs & MODULE_DYING) return -EBUSY;
+    } while (!__atomic_compare_exchange_n(&module->refs, &refs, refs + 1U, 0,
+                                          __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
     return 0;
 }
 
 void module_put(struct module *module) {
-    if (module && module->refs) module->refs--;
+    if (module && (__atomic_load_n(&module->refs, __ATOMIC_ACQUIRE) & ~MODULE_DYING))
+        __atomic_sub_fetch(&module->refs, 1U, __ATOMIC_ACQ_REL);
 }
 
 const char *module_state_name(const struct module *module) {
@@ -556,6 +581,7 @@ static int assign_parameter(struct module *module, const char *name, char *value
 
 int module_param_set(struct module *module, unsigned index, const char *text,
                      size_t length) {
+    MODULES_LOCKED;
     if (!module || index >= module->param_count) return -EINVAL;
     const struct module_param *param = &module->params[index];
 
@@ -594,6 +620,7 @@ static int apply_parameters(struct module *module) {
 
 int module_param_format(const struct module *module, unsigned index, char *out,
                         size_t capacity) {
+    MODULES_LOCKED;
     if (!module || index >= module->param_count || capacity < 24) return -1;
     const struct module_param *param = &module->params[index];
     if (param->type == MODULE_PARAM_STRING) {
@@ -803,6 +830,7 @@ int module_export_value(const struct module *module, const char *name,
 }
 
 int module_load(const void *contents, size_t bytes, const char *arguments) {
+    MODULES_LOCKED;
     struct image image;
     int status = prepare_image(&image, contents, bytes);
     if (status != 0) return status;
@@ -891,10 +919,13 @@ failed:
 
 int module_unload(const char *name, unsigned flags) {
     (void)flags;
+    MODULES_LOCKED;
     struct module *module = module_find(name);
     if (!module) return -ENOENT;
     if (module->state != MODULE_STATE_LIVE) return -EBUSY;
-    if (module->refs) return -EBUSY;
+    uint32_t idle = 0;
+    if (!__atomic_compare_exchange_n(&module->refs, &idle, MODULE_DYING, 0,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return -EBUSY;
 
     module->state = MODULE_STATE_UNLOADING;
     if (module->exit) {

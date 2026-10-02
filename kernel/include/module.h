@@ -71,6 +71,8 @@ struct module *module_list(void);
 struct module *module_active(void);
 unsigned module_kernel_symbol_count(void);
 int module_get(struct module *module);
+void module_lock_acquire(void);
+void module_lock_release(void);
 void module_put(struct module *module);
 const char *module_state_name(const struct module *module);
 int module_param_format(const struct module *module, unsigned index,

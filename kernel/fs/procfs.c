@@ -427,6 +427,7 @@ static int64_t proc_modules_read(struct vfs_node *node, uint64_t offset,
                                  size_t size, void *output) {
     (void)node;
     TEXT_BUFFER text = {0};
+    module_lock_acquire();
     for (struct module *module = module_list(); module; module = module->next) {
         text_string(&text, module->name);
         text_char(&text, ' ');
@@ -449,6 +450,7 @@ static int64_t proc_modules_read(struct vfs_node *node, uint64_t offset,
         text_hex64(&text, module->base);
         text_char(&text, '\n');
     }
+    module_lock_release();
     return text_read(&text, offset, size, output);
 }
 
