@@ -1242,8 +1242,8 @@ static void activate_process(struct process *process) {
     set_kernel_stack(process->kernel_stack_top);
     syscall_set_kernel_stack(process->kernel_stack_top);
     if (cpu_current()->address_space != process->cr3) {
+        __atomic_store_n(&cpu_current()->address_space, process->cr3, __ATOMIC_SEQ_CST);
         vmm_activate(process->cr3);
-        cpu_current()->address_space = process->cr3;
     }
     arch_load_thread_pointers(process->fs_base, process->gs_base);
     fpu_restore(process);
@@ -2407,8 +2407,8 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
 
     memset(frame, 0, sizeof(*frame));
     arch_frame_enter_user(frame, current->entry, current->user_stack_top);
+    __atomic_store_n(&cpu_current()->address_space, new_cr3, __ATOMIC_SEQ_CST);
     vmm_activate(new_cr3);
-    cpu_current()->address_space = new_cr3;
     arch_load_thread_pointers(0, 0);
     if (old_memory) memory_unref(old_memory);
     else vmm_destroy_address_space(old_cr3);

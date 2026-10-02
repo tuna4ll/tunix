@@ -49,12 +49,14 @@ void smp_flush_interrupt(void) {
 static void flush_others(uint64_t cr3, int everywhere) {
     if (online_cpus < 2 || (!cr3 && !everywhere)) return;
 
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
     unsigned self = cpu_current()->index;
     int asked = 0;
     for (unsigned index = 0; index < SMP_MAX_CPUS; index++) {
         struct cpu *cpu = percpu_slot(index);
         if (index == self || !cpu->online) continue;
-        if (!everywhere && cpu->address_space != cr3) continue;
+        if (!everywhere && __atomic_load_n(&cpu->address_space, __ATOMIC_SEQ_CST) != cr3)
+            continue;
         __atomic_store_n(&cpu->flush_pending, 1, __ATOMIC_RELEASE);
         asked = 1;
     }
@@ -75,6 +77,7 @@ static void flush_others(uint64_t cr3, int everywhere) {
                 __atomic_store_n(&cpu->flush_pending, 0, __ATOMIC_RELEASE);
                 break;
             }
+            smp_service_flush();
             cpu_relax();
         }
     }
