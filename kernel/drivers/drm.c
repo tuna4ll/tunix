@@ -14,6 +14,18 @@
 #include "../include/usercopy.h"
 #include "../include/virtgpu.h"
 #include "../include/vmm.h"
+#include "../include/lock.h"
+#include "../include/smp.h"
+
+static struct lock drm_lock = LOCK_INITIALIZER("drm", LOCK_RANK_CHAR);
+
+static void drm_guard_release(int *unused) {
+    (void)unused;
+    lock_release(&drm_lock);
+}
+
+#define DRM_LOCKED \
+    __attribute__((cleanup(drm_guard_release))) int drm_guard = (lock_acquire(&drm_lock), 0)
 
 extern void kprintf(const char *fmt, ...);
 
@@ -1052,6 +1064,7 @@ static int64_t ioctl_get_crtc(uint64_t user_argument) {
 }
 
 void drm_buffer_put(uint32_t handle) {
+    DRM_LOCKED;
     struct drm_dumb_buffer *buffer = buffer_find(handle);
     if (buffer) buffer_release(buffer);
 }
@@ -1104,6 +1117,7 @@ static int64_t ioctl_prime_fd_to_handle(uint64_t user_argument) {
 
 int64_t drm_dmabuf_mmap(struct file *file, uint64_t cr3, uint64_t virtual_address,
                         uint64_t length, uint64_t offset, uint64_t page_flags) {
+    DRM_LOCKED;
     if (!file || !length || (offset & 0xFFFULL)) return -EINVAL;
     struct drm_dumb_buffer *buffer = buffer_find(file->dmabuf_handle);
     if (!buffer) return -ENOENT;
@@ -1301,30 +1315,12 @@ static int present_via_virtgpu(const struct drm_framebuffer *fb,
 static int64_t drm_dispatch_ioctl(struct file *file, unsigned long request,
                                   uint64_t user_argument);
 
-static volatile uint32_t drm_busy_holder;
-
 static void drm_enter(void) {
-    uint32_t me = cpu_current()->index + 1U;
-    for (;;) {
-        uint32_t nobody = 0;
-        if (__atomic_compare_exchange_n(&drm_busy_holder, &nobody, me, 0,
-                                        __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
-            return;
-        int released = kernel_lock_release_for_wait();
-        while (__atomic_load_n(&drm_busy_holder, __ATOMIC_RELAXED)) {
-            kernel_lock_wait_tick();
-            cpu_relax();
-        }
-        kernel_lock_retake_after_wait(released);
-    }
+    lock_acquire(&drm_lock);
 }
 
 static void drm_leave(void) {
-    __atomic_store_n(&drm_busy_holder, 0U, __ATOMIC_RELEASE);
-}
-
-static int drm_is_busy(void) {
-    return __atomic_load_n(&drm_busy_holder, __ATOMIC_RELAXED) != 0;
+    lock_release(&drm_lock);
 }
 
 static void copy_row_span(const struct drm_framebuffer *fb, const struct drm_dumb_buffer *buffer,
@@ -1378,7 +1374,6 @@ static int present_framebuffer(const struct file *client, uint32_t fb_id,
     struct drm_damage whole = { 1, { { 0, 0, (int32_t)columns, (int32_t)rows } } };
     if (!damage || !scanout_current) damage = &whole;
 
-    int released = kernel_lock_release_for_wait();
     for (uint32_t index = 0; index < damage->count; index++) {
         const struct drm_mode_rect *rect = &damage->rects[index];
         uint32_t top = (uint32_t)clamp_edge(rect->y1, rows);
@@ -1389,10 +1384,9 @@ static int present_framebuffer(const struct file *client, uint32_t fb_id,
         if (first >= end) continue;
         for (uint32_t row = top; row < bottom; row++) {
             copy_row_span(fb, buffer, scanout + (uint64_t)row * screen_pitch, row, first, end);
-            kernel_lock_wait_tick();
+            smp_service_flush();
         }
     }
-    kernel_lock_retake_after_wait(released);
     framebuffer_present();
     scanout_current = 1;
     return 0;
@@ -1451,6 +1445,7 @@ static void queue_flip_event(uint64_t user_data) {
 
 int64_t drm_device_read(struct vfs_node *node, uint64_t offset,
                         size_t size, void *buffer) {
+    DRM_LOCKED;
     (void)node;
     (void)offset;
     if (!buffer) return -EINVAL;
@@ -1467,6 +1462,7 @@ int64_t drm_device_read(struct vfs_node *node, uint64_t offset,
 }
 
 int drm_device_read_ready(struct vfs_node *node) {
+    DRM_LOCKED;
     (void)node;
     return event_count != 0;
 }
@@ -1944,6 +1940,7 @@ int64_t drm_device_mmap(struct vfs_node *node, struct file *file,
                         uint64_t cr3, uint64_t virtual_address,
                         uint64_t length, uint64_t offset,
                         uint64_t page_flags) {
+    DRM_LOCKED;
     (void)node;
     if (!drm_ready || !length) return -EINVAL;
     if (offset < DRM_MAP_OFFSET_BASE) return -EINVAL;
@@ -1971,11 +1968,13 @@ int64_t drm_device_mmap(struct vfs_node *node, struct file *file,
 }
 
 void drm_device_open(struct vfs_node *node) {
+    DRM_LOCKED;
     (void)node;
     open_count++;
 }
 
 void drm_device_close(struct vfs_node *node) {
+    DRM_LOCKED;
     (void)node;
     drm_enter();
     if (open_count) open_count--;
@@ -1991,6 +1990,7 @@ void drm_device_close(struct vfs_node *node) {
 }
 
 void drm_file_close(struct file *file) {
+    DRM_LOCKED;
     if (!file) return;
     drm_enter();
     for (int index = 0; index < framebuffer_capacity; index++) {
@@ -2010,19 +2010,21 @@ void drm_file_close(struct file *file) {
 }
 
 void drm_display_suspend(void) {
+    DRM_LOCKED;
     if (!drm_ready) return;
     drm_console_present();
 }
 
 void drm_console_present(void) {
     if (!virtgpu_available()) return;
-    if (drm_is_busy()) return;
+    if (!lock_try_acquire(&drm_lock)) return;
     uint32_t pitch = framebuffer_pitch();
-    if (!pitch) return;
-    (void)virtgpu_console_present(framebuffer_physical_address() +
-                                      framebuffer_memory_offset(),
-                                  pitch / 4U, framebuffer_width(),
-                                  framebuffer_height());
+    if (pitch)
+        (void)virtgpu_console_present(framebuffer_physical_address() +
+                                          framebuffer_memory_offset(),
+                                      pitch / 4U, framebuffer_width(),
+                                      framebuffer_height());
+    lock_release(&drm_lock);
 }
 
 void drm_display_resume(void) {

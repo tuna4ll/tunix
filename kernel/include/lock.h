@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 enum lock_rank {
+    LOCK_RANK_CHAR = 8,
     LOCK_RANK_MEMORY = 10,
     LOCK_RANK_MODULES = 12,
     LOCK_RANK_FILE = 17,
