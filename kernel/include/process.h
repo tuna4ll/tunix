@@ -208,6 +208,7 @@ struct process {
     uint8_t on_wait_list;
     uint8_t on_key_list;
     uint8_t on_dead_list;
+    volatile uint8_t on_cpu;
 };
 
 void process_init(void);
@@ -258,6 +259,7 @@ int process_signal_has_handler(int signal_number);
 int process_fault_from_interrupt(struct interrupt_frame *frame, int signal_number);
 void process_run_child_first_from_syscall(struct syscall_frame *frame, uint64_t child_pid);
 void process_reap_deferred(void);
+void process_finish_switch(void);
 void process_exit_from_syscall(struct syscall_frame *frame, int status);
 void process_exit_group_from_syscall(struct syscall_frame *frame, int status);
 int process_install_file(struct process *process, struct file *file, int minimum_fd);

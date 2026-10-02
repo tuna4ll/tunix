@@ -3,6 +3,7 @@
 #include "include/cpu.h"
 #include "include/klock.h"
 #include "include/percpu.h"
+#include "include/process.h"
 #include "include/smp.h"
 #include "include/time.h"
 
@@ -15,9 +16,6 @@ static volatile uint32_t now_serving;
 #define KLOCK_MODE_EXCLUSIVE 1
 #define KLOCK_MODE_SHARED 2
 
-/* Every shared entry writes only its processor's cache line. A single global
-   reader count would still serialize the readers in the cache-coherency
-   protocol even though the lock admitted them together. */
 struct klock_cpu_state {
     volatile uint32_t shared_holders;
     volatile uint8_t held_mode;
@@ -289,4 +287,14 @@ void kernel_unlock_current(void) {
     if (cpu_state[cpu_current()->index].held_mode == KLOCK_MODE_SHARED)
         kernel_unlock_shared();
     else kernel_unlock();
+}
+
+void kernel_exit(void) {
+    process_finish_switch();
+    kernel_unlock_current();
+}
+
+void kernel_exit_from_isr(void) {
+    process_finish_switch();
+    kernel_unlock_from_isr();
 }

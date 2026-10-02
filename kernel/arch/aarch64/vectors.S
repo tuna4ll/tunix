@@ -95,8 +95,10 @@ el0_irq:
     b.ne    1f
     mrs     x9, tpidr_el1
     ldr     x10, [x9, #CPU_KERNEL_RSP]
-    cbz     x10, 1f
+    cbz     x10, 3f
     sub     sp, x10, #FRAME_SIZE
+3:  bl      kernel_exit_from_isr
+    b       2f
 1:  bl      kernel_unlock_from_isr
 2:  RESTORE_FRAME
     eret
@@ -112,9 +114,9 @@ el0_sync:
     sub     sp, x10, #FRAME_SIZE
 1:  cmp     x19, #1
     b.ne    2f
-    bl      kernel_unlock_current
+    bl      kernel_exit
     b       3f
-2:  bl      kernel_unlock_from_isr
+2:  bl      kernel_exit_from_isr
 3:  RESTORE_FRAME
     eret
 

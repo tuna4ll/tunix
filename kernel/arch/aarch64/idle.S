@@ -6,7 +6,7 @@ cpu_enter_idle:
     msr     daifset, #2
     mov     sp, x0
     mov     x29, #0
-    bl      kernel_unlock_current
+    bl      kernel_exit
     b       idle_loop
 
 cpu_idle_park:

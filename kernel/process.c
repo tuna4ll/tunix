@@ -755,7 +755,8 @@ static void release_zombie_memory(void) {
     while (list) {
         struct process *item = list;
         list = item->zombie_next;
-        if (item == current && item->memory) {
+        if ((item == current || __atomic_load_n(&item->on_cpu, __ATOMIC_ACQUIRE)) &&
+            item->memory) {
             item->zombie_next = kept;
             kept = item;
             continue;
@@ -795,7 +796,7 @@ void process_reap_deferred(void) {
         struct process *victim = list;
         list = victim->dead_next;
         victim->dead_next = NULL;
-        if (victim == current) {
+        if (victim == current || __atomic_load_n(&victim->on_cpu, __ATOMIC_ACQUIRE)) {
             victim->dead_next = kept;
             kept = victim;
             continue;
@@ -965,7 +966,9 @@ static int allowed_on_this_cpu(const struct process *process) {
 }
 
 static int runnable(const struct process *process) {
-    return process && process->state == PROCESS_READY && allowed_on_this_cpu(process);
+    return process && process->state == PROCESS_READY && allowed_on_this_cpu(process) &&
+           (!__atomic_load_n(&process->on_cpu, __ATOMIC_ACQUIRE) || process == current ||
+            process == cpu_current()->switch_owner);
 }
 
 static uint64_t minimum_virtual_runtime;
@@ -1227,11 +1230,33 @@ static void fpu_copy(struct process *destination, struct process *source) {
     memcpy(fpu_area(destination), fpu_area(source), PROCESS_FPU_STATE_SIZE);
 }
 
+static void leave_process(struct process *leaving) {
+    struct cpu *cpu = cpu_current();
+    if (!cpu->switching) {
+        cpu->switching = 1;
+        cpu->switch_owner = leaving;
+    }
+    if (leaving && leaving != cpu->switch_owner)
+        __atomic_store_n(&leaving->on_cpu, 0, __ATOMIC_RELEASE);
+}
+
+void process_finish_switch(void) {
+    struct cpu *cpu = cpu_current();
+    if (!cpu->switching) return;
+    struct process *owner = cpu->switch_owner;
+    cpu->switching = 0;
+    cpu->switch_owner = NULL;
+    if (owner && owner != cpu_running(cpu))
+        __atomic_store_n(&owner->on_cpu, 0, __ATOMIC_RELEASE);
+}
+
 static void activate_process(struct process *process) {
     if (current && current != process) {
         arch_save_thread_pointers(current);
         fpu_save(current);
+        leave_process(current);
     }
+    __atomic_store_n(&process->on_cpu, 1, __ATOMIC_RELAXED);
     current = process;
     if (!process->time_slice_ticks)
         process->time_slice_ticks = process->rt_priority
@@ -1263,6 +1288,7 @@ static void go_idle(void) {
     if (current) {
         arch_save_thread_pointers(current);
         fpu_save(current);
+        leave_process(current);
         current = NULL;
     }
     vmm_activate(vmm_kernel_cr3());

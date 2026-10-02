@@ -3,21 +3,11 @@
 .global syscall_entry
 .global process_enter_user
 .extern syscall_dispatch
-.extern kernel_unlock_current
+.extern kernel_exit
 
-/* struct cpu, as percpu.h lays it out. */
 .set CPU_KERNEL_RSP, 0
 .set CPU_USER_RSP, 8
 
-/*
- * SYSCALL overwrites RCX with the return RIP and R11 with RFLAGS.  Tunix uses
- * an iretq return path so the scheduler can resume contexts captured either by
- * SYSCALL or by a timer interrupt with one common process frame.
- *
- * The stack to switch to is per-processor and has to be found before there is
- * a stack to find it with, which is what GS is for: swapgs brings this
- * processor's block into reach without touching a register the caller owns.
- */
 syscall_entry:
     swapgs
     mov qword ptr gs:[CPU_USER_RSP], rsp
@@ -40,7 +30,6 @@ syscall_entry:
     mov qword ptr [rsp + 88], rdi
     mov qword ptr [rsp + 96], rax
 
-    /* Match architectural SYSCALL clobber semantics for resumed contexts. */
     mov qword ptr [rsp + 104], rcx
     mov qword ptr [rsp + 112], r11
     mov qword ptr [rsp + 120], rcx
@@ -51,16 +40,11 @@ syscall_entry:
     mov rdi, rsp
     call syscall_dispatch
 
-    /* The frame may have been moved onto the kernel stack of a different
-       process while the lock was held -- see syscall_dispatch. Follow it, and
-       only then let go of the lock: everything touched from here on, the
-       return addresses included, has to be on a stack no other processor can
-       be standing on. */
+    /* Move onto the resumed process's stack before letting the old one go. */
     mov rsp, qword ptr gs:[CPU_KERNEL_RSP]
     sub rsp, 144
-    call kernel_unlock_current
+    call kernel_exit
 
-    /* Build an iretq frame below the saved process context. */
     mov r11, rsp
     push 0x1b
     push qword ptr [r11 + 136]
@@ -96,8 +80,7 @@ process_enter_user:
     cli
     mov rax, rdx
     mov cr3, rax
-    /* Before the segment loads, because loading GS clears its base and the
-       block must be moved to the kernel side while it is still reachable. */
+
     swapgs
     mov ax, 0x1b
     mov ds, ax
