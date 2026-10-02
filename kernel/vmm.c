@@ -2,10 +2,12 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "include/kstring.h"
-#include "include/oplock.h"
+#include "include/lock.h"
+#include "include/percpu.h"
 
 static int vmm_map_page_in_locked(uint64_t cr3_physical, uint64_t virtual_address,
                                   uint64_t physical_address, uint64_t flags);
+static uint64_t map_device_locked(uint64_t *used, uint64_t physical, uint64_t bytes);
 #include "include/boot.h"
 #include "include/heap.h"
 #include "include/pmm.h"
@@ -31,6 +33,7 @@ extern int process_grow_user_stack(uint64_t fault_address);
 #define KDEBUG(...) do { } while (0)
 #endif
 
+static struct lock tables_lock = LOCK_INITIALIZER("page tables", LOCK_RANK_KERNEL_MAP);
 static uint64_t kernel_cr3_physical;
 static uint64_t boot_space_slots[64];
 static uint64_t *space_slots = boot_space_slots;
@@ -315,6 +318,14 @@ uint64_t vmm_kernel_cr3(void) { return kernel_cr3_physical; }
 uint64_t vmm_map_device(uint64_t physical, uint64_t bytes) {
     static uint64_t arena_used = 0;
     if (!physical || !bytes) return 0;
+    lock_acquire(&tables_lock);
+    uint64_t mapped = map_device_locked(&arena_used, physical, bytes);
+    lock_release(&tables_lock);
+    return mapped;
+}
+
+static uint64_t map_device_locked(uint64_t *used, uint64_t physical, uint64_t bytes) {
+    uint64_t arena_used = *used;
 
     uint64_t page_offset = physical & 0xFFFULL;
     uint64_t first = physical - page_offset;
@@ -323,16 +334,16 @@ uint64_t vmm_map_device(uint64_t physical, uint64_t bytes) {
 
     uint64_t base = DEVICE_ARENA_BASE + arena_used;
     for (uint64_t offset = 0; offset < span; offset += 4096ULL) {
-        if (vmm_map_page_in(kernel_cr3_physical, base + offset, first + offset,
-                            PAGE_WRITE | PAGE_DEVICE | PAGE_UNCACHED | PAGE_NX) != 0)
+        if (vmm_map_page_in_locked(kernel_cr3_physical, base + offset, first + offset,
+                                   PAGE_WRITE | PAGE_DEVICE | PAGE_UNCACHED | PAGE_NX) != 0)
             return 0;
     }
-    arena_used += span;
+    *used = arena_used + span;
     return base + page_offset;
 }
 uint64_t vmm_current_cr3(void) { return vmm_arch_read_root(); }
 
-uint64_t vmm_create_address_space(void) {
+static uint64_t create_locked(void) {
     uint64_t physical = (uint64_t)pmm_alloc_page();
     if (!physical) return 0;
     if (space_add(physical) != 0) {
@@ -354,7 +365,10 @@ uint64_t vmm_create_address_space(void) {
 
 void vmm_activate(uint64_t cr3_physical) {
     uint64_t physical = cr3_physical & ADDRESS_MASK;
-    if (!address_space_registered(physical)) {
+    lock_acquire(&tables_lock);
+    int known = address_space_registered(physical);
+    lock_release(&tables_lock);
+    if (!known) {
         kprintf("VMM: activate rejected stale CR3=%p current=%p\n",
                 (void *)physical, (void *)vmm_arch_read_root());
         panic("VMM: attempted to activate stale address space");
@@ -364,10 +378,10 @@ void vmm_activate(uint64_t cr3_physical) {
 
 int vmm_map_page_in(uint64_t cr3_physical, uint64_t virtual_address,
                     uint64_t physical_address, uint64_t flags) {
-    oplock_enter();
+    lock_acquire(&tables_lock);
     int status = vmm_map_page_in_locked(cr3_physical, virtual_address,
                                         physical_address, flags);
-    oplock_leave();
+    lock_release(&tables_lock);
     return status;
 }
 
@@ -402,67 +416,79 @@ static int vmm_map_page_in_locked(uint64_t cr3_physical, uint64_t virtual_addres
 
 #define DEFERRED_FREE_MAX 64
 
-static unsigned flush_batch_depth;
-static uint64_t flush_batch_cr3;
-static int flush_batch_pending;
-static int flush_batch_kernel;
-static uint64_t deferred_pages[DEFERRED_FREE_MAX];
-static unsigned deferred_count;
+struct flush_batch {
+    unsigned depth;
+    int pending;
+    int kernel;
+    uint64_t cr3;
+    unsigned deferred_count;
+    uint64_t deferred[DEFERRED_FREE_MAX];
+};
 
-static void settle_batch(void) {
-    if (flush_batch_kernel) {
-        flush_batch_kernel = 0;
+static struct flush_batch batches[SMP_MAX_CPUS];
+
+static struct flush_batch *my_batch(void) {
+    return &batches[cpu_current()->index];
+}
+
+static void settle_batch(struct flush_batch *batch) {
+    if (batch->kernel) {
+        batch->kernel = 0;
         smp_flush_kernel_mappings();
     }
-    if (flush_batch_pending) {
-        flush_batch_pending = 0;
-        uint64_t cr3 = flush_batch_cr3;
-        flush_batch_cr3 = 0;
+    if (batch->pending) {
+        batch->pending = 0;
+        uint64_t cr3 = batch->cr3;
+        batch->cr3 = 0;
         smp_flush_address_space(cr3);
     }
-    for (unsigned index = 0; index < deferred_count; index++)
-        pmm_free_page((void *)deferred_pages[index]);
-    deferred_count = 0;
+    for (unsigned index = 0; index < batch->deferred_count; index++)
+        pmm_free_page((void *)batch->deferred[index]);
+    batch->deferred_count = 0;
 }
 
 void vmm_flush_batch_begin(void) {
-    flush_batch_depth++;
+    my_batch()->depth++;
 }
 
 void vmm_flush_batch_end(void) {
-    if (!flush_batch_depth || --flush_batch_depth) return;
-    settle_batch();
+    struct flush_batch *batch = my_batch();
+    if (!batch->depth || --batch->depth) return;
+    settle_batch(batch);
 }
 
 void vmm_free_page_after_flush(uint64_t physical) {
     if (!physical) return;
-    if (!flush_batch_depth) {
+    struct flush_batch *batch = my_batch();
+    if (!batch->depth) {
         pmm_free_page((void *)physical);
         return;
     }
-    if (deferred_count == DEFERRED_FREE_MAX) settle_batch();
-    deferred_pages[deferred_count++] = physical;
+    if (batch->deferred_count == DEFERRED_FREE_MAX) settle_batch(batch);
+    batch->deferred[batch->deferred_count++] = physical;
 }
 
 static void invalidate_after_change(uint64_t cr3, uint64_t virtual_address);
 
 static void flush_kernel_mapping(void) {
-    if (!flush_batch_depth) {
+    struct flush_batch *batch = my_batch();
+    if (!batch->depth) {
         smp_flush_kernel_mappings();
         return;
     }
-    flush_batch_kernel = 1;
+    batch->kernel = 1;
 }
 
 static void flush_others(uint64_t cr3) {
-    if (!flush_batch_depth) {
+    struct flush_batch *batch = my_batch();
+    if (!batch->depth) {
         smp_flush_address_space(cr3);
         return;
     }
-    if (flush_batch_pending && flush_batch_cr3 != cr3)
-        smp_flush_address_space(flush_batch_cr3);
-    flush_batch_cr3 = cr3;
-    flush_batch_pending = 1;
+    if (batch->pending && batch->cr3 != cr3)
+        smp_flush_address_space(batch->cr3);
+    batch->cr3 = cr3;
+    batch->pending = 1;
 }
 
 static void invalidate_after_change(uint64_t cr3, uint64_t virtual_address) {
@@ -472,7 +498,7 @@ static void invalidate_after_change(uint64_t cr3, uint64_t virtual_address) {
     else flush_others(cr3);
 }
 
-int vmm_unmap_page_in(uint64_t cr3_physical, uint64_t virtual_address) {
+static int unmap_page_locked(uint64_t cr3_physical, uint64_t virtual_address) {
     uint64_t cr3 = cr3_physical & ADDRESS_MASK;
     if (!address_space_registered(cr3)) return -1;
     uint64_t *pml4 = page_table_pointer(cr3);
@@ -498,7 +524,7 @@ static int table_is_empty(const uint64_t *table) {
     return 1;
 }
 
-void vmm_prune_empty_tables(uint64_t cr3_physical, uint64_t start, uint64_t end) {
+static void prune_locked(uint64_t cr3_physical, uint64_t start, uint64_t end) {
     uint64_t cr3 = cr3_physical & ADDRESS_MASK;
     if (!address_space_registered(cr3) || start >= end) return;
     uint64_t *pml4 = page_table_pointer(cr3);
@@ -543,8 +569,8 @@ void vmm_prune_empty_tables(uint64_t cr3_physical, uint64_t start, uint64_t end)
     vmm_flush_batch_end();
 }
 
-int vmm_protect_page_in(uint64_t cr3_physical, uint64_t virtual_address,
-                        uint64_t flags) {
+static int protect_page_locked(uint64_t cr3_physical, uint64_t virtual_address,
+                               uint64_t flags) {
     uint64_t cr3 = cr3_physical & ADDRESS_MASK;
     if (!address_space_registered(cr3)) return -1;
     uint64_t *pml4 = page_table_pointer(cr3);
@@ -567,8 +593,8 @@ int vmm_protect_page_in(uint64_t cr3_physical, uint64_t virtual_address,
     return 0;
 }
 
-int vmm_translate(uint64_t cr3_physical, uint64_t virtual_address,
-                  uint64_t *physical_out, uint64_t *flags_out) {
+static int translate_locked(uint64_t cr3_physical, uint64_t virtual_address,
+                            uint64_t *physical_out, uint64_t *flags_out) {
     uint64_t cr3 = cr3_physical & ADDRESS_MASK;
     if (!address_space_registered(cr3)) return -1;
     uint64_t *pml4 = page_table_pointer(cr3);
@@ -736,6 +762,7 @@ void vmm_unmap_page(uint64_t virtual_address) {
 }
 
 static void destroy_user_table(uint64_t physical, int level);
+static void destroy_locked(uint64_t cr3_physical);
 
 static uint64_t clone_user_table(uint64_t source_physical, int level) {
     uint64_t *source = page_table_pointer(source_physical);
@@ -801,27 +828,27 @@ static uint64_t clone_user_table(uint64_t source_physical, int level) {
     return destination_physical;
 }
 
-uint64_t vmm_clone_address_space(uint64_t source_cr3) {
+static uint64_t clone_locked(uint64_t source_cr3) {
     uint64_t source_physical = source_cr3 & ADDRESS_MASK;
     if (!address_space_registered(source_physical)) return 0;
-    uint64_t destination_cr3 = vmm_create_address_space();
+    uint64_t destination_cr3 = create_locked();
     if (!destination_cr3) return 0;
     uint64_t *source = page_table_pointer(source_physical);
     uint64_t *destination = page_table_pointer(destination_cr3);
     if (!source || !destination) {
-        vmm_destroy_address_space(destination_cr3);
+        destroy_locked(destination_cr3);
         return 0;
     }
     for (uint64_t index = 0; index < 256; index++) {
         uint64_t entry = source[index];
         if (!pte_present(entry)) continue;
         if (pte_huge(entry)) {
-            vmm_destroy_address_space(destination_cr3);
+            destroy_locked(destination_cr3);
             return 0;
         }
         uint64_t child = clone_user_table(pte_address(entry), 3);
         if (!child) {
-            vmm_destroy_address_space(destination_cr3);
+            destroy_locked(destination_cr3);
             return 0;
         }
         destination[index] = pte_retarget(entry, child);
@@ -831,7 +858,7 @@ uint64_t vmm_clone_address_space(uint64_t source_cr3) {
     return destination_cr3;
 }
 
-int vmm_handle_cow_fault(uint64_t cr3_physical, uint64_t virtual_address) {
+static int cow_locked(uint64_t cr3_physical, uint64_t virtual_address) {
     uint64_t cr3 = cr3_physical & ADDRESS_MASK;
     if (!address_space_registered(cr3)) return -1;
     if (virtual_address >= USER_ADDRESS_LIMIT) return -1;
@@ -904,7 +931,7 @@ static void destroy_user_table(uint64_t physical, int level) {
     if (pmm_page_is_allocated(physical)) pmm_free_page((void *)physical);
 }
 
-void vmm_destroy_address_space(uint64_t cr3_physical) {
+static void destroy_locked(uint64_t cr3_physical) {
     uint64_t physical = cr3_physical & ADDRESS_MASK;
     if (physical == kernel_cr3_physical || !physical) return;
     if (!address_space_registered(physical)) {
@@ -951,7 +978,7 @@ static uint64_t count_user_table(uint64_t table_physical, int level) {
     return count;
 }
 
-uint64_t vmm_count_user_pages(uint64_t cr3_physical) {
+static uint64_t count_locked(uint64_t cr3_physical) {
     uint64_t physical = cr3_physical & ADDRESS_MASK;
     if (!address_space_registered(physical)) return 0;
     uint64_t *pml4 = page_table_pointer(physical);
@@ -963,4 +990,66 @@ uint64_t vmm_count_user_pages(uint64_t cr3_physical) {
             count += count_user_table(pte_address(entry), 3);
     }
     return count;
+}
+
+int vmm_unmap_page_in(uint64_t cr3_physical, uint64_t virtual_address) {
+    lock_acquire(&tables_lock);
+    int status = unmap_page_locked(cr3_physical, virtual_address);
+    lock_release(&tables_lock);
+    return status;
+}
+
+void vmm_prune_empty_tables(uint64_t cr3_physical, uint64_t start, uint64_t end) {
+    lock_acquire(&tables_lock);
+    prune_locked(cr3_physical, start, end);
+    lock_release(&tables_lock);
+}
+
+int vmm_protect_page_in(uint64_t cr3_physical, uint64_t virtual_address, uint64_t flags) {
+    lock_acquire(&tables_lock);
+    int status = protect_page_locked(cr3_physical, virtual_address, flags);
+    lock_release(&tables_lock);
+    return status;
+}
+
+int vmm_translate(uint64_t cr3_physical, uint64_t virtual_address,
+                  uint64_t *physical_out, uint64_t *flags_out) {
+    lock_acquire(&tables_lock);
+    int status = translate_locked(cr3_physical, virtual_address, physical_out, flags_out);
+    lock_release(&tables_lock);
+    return status;
+}
+
+uint64_t vmm_clone_address_space(uint64_t source_cr3) {
+    lock_acquire(&tables_lock);
+    uint64_t cloned = clone_locked(source_cr3);
+    lock_release(&tables_lock);
+    return cloned;
+}
+
+int vmm_handle_cow_fault(uint64_t cr3_physical, uint64_t virtual_address) {
+    lock_acquire(&tables_lock);
+    int status = cow_locked(cr3_physical, virtual_address);
+    lock_release(&tables_lock);
+    return status;
+}
+
+void vmm_destroy_address_space(uint64_t cr3_physical) {
+    lock_acquire(&tables_lock);
+    destroy_locked(cr3_physical);
+    lock_release(&tables_lock);
+}
+
+uint64_t vmm_count_user_pages(uint64_t cr3_physical) {
+    lock_acquire(&tables_lock);
+    uint64_t count = count_locked(cr3_physical);
+    lock_release(&tables_lock);
+    return count;
+}
+
+uint64_t vmm_create_address_space(void) {
+    lock_acquire(&tables_lock);
+    uint64_t created = create_locked();
+    lock_release(&tables_lock);
+    return created;
 }
