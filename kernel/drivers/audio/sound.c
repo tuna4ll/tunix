@@ -6,6 +6,7 @@
 #include "../../include/devfs.h"
 #include "../../include/module.h"
 #include "../../include/kstring.h"
+#include "../../include/lock.h"
 #include "../../include/pmm.h"
 #include "../../include/sound.h"
 #include "../../include/sysfs.h"
@@ -44,6 +45,30 @@ _Static_assert(sizeof(struct snd_ctl_elem_id) == 64, "elem_id layout");
 _Static_assert(sizeof(struct snd_ctl_elem_list) == 80, "elem_list layout");
 _Static_assert(sizeof(struct snd_ctl_elem_info) == 272, "elem_info layout");
 _Static_assert(sizeof(struct snd_ctl_elem_value) == 1224, "elem_value layout");
+
+static struct lock sound_lock = LOCK_INITIALIZER("sound", LOCK_RANK_DEVICE);
+
+static void sound_guard_release(int *unused) {
+    (void)unused;
+    lock_release(&sound_lock);
+}
+
+#define SOUND_LOCKED \
+    __attribute__((cleanup(sound_guard_release))) int sound_guard = (lock_acquire(&sound_lock), 0)
+
+static int sound_copy_to_user(uint64_t destination, const void *source, size_t size) {
+    lock_release(&sound_lock);
+    int status = copy_to_user(destination, source, size);
+    lock_acquire(&sound_lock);
+    return status;
+}
+
+static int sound_copy_from_user(void *destination, uint64_t source, size_t size) {
+    lock_release(&sound_lock);
+    int status = copy_from_user(destination, source, size);
+    lock_acquire(&sound_lock);
+    return status;
+}
 
 static const struct snd_backend *card;
 static struct module *card_owner;
@@ -226,9 +251,12 @@ static void pcm_update_pointer(void) {
 }
 
 void sound_tick(void) {
-    if (!card || !pcm.configured) return;
-    pcm_refresh_pointer();
-    pcm_silence_ahead();
+    if (!lock_try_acquire(&sound_lock)) return;
+    if (card && pcm.configured) {
+        pcm_refresh_pointer();
+        pcm_silence_ahead();
+    }
+    lock_release(&sound_lock);
 }
 
 static int pcm_start(void) {
@@ -618,6 +646,7 @@ static int64_t pcm_append(const uint8_t *source, uint64_t frames) {
 
 int64_t sound_pcm_write(struct vfs_node *node, uint64_t offset, size_t size,
                         const void *buffer) {
+    SOUND_LOCKED;
     (void)node;
     (void)offset;
     if (!card || !buffer) return -ENXIO;
@@ -630,6 +659,7 @@ int64_t sound_pcm_write(struct vfs_node *node, uint64_t offset, size_t size,
 }
 
 int sound_pcm_write_ready(struct vfs_node *node) {
+    SOUND_LOCKED;
     (void)node;
     if (!card) return 1;
     if (!pcm.configured) return 1;
@@ -660,7 +690,7 @@ static void fill_status(struct snd_pcm_status *status) {
 
 static int64_t ioctl_sync_ptr(uint64_t user_argument) {
     struct snd_pcm_sync_ptr sync;
-    if (copy_from_user(&sync, user_argument, sizeof(sync)) != 0) return -EFAULT;
+    if (sound_copy_from_user(&sync, user_argument, sizeof(sync)) != 0) return -EFAULT;
 
     if (!(sync.flags & SNDRV_PCM_SYNC_PTR_AVAIL_MIN))
         pcm.avail_min = sync.c.control.avail_min;
@@ -681,12 +711,12 @@ static int64_t ioctl_sync_ptr(uint64_t user_argument) {
     sync.s.status.suspended_state = SNDRV_PCM_STATE_SUSPENDED;
     sync.c.control.appl_ptr = pcm.appl_ptr;
     sync.c.control.avail_min = pcm.avail_min;
-    return copy_to_user(user_argument, &sync, sizeof(sync)) == 0 ? 0 : -EFAULT;
+    return sound_copy_to_user(user_argument, &sync, sizeof(sync)) == 0 ? 0 : -EFAULT;
 }
 
 static int64_t ioctl_xferi(uint64_t user_argument) {
     struct snd_xferi transfer;
-    if (copy_from_user(&transfer, user_argument, sizeof(transfer)) != 0) return -EFAULT;
+    if (sound_copy_from_user(&transfer, user_argument, sizeof(transfer)) != 0) return -EFAULT;
     if (!pcm.configured || !pcm.frame_bytes) return -EBADFD;
 
     uint8_t staging[4096];
@@ -698,7 +728,7 @@ static int64_t ioctl_xferi(uint64_t user_argument) {
 
     while (remaining) {
         uint64_t chunk = remaining < per_pass ? remaining : per_pass;
-        if (copy_from_user(staging, source, (size_t)(chunk * pcm.frame_bytes)) != 0) {
+        if (sound_copy_from_user(staging, source, (size_t)(chunk * pcm.frame_bytes)) != 0) {
             if (!done) return -EFAULT;
             break;
         }
@@ -706,7 +736,7 @@ static int64_t ioctl_xferi(uint64_t user_argument) {
         if (moved < 0) {
             if (done) break;
             transfer.result = moved;
-            (void)copy_to_user(user_argument, &transfer, sizeof(transfer));
+            (void)sound_copy_to_user(user_argument, &transfer, sizeof(transfer));
             return moved;
         }
         done += (uint64_t)moved;
@@ -715,7 +745,7 @@ static int64_t ioctl_xferi(uint64_t user_argument) {
         if ((uint64_t)moved < chunk) break;
     }
     transfer.result = (long)done;
-    if (copy_to_user(user_argument, &transfer, sizeof(transfer)) != 0) return -EFAULT;
+    if (sound_copy_to_user(user_argument, &transfer, sizeof(transfer)) != 0) return -EFAULT;
     return (int64_t)done;
 }
 
@@ -740,13 +770,13 @@ static int64_t ioctl_drain(void) {
 
 static int64_t ioctl_channel_info(uint64_t user_argument) {
     struct snd_pcm_channel_info info;
-    if (copy_from_user(&info, user_argument, sizeof(info)) != 0) return -EFAULT;
+    if (sound_copy_from_user(&info, user_argument, sizeof(info)) != 0) return -EFAULT;
     if (!pcm.configured) return -EBADFD;
     if (info.channel >= pcm.channels) return -EINVAL;
     info.offset = 0;
     info.first = info.channel * pcm.sample_bits;
     info.step = pcm.frame_bits;
-    return copy_to_user(user_argument, &info, sizeof(info)) == 0 ? 0 : -EFAULT;
+    return sound_copy_to_user(user_argument, &info, sizeof(info)) == 0 ? 0 : -EFAULT;
 }
 
 static void fill_pcm_info(struct snd_pcm_info *info) {
@@ -781,6 +811,7 @@ static int64_t sound_report_refusal(unsigned nr, int64_t answer, const char *whi
 
 int64_t sound_pcm_ioctl(struct vfs_node *node, unsigned long request,
                         uint64_t user_argument) {
+    SOUND_LOCKED;
     return sound_report_refusal((unsigned)SND_IOC_NR(request),
                                 sound_pcm_ioctl_locked(node, request, user_argument),
                                 "pcm");
@@ -795,12 +826,12 @@ static int64_t sound_pcm_ioctl_locked(struct vfs_node *node, unsigned long reque
     switch (SND_IOC_NR(request)) {
     case 0x00: {
         int version = SNDRV_PCM_VERSION;
-        return copy_to_user(user_argument, &version, sizeof(version)) == 0 ? 0 : -EFAULT;
+        return sound_copy_to_user(user_argument, &version, sizeof(version)) == 0 ? 0 : -EFAULT;
     }
     case 0x01: {
         struct snd_pcm_info info;
         fill_pcm_info(&info);
-        return copy_to_user(user_argument, &info, sizeof(info)) == 0 ? 0 : -EFAULT;
+        return sound_copy_to_user(user_argument, &info, sizeof(info)) == 0 ? 0 : -EFAULT;
     }
     case 0x02:
     case 0x03:
@@ -809,11 +840,11 @@ static int64_t sound_pcm_ioctl_locked(struct vfs_node *node, unsigned long reque
     case SNDRV_PCM_IOCTL_NR_HW_REFINE:
     case SNDRV_PCM_IOCTL_NR_HW_PARAMS: {
         struct snd_pcm_hw_params params;
-        if (copy_from_user(&params, user_argument, sizeof(params)) != 0) return -EFAULT;
+        if (sound_copy_from_user(&params, user_argument, sizeof(params)) != 0) return -EFAULT;
         int64_t result = SND_IOC_NR(request) == SNDRV_PCM_IOCTL_NR_HW_REFINE
                              ? hw_refine(&params) : hw_params(&params);
         if (result != 0) return result;
-        return copy_to_user(user_argument, &params, sizeof(params)) == 0 ? 0 : -EFAULT;
+        return sound_copy_to_user(user_argument, &params, sizeof(params)) == 0 ? 0 : -EFAULT;
     }
     case SNDRV_PCM_IOCTL_NR_HW_FREE:
         pcm_stop(SNDRV_PCM_STATE_OPEN);
@@ -821,21 +852,21 @@ static int64_t sound_pcm_ioctl_locked(struct vfs_node *node, unsigned long reque
         return 0;
     case SNDRV_PCM_IOCTL_NR_SW_PARAMS: {
         struct snd_pcm_sw_params params;
-        if (copy_from_user(&params, user_argument, sizeof(params)) != 0) return -EFAULT;
+        if (sound_copy_from_user(&params, user_argument, sizeof(params)) != 0) return -EFAULT;
         int64_t result = sw_params(&params);
         if (result != 0) return result;
-        return copy_to_user(user_argument, &params, sizeof(params)) == 0 ? 0 : -EFAULT;
+        return sound_copy_to_user(user_argument, &params, sizeof(params)) == 0 ? 0 : -EFAULT;
     }
     case SNDRV_PCM_IOCTL_NR_STATUS:
     case SNDRV_PCM_IOCTL_NR_STATUS_EXT: {
         struct snd_pcm_status status;
         fill_status(&status);
-        return copy_to_user(user_argument, &status, sizeof(status)) == 0 ? 0 : -EFAULT;
+        return sound_copy_to_user(user_argument, &status, sizeof(status)) == 0 ? 0 : -EFAULT;
     }
     case SNDRV_PCM_IOCTL_NR_DELAY: {
         pcm_update_pointer();
         long delay = (long)playback_used();
-        return copy_to_user(user_argument, &delay, sizeof(delay)) == 0 ? 0 : -EFAULT;
+        return sound_copy_to_user(user_argument, &delay, sizeof(delay)) == 0 ? 0 : -EFAULT;
     }
     case SNDRV_PCM_IOCTL_NR_HWSYNC:
         pcm_update_pointer();
@@ -874,6 +905,7 @@ static int64_t sound_pcm_ioctl_locked(struct vfs_node *node, unsigned long reque
 int64_t sound_pcm_mmap(struct vfs_node *node, struct file *file, uint64_t cr3,
                        uint64_t virtual_address, uint64_t length,
                        uint64_t offset, uint64_t page_flags) {
+    SOUND_LOCKED;
     (void)node;
     (void)file;
     if (!card || !length) return -EINVAL;
@@ -898,6 +930,7 @@ int64_t sound_pcm_mmap(struct vfs_node *node, struct file *file, uint64_t cr3,
 }
 
 void sound_pcm_open(struct vfs_node *node) {
+    SOUND_LOCKED;
     (void)node;
     if (!pcm.open) (void)module_get(card_owner);
     pcm.open++;
@@ -905,12 +938,13 @@ void sound_pcm_open(struct vfs_node *node) {
 }
 
 void sound_pcm_close(struct vfs_node *node) {
+    SOUND_LOCKED;
     (void)node;
     if (pcm.open) pcm.open--;
     if (pcm.open) return;
-    module_put(card_owner);
     pcm_stop(SNDRV_PCM_STATE_OPEN);
     pcm.configured = 0;
+    module_put(card_owner);
 }
 
 #define CTL_NUMID_VOLUME 1U
@@ -941,23 +975,23 @@ static unsigned element_lookup(const struct snd_ctl_elem_id *id) {
 
 static int64_t ioctl_elem_list(uint64_t user_argument) {
     struct snd_ctl_elem_list list;
-    if (copy_from_user(&list, user_argument, sizeof(list)) != 0) return -EFAULT;
+    if (sound_copy_from_user(&list, user_argument, sizeof(list)) != 0) return -EFAULT;
     unsigned total = control_element_count();
     list.count = total;
     list.used = 0;
     for (unsigned index = list.offset; index < total && list.used < list.space; index++) {
         struct snd_ctl_elem_id id;
         fill_element_id(&id, index + 1U);
-        if (copy_to_user(list.pids + (uint64_t)list.used * sizeof(id), &id,
+        if (sound_copy_to_user(list.pids + (uint64_t)list.used * sizeof(id), &id,
                          sizeof(id)) != 0) return -EFAULT;
         list.used++;
     }
-    return copy_to_user(user_argument, &list, sizeof(list)) == 0 ? 0 : -EFAULT;
+    return sound_copy_to_user(user_argument, &list, sizeof(list)) == 0 ? 0 : -EFAULT;
 }
 
 static int64_t ioctl_elem_info(uint64_t user_argument) {
     struct snd_ctl_elem_info info;
-    if (copy_from_user(&info, user_argument, sizeof(info)) != 0) return -EFAULT;
+    if (sound_copy_from_user(&info, user_argument, sizeof(info)) != 0) return -EFAULT;
     unsigned numid = element_lookup(&info.id);
     if (!numid || !control_element_count()) return -ENXIO;
 
@@ -977,12 +1011,12 @@ static int64_t ioctl_elem_info(uint64_t user_argument) {
         info.value.integer.max = 1;
         info.value.integer.step = 1;
     }
-    return copy_to_user(user_argument, &info, sizeof(info)) == 0 ? 0 : -EFAULT;
+    return sound_copy_to_user(user_argument, &info, sizeof(info)) == 0 ? 0 : -EFAULT;
 }
 
 static int64_t ioctl_elem_read(uint64_t user_argument) {
     struct snd_ctl_elem_value value;
-    if (copy_from_user(&value, user_argument, sizeof(value)) != 0) return -EFAULT;
+    if (sound_copy_from_user(&value, user_argument, sizeof(value)) != 0) return -EFAULT;
     unsigned numid = element_lookup(&value.id);
     if (!numid || !control_element_count()) return -ENXIO;
     fill_element_id(&value.id, numid);
@@ -993,12 +1027,12 @@ static int64_t ioctl_elem_read(uint64_t user_argument) {
         value.value.integer_value[0] = mixer.muted ? 0 : 1;
         value.value.integer_value[1] = mixer.muted ? 0 : 1;
     }
-    return copy_to_user(user_argument, &value, sizeof(value)) == 0 ? 0 : -EFAULT;
+    return sound_copy_to_user(user_argument, &value, sizeof(value)) == 0 ? 0 : -EFAULT;
 }
 
 static int64_t ioctl_elem_write(uint64_t user_argument) {
     struct snd_ctl_elem_value value;
-    if (copy_from_user(&value, user_argument, sizeof(value)) != 0) return -EFAULT;
+    if (sound_copy_from_user(&value, user_argument, sizeof(value)) != 0) return -EFAULT;
     unsigned numid = element_lookup(&value.id);
     if (!numid || !control_element_count()) return -ENXIO;
 
@@ -1029,6 +1063,7 @@ static void fill_card_info(struct snd_ctl_card_info *info) {
 
 int64_t sound_control_ioctl(struct vfs_node *node, unsigned long request,
                             uint64_t user_argument) {
+    SOUND_LOCKED;
     return sound_report_refusal((unsigned)SND_IOC_NR(request),
                                 sound_control_ioctl_locked(node, request, user_argument),
                                 "control");
@@ -1043,12 +1078,12 @@ static int64_t sound_control_ioctl_locked(struct vfs_node *node, unsigned long r
     switch (SND_IOC_NR(request)) {
     case SNDRV_CTL_IOCTL_NR_PVERSION: {
         int version = SNDRV_CTL_VERSION;
-        return copy_to_user(user_argument, &version, sizeof(version)) == 0 ? 0 : -EFAULT;
+        return sound_copy_to_user(user_argument, &version, sizeof(version)) == 0 ? 0 : -EFAULT;
     }
     case SNDRV_CTL_IOCTL_NR_CARD_INFO: {
         struct snd_ctl_card_info info;
         fill_card_info(&info);
-        return copy_to_user(user_argument, &info, sizeof(info)) == 0 ? 0 : -EFAULT;
+        return sound_copy_to_user(user_argument, &info, sizeof(info)) == 0 ? 0 : -EFAULT;
     }
     case SNDRV_CTL_IOCTL_NR_ELEM_LIST:
         return ioctl_elem_list(user_argument);
@@ -1060,28 +1095,28 @@ static int64_t sound_control_ioctl_locked(struct vfs_node *node, unsigned long r
         return ioctl_elem_write(user_argument);
     case SNDRV_CTL_IOCTL_NR_SUBSCRIBE_EVENTS: {
         int subscribed = 0;
-        return copy_to_user(user_argument, &subscribed, sizeof(subscribed)) == 0
+        return sound_copy_to_user(user_argument, &subscribed, sizeof(subscribed)) == 0
                    ? 0 : -EFAULT;
     }
     case SNDRV_CTL_IOCTL_NR_PCM_NEXT_DEVICE: {
         int device = -1;
-        if (copy_from_user(&device, user_argument, sizeof(device)) != 0) return -EFAULT;
+        if (sound_copy_from_user(&device, user_argument, sizeof(device)) != 0) return -EFAULT;
         device = device < 0 ? 0 : -1;
-        return copy_to_user(user_argument, &device, sizeof(device)) == 0 ? 0 : -EFAULT;
+        return sound_copy_to_user(user_argument, &device, sizeof(device)) == 0 ? 0 : -EFAULT;
     }
     case SNDRV_CTL_IOCTL_NR_PCM_INFO: {
         struct snd_pcm_info info;
-        if (copy_from_user(&info, user_argument, sizeof(info)) != 0) return -EFAULT;
+        if (sound_copy_from_user(&info, user_argument, sizeof(info)) != 0) return -EFAULT;
         if (info.device != 0 || info.stream != SNDRV_PCM_STREAM_PLAYBACK)
             return -ENXIO;
         fill_pcm_info(&info);
-        return copy_to_user(user_argument, &info, sizeof(info)) == 0 ? 0 : -EFAULT;
+        return sound_copy_to_user(user_argument, &info, sizeof(info)) == 0 ? 0 : -EFAULT;
     }
     case SNDRV_CTL_IOCTL_NR_PCM_PREFER_SUBDEVICE:
         return 0;
     case SNDRV_CTL_IOCTL_NR_POWER_STATE: {
         int state = 0;
-        return copy_to_user(user_argument, &state, sizeof(state)) == 0 ? 0 : -EFAULT;
+        return sound_copy_to_user(user_argument, &state, sizeof(state)) == 0 ? 0 : -EFAULT;
     }
     default:
         return -ENOTTY;
@@ -1089,10 +1124,13 @@ static int64_t sound_control_ioctl_locked(struct vfs_node *node, unsigned long r
 }
 
 int snd_register_card(const struct snd_backend *backend) {
-    if (card) return -1;
     if (!backend || !backend->configure || !backend->trigger || !backend->position)
         return -1;
-    if (ring_allocate() != 0) return -1;
+    lock_acquire(&sound_lock);
+    if (card || ring_allocate() != 0) {
+        lock_release(&sound_lock);
+        return -1;
+    }
     card = backend;
     card_owner = module_active();
     memset(&pcm, 0, sizeof(pcm));
@@ -1100,20 +1138,27 @@ int snd_register_card(const struct snd_backend *backend) {
     mixer.left = backend->volume_max;
     mixer.right = backend->volume_max;
     mixer.muted = 0;
+    lock_release(&sound_lock);
     devfs_publish_sound();
     sysfs_publish_sound();
     return 0;
 }
 
 void snd_unregister_card(const struct snd_backend *backend) {
-    if (!card || (backend && backend != card)) return;
+    lock_acquire(&sound_lock);
+    if (!card || (backend && backend != card)) {
+        lock_release(&sound_lock);
+        return;
+    }
     pcm_stop(SNDRV_PCM_STATE_OPEN);
-    devfs_remove_sound();
-    sysfs_remove_sound();
     card = NULL;
     card_owner = NULL;
+    lock_release(&sound_lock);
+    devfs_remove_sound();
+    sysfs_remove_sound();
 }
 
 int sound_card_available(void) {
+    SOUND_LOCKED;
     return card != NULL;
 }
