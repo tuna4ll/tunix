@@ -282,6 +282,7 @@ int process_fault_from_interrupt(struct interrupt_frame *frame, int signal_numbe
 void process_run_child_first_from_syscall(struct syscall_frame *frame, uint64_t child_pid);
 void process_reap_deferred(void);
 void process_io_recheck(void);
+struct process *process_poll_subject(void);
 struct file *file_table_get(struct file_table *table, int fd);
 void file_table_ref(struct file_table *table);
 void file_table_unref(struct file_table *table);

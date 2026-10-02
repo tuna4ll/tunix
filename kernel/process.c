@@ -2520,6 +2520,13 @@ static int process_wake_all_locked(const void *channel) {
     return woken;
 }
 
+static struct process *poll_subjects[SMP_MAX_CPUS];
+
+struct process *process_poll_subject(void) {
+    struct process *subject = poll_subjects[cpu_current()->index];
+    return subject ? subject : current;
+}
+
 static int io_files_ready(struct process *item) {
     struct file_table *table = item->files;
     if (!table) return 1;
@@ -2552,8 +2559,11 @@ void process_io_recheck(void) {
         }
     }
     uint8_t ready[64];
-    for (unsigned index = 0; index < count; index++)
+    for (unsigned index = 0; index < count; index++) {
+        poll_subjects[cpu_current()->index] = candidates[index];
         ready[index] = (uint8_t)io_files_ready(candidates[index]);
+    }
+    poll_subjects[cpu_current()->index] = NULL;
     struct file_table *tables[64];
     {
         SCHED_LOCKED;
