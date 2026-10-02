@@ -276,6 +276,7 @@ static struct pty_pair *new_pair(void) {
 }
 
 struct file *pty_open_master(struct vfs_node *node, uint32_t flags) {
+    TTY_LOCKED;
     if (!node || node != ptmx_node) return NULL;
     for (int index = 0; index <= pair_capacity; index++) {
         struct pty_pair *pty = index < pair_capacity ? pairs[index] : new_pair();
@@ -302,6 +303,7 @@ struct file *pty_open_master(struct vfs_node *node, uint32_t flags) {
 }
 
 struct file *pty_open_slave(struct vfs_node *node, uint32_t flags) {
+    TTY_LOCKED;
     if (!node || !node->data) return NULL;
     struct pty_pair *pty = (struct pty_pair *)node->data;
     if (!pty->allocated || pty->locked || pty->master_files <= 0) return NULL;
@@ -313,6 +315,7 @@ struct file *pty_open_slave(struct vfs_node *node, uint32_t flags) {
 }
 
 struct file *pty_open_controlling(struct vfs_node *node, uint32_t flags) {
+    TTY_LOCKED;
     struct process *process = process_current();
     if (!node || node != tty_node || !process || !process->controlling_pty) return NULL;
     struct pty_pair *pty = process->controlling_pty;
@@ -325,12 +328,14 @@ struct file *pty_open_controlling(struct vfs_node *node, uint32_t flags) {
 }
 
 void pty_ref_endpoint(struct pty_pair *pty, int master) {
+    TTY_LOCKED;
     if (!pty) return;
     if (master) pty->master_files++;
     else pty->slave_files++;
 }
 
 void pty_close_endpoint(struct pty_pair *pty, int master) {
+    TTY_LOCKED;
     if (!pty) return;
     if (master) {
         if (pty->master_files > 0) pty->master_files--;
@@ -346,6 +351,7 @@ void pty_close_endpoint(struct pty_pair *pty, int master) {
 }
 
 int64_t pty_read(struct pty_pair *pty, int master, size_t size, void *buffer) {
+    TTY_LOCKED;
     if (!pty || !buffer) return -EINVAL;
     if (!master) {
         struct process *reader = process_current();
@@ -379,6 +385,7 @@ int64_t pty_read(struct pty_pair *pty, int master, size_t size, void *buffer) {
 }
 
 int64_t pty_write(struct pty_pair *pty, int master, size_t size, const void *buffer) {
+    TTY_LOCKED;
     if (!pty || !buffer) return -EINVAL;
     if ((master && pty->slave_ever_opened && pty->slave_files == 0) ||
         (!master && pty->master_files == 0)) return -EIO;
@@ -400,6 +407,7 @@ int64_t pty_write(struct pty_pair *pty, int master, size_t size, const void *buf
 }
 
 int pty_read_ready(struct pty_pair *pty, int master) {
+    TTY_LOCKED;
     if (!pty) return 0;
     if (master) return pty->to_master.count > 0 ||
                        (pty->slave_ever_opened && pty->slave_files == 0);
@@ -407,6 +415,7 @@ int pty_read_ready(struct pty_pair *pty, int master) {
 }
 
 int pty_write_ready(struct pty_pair *pty, int master) {
+    TTY_LOCKED;
     if (!pty) return 0;
     if (master) return !(pty->slave_ever_opened && pty->slave_files == 0) &&
                        pty->to_slave.count < PTY_QUEUE_CAPACITY &&
@@ -416,6 +425,7 @@ int pty_write_ready(struct pty_pair *pty, int master) {
 
 int64_t pty_ioctl(struct pty_pair *pty, int master, unsigned long request,
                   uint64_t user_argument) {
+    TTY_LOCKED;
     if (!pty) return -ENXIO;
     if (request == TIOCGPTN && master) {
         int number = pty->number;

@@ -9,9 +9,8 @@ struct tunix_input_device_info;
 
 void input_init(void);
 void input_poll(void);
+void input_dispatch_console(void);
 
-/* For keyboards and pointers that are not on the PS/2 controller: the USB HID
-   driver decodes reports into keycodes and hands them in here. */
 void input_external_key(uint16_t keycode, int released);
 void input_external_mouse(int dx, int dy, int wheel, uint8_t buttons);
 void input_irq(void);
@@ -26,15 +25,11 @@ int64_t input_read_scancodes(size_t size, void *buffer);
 struct input_reader *input_reader_open(unsigned device_id);
 void input_reader_close(struct input_reader *reader);
 int input_reader_ready(struct input_reader *reader);
-/* Linux's evdev ioctls. Takes the reader because EVIOCSCLOCKID and EVIOCGRAB
-   are per-descriptor state, not per-device. */
+
 int64_t input_reader_ioctl(struct input_reader *reader, unsigned device_id,
                            unsigned long request, uint64_t user_argument);
 int64_t input_reader_read(struct input_reader *reader, size_t size, void *buffer);
 
-/* The last few key events as the kernel produced them, read through
-   /proc/inputlog: a key typed twice was either delivered twice or repeated
-   above us, and the timestamps tell those apart. */
 #define INPUT_KEY_HISTORY 128U
 
 struct input_key_event {

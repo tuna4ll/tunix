@@ -10,6 +10,9 @@
 #include "../include/vt.h"
 
 #include "../include/tunix/framebuffer.h"
+#include "../include/lock.h"
+
+static struct lock graphics_lock = LOCK_INITIALIZER("graphics owner", LOCK_RANK_LEAF);
 
 extern void kprintf(const char *fmt, ...);
 
@@ -65,9 +68,9 @@ static int file_is_writable(const struct file *file) {
 }
 
 static int framebuffer_owner_is(const void *owner) {
-    uint64_t interrupt_flags = cpu_irq_save();
+    lock_acquire(&graphics_lock);
     int owned = framebuffer.graphics_owner == owner;
-    cpu_irq_restore(interrupt_flags);
+    lock_release(&graphics_lock);
     return owned;
 }
 
@@ -80,15 +83,15 @@ int framebuffer_claim_graphics(const void *owner) {
     if (!framebuffer.ready) return -ENODEV;
     if (!owner) return -EINVAL;
 
-    uint64_t interrupt_flags = cpu_irq_save();
+    lock_acquire(&graphics_lock);
     if (framebuffer.graphics_owner && framebuffer.graphics_owner != owner) {
         int shared = shares_with_graphics_terminal(owner);
-        cpu_irq_restore(interrupt_flags);
+        lock_release(&graphics_lock);
         return shared ? 0 : -EBUSY;
     }
     int first_claim = framebuffer.graphics_owner == NULL;
     framebuffer.graphics_owner = owner;
-    cpu_irq_restore(interrupt_flags);
+    lock_release(&graphics_lock);
     if (first_claim) vt_display_claimed();
     return 0;
 }
@@ -96,16 +99,16 @@ int framebuffer_claim_graphics(const void *owner) {
 int framebuffer_release_graphics(const void *owner, int fail_if_not_owner) {
     if (!framebuffer.ready) return -ENODEV;
 
-    uint64_t interrupt_flags = cpu_irq_save();
+    lock_acquire(&graphics_lock);
     if (framebuffer.graphics_owner != owner) {
         int no_owner = framebuffer.graphics_owner == NULL;
-        cpu_irq_restore(interrupt_flags);
+        lock_release(&graphics_lock);
         if (no_owner) return 0;
         return fail_if_not_owner ? -EPERM : 0;
     }
     framebuffer.graphics_owner = NULL;
     framebuffer.graphics_suspended = 0;
-    cpu_irq_restore(interrupt_flags);
+    lock_release(&graphics_lock);
 
     vt_display_released();
     terminal_redraw();
@@ -113,23 +116,23 @@ int framebuffer_release_graphics(const void *owner, int fail_if_not_owner) {
 }
 
 void framebuffer_suspend_graphics(void) {
-    uint64_t interrupt_flags = cpu_irq_save();
+    lock_acquire(&graphics_lock);
     if (framebuffer.graphics_owner) framebuffer.graphics_suspended = 1;
-    cpu_irq_restore(interrupt_flags);
+    lock_release(&graphics_lock);
 }
 
 void framebuffer_resume_graphics(void) {
-    uint64_t interrupt_flags = cpu_irq_save();
+    lock_acquire(&graphics_lock);
     framebuffer.graphics_suspended = 0;
-    cpu_irq_restore(interrupt_flags);
+    lock_release(&graphics_lock);
 }
 
 int framebuffer_graphics_foreground(const void *owner) {
-    uint64_t interrupt_flags = cpu_irq_save();
+    lock_acquire(&graphics_lock);
     int mine = framebuffer.graphics_owner == owner ||
                shares_with_graphics_terminal(owner);
     int foreground = mine && !framebuffer.graphics_suspended;
-    cpu_irq_restore(interrupt_flags);
+    lock_release(&graphics_lock);
     return foreground;
 }
 

@@ -30,7 +30,8 @@ const void *vt_switch_wait_channel(void);
 const void *vt_input_wait_channel(void);
 void vt_input_arrived(void);
 
-int vt_handle_hotkey(uint16_t keycode, int pressed, int ctrl_held, int alt_held);
+int vt_is_hotkey(uint16_t keycode, int ctrl_held, int alt_held);
+void vt_run_hotkey(uint16_t keycode, int pressed);
 
 void vt_handle_key(uint16_t keycode, int pressed);
 

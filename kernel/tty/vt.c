@@ -78,6 +78,7 @@ static struct vt *vt_ensure(unsigned index) {
 }
 
 struct tty *vt_tty(unsigned index) {
+    TTY_LOCKED;
     struct vt *vt = vt_ensure(index);
     return vt ? vt->tty : NULL;
 }
@@ -87,6 +88,7 @@ unsigned vt_active_index(void) { return active_index; }
 struct tty *vt_active_tty(void) { return terminals[active_index].tty; }
 
 unsigned vt_current_index(void) {
+    TTY_LOCKED;
     struct process *process = process_current();
     if (process && process->sid) {
         for (unsigned index = 1U; index <= VT_COUNT; index++) {
@@ -127,7 +129,7 @@ static void finish_switch(unsigned target) {
 
     tty_reset_keyboard_state();
 
-    active_index = target;
+    __atomic_store_n(&active_index, target, __ATOMIC_RELEASE);
     pending_index = 0;
 
     if (display_owner_index == target) {
@@ -145,6 +147,7 @@ static void finish_switch(unsigned target) {
 }
 
 int vt_switch(unsigned index) {
+    TTY_LOCKED;
     if (!index_valid(index)) return -EINVAL;
     if (!vt_ensure(index)) return -ENOMEM;
     if (index == active_index && !pending_index) return 0;
@@ -173,6 +176,7 @@ static int vt_release_display(int allow) {
 }
 
 int vt_wait_active(unsigned index) {
+    TTY_LOCKED;
     if (!index_valid(index)) return -EINVAL;
     if (index == active_index) return 0;
 
@@ -181,6 +185,7 @@ int vt_wait_active(unsigned index) {
 }
 
 void vt_process_exited(uint64_t pid, uint64_t sid) {
+    TTY_LOCKED;
     for (unsigned index = 1U; index <= VT_COUNT; index++) {
         struct vt *vt = &terminals[index];
         if (!vt->allocated) continue;
@@ -194,17 +199,19 @@ void vt_process_exited(uint64_t pid, uint64_t sid) {
 }
 
 int vt_console_in_front(void) {
-    return !display_owner_index || display_suspended;
+    return !__atomic_load_n(&display_owner_index, __ATOMIC_ACQUIRE) ||
+           __atomic_load_n(&display_suspended, __ATOMIC_RELAXED);
 }
 
 void vt_display_claimed(void) {
-    display_owner_index = active_index;
-    display_suspended = 0;
+    __atomic_store_n(&display_suspended, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&display_owner_index, __atomic_load_n(&active_index, __ATOMIC_RELAXED),
+                     __ATOMIC_RELEASE);
 }
 
 void vt_display_released(void) {
-    display_owner_index = 0;
-    display_suspended = 0;
+    __atomic_store_n(&display_owner_index, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&display_suspended, 0, __ATOMIC_RELAXED);
 }
 
 const void *vt_graphics_mode_owner(void) {
@@ -214,33 +221,42 @@ const void *vt_graphics_mode_owner(void) {
     return vt;
 }
 
-int vt_handle_hotkey(uint16_t keycode, int pressed, int ctrl_held, int alt_held) {
-    if (!ctrl_held || !alt_held) return 0;
-    if (keycode == TUNIX_KEY_D) {
-        if (pressed) process_dump_all();
-        return 1;
-    }
-    unsigned target;
+static unsigned hotkey_target(uint16_t keycode) {
     if (keycode >= TUNIX_KEY_F1 && keycode <= TUNIX_KEY_F10)
-        target = (unsigned)(keycode - TUNIX_KEY_F1) + 1U;
-    else if (keycode == TUNIX_KEY_F11) target = 11U;
-    else if (keycode == TUNIX_KEY_F12) target = 12U;
-    else return 0;
-    if (!index_valid(target)) return 0;
-    if (pressed) (void)vt_switch(target);
+        return (unsigned)(keycode - TUNIX_KEY_F1) + 1U;
+    if (keycode == TUNIX_KEY_F11) return 11U;
+    if (keycode == TUNIX_KEY_F12) return 12U;
+    return 0;
+}
 
-    return 1;
+int vt_is_hotkey(uint16_t keycode, int ctrl_held, int alt_held) {
+    if (!ctrl_held || !alt_held) return 0;
+    if (keycode == TUNIX_KEY_D) return 1;
+    return index_valid(hotkey_target(keycode));
+}
+
+void vt_run_hotkey(uint16_t keycode, int pressed) {
+    TTY_LOCKED;
+    if (!pressed) return;
+    if (keycode == TUNIX_KEY_D) {
+        process_dump_all();
+        return;
+    }
+    unsigned target = hotkey_target(keycode);
+    if (index_valid(target)) (void)vt_switch(target);
 }
 
 void vt_handle_key(uint16_t keycode, int pressed) {
+    TTY_LOCKED;
     tty_handle_key(terminals[active_index].tty, keycode, pressed);
 }
 
 int vt_input_delivered_to(unsigned index) {
-    return index == 0U || index == active_index;
+    return index == 0U || index == __atomic_load_n(&active_index, __ATOMIC_RELAXED);
 }
 
 void vt_poll_serial(void) {
+    TTY_LOCKED;
     struct tty *tty = terminals[active_index].tty;
     if (!tty || !serial_present()) return;
 
@@ -255,6 +271,7 @@ void vt_poll_serial(void) {
 void vt_poll_input(void) {
     vt_poll_serial();
     input_poll();
+    input_dispatch_console();
 }
 
 void vt_init(void) {
@@ -276,6 +293,7 @@ static struct vt *vt_from_node(struct vfs_node *node) {
 }
 
 int64_t vt_node_read(struct vfs_node *node, uint64_t offset, size_t size, void *buffer) {
+    TTY_LOCKED;
     (void)offset;
     struct vt *vt = vt_from_node(node);
     if (!vt) return -ENXIO;
@@ -285,6 +303,7 @@ int64_t vt_node_read(struct vfs_node *node, uint64_t offset, size_t size, void *
 
 int64_t vt_node_write(struct vfs_node *node, uint64_t offset, size_t size,
                       const void *buffer) {
+    TTY_LOCKED;
     (void)offset;
     struct vt *vt = vt_from_node(node);
     if (!vt) return -ENXIO;
@@ -292,6 +311,7 @@ int64_t vt_node_write(struct vfs_node *node, uint64_t offset, size_t size,
 }
 
 int vt_node_ready(struct vfs_node *node) {
+    TTY_LOCKED;
     struct vt *vt = vt_from_node(node);
     return vt ? tty_input_ready(vt->tty) : 0;
 }
@@ -324,6 +344,7 @@ static uint16_t vt_in_use_mask(void) {
 
 int64_t vt_node_ioctl(struct vfs_node *node, unsigned long request,
                       uint64_t user_argument) {
+    TTY_LOCKED;
     struct vt *vt = vt_from_node(node);
     if (!vt) return -ENXIO;
 

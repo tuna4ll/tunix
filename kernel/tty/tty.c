@@ -11,6 +11,8 @@
 #include "../include/vt.h"
 #include "../include/tunix/input_event.h"
 
+struct lock tty_lock = LOCK_INITIALIZER("tty", LOCK_RANK_TTY);
+
 #define EINTR 4
 #define EAGAIN 11
 #define TTY_INPUT_CAPACITY 1024
@@ -19,20 +21,11 @@
 
 extern void serial_write_char(char c);
 
-/*
- * One virtual terminal's line discipline and output parser. Everything here is
- * per-terminal: what has been typed at it, what it is echoing, where its cursor
- * is. The keyboard itself is not -- there is one of those, and the state it
- * holds (which modifiers are down) is the file-scope block further down.
- */
 struct tty {
     struct terminal_screen *screen;
     struct tunix_termios termios;
     int foreground_pgid;
-    /* The session that has claimed this terminal as its controlling terminal,
-       or 0 while nobody has. Job control only applies inside that session: a
-       process from anywhere else -- login before it has claimed the terminal, a
-       service writing to a console -- is simply allowed to read. */
+
     uint64_t session;
 
     uint8_t input_buffer[TTY_INPUT_CAPACITY];
@@ -64,7 +57,6 @@ static int alt_down;
 static int altgr_down;
 static int caps_lock;
 
-
 static const char default_keymap[128] = {
     [0x02]='1',[0x03]='2',[0x04]='3',[0x05]='4',[0x06]='5',[0x07]='6',[0x08]='7',[0x09]='8',[0x0A]='9',[0x0B]='0',
     [0x0C]='-',[0x0D]='=',[0x0E]='\b',[0x0F]='\t',[0x10]='q',[0x11]='w',[0x12]='e',[0x13]='r',[0x14]='t',[0x15]='y',
@@ -81,8 +73,6 @@ static const char default_shift_keymap[128] = {
     [0x2F]='V',[0x30]='B',[0x31]='N',[0x32]='M',[0x33]='<',[0x34]='>',[0x35]='?',[0x39]=' '
 };
 
-/* One keyboard, one layout: loadkeys(1) changes it for every terminal at once,
-   which is what a user of a machine with several of them expects. */
 static struct tunix_keymap active_keymap;
 static int keymap_loaded;
 
@@ -424,22 +414,16 @@ static void terminal_feed(struct tty *tty, char c) {
     terminal_ansi_final(tty, c);
 }
 
-/*
- * Everything written to any terminal is mirrored to the serial line. On a
- * machine with several of them that interleaves, but the serial log is the only
- * record of a terminal nobody is looking at, and losing it would mean losing
- * the output of every service that is not on the terminal in front of you.
- */
 static void emit_char(struct tty *tty, char c) {
     serial_write_char(c);
     terminal_feed(tty, c);
 }
 
 int64_t tty_write(struct tty *tty, size_t size, const void *buffer) {
+    TTY_LOCKED;
     if (!tty || !buffer) return -1;
     const char *bytes = (const char *)buffer;
-    /* The screen for the whole write. A program printing a line is one hold
-       rather than eighty, and the kernel log cannot land in the middle of it. */
+
     terminal_paint_begin();
     for (size_t i = 0; i < size; i++) emit_char(tty, bytes[i]);
     terminal_paint_end();
@@ -479,11 +463,6 @@ static int signal_input_character(struct tty *tty, uint8_t value) {
 }
 
 static int input_push(struct tty *tty, uint8_t value) {
-    /* Either way something has happened that a blocked reader cares about: a
-       character to take, or a signal that ends its read. Waking is safe from
-       the keyboard interrupt because everything here runs under the kernel
-       lock with interrupts off, so no reader can be between deciding it has
-       nothing to do and going to sleep. */
     if (signal_input_character(tty, value)) {
         vt_input_arrived();
         return 0;
@@ -511,25 +490,31 @@ static int input_pop(struct tty *tty) {
 }
 
 void tty_push_serial(struct tty *tty, uint8_t value) {
+    TTY_LOCKED;
     if (tty) (void)input_push(tty, value);
 }
 
 void tty_flush_input(struct tty *tty) {
+    TTY_LOCKED;
     if (!tty) return;
     tty->canonical_length = tty->canonical_offset = 0;
     tty->input_head = tty->input_tail = tty->input_count = 0;
 }
 
+static volatile int keyboard_reset_pending;
+
 void tty_reset_keyboard_state(void) {
+    __atomic_store_n(&keyboard_reset_pending, 1, __ATOMIC_RELEASE);
+}
+
+static void apply_keyboard_reset(void) {
+    if (!__atomic_exchange_n(&keyboard_reset_pending, 0, __ATOMIC_ACQ_REL)) return;
     shift_down = 0;
     ctrl_down = 0;
     alt_down = 0;
     altgr_down = 0;
 }
 
-/* The keys that stand for a sequence rather than a character. Terminfo calls
-   these kcuu1, kend, kf1 and so on; they are what makes an arrow key move the
-   cursor in a shell instead of doing nothing. */
 static const char *key_sequence(uint16_t keycode) {
     switch (keycode) {
         case TUNIX_KEY_UP: return "\x1b[A";
@@ -558,18 +543,9 @@ static const char *key_sequence(uint16_t keycode) {
     }
 }
 
-/*
- * One key, as a keycode rather than as a scancode.
- *
- * Keycodes are what the keymap has always been indexed by -- loadkeys(1) reads
- * "keycode N = symbol" out of a keymap file, the same as on Linux -- and it
- * only worked when fed scancodes because the two coincide for the main block
- * of a set-1 keyboard. Speaking keycodes here is both the correction of that
- * and the reason a USB keyboard now reaches the console at all: the PS/2
- * driver decodes scancodes into keycodes already, and the HID driver produces
- * nothing else, so the two meet here instead of only in evdev.
- */
 void tty_handle_key(struct tty *tty, uint16_t keycode, int pressed) {
+    TTY_LOCKED;
+    apply_keyboard_reset();
     if (!tty) return;
     switch (keycode) {
         case TUNIX_KEY_LEFTSHIFT:
@@ -578,15 +554,13 @@ void tty_handle_key(struct tty *tty, uint16_t keycode, int pressed) {
         case TUNIX_KEY_RIGHTCTRL: ctrl_down = pressed; return;
         case TUNIX_KEY_LEFTALT: alt_down = pressed; return;
         case TUNIX_KEY_RIGHTALT: altgr_down = pressed; return;
-        /* Caps lock turns over on the press and is left alone on the release,
-           or holding it down would turn it over twice. */
+
         case TUNIX_KEY_CAPSLOCK:
             if (pressed) caps_lock = !caps_lock;
             return;
         default: break;
     }
-    /* A release changes nothing else: the character was delivered when the key
-       went down, and a held key repeats through another press. */
+
     if (!pressed) return;
 
     if (keycode == TUNIX_KEY_ESC) { (void)input_push(tty, 0x1BU); return; }
@@ -622,16 +596,6 @@ void tty_handle_key(struct tty *tty, uint16_t keycode, int pressed) {
     (void)input_push_codepoint(tty, value);
 }
 
-/*
- * Take one character from the queue.
- *
- * Nothing waits here. A terminal only ever has characters put in it by the
- * keyboard or the serial line, and both do that from an interrupt; the read
- * path is only entered once tty_input_ready() has said there is something to
- * take, and a terminal that is not the active one is never given anything at
- * all. Spinning would hold the kernel lock against the very interrupt that
- * would end the spin.
- */
 static int read_input_char(struct tty *tty) {
     vt_poll_input();
     if (tty->input_interrupted) {
@@ -650,12 +614,12 @@ static int canonical_input_complete(struct tty *tty) {
             value == tty->termios.cc[TTY_VEOF]) return 1;
         at = (at + 1U) % TTY_INPUT_CAPACITY;
     }
-    /* A queue that has filled without a delimiter has to be handed over as it
-       is; the alternative is a terminal that never answers again. */
+
     return tty->input_count >= TTY_CANONICAL_CAPACITY;
 }
 
 int tty_input_ready(struct tty *tty) {
+    TTY_LOCKED;
     if (!tty) return 0;
     vt_poll_input();
     if (tty->input_interrupted) return 1;
@@ -670,9 +634,7 @@ static int refill_canonical(struct tty *tty) {
     int starved = 0;
     while (tty->canonical_length < sizeof(tty->canonical_buffer)) {
         int value = read_input_char(tty);
-        /* Nothing queued. Distinguished from end of file below: a terminal with
-           an empty queue has not ended, it simply has nothing typed at it yet,
-           and answering 0 there would look like Ctrl-D to every shell. */
+
         if (value == -EAGAIN) {
             starved = 1;
             break;
@@ -705,6 +667,7 @@ static int refill_canonical(struct tty *tty) {
 }
 
 int64_t tty_read(struct tty *tty, size_t size, void *buffer) {
+    TTY_LOCKED;
     if (!tty || !buffer || size == 0) return 0;
     struct process *reader = process_current();
     if (reader && tty->session > 0 && reader->sid == tty->session &&
@@ -740,6 +703,7 @@ int64_t tty_read(struct tty *tty, size_t size, void *buffer) {
 }
 
 struct tty *tty_create(struct terminal_screen *screen) {
+    TTY_LOCKED;
     struct tty *tty = kmalloc(sizeof(*tty));
     if (!tty) return NULL;
     memset(tty, 0, sizeof(*tty));
@@ -768,6 +732,7 @@ struct tty *tty_create(struct terminal_screen *screen) {
 }
 
 void tty_destroy(struct tty *tty) {
+    TTY_LOCKED;
     kfree(tty);
 }
 
@@ -776,6 +741,7 @@ struct terminal_screen *tty_screen(const struct tty *tty) {
 }
 
 int tty_ioctl(struct tty *tty, unsigned long request, void *argument) {
+    TTY_LOCKED;
     if (!tty || !argument) return -1;
     switch (request) {
         case TCGETS:
@@ -816,10 +782,12 @@ int tty_ioctl(struct tty *tty, unsigned long request, void *argument) {
 }
 
 int tty_foreground_pgid(const struct tty *tty) {
+    TTY_LOCKED;
     return tty ? tty->foreground_pgid : 0;
 }
 
 void tty_set_foreground_pgid(struct tty *tty, int pgid) {
+    TTY_LOCKED;
     if (!tty) return;
     tty->foreground_pgid = pgid;
     tty->input_interrupted = 0;
@@ -828,15 +796,15 @@ void tty_set_foreground_pgid(struct tty *tty, int pgid) {
 uint64_t tty_session(const struct tty *tty) { return tty ? tty->session : 0; }
 
 void tty_set_controlling_session(struct tty *tty, uint64_t sid, int pgid) {
+    TTY_LOCKED;
     if (!tty) return;
     tty->session = sid;
     tty->foreground_pgid = pgid;
     tty->input_interrupted = 0;
 }
 
-/* TIOCNOTTY. The foreground group is left alone: it is what Ctrl-C is aimed
-   at, and nothing takes over as the terminal's session until a login does. */
 void tty_release_controlling_session(struct tty *tty, uint64_t sid) {
+    TTY_LOCKED;
     if (!tty) return;
     if (tty->session && tty->session != sid) return;
     tty->session = 0;

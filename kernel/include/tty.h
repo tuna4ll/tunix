@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <tunix/keymap.h>
+#include "lock.h"
 
 #define TCGETS      0x5401UL
 #define TCSETS      0x5402UL
@@ -17,9 +18,6 @@
 #define TIOCGETD    0x5424UL
 #define TIOCSETD    0x5423UL
 
-/* The console/keyboard and virtual-terminal ioctls. Tunix has real virtual
-   terminals -- see vt.c -- so these are answered for the terminal the caller
-   has open rather than fixed at one. */
 #define KDGKBTYPE     0x4B33UL
 #define KDSETMODE     0x4B3AUL
 #define KDGETMODE     0x4B3BUL
@@ -76,17 +74,7 @@ struct tunix_vt_mode {
 #define TTY_VSTART  8
 #define TTY_VSTOP   9
 #define TTY_VSUSP   10
-/*
- * Linux's NCCS, and Linux's struct termios: this is what TCGETS and TCSETS
- * copy in and out, so its size is an ABI and not a choice.
- *
- * It used to carry 32 control characters and a pair of speeds, which is musl's
- * struct rather than the kernel's -- musl passes its own termios straight to
- * the ioctl, so the two agreed and nothing showed. glibc does not: tcgetattr
- * gives the kernel a 36-byte buffer on the stack and converts, so writing 60
- * bytes into it overran the stack of every program that called isatty(). The
- * speeds moved into cflag's CBAUD bits, which is where Linux keeps them.
- */
+
 #define TTY_NCCS    19
 
 struct tunix_termios {
@@ -100,11 +88,6 @@ struct tunix_termios {
 
 _Static_assert(sizeof(struct tunix_termios) == 36U, "termios ABI size mismatch");
 
-/*
- * One terminal's line discipline: what has been typed at it, what it has been
- * told about echoing and signals, and the screen it prints on. One per virtual
- * terminal, created by the VT layer.
- */
 struct tty;
 struct terminal_screen;
 
@@ -115,29 +98,31 @@ struct terminal_screen *tty_screen(const struct tty *tty);
 int64_t tty_read(struct tty *tty, size_t size, void *buffer);
 int64_t tty_write(struct tty *tty, size_t size, const void *buffer);
 int tty_input_ready(struct tty *tty);
-/*
- * Everything typed at the keyboard while this terminal is the active one, as a
- * keycode -- which is what the keymap is indexed by, and the only thing a USB
- * keyboard can produce. The PS/2 driver decodes its scancodes before this.
- */
+
 void tty_handle_key(struct tty *tty, uint16_t keycode, int pressed);
-/* One byte that arrived on the serial line. */
+
 void tty_push_serial(struct tty *tty, uint8_t value);
-/* The modifiers the keyboard is holding are global -- there is one keyboard --
-   and this is how a change of ownership says the record is stale. */
+
 void tty_reset_keyboard_state(void);
 void tty_flush_input(struct tty *tty);
 
-/* The termios and job-control ioctls. The KD and VT ones belong to the virtual
-   terminal rather than the line discipline and live in vt.c. */
 int tty_ioctl(struct tty *tty, unsigned long request, void *argument);
 
 int tty_foreground_pgid(const struct tty *tty);
 void tty_set_foreground_pgid(struct tty *tty, int pgid);
 uint64_t tty_session(const struct tty *tty);
-/* TIOCSCTTY: the session takes this terminal, and its leader takes the
-   foreground. Job control is only enforced against this session. */
+
 void tty_set_controlling_session(struct tty *tty, uint64_t sid, int pgid);
 void tty_release_controlling_session(struct tty *tty, uint64_t sid);
+
+extern struct lock tty_lock;
+
+static inline void tty_guard_release(int *unused) {
+    (void)unused;
+    lock_release(&tty_lock);
+}
+
+#define TTY_LOCKED \
+    __attribute__((cleanup(tty_guard_release))) int tty_guard = (lock_acquire(&tty_lock), 0)
 
 #endif

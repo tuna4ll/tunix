@@ -332,12 +332,20 @@ void file_unref(struct file *file) {
     kfree(file);
 }
 
+static int file_positioned(const struct file *file) {
+    if (file->kind == FILE_KIND_MEMFD) return 1;
+    if (file->kind != FILE_KIND_VFS || !file->node) return 0;
+    uint32_t type = file->node->flags & 0xFFU;
+    return type == VFS_FILE || type == VFS_DIRECTORY || type == VFS_SYMLINK ||
+           type == VFS_BLOCKDEVICE;
+}
+
 static void file_enter(struct file *file) {
-    lock_acquire(&file->lock);
+    if (file_positioned(file)) lock_acquire(&file->lock);
 }
 
 static void file_leave(struct file *file) {
-    lock_release(&file->lock);
+    if (file_positioned(file)) lock_release(&file->lock);
 }
 
 int64_t file_pread(struct file *file, uint64_t offset, size_t size, void *buffer) {

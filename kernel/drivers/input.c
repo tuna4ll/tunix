@@ -17,6 +17,17 @@ extern void kprintf(const char *fmt, ...);
 #include "../include/usercopy.h"
 #include "../include/vt.h"
 #include "../include/tunix/input_event.h"
+#include "../include/lock.h"
+
+static struct lock input_lock = LOCK_INITIALIZER("input", LOCK_RANK_INPUT);
+
+static void input_guard_release(int *unused) {
+    (void)unused;
+    lock_release(&input_lock);
+}
+
+#define INPUT_LOCKED \
+    __attribute__((cleanup(input_guard_release))) int input_guard = (lock_acquire(&input_lock), 0)
 
 #define EAGAIN 11
 #define EINVAL 22
@@ -223,10 +234,12 @@ static struct input_key_event key_history[INPUT_KEY_HISTORY];
 static unsigned key_history_total;
 
 unsigned input_key_history_count(void) {
+    INPUT_LOCKED;
     return key_history_total;
 }
 
 int input_key_history_at(unsigned index, struct input_key_event *out) {
+    INPUT_LOCKED;
     if (!out || index >= key_history_total) return -1;
     if (key_history_total > INPUT_KEY_HISTORY &&
         index < key_history_total - INPUT_KEY_HISTORY) return -1;
@@ -315,12 +328,56 @@ static uint16_t extended_keycode(uint8_t scan) {
 
 #endif
 
+#define CONSOLE_KEYS 256U
+
+struct console_key {
+    uint16_t keycode;
+    uint8_t pressed;
+    uint8_t hotkey;
+};
+
+static struct console_key console_keys[CONSOLE_KEYS];
+static unsigned console_head;
+static unsigned console_count;
+
+static void console_queue(uint16_t keycode, int pressed, int hotkey) {
+    if (console_count == CONSOLE_KEYS) {
+        console_head = (console_head + 1U) % CONSOLE_KEYS;
+        console_count--;
+    }
+    struct console_key *slot = &console_keys[(console_head + console_count) % CONSOLE_KEYS];
+    slot->keycode = keycode;
+    slot->pressed = (uint8_t)(pressed != 0);
+    slot->hotkey = (uint8_t)(hotkey != 0);
+    console_count++;
+}
+
+void input_dispatch_console(void) {
+    for (;;) {
+        struct console_key batch[32];
+        unsigned taken = 0;
+        lock_acquire(&input_lock);
+        while (console_count && taken < sizeof(batch) / sizeof(batch[0])) {
+            batch[taken++] = console_keys[console_head];
+            console_head = (console_head + 1U) % CONSOLE_KEYS;
+            console_count--;
+        }
+        lock_release(&input_lock);
+        if (!taken) return;
+        for (unsigned index = 0; index < taken; index++) {
+            if (batch[index].hotkey) vt_run_hotkey(batch[index].keycode, batch[index].pressed);
+            else vt_handle_key(batch[index].keycode, batch[index].pressed);
+        }
+    }
+}
+
 static int keyboard_emit_key(uint16_t keycode, int released) {
     if (!keycode || keycode >= INPUT_KEY_STATE_SIZE) return 1;
     int ctrl_held = key_down[TUNIX_KEY_LEFTCTRL] || key_down[TUNIX_KEY_RIGHTCTRL];
     int alt_held = key_down[TUNIX_KEY_LEFTALT] || key_down[TUNIX_KEY_RIGHTALT];
-    if (vt_handle_hotkey(keycode, !released, ctrl_held, alt_held)) {
+    if (vt_is_hotkey(keycode, ctrl_held, alt_held)) {
         key_down[keycode] = released ? 0 : 1;
+        console_queue(keycode, !released, 1);
         return 0;
     }
     int32_t value;
@@ -339,7 +396,7 @@ static int keyboard_emit_key(uint16_t keycode, int released) {
     input_sync_at(TUNIX_INPUT_DEVICE_KEYBOARD, timestamp);
 
     if (!device_has_reader(TUNIX_INPUT_DEVICE_KEYBOARD))
-        vt_handle_key(keycode, released ? 0 : 1);
+        console_queue(keycode, !released, 0);
     return 1;
 }
 
@@ -347,10 +404,12 @@ static void mouse_emit_button(uint64_t timestamp, uint8_t changed,
                               uint8_t state, uint8_t bit, uint16_t code);
 
 void input_external_key(uint16_t keycode, int released) {
+    INPUT_LOCKED;
     (void)keyboard_emit_key(keycode, released);
 }
 
 void input_external_mouse(int dx, int dy, int wheel, uint8_t buttons) {
+    INPUT_LOCKED;
     uint8_t changed = buttons ^ mouse_buttons;
     if (!dx && !dy && !wheel && !changed) return;
 
@@ -552,21 +611,27 @@ static void input_drain_controller(void) {
 
 void input_poll(void) {
     uint64_t flags = cpu_irq_save();
+    lock_acquire(&input_lock);
     input_drain_controller();
+    lock_release(&input_lock);
     cpu_irq_restore(flags);
     xhci_poll();
     ehci_poll();
 }
 
 void input_irq(void) {
+    lock_acquire(&input_lock);
     input_drain_controller();
+    lock_release(&input_lock);
 }
 
 int input_mouse_available(void) {
+    INPUT_LOCKED;
     return mouse_present != 0 || xhci_pointer_present();
 }
 
 int input_get_device_info(unsigned device_id, struct tunix_input_device_info *info) {
+    INPUT_LOCKED;
     if (!info) return -EINVAL;
     memset(info, 0, sizeof(*info));
     info->abi_version = TUNIX_INPUT_ABI_VERSION;
@@ -603,12 +668,14 @@ int input_get_device_info(unsigned device_id, struct tunix_input_device_info *in
 }
 
 void input_scancode_open(void) {
+    INPUT_LOCKED;
     uint64_t flags = cpu_irq_save();
     raw_listeners++;
     cpu_irq_restore(flags);
 }
 
 void input_scancode_close(void) {
+    INPUT_LOCKED;
     uint64_t flags = cpu_irq_save();
     if (raw_listeners) raw_listeners--;
     if (!raw_listeners) {
@@ -621,6 +688,7 @@ void input_scancode_close(void) {
 
 int input_scancodes_ready(void) {
     input_poll();
+    INPUT_LOCKED;
     uint64_t flags = cpu_irq_save();
     int ready = raw_count != 0;
     cpu_irq_restore(flags);
@@ -628,9 +696,10 @@ int input_scancodes_ready(void) {
 }
 
 int64_t input_read_scancodes(size_t size, void *buffer) {
+    input_poll();
+    INPUT_LOCKED;
     if (!buffer) return -EINVAL;
     if (!size) return 0;
-    input_poll();
     uint64_t flags = cpu_irq_save();
     if (!raw_count) {
         cpu_irq_restore(flags);
@@ -658,6 +727,7 @@ struct input_reader *input_reader_open(unsigned device_id) {
     reader->device_id = device_id;
     reader->vt_index = vt_current_index();
 
+    lock_acquire(&input_lock);
     uint64_t flags = cpu_irq_save();
     reader->next = input_readers;
     input_readers = reader;
@@ -665,6 +735,7 @@ struct input_reader *input_reader_open(unsigned device_id) {
     for (struct input_reader *walk = input_readers; walk; walk = walk->next)
         if (walk->device_id == device_id) total++;
     cpu_irq_restore(flags);
+    lock_release(&input_lock);
     if (input_logging)
         kprintf("INPUT: open device %u vt %u by pid %d, %u readers now\n",
                 device_id, reader->vt_index, (int)process_current_pid(), total);
@@ -672,6 +743,7 @@ struct input_reader *input_reader_open(unsigned device_id) {
 }
 
 void input_reader_close(struct input_reader *reader) {
+    INPUT_LOCKED;
     if (!reader) return;
     uint64_t flags = cpu_irq_save();
     struct input_reader **link = &input_readers;
@@ -687,8 +759,9 @@ void input_reader_close(struct input_reader *reader) {
 }
 
 int input_reader_ready(struct input_reader *reader) {
-    if (!reader) return 0;
     input_poll();
+    INPUT_LOCKED;
+    if (!reader) return 0;
     uint64_t flags = cpu_irq_save();
     int ready = reader->count != 0;
     cpu_irq_restore(flags);
@@ -778,12 +851,16 @@ static int64_t evdev_copy_out(uint64_t user_argument, const void *source,
                               size_t available, size_t size) {
     if (!user_argument) return -EINVAL;
     size_t copy = size < available ? size : available;
-    if (input_copy_to_user(user_argument, source, copy) != 0) return -EFAULT;
+    lock_release(&input_lock);
+    int status = input_copy_to_user(user_argument, source, copy);
+    lock_acquire(&input_lock);
+    if (status != 0) return -EFAULT;
     return (int64_t)copy;
 }
 
 int64_t input_reader_ioctl(struct input_reader *reader, unsigned device_id,
                            unsigned long request, uint64_t user_argument) {
+    INPUT_LOCKED;
     if (EVDEV_IOCTL_TYPE_OF(request) != (unsigned)EVDEV_IOCTL_TYPE) return -ENOTTY;
     unsigned nr = EVDEV_IOCTL_NR(request);
     size_t size = EVDEV_IOCTL_SIZE(request);
@@ -846,8 +923,10 @@ int64_t input_reader_ioctl(struct input_reader *reader, unsigned device_id,
 
     if (nr == EVIOCSCLOCKID_NR) {
         int32_t clock_id = 0;
-        if (input_copy_from_user(&clock_id, user_argument, sizeof(clock_id)) != 0)
-            return -EFAULT;
+        lock_release(&input_lock);
+        int status = input_copy_from_user(&clock_id, user_argument, sizeof(clock_id));
+        lock_acquire(&input_lock);
+        if (status != 0) return -EFAULT;
         if (clock_id != EVDEV_CLOCK_REALTIME && clock_id != EVDEV_CLOCK_MONOTONIC)
             return -EINVAL;
         if (reader) reader->clock_id = clock_id;
@@ -876,9 +955,10 @@ int64_t input_reader_ioctl(struct input_reader *reader, unsigned device_id,
 }
 
 int64_t input_reader_read(struct input_reader *reader, size_t size, void *buffer) {
+    input_poll();
+    INPUT_LOCKED;
     if (!reader || !buffer) return -EINVAL;
     if (size < sizeof(struct tunix_input_event)) return -EINVAL;
-    input_poll();
 
     size_t event_capacity = size / sizeof(struct tunix_input_event);
     uint64_t flags = cpu_irq_save();
