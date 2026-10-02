@@ -4,6 +4,18 @@
 #include "../include/file.h"
 #include "../include/heap.h"
 #include "../include/kstring.h"
+#include "../include/lock.h"
+#include "../include/syscall.h"
+
+static struct lock epoll_lock = LOCK_INITIALIZER("epoll", LOCK_RANK_OBJECT);
+
+static void epoll_guard_release(int *unused) {
+    (void)unused;
+    lock_release(&epoll_lock);
+}
+
+#define EPOLL_LOCKED \
+    __attribute__((cleanup(epoll_guard_release))) int epoll_guard = (lock_acquire(&epoll_lock), 0)
 
 #define EEXIST 17
 #define EINVAL 22
@@ -72,6 +84,7 @@ static int entry_fresh(const struct epoll_entry *entry, uint32_t occurred) {
 }
 
 struct epoll_context *epoll_create(void) {
+    EPOLL_LOCKED;
     struct epoll_context *context = kmalloc(sizeof(*context));
     if (!context) return NULL;
     memset(context, 0, sizeof(*context));
@@ -80,10 +93,11 @@ struct epoll_context *epoll_create(void) {
 }
 
 void epoll_destroy(struct epoll_context *context) {
+    EPOLL_LOCKED;
     if (!context) return;
     for (int index = 0; index < context->capacity; index++) {
         if (context->entries[index].active && context->entries[index].file)
-            file_unref(context->entries[index].file);
+            syscall_unref_later(context->entries[index].file);
     }
     kfree(context->entries);
     kfree(context);
@@ -106,11 +120,13 @@ static int free_slot(struct epoll_context *context) {
 }
 
 int epoll_entry_count(const struct epoll_context *context) {
+    EPOLL_LOCKED;
     return context ? context->count : 0;
 }
 
 int epoll_ctl_add(struct epoll_context *context, int fd, struct file *file,
                   const struct tunix_epoll_event *event) {
+    EPOLL_LOCKED;
     if (!context || !file || !event) return -EINVAL;
     if (find_entry(context, fd, file)) return -EEXIST;
     int index = free_slot(context);
@@ -130,6 +146,7 @@ int epoll_ctl_add(struct epoll_context *context, int fd, struct file *file,
 
 int epoll_ctl_mod(struct epoll_context *context, int fd, struct file *file,
                   const struct tunix_epoll_event *event) {
+    EPOLL_LOCKED;
     if (!context || !file || !event) return -EINVAL;
     struct epoll_entry *entry = find_entry(context, fd, file);
     if (!entry) return -ENOENT;
@@ -138,6 +155,7 @@ int epoll_ctl_mod(struct epoll_context *context, int fd, struct file *file,
 }
 
 int epoll_ctl_del(struct epoll_context *context, int fd, struct file *file) {
+    EPOLL_LOCKED;
     if (!context || !file) return -EINVAL;
     struct epoll_entry *entry = find_entry(context, fd, file);
     if (!entry) return -ENOENT;
@@ -149,7 +167,7 @@ int epoll_ctl_del(struct epoll_context *context, int fd, struct file *file) {
             break;
         }
     }
-    file_unref(entry->file);
+    syscall_unref_later(entry->file);
     memset(entry, 0, sizeof(*entry));
     context->count--;
     if (index < context->free_hint) context->free_hint = index;
@@ -158,6 +176,7 @@ int epoll_ctl_del(struct epoll_context *context, int fd, struct file *file) {
 
 int epoll_collect(struct epoll_context *context,
                   struct tunix_epoll_event *events, int maximum, unsigned depth) {
+    EPOLL_LOCKED;
     if (!context || !events || maximum <= 0) return -EINVAL;
     if (depth >= EPOLL_MAX_NESTING) return 0;
     int ready = 0;
@@ -183,6 +202,7 @@ int epoll_collect(struct epoll_context *context,
 }
 
 int epoll_read_ready(struct epoll_context *context, unsigned depth) {
+    EPOLL_LOCKED;
     if (!context) return 0;
     if (depth >= EPOLL_MAX_NESTING) return 0;
     for (int index = 0; index < context->capacity; index++) {

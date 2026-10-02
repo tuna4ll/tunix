@@ -7,7 +7,8 @@
 #include "../include/pipe.h"
 #include "../include/process.h"
 #include "../include/klock.h"
-#include "../include/oplock.h"
+#include "../include/lock.h"
+#include "../include/syscall.h"
 #include "../include/spinlock.h"
 #include "../include/unix_socket.h"
 
@@ -91,15 +92,15 @@ struct unix_socket {
     struct unix_socket *next_listener;
 };
 
-static void channel_enter(struct unix_socket *socket) {
-    if (kernel_lock_shared_here() && socket && socket->channel)
-        spinlock_acquire(&socket->channel->lock);
+static struct lock unix_lock = LOCK_INITIALIZER("unix sockets", LOCK_RANK_OBJECT);
+
+static void unix_guard_release(int *unused) {
+    (void)unused;
+    lock_release(&unix_lock);
 }
 
-static void channel_leave(struct unix_socket *socket) {
-    if (kernel_lock_shared_here() && socket && socket->channel)
-        spinlock_release(&socket->channel->lock);
-}
+#define UNIX_LOCKED \
+    __attribute__((cleanup(unix_guard_release))) int unix_guard = (lock_acquire(&unix_lock), 0)
 
 static struct unix_socket *listener_list;
 
@@ -139,7 +140,7 @@ static struct unix_ancillary_queue *outgoing_ancillary(struct unix_socket *socke
 static void ancillary_release(struct unix_ancillary *message) {
     if (!message) return;
     for (size_t index = 0; index < message->file_count; index++)
-        if (message->files[index]) file_unref(message->files[index]);
+        if (message->files[index]) syscall_unref_later(message->files[index]);
     kfree(message);
 }
 
@@ -282,6 +283,7 @@ static void listener_unregister(struct unix_socket *socket) {
 }
 
 struct unix_socket *unix_socket_create(int seqpacket) {
+    UNIX_LOCKED;
     struct unix_socket *socket = (struct unix_socket *)kmalloc(sizeof(*socket));
     if (!socket) return NULL;
     memset(socket, 0, sizeof(*socket));
@@ -293,6 +295,7 @@ struct unix_socket *unix_socket_create(int seqpacket) {
 
 void unix_socket_set_credentials(struct unix_socket *socket, int32_t pid,
                                  uint32_t uid, uint32_t gid) {
+    UNIX_LOCKED;
     if (!socket) return;
     socket->credentials.pid = pid;
     socket->credentials.uid = uid;
@@ -305,6 +308,7 @@ void unix_socket_set_credentials(struct unix_socket *socket, int32_t pid,
 
 int unix_socket_get_peer_credentials(struct unix_socket *socket,
                                      struct unix_credentials *credentials) {
+    UNIX_LOCKED;
     if (!socket || !credentials || !socket->connected || !socket->channel)
         return -ENOTCONN;
     *credentials = socket->side == 0 ? socket->channel->b_credentials :
@@ -314,6 +318,7 @@ int unix_socket_get_peer_credentials(struct unix_socket *socket,
 
 int unix_socket_get_name(struct unix_socket *socket, int peer,
                          struct tunix_sockaddr_un *address, size_t *length) {
+    UNIX_LOCKED;
     if (!socket || !address || !length) return -EINVAL;
     const char *path = socket->path;
     if (peer) {
@@ -339,15 +344,18 @@ int unix_socket_get_name(struct unix_socket *socket, int peer,
 }
 
 void unix_socket_set_passcred(struct unix_socket *socket, int enabled) {
+    UNIX_LOCKED;
     if (socket) socket->passcred = enabled != 0;
 }
 
 int unix_socket_get_passcred(struct unix_socket *socket) {
+    UNIX_LOCKED;
     return socket && socket->passcred;
 }
 
 int unix_socket_pair(struct unix_socket **first, struct unix_socket **second,
                      int seqpacket) {
+    UNIX_LOCKED;
     if (!first || !second) return -EINVAL;
     *first = NULL;
     *second = NULL;
@@ -387,10 +395,12 @@ int unix_socket_pair(struct unix_socket **first, struct unix_socket **second,
 }
 
 void unix_socket_ref(struct unix_socket *socket) {
+    UNIX_LOCKED;
     if (socket) socket->refs++;
 }
 
 void unix_socket_unref(struct unix_socket *socket) {
+    UNIX_LOCKED;
     if (!socket || socket->refs <= 0) return;
     socket->refs--;
     if (socket->refs != 0) return;
@@ -453,6 +463,7 @@ static int copy_path(char destination[108], const struct tunix_sockaddr_un *addr
 
 int unix_socket_bind(struct unix_socket *socket, const struct tunix_sockaddr_un *address,
                      size_t length, const char *resolved) {
+    UNIX_LOCKED;
     if (!socket || socket->connected || socket->listening || socket->path[0]) return -EINVAL;
     char path[108];
     int status = copy_path(path, address, length);
@@ -470,6 +481,7 @@ int unix_socket_bind(struct unix_socket *socket, const struct tunix_sockaddr_un 
 }
 
 int unix_socket_listen(struct unix_socket *socket, int backlog) {
+    UNIX_LOCKED;
     if (!socket || !socket->path[0] || socket->connected) return -EINVAL;
     for (struct unix_socket *bound = listener_list; bound; bound = bound->next_listener) {
         if (bound == socket) {
@@ -493,6 +505,7 @@ static struct unix_socket *find_listener(const char *key) {
 
 int unix_socket_connect(struct unix_socket *socket, const struct tunix_sockaddr_un *address,
                         size_t length, const char *resolved) {
+    UNIX_LOCKED;
     if (!socket) return -EINVAL;
     if (socket->connected) return -EALREADY;
     char path[108];
@@ -543,6 +556,7 @@ int unix_socket_connect(struct unix_socket *socket, const struct tunix_sockaddr_
 }
 
 struct unix_socket *unix_socket_accept(struct unix_socket *socket) {
+    UNIX_LOCKED;
     if (!socket || !socket->listening || socket->pending_count == 0) return NULL;
     struct unix_socket *accepted = socket->pending_head;
     socket->pending_head = accepted->pending_next;
@@ -591,16 +605,13 @@ static int64_t unix_socket_read_data(struct unix_socket *socket, size_t size,
 }
 
 int64_t unix_socket_read(struct unix_socket *socket, size_t size, void *buffer) {
-    channel_enter(socket);
+    UNIX_LOCKED;
     size_t consumed = 0;
     int64_t result = unix_socket_read_data(socket, size, buffer, &consumed);
     struct unix_ancillary_queue *ancillary = incoming_ancillary(socket);
     if (ancillary && ancillary->count > 0) {
-        oplock_enter();
         ancillary_consume(ancillary, consumed, NULL, 0, NULL);
-        oplock_leave();
     }
-    channel_leave(socket);
     return result;
 }
 
@@ -644,15 +655,15 @@ static int64_t unix_socket_write_locked(struct unix_socket *socket, size_t size,
 }
 
 int64_t unix_socket_write(struct unix_socket *socket, size_t size, const void *buffer) {
-    channel_enter(socket);
+    UNIX_LOCKED;
     int64_t result = unix_socket_write_locked(socket, size, buffer);
-    channel_leave(socket);
     return result;
 }
 
 int64_t unix_socket_send_with_rights(struct unix_socket *socket, size_t size,
                                      const void *buffer, struct file **files,
                                      size_t file_count) {
+    UNIX_LOCKED;
     if (file_count > UNIX_RIGHTS_MAX) return -EINVAL;
     struct unix_ancillary_queue *queue = outgoing_ancillary(socket);
     if (file_count && (!queue || queue->count >= UNIX_QUEUE_MAX)) return -EAGAIN;
@@ -675,7 +686,7 @@ int64_t unix_socket_send_with_rights(struct unix_socket *socket, size_t size,
         if (ancillary_push(queue, message) != 0) {
             message->file_count = 0;
             kfree(message);
-            for (size_t index = 0; index < file_count; index++) file_unref(files[index]);
+            for (size_t index = 0; index < file_count; index++) syscall_unref_later(files[index]);
         }
     }
     return result;
@@ -684,6 +695,7 @@ int64_t unix_socket_send_with_rights(struct unix_socket *socket, size_t size,
 int64_t unix_socket_recv_with_rights(struct unix_socket *socket, size_t size,
                                      void *buffer, struct file **files,
                                      size_t maximum_files, size_t *file_count) {
+    UNIX_LOCKED;
     if (!file_count) return -EINVAL;
     *file_count = 0;
     struct unix_ancillary_queue *queue = incoming_ancillary(socket);
@@ -697,6 +709,7 @@ int64_t unix_socket_recv_with_rights(struct unix_socket *socket, size_t size,
 
 void unix_socket_last_sender(struct unix_socket *socket,
                              struct unix_credentials *out) {
+    UNIX_LOCKED;
     if (!out) return;
     if (socket && socket->last_sender.pid) { *out = socket->last_sender; return; }
     if (!socket || unix_socket_get_peer_credentials(socket, out) != 0)
@@ -704,6 +717,7 @@ void unix_socket_last_sender(struct unix_socket *socket,
 }
 
 int unix_socket_read_ready(struct unix_socket *socket) {
+    UNIX_LOCKED;
     if (!socket) return 0;
     if (socket->listening) return socket->pending_count > 0;
     if (!socket->connected || !socket->channel) return 0;
@@ -716,6 +730,7 @@ int unix_socket_read_ready(struct unix_socket *socket) {
 }
 
 size_t unix_socket_read_available(struct unix_socket *socket) {
+    UNIX_LOCKED;
     if (!socket || socket->listening || !socket->connected || !socket->channel)
         return 0;
     if (socket->seqpacket) {
@@ -728,16 +743,19 @@ size_t unix_socket_read_available(struct unix_socket *socket) {
 }
 
 int unix_socket_write_ready(struct unix_socket *socket) {
+    UNIX_LOCKED;
     if (!socket || !socket->connected || !socket->channel || !peer_open(socket)) return 0;
     if (own_write_shutdown(socket) || peer_read_shutdown(socket)) return 0;
     return outgoing(socket)->count < PIPE_CAPACITY;
 }
 
 int unix_socket_peer_closed(struct unix_socket *socket) {
+    UNIX_LOCKED;
     return socket && socket->connected && socket->channel && !peer_write_open(socket);
 }
 
 int unix_socket_shutdown(struct unix_socket *socket, int how) {
+    UNIX_LOCKED;
     if (!socket || !socket->connected || !socket->channel) return -ENOTCONN;
     if (how < 0 || how > 2) return -EINVAL;
     if (how == 0 || how == 2) {
@@ -754,9 +772,11 @@ int unix_socket_shutdown(struct unix_socket *socket, int how) {
 }
 
 int unix_socket_is_seqpacket(struct unix_socket *socket) {
+    UNIX_LOCKED;
     return socket && socket->seqpacket;
 }
 
 int unix_socket_is_listener(struct unix_socket *socket) {
+    UNIX_LOCKED;
     return socket && socket->listening;
 }

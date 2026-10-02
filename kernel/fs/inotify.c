@@ -3,6 +3,17 @@
 #include "../include/heap.h"
 #include "../include/inotify.h"
 #include "../include/kstring.h"
+#include "../include/lock.h"
+
+static struct lock inotify_lock = LOCK_INITIALIZER("inotify", LOCK_RANK_OBJECT);
+
+static void inotify_guard_release(int *unused) {
+    (void)unused;
+    lock_release(&inotify_lock);
+}
+
+#define INOTIFY_LOCKED \
+    __attribute__((cleanup(inotify_guard_release))) int inotify_guard = (lock_acquire(&inotify_lock), 0)
 
 #define EAGAIN 11
 #define EINVAL 22
@@ -115,6 +126,7 @@ static int queue_event(struct inotify_context *context, int wd, uint32_t mask,
 }
 
 struct inotify_context *inotify_create(void) {
+    INOTIFY_LOCKED;
     struct inotify_context *context = kmalloc(sizeof(*context));
     if (!context) return NULL;
     memset(context, 0, sizeof(*context));
@@ -152,6 +164,7 @@ static void drop_watch(struct inotify_watch *watch) {
 }
 
 void inotify_destroy(struct inotify_context *context) {
+    INOTIFY_LOCKED;
     if (!context) return;
     while (context->watches) drop_watch(context->watches);
     kfree(context->queue);
@@ -160,6 +173,7 @@ void inotify_destroy(struct inotify_context *context) {
 
 int inotify_add_watch(struct inotify_context *context, struct vfs_node *node,
                       uint32_t mask) {
+    INOTIFY_LOCKED;
     if (!context || !node || !mask) return -EINVAL;
     for (struct inotify_watch *watch = *node_bucket(node); watch; watch = watch->node_next) {
         if (watch->context == context && watch->node == node) {
@@ -183,6 +197,7 @@ int inotify_add_watch(struct inotify_context *context, struct vfs_node *node,
 }
 
 int inotify_remove_watch(struct inotify_context *context, int descriptor) {
+    INOTIFY_LOCKED;
     if (!context || descriptor <= 0) return -EINVAL;
     for (struct inotify_watch *watch = context->watches; watch; watch = watch->context_next) {
         if (watch->descriptor == descriptor) {
@@ -195,6 +210,7 @@ int inotify_remove_watch(struct inotify_context *context, int descriptor) {
 }
 
 int64_t inotify_read(struct inotify_context *context, size_t size, void *buffer) {
+    INOTIFY_LOCKED;
     if (!context || !buffer) return -EINVAL;
     if (!context->queued) return -EAGAIN;
     if (size < sizeof(struct linux_inotify_event)) return -EINVAL;
@@ -222,11 +238,13 @@ int64_t inotify_read(struct inotify_context *context, size_t size, void *buffer)
 }
 
 int inotify_read_ready(struct inotify_context *context) {
+    INOTIFY_LOCKED;
     return context && context->queued != 0;
 }
 
 void inotify_notify(struct vfs_node *node, uint32_t mask, const char *name,
                     uint32_t cookie) {
+    INOTIFY_LOCKED;
     if (!node || !mask) return;
     for (struct inotify_watch *watch = *node_bucket(node); watch; watch = watch->node_next)
         if (watch->node == node && (watch->mask & mask))
@@ -235,6 +253,7 @@ void inotify_notify(struct vfs_node *node, uint32_t mask, const char *name,
 }
 
 void inotify_invalidate(struct vfs_node *node) {
+    INOTIFY_LOCKED;
     if (!node) return;
     struct inotify_watch *watch = *node_bucket(node);
     while (watch) {
@@ -248,6 +267,7 @@ void inotify_invalidate(struct vfs_node *node) {
 }
 
 uint32_t inotify_next_cookie(void) {
+    INOTIFY_LOCKED;
     uint32_t cookie = next_cookie++;
     if (!next_cookie) next_cookie = 1;
     return cookie;

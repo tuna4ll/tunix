@@ -2,6 +2,17 @@
 #include <stdint.h>
 #include "../include/eventfd.h"
 #include "../include/heap.h"
+#include "../include/lock.h"
+
+static struct lock eventfd_lock = LOCK_INITIALIZER("eventfd", LOCK_RANK_OBJECT);
+
+static void eventfd_guard_release(int *unused) {
+    (void)unused;
+    lock_release(&eventfd_lock);
+}
+
+#define EVENTFD_LOCKED \
+    __attribute__((cleanup(eventfd_guard_release))) int eventfd_guard = (lock_acquire(&eventfd_lock), 0)
 
 #define EAGAIN 11
 #define EINVAL 22
@@ -12,6 +23,7 @@ struct eventfd_context {
 };
 
 struct eventfd_context *eventfd_create(uint64_t initial_value, int semaphore) {
+    EVENTFD_LOCKED;
     struct eventfd_context *context = kmalloc(sizeof(*context));
     if (!context) return NULL;
     context->counter = initial_value;
@@ -20,10 +32,12 @@ struct eventfd_context *eventfd_create(uint64_t initial_value, int semaphore) {
 }
 
 void eventfd_destroy(struct eventfd_context *context) {
+    EVENTFD_LOCKED;
     if (context) kfree(context);
 }
 
 int64_t eventfd_read(struct eventfd_context *context, size_t size, void *buffer) {
+    EVENTFD_LOCKED;
     if (!context || !buffer || size != sizeof(uint64_t)) return -EINVAL;
     if (context->counter == 0) return -EAGAIN;
     uint64_t value;
@@ -39,6 +53,7 @@ int64_t eventfd_read(struct eventfd_context *context, size_t size, void *buffer)
 }
 
 int64_t eventfd_write(struct eventfd_context *context, size_t size, const void *buffer) {
+    EVENTFD_LOCKED;
     if (!context || !buffer || size != sizeof(uint64_t)) return -EINVAL;
     uint64_t value = *(const uint64_t *)buffer;
     if (value == UINT64_MAX) return -EINVAL;
@@ -48,9 +63,11 @@ int64_t eventfd_write(struct eventfd_context *context, size_t size, const void *
 }
 
 int eventfd_read_ready(struct eventfd_context *context) {
+    EVENTFD_LOCKED;
     return context && context->counter != 0;
 }
 
 int eventfd_write_ready(struct eventfd_context *context) {
+    EVENTFD_LOCKED;
     return context && context->counter < UINT64_MAX - 1U;
 }

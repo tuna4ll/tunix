@@ -53,6 +53,8 @@ _Static_assert(__builtin_offsetof(struct syscall_frame, spsr) == 256, "entry wri
 _Static_assert(__builtin_offsetof(struct syscall_frame, sp_el0) == 264, "entry writes sp_el0 at 264");
 
 void syscall_release_pins(void);
+struct file;
+void syscall_unref_later(struct file *file);
 
 #endif
 
@@ -61,5 +63,7 @@ void syscall_set_kernel_stack(uint64_t stack_top);
 void syscall_dispatch(struct syscall_frame *frame);
 
 void syscall_release_pins(void);
+struct file;
+void syscall_unref_later(struct file *file);
 
 #endif

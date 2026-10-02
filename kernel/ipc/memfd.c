@@ -5,6 +5,17 @@
 #include "../include/memfd.h"
 #include "../include/pmm.h"
 #include "../include/vmm.h"
+#include "../include/lock.h"
+
+static struct lock memfd_lock = LOCK_INITIALIZER("memfd", LOCK_RANK_OBJECT);
+
+static void memfd_guard_release(int *unused) {
+    (void)unused;
+    lock_release(&memfd_lock);
+}
+
+#define MEMFD_LOCKED \
+    __attribute__((cleanup(memfd_guard_release))) int memfd_guard = (lock_acquire(&memfd_lock), 0)
 
 #define MEMFD_PAGE_SIZE 4096ULL
 
@@ -23,6 +34,7 @@ static uint64_t pages_for(uint64_t size) {
 }
 
 struct memfd_object *memfd_create_object(void) {
+    MEMFD_LOCKED;
     struct memfd_object *object = (struct memfd_object *)kmalloc(sizeof(*object));
     if (!object) return NULL;
     memset(object, 0, sizeof(*object));
@@ -31,10 +43,12 @@ struct memfd_object *memfd_create_object(void) {
 }
 
 void memfd_ref(struct memfd_object *object) {
+    MEMFD_LOCKED;
     if (object) object->refs++;
 }
 
 void memfd_destroy(struct memfd_object *object) {
+    MEMFD_LOCKED;
     if (!object) return;
     if (object->refs > 1) {
         object->refs--;
@@ -48,14 +62,17 @@ void memfd_destroy(struct memfd_object *object) {
 }
 
 void memfd_allow_sealing(struct memfd_object *object) {
+    MEMFD_LOCKED;
     if (object) object->sealable = 1;
 }
 
 uint32_t memfd_seals(const struct memfd_object *object) {
+    MEMFD_LOCKED;
     return object ? object->seals : 0;
 }
 
 int memfd_add_seals(struct memfd_object *object, uint32_t seals) {
+    MEMFD_LOCKED;
     if (!object || !object->sealable) return -22;
     if (seals & ~(uint32_t)MEMFD_SEAL_ALL) return -22;
     if (object->seals & MEMFD_SEAL_SEAL) return -1;
@@ -64,10 +81,12 @@ int memfd_add_seals(struct memfd_object *object, uint32_t seals) {
 }
 
 uint64_t memfd_size(const struct memfd_object *object) {
+    MEMFD_LOCKED;
     return object ? object->size : 0;
 }
 
 uint64_t memfd_page(const struct memfd_object *object, uint64_t index) {
+    MEMFD_LOCKED;
     if (!object || index >= object->count) return 0;
     return object->pages[index];
 }
@@ -89,6 +108,7 @@ static int reserve_pages(struct memfd_object *object, uint64_t needed) {
 }
 
 uint64_t memfd_page_ensure(struct memfd_object *object, uint64_t index) {
+    MEMFD_LOCKED;
     if (!object || index >= object->count) return 0;
     if (!object->pages[index]) {
         uint64_t physical = (uint64_t)pmm_alloc_page();
@@ -100,6 +120,7 @@ uint64_t memfd_page_ensure(struct memfd_object *object, uint64_t index) {
 }
 
 int memfd_truncate(struct memfd_object *object, uint64_t size) {
+    MEMFD_LOCKED;
     if (!object) return -1;
     if (size < object->size && (object->seals & MEMFD_SEAL_SHRINK)) return -1;
     if (size > object->size && (object->seals & MEMFD_SEAL_GROW)) return -1;
@@ -148,10 +169,12 @@ static int64_t transfer(struct memfd_object *object, uint64_t offset,
 
 int64_t memfd_read(struct memfd_object *object, uint64_t offset,
                    size_t length, void *out) {
+    MEMFD_LOCKED;
     return transfer(object, offset, length, out, NULL);
 }
 
 int64_t memfd_write(struct memfd_object *object, uint64_t offset,
                     size_t length, const void *in) {
+    MEMFD_LOCKED;
     return transfer(object, offset, length, NULL, in);
 }

@@ -3,6 +3,17 @@
 #include "../include/heap.h"
 #include "../include/time.h"
 #include "../include/timerfd.h"
+#include "../include/lock.h"
+
+static struct lock timerfd_lock = LOCK_INITIALIZER("timerfd", LOCK_RANK_OBJECT);
+
+static void timerfd_guard_release(int *unused) {
+    (void)unused;
+    lock_release(&timerfd_lock);
+}
+
+#define TIMERFD_LOCKED \
+    __attribute__((cleanup(timerfd_guard_release))) int timerfd_guard = (lock_acquire(&timerfd_lock), 0)
 
 #define EAGAIN 11
 #define EINVAL 22
@@ -62,6 +73,7 @@ static void refresh(struct timerfd_context *context) {
 }
 
 struct timerfd_context *timerfd_create(int clock_id) {
+    TIMERFD_LOCKED;
     if (clock_id != CLOCK_REALTIME && clock_id != CLOCK_MONOTONIC &&
         clock_id != CLOCK_BOOTTIME) return NULL;
     struct timerfd_context *context = kmalloc(sizeof(*context));
@@ -74,11 +86,13 @@ struct timerfd_context *timerfd_create(int clock_id) {
 }
 
 void timerfd_destroy(struct timerfd_context *context) {
+    TIMERFD_LOCKED;
     if (context) kfree(context);
 }
 
 int timerfd_gettime(struct timerfd_context *context,
                     struct tunix_itimerspec *value) {
+    TIMERFD_LOCKED;
     if (!context || !value) return -EINVAL;
     refresh(context);
     uint64_t remaining = 0;
@@ -96,6 +110,7 @@ int timerfd_gettime(struct timerfd_context *context,
 int timerfd_settime(struct timerfd_context *context, int flags,
                     const struct tunix_itimerspec *new_value,
                     struct tunix_itimerspec *old_value) {
+    TIMERFD_LOCKED;
     if (!context || !new_value || (flags & ~TFD_TIMER_ABSTIME)) return -EINVAL;
     if (old_value && timerfd_gettime(context, old_value) != 0) return -EINVAL;
     uint64_t interval;
@@ -118,6 +133,7 @@ int timerfd_settime(struct timerfd_context *context, int flags,
 }
 
 int64_t timerfd_read(struct timerfd_context *context, size_t size, void *buffer) {
+    TIMERFD_LOCKED;
     if (!context || !buffer || size != sizeof(uint64_t)) return -EINVAL;
     refresh(context);
     if (!context->pending_expirations) return -EAGAIN;
@@ -127,6 +143,7 @@ int64_t timerfd_read(struct timerfd_context *context, size_t size, void *buffer)
 }
 
 int timerfd_read_ready(struct timerfd_context *context) {
+    TIMERFD_LOCKED;
     refresh(context);
     return context && context->pending_expirations != 0;
 }

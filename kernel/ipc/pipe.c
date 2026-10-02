@@ -3,10 +3,11 @@
 #include "../include/file.h"
 #include "../include/heap.h"
 #include "../include/kstring.h"
-#include "../include/klock.h"
+#include "../include/lock.h"
 
 static int64_t pipe_read_locked(struct pipe_buffer *pipe, size_t size, void *buffer);
 static int64_t pipe_write_locked(struct pipe_buffer *pipe, size_t size, const void *buffer);
+static int pipe_resize_locked(struct pipe_buffer *pipe, size_t capacity);
 #include "../include/pipe.h"
 #include "../include/process.h"
 
@@ -14,6 +15,7 @@ static int64_t pipe_write_locked(struct pipe_buffer *pipe, size_t size, const vo
 
 int pipe_buffer_init(struct pipe_buffer *pipe, size_t capacity) {
     memset(pipe, 0, sizeof(*pipe));
+    lock_init(&pipe->lock, "pipe", LOCK_RANK_OBJECT);
     pipe->data = (uint8_t *)kmalloc(capacity);
     if (!pipe->data) return -1;
     pipe->capacity = capacity;
@@ -28,7 +30,15 @@ void pipe_buffer_fini(struct pipe_buffer *pipe) {
 }
 
 int pipe_resize(struct pipe_buffer *pipe, size_t capacity) {
-    if (!pipe || capacity < pipe->count) return -1;
+    if (!pipe) return -1;
+    lock_acquire(&pipe->lock);
+    int status = pipe_resize_locked(pipe, capacity);
+    lock_release(&pipe->lock);
+    return status;
+}
+
+static int pipe_resize_locked(struct pipe_buffer *pipe, size_t capacity) {
+    if (capacity < pipe->count) return -1;
     if (capacity == pipe->capacity) return 0;
     uint8_t *data = (uint8_t *)kmalloc(capacity);
     if (!data) return -1;
@@ -76,11 +86,18 @@ void pipe_buffer_destroy(struct pipe_buffer *pipe) {
 }
 
 static void pipe_enter(struct pipe_buffer *pipe) {
-    if (kernel_lock_shared_here()) spinlock_acquire(&pipe->lock);
+    lock_acquire(&pipe->lock);
 }
 
 static void pipe_leave(struct pipe_buffer *pipe) {
-    if (kernel_lock_shared_here()) spinlock_release(&pipe->lock);
+    lock_release(&pipe->lock);
+}
+
+void pipe_attach_end(struct pipe_buffer *pipe, int write_end) {
+    pipe_enter(pipe);
+    if (write_end) pipe->writers++;
+    else pipe->readers++;
+    pipe_leave(pipe);
 }
 
 int64_t pipe_read(struct pipe_buffer *pipe, size_t size, void *buffer) {
@@ -132,13 +149,15 @@ static int64_t pipe_write_locked(struct pipe_buffer *pipe, size_t size, const vo
 
 void pipe_release(struct pipe_buffer *pipe, int write_end) {
     if (!pipe) return;
+    pipe_enter(pipe);
     if (write_end) {
         if (pipe->writers > 0) pipe->writers--;
-
         if (pipe->writers == 0) process_wake_all(&pipe->data_wait);
     } else {
         if (pipe->readers > 0) pipe->readers--;
         if (pipe->readers == 0) process_wake_all(&pipe->space_wait);
     }
-    if (!pipe->named && pipe->readers == 0 && pipe->writers == 0) pipe_buffer_destroy(pipe);
+    int unused = !pipe->named && pipe->readers == 0 && pipe->writers == 0;
+    pipe_leave(pipe);
+    if (unused) pipe_buffer_destroy(pipe);
 }

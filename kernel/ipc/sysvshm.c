@@ -7,6 +7,18 @@
 #include "../include/memfd.h"
 #include "../include/sysvshm.h"
 #include "../include/time.h"
+#include "../include/lock.h"
+#include "../include/syscall.h"
+
+static struct lock shm_lock = LOCK_INITIALIZER("sysv shm", LOCK_RANK_OBJECT);
+
+static void shm_guard_release(int *unused) {
+    (void)unused;
+    lock_release(&shm_lock);
+}
+
+#define SHM_LOCKED \
+    __attribute__((cleanup(shm_guard_release))) int shm_guard = (lock_acquire(&shm_lock), 0)
 
 #define SHM_MAX_BYTES 0x00007FFFFFFFFFFFULL
 
@@ -58,17 +70,19 @@ static uint64_t attach_count(const struct shm_segment *segment) {
 }
 
 static void release(struct shm_segment *segment) {
-    if (segment->file) file_unref(segment->file);
+    if (segment->file) syscall_unref_later(segment->file);
     memset(segment, 0, sizeof(*segment));
 }
 
 void sysvshm_reap(void) {
+    SHM_LOCKED;
     for (int i = 0; i < segment_capacity; i++)
         if (segments[i].used && segments[i].destroyed && attach_count(&segments[i]) == 0)
             release(&segments[i]);
 }
 
 int sysvshm_get(int32_t key, uint64_t size, int flags, uint32_t pid) {
+    SHM_LOCKED;
     sysvshm_reap();
     struct shm_segment *existing = find_by_key(key);
     if (existing) {
@@ -128,6 +142,7 @@ int sysvshm_get(int32_t key, uint64_t size, int flags, uint32_t pid) {
 }
 
 struct file *sysvshm_acquire(int id, uint64_t *size_out) {
+    SHM_LOCKED;
     struct shm_segment *segment = find_by_id(id);
     if (!segment) return NULL;
     if (size_out) *size_out = segment->size;
@@ -136,6 +151,7 @@ struct file *sysvshm_acquire(int id, uint64_t *size_out) {
 }
 
 void sysvshm_touch(int id, uint32_t pid, int attaching) {
+    SHM_LOCKED;
     struct shm_segment *segment = find_by_id(id);
     if (!segment) return;
     segment->lpid = pid;
@@ -144,6 +160,7 @@ void sysvshm_touch(int id, uint32_t pid, int attaching) {
 }
 
 int sysvshm_stat(int id, struct shm_id_ds *out) {
+    SHM_LOCKED;
     struct shm_segment *segment = find_by_id(id);
     if (!segment) return -EINVAL;
     memset(out, 0, sizeof(*out));
@@ -164,6 +181,7 @@ int sysvshm_stat(int id, struct shm_id_ds *out) {
 }
 
 int sysvshm_set(int id, uint32_t mode, uint32_t uid, uint32_t gid) {
+    SHM_LOCKED;
     struct shm_segment *segment = find_by_id(id);
     if (!segment) return -EINVAL;
     segment->mode = mode & 0777U;
@@ -174,6 +192,7 @@ int sysvshm_set(int id, uint32_t mode, uint32_t uid, uint32_t gid) {
 }
 
 int sysvshm_remove(int id) {
+    SHM_LOCKED;
     struct shm_segment *segment = find_by_id(id);
     if (!segment) return -EINVAL;
 

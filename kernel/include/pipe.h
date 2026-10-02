@@ -34,5 +34,6 @@ void pipe_buffer_destroy(struct pipe_buffer *pipe);
 int64_t pipe_read(struct pipe_buffer *pipe, size_t size, void *buffer);
 int64_t pipe_write(struct pipe_buffer *pipe, size_t size, const void *buffer);
 void pipe_release(struct pipe_buffer *pipe, int write_end);
+void pipe_attach_end(struct pipe_buffer *pipe, int write_end);
 
 #endif

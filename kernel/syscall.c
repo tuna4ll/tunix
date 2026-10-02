@@ -831,24 +831,34 @@ struct file_pins {
 
 static struct file_pins pinned[SMP_MAX_CPUS];
 
-static struct file *fd_file(int fd) {
-    struct file *file = process_file_get(process_current(), fd);
-    if (!file) return NULL;
+static int pin_file(struct file *file) {
     struct file_pins *pins = &pinned[cpu_current()->index];
     if (pins->count == pins->capacity) {
         unsigned capacity = pins->capacity ? pins->capacity * 2U : 16U;
         struct file **files = (struct file **)kmalloc(capacity * sizeof(*files));
-        if (!files) {
-            file_unref(file);
-            return NULL;
-        }
+        if (!files) return -1;
         if (pins->count) memcpy(files, pins->files, pins->count * sizeof(*files));
         kfree(pins->files);
         pins->files = files;
         pins->capacity = capacity;
     }
     pins->files[pins->count++] = file;
+    return 0;
+}
+
+static struct file *fd_file(int fd) {
+    struct file *file = process_file_get(process_current(), fd);
+    if (!file) return NULL;
+    if (pin_file(file) != 0) {
+        file_unref(file);
+        return NULL;
+    }
     return file;
+}
+
+void syscall_unref_later(struct file *file) {
+    if (!file) return;
+    if (pin_file(file) != 0) file_unref(file);
 }
 
 void syscall_release_pins(void) {
