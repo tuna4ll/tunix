@@ -291,10 +291,12 @@ void kernel_unlock_current(void) {
 
 void kernel_exit(void) {
     process_finish_switch();
+    process_io_recheck();
     kernel_unlock_current();
 }
 
 void kernel_exit_from_isr(void) {
     process_finish_switch();
+    process_io_recheck();
     kernel_unlock_from_isr();
 }

@@ -10,7 +10,7 @@
 #include "include/heap.h"
 #include "include/interrupt.h"
 #include "include/klock.h"
-#include "include/oplock.h"
+#include "include/lock.h"
 
 static int process_wake_all_locked(const void *channel);
 static int signal_would_act(const struct process *process, int signal_number);
@@ -327,6 +327,40 @@ static int zombie_memory_pending;
 
 #define current (cpu_current()->current)
 
+static struct lock sched_lock = LOCK_INITIALIZER("scheduler", LOCK_RANK_SCHED);
+
+static void sched_guard_release(int *unused) {
+    (void)unused;
+    lock_release(&sched_lock);
+}
+
+#define SCHED_LOCKED \
+    __attribute__((cleanup(sched_guard_release))) int sched_guard = (lock_acquire(&sched_lock), 0)
+
+static volatile uint64_t wake_sequence;
+static volatile int io_recheck_pending;
+
+static void wake_bump(void) {
+    __atomic_add_fetch(&wake_sequence, 1, __ATOMIC_SEQ_CST);
+}
+
+static int wake_missed(void) {
+    return current &&
+           __atomic_load_n(&wake_sequence, __ATOMIC_SEQ_CST) != current->wake_snapshot;
+}
+
+void process_note_syscall_entry(void) {
+    if (current) current->wake_snapshot = __atomic_load_n(&wake_sequence, __ATOMIC_SEQ_CST);
+}
+
+void process_table_lock(void) {
+    lock_acquire(&sched_lock);
+}
+
+void process_table_unlock(void) {
+    lock_release(&sched_lock);
+}
+
 static void signal_one_process(struct process *target, int signal_number);
 
 static struct process_memory *memory_create(uint64_t cr3, uint64_t brk_start,
@@ -343,7 +377,7 @@ static struct process_memory *memory_create(uint64_t cr3, uint64_t brk_start,
 }
 
 static void memory_ref(struct process_memory *memory) {
-    if (memory) memory->refs++;
+    if (memory) __atomic_add_fetch(&memory->refs, 1, __ATOMIC_RELAXED);
 }
 
 static void areas_free(struct process_memory *memory);
@@ -351,9 +385,8 @@ static int areas_copy(struct process_memory *destination,
                       const struct process_memory *source);
 
 static void memory_unref(struct process_memory *memory) {
-    if (!memory || memory->refs == 0) return;
-    memory->refs--;
-    if (memory->refs != 0) return;
+    if (!memory || __atomic_load_n(&memory->refs, __ATOMIC_RELAXED) == 0) return;
+    if (__atomic_sub_fetch(&memory->refs, 1, __ATOMIC_ACQ_REL) != 0) return;
     areas_free(memory);
     if (memory->cr3) vmm_destroy_address_space(memory->cr3);
     kfree(memory);
@@ -504,6 +537,7 @@ void process_dump_wakes(void);
 static void futex_note(char kind, uint64_t address, int woken, int maximum, unsigned value);
 
 void process_dump_all(void) {
+    SCHED_LOCKED;
     process_dump_wakes();
     kprintf("PROCESSES:" "\n");
     if (!queue) return;
@@ -542,6 +576,31 @@ struct process *process_find(uint64_t pid) {
     return NULL;
 }
 
+struct process *process_get(uint64_t pid) {
+    SCHED_LOCKED;
+    struct process *found = process_find(pid);
+    if (found) found->refs++;
+    return found;
+}
+
+static void free_process_struct(struct process *process);
+
+void process_put(struct process *process) {
+    if (!process) return;
+    int release = 0;
+    {
+        SCHED_LOCKED;
+        if (process->refs) process->refs--;
+        release = !process->refs && process->struct_orphaned;
+    }
+    if (release) free_process_struct(process);
+}
+
+int process_exists(uint64_t pid) {
+    SCHED_LOCKED;
+    return process_find(pid) != NULL;
+}
+
 static uint64_t fd_limit(const struct process *process) {
     uint64_t limit = process->rlimits[PROCESS_RLIMIT_NOFILE].soft;
     return limit > PROCESS_NR_OPEN ? PROCESS_NR_OPEN : limit;
@@ -572,9 +631,25 @@ static int file_table_grow(struct file_table *table, int wanted) {
     return 0;
 }
 
+struct file *file_table_get(struct file_table *table, int fd) {
+    if (!table || fd < 0) return NULL;
+    lock_acquire(&table->lock);
+    struct file *file = fd < table->capacity ? table->fds[fd] : NULL;
+    if (file) file_ref(file);
+    lock_release(&table->lock);
+    return file;
+}
+
+struct file *process_file_get(struct process *process, int fd) {
+    return process ? file_table_get(process->files, fd) : NULL;
+}
+
 int process_reserve_fd(struct process *process, int fd) {
     if (!process || !process->files || fd < 0 || (uint64_t)fd >= fd_limit(process)) return -1;
-    return file_table_grow(process->files, fd + 1);
+    lock_acquire(&process->files->lock);
+    int status = file_table_grow(process->files, fd + 1);
+    lock_release(&process->files->lock);
+    return status;
 }
 
 int process_install_file_flags(struct process *process, struct file *file,
@@ -583,16 +658,37 @@ int process_install_file_flags(struct process *process, struct file *file,
     if (minimum_fd < 0) minimum_fd = 0;
     struct file_table *table = process->files;
     uint64_t limit = fd_limit(process);
+    int installed = -1;
+    lock_acquire(&table->lock);
     for (uint64_t fd = (uint64_t)minimum_fd; fd < limit; fd++) {
-        if (fd >= (uint64_t)table->capacity && process_reserve_fd(process, (int)fd) != 0)
-            return -1;
+        if (fd >= (uint64_t)table->capacity && file_table_grow(table, (int)fd + 1) != 0)
+            break;
         if (!table->fds[fd]) {
             table->fds[fd] = file;
             table->fd_flags[fd] = flags & PROCESS_FD_CLOEXEC;
-            return (int)fd;
+            installed = (int)fd;
+            break;
         }
     }
-    return -1;
+    lock_release(&table->lock);
+    return installed;
+}
+
+int process_install_file_at(struct process *process, struct file *file, int fd,
+                            uint8_t flags, struct file **replaced) {
+    if (replaced) *replaced = NULL;
+    if (!process || !process->files || !file || fd < 0 || (uint64_t)fd >= fd_limit(process))
+        return -1;
+    struct file_table *table = process->files;
+    lock_acquire(&table->lock);
+    int status = file_table_grow(table, fd + 1);
+    if (status == 0) {
+        if (replaced) *replaced = table->fds[fd];
+        table->fds[fd] = file;
+        table->fd_flags[fd] = flags & PROCESS_FD_CLOEXEC;
+    }
+    lock_release(&table->lock);
+    return status;
 }
 
 static const struct process_rlimit default_rlimits[PROCESS_RLIMITS] = {
@@ -618,6 +714,7 @@ int process_set_rlimit(struct process *process, unsigned resource,
                        const struct process_rlimit *value) {
     if (!process || resource >= PROCESS_RLIMITS || !value || value->soft > value->hard) return -1;
     if (resource == PROCESS_RLIMIT_NOFILE && value->hard > PROCESS_NR_OPEN) return -1;
+    SCHED_LOCKED;
     struct process *item = queue;
     if (!item) return -1;
     do {
@@ -632,24 +729,38 @@ int process_install_file(struct process *process, struct file *file, int minimum
 }
 
 uint8_t process_get_fd_flags(const struct process *process, int fd) {
-    if (!process || !process->files || fd < 0 || fd >= process->files->capacity ||
-        !process->files->fds[fd]) return 0;
-    return process->files->fd_flags[fd];
+    if (!process || !process->files || fd < 0) return 0;
+    struct file_table *table = process->files;
+    lock_acquire(&table->lock);
+    uint8_t flags = fd < table->capacity && table->fds[fd] ? table->fd_flags[fd] : 0;
+    lock_release(&table->lock);
+    return flags;
 }
 
 int process_set_fd_flags(struct process *process, int fd, uint8_t flags) {
-    if (!process || !process->files || fd < 0 || fd >= process->files->capacity ||
-        !process->files->fds[fd]) return -1;
-    process->files->fd_flags[fd] = flags & PROCESS_FD_CLOEXEC;
-    return 0;
+    if (!process || !process->files || fd < 0) return -1;
+    struct file_table *table = process->files;
+    int status = -1;
+    lock_acquire(&table->lock);
+    if (fd < table->capacity && table->fds[fd]) {
+        table->fd_flags[fd] = flags & PROCESS_FD_CLOEXEC;
+        status = 0;
+    }
+    lock_release(&table->lock);
+    return status;
 }
 
 int process_close_fd(struct process *process, int fd) {
-    if (!process || !process->files || fd < 0 || fd >= process->files->capacity ||
-        !process->files->fds[fd]) return -1;
-    struct file *file = process->files->fds[fd];
-    process->files->fds[fd] = NULL;
-    process->files->fd_flags[fd] = 0;
+    if (!process || !process->files || fd < 0) return -1;
+    struct file_table *table = process->files;
+    lock_acquire(&table->lock);
+    struct file *file = fd < table->capacity ? table->fds[fd] : NULL;
+    if (file) {
+        table->fds[fd] = NULL;
+        table->fd_flags[fd] = 0;
+    }
+    lock_release(&table->lock);
+    if (!file) return -1;
     file_unref(file);
     return 0;
 }
@@ -658,6 +769,7 @@ static struct file_table *file_table_create(void) {
     struct file_table *table = (struct file_table *)kmalloc(sizeof(*table));
     if (!table) return NULL;
     memset(table, 0, sizeof(*table));
+    lock_init(&table->lock, "file table", LOCK_RANK_FILES);
     table->refs = 1;
     if (file_table_grow(table, 64) != 0) {
         kfree(table);
@@ -672,10 +784,12 @@ static void file_table_free(struct file_table *table) {
     kfree(table);
 }
 
-static struct file_table *file_table_clone(const struct file_table *source) {
+static struct file_table *file_table_clone(struct file_table *source) {
     struct file_table *table = file_table_create();
     if (!table || !source) return table;
+    lock_acquire(&source->lock);
     if (file_table_grow(table, source->capacity) != 0) {
+        lock_release(&source->lock);
         file_table_free(table);
         return NULL;
     }
@@ -686,23 +800,62 @@ static struct file_table *file_table_clone(const struct file_table *source) {
             file_ref(table->fds[fd]);
         }
     }
+    lock_release(&source->lock);
     return table;
+}
+
+void file_table_ref(struct file_table *table) {
+    if (table) __atomic_add_fetch(&table->refs, 1, __ATOMIC_RELAXED);
+}
+
+void file_table_unref(struct file_table *table) {
+    if (!table || __atomic_sub_fetch(&table->refs, 1, __ATOMIC_ACQ_REL) > 0) return;
+    for (int fd = 0; fd < table->capacity; fd++) {
+        struct file *file = table->fds[fd];
+        if (!file) continue;
+        table->fds[fd] = NULL;
+        table->fd_flags[fd] = 0;
+        file_unref(file);
+    }
+    file_table_free(table);
+}
+
+void file_table_close_on_exec(struct file_table *table) {
+    if (!table) return;
+    for (;;) {
+        struct file *closing = NULL;
+        lock_acquire(&table->lock);
+        for (int fd = 0; fd < table->capacity; fd++) {
+            if (table->fds[fd] && (table->fd_flags[fd] & PROCESS_FD_CLOEXEC)) {
+                closing = table->fds[fd];
+                table->fds[fd] = NULL;
+                table->fd_flags[fd] = 0;
+                break;
+            }
+        }
+        lock_release(&table->lock);
+        if (!closing) return;
+        file_unref(closing);
+    }
 }
 
 static void process_release_files(struct process *process) {
     if (!process || !process->files) return;
-    struct file_table *table = process->files;
-    process->files = NULL;
-    if (--table->refs > 0) return;
-    for (int fd = 0; fd < table->capacity; fd++) {
-        if (table->fds[fd]) {
-            struct file *file = table->fds[fd];
-            table->fds[fd] = NULL;
-            table->fd_flags[fd] = 0;
-            file_unref(file);
-        }
+    struct file_table *table;
+    {
+        SCHED_LOCKED;
+        table = process->files;
+        process->files = NULL;
     }
-    file_table_free(table);
+    file_table_unref(table);
+}
+
+struct file_table *process_files_get(struct process *process) {
+    if (!process) return NULL;
+    SCHED_LOCKED;
+    struct file_table *table = process->files;
+    file_table_ref(table);
+    return table;
 }
 
 static void fpu_save(struct process *process);
@@ -742,15 +895,24 @@ static void destroy_process_resources(struct process *process) {
         process->kernel_stack_base = 0;
         process->kernel_stack_top = 0;
     }
-    free_process_struct(process);
+    int keep = 0;
+    {
+        SCHED_LOCKED;
+        if (process->refs) {
+            process->struct_orphaned = 1;
+            keep = 1;
+        }
+    }
+    if (!keep) free_process_struct(process);
     KDEBUG("process: reaped pid=%u\n", (unsigned)pid);
 }
 
 static struct process *zombie_head;
 
-static void release_zombie_memory(void) {
+static struct process_memory *take_zombie_memory(void) {
     struct process *list = zombie_head;
     struct process *kept = NULL;
+    struct process_memory *released = NULL;
     zombie_head = NULL;
     while (list) {
         struct process *item = list;
@@ -764,13 +926,15 @@ static void release_zombie_memory(void) {
         item->zombie_next = NULL;
         item->on_zombie_list = 0;
         if (item->state == PROCESS_ZOMBIE && item->memory) {
-            memory_unref(item->memory);
+            item->memory->release_next = released;
+            released = item->memory;
             item->memory = NULL;
             item->cr3 = 0;
         }
     }
     zombie_head = kept;
     zombie_memory_pending = kept != NULL;
+    return released;
 }
 
 static void zombie_forget(struct process *process) {
@@ -786,28 +950,49 @@ static void zombie_forget(struct process *process) {
 }
 
 void process_reap_deferred(void) {
-    if (zombie_memory_pending) release_zombie_memory();
-    if (!reap_pending) return;
-
-    struct process *list = dead_head;
-    struct process *kept = NULL;
-    dead_head = NULL;
-    while (list) {
-        struct process *victim = list;
-        list = victim->dead_next;
-        victim->dead_next = NULL;
-        if (victim == current || __atomic_load_n(&victim->on_cpu, __ATOMIC_ACQUIRE)) {
-            victim->dead_next = kept;
-            kept = victim;
-            continue;
+    if (!__atomic_load_n(&zombie_memory_pending, __ATOMIC_RELAXED) &&
+        !__atomic_load_n(&reap_pending, __ATOMIC_RELAXED)) return;
+    struct process_memory *memories = NULL;
+    struct process *victims = NULL;
+    {
+        SCHED_LOCKED;
+        if (zombie_memory_pending) memories = take_zombie_memory();
+        if (reap_pending) {
+            struct process *list = dead_head;
+            struct process *kept = NULL;
+            dead_head = NULL;
+            while (list) {
+                struct process *victim = list;
+                list = victim->dead_next;
+                victim->dead_next = NULL;
+                if (victim == current || __atomic_load_n(&victim->on_cpu, __ATOMIC_ACQUIRE)) {
+                    victim->dead_next = kept;
+                    kept = victim;
+                    continue;
+                }
+                victim->on_dead_list = 0;
+                zombie_forget(victim);
+                dequeue(victim);
+                ready_unlink(victim);
+                waits_unlink(victim);
+                victim->dead_next = victims;
+                victims = victim;
+            }
+            dead_head = kept;
+            reap_pending = kept != NULL;
         }
-        victim->on_dead_list = 0;
-        zombie_forget(victim);
-        dequeue(victim);
-        destroy_process_resources(victim);
     }
-    dead_head = kept;
-    reap_pending = kept != NULL;
+    while (memories) {
+        struct process_memory *next = memories->release_next;
+        memory_unref(memories);
+        memories = next;
+    }
+    while (victims) {
+        struct process *next = victims->dead_next;
+        victims->dead_next = NULL;
+        destroy_process_resources(victims);
+        victims = next;
+    }
 }
 
 static void install_console(struct process *process) {
@@ -841,8 +1026,6 @@ static void free_process_struct(struct process *process) {
     cred_groups_release(&process->cred);
     kfree(process->io_watch_fd);
     kfree(process->io_watch_events);
-    ready_unlink(process);
-    waits_unlink(process);
     kfree(process->exe_path);
     kfree(process);
 }
@@ -861,7 +1044,7 @@ struct process *process_create_from_path(const char *path) {
     }
     memset(process, 0, sizeof(*process));
     memcpy(process->rlimits, default_rlimits, sizeof(process->rlimits));
-    process->pid = next_pid++;
+    process->pid = __atomic_fetch_add(&next_pid, 1, __ATOMIC_RELAXED);
     process->tgid = process->pid;
     process->ppid = 0;
     process->pgid = process->pid;
@@ -926,8 +1109,11 @@ struct process *process_create_from_path(const char *path) {
     arch_frame_enter_user(&process->saved_frame, process->entry, process->user_stack_top);
     install_console(process);
 
-    enqueue(process);
-    ready_link(process);
+    {
+        SCHED_LOCKED;
+        enqueue(process);
+        ready_link(process);
+    }
     procfs_register_process(process);
     eventfs_emit_process_exec(process->cred.euid, process->pid, process->name);
     if (process->pid == 1) tty_set_foreground_pgid(vt_tty(1U), (int)process->pgid);
@@ -947,6 +1133,7 @@ uint32_t process_get_umask(void) {
 
 uint32_t process_set_umask(uint32_t mask) {
     if (!current) return 022;
+    SCHED_LOCKED;
     uint32_t old = current->umask;
     uint32_t value = mask & 0777U;
     uint64_t group = current->tgid;
@@ -1125,6 +1312,7 @@ static struct process *scheduling_target(uint64_t tid) {
 }
 
 int process_set_scheduler(uint64_t tid, int policy, int rt_priority) {
+    SCHED_LOCKED;
     struct process *target = scheduling_target(tid);
     if (!target) return -ESRCH;
 
@@ -1149,6 +1337,7 @@ int process_set_scheduler(uint64_t tid, int policy, int rt_priority) {
 }
 
 int process_get_scheduler(uint64_t tid, int *policy, int *rt_priority) {
+    SCHED_LOCKED;
     struct process *target = scheduling_target(tid);
     if (!target) return -ESRCH;
     if (policy) *policy = target->policy;
@@ -1157,6 +1346,7 @@ int process_get_scheduler(uint64_t tid, int *policy, int *rt_priority) {
 }
 
 int process_set_nice(uint64_t tid, int nice) {
+    SCHED_LOCKED;
     struct process *target = scheduling_target(tid);
     if (!target) return -ESRCH;
     if (nice < -20) nice = -20;
@@ -1170,6 +1360,7 @@ int process_set_nice(uint64_t tid, int nice) {
 }
 
 int process_get_nice(uint64_t tid, int *nice) {
+    SCHED_LOCKED;
     struct process *target = scheduling_target(tid);
     if (!target) return -ESRCH;
     if (nice) *nice = target->nice;
@@ -1183,6 +1374,7 @@ static void online_cpu_mask(struct cpu_mask *mask) {
 }
 
 int process_set_affinity(uint64_t tid, const struct cpu_mask *mask) {
+    SCHED_LOCKED;
     struct process *target = scheduling_target(tid);
     if (!target || !mask) return -ESRCH;
     struct cpu_mask online;
@@ -1197,6 +1389,7 @@ int process_set_affinity(uint64_t tid, const struct cpu_mask *mask) {
 }
 
 int process_get_affinity(uint64_t tid, struct cpu_mask *mask) {
+    SCHED_LOCKED;
     struct process *target = scheduling_target(tid);
     if (!target) return -ESRCH;
     if (!mask) return 0;
@@ -1295,6 +1488,8 @@ static void go_idle(void) {
     cpu_current()->address_space = 0;
     set_kernel_stack(cpu_current()->idle_stack_top);
     syscall_set_kernel_stack(cpu_current()->idle_stack_top);
+    lock_drop(&sched_lock);
+    lock_check_released("the kernel for idle");
     cpu_enter_idle(cpu_current()->idle_stack_top);
 }
 
@@ -1668,10 +1863,14 @@ int process_fault_from_interrupt(struct interrupt_frame *frame, int signal_numbe
 }
 
 static void resume_from_idle(struct interrupt_frame *frame) {
-    struct process *next = next_runnable(NULL);
-    if (!next) return;
-    activate_process(next);
-    struct syscall_frame resume = next->saved_frame;
+    struct syscall_frame resume;
+    {
+        SCHED_LOCKED;
+        struct process *next = next_runnable(NULL);
+        if (!next) return;
+        activate_process(next);
+        resume = next->saved_frame;
+    }
     process_prepare_user_return(&resume);
     if (!current || current->state != PROCESS_RUNNING) go_idle();
     current->saved_frame = resume;
@@ -1691,6 +1890,7 @@ void process_timer_interrupt(struct interrupt_frame *frame) {
 
     struct syscall_frame resume = current->saved_frame;
     if (current->time_slice_ticks) current->time_slice_ticks--;
+    lock_acquire(&sched_lock);
     if (!current->time_slice_ticks || higher_priority_waiting(current) ||
         ordinary_should_preempt(current) || !allowed_on_this_cpu(current)) {
         struct process *preempted = current;
@@ -1709,6 +1909,7 @@ void process_timer_interrupt(struct interrupt_frame *frame) {
             current = preempted;
         }
     }
+    lock_release(&sched_lock);
 
     process_prepare_user_return(&resume);
     if (!current || current->state != PROCESS_RUNNING) return;
@@ -1718,6 +1919,7 @@ void process_timer_interrupt(struct interrupt_frame *frame) {
 
 void process_yield_from_syscall(struct syscall_frame *frame) {
     if (!current || !frame) return;
+    SCHED_LOCKED;
     struct process *yielding = current;
     yielding->saved_frame = *frame;
     set_process_state(yielding, PROCESS_READY);
@@ -1733,10 +1935,11 @@ void process_yield_from_syscall(struct syscall_frame *frame) {
 
 void process_run_child_first_from_syscall(struct syscall_frame *frame, uint64_t child_pid) {
     if (!current || !frame || child_pid == 0) return;
+    SCHED_LOCKED;
 
     struct process *parent = current;
     struct process *child = process_find(child_pid);
-    if (!child || child->state != PROCESS_READY ||
+    if (!child || child->state != PROCESS_READY || child->on_cpu ||
         (child->ppid != parent->pid &&
          !(child->is_thread && child->tgid == parent->tgid))) return;
 
@@ -1758,23 +1961,24 @@ static int child_matches(const struct process *child, const struct process *pare
     return child->pgid == (uint64_t)(-requested);
 }
 
-static int store_wait_status(struct process *parent, struct process *child, uint64_t status_user) {
-    if (!status_user) return 0;
-    int status = child->termination_signal
-        ? (child->termination_signal & 0x7F)
-        : ((child->exit_status & 0xFF) << 8);
-    return vmm_copy_to_space(parent->cr3, status_user, &status, sizeof(status));
-}
-
-static int store_job_status(struct process *parent, int status, uint64_t status_user) {
-    if (!status_user) return 0;
-    return vmm_copy_to_space(parent->cr3, status_user, &status, sizeof(status));
+static int exit_status_word(const struct process *child) {
+    return child->termination_signal ? (child->termination_signal & 0x7F)
+                                     : ((child->exit_status & 0xFF) << 8);
 }
 
 static int signal_reaches_waiter(const struct process *target, int signal_number) {
     if (!target || target->state != PROCESS_BLOCKED) return 0;
     if (target->signal_blocked & signal_bit(signal_number)) return 0;
     return signal_would_act(target, signal_number);
+}
+
+static void wake_waiting_parent(struct process *parent) {
+    if (parent->wait4_active && parent->state == PROCESS_BLOCKED) {
+        parent->wait4_active = 0;
+        wake_to_ready(parent);
+    } else if (!parent->wait4_active && signal_reaches_waiter(parent, SIGCHLD)) {
+        wake_to_ready(parent);
+    }
 }
 
 static void notify_parent_of_exit(struct process *child) {
@@ -1784,42 +1988,15 @@ static void notify_parent_of_exit(struct process *child) {
         return;
     }
     sibling_to_front(child);
-
-    parent->signal_pending |= signal_bit(SIGCHLD);
-    if (parent->wait4_active && parent->state == PROCESS_BLOCKED &&
-        child_matches(child, parent, parent->wait_pid)) {
-        if (store_wait_status(parent, child, parent->wait_status_user) == 0) SYSCALL_RET(&parent->saved_frame) = child->pid;
-        else SYSCALL_RET(&parent->saved_frame) = (uint64_t)-(int64_t)EINVAL;
-        parent->wait4_active = 0;
-        parent->wait_pid = 0;
-        parent->wait_status_user = 0;
-        parent->wait_options = 0;
-        wake_to_ready(parent);
-        mark_dead(child);
-    } else if (!parent->wait4_active && signal_reaches_waiter(parent, SIGCHLD)) {
-        wake_to_ready(parent);
-    }
+    __atomic_fetch_or(&parent->signal_pending, signal_bit(SIGCHLD), __ATOMIC_RELEASE);
+    wake_waiting_parent(parent);
 }
 
-static int notify_parent_of_job_change(struct process *child, int wait_flag, int status) {
+static void notify_parent_of_job_change(struct process *child) {
     struct process *parent = find_parent(child);
-    if (!parent) return 0;
-
-    parent->signal_pending |= signal_bit(SIGCHLD);
-    if (!parent->wait4_active || parent->state != PROCESS_BLOCKED ||
-        !child_matches(child, parent, parent->wait_pid) ||
-        !(parent->wait_options & wait_flag)) return 0;
-
-    if (store_job_status(parent, status, parent->wait_status_user) == 0)
-        SYSCALL_RET(&parent->saved_frame) = child->pid;
-    else
-        SYSCALL_RET(&parent->saved_frame) = (uint64_t)-(int64_t)EINVAL;
-    parent->wait4_active = 0;
-    parent->wait_pid = 0;
-    parent->wait_status_user = 0;
-    parent->wait_options = 0;
-    wake_to_ready(parent);
-    return 1;
+    if (!parent) return;
+    __atomic_fetch_or(&parent->signal_pending, signal_bit(SIGCHLD), __ATOMIC_RELEASE);
+    wake_waiting_parent(parent);
 }
 
 struct linux_robust_list_head_user {
@@ -1917,15 +2094,7 @@ void process_exit_from_syscall(struct syscall_frame *frame, int status) {
     }
     eventfs_emit_process_exit(exiting->cred.euid, exiting->pid, status);
     exiting->exit_status = status;
-    set_process_state(exiting, PROCESS_ZOMBIE);
-    if (exiting->memory && !exiting->on_zombie_list) {
-        exiting->on_zombie_list = 1;
-        exiting->zombie_next = zombie_head;
-        zombie_head = exiting;
-        zombie_memory_pending = 1;
-    }
     process_handle_robust_list(exiting);
-    notify_children_of_parent_death(exiting);
     if (exiting->clear_child_tid_user) {
         uint64_t clear_address = exiting->clear_child_tid_user;
         uint32_t zero = 0;
@@ -1937,6 +2106,17 @@ void process_exit_from_syscall(struct syscall_frame *frame, int status) {
     if (!exiting->is_thread)
         vt_process_exited(exiting->pid,
                           exiting->sid == exiting->pid ? exiting->sid : 0);
+
+    SCHED_LOCKED;
+    wake_bump();
+    set_process_state(exiting, PROCESS_ZOMBIE);
+    if (exiting->memory && !exiting->on_zombie_list) {
+        exiting->on_zombie_list = 1;
+        exiting->zombie_next = zombie_head;
+        zombie_head = exiting;
+        zombie_memory_pending = 1;
+    }
+    notify_children_of_parent_death(exiting);
     if (exiting->is_thread) mark_dead(exiting);
     else notify_parent_of_exit(exiting);
     KDEBUG("process: pid=%u exited status=%d\n", (unsigned)exiting->pid, status);
@@ -1944,14 +2124,15 @@ void process_exit_from_syscall(struct syscall_frame *frame, int status) {
     if (switch_to_next(frame, exiting) != 0) go_idle();
 }
 
-int64_t process_fork_from_syscall(struct syscall_frame *frame) {
+int64_t process_fork_from_syscall(struct syscall_frame *frame,
+                                  const struct fork_request *request) {
     if (!current || !frame) return -EINVAL;
     struct process *parent = current;
     struct process *child = (struct process *)kmalloc(sizeof(*child));
     if (!child) return -EINVAL;
     memset(child, 0, sizeof(*child));
 
-    child->pid = next_pid++;
+    child->pid = __atomic_fetch_add(&next_pid, 1, __ATOMIC_RELAXED);
     child->tgid = child->pid;
     child->ppid = parent->pid;
     child->pgid = parent->pgid;
@@ -2030,8 +2211,26 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame) {
         return -EAGAIN;
     }
 
-    enqueue(child);
-    ready_link(child);
+    if (request) {
+        if (request->child_stack) SYSCALL_USER_SP(&child->saved_frame) = request->child_stack;
+        if (request->child_settid_user) {
+            uint32_t tid = (uint32_t)child->pid;
+            (void)vmm_copy_to_space(child->cr3, request->child_settid_user, &tid, sizeof(tid));
+        }
+        if (request->child_cleartid_user) child->clear_child_tid_user = request->child_cleartid_user;
+        if (request->clear_signal_handlers) {
+            for (unsigned signal = 0; signal < TUNIX_NSIG; signal++)
+                if (child->signal_actions[signal].handler != SIG_IGN)
+                    memset(&child->signal_actions[signal], 0, sizeof(child->signal_actions[signal]));
+        }
+    }
+
+    {
+        SCHED_LOCKED;
+        wake_bump();
+        enqueue(child);
+        ready_link(child);
+    }
     procfs_register_process(child);
     eventfs_emit_process_fork(parent->cred.euid, parent->pid, child->pid);
     KDEBUG("process: fork parent=%u child=%u\n", (unsigned)parent->pid, (unsigned)child->pid);
@@ -2052,7 +2251,7 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
     if (!child) return -EINVAL;
     memset(child, 0, sizeof(*child));
 
-    child->pid = next_pid++;
+    child->pid = __atomic_fetch_add(&next_pid, 1, __ATOMIC_RELAXED);
     child->tgid = parent->tgid;
     child->ppid = parent->ppid;
     child->pgid = parent->pgid;
@@ -2106,7 +2305,7 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
     memcpy(child->signal_actions, parent->signal_actions, sizeof(child->signal_actions));
 
     child->files = parent->files;
-    child->files->refs++;
+    file_table_ref(child->files);
 
     uint32_t tid = (uint32_t)child->pid;
     if ((flags & 0x00100000ULL) && parent_tid_user &&
@@ -2129,8 +2328,12 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
         if (flags & 0x00200000ULL) child->clear_child_tid_user = child_tid_user;
     }
 
-    enqueue(child);
-    ready_link(child);
+    {
+        SCHED_LOCKED;
+        wake_bump();
+        enqueue(child);
+        ready_link(child);
+    }
     procfs_register_process(child);
     KDEBUG("process: clone thread tgid=%u tid=%u\n",
            (unsigned)child->tgid, (unsigned)child->pid);
@@ -2155,7 +2358,10 @@ int64_t process_futex_wait(struct syscall_frame *frame, uint64_t address,
         return -EFAULT;
     if (value != expected) { futex_note('A', address, 0, 0, value); return -EAGAIN; }
     if (timeout_ns == 0) return -ETIMEDOUT;
+    uint64_t key = shared ? futex_shared_key(address) : 0;
+    SCHED_LOCKED;
     if (process_signal_interrupts_wait()) return -EINTR;
+    if (wake_missed()) return 0;
 
     struct process *waiting = current;
     waiting->saved_frame = *frame;
@@ -2163,7 +2369,7 @@ int64_t process_futex_wait(struct syscall_frame *frame, uint64_t address,
     set_process_state(waiting, PROCESS_BLOCKED);
     waiting->futex_wait_active = 1;
     waiting->futex_wait_address = address;
-    waiting->futex_wait_key = shared ? futex_shared_key(address) : 0;
+    waiting->futex_wait_key = key;
     waiting->futex_wait_expected = expected;
     waiting->futex_wait_bitset = bitset;
     futex_note('W', address, 0, 0, expected);
@@ -2179,6 +2385,8 @@ int64_t process_futex_wait(struct syscall_frame *frame, uint64_t address,
 
 int process_sleep_on(struct syscall_frame *frame, const void *channel) {
     if (!current || !frame || !channel) return -EAGAIN;
+    SCHED_LOCKED;
+    if (wake_missed()) return -EAGAIN;
     struct process *waiting = current;
     waiting->saved_frame = *frame;
     set_process_state(waiting, PROCESS_BLOCKED);
@@ -2193,31 +2401,25 @@ int process_sleep_on(struct syscall_frame *frame, const void *channel) {
 
 static const char io_wait_token;
 
-static int io_waiter_ready(const struct process *item, uint64_t *now) {
-    if (!item->io_watch_armed) return 1;
-    if (item->signal_pending & ~item->signal_blocked) return 1;
-    if (item->io_wait_active && item->io_wait_deadline_ns != UINT64_MAX) {
-        if (!*now) *now = time_uptime_ns();
-        if (*now >= item->io_wait_deadline_ns) return 1;
-    }
-    for (unsigned index = 0; index < item->io_watch_count; index++) {
-        int fd = item->io_watch_fd[index];
-        struct file *file = item->files && fd >= 0 && fd < item->files->capacity ?
-            item->files->fds[fd] : NULL;
-        if (!file || file_poll_events(file, item->io_watch_events[index])) return 1;
-    }
-    return 0;
-}
-
 const void *process_io_wait_channel(void) { return &io_wait_token; }
 
 int process_wake_io(void) { return process_wake_all(&io_wait_token); }
 
 int process_wake_all(const void *channel) {
-    oplock_enter();
-    int woken = process_wake_all_locked(channel);
-    oplock_leave();
-    return woken;
+    SCHED_LOCKED;
+    wake_bump();
+    return process_wake_all_locked(channel);
+}
+
+static int io_waiter_urgent(const struct process *item, uint64_t *now) {
+    if (!item->io_watch_armed) return 1;
+    if (__atomic_load_n(&item->signal_pending, __ATOMIC_RELAXED) & ~item->signal_blocked)
+        return 1;
+    if (item->io_wait_active && item->io_wait_deadline_ns != UINT64_MAX) {
+        if (!*now) *now = time_uptime_ns();
+        if (*now >= item->io_wait_deadline_ns) return 1;
+    }
+    return 0;
 }
 
 static int wake_bucket(const void *channel, const void *exact, uint64_t *now) {
@@ -2225,12 +2427,20 @@ static int wake_bucket(const void *channel, const void *exact, uint64_t *now) {
     struct process *item = wait_buckets[wait_bucket_of((uint64_t)(uintptr_t)channel)];
     while (item) {
         struct process *next = item->wait_next;
-        if (item->state == PROCESS_BLOCKED && item->wait_channel &&
-            ((exact && item->wait_channel == exact) ||
-             (item->wait_channel == &io_wait_token && io_waiter_ready(item, now)))) {
-            item->wait_channel = NULL;
-            wake_to_ready(item);
-            woken++;
+        if (item->state == PROCESS_BLOCKED && item->wait_channel) {
+            if (exact && item->wait_channel == exact) {
+                item->wait_channel = NULL;
+                wake_to_ready(item);
+                woken++;
+            } else if (!exact && item->wait_channel == &io_wait_token) {
+                if (io_waiter_urgent(item, now)) {
+                    item->wait_channel = NULL;
+                    wake_to_ready(item);
+                    woken++;
+                } else {
+                    __atomic_store_n(&io_recheck_pending, 1, __ATOMIC_RELEASE);
+                }
+            }
         }
         item = next;
     }
@@ -2244,6 +2454,59 @@ static int process_wake_all_locked(const void *channel) {
     if (channel != &io_wait_token) woken += wake_bucket(channel, channel, &now);
     woken += wake_bucket(&io_wait_token, NULL, &now);
     return woken;
+}
+
+static int io_files_ready(struct process *item) {
+    struct file_table *table = item->files;
+    if (!table) return 1;
+    for (unsigned index = 0; index < item->io_watch_count; index++) {
+        struct file *file = file_table_get(table, item->io_watch_fd[index]);
+        if (!file) return 1;
+        uint32_t events = file_poll_events(file, item->io_watch_events[index]);
+        file_unref(file);
+        if (events) return 1;
+    }
+    return 0;
+}
+
+void process_io_recheck(void) {
+    if (!__atomic_exchange_n(&io_recheck_pending, 0, __ATOMIC_ACQ_REL)) return;
+    struct process *candidates[64];
+    unsigned count = 0;
+    {
+        SCHED_LOCKED;
+        struct process *item = wait_buckets[wait_bucket_of((uint64_t)(uintptr_t)&io_wait_token)];
+        for (; item; item = item->wait_next) {
+            if (item->state != PROCESS_BLOCKED || item->wait_channel != &io_wait_token) continue;
+            if (count == sizeof(candidates) / sizeof(candidates[0])) {
+                __atomic_store_n(&io_recheck_pending, 1, __ATOMIC_RELEASE);
+                break;
+            }
+            item->refs++;
+            if (item->files) file_table_ref(item->files);
+            candidates[count++] = item;
+        }
+    }
+    uint8_t ready[64];
+    for (unsigned index = 0; index < count; index++)
+        ready[index] = (uint8_t)io_files_ready(candidates[index]);
+    struct file_table *tables[64];
+    {
+        SCHED_LOCKED;
+        for (unsigned index = 0; index < count; index++) {
+            struct process *item = candidates[index];
+            tables[index] = item->files;
+            if (ready[index] && item->state == PROCESS_BLOCKED &&
+                item->wait_channel == &io_wait_token) {
+                item->wait_channel = NULL;
+                wake_to_ready(item);
+            }
+        }
+    }
+    for (unsigned index = 0; index < count; index++) {
+        if (tables[index]) file_table_unref(tables[index]);
+        process_put(candidates[index]);
+    }
 }
 
 struct wake_record { uint64_t address; int woken; int pid; int max; char kind; unsigned value; };
@@ -2299,8 +2562,11 @@ static int futex_wake_list(struct process *item, int by_key, uint64_t address, u
 }
 
 int process_futex_wake(uint64_t address, int maximum, uint32_t bitset, int shared) {
-    if (!current || !queue || maximum <= 0 || !bitset) return 0;
+    if (!current || maximum <= 0 || !bitset) return 0;
     uint64_t key = shared ? futex_shared_key(address) : 0;
+    SCHED_LOCKED;
+    wake_bump();
+    if (!queue) return 0;
     int woken = futex_wake_list(wait_buckets[wait_bucket_of(address)], 0, address, key,
                                 bitset, maximum, 0);
     if (key && woken < maximum)
@@ -2317,6 +2583,7 @@ int process_ready_pending(void) {
 }
 
 void process_note_deadline(uint64_t deadline_ns) {
+    SCHED_LOCKED;
     note_deadline(deadline_ns);
 }
 
@@ -2337,27 +2604,24 @@ void process_set_sigaction(int signal_number,
 }
 
 static void terminate_sibling_threads(int status) {
-    if (!current || !queue) return;
+    if (!current) return;
+    SCHED_LOCKED;
+    if (!queue) return;
+    wake_bump();
     uint64_t group = current->tgid;
     struct process *item = queue;
     do {
-        if (item != current && item->tgid == group && item->state != PROCESS_DEAD) {
+        if (item != current && item->tgid == group && item->state != PROCESS_DEAD &&
+            item->state != PROCESS_ZOMBIE) {
             item->exit_status = status;
-            if (item->state == PROCESS_RUNNING) {
-                item->group_exit_pending = 1;
-                item = item->next;
-                continue;
+            item->is_thread = 1;
+            item->group_exit_pending = 1;
+            if (item->state == PROCESS_BLOCKED || item->state == PROCESS_STOPPED) {
+                item->futex_wait_active = 0;
+                item->wait4_active = 0;
+                item->wait_channel = NULL;
+                wake_to_ready(item);
             }
-            process_handle_robust_list(item);
-            if (item->clear_child_tid_user) {
-                uint64_t clear_address = item->clear_child_tid_user;
-                uint32_t zero = 0;
-                (void)vmm_copy_to_space(item->cr3, clear_address, &zero, sizeof(zero));
-                item->clear_child_tid_user = 0;
-                (void)process_futex_wake(clear_address, 1, FUTEX_BITSET_MATCH_ANY, 1);
-            }
-            mark_dead(item);
-            process_release_files(item);
         }
         item = item->next;
     } while (item != queue);
@@ -2394,12 +2658,16 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
         vmm_destroy_address_space(new_cr3);
         return -EINVAL;
     }
+    terminate_sibling_threads(0);
     struct process_memory *old_memory = current->memory;
     uint64_t old_cr3 = current->cr3;
     current->memory = new_memory;
     current->cr3 = new_cr3;
-    current->tgid = current->pid;
-    current->is_thread = 0;
+    {
+        SCHED_LOCKED;
+        current->tgid = current->pid;
+        current->is_thread = 0;
+    }
     current->entry = image.entry;
     fpu_init_state(current);
     fpu_restore(current);
@@ -2424,12 +2692,9 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
     for (int sig = 0; sig < TUNIX_NSIG; sig++) {
         if (current->signal_actions[sig].handler != SIG_IGN) memset(&current->signal_actions[sig], 0, sizeof(current->signal_actions[sig]));
     }
-    current->signal_pending = 0;
+    __atomic_store_n(&current->signal_pending, 0, __ATOMIC_RELEASE);
     current->in_signal = 0;
-    for (int fd = 0; fd < current->files->capacity; fd++) {
-        if (current->files->fds[fd] && (current->files->fd_flags[fd] & PROCESS_FD_CLOEXEC))
-            process_close_fd(current, fd);
-    }
+    file_table_close_on_exec(current->files);
 
     memset(frame, 0, sizeof(*frame));
     arch_frame_enter_user(frame, current->entry, current->user_stack_top);
@@ -2444,47 +2709,65 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
 }
 
 int64_t process_waitpid_from_syscall(struct syscall_frame *frame, int64_t pid,
-                                     uint64_t status_user, int options) {
+                                     uint64_t status_user, int options,
+                                     uint64_t syscall_number) {
     options &= ~(WNOTHREAD | WALLCHILDREN | WCLONE);
     if (!current || !frame || (options & ~(WNOHANG | WUNTRACED | WCONTINUED))) return -EINVAL;
     struct process *parent = current;
-    int has_child = 0;
-    for (struct process *item = parent->children; item; item = item->sibling_next) {
-        {
-            if (child_matches(item, parent, pid)) {
-                has_child = 1;
-                if (item->state == PROCESS_ZOMBIE) {
-                    if (store_wait_status(parent, item, status_user) != 0) return -EINVAL;
-                    mark_dead(item);
-                    return (int64_t)item->pid;
-                }
-                if ((options & WUNTRACED) && item->state == PROCESS_STOPPED &&
-                    !item->stop_reported) {
-                    int status = ((item->stop_signal & 0xFF) << 8) | 0x7F;
-                    if (store_job_status(parent, status, status_user) != 0) return -EINVAL;
-                    item->stop_reported = 1;
-                    return (int64_t)item->pid;
-                }
-                if ((options & WCONTINUED) && item->continued_pending) {
-                    if (store_job_status(parent, 0xFFFF, status_user) != 0) return -EINVAL;
-                    item->continued_pending = 0;
-                    return (int64_t)item->pid;
-                }
+    int status = 0;
+    int64_t found = 0;
+    {
+        SCHED_LOCKED;
+        int has_child = 0;
+        for (struct process *item = parent->children; item && !found;
+             item = item->sibling_next) {
+            if (!child_matches(item, parent, pid)) continue;
+            has_child = 1;
+            if (item->state == PROCESS_ZOMBIE) {
+                status = exit_status_word(item);
+                found = (int64_t)item->pid;
+                mark_dead(item);
+            } else if ((options & WUNTRACED) && item->state == PROCESS_STOPPED &&
+                       !item->stop_reported) {
+                status = ((item->stop_signal & 0xFF) << 8) | 0x7F;
+                item->stop_reported = 1;
+                found = (int64_t)item->pid;
+            } else if ((options & WCONTINUED) && item->continued_pending) {
+                status = 0xFFFF;
+                item->continued_pending = 0;
+                found = (int64_t)item->pid;
             }
         }
+        if (!found) {
+            if (!has_child) return -ECHILD;
+            if (options & WNOHANG) return 0;
+            if (process_signal_interrupts_wait()) return -EINTR;
+            SYSCALL_RESTART(frame, syscall_number);
+            parent->syscall_rewound = 1;
+            parent->saved_frame = *frame;
+            if (wake_missed()) {
+                set_process_state(parent, PROCESS_READY);
+                struct process *next = next_runnable(parent);
+                if (!next || next == parent) {
+                    set_process_state(parent, PROCESS_RUNNING);
+                    return PROCESS_RESTARTED;
+                }
+                *frame = next->saved_frame;
+                activate_process(next);
+                return PROCESS_RESTARTED;
+            }
+            set_process_state(parent, PROCESS_BLOCKED);
+            parent->wait4_active = 1;
+            parent->wait_pid = pid;
+            parent->wait_options = options;
+            parent->voluntary_switches++;
+            if (switch_to_next(frame, parent) != 0) go_idle();
+            return PROCESS_RESTARTED;
+        }
     }
-    if (!has_child) return -ECHILD;
-    if (options & WNOHANG) return 0;
-    if (process_signal_interrupts_wait()) return -EINTR;
-
-    parent->saved_frame = *frame;
-    set_process_state(parent, PROCESS_BLOCKED);
-    parent->wait4_active = 1;
-    parent->wait_pid = pid;
-    parent->wait_status_user = status_user;
-    parent->wait_options = options;
-    if (switch_to_next(frame, parent) != 0) go_idle();
-    return 0;
+    if (status_user && vmm_copy_to_space(parent->cr3, status_user, &status, sizeof(status)) != 0)
+        return -EFAULT;
+    return found;
 }
 
 struct waitid_siginfo {
@@ -2509,58 +2792,50 @@ int64_t process_waitid_from_syscall(int64_t pid_spec, uint64_t info_user,
     struct process *parent = current;
     struct waitid_siginfo info;
     memset(&info, 0, sizeof(info));
-
-    int has_child = 0;
-    for (struct process *item = parent->children; item; item = item->sibling_next) {
-        {
-            if (child_matches(item, parent, pid_spec)) {
-                has_child = 1;
-                if ((options & WEXITED) && item->state == PROCESS_ZOMBIE) {
-                    info.si_signo = SIGCHLD;
-                    info.si_pid = (int32_t)item->pid;
-                    if (item->termination_signal) {
-                        info.si_code = CLD_KILLED;
-                        info.si_status = item->termination_signal & 0x7F;
-                    } else {
-                        info.si_code = CLD_EXITED;
-                        info.si_status = item->exit_status & 0xFF;
-                    }
-                    if (vmm_copy_to_space(parent->cr3, info_user, &info,
-                                          sizeof(info)) != 0) return -EFAULT;
-                    if (!(options & WNOWAIT)) mark_dead(item);
-                    return 0;
+    int found = 0;
+    {
+        SCHED_LOCKED;
+        int has_child = 0;
+        for (struct process *item = parent->children; item && !found;
+             item = item->sibling_next) {
+            if (!child_matches(item, parent, pid_spec)) continue;
+            has_child = 1;
+            if ((options & WEXITED) && item->state == PROCESS_ZOMBIE) {
+                info.si_signo = SIGCHLD;
+                info.si_pid = (int32_t)item->pid;
+                if (item->termination_signal) {
+                    info.si_code = CLD_KILLED;
+                    info.si_status = item->termination_signal & 0x7F;
+                } else {
+                    info.si_code = CLD_EXITED;
+                    info.si_status = item->exit_status & 0xFF;
                 }
-                if ((options & WSTOPPED) && item->state == PROCESS_STOPPED &&
-                    !item->stop_reported) {
-                    info.si_signo = SIGCHLD;
-                    info.si_pid = (int32_t)item->pid;
-                    info.si_code = CLD_STOPPED;
-                    info.si_status = item->stop_signal & 0xFF;
-                    if (vmm_copy_to_space(parent->cr3, info_user, &info,
-                                          sizeof(info)) != 0) return -EFAULT;
-                    if (!(options & WNOWAIT)) item->stop_reported = 1;
-                    return 0;
-                }
-                if ((options & WCONTINUED) && item->continued_pending) {
-                    info.si_signo = SIGCHLD;
-                    info.si_pid = (int32_t)item->pid;
-                    info.si_code = CLD_CONTINUED;
-                    info.si_status = SIGCONT;
-                    if (vmm_copy_to_space(parent->cr3, info_user, &info,
-                                          sizeof(info)) != 0) return -EFAULT;
-                    if (!(options & WNOWAIT)) item->continued_pending = 0;
-                    return 0;
-                }
+                if (!(options & WNOWAIT)) mark_dead(item);
+                found = 1;
+            } else if ((options & WSTOPPED) && item->state == PROCESS_STOPPED &&
+                       !item->stop_reported) {
+                info.si_signo = SIGCHLD;
+                info.si_pid = (int32_t)item->pid;
+                info.si_code = CLD_STOPPED;
+                info.si_status = item->stop_signal & 0xFF;
+                if (!(options & WNOWAIT)) item->stop_reported = 1;
+                found = 1;
+            } else if ((options & WCONTINUED) && item->continued_pending) {
+                info.si_signo = SIGCHLD;
+                info.si_pid = (int32_t)item->pid;
+                info.si_code = CLD_CONTINUED;
+                info.si_status = SIGCONT;
+                if (!(options & WNOWAIT)) item->continued_pending = 0;
+                found = 1;
             }
         }
+        if (!found) {
+            if (!has_child) return -ECHILD;
+            if (!(options & WNOHANG)) return -EAGAIN;
+        }
     }
-    if (!has_child) return -ECHILD;
-    if (options & WNOHANG) {
-        if (vmm_copy_to_space(parent->cr3, info_user, &info, sizeof(info)) != 0)
-            return -EFAULT;
-        return 0;
-    }
-    return -EAGAIN;
+    if (vmm_copy_to_space(parent->cr3, info_user, &info, sizeof(info)) != 0) return -EFAULT;
+    return 0;
 }
 
 static void signal_one_process(struct process *target, int signal_number) {
@@ -2572,12 +2847,12 @@ static void signal_one_process(struct process *target, int signal_number) {
         wake_to_ready(target);
         target->continued_pending = 1;
         target->stop_reported = 0;
-        target->signal_pending &= ~(signal_bit(SIGSTOP) | signal_bit(SIGTSTP) |
-                                    signal_bit(SIGTTIN) | signal_bit(SIGTTOU));
-        if (notify_parent_of_job_change(target, WCONTINUED, 0xFFFF))
-            target->continued_pending = 0;
+        __atomic_fetch_and(&target->signal_pending,
+                           ~(signal_bit(SIGSTOP) | signal_bit(SIGTSTP) |
+                             signal_bit(SIGTTIN) | signal_bit(SIGTTOU)), __ATOMIC_RELEASE);
+        notify_parent_of_job_change(target);
     }
-    target->signal_pending |= signal_bit(signal_number);
+    __atomic_fetch_or(&target->signal_pending, signal_bit(signal_number), __ATOMIC_RELEASE);
     if (target->state == PROCESS_BLOCKED &&
         (signal_number != SIGCHLD ||
          (!target->wait4_active && signal_reaches_waiter(target, SIGCHLD)))) {
@@ -2644,21 +2919,20 @@ static int send_signal(int64_t pid, int signal_number, int checked) {
 }
 
 int process_send_signal(int64_t pid, int signal_number) {
-    oplock_enter();
-    int result = send_signal(pid, signal_number, 0);
-    oplock_leave();
-    return result;
+    SCHED_LOCKED;
+    wake_bump();
+    return send_signal(pid, signal_number, 0);
 }
 
 int process_send_signal_checked(int64_t pid, int signal_number) {
-    oplock_enter();
-    int result = send_signal(pid, signal_number, 1);
-    oplock_leave();
-    return result;
+    SCHED_LOCKED;
+    wake_bump();
+    return send_signal(pid, signal_number, 1);
 }
 
 int process_setpgid(int64_t pid, int64_t pgid) {
     if (!current) return -EINVAL;
+    SCHED_LOCKED;
     struct process *target = pid == 0 ? current : process_find((uint64_t)pid);
     if (!target) return -ESRCH;
     if (target != current && target->ppid != current->pid) return -EPERM;
@@ -2670,6 +2944,7 @@ int process_setpgid(int64_t pid, int64_t pgid) {
 
 int64_t process_setsid(void) {
     if (!current) return -EINVAL;
+    SCHED_LOCKED;
     if (current->pgid == current->pid) return -EPERM;
     current->sid = current->pid;
     current->pgid = current->pid;
@@ -2696,8 +2971,9 @@ int process_sigreturn(struct syscall_frame *frame) {
 }
 
 static int next_pending_signal(struct process *process) {
-    uint64_t available = process->signal_pending & ~process->signal_blocked;
-    available |= process->signal_pending & signal_bit(SIGKILL);
+    uint64_t pending = __atomic_load_n(&process->signal_pending, __ATOMIC_ACQUIRE);
+    uint64_t available = pending & ~process->signal_blocked;
+    available |= pending & signal_bit(SIGKILL);
     if (!available) return 0;
     for (int signal_number = 1; signal_number <= TUNIX_NSIG; signal_number++) {
         if (available & signal_bit(signal_number)) return signal_number;
@@ -2786,7 +3062,7 @@ void process_prepare_user_return(struct syscall_frame *frame) {
     int signal_number = next_pending_signal(current);
     if (!signal_number) return;
     uint64_t bit = signal_bit(signal_number);
-    current->signal_pending &= ~bit;
+    __atomic_fetch_and(&current->signal_pending, ~bit, __ATOMIC_ACQ_REL);
     struct tunix_sigaction *action = &current->signal_actions[signal_number - 1];
 
     if (!signal_would_act(current, signal_number)) return;
@@ -2794,12 +3070,14 @@ void process_prepare_user_return(struct syscall_frame *frame) {
         (action->handler == SIG_DFL &&
          (signal_number == SIGTSTP || signal_number == SIGTTIN ||
           signal_number == SIGTTOU))) {
+        SCHED_LOCKED;
+        wake_bump();
         current->stop_signal = signal_number;
         current->stop_reported = 0;
         current->continued_pending = 0;
+        current->saved_frame = *frame;
         set_process_state(current, PROCESS_STOPPED);
-        current->stop_reported = notify_parent_of_job_change(
-            current, WUNTRACED, ((signal_number & 0xFF) << 8) | 0x7F);
+        notify_parent_of_job_change(current);
         if (switch_to_next(frame, current) != 0) go_idle();
         return;
     }
@@ -2924,6 +3202,7 @@ uint64_t process_runtime_ns(const struct process *process) {
 }
 
 uint64_t process_count(void) {
+    SCHED_LOCKED;
     if (!queue) return 0;
     uint64_t count = 0;
     struct process *item = queue;
@@ -2939,6 +3218,7 @@ uint64_t process_created_count(void) {
 }
 
 uint64_t process_runnable_count(void) {
+    SCHED_LOCKED;
     if (!queue) return 0;
     uint64_t count = 0;
     struct process *item = queue;
@@ -2950,6 +3230,7 @@ uint64_t process_runnable_count(void) {
 }
 
 uint64_t process_blocked_count(void) {
+    SCHED_LOCKED;
     if (!queue) return 0;
     uint64_t count = 0;
     struct process *item = queue;
@@ -2961,6 +3242,7 @@ uint64_t process_blocked_count(void) {
 }
 
 uint64_t process_total_runtime_ns(void) {
+    SCHED_LOCKED;
     if (!queue) return 0;
     uint64_t total = 0;
     struct process *item = queue;

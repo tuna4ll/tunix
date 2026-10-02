@@ -34,6 +34,7 @@ void lock_init(struct lock *lock, const char *name, unsigned rank);
 void lock_acquire(struct lock *lock);
 int lock_try_acquire(struct lock *lock);
 void lock_release(struct lock *lock);
+void lock_drop(struct lock *lock);
 int lock_held(const struct lock *lock);
 unsigned lock_depth_here(void);
 void lock_check_released(const char *where);

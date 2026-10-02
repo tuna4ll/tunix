@@ -2,6 +2,7 @@
 #define TUNIX_PROCESS_H
 
 #include <stdint.h>
+#include "lock.h"
 #include "cred.h"
 #include "percpu.h"
 #include "file.h"
@@ -58,9 +59,11 @@ struct process_memory {
     uint64_t brk_end;
     uint64_t mmap_base;
     struct vm_area *areas;
+    struct process_memory *release_next;
 };
 
 struct file_table {
+    struct lock lock;
     int refs;
     int capacity;
     struct file **fds;
@@ -209,6 +212,18 @@ struct process {
     uint8_t on_key_list;
     uint8_t on_dead_list;
     volatile uint8_t on_cpu;
+    uint8_t struct_orphaned;
+    uint32_t refs;
+    uint64_t wake_snapshot;
+};
+
+#define PROCESS_RESTARTED INT64_MIN
+
+struct fork_request {
+    uint64_t child_stack;
+    uint64_t child_settid_user;
+    uint64_t child_cleartid_user;
+    int clear_signal_handlers;
 };
 
 void process_init(void);
@@ -216,6 +231,12 @@ struct process *process_create_from_path(const char *path);
 struct process *process_current(void);
 void process_dump_all(void);
 struct process *process_find(uint64_t pid);
+struct process *process_get(uint64_t pid);
+void process_put(struct process *process);
+int process_exists(uint64_t pid);
+void process_table_lock(void);
+void process_table_unlock(void);
+void process_note_syscall_entry(void);
 void process_note_deadline(uint64_t deadline_ns);
 int process_ready_pending(void);
 uint64_t process_stack_floor(const struct process *process);
@@ -259,18 +280,28 @@ int process_signal_has_handler(int signal_number);
 int process_fault_from_interrupt(struct interrupt_frame *frame, int signal_number);
 void process_run_child_first_from_syscall(struct syscall_frame *frame, uint64_t child_pid);
 void process_reap_deferred(void);
+void process_io_recheck(void);
+struct file *file_table_get(struct file_table *table, int fd);
+void file_table_ref(struct file_table *table);
+void file_table_unref(struct file_table *table);
+void file_table_close_on_exec(struct file_table *table);
+struct file *process_file_get(struct process *process, int fd);
+struct file_table *process_files_get(struct process *process);
 void process_finish_switch(void);
 void process_exit_from_syscall(struct syscall_frame *frame, int status);
 void process_exit_group_from_syscall(struct syscall_frame *frame, int status);
 int process_install_file(struct process *process, struct file *file, int minimum_fd);
 int process_install_file_flags(struct process *process, struct file *file, int minimum_fd, uint8_t flags);
+int process_install_file_at(struct process *process, struct file *file, int fd,
+                            uint8_t flags, struct file **replaced);
 uint8_t process_get_fd_flags(const struct process *process, int fd);
 int process_set_fd_flags(struct process *process, int fd, uint8_t flags);
 int process_close_fd(struct process *process, int fd);
 int process_reserve_fd(struct process *process, int fd);
 int process_set_rlimit(struct process *process, unsigned resource,
                        const struct process_rlimit *value);
-int64_t process_fork_from_syscall(struct syscall_frame *frame);
+int64_t process_fork_from_syscall(struct syscall_frame *frame,
+                                  const struct fork_request *request);
 int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
                                           uint64_t child_stack, uint64_t tls,
                                           uint64_t parent_tid_user,
@@ -280,7 +311,8 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
                                   const char *const argv[], const char *const envp[],
                                   const struct vfs_node *credential_source);
 int64_t process_waitpid_from_syscall(struct syscall_frame *frame, int64_t pid,
-                                     uint64_t status_user, int options);
+                                     uint64_t status_user, int options,
+                                     uint64_t syscall_number);
 int64_t process_waitid_from_syscall(int64_t pid_spec, uint64_t info_user,
                                     int options);
 int process_send_signal(int64_t pid, int signal_number);

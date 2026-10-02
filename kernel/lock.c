@@ -150,3 +150,9 @@ void lock_check_released(const char *where) {
                 mine->locks[0]->name);
     }
 }
+
+void lock_drop(struct lock *lock) {
+    if (!lock_held(lock)) return;
+    lock->depth = 1;
+    lock_release(lock);
+}

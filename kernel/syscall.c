@@ -4481,10 +4481,18 @@ static int64_t sys_capget(uint64_t user_header, uint64_t user_data) {
     if (!user_data) return 0;
     if (header.pid < 0) return -EINVAL;
 
-    struct process *target = header.pid ? process_find((uint64_t)header.pid) : process_current();
-    if (!target) return -ESRCH;
+    uint32_t target_euid = 0;
+    if (header.pid) {
+        process_table_lock();
+        struct process *target = process_find((uint64_t)header.pid);
+        if (target) target_euid = target->cred.euid;
+        process_table_unlock();
+        if (!target) return -ESRCH;
+    } else {
+        target_euid = process_current()->cred.euid;
+    }
 
-    uint32_t bits = target->cred.euid == 0 ? 0xFFFFFFFFU : 0U;
+    uint32_t bits = target_euid == 0 ? 0xFFFFFFFFU : 0U;
     struct cap_user_data data[2];
     data[0].effective = data[0].permitted = data[0].inheritable = bits;
     data[1].effective = data[1].permitted = data[1].inheritable = bits;
@@ -4620,33 +4628,44 @@ static int64_t sys_set_robust_list(uint64_t user_head, size_t length) {
 static int64_t sys_get_robust_list(int pid, uint64_t user_head_pointer,
                                    uint64_t user_length_pointer) {
     if (!user_head_pointer || !user_length_pointer) return -EFAULT;
+    uint64_t head = 0;
+    uint64_t length = 0;
+    process_table_lock();
     struct process *target = pid == 0 ? process_current() : process_find((uint64_t)pid);
+    if (target) {
+        head = target->robust_list_head;
+        length = target->robust_list_length;
+    }
+    process_table_unlock();
     if (!target) return -ESRCH;
-    uint64_t head = target->robust_list_head;
-    uint64_t length = target->robust_list_length;
     if (copy_to_user(user_head_pointer, &head, sizeof(head)) != 0) return -EFAULT;
     return copy_to_user(user_length_pointer, &length, sizeof(length)) == 0 ? 0 : -EFAULT;
 }
 
 static int64_t sys_prlimit(uint64_t pid, uint64_t resource, uint64_t user_new_limit,
                            uint64_t user_old_limit) {
-    struct process *target = pid ? process_find(pid) : process_current();
-    if (!target) return -ESRCH;
     if (resource >= PROCESS_RLIMITS) return -EINVAL;
-    const struct credentials *cred = cred_current();
-    int privileged = !cred || cred->euid == 0;
-    if (target != process_current() && !privileged && cred->euid != target->cred.uid)
-        return -EPERM;
     struct linux_rlimit wanted;
     if (user_new_limit && copy_from_user(&wanted, user_new_limit, sizeof(wanted)) != 0)
         return -EFAULT;
-    struct process_rlimit previous = target->rlimits[resource];
-    if (user_new_limit) {
-        if (wanted.rlim_cur > wanted.rlim_max) return -EINVAL;
-        if (wanted.rlim_max > previous.hard && !privileged) return -EPERM;
+    const struct credentials *cred = cred_current();
+    int privileged = !cred || cred->euid == 0;
+    struct process_rlimit previous = {0, 0};
+    int64_t status = 0;
+    process_table_lock();
+    struct process *target = pid ? process_find(pid) : process_current();
+    if (!target) status = -ESRCH;
+    else if (target != process_current() && !privileged && cred->euid != target->cred.uid)
+        status = -EPERM;
+    else previous = target->rlimits[resource];
+    if (status == 0 && user_new_limit) {
         struct process_rlimit value = {wanted.rlim_cur, wanted.rlim_max};
-        if (process_set_rlimit(target, (unsigned)resource, &value) != 0) return -EPERM;
+        if (wanted.rlim_cur > wanted.rlim_max) status = -EINVAL;
+        else if (wanted.rlim_max > previous.hard && !privileged) status = -EPERM;
+        else if (process_set_rlimit(target, (unsigned)resource, &value) != 0) status = -EPERM;
     }
+    process_table_unlock();
+    if (status != 0) return status;
     if (user_old_limit) {
         struct linux_rlimit old = {previous.soft, previous.hard};
         if (copy_to_user(user_old_limit, &old, sizeof(old)) != 0) return -EFAULT;
@@ -4657,7 +4676,7 @@ static int64_t sys_prlimit(uint64_t pid, uint64_t resource, uint64_t user_new_li
 static int64_t sys_clone_fork_compat(struct syscall_frame *frame,
                                      uint64_t flags, uint64_t child_stack,
                                      uint64_t parent_tid_user, uint64_t child_tid_user,
-                                     uint64_t tls) {
+                                     uint64_t tls, int clear_handlers) {
     struct process *parent = process_current();
     if (!parent) return -EINVAL;
     if ((flags & CLONE_PARENT_SETTID) &&
@@ -4687,12 +4706,8 @@ static int64_t sys_clone_fork_compat(struct syscall_frame *frame,
                                  CLONE_FORK_METADATA_FLAGS;
         if (flags & ~(0xFFULL | vfork_allowed)) return -ENOSYS;
         if (exit_signal != 0 && exit_signal != SIGCHLD) return -EINVAL;
-        int64_t vfork_pid = process_fork_from_syscall(frame);
-        if (vfork_pid <= 0) return vfork_pid;
-        struct process *spawned = process_find((uint64_t)vfork_pid);
-        if (!spawned) return -ESRCH;
-        SYSCALL_USER_SP(&spawned->saved_frame) = child_stack;
-        return vfork_pid;
+        struct fork_request request = {child_stack, 0, 0, clear_handlers};
+        return process_fork_from_syscall(frame, &request);
     }
 
     uint64_t unsupported = flags & ~(0xFFULL | CLONE_FORK_METADATA_FLAGS);
@@ -4703,35 +4718,20 @@ static int64_t sys_clone_fork_compat(struct syscall_frame *frame,
     }
     if (exit_signal != 0 && exit_signal != SIGCHLD) return -EINVAL;
 
-    int64_t pid = process_fork_from_syscall(frame);
+    struct fork_request request = {
+        child_stack,
+        (flags & CLONE_CHILD_SETTID) ? child_tid_user : 0,
+        (flags & CLONE_CHILD_CLEARTID) ? child_tid_user : 0,
+        clear_handlers,
+    };
+    int64_t pid = process_fork_from_syscall(frame, &request);
     if (pid <= 0) return pid;
 
     uint32_t tid = (uint32_t)pid;
     if ((flags & CLONE_PARENT_SETTID) && parent_tid_user) {
         if (copy_to_user(parent_tid_user, &tid, sizeof(tid)) != 0) return -EFAULT;
     }
-
-    struct process *child = process_find((uint64_t)pid);
-    if (!child) return -ESRCH;
-    if (child_stack) SYSCALL_USER_SP(&child->saved_frame) = child_stack;
-    if ((flags & CLONE_CHILD_SETTID) && child_tid_user) {
-        if (vmm_copy_to_space(child->cr3, child_tid_user, &tid, sizeof(tid)) != 0)
-            return -EFAULT;
-    }
-    if ((flags & CLONE_CHILD_CLEARTID) && child_tid_user)
-        child->clear_child_tid_user = child_tid_user;
-
     return pid;
-}
-
-static void clone3_clear_signal_handlers(uint64_t child_pid) {
-    struct process *child = process_find(child_pid);
-    if (!child) return;
-    for (unsigned signal = 0; signal < TUNIX_NSIG; signal++) {
-        if (child->signal_actions[signal].handler != SIG_IGN)
-            memset(&child->signal_actions[signal], 0,
-                   sizeof(child->signal_actions[signal]));
-    }
 }
 
 static int64_t sys_clone3_fork_compat(struct syscall_frame *frame,
@@ -4755,11 +4755,9 @@ static int64_t sys_clone3_fork_compat(struct syscall_frame *frame,
 
     uint64_t child_stack = args.stack ? args.stack + args.stack_size : 0;
     uint64_t flags = (args.flags & ~CLONE_CLEAR_SIGHAND) | args.exit_signal;
-    int64_t pid = sys_clone_fork_compat(frame, flags, child_stack,
-                                        args.parent_tid, args.child_tid, args.tls);
-    if (pid > 0 && (args.flags & CLONE_CLEAR_SIGHAND))
-        clone3_clear_signal_handlers((uint64_t)pid);
-    return pid;
+    return sys_clone_fork_compat(frame, flags, child_stack, args.parent_tid,
+                                 args.child_tid, args.tls,
+                                 (args.flags & CLONE_CLEAR_SIGHAND) != 0);
 }
 
 static struct file *file_from_fd(int fd) {
@@ -5487,7 +5485,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         case SYS_CLONE: {
             int64_t pid = sys_clone_fork_compat(
                 frame, SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame),
-                SYSCALL_CLONE_CHILD_TID(frame), SYSCALL_CLONE_TLS(frame));
+                SYSCALL_CLONE_CHILD_TID(frame), SYSCALL_CLONE_TLS(frame), 0);
             SYSCALL_RET(frame) = (uint64_t)pid;
             if (pid > 0) process_run_child_first_from_syscall(frame, (uint64_t)pid);
             break;
@@ -5500,7 +5498,7 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         }
         case SYS_FORK:
         case SYS_VFORK: {
-            int64_t pid = process_fork_from_syscall(frame);
+            int64_t pid = process_fork_from_syscall(frame, NULL);
             SYSCALL_RET(frame) = (uint64_t)pid;
             if (pid > 0) process_run_child_first_from_syscall(frame, (uint64_t)pid);
             break;
@@ -5509,8 +5507,9 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         case SYS_EXIT: process_exit_from_syscall(frame, (int)SYSCALL_ARG0(frame)); break;
         case SYS_EXIT_GROUP: process_exit_group_from_syscall(frame, (int)SYSCALL_ARG0(frame)); break;
         case SYS_WAIT4: {
-            int64_t result = process_waitpid_from_syscall(frame, (int64_t)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame));
-            if (process_current() == caller) SYSCALL_RET(frame) = (uint64_t)result;
+            int64_t result = process_waitpid_from_syscall(frame, (int64_t)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame), SYS_WAIT4);
+            if (result != PROCESS_RESTARTED && process_current() == caller)
+                SYSCALL_RET(frame) = (uint64_t)result;
             break;
         }
         case SYS_WAITID: {
@@ -5852,13 +5851,17 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         case SYS_GETPGRP: SYSCALL_RET(frame) = process_current() ? process_current()->pgid : 0; break;
         case SYS_SETSID: SYSCALL_RET(frame) = (uint64_t)process_setsid(); break;
         case SYS_GETPGID: {
+            process_table_lock();
             struct process *target = SYSCALL_ARG0(frame) ? process_find(SYSCALL_ARG0(frame)) : process_current();
             SYSCALL_RET(frame) = target ? target->pgid : (uint64_t)-(int64_t)ESRCH;
+            process_table_unlock();
             break;
         }
         case SYS_GETSID: {
+            process_table_lock();
             struct process *target = SYSCALL_ARG0(frame) ? process_find(SYSCALL_ARG0(frame)) : process_current();
             SYSCALL_RET(frame) = target ? target->sid : (uint64_t)-(int64_t)ESRCH;
+            process_table_unlock();
             break;
         }
         case SYS_CAPGET: SYSCALL_RET(frame) = (uint64_t)sys_capget(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame)); break;
@@ -6217,6 +6220,7 @@ static int syscall_number_may_share(uint64_t number) {
 void syscall_dispatch(struct syscall_frame *frame) {
     uint64_t syscall_number = SYSCALL_NR(frame);
     klock_note(KLOCK_NOTE_SYSCALL | (uint32_t)SYSCALL_NR(frame));
+    process_note_syscall_entry();
 
     if (boot_verbose()) {
         static unsigned traced;

@@ -271,13 +271,12 @@ int file_flock(struct file *file, int operation) {
 }
 
 void file_ref(struct file *file) {
-    if (file) file->refs++;
+    if (file) __atomic_add_fetch(&file->refs, 1, __ATOMIC_RELAXED);
 }
 
 void file_unref(struct file *file) {
-    if (!file || file->refs <= 0) return;
-    file->refs--;
-    if (file->refs != 0) return;
+    if (!file || __atomic_load_n(&file->refs, __ATOMIC_RELAXED) <= 0) return;
+    if (__atomic_sub_fetch(&file->refs, 1, __ATOMIC_ACQ_REL) != 0) return;
 
     file_flock_release(file);
 
