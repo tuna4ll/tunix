@@ -8,6 +8,7 @@
 #include "../../include/kstring.h"
 #include "../../include/pci.h"
 #include "../../include/vmm.h"
+#include "../../include/lock.h"
 
 extern void kprintf(const char *fmt, ...);
 
@@ -104,6 +105,7 @@ struct ahci_port {
     uint8_t *page;
     uint64_t sectors;
     char name[16];
+    struct lock lock;
 };
 
 static unsigned port_count;
@@ -226,7 +228,7 @@ static int issue(struct ahci_port *port, uint8_t command, uint64_t lba,
     return wait_for_completion(port);
 }
 
-static int ahci_read(void *context, uint64_t lba, uint32_t count, void *destination) {
+static int ahci_read_unlocked(void *context, uint64_t lba, uint32_t count, void *destination) {
     struct ahci_port *port = (struct ahci_port *)context;
     uint8_t *out = (uint8_t *)destination;
     while (count) {
@@ -240,7 +242,15 @@ static int ahci_read(void *context, uint64_t lba, uint32_t count, void *destinat
     return 0;
 }
 
-static int ahci_write(void *context, uint64_t lba, uint32_t count, const void *source) {
+static int ahci_read(void *context, uint64_t lba, uint32_t count, void *destination) {
+    struct ahci_port *port = (struct ahci_port *)context;
+    lock_acquire(&port->lock);
+    int status = ahci_read_unlocked(context, lba, count, destination);
+    lock_release(&port->lock);
+    return status;
+}
+
+static int ahci_write_unlocked(void *context, uint64_t lba, uint32_t count, const void *source) {
     struct ahci_port *port = (struct ahci_port *)context;
     const uint8_t *in = (const uint8_t *)source;
     while (count) {
@@ -254,8 +264,24 @@ static int ahci_write(void *context, uint64_t lba, uint32_t count, const void *s
     return 0;
 }
 
-static int ahci_flush(void *context) {
+static int ahci_write(void *context, uint64_t lba, uint32_t count, const void *source) {
+    struct ahci_port *port = (struct ahci_port *)context;
+    lock_acquire(&port->lock);
+    int status = ahci_write_unlocked(context, lba, count, source);
+    lock_release(&port->lock);
+    return status;
+}
+
+static int ahci_flush_unlocked(void *context) {
     return issue((struct ahci_port *)context, ATA_FLUSH_CACHE_EXT, 0, 0, NULL, 0, 0);
+}
+
+static int ahci_flush(void *context) {
+    struct ahci_port *port = (struct ahci_port *)context;
+    lock_acquire(&port->lock);
+    int status = ahci_flush_unlocked(context);
+    lock_release(&port->lock);
+    return status;
 }
 
 static uint64_t identify_sectors(struct ahci_port *port) {
@@ -284,6 +310,7 @@ static void bring_up_port(uint64_t hba, unsigned index) {
     struct ahci_port *port = kmalloc(sizeof(*port));
     if (!port) return;
     memset(port, 0, sizeof(*port));
+    lock_init(&port->lock, "ahci port", LOCK_RANK_BLOCK);
     port->registers = registers;
 
     if (stop_port(port) != 0) {

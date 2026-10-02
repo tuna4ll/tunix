@@ -8,6 +8,7 @@
 #include "../../include/nvme.h"
 #include "../../include/pci.h"
 #include "../../include/vmm.h"
+#include "../../include/lock.h"
 
 extern void kprintf(const char *fmt, ...);
 
@@ -75,6 +76,7 @@ struct nvme_queue {
 };
 
 struct nvme_controller {
+    struct lock lock;
     uint64_t registers;
     uint32_t doorbell_stride;
     uint8_t *pages;
@@ -214,7 +216,7 @@ static int transfer(struct nvme_namespace *space, uint64_t lba, uint32_t count,
     return submit(space->controller, &space->controller->io_queue, &command) == 0 ? 0 : -1;
 }
 
-static int nvme_read(void *context, uint64_t lba, uint32_t count, void *destination) {
+static int nvme_read_unlocked(void *context, uint64_t lba, uint32_t count, void *destination) {
     struct nvme_namespace *space = context;
     uint8_t *out = (uint8_t *)destination;
     while (count) {
@@ -241,7 +243,15 @@ static int nvme_read(void *context, uint64_t lba, uint32_t count, void *destinat
     return 0;
 }
 
-static int nvme_write(void *context, uint64_t lba, uint32_t count, const void *source) {
+static int nvme_read(void *context, uint64_t lba, uint32_t count, void *destination) {
+    struct nvme_namespace *space = context;
+    lock_acquire(&space->controller->lock);
+    int status = nvme_read_unlocked(context, lba, count, destination);
+    lock_release(&space->controller->lock);
+    return status;
+}
+
+static int nvme_write_unlocked(void *context, uint64_t lba, uint32_t count, const void *source) {
     struct nvme_namespace *space = context;
     const uint8_t *in = (const uint8_t *)source;
     while (count) {
@@ -269,13 +279,29 @@ static int nvme_write(void *context, uint64_t lba, uint32_t count, const void *s
     return 0;
 }
 
-static int nvme_flush(void *context) {
+static int nvme_write(void *context, uint64_t lba, uint32_t count, const void *source) {
+    struct nvme_namespace *space = context;
+    lock_acquire(&space->controller->lock);
+    int status = nvme_write_unlocked(context, lba, count, source);
+    lock_release(&space->controller->lock);
+    return status;
+}
+
+static int nvme_flush_unlocked(void *context) {
     struct nvme_namespace *space = context;
     struct nvme_command command;
     memset(&command, 0, sizeof(command));
     command.dword0 = IO_FLUSH;
     command.nsid = space->nsid;
     return submit(space->controller, &space->controller->io_queue, &command) == 0 ? 0 : -1;
+}
+
+static int nvme_flush(void *context) {
+    struct nvme_namespace *space = context;
+    lock_acquire(&space->controller->lock);
+    int status = nvme_flush_unlocked(context);
+    lock_release(&space->controller->lock);
+    return status;
 }
 
 static int wait_ready(struct nvme_controller *controller, int wanted) {
@@ -383,6 +409,7 @@ static void bring_up(const struct pci_device *pci) {
     struct nvme_controller *controller = kmalloc(sizeof(*controller));
     if (!controller) return;
     memset(controller, 0, sizeof(*controller));
+    lock_init(&controller->lock, "nvme", LOCK_RANK_BLOCK);
     controller->next_command_id = 1;
     controller->index = controller_count;
     controller->registers = vmm_map_device(base, 0x2000U);

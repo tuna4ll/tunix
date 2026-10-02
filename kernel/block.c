@@ -8,6 +8,7 @@
 #include "include/eventfs.h"
 #include "include/heap.h"
 #include "include/kstring.h"
+#include "include/lock.h"
 #include "include/nvme.h"
 #include "include/partition.h"
 #include "include/time.h"
@@ -20,6 +21,17 @@ static int device_capacity;
 static int device_count;
 static int disk_count;
 static int root_index;
+
+static struct lock registry_lock = LOCK_INITIALIZER("block devices", LOCK_RANK_REGISTRY);
+
+static void registry_guard_release(int *unused) {
+    (void)unused;
+    lock_release(&registry_lock);
+}
+
+#define REGISTRY_LOCKED \
+    __attribute__((cleanup(registry_guard_release))) int registry_guard = \
+        (lock_acquire(&registry_lock), 0)
 
 struct partition_context {
     int parent;
@@ -87,16 +99,23 @@ static void disk_name(int number, char *out) {
 
 int block_register(const struct block_device *device) {
     if (!device || !device->read || !device->sectors) return -1;
+    lock_acquire(&registry_lock);
     struct block_device *entry = new_entry();
-    if (!entry) return -1;
+    if (!entry) {
+        lock_release(&registry_lock);
+        return -1;
+    }
     *entry = *device;
     entry->name[sizeof entry->name - 1] = '\0';
     entry->parent = -1;
     disk_name(disk_count, entry->dev_name);
     disk_count++;
     announce(device_count);
+    int index = device_count;
+    __atomic_store_n(&device_count, index + 1, __ATOMIC_RELEASE);
+    lock_release(&registry_lock);
     eventfs_emit_device_attach("block", entry->dev_name);
-    return device_count++;
+    return index;
 }
 
 int block_register_partition(int parent, int number, uint64_t start,
@@ -111,8 +130,10 @@ int block_register_partition(int parent, int number, uint64_t start,
     context->parent = parent;
     context->start = start;
 
+    lock_acquire(&registry_lock);
     struct block_device *entry = new_entry();
     if (!entry) {
+        lock_release(&registry_lock);
         kfree(context);
         return -1;
     }
@@ -134,8 +155,11 @@ int block_register_partition(int parent, int number, uint64_t start,
     entry->flush = partition_flush;
     entry->context = context;
     announce(device_count);
+    int index = device_count;
+    __atomic_store_n(&device_count, index + 1, __ATOMIC_RELEASE);
+    lock_release(&registry_lock);
     eventfs_emit_device_attach("block", entry->dev_name);
-    return device_count++;
+    return index;
 }
 
 int block_device_index_by_name(const char *name) {
@@ -146,23 +170,27 @@ int block_device_index_by_name(const char *name) {
             if (name[index] != prefix[index]) return -1;
         name += sizeof prefix - 1;
     }
+    REGISTRY_LOCKED;
     for (int index = 0; index < device_count; index++)
         if (strcmp(devices[index]->dev_name, name) == 0) return index;
     return -1;
 }
 
-int block_device_count(void) { return device_count; }
+int block_device_count(void) { return __atomic_load_n(&device_count, __ATOMIC_ACQUIRE); }
 
 const struct block_device *block_device_at(int index) {
+    REGISTRY_LOCKED;
     if (index < 0 || index >= device_count) return NULL;
     return devices[index];
 }
 
 const struct block_device *block_root(void) {
+    REGISTRY_LOCKED;
     return root_index < device_count ? devices[root_index] : NULL;
 }
 
 void block_select_root(int index) {
+    REGISTRY_LOCKED;
     root_index = index >= 0 && index < device_count ? index : 0;
     if (device_count) kprintf("BLOCK: root on %s\n", devices[root_index]->dev_name);
 }
@@ -174,10 +202,10 @@ static uint64_t block_write_failures;
 
 void block_statistics(uint64_t *reads, uint64_t *sectors, uint64_t *nanoseconds,
                       uint64_t *write_failures) {
-    if (reads) *reads = block_reads;
-    if (sectors) *sectors = block_sectors_read;
-    if (nanoseconds) *nanoseconds = block_read_ns;
-    if (write_failures) *write_failures = block_write_failures;
+    if (reads) *reads = __atomic_load_n(&block_reads, __ATOMIC_RELAXED);
+    if (sectors) *sectors = __atomic_load_n(&block_sectors_read, __ATOMIC_RELAXED);
+    if (nanoseconds) *nanoseconds = __atomic_load_n(&block_read_ns, __ATOMIC_RELAXED);
+    if (write_failures) *write_failures = __atomic_load_n(&block_write_failures, __ATOMIC_RELAXED);
 }
 
 static int device_read_counted(const struct block_device *device, uint64_t lba,
@@ -185,9 +213,9 @@ static int device_read_counted(const struct block_device *device, uint64_t lba,
     uint64_t begun = time_uptime_ns();
     int status = device->read(device->context, lba, count, destination);
     uint64_t now = time_uptime_ns();
-    block_reads++;
-    block_sectors_read += count;
-    if (now > begun) block_read_ns += now - begun;
+    __atomic_fetch_add(&block_reads, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&block_sectors_read, count, __ATOMIC_RELAXED);
+    if (now > begun) __atomic_fetch_add(&block_read_ns, now - begun, __ATOMIC_RELAXED);
     return status;
 }
 
@@ -206,11 +234,11 @@ int block_device_write(const struct block_device *device, uint64_t lba,
     if (lba + count > device->sectors) return -1;
     int status = device->write(device->context, lba, count, source);
     if (status != 0) {
-        block_write_failures++;
-        if (block_write_failures <= WRITE_FAILURE_REPORT_LIMIT)
+        uint64_t failures = __atomic_add_fetch(&block_write_failures, 1, __ATOMIC_RELAXED);
+        if (failures <= WRITE_FAILURE_REPORT_LIMIT)
             kprintf("BLOCK: write of %u sectors at lba %u on %s failed (%d)%s\n",
                     (unsigned)count, (unsigned)lba, device->dev_name, status,
-                    block_write_failures == WRITE_FAILURE_REPORT_LIMIT
+                    failures == WRITE_FAILURE_REPORT_LIMIT
                         ? ", further failures counted in /proc/blockstat" : "");
     }
     return status;

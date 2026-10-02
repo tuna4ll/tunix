@@ -7,6 +7,7 @@
 #include "../include/kstring.h"
 #include "../include/pci.h"
 #include "../include/vmm.h"
+#include "../include/lock.h"
 
 #define ATA_DATA       0x1F0
 #define ATA_SECCOUNT0  0x1F2
@@ -51,6 +52,8 @@ static int identify_attempted;
 static int dma_probe_state;
 static uint16_t dma_io_base;
 static struct ata_prd dma_prdt[ATA_DMA_MAX_PRDS] __attribute__((aligned(16)));
+
+static struct lock ata_lock = LOCK_INITIALIZER("ata", LOCK_RANK_BLOCK);
 
 static inline uint64_t ata_pointer_physical(const void *pointer, uint64_t length) {
     return vmm_dma_physical(pointer, length);
@@ -300,7 +303,7 @@ int ata_pio_read28(uint32_t lba, uint32_t sectors, void *destination) {
     return 0;
 }
 
-int ata_flush_cache(void) {
+static int ata_flush_cache_unlocked(void) {
     if (ata_wait_not_busy() < 0) return -1;
     outb(ATA_HDDEVSEL, 0xE0U);
     io_wait();
@@ -308,6 +311,13 @@ int ata_flush_cache(void) {
     int status = ata_wait_not_busy();
     if (status < 0 || (status & (ATA_SR_ERR | ATA_SR_DF))) return -1;
     return 0;
+}
+
+int ata_flush_cache(void) {
+    lock_acquire(&ata_lock);
+    int status = ata_flush_cache_unlocked();
+    lock_release(&ata_lock);
+    return status;
 }
 
 int ata_pio_write28(uint32_t lba, uint32_t sectors, const void *source) {
@@ -372,18 +382,32 @@ int ata_pio_read_bytes(uint64_t offset, size_t size, void *destination) {
     return (int)completed;
 }
 
-static int ata_block_read(void *context, uint64_t lba, uint32_t count, void *destination) {
+static int ata_block_read_unlocked(void *context, uint64_t lba, uint32_t count, void *destination) {
     (void)context;
     if (lba > 0x0FFFFFFFULL) return -1;
     if (ata_dma_read28((uint32_t)lba, count, destination) == 0) return 0;
     return ata_pio_read28((uint32_t)lba, count, destination);
 }
 
-static int ata_block_write(void *context, uint64_t lba, uint32_t count, const void *source) {
+static int ata_block_read(void *context, uint64_t lba, uint32_t count, void *destination) {
+    lock_acquire(&ata_lock);
+    int status = ata_block_read_unlocked(context, lba, count, destination);
+    lock_release(&ata_lock);
+    return status;
+}
+
+static int ata_block_write_unlocked(void *context, uint64_t lba, uint32_t count, const void *source) {
     (void)context;
     if (lba > 0x0FFFFFFFULL) return -1;
     if (ata_dma_write28((uint32_t)lba, count, source) == 0) return 0;
     return ata_pio_write28((uint32_t)lba, count, source);
+}
+
+static int ata_block_write(void *context, uint64_t lba, uint32_t count, const void *source) {
+    lock_acquire(&ata_lock);
+    int status = ata_block_write_unlocked(context, lba, count, source);
+    lock_release(&ata_lock);
+    return status;
 }
 
 static int ata_block_flush(void *context) {

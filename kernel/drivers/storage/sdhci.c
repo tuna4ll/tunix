@@ -5,6 +5,7 @@
 #include "../../include/cpu.h"
 #include "../../include/sdhci.h"
 #include "../../include/time.h"
+#include "../../include/lock.h"
 
 extern void kprintf(const char *fmt, ...);
 
@@ -66,6 +67,7 @@ extern void kprintf(const char *fmt, ...);
 #define DATA_TIMEOUT_NS 5000000000ULL
 
 struct sdhci_host {
+    struct lock lock;
     uint64_t base;
     uint64_t clock_hz;
     int quirks;
@@ -278,7 +280,7 @@ static int transfer_chunk(struct sdhci_host *host, uint64_t lba, uint32_t count,
     return 0;
 }
 
-static int sdhci_transfer(void *context, uint64_t lba, uint32_t count, uint8_t *buffer, int write) {
+static int sdhci_transfer_unlocked(void *context, uint64_t lba, uint32_t count, uint8_t *buffer, int write) {
     struct sdhci_host *host = context;
     if (lba >= host->sectors || count > host->sectors - lba) return -1;
     while (count) {
@@ -294,6 +296,14 @@ static int sdhci_transfer(void *context, uint64_t lba, uint32_t count, uint8_t *
     return 0;
 }
 
+static int sdhci_transfer(void *context, uint64_t lba, uint32_t count, uint8_t *buffer, int write) {
+    struct sdhci_host *host = context;
+    lock_acquire(&host->lock);
+    int status = sdhci_transfer_unlocked(context, lba, count, buffer, write);
+    lock_release(&host->lock);
+    return status;
+}
+
 static int sdhci_read(void *context, uint64_t lba, uint32_t count, void *destination) {
     return sdhci_transfer(context, lba, count, destination, 0);
 }
@@ -305,6 +315,7 @@ static int sdhci_write(void *context, uint64_t lba, uint32_t count, const void *
 int sdhci_attach(uint64_t registers, uint64_t clock_hz, int quirks) {
     if (!registers || host_count >= MAX_HOSTS) return -1;
     struct sdhci_host *host = &hosts[host_count];
+    lock_init(&host->lock, "sdhci", LOCK_RANK_BLOCK);
     host->base = registers;
     host->quirks = quirks;
     uint64_t capability_clock = ((read_register(host, REG_CAPABILITIES) >> 8) & 0xFFU) * 1000000ULL;
