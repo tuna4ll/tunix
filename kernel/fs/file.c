@@ -40,6 +40,7 @@ struct file *file_open_node(struct vfs_node *node, uint32_t flags) {
     struct file *file = (struct file *)kmalloc(sizeof(*file));
     if (!file) return NULL;
     memset(file, 0, sizeof(*file));
+    lock_init(&file->lock, "open file", LOCK_RANK_FILE);
     file->refs = 1;
     file->kind = FILE_KIND_VFS;
     file->flags = flags;
@@ -94,6 +95,7 @@ struct file *file_create_pipe_end(struct pipe_buffer *pipe, int write_end) {
     if (!pipe) return NULL;
     struct file *file = (struct file *)kmalloc(sizeof(*file));
     memset(file, 0, sizeof(*file));
+    lock_init(&file->lock, "open file", LOCK_RANK_FILE);
     file->refs = 1;
     file->kind = write_end ? FILE_KIND_PIPE_WRITE : FILE_KIND_PIPE_READ;
     file->flags = 0;
@@ -108,6 +110,7 @@ struct file *file_create_socket(struct unix_socket *socket) {
     struct file *file = (struct file *)kmalloc(sizeof(*file));
     if (!file) return NULL;
     memset(file, 0, sizeof(*file));
+    lock_init(&file->lock, "open file", LOCK_RANK_FILE);
     file->refs = 1;
     file->kind = FILE_KIND_SOCKET;
     file->flags = 0;
@@ -120,6 +123,7 @@ struct file *file_create_inet_socket(struct inet_socket *socket) {
     struct file *file = (struct file *)kmalloc(sizeof(*file));
     if (!file) return NULL;
     memset(file, 0, sizeof(*file));
+    lock_init(&file->lock, "open file", LOCK_RANK_FILE);
     file->refs = 1;
     file->kind = FILE_KIND_INET_SOCKET;
     file->flags = 0;
@@ -132,6 +136,7 @@ struct file *file_create_netlink_socket(struct netlink_socket *socket) {
     struct file *file = (struct file *)kmalloc(sizeof(*file));
     if (!file) return NULL;
     memset(file, 0, sizeof(*file));
+    lock_init(&file->lock, "open file", LOCK_RANK_FILE);
     file->refs = 1;
     file->kind = FILE_KIND_NETLINK_SOCKET;
     file->flags = 0;
@@ -143,6 +148,7 @@ static struct file *file_create_special(int kind, uint32_t flags) {
     struct file *file = (struct file *)kmalloc(sizeof(*file));
     if (!file) return NULL;
     memset(file, 0, sizeof(*file));
+    lock_init(&file->lock, "open file", LOCK_RANK_FILE);
     file->refs = 1;
     file->kind = kind;
     file->flags = flags;
@@ -197,6 +203,7 @@ struct file *file_create_pty_endpoint(struct pty_pair *pty, int master,
     struct file *file = (struct file *)kmalloc(sizeof(*file));
     if (!file) return NULL;
     memset(file, 0, sizeof(*file));
+    lock_init(&file->lock, "open file", LOCK_RANK_FILE);
     file->refs = 1;
     file->kind = master ? FILE_KIND_PTY_MASTER : FILE_KIND_PTY_SLAVE;
     file->flags = flags;
@@ -327,11 +334,25 @@ void file_unref(struct file *file) {
 }
 
 static void file_enter(struct file *file) {
-    if (kernel_lock_shared_here()) spinlock_acquire(&file->lock);
+    lock_acquire(&file->lock);
 }
 
 static void file_leave(struct file *file) {
-    if (kernel_lock_shared_here()) spinlock_release(&file->lock);
+    lock_release(&file->lock);
+}
+
+int64_t file_pread(struct file *file, uint64_t offset, size_t size, void *buffer) {
+    if (!file || !buffer) return -EBADF;
+    if (file->kind == FILE_KIND_MEMFD) return memfd_read(file->memfd, offset, size, buffer);
+    if (file->kind != FILE_KIND_VFS || !file->node) return -EBADF;
+    return vfs_read(file->node, offset, size, buffer);
+}
+
+int64_t file_pwrite(struct file *file, uint64_t offset, size_t size, const void *buffer) {
+    if (!file || !buffer) return -EBADF;
+    if (file->kind == FILE_KIND_MEMFD) return memfd_write(file->memfd, offset, size, buffer);
+    if (file->kind != FILE_KIND_VFS || !file->node) return -EBADF;
+    return vfs_write(file->node, offset, size, buffer);
 }
 
 int64_t file_read(struct file *file, size_t size, void *buffer) {

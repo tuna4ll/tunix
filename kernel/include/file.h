@@ -64,6 +64,8 @@ struct file {
     uint32_t edge_generation;
 };
 
+int64_t file_pread(struct file *file, uint64_t offset, size_t size, void *buffer);
+int64_t file_pwrite(struct file *file, uint64_t offset, size_t size, const void *buffer);
 struct file *file_open_node(struct vfs_node *node, uint32_t flags);
 struct file *file_create_pipe_end(struct pipe_buffer *pipe, int write_end);
 struct file *file_create_socket(struct unix_socket *socket);
