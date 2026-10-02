@@ -673,6 +673,19 @@ struct file *file_table_get(struct file_table *table, int fd) {
     return file;
 }
 
+int file_table_find(struct file_table *table, const struct file *file) {
+    if (!table || !file) return -1;
+    lock_acquire(&table->lock);
+    int found = -1;
+    for (int fd = 0; fd < table->capacity; fd++) {
+        if (table->fds[fd] != file) continue;
+        found = fd;
+        break;
+    }
+    lock_release(&table->lock);
+    return found;
+}
+
 struct file *process_file_get(struct process *process, int fd) {
     return process ? file_table_get(process->files, fd) : NULL;
 }
@@ -1522,6 +1535,7 @@ static void go_idle(void) {
     set_kernel_stack(cpu_current()->idle_stack_top);
     syscall_set_kernel_stack(cpu_current()->idle_stack_top);
     lock_drop(&sched_lock);
+    syscall_release_pins();
     lock_check_released("the kernel for idle");
     cpu_enter_idle(cpu_current()->idle_stack_top);
 }
@@ -2139,6 +2153,7 @@ void process_exit_from_syscall(struct syscall_frame *frame, int status) {
     }
     eventfs_emit_process_exit(exiting->cred.euid, exiting->pid, status);
     exiting->exit_status = status;
+    syscall_release_pins();
     process_handle_robust_list(exiting);
     if (exiting->clear_child_tid_user) {
         uint64_t clear_address = exiting->clear_child_tid_user;

@@ -1083,12 +1083,13 @@ static int64_t ioctl_prime_handle_to_fd(const struct file *client, uint64_t user
 static int64_t ioctl_prime_fd_to_handle(uint64_t user_argument) {
     struct drm_prime_handle request;
     if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
-    struct process *process = process_current();
-    if (!process || !process->files || request.fd < 0 || request.fd >= process->files->capacity ||
-        !process->files->fds[request.fd]) return -EBADF;
-    struct file *file = process->files->fds[request.fd];
-    if (file->kind != FILE_KIND_DMABUF) return -EINVAL;
-    struct drm_dumb_buffer *buffer = buffer_find(file->dmabuf_handle);
+    struct file *file = process_file_get(process_current(), request.fd);
+    if (!file) return -EBADF;
+    int kind = file->kind;
+    uint32_t handle = file->dmabuf_handle;
+    file_unref(file);
+    if (kind != FILE_KIND_DMABUF) return -EINVAL;
+    struct drm_dumb_buffer *buffer = buffer_find(handle);
     if (!buffer) return -ENOENT;
 
     if (buffer->rendered && buffer->virtio_resource) {

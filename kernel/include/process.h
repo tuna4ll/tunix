@@ -287,6 +287,7 @@ void file_table_ref(struct file_table *table);
 void file_table_unref(struct file_table *table);
 void file_table_close_on_exec(struct file_table *table);
 struct file *process_file_get(struct process *process, int fd);
+int file_table_find(struct file_table *table, const struct file *file);
 struct file_table *process_files_get(struct process *process);
 void process_memory_enter(void);
 void process_memory_leave(void);
