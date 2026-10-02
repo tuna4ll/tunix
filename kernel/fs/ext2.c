@@ -10,6 +10,14 @@
 #include "../include/time.h"
 #include "../include/vfs.h"
 
+static void vfs_guard_release(int *unused) {
+    (void)unused;
+    vfs_lock_release();
+}
+
+#define VFS_GUARD \
+    __attribute__((cleanup(vfs_guard_release))) int vfs_guard = (vfs_lock_acquire(), 0)
+
 extern void kprintf(const char *fmt, ...);
 
 #if TUNIX_DEBUG_LOGS
@@ -1919,6 +1927,7 @@ static void mark_volatile_dirs(void) {
 }
 
 int ext2fs_find_label(const char *label) {
+    VFS_GUARD;
     if (!label || !*label) return -1;
     int count = block_device_count();
     for (int index = 0; index < count; index++) {
@@ -1938,6 +1947,7 @@ int ext2fs_find_label(const char *label) {
 }
 
 int ext2fs_mount_root(void) {
+    VFS_GUARD;
     const struct block_device *device = block_root();
     if (!vfs_root || !device || volume_of(vfs_root)) return -1;
     struct ext2_volume *volume;
@@ -1954,6 +1964,7 @@ static int devices_overlap(const struct block_device *a, const struct block_devi
 }
 
 int ext2fs_mount(const char *source, const char *mount_name, struct vfs_node **root_out) {
+    VFS_GUARD;
     *root_out = NULL;
     if (!source) return -EINVAL;
     int index = block_device_index_by_name(source);
@@ -1973,6 +1984,7 @@ int ext2fs_mount(const char *source, const char *mount_name, struct vfs_node **r
 }
 
 void ext2fs_unmount(struct vfs_node *root) {
+    VFS_GUARD;
     struct ext2_volume *volume = volumes;
     while (volume && volume->root != root) volume = volume->next;
     if (!volume) return;
@@ -1985,15 +1997,18 @@ void ext2fs_unmount(struct vfs_node *root) {
 }
 
 int ext2fs_owns(const struct vfs_node *node) {
+    VFS_GUARD;
     return volume_of(node) != NULL;
 }
 
 int ext2fs_journalled(const struct vfs_node *node) {
+    VFS_GUARD;
     struct ext2_volume *volume = volume_of(node);
     return volume && volume->journal;
 }
 
 int ext2fs_stats(const struct vfs_node *node, struct ext2_fs_stats *out) {
+    VFS_GUARD;
     struct ext2_volume *volume = NULL;
     for (const struct vfs_node *walk = node; walk && !volume; walk = walk->parent) {
         volume = volume_of(walk);
@@ -2010,6 +2025,7 @@ int ext2fs_stats(const struct vfs_node *node, struct ext2_fs_stats *out) {
 }
 
 int ext2fs_fsync_node(struct vfs_node *node) {
+    VFS_GUARD;
     struct ext2_volume *volume = volume_of(node);
     if (!volume) return 0;
     struct ext2_volume *saved = enter(volume);
@@ -2024,6 +2040,7 @@ int ext2fs_fsync_node(struct vfs_node *node) {
 }
 
 int ext2fs_sync(void) {
+    VFS_GUARD;
     int status = 0;
     for (struct ext2_volume *volume = volumes; volume; volume = volume->next) {
         struct ext2_volume *saved = enter(volume);
@@ -2034,6 +2051,7 @@ int ext2fs_sync(void) {
 }
 
 int ext2fs_shutdown(void) {
+    VFS_GUARD;
     int status = 0;
     for (struct ext2_volume *volume = volumes; volume; volume = volume->next) {
         struct ext2_volume *saved = enter(volume);

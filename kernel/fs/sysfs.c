@@ -13,6 +13,14 @@
 #include "../include/sysfs.h"
 #include "../include/vfs.h"
 
+static void vfs_guard_release(int *unused) {
+    (void)unused;
+    vfs_lock_release();
+}
+
+#define VFS_GUARD \
+    __attribute__((cleanup(vfs_guard_release))) int vfs_guard = (vfs_lock_acquire(), 0)
+
 static void append_string(char *out, size_t limit, size_t *used, const char *text) {
     while (*text && *used + 1 < limit) out[(*used)++] = *text++;
 }
@@ -72,6 +80,7 @@ static void uevent_send(const struct sysfs_device *device, const char *action) {
 
 static int64_t uevent_write(struct vfs_node *node, uint64_t offset, size_t size,
                             const void *buffer) {
+    VFS_GUARD;
     (void)offset;
     const struct sysfs_device *device = (const struct sysfs_device *)node->fs_private;
     if (!device || !size) return (int64_t)size;
@@ -305,6 +314,7 @@ static void driver_directory(char *out, size_t limit, const char *driver,
 }
 
 void sysfs_pci_driver_added(const char *driver) {
+    VFS_GUARD;
     char path[96];
     driver_directory(path, sizeof(path), driver, NULL);
     struct vfs_node *node = vfs_mkdir_p(path);
@@ -312,6 +322,7 @@ void sysfs_pci_driver_added(const char *driver) {
 }
 
 void sysfs_pci_driver_removed(const char *driver) {
+    VFS_GUARD;
     char path[96];
     driver_directory(path, sizeof(path), driver, NULL);
     struct vfs_node *node = vfs_lookup(path);
@@ -319,6 +330,7 @@ void sysfs_pci_driver_removed(const char *driver) {
 }
 
 void sysfs_pci_bound(const struct pci_device *device, const char *driver) {
+    VFS_GUARD;
     char slot[16];
     size_t slot_length = 0;
     pci_slot_name(slot, sizeof(slot), &slot_length, device);
@@ -365,6 +377,7 @@ void sysfs_pci_bound(const struct pci_device *device, const char *driver) {
 }
 
 void sysfs_pci_unbound(const struct pci_device *device) {
+    VFS_GUARD;
     char link[128];
     pci_device_path(link, sizeof(link), device, "/driver");
     struct vfs_node *node = vfs_lookup_nofollow(link);
@@ -631,6 +644,7 @@ static struct vfs_node *module_directory(const char *name, const char *child) {
 }
 
 void sysfs_module_added(struct module *module) {
+    VFS_GUARD;
     if (!module) return;
     struct vfs_node *root = module_directory(module->name, NULL);
     if (!root) return;
@@ -682,6 +696,7 @@ static int64_t module_section_read(struct vfs_node *node, uint64_t offset, size_
 }
 
 void sysfs_module_removed(const char *name) {
+    VFS_GUARD;
     char path[96];
     size_t used = 0;
     append_string(path, sizeof(path), &used, "/sys/module/");
@@ -717,6 +732,7 @@ static void announce(const char *name) {
 }
 
 void sysfs_publish_sound(void) {
+    VFS_GUARD;
     publish_device("controlC0", "snd/controlC0", "sound", NULL,
                    DEV_MAJOR_SOUND, DEV_MINOR_SOUND_CONTROL);
     publish_device("pcmC0D0p", "snd/pcmC0D0p", "sound", NULL,
@@ -726,6 +742,7 @@ void sysfs_publish_sound(void) {
 }
 
 void sysfs_remove_sound(void) {
+    VFS_GUARD;
     remove_published("controlC0");
     remove_published("pcmC0D0p");
 }

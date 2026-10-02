@@ -164,6 +164,8 @@ struct vfs_persist_ops {
 };
 
 void vfs_set_persist_ops(const struct vfs_persist_ops *ops);
+void vfs_lock_acquire(void);
+void vfs_lock_release(void);
 void vfs_notify_meta_changed(struct vfs_node *node);
 
 int vfs_fault_in(struct vfs_node *node);

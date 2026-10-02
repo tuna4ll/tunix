@@ -50,18 +50,18 @@ struct file *file_open_node(struct vfs_node *node, uint32_t flags) {
 
     if ((node->flags & 0xFFU) == VFS_PIPE) {
         int write_end = (flags & 3U) != 0;
-        if (!node->fifo) {
-            node->fifo = pipe_buffer_create_named();
-            if (!node->fifo) {
-                vfs_node_unref(node);
-                kfree(file);
-                return NULL;
-            }
+        vfs_lock_acquire();
+        if (!node->fifo) node->fifo = pipe_buffer_create_named();
+        struct pipe_buffer *fifo = node->fifo;
+        vfs_lock_release();
+        if (!fifo) {
+            vfs_node_unref(node);
+            kfree(file);
+            return NULL;
         }
         file->kind = write_end ? FILE_KIND_PIPE_WRITE : FILE_KIND_PIPE_READ;
-        file->pipe = node->fifo;
-        if (write_end) node->fifo->writers++;
-        else node->fifo->readers++;
+        file->pipe = fifo;
+        pipe_attach_end(fifo, write_end);
         return file;
     }
     if (node->flags & VFS_EVENTSTREAM) {
@@ -100,8 +100,7 @@ struct file *file_create_pipe_end(struct pipe_buffer *pipe, int write_end) {
     file->kind = write_end ? FILE_KIND_PIPE_WRITE : FILE_KIND_PIPE_READ;
     file->flags = 0;
     file->pipe = pipe;
-    if (write_end) pipe->writers++;
-    else pipe->readers++;
+    pipe_attach_end(pipe, write_end);
     return file;
 }
 

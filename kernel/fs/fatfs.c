@@ -7,6 +7,14 @@
 #include "../include/time.h"
 #include "../include/vfs.h"
 
+static void vfs_guard_release(int *unused) {
+    (void)unused;
+    vfs_lock_release();
+}
+
+#define VFS_GUARD \
+    __attribute__((cleanup(vfs_guard_release))) int vfs_guard = (vfs_lock_acquire(), 0)
+
 extern void kprintf(const char *fmt, ...);
 
 #define EINVAL 22
@@ -185,6 +193,7 @@ static uint32_t cluster_at(struct fat_volume *volume, uint32_t first,
 
 static int64_t fat_node_read(struct vfs_node *node, uint64_t offset,
                              size_t size, void *buffer) {
+    VFS_GUARD;
     struct fat_file *file = (struct fat_file *)node->fs_private;
     if (!file) return -1;
     struct fat_volume *volume = file->volume;
@@ -226,6 +235,7 @@ static int release_chain(struct fat_volume *volume, uint32_t cluster) {
 }
 
 static int fat_node_truncate(struct vfs_node *node, uint64_t length) {
+    VFS_GUARD;
     struct fat_file *file = (struct fat_file *)node->fs_private;
     if (!file) return -1;
     struct fat_volume *volume = file->volume;
@@ -256,6 +266,7 @@ static int fat_node_truncate(struct vfs_node *node, uint64_t length) {
 
 static int64_t fat_node_write(struct vfs_node *node, uint64_t offset,
                               size_t size, const void *buffer) {
+    VFS_GUARD;
     struct fat_file *file = (struct fat_file *)node->fs_private;
     if (!file) return -1;
     struct fat_volume *volume = file->volume;
@@ -605,6 +616,7 @@ static const struct block_device *device_from_source(const char *source) {
 }
 
 int fatfs_mount(const char *source, const char *mount_name, struct vfs_node **root_out) {
+    VFS_GUARD;
     const struct block_device *device = device_from_source(source);
     if (!device) return -ENODEV;
 
@@ -692,6 +704,7 @@ int fatfs_mount(const char *source, const char *mount_name, struct vfs_node **ro
 }
 
 int fatfs_owns(const struct vfs_node *node) {
+    VFS_GUARD;
     if (!node) return 0;
     for (int index = 0; index < volume_capacity; index++)
         if (volumes[index] && volumes[index]->used && volumes[index]->root == node) return 1;
@@ -711,6 +724,7 @@ static void free_subtree(struct vfs_node *node) {
 }
 
 void fatfs_unmount(struct vfs_node *root) {
+    VFS_GUARD;
     for (int index = 0; index < volume_capacity; index++) {
         if (!volumes[index] || !volumes[index]->used || volumes[index]->root != root) continue;
         free_subtree(root);

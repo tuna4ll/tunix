@@ -1,7 +1,9 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "../include/cred.h"
+#include "../include/defer.h"
 #include "../include/heap.h"
+#include "../include/lock.h"
 #include "../include/pmm.h"
 #include "../include/vmm.h"
 #include "../include/inotify.h"
@@ -19,6 +21,24 @@ extern void kprintf(const char *fmt, ...);
 #define VFS_MOUNT_MAX_DEPTH 16
 
 struct vfs_node *vfs_root;
+
+static struct lock vfs_lock = LOCK_INITIALIZER("vfs", LOCK_RANK_VFS);
+
+static void vfs_guard_release(int *unused) {
+    (void)unused;
+    lock_release(&vfs_lock);
+}
+
+#define VFS_LOCKED \
+    __attribute__((cleanup(vfs_guard_release))) int vfs_guard = (lock_acquire(&vfs_lock), 0)
+
+void vfs_lock_acquire(void) {
+    lock_acquire(&vfs_lock);
+}
+
+void vfs_lock_release(void) {
+    lock_release(&vfs_lock);
+}
 static uint64_t next_inode = 1;
 static const struct vfs_persist_ops *persist_ops;
 
@@ -35,6 +55,7 @@ void vfs_set_persist_ops(const struct vfs_persist_ops *ops) {
 }
 
 void vfs_stamp_times(struct vfs_node *node, uint32_t which) {
+    VFS_LOCKED;
     if (!node) return;
     uint32_t now = (uint32_t)time_epoch_seconds();
     if (which & VFS_TIME_ATIME) node->atime = now;
@@ -43,6 +64,7 @@ void vfs_stamp_times(struct vfs_node *node, uint32_t which) {
 }
 
 void vfs_notify_meta_changed(struct vfs_node *node) {
+    VFS_LOCKED;
     vfs_stamp_times(node, VFS_TIME_CTIME);
     PERSIST(meta_changed, node);
 }
@@ -63,6 +85,7 @@ uint64_t vfs_cached_bytes(void) { return cached_bytes; }
 static uint64_t pages_for(uint64_t length);
 
 int vfs_fault_in(struct vfs_node *node) {
+    VFS_LOCKED;
     if (!node) return -1;
     if ((node->flags & 0xFFU) == VFS_FILE && node->disk_inode) {
         uint64_t span = pages_for(node->length);
@@ -74,6 +97,7 @@ int vfs_fault_in(struct vfs_node *node) {
 }
 
 void vfs_forget_backing(struct vfs_node *node) {
+    VFS_LOCKED;
     if (!node || !node->disk_inode) return;
     struct vfs_page_map *map = node->pages;
     if (map) {
@@ -87,14 +111,17 @@ void vfs_forget_backing(struct vfs_node *node) {
 }
 
 void vfs_map_ref(struct vfs_node *node) {
+    VFS_LOCKED;
     if (node) node->mapped_refs++;
 }
 
 void vfs_map_unref(struct vfs_node *node) {
+    VFS_LOCKED;
     if (node && node->mapped_refs) node->mapped_refs--;
 }
 
 void vfs_map_write_ref(struct vfs_node *node, uint64_t offset, uint64_t length) {
+    VFS_LOCKED;
     if (!node) return;
     node->shared_writers++;
     uint64_t end = offset + length;
@@ -109,6 +136,7 @@ void vfs_map_write_ref(struct vfs_node *node, uint64_t offset, uint64_t length) 
 }
 
 void vfs_flush_mapped(struct vfs_node *node) {
+    VFS_LOCKED;
     if (!node || !node->map_dirty_end) return;
     uint64_t start = node->map_dirty_start;
     uint64_t end = node->map_dirty_end;
@@ -127,11 +155,13 @@ void vfs_flush_mapped(struct vfs_node *node) {
 }
 
 void vfs_map_write_unref(struct vfs_node *node) {
+    VFS_LOCKED;
     if (!node || !node->shared_writers) return;
     if (--node->shared_writers == 0) vfs_flush_mapped(node);
 }
 
 uint64_t vfs_drop_clean_pages(struct vfs_node *node) {
+    VFS_LOCKED;
     if (!cacheable(node) || node->mapped_refs) return 0;
     if (!persist_ops || !persist_ops->fetch_page) return 0;
     struct vfs_page_map *map = node->pages;
@@ -146,6 +176,7 @@ uint64_t vfs_drop_clean_pages(struct vfs_node *node) {
 }
 
 void vfs_release_data(struct vfs_node *node) {
+    VFS_LOCKED;
     vfs_flush_mapped(node);
     (void)vfs_drop_clean_pages(node);
 }
@@ -165,10 +196,12 @@ static uint64_t reclaim_below(struct vfs_node *node, uint32_t newer_than) {
 }
 
 uint64_t vfs_reclaim_file_data(struct vfs_node *node) {
+    VFS_LOCKED;
     return reclaim_below(node, 0xFFFFFFFFU);
 }
 
 void vfs_trim_cache(uint64_t budget) {
+    VFS_LOCKED;
     static uint64_t retry_above;
 
     if (!budget || cached_bytes <= budget || cached_bytes < retry_above) return;
@@ -210,14 +243,15 @@ void vfs_path_release(char **buffer) {
 }
 
 int vfs_set_name(struct vfs_node *node, const char *name) {
+    VFS_LOCKED;
     if (!name) name = "";
     size_t length = strlen(name);
     if (length > VFS_NAME_MAX) length = VFS_NAME_MAX;
-    char *copy = (char *)kmalloc(length + 1);
+    char *copy = (char *)defer_alloc(length + 1);
     if (!copy) return -1;
     memcpy(copy, name, length);
     copy[length] = '\0';
-    kfree(node->name);
+    defer_free(node->name);
     node->name = copy;
     return 0;
 }
@@ -272,19 +306,21 @@ static void index_rebuild(struct vfs_node *directory) {
 }
 
 void vfs_free_node(struct vfs_node *node) {
+    VFS_LOCKED;
     if (!node) return;
     cursor_forget(node);
     index_drop(node);
-    kfree(node->name);
-    kfree(node);
+    defer_free(node->name);
+    defer_free(node);
 }
 
 struct vfs_node *vfs_alloc_node(const char *name, uint32_t flags) {
-    struct vfs_node *node = (struct vfs_node *)kmalloc(sizeof(*node));
+    VFS_LOCKED;
+    struct vfs_node *node = (struct vfs_node *)defer_alloc(sizeof(*node));
     if (!node) return NULL;
     memset(node, 0, sizeof(*node));
     if (vfs_set_name(node, name) != 0) {
-        kfree(node);
+        defer_free(node);
         return NULL;
     }
     node->flags = flags;
@@ -302,6 +338,7 @@ void vfs_init(void) {
 }
 
 int vfs_attach(struct vfs_node *parent, struct vfs_node *child) {
+    VFS_LOCKED;
     if (!parent || !child || (parent->flags & 0xFFU) != VFS_DIRECTORY) return -1;
     if (vfs_find_child(parent, child->name)) return -2;
     child->parent = parent;
@@ -319,6 +356,7 @@ int vfs_attach(struct vfs_node *parent, struct vfs_node *child) {
 }
 
 struct vfs_node *vfs_find_entry(struct vfs_node *directory, const char *name) {
+    VFS_LOCKED;
     if (!directory || !name || (directory->flags & 0xFFU) != VFS_DIRECTORY) return NULL;
     if (directory->refresh) directory->refresh(directory);
     if (directory->child_index) {
@@ -342,6 +380,7 @@ static struct vfs_node *cross_mounts(struct vfs_node *node) {
 }
 
 struct vfs_node *vfs_find_child(struct vfs_node *directory, const char *name) {
+    VFS_LOCKED;
     struct vfs_node *node = vfs_find_entry(directory, name);
     if (node && node->link_target) node = node->link_target;
     return cross_mounts(node);
@@ -360,6 +399,7 @@ static const char *next_component(const char *path, char component[VFS_NAME_MAX 
 }
 
 int vfs_node_path(struct vfs_node *node, char *buffer, size_t capacity) {
+    VFS_LOCKED;
     if (!node || !buffer || capacity < 2) return -1;
     if (node == vfs_root) {
         buffer[0] = '/'; buffer[1] = '\0'; return 0;
@@ -457,14 +497,17 @@ static struct vfs_node *lookup_internal(const char *path, int follow_final) {
 }
 
 struct vfs_node *vfs_lookup(const char *path) {
+    VFS_LOCKED;
     return lookup_internal(path, 1);
 }
 
 struct vfs_node *vfs_lookup_nofollow(const char *path) {
+    VFS_LOCKED;
     return lookup_internal(path, 0);
 }
 
 struct vfs_node *vfs_mkdir_p(const char *path) {
+    VFS_LOCKED;
     if (!path || path[0] != '/' || !vfs_root) return NULL;
     struct vfs_node *current = vfs_root;
     char component[VFS_NAME_MAX + 1];
@@ -599,6 +642,7 @@ static uint8_t *page_allocate(struct vfs_node *node, struct vfs_page_map *map,
 }
 
 void *vfs_page(struct vfs_node *node, uint64_t index, int for_write) {
+    VFS_LOCKED;
     if (!node) return NULL;
     if (!for_write) {
         uint64_t span = pages_for(node->length);
@@ -621,27 +665,32 @@ void *vfs_page(struct vfs_node *node, uint64_t index, int for_write) {
 }
 
 void *vfs_page_peek(struct vfs_node *node, uint64_t index) {
+    VFS_LOCKED;
     if (!node || !node->pages || index >= node->pages->count) return NULL;
     return node->pages->page[index];
 }
 
 uint64_t vfs_page_physical(struct vfs_node *node, uint64_t index) {
+    VFS_LOCKED;
     void *page = vfs_page(node, index, 0);
     if (!page) return 0;
     return vmm_virt_to_phys_direct(page);
 }
 
 int vfs_page_is_dirty(struct vfs_node *node, uint64_t index) {
+    VFS_LOCKED;
     if (!node || !node->pages || index >= node->pages->count) return 0;
     return (node->pages->dirty[index / 64ULL] >> (index % 64ULL)) & 1ULL;
 }
 
 void vfs_page_clear_dirty(struct vfs_node *node, uint64_t index) {
+    VFS_LOCKED;
     if (!node || !node->pages || index >= node->pages->count) return;
     node->pages->dirty[index / 64ULL] &= ~(1ULL << (index % 64ULL));
 }
 
 uint64_t vfs_page_span(struct vfs_node *node) {
+    VFS_LOCKED;
     if (!node) return 0;
     uint64_t span = pages_for(node->length);
     if (node->pages && node->pages->count > span) span = node->pages->count;
@@ -649,6 +698,7 @@ uint64_t vfs_page_span(struct vfs_node *node) {
 }
 
 static int64_t memory_read(struct vfs_node *node, uint64_t offset, size_t size, void *buffer) {
+    VFS_LOCKED;
     if (!node || !buffer || offset >= node->length) return 0;
     uint64_t available = node->length - offset;
     if ((uint64_t)size > available) size = (size_t)available;
@@ -673,6 +723,7 @@ static int64_t memory_read(struct vfs_node *node, uint64_t offset, size_t size, 
 }
 
 static int64_t memory_write(struct vfs_node *node, uint64_t offset, size_t size, const void *buffer) {
+    VFS_LOCKED;
     if (!node || !buffer || (node->flags & VFS_READONLY)) return -1;
     if ((uint64_t)size > UINT64_MAX - offset) return -1;
     uint64_t end = offset + size;
@@ -705,6 +756,7 @@ static int64_t memory_write(struct vfs_node *node, uint64_t offset, size_t size,
 }
 
 void vfs_setup_memory_file(struct vfs_node *node) {
+    VFS_LOCKED;
     if (!node) return;
     node->read = memory_read;
     if (!(node->flags & VFS_READONLY)) node->write = memory_write;
@@ -712,6 +764,7 @@ void vfs_setup_memory_file(struct vfs_node *node) {
 
 struct vfs_node *vfs_create_file(const char *path, const void *data,
                                  uint64_t length, uint32_t flags, int copy_data) {
+    VFS_LOCKED;
     char name[VFS_NAME_MAX + 1];
     struct vfs_node *parent = parent_of(path, name, 1);
     if (!parent || vfs_find_child(parent, name)) return NULL;
@@ -752,6 +805,7 @@ struct vfs_node *vfs_create_file(const char *path, const void *data,
 }
 
 struct vfs_node *vfs_create_file_node(const char *path, uint32_t mode) {
+    VFS_LOCKED;
     char name[VFS_NAME_MAX + 1];
     struct vfs_node *parent = parent_of(path, name, 0);
     if (!parent || (parent->flags & 0xFFU) != VFS_DIRECTORY) return NULL;
@@ -774,6 +828,7 @@ struct vfs_node *vfs_create_file_node(const char *path, uint32_t mode) {
 }
 
 struct vfs_node *vfs_create_directory(const char *path, uint32_t mode) {
+    VFS_LOCKED;
     char name[VFS_NAME_MAX + 1];
     struct vfs_node *parent = parent_of(path, name, 0);
     if (!parent || (parent->flags & 0xFFU) != VFS_DIRECTORY) return NULL;
@@ -795,6 +850,7 @@ struct vfs_node *vfs_create_directory(const char *path, uint32_t mode) {
 
 struct vfs_node *vfs_create_symlink(const char *path, const char *target,
                                     uint32_t flags) {
+    VFS_LOCKED;
     if (!target || !target[0]) return NULL;
     char name[VFS_NAME_MAX + 1];
     struct vfs_node *parent = parent_of(path, name, 1);
@@ -821,6 +877,7 @@ struct vfs_node *vfs_create_symlink(const char *path, const char *target,
 }
 
 struct vfs_node *vfs_create_fifo(const char *path, uint32_t mode) {
+    VFS_LOCKED;
     char name[VFS_NAME_MAX + 1];
     struct vfs_node *parent = parent_of(path, name, 0);
     if (!parent || (parent->flags & 0xFFU) != VFS_DIRECTORY) return NULL;
@@ -840,6 +897,7 @@ struct vfs_node *vfs_create_fifo(const char *path, uint32_t mode) {
 }
 
 struct vfs_node *vfs_create_socket_node(const char *path, uint32_t mode) {
+    VFS_LOCKED;
     char name[VFS_NAME_MAX + 1];
     struct vfs_node *parent = parent_of(path, name, 0);
     if (!parent || (parent->flags & 0xFFU) != VFS_DIRECTORY) return NULL;
@@ -860,6 +918,7 @@ struct vfs_node *vfs_create_socket_node(const char *path, uint32_t mode) {
 
 struct vfs_node *vfs_attach_symlink(struct vfs_node *parent, const char *name,
                                     const char *target) {
+    VFS_LOCKED;
     if (!parent || !name || !target || !target[0]) return NULL;
     struct vfs_node *node = vfs_alloc_node(name, VFS_SYMLINK | VFS_OWNED_DATA | VFS_VOLATILE);
     if (!node) return NULL;
@@ -879,6 +938,7 @@ struct vfs_node *vfs_attach_symlink(struct vfs_node *parent, const char *name,
 
 struct vfs_node *vfs_attach_link(struct vfs_node *parent, const char *name,
                                  struct vfs_node *target) {
+    VFS_LOCKED;
     if (!parent || !name || !target) return NULL;
     if (target->link_target) target = target->link_target;
     uint32_t kind = target->flags & 0xFFU;
@@ -897,6 +957,7 @@ struct vfs_node *vfs_attach_link(struct vfs_node *parent, const char *name,
 }
 
 int vfs_link(struct vfs_node *target, const char *path) {
+    VFS_LOCKED;
     char name[VFS_NAME_MAX + 1];
     if (!target) return -1;
     if (target->link_target) target = target->link_target;
@@ -916,6 +977,7 @@ int vfs_link(struct vfs_node *target, const char *path) {
 }
 
 int64_t vfs_readlink(struct vfs_node *node, void *buffer, size_t size) {
+    VFS_LOCKED;
     if (!node || !buffer || (node->flags & 0xFFU) != VFS_SYMLINK || !node->data) return -1;
     size_t length = (size_t)node->length;
     if (length > size) length = size;
@@ -949,10 +1011,12 @@ static void destroy_node(struct vfs_node *node) {
 }
 
 void vfs_node_ref(struct vfs_node *node) {
+    VFS_LOCKED;
     if (node) node->refs++;
 }
 
 void vfs_node_unref(struct vfs_node *node) {
+    VFS_LOCKED;
     if (!node || !node->refs) return;
     if (--node->refs) return;
     if (!(node->flags & VFS_ORPHANED)) return;
@@ -977,6 +1041,7 @@ static int detach_child(struct vfs_node *parent, struct vfs_node *node) {
 }
 
 int vfs_detach_child(struct vfs_node *parent, struct vfs_node *node) {
+    VFS_LOCKED;
     if (!parent || !node) return -1;
     if (detach_child(parent, node) != 0) return -1;
     destroy_node(node);
@@ -984,6 +1049,7 @@ int vfs_detach_child(struct vfs_node *parent, struct vfs_node *node) {
 }
 
 int vfs_remove(const char *path, int remove_directory) {
+    VFS_LOCKED;
     char name[VFS_NAME_MAX + 1];
     struct vfs_node *parent = parent_of(path, name, 0);
     if (!parent || (parent->flags & 0xFFU) != VFS_DIRECTORY) return -1;
@@ -1007,6 +1073,7 @@ int vfs_remove(const char *path, int remove_directory) {
 }
 
 int vfs_rename(const char *old_path, const char *new_path) {
+    VFS_LOCKED;
     char old_name[VFS_NAME_MAX + 1];
     char new_name[VFS_NAME_MAX + 1];
     struct vfs_node *old_parent = parent_of(old_path, old_name, 0);
@@ -1090,6 +1157,7 @@ static void mount_insert(struct vfs_mount *entry) {
 
 void vfs_mount_builtin(const char *source, const char *target, const char *type,
                        struct vfs_node *root) {
+    VFS_LOCKED;
     if (!target || mount_at(target)) return;
     struct vfs_mount *entry = (struct vfs_mount *)kmalloc(sizeof(*entry));
     if (!entry) return;
@@ -1148,6 +1216,7 @@ static int mount_is_pseudo(const char *type) {
 
 int vfs_mount(const char *source, const char *target, const char *type,
               uint32_t flags) {
+    VFS_LOCKED;
     if (!target || !type || target[0] != '/') return -VFS_EINVAL;
     if (flags & ~(VFS_MS_SUPPORTED | VFS_MS_IGNORED)) return -VFS_EINVAL;
     flags &= ~VFS_MS_IGNORED;
@@ -1229,6 +1298,7 @@ int vfs_mount(const char *source, const char *target, const char *type,
 }
 
 int vfs_umount(const char *target) {
+    VFS_LOCKED;
     if (!target) return -VFS_EINVAL;
     struct vfs_mount *previous = NULL;
     struct vfs_mount *entry = mount_table;
@@ -1252,6 +1322,7 @@ int vfs_umount(const char *target) {
 }
 
 int vfs_truncate(struct vfs_node *node, uint64_t length) {
+    VFS_LOCKED;
     if (!node || (node->flags & 0xFFU) != VFS_FILE || (node->flags & VFS_READONLY)) return -1;
     if (node->truncate) {
         if (node->truncate(node, length) != 0) return -1;
@@ -1294,6 +1365,7 @@ int64_t vfs_write(struct vfs_node *node, uint64_t offset, size_t size, const voi
 }
 
 int vfs_readdir(struct vfs_node *directory, uint64_t index, struct dirent *out) {
+    VFS_LOCKED;
     if (!directory || !out || (directory->flags & 0xFFU) != VFS_DIRECTORY) return -1;
     if (directory->refresh) directory->refresh(directory);
     struct vfs_node *node;
