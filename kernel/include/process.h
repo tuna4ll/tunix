@@ -53,6 +53,7 @@ struct vm_area {
 };
 
 struct process_memory {
+    struct lock lock;
     uint64_t cr3;
     uint64_t refs;
     uint64_t brk_start;
@@ -287,6 +288,10 @@ void file_table_unref(struct file_table *table);
 void file_table_close_on_exec(struct file_table *table);
 struct file *process_file_get(struct process *process, int fd);
 struct file_table *process_files_get(struct process *process);
+void process_memory_enter(void);
+void process_memory_leave(void);
+struct process_memory *process_memory_get(struct process *process);
+void process_memory_put(struct process_memory *memory);
 void process_finish_switch(void);
 void process_exit_from_syscall(struct syscall_frame *frame, int status);
 void process_exit_group_from_syscall(struct syscall_frame *frame, int status);

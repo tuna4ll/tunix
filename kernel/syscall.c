@@ -5021,6 +5021,24 @@ static void note_would_block(struct syscall_frame *frame, uint64_t number, uint6
     if (file) file->edge_generation++;
 }
 
+
+#define MEMORY_SYSCALL(name, params, args) \
+    static int64_t memory_call_##name params { \
+        process_memory_enter(); \
+        int64_t result = sys_##name args; \
+        process_memory_leave(); \
+        return result; \
+    }
+
+MEMORY_SYSCALL(mmap, (uint64_t a, uint64_t b, int c, int d, int e, uint64_t f), (a, b, c, d, e, f))
+MEMORY_SYSCALL(mprotect, (uint64_t a, uint64_t b, int c), (a, b, c))
+MEMORY_SYSCALL(mremap, (uint64_t a, uint64_t b, uint64_t c, int d, uint64_t e), (a, b, c, d, e))
+MEMORY_SYSCALL(msync, (uint64_t a, uint64_t b, int c), (a, b, c))
+MEMORY_SYSCALL(munmap, (uint64_t a, uint64_t b), (a, b))
+MEMORY_SYSCALL(shmat, (int a, uint64_t b, int c), (a, b, c))
+MEMORY_SYSCALL(shmdt, (uint64_t a), (a))
+MEMORY_SYSCALL(brk, (uint64_t a), (a))
+
 static void syscall_dispatch_locked(struct syscall_frame *frame) {
     if (!frame) return;
     process_reap_deferred();
@@ -5080,30 +5098,30 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
         case SYS_LSTAT: SYSCALL_RET(frame) = (uint64_t)stat_path(AT_FDCWD, SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), 0); break;
         case SYS_FSTAT: SYSCALL_RET(frame) = (uint64_t)sys_fstat((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame)); break;
         case SYS_LSEEK: SYSCALL_RET(frame) = (uint64_t)sys_lseek((int)SYSCALL_ARG0(frame), (int64_t)SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame)); break;
-        case SYS_MMAP: SYSCALL_RET(frame) = (uint64_t)sys_mmap(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame), (int)SYSCALL_ARG3(frame), (int)SYSCALL_ARG4(frame), SYSCALL_ARG5(frame)); break;
-        case SYS_MPROTECT: SYSCALL_RET(frame) = (uint64_t)sys_mprotect(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame)); break;
+        case SYS_MMAP: SYSCALL_RET(frame) = (uint64_t)memory_call_mmap(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame), (int)SYSCALL_ARG3(frame), (int)SYSCALL_ARG4(frame), SYSCALL_ARG5(frame)); break;
+        case SYS_MPROTECT: SYSCALL_RET(frame) = (uint64_t)memory_call_mprotect(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame)); break;
         case SYS_MREMAP:
-            SYSCALL_RET(frame) = (uint64_t)sys_mremap(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame),
+            SYSCALL_RET(frame) = (uint64_t)memory_call_mremap(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame),
                                               (int)SYSCALL_ARG3(frame), SYSCALL_ARG4(frame));
             break;
 
         case SYS_MADVISE: SYSCALL_RET(frame) = 0; break;
         case SYS_FADVISE64: SYSCALL_RET(frame) = 0; break;
         case SYS_MSYNC:
-            SYSCALL_RET(frame) = (uint64_t)sys_msync(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame));
+            SYSCALL_RET(frame) = (uint64_t)memory_call_msync(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame));
             break;
-        case SYS_MUNMAP: SYSCALL_RET(frame) = (uint64_t)sys_munmap(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame)); break;
+        case SYS_MUNMAP: SYSCALL_RET(frame) = (uint64_t)memory_call_munmap(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame)); break;
         case SYS_SHMGET:
             SYSCALL_RET(frame) = (uint64_t)sys_shmget((int32_t)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame));
             break;
         case SYS_SHMAT:
-            SYSCALL_RET(frame) = (uint64_t)sys_shmat((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame));
+            SYSCALL_RET(frame) = (uint64_t)memory_call_shmat((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame));
             break;
-        case SYS_SHMDT: SYSCALL_RET(frame) = (uint64_t)sys_shmdt(SYSCALL_ARG0(frame)); break;
+        case SYS_SHMDT: SYSCALL_RET(frame) = (uint64_t)memory_call_shmdt(SYSCALL_ARG0(frame)); break;
         case SYS_SHMCTL:
             SYSCALL_RET(frame) = (uint64_t)sys_shmctl((int)SYSCALL_ARG0(frame), (int)SYSCALL_ARG1(frame), SYSCALL_ARG2(frame));
             break;
-        case SYS_BRK: SYSCALL_RET(frame) = (uint64_t)sys_brk(SYSCALL_ARG0(frame)); break;
+        case SYS_BRK: SYSCALL_RET(frame) = (uint64_t)memory_call_brk(SYSCALL_ARG0(frame)); break;
         case SYS_RT_SIGACTION: SYSCALL_RET(frame) = (uint64_t)sys_sigaction((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame), SYSCALL_ARG3(frame)); break;
         case SYS_RT_SIGPROCMASK: SYSCALL_RET(frame) = (uint64_t)sys_sigprocmask((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame), SYSCALL_ARG3(frame)); break;
         case SYS_RT_SIGRETURN:

@@ -631,6 +631,12 @@ static void put_process(struct process **process) {
 
 #define PROCESS_REF __attribute__((cleanup(put_process))) struct process *
 
+static void put_memory(struct process_memory **memory) {
+    process_memory_put(*memory);
+}
+
+#define MEMORY_REF __attribute__((cleanup(put_memory))) struct process_memory *
+
 static char state_code(const struct process *process) {
     if (process->state == PROCESS_BLOCKED) return 'S';
     if (process->state == PROCESS_ZOMBIE) return 'Z';
@@ -765,13 +771,15 @@ static void maps_line(struct text_buffer *text, uint64_t start, uint64_t end,
 static int64_t proc_pid_maps_read(struct vfs_node *node, uint64_t offset,
                                   size_t size, void *output) {
     PROCESS_REF process = process_get(node_pid(node));
-    if (!process || !process->memory) return 0;
+    MEMORY_REF memory = process_memory_get(process);
+    if (!memory) return 0;
+    lock_acquire(&memory->lock);
 
     uint8_t *out = (uint8_t *)output;
     size_t produced = 0;
     uint64_t position = 0;
 
-    struct vm_area heap = {process->memory->brk_start, process->memory->brk_end,
+    struct vm_area heap = {memory->brk_start, memory->brk_end,
                            PAGE_WRITE | PAGE_NX, VM_ANONYMOUS, NULL, 0, NULL};
     struct vm_area stack = {process_stack_floor(process), USER_STACK_TOP,
                             PAGE_WRITE | PAGE_NX, VM_ANONYMOUS, NULL, 0, NULL};
@@ -779,7 +787,7 @@ static int64_t proc_pid_maps_read(struct vfs_node *node, uint64_t offset,
     VFS_PATH_SCOPED path = vfs_path_buffer();
     for (int step = 0; step < 3 && produced < size; step++) {
         struct vm_area *area = step == 0 ? (heap.end > heap.start ? &heap : NULL)
-                             : step == 1 ? process->memory->areas
+                             : step == 1 ? memory->areas
                              : &stack;
         for (; area && produced < size; area = step == 1 ? area->next : NULL) {
             TEXT_BUFFER line = {0};
@@ -802,6 +810,7 @@ static int64_t proc_pid_maps_read(struct vfs_node *node, uint64_t offset,
             position += line.length;
         }
     }
+    lock_release(&memory->lock);
     return (int64_t)produced;
 }
 
@@ -818,13 +827,15 @@ static int64_t proc_pid_comm_read(struct vfs_node *node, uint64_t offset,
 static int64_t proc_cmdline_read(struct vfs_node *node, uint64_t offset,
                                  size_t size, void *output) {
     PROCESS_REF process = process_get(node_pid(node));
-    if (!process || !process->cr3 || process->arg_end <= process->arg_start ||
+    MEMORY_REF memory = process_memory_get(process);
+    if (!memory || process->arg_end <= process->arg_start ||
         offset >= process->arg_end - process->arg_start) return 0;
     uint64_t available = process->arg_end - process->arg_start - offset;
     if (size > available) size = (size_t)available;
-    if (vmm_copy_from_space(process->cr3, output, process->arg_start + offset, size) != 0)
-        return 0;
-    return (int64_t)size;
+    lock_acquire(&memory->lock);
+    int status = vmm_copy_from_space(memory->cr3, output, process->arg_start + offset, size);
+    lock_release(&memory->lock);
+    return status == 0 ? (int64_t)size : 0;
 }
 
 static struct vfs_node *virtual_file(struct vfs_node *parent, const char *name,

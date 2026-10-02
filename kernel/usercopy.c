@@ -7,13 +7,19 @@
 int copy_from_user(void *destination, uint64_t user_source, size_t length) {
     struct process *process = process_current();
     if (!process) return -1;
-    return vmm_copy_from_space(process->cr3, destination, user_source, length);
+    process_memory_enter();
+    int status = vmm_copy_from_space(process->cr3, destination, user_source, length);
+    process_memory_leave();
+    return status;
 }
 
 int copy_to_user(uint64_t user_destination, const void *source, size_t length) {
     struct process *process = process_current();
     if (!process) return -1;
-    return vmm_copy_to_space(process->cr3, user_destination, source, length);
+    process_memory_enter();
+    int status = vmm_copy_to_space(process->cr3, user_destination, source, length);
+    process_memory_leave();
+    return status;
 }
 
 int copy_string_from_user(char *destination, size_t capacity, uint64_t user_source) {

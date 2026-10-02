@@ -11,6 +11,7 @@
 #include "include/interrupt.h"
 #include "include/klock.h"
 #include "include/lock.h"
+#include "include/usercopy.h"
 
 static int process_wake_all_locked(const void *channel);
 static int signal_would_act(const struct process *process, int signal_number);
@@ -362,12 +363,14 @@ void process_table_unlock(void) {
 }
 
 static void signal_one_process(struct process *target, int signal_number);
+static int send_signal(int64_t pid, int signal_number, int checked);
 
 static struct process_memory *memory_create(uint64_t cr3, uint64_t brk_start,
                                             uint64_t brk_end, uint64_t mmap_base) {
     struct process_memory *memory = (struct process_memory *)kmalloc(sizeof(*memory));
     if (!memory) return NULL;
     memset(memory, 0, sizeof(*memory));
+    lock_init(&memory->lock, "address space", LOCK_RANK_MEMORY);
     memory->cr3 = cr3;
     memory->refs = 1;
     memory->brk_start = brk_start;
@@ -391,6 +394,36 @@ static void memory_unref(struct process_memory *memory) {
     if (memory->cr3) vmm_destroy_address_space(memory->cr3);
     kfree(memory);
 }
+
+void process_memory_enter(void) {
+    struct process *self = current;
+    if (self && self->memory) lock_acquire(&self->memory->lock);
+}
+
+void process_memory_leave(void) {
+    struct process *self = current;
+    if (self && self->memory) lock_release(&self->memory->lock);
+}
+
+struct process_memory *process_memory_get(struct process *process) {
+    if (!process) return NULL;
+    SCHED_LOCKED;
+    struct process_memory *memory = process->memory;
+    memory_ref(memory);
+    return memory;
+}
+
+void process_memory_put(struct process_memory *memory) {
+    memory_unref(memory);
+}
+
+static void memory_guard_release(int *unused) {
+    (void)unused;
+    process_memory_leave();
+}
+
+#define MEMORY_LOCKED \
+    __attribute__((cleanup(memory_guard_release))) int memory_guard = (process_memory_enter(), 0)
 
 static void memory_copy_mappings(struct process_memory *destination,
                                  const struct process_memory *source) {
@@ -1562,6 +1595,7 @@ static void area_insert(struct vm_area **list, struct vm_area *area) {
 
 int process_map_area(uint64_t start, uint64_t end, uint64_t page_flags,
                      uint32_t kind, struct file *file, uint64_t offset) {
+    MEMORY_LOCKED;
     struct vm_area **list = area_list();
     if (!list || start >= end) return -1;
     process_unmap_area(start, end);
@@ -1572,6 +1606,7 @@ int process_map_area(uint64_t start, uint64_t end, uint64_t page_flags,
 }
 
 void process_unmap_area(uint64_t start, uint64_t end) {
+    MEMORY_LOCKED;
     struct vm_area **list = area_list();
     if (!list || start >= end) return;
 
@@ -1604,6 +1639,7 @@ void process_unmap_area(uint64_t start, uint64_t end) {
 }
 
 void process_protect_area(uint64_t start, uint64_t end, uint64_t page_flags) {
+    MEMORY_LOCKED;
     struct vm_area **list = area_list();
     if (!list || start >= end) return;
 
@@ -1627,6 +1663,7 @@ void process_protect_area(uint64_t start, uint64_t end, uint64_t page_flags) {
 }
 
 int process_area_range_free(uint64_t start, uint64_t end) {
+    MEMORY_LOCKED;
     struct vm_area **list = area_list();
     if (!list || start >= end) return 0;
     for (struct vm_area *area = *list; area; area = area->next) {
@@ -1637,6 +1674,7 @@ int process_area_range_free(uint64_t start, uint64_t end) {
 }
 
 int process_find_free_range(uint64_t start, uint64_t length, uint64_t *base_out) {
+    MEMORY_LOCKED;
     struct vm_area **list = area_list();
     if (!list || !length || !base_out) return -1;
     uint64_t base = start;
@@ -1652,6 +1690,7 @@ int process_find_free_range(uint64_t start, uint64_t length, uint64_t *base_out)
 }
 
 int process_sync_file_areas(uint64_t start, uint64_t end) {
+    MEMORY_LOCKED;
     struct vm_area **list = area_list();
     if (!list) return 0;
     int covered = 0;
@@ -1666,6 +1705,7 @@ int process_sync_file_areas(uint64_t start, uint64_t end) {
 }
 
 struct vm_area *process_find_area(uint64_t address) {
+    MEMORY_LOCKED;
     struct vm_area **list = area_list();
     if (!list) return NULL;
     for (struct vm_area *area = *list; area; area = area->next) {
@@ -1678,6 +1718,7 @@ struct vm_area *process_find_area(uint64_t address) {
 static int reclaim_or_kill(void) {
     if (vfs_reclaim_file_data(vfs_root)) return 1;
 
+    SCHED_LOCKED;
     struct process *victim = NULL;
     uint64_t worst = 0;
     struct process *item = queue;
@@ -1695,7 +1736,8 @@ static int reclaim_or_kill(void) {
     kprintf("OOM: killing pid=%u (%s), %u MiB resident\n",
             (unsigned)victim->pid, victim->name,
             (unsigned)(worst / 256U));
-    (void)process_send_signal((int64_t)victim->pid, SIGKILL);
+    wake_bump();
+    (void)send_signal((int64_t)victim->pid, SIGKILL, 0);
     return 0;
 }
 
@@ -1764,6 +1806,7 @@ static int commit_memfd(struct vm_area *area, uint64_t page) {
 }
 
 int process_commit_area(uint64_t fault_address) {
+    MEMORY_LOCKED;
     if (!current || current->state != PROCESS_RUNNING || !current->cr3) return 0;
     uint64_t page = fault_address & ~4095ULL;
     struct vm_area *area = process_find_area(page);
@@ -1808,6 +1851,7 @@ static int areas_copy(struct process_memory *destination,
 }
 
 int process_grow_user_stack(uint64_t fault_address) {
+    MEMORY_LOCKED;
     if (!current || current->state != PROCESS_RUNNING || !current->cr3) return 0;
     if (fault_address >= USER_STACK_TOP || fault_address < process_stack_floor(current)) return 0;
 
@@ -1829,6 +1873,7 @@ int process_grow_user_stack(uint64_t fault_address) {
 }
 
 int process_handle_cow_fault(uint64_t fault_address) {
+    MEMORY_LOCKED;
     if (!current || current->state != PROCESS_RUNNING || !current->cr3) return 0;
     return vmm_handle_cow_fault(current->cr3, fault_address & ~4095ULL) == 0;
 }
@@ -2008,10 +2053,10 @@ struct linux_robust_list_head_user {
 static void robust_wake_address(struct process *process, uint64_t address) {
     if (!process || (address & 3U) || address >= USER_ADDRESS_LIMIT) return;
     uint32_t value;
-    if (vmm_copy_from_space(process->cr3, &value, address, sizeof(value)) != 0) return;
+    if (copy_from_user(&value, address, sizeof(value)) != 0) return;
     if ((value & FUTEX_TID_MASK) != (uint32_t)process->pid) return;
     value = (value & ~FUTEX_TID_MASK) | FUTEX_OWNER_DIED;
-    if (vmm_copy_to_space(process->cr3, address, &value, sizeof(value)) != 0) return;
+    if (copy_to_user(address, &value, sizeof(value)) != 0) return;
     (void)process_futex_wake(address, 1, FUTEX_BITSET_MATCH_ANY, 1);
 }
 
@@ -2035,12 +2080,12 @@ static void process_handle_robust_list(struct process *process) {
 
     uint64_t head_address = process->robust_list_head;
     struct linux_robust_list_head_user head;
-    if (vmm_copy_from_space(process->cr3, &head, head_address, sizeof(head)) != 0) return;
+    if (copy_from_user(&head, head_address, sizeof(head)) != 0) return;
 
     uint64_t entry = head.list_next;
     for (unsigned count = 0; entry && entry != head_address && count < ROBUST_LIST_LIMIT; count++) {
         uint64_t next;
-        if (vmm_copy_from_space(process->cr3, &next, entry, sizeof(next)) != 0) break;
+        if (copy_from_user(&next, entry, sizeof(next)) != 0) break;
         uint64_t futex_address;
         if (robust_futex_address(entry, head.futex_offset, &futex_address) == 0)
             robust_wake_address(process, futex_address);
@@ -2098,7 +2143,7 @@ void process_exit_from_syscall(struct syscall_frame *frame, int status) {
     if (exiting->clear_child_tid_user) {
         uint64_t clear_address = exiting->clear_child_tid_user;
         uint32_t zero = 0;
-        (void)vmm_copy_to_space(exiting->cr3, clear_address, &zero, sizeof(zero));
+        (void)copy_to_user(clear_address, &zero, sizeof(zero));
         exiting->clear_child_tid_user = 0;
         (void)process_futex_wake(clear_address, 1, FUTEX_BITSET_MATCH_ANY, 1);
     }
@@ -2161,8 +2206,10 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame,
     strncpy(child->name, parent->name, sizeof(child->name) - 1);
     child->exe_path = copy_text(parent->exe_path);
     memcpy(child->rlimits, parent->rlimits, sizeof(child->rlimits));
+    process_memory_enter();
     child->cr3 = vmm_clone_address_space(parent->cr3);
     if (!child->cr3) {
+        process_memory_leave();
         free_process_struct(child);
         return -EINVAL;
     }
@@ -2172,11 +2219,13 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame,
     child->memory = memory_create(child->cr3, parent_brk_start, parent_brk_end,
                                   parent_mmap_base);
     if (!child->memory) {
+        process_memory_leave();
         vmm_destroy_address_space(child->cr3);
         free_process_struct(child);
         return -EINVAL;
     }
     memory_copy_mappings(child->memory, parent->memory);
+    process_memory_leave();
     arch_save_thread_pointers(parent);
     fpu_save(parent);
     fpu_copy(child, parent);
@@ -2309,7 +2358,7 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
 
     uint32_t tid = (uint32_t)child->pid;
     if ((flags & 0x00100000ULL) && parent_tid_user &&
-        vmm_copy_to_space(parent->cr3, parent_tid_user, &tid, sizeof(tid)) != 0) {
+        copy_to_user(parent_tid_user, &tid, sizeof(tid)) != 0) {
         process_release_files(child);
         memory_unref(child->memory);
         kfree((void *)child->kernel_stack_base);
@@ -2318,7 +2367,7 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
     }
     if ((flags & (0x01000000ULL | 0x00200000ULL)) && child_tid_user) {
         if ((flags & 0x01000000ULL) &&
-            vmm_copy_to_space(child->cr3, child_tid_user, &tid, sizeof(tid)) != 0) {
+            copy_to_user(child_tid_user, &tid, sizeof(tid)) != 0) {
             process_release_files(child);
             memory_unref(child->memory);
             kfree((void *)child->kernel_stack_base);
@@ -2354,7 +2403,7 @@ int64_t process_futex_wait(struct syscall_frame *frame, uint64_t address,
     if (!current || !frame || (address & 3U) || address >= USER_ADDRESS_LIMIT)
         return -EINVAL;
     uint32_t value = 0;
-    if (vmm_copy_from_space(current->cr3, &value, address, sizeof(value)) != 0)
+    if (copy_from_user(&value, address, sizeof(value)) != 0)
         return -EFAULT;
     if (value != expected) { futex_note('A', address, 0, 0, value); return -EAGAIN; }
     if (timeout_ns == 0) return -ETIMEDOUT;
@@ -2765,7 +2814,7 @@ int64_t process_waitpid_from_syscall(struct syscall_frame *frame, int64_t pid,
             return PROCESS_RESTARTED;
         }
     }
-    if (status_user && vmm_copy_to_space(parent->cr3, status_user, &status, sizeof(status)) != 0)
+    if (status_user && copy_to_user(status_user, &status, sizeof(status)) != 0)
         return -EFAULT;
     return found;
 }
@@ -2834,7 +2883,7 @@ int64_t process_waitid_from_syscall(int64_t pid_spec, uint64_t info_user,
             if (!(options & WNOHANG)) return -EAGAIN;
         }
     }
-    if (vmm_copy_to_space(parent->cr3, info_user, &info, sizeof(info)) != 0) return -EFAULT;
+    if (copy_to_user(info_user, &info, sizeof(info)) != 0) return -EFAULT;
     return 0;
 }
 
@@ -2959,9 +3008,8 @@ int process_sigreturn(struct syscall_frame *frame) {
     *frame = current->signal_saved_frame;
     if (current->signal_context_address) {
         uint8_t context[SIGNAL_CONTEXT_SIZE];
-        if (vmm_copy_from_space(current->cr3, context,
-                                current->signal_context_address,
-                                SIGNAL_CONTEXT_SIZE) == 0)
+        if (copy_from_user(context, current->signal_context_address,
+                           SIGNAL_CONTEXT_SIZE) == 0)
             read_user_context(frame, context);
     }
     current->signal_context_address = 0;
@@ -3116,7 +3164,7 @@ void process_prepare_user_return(struct syscall_frame *frame) {
         fill_user_context(context, frame, current->signal_blocked);
         area -= SIGNAL_CONTEXT_SIZE;
         context_address = area;
-        if (vmm_copy_to_space(current->cr3, context_address, context, SIGNAL_CONTEXT_SIZE) != 0) {
+        if (copy_to_user(context_address, context, SIGNAL_CONTEXT_SIZE) != 0) {
             process_exit_from_signal(frame, SIGSEGV);
             return;
         }
@@ -3131,7 +3179,7 @@ void process_prepare_user_return(struct syscall_frame *frame) {
         }
         area -= SIGNAL_SIGINFO_SIZE;
         siginfo_address = area;
-        if (vmm_copy_to_space(current->cr3, siginfo_address, info, SIGNAL_SIGINFO_SIZE) != 0) {
+        if (copy_to_user(siginfo_address, info, SIGNAL_SIGINFO_SIZE) != 0) {
             process_exit_from_signal(frame, SIGSEGV);
             return;
         }
@@ -3142,7 +3190,10 @@ void process_prepare_user_return(struct syscall_frame *frame) {
     current->signal_sender_uid[signal_number - 1] = 0;
 
     uint64_t new_rsp;
-    if (arch_signal_push_restorer(current->cr3, area, &action->restorer, &new_rsp) != 0) {
+    process_memory_enter();
+    int pushed = arch_signal_push_restorer(current->cr3, area, &action->restorer, &new_rsp);
+    process_memory_leave();
+    if (pushed != 0) {
         process_exit_from_signal(frame, SIGSEGV);
         return;
     }
