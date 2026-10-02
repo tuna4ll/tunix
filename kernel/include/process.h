@@ -41,6 +41,7 @@ struct interrupt_frame;
 #define VM_FILE_PAGES 0x2U
 #define VM_MEMFD 0x4U
 #define VM_PRIVATE 0x8U
+#define VM_DEVICE 0x10U
 
 struct vm_area {
     uint64_t start;

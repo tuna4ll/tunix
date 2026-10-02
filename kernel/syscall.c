@@ -3438,6 +3438,28 @@ static int find_mapping_range(struct process *process, uint64_t start,
     return -1;
 }
 
+static int64_t map_device(struct process *process, struct file *file, uint64_t base,
+                          uint64_t length, uint64_t offset, uint64_t page_flags,
+                          int advance_mmap_base) {
+    if (process_map_area(base, base + length, page_flags | PAGE_SHARED, VM_DEVICE,
+                         file, offset) != 0) return -ENOMEM;
+    if (advance_mmap_base) {
+        process->mmap_base = base + length + 4096;
+        if (process->memory) process->memory->mmap_base = process->mmap_base;
+    }
+    process_memory_leave();
+    int64_t status = file->kind == FILE_KIND_DMABUF
+        ? drm_dmabuf_mmap(file, process->cr3, base, length, offset, page_flags | PAGE_SHARED)
+        : file->node->mmap(file->node, file, process->cr3, base, length, offset,
+                           page_flags | PAGE_SHARED);
+    process_memory_enter();
+    if (status < 0) {
+        unmap_pages(process, base, base + length);
+        return status;
+    }
+    return (int64_t)base;
+}
+
 static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, int fd, uint64_t offset) {
     struct process *process = process_current();
     if (!process || !length) return -EINVAL;
@@ -3504,29 +3526,15 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
 
         if (file->kind == FILE_KIND_DMABUF) {
             if (!(flags & MAP_SHARED)) return -EINVAL;
-            int64_t status = drm_dmabuf_mmap(file, process->cr3, base, length,
-                                             offset, page_flags | PAGE_SHARED);
-            if (status < 0) return status;
-            if (advance_mmap_base) {
-                process->mmap_base = base + length + 4096;
-                if (process->memory) process->memory->mmap_base = process->mmap_base;
-            }
-            return (int64_t)base;
+            return map_device(process, file, base, length, offset, page_flags,
+                              advance_mmap_base);
         }
         if ((file->kind != FILE_KIND_VFS && file->kind != FILE_KIND_FRAMEBUFFER) ||
             !file->node) return -ENODEV;
         if (file->node->mmap) {
             if (!(flags & MAP_SHARED)) return -EINVAL;
-
-            int64_t status = file->node->mmap(file->node, file, process->cr3,
-                                              base, length, offset,
-                                              page_flags | PAGE_SHARED);
-            if (status < 0) return status;
-            if (advance_mmap_base) {
-                process->mmap_base = base + length + 4096;
-                if (process->memory) process->memory->mmap_base = process->mmap_base;
-            }
-            return (int64_t)base;
+            return map_device(process, file, base, length, offset, page_flags,
+                              advance_mmap_base);
         }
     }
 
