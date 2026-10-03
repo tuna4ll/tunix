@@ -6,9 +6,9 @@
 enum lock_rank {
     LOCK_RANK_TTY = 6,
     LOCK_RANK_CHAR = 8,
+    LOCK_RANK_FILE = 9,
     LOCK_RANK_MEMORY = 10,
-    LOCK_RANK_MODULES = 12,
-    LOCK_RANK_FILE = 17,
+    LOCK_RANK_MODULES = 18,
     LOCK_RANK_VFS = 20,
     LOCK_RANK_OBJECT = 30,
     LOCK_RANK_NET = 35,

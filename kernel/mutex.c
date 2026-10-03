@@ -13,6 +13,12 @@ extern void kprintf(const char *fmt, ...);
 
 static volatile uint32_t reports;
 
+struct mutex_waiter {
+    struct mutex_waiter *next;
+    struct process *process;
+    volatile int granted;
+};
+
 static int may_report(void) {
     return __atomic_fetch_add(&reports, 1, __ATOMIC_RELAXED) < MUTEX_REPORTS;
 }
@@ -63,9 +69,10 @@ void mutex_init(struct mutex *mutex, const char *name, unsigned rank) {
     lock_init(&mutex->guard, name, LOCK_RANK_MUTEX);
     mutex->owner = NULL;
     mutex->depth = 0;
-    mutex->waiters = 0;
     mutex->rank = rank;
     mutex->name = name;
+    mutex->first = NULL;
+    mutex->last = NULL;
 }
 
 int mutex_held(const struct mutex *mutex) {
@@ -116,14 +123,22 @@ void mutex_lock(struct mutex *mutex) {
             cpu_relax();
             continue;
         }
-        mutex->waiters++;
-        process_prepare_wait(mutex, 0);
+        struct mutex_waiter waiter = {NULL, self, 0};
+        if (mutex->last) mutex->last->next = &waiter;
+        else mutex->first = &waiter;
+        mutex->last = &waiter;
         lock_release(&mutex->guard);
-        process_wait();
-        process_finish_wait();
-        lock_acquire(&mutex->guard);
-        mutex->waiters--;
-        lock_release(&mutex->guard);
+        while (!__atomic_load_n(&waiter.granted, __ATOMIC_ACQUIRE)) {
+            process_prepare_wait(&waiter, 0);
+            if (__atomic_load_n(&waiter.granted, __ATOMIC_ACQUIRE)) {
+                process_finish_wait();
+                break;
+            }
+            process_wait();
+            process_finish_wait();
+        }
+        remember(self, mutex);
+        return;
     }
 }
 
@@ -138,10 +153,18 @@ void mutex_unlock(struct mutex *mutex) {
     struct process *self = process_current();
     if (self) forget(self, mutex);
     lock_acquire(&mutex->guard);
-    mutex->owner = NULL;
-    int waiting = mutex->waiters != 0;
+    struct mutex_waiter *next = mutex->first;
+    if (next) {
+        mutex->first = next->next;
+        if (!mutex->first) mutex->last = NULL;
+        mutex->owner = next->process;
+        mutex->depth = 1;
+        __atomic_store_n(&next->granted, 1, __ATOMIC_RELEASE);
+    } else {
+        mutex->owner = NULL;
+    }
     lock_release(&mutex->guard);
-    if (waiting) process_wake_one(mutex);
+    if (next) process_wake_all(next);
 }
 
 unsigned mutex_release_all(struct mutex *mutex) {

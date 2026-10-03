@@ -5,18 +5,20 @@
 #include "lock.h"
 
 struct process;
+struct mutex_waiter;
 
 struct mutex {
     struct lock guard;
     struct process *volatile owner;
     uint32_t depth;
-    uint32_t waiters;
     uint32_t rank;
     const char *name;
+    struct mutex_waiter *first;
+    struct mutex_waiter *last;
 };
 
 #define MUTEX_INITIALIZER(label, order) \
-    { LOCK_INITIALIZER(label, LOCK_RANK_MUTEX), NULL, 0, 0, (order), (label) }
+    { LOCK_INITIALIZER(label, LOCK_RANK_MUTEX), NULL, 0, (order), (label), NULL, NULL }
 
 void mutex_init(struct mutex *mutex, const char *name, unsigned rank);
 void mutex_lock(struct mutex *mutex);
