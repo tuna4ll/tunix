@@ -1140,7 +1140,7 @@ static void service_pipe(struct ehci_pipe *pipe) {
 }
 
 void ehci_poll(void) {
-    if (!lock_try_acquire(&ehci_lock)) return;
+    lock_acquire(&ehci_lock);
     for (unsigned index = 0; index < pipe_capacity; index++)
         if (pipes[index] && pipes[index]->used) service_pipe(pipes[index]);
     lock_release(&ehci_lock);

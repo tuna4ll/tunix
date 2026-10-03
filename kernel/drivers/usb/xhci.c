@@ -1409,7 +1409,7 @@ static int any_work(struct xhci_host *host) {
 }
 
 void xhci_poll(void) {
-    if (!lock_try_acquire(&xhci_lock)) return;
+    lock_acquire(&xhci_lock);
     for (unsigned index = 0; index < host_count; index++) pump(hosts[index]);
     if (!servicing && booted) {
         servicing = 1;
