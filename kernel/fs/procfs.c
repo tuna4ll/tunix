@@ -761,7 +761,7 @@ static int64_t proc_pid_maps_read(struct vfs_node *node, uint64_t offset,
     PROCESS_REF process = process_get(node_pid(node));
     MEMORY_REF memory = process_memory_get(process);
     if (!memory) return 0;
-    lock_acquire(&memory->lock);
+    mutex_lock(&memory->lock);
 
     uint8_t *out = (uint8_t *)output;
     size_t produced = 0;
@@ -798,7 +798,7 @@ static int64_t proc_pid_maps_read(struct vfs_node *node, uint64_t offset,
             position += line.length;
         }
     }
-    lock_release(&memory->lock);
+    mutex_unlock(&memory->lock);
     return (int64_t)produced;
 }
 
@@ -820,9 +820,9 @@ static int64_t proc_cmdline_read(struct vfs_node *node, uint64_t offset,
         offset >= process->arg_end - process->arg_start) return 0;
     uint64_t available = process->arg_end - process->arg_start - offset;
     if (size > available) size = (size_t)available;
-    lock_acquire(&memory->lock);
+    mutex_lock(&memory->lock);
     int status = vmm_copy_from_space(memory->cr3, output, process->arg_start + offset, size);
-    lock_release(&memory->lock);
+    mutex_unlock(&memory->lock);
     return status == 0 ? (int64_t)size : 0;
 }
 

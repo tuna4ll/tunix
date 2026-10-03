@@ -407,7 +407,7 @@ int64_t pty_write(struct pty_pair *pty, int master, size_t size, const void *buf
 }
 
 int pty_read_ready(struct pty_pair *pty, int master) {
-    TTY_LOCKED;
+    TTY_POLL_LOCKED;
     if (!pty) return 0;
     if (master) return pty->to_master.count > 0 ||
                        (pty->slave_ever_opened && pty->slave_files == 0);
@@ -415,7 +415,7 @@ int pty_read_ready(struct pty_pair *pty, int master) {
 }
 
 int pty_write_ready(struct pty_pair *pty, int master) {
-    TTY_LOCKED;
+    TTY_POLL_LOCKED;
     if (!pty) return 0;
     if (master) return !(pty->slave_ever_opened && pty->slave_files == 0) &&
                        pty->to_slave.count < PTY_QUEUE_CAPACITY &&

@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <tunix/keymap.h>
-#include "lock.h"
+#include "mutex.h"
 
 #define TCGETS      0x5401UL
 #define TCSETS      0x5402UL
@@ -115,14 +115,20 @@ uint64_t tty_session(const struct tty *tty);
 void tty_set_controlling_session(struct tty *tty, uint64_t sid, int pgid);
 void tty_release_controlling_session(struct tty *tty, uint64_t sid);
 
-extern struct lock tty_lock;
+extern struct mutex tty_lock;
 
 static inline void tty_guard_release(int *unused) {
     (void)unused;
-    lock_release(&tty_lock);
+    mutex_unlock(&tty_lock);
 }
 
+int tty_poll_lock(void);
+
 #define TTY_LOCKED \
-    __attribute__((cleanup(tty_guard_release))) int tty_guard = (lock_acquire(&tty_lock), 0)
+    __attribute__((cleanup(tty_guard_release))) int tty_guard = (mutex_lock(&tty_lock), 0)
+
+#define TTY_POLL_LOCKED \
+    if (!tty_poll_lock()) return 1; \
+    __attribute__((cleanup(tty_guard_release))) int tty_guard = 0
 
 #endif

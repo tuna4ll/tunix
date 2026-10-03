@@ -61,6 +61,12 @@ void serial_write_char(char c) {
     }
 }
 
+int serial_data_ready(void) {
+    if (!present) return 0;
+    uint8_t status = inb(COM1_LINE_STATUS);
+    return status != 0xFFU && (status & LINE_STATUS_DATA_READY);
+}
+
 int serial_read_char(void) {
     if (!present) return -1;
     uint8_t status = inb(COM1_LINE_STATUS);
@@ -165,6 +171,13 @@ void serial_write_char(char c) {
             return;
         }
     }
+}
+
+int serial_data_ready(void) {
+    if (!present) return 0;
+    if (kind == UART_PL011) return !(pl011_read(PL011_FR) & PL011_FR_RXFE);
+    uint32_t status = ns16550_read(NS16550_LINE_STATUS);
+    return (status & 0xFFU) != 0xFFU && (status & LINE_STATUS_DATA_READY);
 }
 
 int serial_read_char(void) {

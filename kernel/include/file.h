@@ -3,7 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include "spinlock.h"
+#include "mutex.h"
 
 struct vfs_node;
 struct pipe_buffer;
@@ -40,7 +40,7 @@ struct eventfs_subscriber;
 #define FILE_KIND_EVENTFS     18
 
 struct file {
-    spinlock_t lock;
+    struct mutex lock;
     int refs;
     int kind;
     uint32_t flags;

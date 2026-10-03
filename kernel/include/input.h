@@ -10,6 +10,7 @@ struct tunix_input_device_info;
 void input_init(void);
 void input_poll(void);
 void input_dispatch_console(void);
+int input_console_pending(void);
 
 void input_external_key(uint16_t keycode, int released);
 void input_external_mouse(int dx, int dy, int wheel, uint8_t buttons);

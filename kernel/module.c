@@ -2,6 +2,7 @@
 #include <stdint.h>
 
 #include "include/heap.h"
+#include "include/mutex.h"
 #include "include/klog.h"
 #include "include/kstring.h"
 #include "include/module.h"
@@ -109,24 +110,24 @@ struct image {
 
 static struct module *modules;
 static struct module *active;
-static struct lock module_lock = LOCK_INITIALIZER("modules", LOCK_RANK_MODULES);
+static struct mutex module_lock = MUTEX_INITIALIZER("modules", LOCK_RANK_MODULES);
 
 #define MODULE_DYING 0x80000000U
 
 static void module_guard_release(int *unused) {
     (void)unused;
-    lock_release(&module_lock);
+    mutex_unlock(&module_lock);
 }
 
 #define MODULES_LOCKED \
-    __attribute__((cleanup(module_guard_release))) int module_guard = (lock_acquire(&module_lock), 0)
+    __attribute__((cleanup(module_guard_release))) int module_guard = (mutex_lock(&module_lock), 0)
 
 void module_lock_acquire(void) {
-    lock_acquire(&module_lock);
+    mutex_lock(&module_lock);
 }
 
 void module_lock_release(void) {
-    lock_release(&module_lock);
+    mutex_unlock(&module_lock);
 }
 
 extern const struct module_export kernel_symbols[];

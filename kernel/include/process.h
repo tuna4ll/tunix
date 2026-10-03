@@ -58,7 +58,7 @@ struct vm_area {
 };
 
 struct process_memory {
-    struct lock lock;
+    struct mutex lock;
     uint64_t cr3;
     uint64_t refs;
     uint64_t brk_start;

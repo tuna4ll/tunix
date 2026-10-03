@@ -9,6 +9,7 @@ void serial_attach_pl011(uint64_t virtual_base);
 int serial_present(void);
 void serial_write_char(char c);
 int serial_read_char(void);
+int serial_data_ready(void);
 unsigned serial_read_limit(void);
 
 #endif

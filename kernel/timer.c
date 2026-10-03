@@ -17,7 +17,7 @@ void timer_init(void) {
 
 void timer_irq(struct interrupt_frame *frame) {
     ticks++;
-    vt_poll_input();
+    vt_poll_from_tick();
     net_tick();
     if ((ticks % (TIMER_FREQUENCY_HZ / 30U)) == 0U && vt_console_in_front())
         drm_console_present();

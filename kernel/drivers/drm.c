@@ -14,17 +14,18 @@
 #include "../include/virtgpu.h"
 #include "../include/vmm.h"
 #include "../include/lock.h"
+#include "../include/mutex.h"
 #include "../include/smp.h"
 
-static struct lock drm_lock = LOCK_INITIALIZER("drm", LOCK_RANK_CHAR);
+static struct mutex drm_lock = MUTEX_INITIALIZER("drm", LOCK_RANK_CHAR);
 
 static void drm_guard_release(int *unused) {
     (void)unused;
-    lock_release(&drm_lock);
+    mutex_unlock(&drm_lock);
 }
 
 #define DRM_LOCKED \
-    __attribute__((cleanup(drm_guard_release))) int drm_guard = (lock_acquire(&drm_lock), 0)
+    __attribute__((cleanup(drm_guard_release))) int drm_guard = (mutex_lock(&drm_lock), 0)
 
 extern void kprintf(const char *fmt, ...);
 
@@ -1315,11 +1316,11 @@ static int64_t drm_dispatch_ioctl(struct file *file, unsigned long request,
                                   uint64_t user_argument);
 
 static void drm_enter(void) {
-    lock_acquire(&drm_lock);
+    mutex_lock(&drm_lock);
 }
 
 static void drm_leave(void) {
-    lock_release(&drm_lock);
+    mutex_unlock(&drm_lock);
 }
 
 static void copy_row_span(const struct drm_framebuffer *fb, const struct drm_dumb_buffer *buffer,
@@ -1461,9 +1462,8 @@ int64_t drm_device_read(struct vfs_node *node, uint64_t offset,
 }
 
 int drm_device_read_ready(struct vfs_node *node) {
-    DRM_LOCKED;
     (void)node;
-    return event_count != 0;
+    return __atomic_load_n(&event_count, __ATOMIC_RELAXED) != 0;
 }
 
 static int64_t ioctl_page_flip(const struct file *client, uint64_t user_argument) {
@@ -2015,14 +2015,14 @@ void drm_display_suspend(void) {
 
 void drm_console_present(void) {
     if (!virtgpu_available()) return;
-    if (!lock_try_acquire(&drm_lock)) return;
+    if (!mutex_trylock(&drm_lock)) return;
     uint32_t pitch = framebuffer_pitch();
     if (pitch)
         (void)virtgpu_console_present(framebuffer_physical_address() +
                                           framebuffer_memory_offset(),
                                       pitch / 4U, framebuffer_width(),
                                       framebuffer_height());
-    lock_release(&drm_lock);
+    mutex_unlock(&drm_lock);
 }
 
 void drm_display_resume(void) {

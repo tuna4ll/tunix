@@ -11,7 +11,13 @@
 #include "../include/vt.h"
 #include "../include/tunix/input_event.h"
 
-struct lock tty_lock = LOCK_INITIALIZER("tty", LOCK_RANK_TTY);
+struct mutex tty_lock = MUTEX_INITIALIZER("tty", LOCK_RANK_TTY);
+
+int tty_poll_lock(void) {
+    if (!process_may_sleep()) return mutex_trylock(&tty_lock);
+    mutex_lock(&tty_lock);
+    return 1;
+}
 
 #define EINTR 4
 #define EAGAIN 11
@@ -619,9 +625,9 @@ static int canonical_input_complete(struct tty *tty) {
 }
 
 int tty_input_ready(struct tty *tty) {
-    TTY_LOCKED;
+    TTY_POLL_LOCKED;
     if (!tty) return 0;
-    vt_poll_input();
+    if (process_may_sleep()) vt_poll_input();
     if (tty->input_interrupted) return 1;
     if (!(tty->termios.lflag & TTY_ICANON)) return tty->input_count != 0;
     return canonical_input_complete(tty);

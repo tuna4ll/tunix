@@ -11,6 +11,7 @@
 #include "../../include/vmm.h"
 #include "../../include/usb.h"
 #include "../../include/lock.h"
+#include "../../include/workqueue.h"
 
 extern void kprintf(const char *fmt, ...);
 
@@ -338,9 +339,8 @@ void usb_storage_init(void) {
     __atomic_store_n(&initialized, 1, __ATOMIC_RELEASE);
 }
 
-void usb_storage_poll(void) {
-    if (!__atomic_load_n(&initialized, __ATOMIC_ACQUIRE)) return;
-    if (__atomic_load_n(&attached_slots, __ATOMIC_ACQUIRE) >= usb_storage_count()) return;
+static void attach_pending(void *unused) {
+    (void)unused;
     if (__atomic_exchange_n(&attaching, 1, __ATOMIC_ACQUIRE)) return;
     while (attached_slots < usb_storage_count()) {
         int index = attached_slots;
@@ -355,4 +355,12 @@ void usb_storage_poll(void) {
         for (int device = before; device < after; device++) devfs_add_block(device);
     }
     __atomic_store_n(&attaching, 0, __ATOMIC_RELEASE);
+}
+
+static struct work attach_work = WORK_INITIALIZER(attach_pending, NULL);
+
+void usb_storage_poll(void) {
+    if (!__atomic_load_n(&initialized, __ATOMIC_ACQUIRE)) return;
+    if (__atomic_load_n(&attached_slots, __ATOMIC_ACQUIRE) >= usb_storage_count()) return;
+    work_queue(&attach_work);
 }

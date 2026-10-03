@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
+#include "../include/workqueue.h"
 #include "../include/drm.h"
 #include "../include/framebuffer.h"
 #include "../include/input.h"
@@ -274,6 +275,18 @@ void vt_poll_input(void) {
     input_dispatch_console();
 }
 
+static void console_work_run(void *unused) {
+    (void)unused;
+    vt_poll_input();
+}
+
+static struct work console_work = WORK_INITIALIZER(console_work_run, NULL);
+
+void vt_poll_from_tick(void) {
+    input_poll();
+    if (serial_data_ready() || input_console_pending()) work_queue(&console_work);
+}
+
 void vt_init(void) {
     memset(terminals, 0, sizeof(terminals));
     active_index = 1U;
@@ -311,7 +324,7 @@ int64_t vt_node_write(struct vfs_node *node, uint64_t offset, size_t size,
 }
 
 int vt_node_ready(struct vfs_node *node) {
-    TTY_LOCKED;
+    TTY_POLL_LOCKED;
     struct vt *vt = vt_from_node(node);
     return vt ? tty_input_ready(vt->tty) : 0;
 }

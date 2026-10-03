@@ -4,6 +4,7 @@
 #include "../include/defer.h"
 #include "../include/heap.h"
 #include "../include/lock.h"
+#include "../include/mutex.h"
 #include "../include/pmm.h"
 #include "../include/vmm.h"
 #include "../include/inotify.h"
@@ -22,22 +23,26 @@ extern void kprintf(const char *fmt, ...);
 
 struct vfs_node *vfs_root;
 
-static struct lock vfs_lock = LOCK_INITIALIZER("vfs", LOCK_RANK_VFS);
+static struct mutex vfs_mutex = MUTEX_INITIALIZER("vfs", LOCK_RANK_VFS);
 
 static void vfs_guard_release(int *unused) {
     (void)unused;
-    lock_release(&vfs_lock);
+    mutex_unlock(&vfs_mutex);
 }
 
 #define VFS_LOCKED \
-    __attribute__((cleanup(vfs_guard_release))) int vfs_guard = (lock_acquire(&vfs_lock), 0)
+    __attribute__((cleanup(vfs_guard_release))) int vfs_guard = (mutex_lock(&vfs_mutex), 0)
 
 void vfs_lock_acquire(void) {
-    lock_acquire(&vfs_lock);
+    mutex_lock(&vfs_mutex);
 }
 
 void vfs_lock_release(void) {
-    lock_release(&vfs_lock);
+    mutex_unlock(&vfs_mutex);
+}
+
+int vfs_lock_try(void) {
+    return mutex_trylock(&vfs_mutex);
 }
 static uint64_t next_inode = 1;
 static const struct vfs_persist_ops *persist_ops;

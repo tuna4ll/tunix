@@ -353,6 +353,10 @@ static void console_queue(uint16_t keycode, int pressed, int hotkey) {
     console_count++;
 }
 
+int input_console_pending(void) {
+    return __atomic_load_n(&console_count, __ATOMIC_RELAXED) != 0;
+}
+
 void input_dispatch_console(void) {
     for (;;) {
         struct console_key batch[32];

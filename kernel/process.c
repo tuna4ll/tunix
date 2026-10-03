@@ -370,7 +370,7 @@ static struct process_memory *memory_create(uint64_t cr3, uint64_t brk_start,
     struct process_memory *memory = (struct process_memory *)kmalloc(sizeof(*memory));
     if (!memory) return NULL;
     memset(memory, 0, sizeof(*memory));
-    lock_init(&memory->lock, "address space", LOCK_RANK_MEMORY);
+    mutex_init(&memory->lock, "address space", LOCK_RANK_MEMORY);
     memory->cr3 = cr3;
     memory->refs = 1;
     memory->brk_start = brk_start;
@@ -397,12 +397,12 @@ static void memory_unref(struct process_memory *memory) {
 
 void process_memory_enter(void) {
     struct process *self = current;
-    if (self && self->memory) lock_acquire(&self->memory->lock);
+    if (self && self->memory) mutex_lock(&self->memory->lock);
 }
 
 void process_memory_leave(void) {
     struct process *self = current;
-    if (self && self->memory) lock_release(&self->memory->lock);
+    if (self && self->memory) mutex_unlock(&self->memory->lock);
 }
 
 struct process_memory *process_memory_get(struct process *process) {

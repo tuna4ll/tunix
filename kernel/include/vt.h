@@ -36,6 +36,7 @@ void vt_run_hotkey(uint16_t keycode, int pressed);
 void vt_handle_key(uint16_t keycode, int pressed);
 
 void vt_poll_input(void);
+void vt_poll_from_tick(void);
 
 int vt_console_in_front(void);
 void vt_poll_serial(void);
