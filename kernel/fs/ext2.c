@@ -6,6 +6,8 @@
 #include "../include/ext3.h"
 #include "../include/heap.h"
 #include "../include/kstring.h"
+#include "../include/mutex.h"
+#include "../include/process.h"
 #include "../include/random.h"
 #include "../include/time.h"
 #include "../include/vfs.h"
@@ -161,11 +163,17 @@ typedef char ext2_superblock_size_check[(sizeof(struct ext2_superblock) == 1024)
 typedef char ext2_group_desc_size_check[(sizeof(struct ext2_group_desc) == EXT2_GROUP_DESC_SIZE) ? 1 : -1];
 typedef char ext2_inode_size_check[(sizeof(struct ext2_inode) == EXT2_GOOD_OLD_INODE_SIZE) ? 1 : -1];
 
-struct block_cache {
+struct ext2_buffer {
+    struct ext2_buffer *hash_next;
+    struct ext2_buffer *lru_prev;
+    struct ext2_buffer *lru_next;
     uint32_t block;
-    int dirty;
-    uint8_t data[EXT2_MAX_BLOCK_SIZE];
+    uint8_t dirty;
+    uint8_t data[];
 };
+
+#define EXT2_BUFFER_BUCKETS 4096U
+#define EXT2_BUFFER_BYTES (8U * 1024U * 1024U)
 
 struct ext2_volume {
     struct ext2_volume *next;
@@ -174,7 +182,6 @@ struct ext2_volume {
     int loading;
 
     struct ext2_superblock sb;
-    uint8_t *sb_home;
     uint32_t sb_home_block;
     uint32_t sb_home_offset;
     struct ext2_group_desc *gds;
@@ -192,11 +199,19 @@ struct ext2_volume {
     uint32_t gd_per_block;
     uint16_t extra_isize;
 
-    struct block_cache bbitmap;
-    struct block_cache ibitmap;
-    struct block_cache itable;
-    struct block_cache dir;
-    struct block_cache map[EXT2_INDIRECT_LEVELS];
+    struct ext2_buffer **buffers;
+    struct ext2_buffer *lru_head;
+    struct ext2_buffer *lru_tail;
+    uint32_t buffer_count;
+    uint32_t buffer_limit;
+    uint32_t dirty_buffers;
+
+    struct ext2_group_desc *gds_written;
+    struct ext2_superblock sb_written;
+    uint32_t *pending_free;
+    uint32_t pending_free_count;
+    uint32_t pending_free_capacity;
+    uint64_t last_commit_ns;
 
     uint32_t block_cursor_group;
     uint32_t block_cursor_bit;
@@ -214,10 +229,36 @@ static uint8_t meta_buf[EXT2_MAX_BLOCK_SIZE];
 static uint8_t data_buf[EXT2_MAX_BLOCK_SIZE];
 static uint8_t bulk_buf[EXT2_RUN_BYTES];
 
+static struct mutex ext2_lock = MUTEX_INITIALIZER("ext2", LOCK_RANK_EXT2);
+
+static void ext2_guard_release(int *unused) {
+    (void)unused;
+    mutex_unlock(&ext2_lock);
+}
+
+#define EXT2_LOCKED \
+    __attribute__((cleanup(ext2_guard_release))) int ext2_guard = (mutex_lock(&ext2_lock), 0)
+
+#define EXT2_COMMIT_INTERVAL_NS (5ULL * 1000ULL * 1000ULL * 1000ULL)
+#define EXT2_COMMIT_POLL_NS (1000ULL * 1000ULL * 1000ULL)
+
 static struct ext2_volume *enter(struct ext2_volume *volume) {
     struct ext2_volume *previous = fs;
     fs = volume;
     return previous;
+}
+
+static void buffers_trim(void);
+
+static struct ext2_volume *op_enter(struct ext2_volume *volume) {
+    mutex_lock(&ext2_lock);
+    return enter(volume);
+}
+
+static void op_leave(struct ext2_volume *saved) {
+    if (fs && fs->buffer_count > fs->buffer_limit) buffers_trim();
+    fs = saved;
+    mutex_unlock(&ext2_lock);
 }
 
 static struct ext2_volume *volume_of(const struct vfs_node *node) {
@@ -240,10 +281,6 @@ static void adopt(struct vfs_node *node, uint32_t ino) {
 static void forget(struct vfs_node *node) {
     vfs_forget_backing(node);
     node->fs_private = NULL;
-}
-
-static int journal_active(void) {
-    return ext3_journal_active(fs->journal);
 }
 
 static uint16_t sb_u16(uint32_t offset) {
@@ -297,116 +334,274 @@ static int read_blocks_raw(uint32_t block, uint32_t count, void *out) {
     return volume_read(fs, block, count, out);
 }
 
-static int read_blocks(uint32_t block, uint32_t count, void *out) {
-    if (!ext3_journal_staged(fs->journal)) return read_blocks_raw(block, count, out);
-    uint8_t *bytes = (uint8_t *)out;
-    for (uint32_t index = 0; index < count; index++) {
-        uint8_t *slot = bytes + (size_t)index * fs->block_size;
-        if (ext3_journal_peek(fs->journal, block + index, slot) == 0) continue;
-        if (read_blocks_raw(block + index, 1, slot) != 0) return -1;
-    }
-    return 0;
-}
-
 static int write_blocks(uint32_t block, uint32_t count, const void *data) {
     return volume_write(fs, block, count, data);
 }
 
-static int read_block(uint32_t block, void *out) {
-    return read_blocks(block, 1, out);
+static struct ext2_buffer *buffer_of(const uint8_t *data) {
+    return (struct ext2_buffer *)(uintptr_t)(data - __builtin_offsetof(struct ext2_buffer, data));
 }
 
-static int meta_write(uint32_t block, const void *data) {
-    if (journal_active()) return ext3_journal_stage(fs->journal, block, data);
-    return write_blocks(block, 1, data);
+static uint32_t buffer_bucket(uint32_t block) {
+    return (block * 2654435761U) & (EXT2_BUFFER_BUCKETS - 1U);
 }
 
-static int cache_flush_one(struct block_cache *cache) {
-    if (cache->block && cache->dirty &&
-        meta_write(cache->block, cache->data) != 0) return -1;
-    cache->dirty = 0;
+static void lru_unlink(struct ext2_buffer *buffer) {
+    if (buffer->lru_prev) buffer->lru_prev->lru_next = buffer->lru_next;
+    else fs->lru_head = buffer->lru_next;
+    if (buffer->lru_next) buffer->lru_next->lru_prev = buffer->lru_prev;
+    else fs->lru_tail = buffer->lru_prev;
+    buffer->lru_prev = buffer->lru_next = NULL;
+}
+
+static void lru_push(struct ext2_buffer *buffer) {
+    buffer->lru_prev = NULL;
+    buffer->lru_next = fs->lru_head;
+    if (fs->lru_head) fs->lru_head->lru_prev = buffer;
+    else fs->lru_tail = buffer;
+    fs->lru_head = buffer;
+}
+
+static struct ext2_buffer *buffer_find(uint32_t block) {
+    if (!fs->buffers) return NULL;
+    for (struct ext2_buffer *buffer = fs->buffers[buffer_bucket(block)]; buffer;
+         buffer = buffer->hash_next)
+        if (buffer->block == block) return buffer;
+    return NULL;
+}
+
+static struct ext2_buffer *buffer_create(uint32_t block) {
+    if (!fs->buffers) {
+        fs->buffers = (struct ext2_buffer **)kmalloc(EXT2_BUFFER_BUCKETS * sizeof(*fs->buffers));
+        if (!fs->buffers) return NULL;
+        memset(fs->buffers, 0, EXT2_BUFFER_BUCKETS * sizeof(*fs->buffers));
+        fs->buffer_limit = EXT2_BUFFER_BYTES / fs->block_size;
+    }
+    struct ext2_buffer *buffer =
+        (struct ext2_buffer *)kmalloc(sizeof(*buffer) + fs->block_size);
+    if (!buffer) return NULL;
+    buffer->block = block;
+    buffer->dirty = 0;
+    uint32_t bucket = buffer_bucket(block);
+    buffer->hash_next = fs->buffers[bucket];
+    fs->buffers[bucket] = buffer;
+    lru_push(buffer);
+    fs->buffer_count++;
+    return buffer;
+}
+
+static void buffer_destroy(struct ext2_buffer *buffer) {
+    struct ext2_buffer **link = &fs->buffers[buffer_bucket(buffer->block)];
+    while (*link && *link != buffer) link = &(*link)->hash_next;
+    if (*link) *link = buffer->hash_next;
+    lru_unlink(buffer);
+    if (buffer->dirty) fs->dirty_buffers--;
+    fs->buffer_count--;
+    kfree(buffer);
+}
+
+static void buf_mark(uint8_t *data) {
+    struct ext2_buffer *buffer = buffer_of(data);
+    if (buffer->dirty) return;
+    buffer->dirty = 1;
+    fs->dirty_buffers++;
+}
+
+static uint8_t *buf_get(uint32_t block) {
+    struct ext2_buffer *buffer = buffer_find(block);
+    if (buffer) {
+        lru_unlink(buffer);
+        lru_push(buffer);
+        return buffer->data;
+    }
+    buffer = buffer_create(block);
+    if (!buffer) return NULL;
+    if (read_blocks_raw(block, 1, buffer->data) != 0) {
+        buffer_destroy(buffer);
+        return NULL;
+    }
+    return buffer->data;
+}
+
+static uint8_t *buf_zero(uint32_t block) {
+    struct ext2_buffer *buffer = buffer_find(block);
+    if (!buffer) buffer = buffer_create(block);
+    if (!buffer) return NULL;
+    memset(buffer->data, 0, fs->block_size);
+    buf_mark(buffer->data);
+    return buffer->data;
+}
+
+static int buf_write(uint32_t block, const void *data) {
+    struct ext2_buffer *buffer = buffer_find(block);
+    if (!buffer) buffer = buffer_create(block);
+    if (!buffer) return -1;
+    memcpy(buffer->data, data, fs->block_size);
+    buf_mark(buffer->data);
     return 0;
 }
 
-static uint8_t *cache_get(struct block_cache *cache, uint32_t block) {
-    if (cache->block == block) return cache->data;
-    if (cache_flush_one(cache) != 0) return NULL;
-    if (read_block(block, cache->data) != 0) {
-        cache->block = 0;
-        return NULL;
+static void buf_forget(uint32_t block) {
+    struct ext2_buffer *buffer = buffer_find(block);
+    if (buffer) buffer_destroy(buffer);
+}
+
+static void buffers_trim(void) {
+    struct ext2_buffer *buffer = fs->lru_tail;
+    while (buffer && fs->buffer_count > fs->buffer_limit) {
+        struct ext2_buffer *previous = buffer->lru_prev;
+        if (!buffer->dirty) buffer_destroy(buffer);
+        buffer = previous;
     }
-    cache->block = block;
-    return cache->data;
 }
 
-static uint8_t *cache_put_new(struct block_cache *cache, uint32_t block) {
-    if (cache_flush_one(cache) != 0) return NULL;
-    memset(cache->data, 0, fs->block_size);
-    cache->block = block;
-    cache->dirty = 1;
-    return cache->data;
+static void buffers_drop_all(void) {
+    while (fs->lru_head) buffer_destroy(fs->lru_head);
+    kfree(fs->buffers);
+    fs->buffers = NULL;
+    fs->buffer_count = 0;
+    fs->dirty_buffers = 0;
 }
 
-static void cache_invalidate(struct block_cache *cache) {
-    cache->block = 0;
-    cache->dirty = 0;
+static int read_block(uint32_t block, void *out) {
+    uint8_t *cached = buf_get(block);
+    if (!cached) return -1;
+    memcpy(out, cached, fs->block_size);
+    return 0;
 }
 
-static void invalidate_maps(void) {
-    for (uint32_t level = 0; level < EXT2_INDIRECT_LEVELS; level++)
-        cache_invalidate(&fs->map[level]);
-    cache_invalidate(&fs->dir);
-}
-
-static int cache_flush_all(void) {
-    struct block_cache *caches[] = {
-        &fs->bbitmap, &fs->ibitmap, &fs->itable, &fs->dir,
-        &fs->map[0], &fs->map[1], &fs->map[2],
-    };
-    int status = 0;
-    for (size_t index = 0; index < sizeof(caches) / sizeof(caches[0]); index++)
-        if (cache_flush_one(caches[index]) != 0) status = -1;
-    return status;
-}
-
-static void cache_reset_all(void) {
-    cache_invalidate(&fs->bbitmap);
-    cache_invalidate(&fs->ibitmap);
-    cache_invalidate(&fs->itable);
-    invalidate_maps();
-}
-
-static int write_gd_table(void) {
-    uint32_t first_block = fs->first_data_block + 1U;
+static int stage_groups(void) {
     for (uint32_t index = 0; index < fs->gd_blocks; index++) {
         uint32_t start = index * fs->gd_per_block;
         uint32_t count = fs->group_count - start;
         if (count > fs->gd_per_block) count = fs->gd_per_block;
-        memset(meta_buf, 0, fs->block_size);
-        memcpy(meta_buf, &fs->gds[start], count * sizeof(struct ext2_group_desc));
-        if (meta_write(first_block + index, meta_buf) != 0) return -1;
+        size_t bytes = count * sizeof(struct ext2_group_desc);
+        if (memcmp(&fs->gds[start], &fs->gds_written[start], bytes) == 0) continue;
+        uint8_t *block = buf_zero(fs->first_data_block + 1U + index);
+        if (!block) return -1;
+        memcpy(block, &fs->gds[start], bytes);
+        memcpy(&fs->gds_written[start], &fs->gds[start], bytes);
     }
     return 0;
 }
 
-static void sb_home_refresh(void) {
-    memcpy(fs->sb_home + fs->sb_home_offset, &fs->sb, sizeof(fs->sb));
+static int stage_superblock(void) {
+    if (memcmp(&fs->sb, &fs->sb_written, sizeof(fs->sb)) == 0) return 0;
+    uint8_t *home = buf_get(fs->sb_home_block);
+    if (!home) return -1;
+    memcpy(home + fs->sb_home_offset, &fs->sb, sizeof(fs->sb));
+    buf_mark(home);
+    fs->sb_written = fs->sb;
+    return 0;
 }
 
 static int write_superblock_direct(void) {
-    sb_home_refresh();
-    return write_blocks(fs->sb_home_block, 1, fs->sb_home);
+    uint8_t *home = buf_get(fs->sb_home_block);
+    if (!home) return -1;
+    memcpy(home + fs->sb_home_offset, &fs->sb, sizeof(fs->sb));
+    fs->sb_written = fs->sb;
+    if (write_blocks(fs->sb_home_block, 1, home) != 0) return -1;
+    struct ext2_buffer *buffer = buffer_of(home);
+    if (buffer->dirty) {
+        buffer->dirty = 0;
+        fs->dirty_buffers--;
+    }
+    return 0;
 }
 
+static void release_block_now(uint32_t block);
+
+static void apply_pending_frees(void) {
+    for (uint32_t index = 0; index < fs->pending_free_count; index++)
+        release_block_now(fs->pending_free[index]);
+    fs->pending_free_count = 0;
+}
+
+static void sort_blocks(uint32_t *targets, uint8_t **data, uint32_t count) {
+    for (uint32_t gap = count / 2U; gap; gap /= 2U) {
+        for (uint32_t index = gap; index < count; index++) {
+            uint32_t target = targets[index];
+            uint8_t *bytes = data[index];
+            uint32_t at = index;
+            while (at >= gap && targets[at - gap] > target) {
+                targets[at] = targets[at - gap];
+                data[at] = data[at - gap];
+                at -= gap;
+            }
+            targets[at] = target;
+            data[at] = bytes;
+        }
+    }
+}
+
+static int write_sorted(const uint32_t *targets, uint8_t *const *data, uint32_t count) {
+    uint32_t per_run = EXT2_RUN_BYTES / fs->block_size;
+    for (uint32_t index = 0; index < count;) {
+        uint32_t run = 1;
+        memcpy(bulk_buf, data[index], fs->block_size);
+        while (index + run < count && run < per_run &&
+               targets[index + run] == targets[index] + run) {
+            memcpy(bulk_buf + (size_t)run * fs->block_size, data[index + run], fs->block_size);
+            run++;
+        }
+        if (write_blocks(targets[index], run, bulk_buf) != 0) return -1;
+        index += run;
+    }
+    return 0;
+}
+
+static int volume_commit(void) {
+    apply_pending_frees();
+    if (stage_groups() != 0 || stage_superblock() != 0) return -1;
+    fs->last_commit_ns = time_uptime_ns();
+    uint32_t count = fs->dirty_buffers;
+    if (!count) return 0;
+    uint32_t *targets = (uint32_t *)kmalloc(count * sizeof(*targets));
+    uint8_t **data = (uint8_t **)kmalloc(count * sizeof(*data));
+    int status = -1;
+    if (targets && data) {
+        uint32_t found = 0;
+        for (struct ext2_buffer *buffer = fs->lru_head; buffer && found < count;
+             buffer = buffer->lru_next) {
+            if (!buffer->dirty) continue;
+            targets[found] = buffer->block;
+            data[found] = buffer->data;
+            found++;
+        }
+        sort_blocks(targets, data, found);
+        status = fs->journal ? ext3_journal_commit(fs->journal, found, targets, data)
+                             : write_sorted(targets, data, found);
+        if (status == 0) {
+            for (uint32_t index = 0; index < found; index++) {
+                struct ext2_buffer *buffer = buffer_of(data[index]);
+                if (!buffer->dirty) continue;
+                buffer->dirty = 0;
+                fs->dirty_buffers--;
+            }
+        }
+    }
+    kfree(targets);
+    kfree(data);
+    buffers_trim();
+    return status;
+}
+
+static uint32_t commit_threshold(void) {
+    uint32_t limit = fs->buffer_limit ? fs->buffer_limit / 2U : 1024U;
+    if (fs->journal) {
+        uint32_t capacity = ext3_journal_capacity(fs->journal) / 2U;
+        if (capacity && capacity < limit) limit = capacity;
+    }
+    return limit;
+}
+
+static void commit_kick(void);
+
 static int flush_meta(void) {
-    if (cache_flush_all() != 0) return -1;
-    int journalled = journal_active();
-    if (journalled) fs->sb.s_feature_incompat |= EXT2_FEATURE_INCOMPAT_RECOVER;
-    sb_home_refresh();
-    if (meta_write(fs->sb_home_block, fs->sb_home) != 0) return -1;
-    if (write_gd_table() != 0) return -1;
-    if (!journalled) return 0;
-    return ext3_journal_commit(fs->journal);
+    if (fs->dirty_buffers + fs->pending_free_count / 64U >= commit_threshold())
+        return volume_commit();
+    commit_kick();
+    return 0;
 }
 
 static int64_t bitmap_scan(const uint8_t *bits, uint32_t start, uint32_t max_bits) {
@@ -430,23 +625,21 @@ static int64_t bitmap_scan(const uint8_t *bits, uint32_t start, uint32_t max_bit
     return -1;
 }
 
-static int64_t bitmap_alloc(struct block_cache *cache, uint32_t bitmap_block,
-                            uint32_t max_bits, uint32_t start) {
-    uint8_t *bits = cache_get(cache, bitmap_block);
+static int64_t bitmap_alloc(uint32_t bitmap_block, uint32_t max_bits, uint32_t start) {
+    uint8_t *bits = buf_get(bitmap_block);
     if (!bits) return -1;
     int64_t bit = bitmap_scan(bits, start, max_bits);
     if (bit < 0) return -1;
     bits[bit >> 3] |= (uint8_t)(1U << (bit & 7U));
-    cache->dirty = 1;
+    buf_mark(bits);
     return bit;
 }
 
-static void bitmap_release(struct block_cache *cache, uint32_t bitmap_block,
-                           uint32_t bit) {
-    uint8_t *bits = cache_get(cache, bitmap_block);
+static void bitmap_release(uint32_t bitmap_block, uint32_t bit) {
+    uint8_t *bits = buf_get(bitmap_block);
     if (!bits) return;
     bits[bit >> 3] &= (uint8_t)~(1U << (bit & 7U));
-    cache->dirty = 1;
+    buf_mark(bits);
 }
 
 static uint32_t alloc_block(void) {
@@ -457,7 +650,7 @@ static uint32_t alloc_block(void) {
         if (group >= groups) group -= groups;
         if (!fs->gds[group].bg_free_blocks_count) continue;
         uint32_t start = group == fs->block_cursor_group ? fs->block_cursor_bit : 0;
-        int64_t bit = bitmap_alloc(&fs->bbitmap, fs->gds[group].bg_block_bitmap,
+        int64_t bit = bitmap_alloc(fs->gds[group].bg_block_bitmap,
                                    group_block_count(group), start);
         if (bit < 0) continue;
         if (fs->sb.s_free_blocks_count) fs->sb.s_free_blocks_count--;
@@ -470,14 +663,31 @@ static uint32_t alloc_block(void) {
     return 0;
 }
 
-static void free_block(uint32_t block) {
-    if (block < fs->first_data_block || block >= fs->sb.s_blocks_count) return;
+static void release_block_now(uint32_t block) {
     uint32_t within = block - fs->first_data_block;
     uint32_t group = within / fs->blocks_per_group;
-    bitmap_release(&fs->bbitmap, fs->gds[group].bg_block_bitmap,
-                   within % fs->blocks_per_group);
+    bitmap_release(fs->gds[group].bg_block_bitmap, within % fs->blocks_per_group);
     fs->sb.s_free_blocks_count++;
     fs->gds[group].bg_free_blocks_count++;
+}
+
+static void free_block(uint32_t block) {
+    if (block < fs->first_data_block || block >= fs->sb.s_blocks_count) return;
+    buf_forget(block);
+    if (fs->pending_free_count == fs->pending_free_capacity) {
+        uint32_t capacity = fs->pending_free_capacity ? fs->pending_free_capacity * 2U : 256U;
+        uint32_t *grown = (uint32_t *)kmalloc(capacity * sizeof(*grown));
+        if (!grown) {
+            release_block_now(block);
+            return;
+        }
+        if (fs->pending_free_count)
+            memcpy(grown, fs->pending_free, fs->pending_free_count * sizeof(*grown));
+        kfree(fs->pending_free);
+        fs->pending_free = grown;
+        fs->pending_free_capacity = capacity;
+    }
+    fs->pending_free[fs->pending_free_count++] = block;
 }
 
 static uint32_t alloc_inode(void) {
@@ -488,7 +698,7 @@ static uint32_t alloc_inode(void) {
         if (group >= groups) group -= groups;
         if (!fs->gds[group].bg_free_inodes_count) continue;
         uint32_t start = group == fs->inode_cursor_group ? fs->inode_cursor_bit : 0;
-        int64_t bit = bitmap_alloc(&fs->ibitmap, fs->gds[group].bg_inode_bitmap,
+        int64_t bit = bitmap_alloc(fs->gds[group].bg_inode_bitmap,
                                    fs->inodes_per_group, start);
         if (bit < 0) continue;
         if (fs->sb.s_free_inodes_count) fs->sb.s_free_inodes_count--;
@@ -505,8 +715,7 @@ static void free_inode(uint32_t ino, int is_directory) {
     if (!ino || ino > fs->sb.s_inodes_count) return;
     uint32_t index = ino - 1U;
     uint32_t group = index / fs->inodes_per_group;
-    bitmap_release(&fs->ibitmap, fs->gds[group].bg_inode_bitmap,
-                   index % fs->inodes_per_group);
+    bitmap_release(fs->gds[group].bg_inode_bitmap, index % fs->inodes_per_group);
     fs->sb.s_free_inodes_count++;
     fs->gds[group].bg_free_inodes_count++;
     if (is_directory && fs->gds[group].bg_used_dirs_count)
@@ -518,34 +727,37 @@ static void inode_group_dirs_inc(uint32_t ino) {
     fs->gds[(ino - 1U) / fs->inodes_per_group].bg_used_dirs_count++;
 }
 
-static uint8_t *inode_slot(uint32_t ino) {
+static uint8_t *inode_slot(uint32_t ino, uint8_t **table_out) {
     if (!ino || ino > fs->sb.s_inodes_count) return NULL;
     uint32_t index = ino - 1U;
     uint32_t group = index / fs->inodes_per_group;
     uint32_t within = index % fs->inodes_per_group;
     uint32_t block = fs->gds[group].bg_inode_table + within / fs->inodes_per_block;
-    uint8_t *table = cache_get(&fs->itable, block);
+    uint8_t *table = buf_get(block);
     if (!table) return NULL;
+    if (table_out) *table_out = table;
     return table + (within % fs->inodes_per_block) * fs->inode_size;
 }
 
 static int inode_read(uint32_t ino, struct ext2_inode *out) {
-    uint8_t *slot = inode_slot(ino);
+    uint8_t *slot = inode_slot(ino, NULL);
     if (!slot) return -1;
     memcpy(out, slot, sizeof(*out));
     return 0;
 }
 
 static int inode_write(uint32_t ino, const struct ext2_inode *in) {
-    uint8_t *slot = inode_slot(ino);
+    uint8_t *table = NULL;
+    uint8_t *slot = inode_slot(ino, &table);
     if (!slot) return -1;
     memcpy(slot, in, sizeof(*in));
-    fs->itable.dirty = 1;
+    buf_mark(table);
     return 0;
 }
 
 static int inode_write_new(uint32_t ino, const struct ext2_inode *in) {
-    uint8_t *slot = inode_slot(ino);
+    uint8_t *table = NULL;
+    uint8_t *slot = inode_slot(ino, &table);
     if (!slot) return -1;
     memset(slot, 0, fs->inode_size);
     memcpy(slot, in, sizeof(*in));
@@ -556,7 +768,7 @@ static int inode_write_new(uint32_t ino, const struct ext2_inode *in) {
             memcpy(slot + EXT2_GOOD_OLD_INODE_SIZE + 16U, &now, sizeof(now));
         }
     }
-    fs->itable.dirty = 1;
+    buf_mark(table);
     return 0;
 }
 
@@ -633,7 +845,7 @@ static int64_t inode_bmap(struct ext2_inode *inode, uint32_t file_block,
     if (!block) {
         if (!alloc) return 0;
         block = alloc_block();
-        if (!block || !cache_put_new(&fs->map[0], block)) return -1;
+        if (!block || !buf_zero(block)) return -1;
         inode->i_block[top] = block;
         count_block(inode, inode_dirty);
     }
@@ -641,20 +853,16 @@ static int64_t inode_bmap(struct ext2_inode *inode, uint32_t file_block,
         span /= fs->pointers;
         uint32_t slot = (uint32_t)(index / span);
         index %= span;
-        struct block_cache *cache = &fs->map[depth];
-        uint32_t *entries = (uint32_t *)cache_get(cache, block);
+        uint32_t *entries = (uint32_t *)buf_get(block);
         if (!entries) return -1;
         uint32_t child = entries[slot];
         if (!child) {
             if (!alloc) return 0;
             child = alloc_block();
             if (!child) return -1;
-            if (depth + 1U < level && !cache_put_new(&fs->map[depth + 1U], child))
-                return -1;
-            entries = (uint32_t *)cache_get(cache, block);
-            if (!entries) return -1;
+            if (depth + 1U < level && !buf_zero(child)) return -1;
             entries[slot] = child;
-            cache->dirty = 1;
+            buf_mark((uint8_t *)entries);
             count_block(inode, inode_dirty);
         }
         block = child;
@@ -709,13 +917,12 @@ static int trim_subtree(uint32_t block, uint32_t height, uint64_t base, uint64_t
         entries[slot] = 0;
         changed = 1;
     }
-    if (changed) meta_write(block, entries);
+    if (changed) buf_write(block, entries);
     kfree(entries);
     return 0;
 }
 
 static void inode_truncate_blocks(struct ext2_inode *inode, uint64_t keep) {
-    cache_flush_all();
     for (uint64_t index = keep; index < EXT2_DIRECT_BLOCKS; index++) {
         if (!inode->i_block[index]) continue;
         free_block(inode->i_block[index]);
@@ -732,8 +939,6 @@ static void inode_truncate_blocks(struct ext2_inode *inode, uint64_t keep) {
         base += span;
         span *= fs->pointers;
     }
-    cache_flush_all();
-    invalidate_maps();
 }
 
 static void inode_release_blocks(struct ext2_inode *inode) {
@@ -748,7 +953,7 @@ static void release_xattr(struct ext2_inode *inode) {
     if (header && read_block(block, header) == 0 && header[0] == EXT2_XATTR_MAGIC &&
         header[1] > 1U) {
         header[1]--;
-        meta_write(block, header);
+        buf_write(block, header);
     } else {
         free_block(block);
     }
@@ -804,7 +1009,7 @@ static int dir_add_entry(uint32_t dir_ino, const char *name, uint32_t child_ino,
         int dirty = 0;
         int64_t block = inode_bmap(&dir, file_block, 0, &dirty);
         if (block <= 0) return -1;
-        uint8_t *dir_data = cache_get(&fs->dir, (uint32_t)block);
+        uint8_t *dir_data = buf_get((uint32_t)block);
         if (!dir_data) return -1;
         uint32_t at = 0;
         while (at + 8U <= fs->block_size) {
@@ -812,7 +1017,7 @@ static int dir_add_entry(uint32_t dir_ino, const char *name, uint32_t child_ino,
             if (!dirent_sane(entry, at)) return -1;
             if (!entry->inode && entry->rec_len >= needed) {
                 dirent_fill(entry, child_ino, name, name_len, file_type);
-                fs->dir.dirty = 1;
+                buf_mark(dir_data);
                 return 0;
             }
             uint16_t used = (uint16_t)(8U + ((entry->name_len + 3U) & ~3U));
@@ -822,7 +1027,7 @@ static int dir_add_entry(uint32_t dir_ino, const char *name, uint32_t child_ino,
                 fresh->rec_len = (uint16_t)(entry->rec_len - used);
                 entry->rec_len = used;
                 dirent_fill(fresh, child_ino, name, name_len, file_type);
-                fs->dir.dirty = 1;
+                buf_mark(dir_data);
                 return 0;
             }
             at += entry->rec_len;
@@ -832,7 +1037,7 @@ static int dir_add_entry(uint32_t dir_ino, const char *name, uint32_t child_ino,
     int dirty = 0;
     int64_t block = inode_bmap(&dir, block_count, 1, &dirty);
     if (block <= 0) return -1;
-    uint8_t *dir_data = cache_put_new(&fs->dir, (uint32_t)block);
+    uint8_t *dir_data = buf_zero((uint32_t)block);
     if (!dir_data) return -1;
     struct ext2_dirent *entry = (struct ext2_dirent *)dir_data;
     entry->rec_len = (uint16_t)fs->block_size;
@@ -852,7 +1057,7 @@ static int dir_remove_entry(uint32_t dir_ino, const char *name) {
         int dirty = 0;
         int64_t block = inode_bmap(&dir, file_block, 0, &dirty);
         if (block <= 0) return -1;
-        uint8_t *dir_data = cache_get(&fs->dir, (uint32_t)block);
+        uint8_t *dir_data = buf_get((uint32_t)block);
         if (!dir_data) return -1;
         uint32_t at = 0;
         struct ext2_dirent *previous = NULL;
@@ -863,7 +1068,7 @@ static int dir_remove_entry(uint32_t dir_ino, const char *name) {
                 strncmp(entry->name, name, name_len) == 0) {
                 if (previous) previous->rec_len += entry->rec_len;
                 else entry->inode = 0;
-                fs->dir.dirty = 1;
+                buf_mark(dir_data);
                 return 0;
             }
             previous = entry;
@@ -879,7 +1084,7 @@ static int dir_set_dotdot(uint32_t dir_ino, uint32_t parent_ino) {
     int dirty = 0;
     int64_t block = inode_bmap(&dir, 0, 0, &dirty);
     if (block <= 0) return -1;
-    uint8_t *dir_data = cache_get(&fs->dir, (uint32_t)block);
+    uint8_t *dir_data = buf_get((uint32_t)block);
     if (!dir_data) return -1;
     struct ext2_dirent *dot = (struct ext2_dirent *)dir_data;
     if (dot->rec_len < 8U || dot->rec_len >= fs->block_size) return -1;
@@ -887,13 +1092,13 @@ static int dir_set_dotdot(uint32_t dir_ino, uint32_t parent_ino) {
     if (dotdot->name_len != 2 || dotdot->name[0] != '.' || dotdot->name[1] != '.')
         return -1;
     dotdot->inode = parent_ino;
-    fs->dir.dirty = 1;
+    buf_mark(dir_data);
     return 0;
 }
 
 static int dir_write_initial_block(uint32_t block, uint32_t dir_ino,
                                    uint32_t parent_ino) {
-    uint8_t *dir_data = cache_put_new(&fs->dir, block);
+    uint8_t *dir_data = buf_zero(block);
     if (!dir_data) return -1;
     struct ext2_dirent *dot = (struct ext2_dirent *)dir_data;
     dot->inode = dir_ino;
@@ -918,16 +1123,7 @@ struct run_writer {
 
 static int run_flush(struct run_writer *run) {
     if (!run->count) return 0;
-    int status = 0;
-    if (journal_active()) {
-        for (uint32_t index = 0; index < run->count; index++) {
-            status = ext3_journal_stage(fs->journal, run->start_block + index,
-                                        bulk_buf + (size_t)index * fs->block_size);
-            if (status != 0) break;
-        }
-    } else {
-        status = write_blocks(run->start_block, run->count, bulk_buf);
-    }
+    int status = write_blocks(run->start_block, run->count, bulk_buf);
     run->count = 0;
     return status;
 }
@@ -946,12 +1142,12 @@ static int run_append(struct run_writer *run, uint32_t block, const void *data) 
 
 static const char *failed_stage = "?";
 
-static int write_page(struct ext2_inode *inode, struct vfs_node *node, uint64_t index,
+static int write_page(struct ext2_inode *inode, uint64_t length, uint64_t index,
                       const uint8_t *page, struct run_writer *run, int *allocated) {
     uint32_t block_size = fs->block_size;
     for (uint32_t part = 0; part < VFS_PAGE_SIZE / block_size; part++) {
         uint64_t start = index * VFS_PAGE_SIZE + (uint64_t)part * block_size;
-        if (start >= node->length) break;
+        if (start >= length) break;
         uint64_t file_block = start / block_size;
         failed_stage = "block map";
         if (file_block > 0xFFFFFFFFULL) return -1;
@@ -960,7 +1156,7 @@ static int write_page(struct ext2_inode *inode, struct vfs_node *node, uint64_t 
         if (block <= 0) return -1;
         if (dirty) *allocated = 1;
         const uint8_t *source = page + (size_t)part * block_size;
-        uint64_t available = node->length - start;
+        uint64_t available = length - start;
         if (available < block_size) {
             memset(data_buf, 0, block_size);
             memcpy(data_buf, source, (size_t)available);
@@ -988,7 +1184,7 @@ static int file_write_range(uint32_t ino, struct vfs_node *node,
         for (uint64_t index = first; index <= last; index++) {
             const uint8_t *page = (const uint8_t *)vfs_page_peek(node, index);
             if (!page || !vfs_page_is_dirty(node, index)) continue;
-            if (write_page(&inode, node, index, page, &run, &allocated) != 0) {
+            if (write_page(&inode, node->length, index, page, &run, &allocated) != 0) {
                 run_flush(&run);
                 inode_write(ino, &inode);
                 return -1;
@@ -1077,7 +1273,7 @@ static int create_one(struct vfs_node *node) {
             }
             memset(data_buf, 0, fs->block_size);
             memcpy(data_buf, node->data, (size_t)length);
-            if (meta_write(block, data_buf) != 0) {
+            if (buf_write(block, data_buf) != 0) {
                 free_block(block);
                 free_inode(ino, 0);
                 return -1;
@@ -1237,19 +1433,19 @@ static void unpersist_subtree(struct vfs_node *top, uint32_t parent_ino, const c
 static void ext2_event_created(struct vfs_node *node) {
     struct ext2_volume *volume = node ? active_volume_of(node->parent) : NULL;
     if (!volume) return;
-    struct ext2_volume *saved = enter(volume);
+    struct ext2_volume *saved = op_enter(volume);
     int status = create_one(node);
     if (status < 0)
         report_failure("create", node->name);
     else if (status == 0)
         flush_meta();
-    fs = saved;
+    op_leave(saved);
 }
 
 static void ext2_event_removed(struct vfs_node *node) {
     struct ext2_volume *volume = node ? active_volume_of(node->parent) : NULL;
     if (!volume) return;
-    struct ext2_volume *saved = enter(volume);
+    struct ext2_volume *saved = op_enter(volume);
     uint32_t parent_ino = node->parent->disk_inode;
     if (node->link_target) {
         if (volume_of(node->link_target) == volume) {
@@ -1263,26 +1459,26 @@ static void ext2_event_removed(struct vfs_node *node) {
             remove_one(node, parent_ino, node->name);
         flush_meta();
     }
-    fs = saved;
+    op_leave(saved);
 }
 
 static void ext2_event_linked(struct vfs_node *link) {
     struct ext2_volume *volume = link ? active_volume_of(link->parent) : NULL;
     if (!volume || volume_of(link->link_target) != volume) return;
-    struct ext2_volume *saved = enter(volume);
+    struct ext2_volume *saved = op_enter(volume);
     if (link_one(link) != 0) kprintf("EXT2: cannot link %s\n", link->name);
     else flush_meta();
-    fs = saved;
+    op_leave(saved);
 }
 
 static void ext2_event_released(struct vfs_node *node) {
     struct ext2_volume *volume = active_volume_of(node);
     if (!volume) return;
-    struct ext2_volume *saved = enter(volume);
+    struct ext2_volume *saved = op_enter(volume);
     release_inode(node->disk_inode, 0);
     forget(node);
     flush_meta();
-    fs = saved;
+    op_leave(saved);
 }
 
 static void move_link(struct vfs_node *node, struct vfs_node *old_parent,
@@ -1293,14 +1489,14 @@ static void move_link(struct vfs_node *node, struct vfs_node *old_parent,
     int was = volume_of(old_parent) == volume;
     int now = volume_of(node->parent) == volume;
     if (!was && !now) return;
-    struct ext2_volume *saved = enter(volume);
+    struct ext2_volume *saved = op_enter(volume);
     if (was) dir_remove_entry(old_parent->disk_inode, old_name);
     if (now)
         dir_add_entry(node->parent->disk_inode, node->name, target->disk_inode,
                       dirent_type_for(target));
     if (was != now) inode_links_adjust(target->disk_inode, now ? 1 : -1);
     flush_meta();
-    fs = saved;
+    op_leave(saved);
 }
 
 static void ext2_event_moved(struct vfs_node *node, struct vfs_node *old_parent,
@@ -1316,7 +1512,7 @@ static void ext2_event_moved(struct vfs_node *node, struct vfs_node *old_parent,
     if ((home && home->loading) || (to && to->loading)) return;
 
     if (home && home == from && home == to) {
-        struct ext2_volume *saved = enter(home);
+        struct ext2_volume *saved = op_enter(home);
         uint32_t old_parent_ino = old_parent->disk_inode;
         uint32_t new_parent_ino = node->parent->disk_inode;
         dir_remove_entry(old_parent_ino, old_name);
@@ -1329,43 +1525,28 @@ static void ext2_event_moved(struct vfs_node *node, struct vfs_node *old_parent,
             inode_links_adjust(new_parent_ino, 1);
         }
         flush_meta();
-        fs = saved;
+        op_leave(saved);
         return;
     }
     if (home && home == from) {
-        struct ext2_volume *saved = enter(home);
+        struct ext2_volume *saved = op_enter(home);
         unpersist_subtree(node, old_parent->disk_inode, old_name);
         flush_meta();
-        fs = saved;
+        op_leave(saved);
     }
     if (to && !node->disk_inode) {
-        struct ext2_volume *saved = enter(to);
+        struct ext2_volume *saved = op_enter(to);
         persist_subtree(node);
         if ((node->flags & 0xFFU) == VFS_DIRECTORY) persist_links(node);
         flush_meta();
-        fs = saved;
+        op_leave(saved);
     }
-}
-
-static void ext2_event_written(struct vfs_node *node, uint64_t offset,
-                               uint64_t size) {
-    struct ext2_volume *volume = active_volume_of(node);
-    if (!volume || (node->flags & 0xFFU) != VFS_FILE || !size) return;
-    struct ext2_volume *saved = enter(volume);
-    int result = file_write_range(node->disk_inode, node, offset, size);
-    if (result < 0)
-        report_failure("write back", node->name);
-    else if (result > 0)
-        flush_meta();
-    else
-        cache_flush_all();
-    fs = saved;
 }
 
 static void ext2_event_truncated(struct vfs_node *node) {
     struct ext2_volume *volume = active_volume_of(node);
     if (!volume || (node->flags & 0xFFU) != VFS_FILE) return;
-    struct ext2_volume *saved = enter(volume);
+    struct ext2_volume *saved = op_enter(volume);
     struct ext2_inode inode;
     if (inode_read(node->disk_inode, &inode) == 0) {
         uint64_t keep = (node->length + fs->block_size - 1U) / fs->block_size;
@@ -1373,28 +1554,91 @@ static void ext2_event_truncated(struct vfs_node *node) {
         inode_set_size(&inode, node->length);
         inode.i_ctime = node->ctime;
         inode.i_mtime = node->mtime;
-        if (inode_write(node->disk_inode, &inode) == 0) {
-            if (node->length) file_write_range(node->disk_inode, node, 0, node->length);
-            flush_meta();
-        }
+        if (inode_write(node->disk_inode, &inode) == 0) flush_meta();
     }
-    fs = saved;
+    node->io_generation++;
+    op_leave(saved);
 }
 
 static void ext2_event_meta_changed(struct vfs_node *node) {
     struct ext2_volume *volume = active_volume_of(node);
     if (!volume) return;
-    struct ext2_volume *saved = enter(volume);
+    struct ext2_volume *saved = op_enter(volume);
     struct ext2_inode inode;
     if (inode_read(node->disk_inode, &inode) == 0) {
         inode.i_mode = (uint16_t)((inode.i_mode & 0xF000U) | (node->mode & 07777U));
         inode.i_uid = (uint16_t)node->uid;
         inode.i_gid = (uint16_t)node->gid;
         inode.i_ctime = node->ctime;
-        inode_write(node->disk_inode, &inode);
-        cache_flush_all();
+        if (inode_write(node->disk_inode, &inode) == 0) flush_meta();
     }
+    op_leave(saved);
+}
+
+static int ext2_writeback(struct vfs_node *node, const struct vfs_writeback *batch) {
+    mutex_lock(&ext2_lock);
+    struct ext2_volume *volume = active_volume_of(node);
+    if (!volume || node->disk_inode != batch->ino ||
+        node->io_generation != batch->generation) {
+        mutex_unlock(&ext2_lock);
+        return VFS_WRITEBACK_STALE;
+    }
+    struct ext2_volume *saved = enter(volume);
+    int status = -1;
+    int allocated = 0;
+    struct ext2_inode inode;
+    failed_stage = "inode read";
+    if (inode_read(batch->ino, &inode) == 0) {
+        struct run_writer run = {0, 0};
+        status = 0;
+        for (uint32_t index = 0; index < batch->count && status == 0; index++)
+            status = write_page(&inode, batch->length, batch->indices[index],
+                                batch->pages[index], &run, &allocated);
+        if (run_flush(&run) != 0) status = -1;
+        if (batch->length > inode_size_of(&inode)) inode_set_size(&inode, batch->length);
+        if (batch->atime > inode.i_atime) inode.i_atime = batch->atime;
+        if (batch->mtime > inode.i_mtime) inode.i_mtime = batch->mtime;
+        if (batch->ctime > inode.i_ctime) inode.i_ctime = batch->ctime;
+        failed_stage = "inode write";
+        if (inode_write(batch->ino, &inode) != 0) status = -1;
+    }
+    if (status != 0) report_failure("write back", node->name);
+    else if (allocated) flush_meta();
     fs = saved;
+    mutex_unlock(&ext2_lock);
+    return status;
+}
+
+static int volume_sync(void) {
+    int status = volume_commit();
+    if (volume_flush(fs) != 0) status = -1;
+    return status;
+}
+
+static int ext2_sync_node(struct vfs_node *node) {
+    mutex_lock(&ext2_lock);
+    struct ext2_volume *volume = volume_of(node);
+    int status = 0;
+    if (volume) {
+        struct ext2_volume *saved = enter(volume);
+        status = volume_sync();
+        fs = saved;
+    }
+    mutex_unlock(&ext2_lock);
+    return status;
+}
+
+static int ext2_sync_all(void) {
+    mutex_lock(&ext2_lock);
+    int status = 0;
+    for (struct ext2_volume *volume = volumes; volume; volume = volume->next) {
+        if (volume->loading) continue;
+        struct ext2_volume *saved = enter(volume);
+        if (volume_sync() != 0) status = -1;
+        fs = saved;
+    }
+    mutex_unlock(&ext2_lock);
+    return status;
 }
 
 static int read_page(uint32_t ino, uint64_t index, uint8_t *out) {
@@ -1418,7 +1662,7 @@ static int read_page(uint32_t ino, uint64_t index, uint8_t *out) {
         while (part + run < per_page &&
                inode_bmap(&inode, (uint32_t)(first + part + run), 0, &dirty) ==
                    block + run) run++;
-        if (read_blocks((uint32_t)block, run, out + (size_t)part * block_size) != 0)
+        if (read_blocks_raw((uint32_t)block, run, out + (size_t)part * block_size) != 0)
             return -1;
         part += run;
     }
@@ -1433,9 +1677,9 @@ static int ext2_fetch_data(struct vfs_node *node) {
 static int ext2_fetch_page(struct vfs_node *node, uint64_t index, void *out) {
     struct ext2_volume *volume = volume_of(node);
     if (!volume || !out) return -1;
-    struct ext2_volume *saved = enter(volume);
+    struct ext2_volume *saved = op_enter(volume);
     int status = read_page(node->disk_inode, index, (uint8_t *)out);
-    fs = saved;
+    op_leave(saved);
     return status;
 }
 
@@ -1443,13 +1687,15 @@ static const struct vfs_persist_ops ext2_persist_ops = {
     .created = ext2_event_created,
     .removed = ext2_event_removed,
     .moved = ext2_event_moved,
-    .written = ext2_event_written,
     .truncated = ext2_event_truncated,
     .meta_changed = ext2_event_meta_changed,
     .linked = ext2_event_linked,
     .released = ext2_event_released,
     .fetch = ext2_fetch_data,
     .fetch_page = ext2_fetch_page,
+    .writeback = ext2_writeback,
+    .sync_node = ext2_sync_node,
+    .sync_all = ext2_sync_all,
 };
 
 static int load_symlink_target(struct ext2_inode *inode, char **out) {
@@ -1462,7 +1708,7 @@ static int load_symlink_target(struct ext2_inode *inode, char **out) {
     } else {
         int dirty = 0;
         int64_t block = inode_bmap(inode, 0, 0, &dirty);
-        if (block <= 0 || read_block((uint32_t)block, data_buf) != 0) {
+        if (block <= 0 || read_blocks_raw((uint32_t)block, 1, data_buf) != 0) {
             kfree(target);
             return -1;
         }
@@ -1577,7 +1823,7 @@ static int load_directory(uint32_t dir_ino, struct vfs_node *dir_node,
         int64_t block = inode_bmap(&dir, file_block, 0, &dirty);
         if (block < 0) goto fail;
         if (!block) continue;
-        if (read_block((uint32_t)block, block_data) != 0) goto fail;
+        if (read_blocks_raw((uint32_t)block, 1, block_data) != 0) goto fail;
 
         uint32_t at = 0;
         while (at + 8U <= fs->block_size) {
@@ -1698,21 +1944,21 @@ static int journal_flush_device(void *context) {
 }
 
 static int journal_map_block(void *context, uint32_t file_block, uint32_t *disk_block) {
-    struct ext2_volume *saved = enter((struct ext2_volume *)context);
+    struct ext2_volume *saved = op_enter((struct ext2_volume *)context);
     int dirty = 0;
     int64_t block = inode_bmap(&fs->journal_inode, file_block, 0, &dirty);
-    fs = saved;
+    op_leave(saved);
     if (block <= 0) return -1;
     *disk_block = (uint32_t)block;
     return 0;
 }
 
 static int journal_mark_recovery(void *context, int needs_recovery) {
-    struct ext2_volume *saved = enter((struct ext2_volume *)context);
+    struct ext2_volume *saved = op_enter((struct ext2_volume *)context);
     if (needs_recovery) fs->sb.s_feature_incompat |= EXT2_FEATURE_INCOMPAT_RECOVER;
     else fs->sb.s_feature_incompat &= ~EXT2_FEATURE_INCOMPAT_RECOVER;
     int status = write_superblock_direct();
-    fs = saved;
+    op_leave(saved);
     return status;
 }
 
@@ -1795,12 +2041,12 @@ static int read_metadata(void) {
     if (!superblock_usable()) return -EINVAL;
     adopt_geometry();
 
-    kfree(fs->sb_home);
     kfree(fs->gds);
-    fs->sb_home = (uint8_t *)kmalloc(fs->block_size);
-    fs->gds = (struct ext2_group_desc *)kmalloc((size_t)fs->group_count * sizeof(*fs->gds));
-    if (!fs->sb_home || !fs->gds) return -ENOMEM;
-    if (read_blocks_raw(fs->sb_home_block, 1, fs->sb_home) != 0) return -EIO;
+    kfree(fs->gds_written);
+    size_t table_bytes = (size_t)fs->group_count * sizeof(*fs->gds);
+    fs->gds = (struct ext2_group_desc *)kmalloc(table_bytes);
+    fs->gds_written = (struct ext2_group_desc *)kmalloc(table_bytes);
+    if (!fs->gds || !fs->gds_written) return -ENOMEM;
 
     for (uint32_t index = 0; index < fs->gd_blocks; index++) {
         if (read_blocks_raw(fs->first_data_block + 1U + index, 1, meta_buf) != 0)
@@ -1817,27 +2063,34 @@ static int read_metadata(void) {
             fs->gds[group].bg_inode_bitmap >= fs->sb.s_blocks_count ||
             table_end > fs->sb.s_blocks_count) return -EINVAL;
     }
+    memcpy(fs->gds_written, fs->gds, (size_t)fs->group_count * sizeof(*fs->gds));
+    fs->sb_written = fs->sb;
     return 0;
 }
 
 static int volume_open(void) {
-    cache_reset_all();
+    buffers_drop_all();
     int status = read_metadata();
     if (status != 0) return status;
     if (journal_start_up() != 0) return -EIO;
-    cache_reset_all();
+    buffers_drop_all();
     status = read_metadata();
     if (status != 0) return status;
-    if (fs->sb.s_feature_incompat & EXT2_FEATURE_INCOMPAT_RECOVER) {
+    if (fs->journal) {
+        fs->sb.s_feature_incompat |= EXT2_FEATURE_INCOMPAT_RECOVER;
+        if (write_superblock_direct() != 0 || volume_flush(fs) != 0) return -EIO;
+        if (ext3_journal_begin(fs->journal) != 0) return -EIO;
+    } else if (fs->sb.s_feature_incompat & EXT2_FEATURE_INCOMPAT_RECOVER) {
         fs->sb.s_feature_incompat &= ~EXT2_FEATURE_INCOMPAT_RECOVER;
         if (write_superblock_direct() != 0) return -EIO;
     }
+    fs->last_commit_ns = time_uptime_ns();
     return 0;
 }
 
 static int volume_shutdown(void) {
-    int status = flush_meta();
-    if (fs->journal && ext3_journal_commit(fs->journal) != 0) status = -1;
+    int status = volume_commit();
+    if (fs->journal && ext3_journal_end(fs->journal) != 0) status = -1;
     fs->sb.s_feature_incompat &= ~EXT2_FEATURE_INCOMPAT_RECOVER;
     if (write_superblock_direct() != 0) status = -1;
     if (volume_flush(fs) != 0) status = -1;
@@ -1845,9 +2098,13 @@ static int volume_shutdown(void) {
 }
 
 static void volume_destroy(struct ext2_volume *volume) {
+    struct ext2_volume *saved = enter(volume);
+    buffers_drop_all();
+    fs = saved;
     ext3_journal_close(volume->journal);
     kfree(volume->gds);
-    kfree(volume->sb_home);
+    kfree(volume->gds_written);
+    kfree(volume->pending_free);
     kfree(volume);
 }
 
@@ -1868,7 +2125,7 @@ static int mount_volume(const struct block_device *device, struct vfs_node *root
     volume->root = root;
     volume->loading = 1;
 
-    struct ext2_volume *saved = enter(volume);
+    struct ext2_volume *saved = op_enter(volume);
     int status = volume_open();
     if (status == 0) {
         volume->next = volumes;
@@ -1890,11 +2147,9 @@ static int mount_volume(const struct block_device *device, struct vfs_node *root
                    (unsigned)fs->sb.s_blocks_count);
         }
     }
-    fs = saved;
-    if (status != 0) {
-        volume_destroy(volume);
-        return status;
-    }
+    if (status != 0) volume_destroy(volume);
+    op_leave(saved);
+    if (status != 0) return status;
     vfs_set_persist_ops(&ext2_persist_ops);
     *out = volume;
     return 0;
@@ -1985,30 +2240,36 @@ int ext2fs_mount(const char *source, const char *mount_name, struct vfs_node **r
 
 void ext2fs_unmount(struct vfs_node *root) {
     VFS_GUARD;
+    mutex_lock(&ext2_lock);
     struct ext2_volume *volume = volumes;
     while (volume && volume->root != root) volume = volume->next;
-    if (!volume) return;
-    struct ext2_volume *saved = enter(volume);
-    if (volume_shutdown() != 0)
-        kprintf("EXT2: %s did not unmount cleanly\n", volume->device->dev_name);
-    fs = saved;
-    volume_unlist(volume);
-    volume_destroy(volume);
+    if (volume) {
+        struct ext2_volume *saved = enter(volume);
+        if (volume_shutdown() != 0)
+            kprintf("EXT2: %s did not unmount cleanly\n", volume->device->dev_name);
+        fs = saved;
+        volume_unlist(volume);
+        volume_destroy(volume);
+    }
+    mutex_unlock(&ext2_lock);
 }
 
 int ext2fs_owns(const struct vfs_node *node) {
     VFS_GUARD;
+    EXT2_LOCKED;
     return volume_of(node) != NULL;
 }
 
 int ext2fs_journalled(const struct vfs_node *node) {
     VFS_GUARD;
+    EXT2_LOCKED;
     struct ext2_volume *volume = volume_of(node);
     return volume && volume->journal;
 }
 
 int ext2fs_stats(const struct vfs_node *node, struct ext2_fs_stats *out) {
     VFS_GUARD;
+    EXT2_LOCKED;
     struct ext2_volume *volume = NULL;
     for (const struct vfs_node *walk = node; walk && !volume; walk = walk->parent) {
         volume = volume_of(walk);
@@ -2024,34 +2285,9 @@ int ext2fs_stats(const struct vfs_node *node, struct ext2_fs_stats *out) {
     return 0;
 }
 
-int ext2fs_fsync_node(struct vfs_node *node) {
-    VFS_GUARD;
-    struct ext2_volume *volume = volume_of(node);
-    if (!volume) return 0;
-    struct ext2_volume *saved = enter(volume);
-    int status = 0;
-    if ((node->flags & 0xFFU) == VFS_FILE &&
-        file_write_range(node->disk_inode, node, 0, node->length) < 0)
-        status = -1;
-    if (status == 0 && flush_meta() != 0) status = -1;
-    if (status == 0) status = volume_flush(volume);
-    fs = saved;
-    return status;
-}
-
-int ext2fs_sync(void) {
-    VFS_GUARD;
-    int status = 0;
-    for (struct ext2_volume *volume = volumes; volume; volume = volume->next) {
-        struct ext2_volume *saved = enter(volume);
-        if (flush_meta() != 0 || volume_flush(volume) != 0) status = -1;
-        fs = saved;
-    }
-    return status;
-}
-
 int ext2fs_shutdown(void) {
     VFS_GUARD;
+    EXT2_LOCKED;
     int status = 0;
     for (struct ext2_volume *volume = volumes; volume; volume = volume->next) {
         struct ext2_volume *saved = enter(volume);
@@ -2059,4 +2295,47 @@ int ext2fs_shutdown(void) {
         fs = saved;
     }
     return status;
+}
+
+static const char commit_channel;
+static volatile int commit_requested;
+
+static void commit_kick(void) {
+    if (__atomic_exchange_n(&commit_requested, 1, __ATOMIC_ACQ_REL)) return;
+    process_wake_all(&commit_channel);
+}
+
+static int volume_needs_commit(void) {
+    return fs->dirty_buffers || fs->pending_free_count ||
+           memcmp(&fs->sb, &fs->sb_written, sizeof(fs->sb)) != 0 ||
+           memcmp(fs->gds, fs->gds_written, (size_t)fs->group_count * sizeof(*fs->gds)) != 0;
+}
+
+static void commit_thread(void *unused) {
+    (void)unused;
+    for (;;) {
+        process_prepare_wait(&commit_channel, time_uptime_ns() + EXT2_COMMIT_POLL_NS);
+        if (!__atomic_load_n(&commit_requested, __ATOMIC_ACQUIRE)) process_wait();
+        process_finish_wait();
+        int urgent = __atomic_exchange_n(&commit_requested, 0, __ATOMIC_ACQ_REL);
+        uint64_t now = time_uptime_ns();
+        mutex_lock(&ext2_lock);
+        for (struct ext2_volume *volume = volumes; volume; volume = volume->next) {
+            if (volume->loading) continue;
+            struct ext2_volume *saved = enter(volume);
+            if (volume_needs_commit() &&
+                (urgent || now - fs->last_commit_ns >= EXT2_COMMIT_INTERVAL_NS)) {
+                if (volume_commit() != 0) report_failure("commit", "metadata");
+            } else if (fs->buffer_count > fs->buffer_limit) {
+                buffers_trim();
+            }
+            fs = saved;
+        }
+        mutex_unlock(&ext2_lock);
+    }
+}
+
+void ext2fs_start(void) {
+    if (!process_create_kthread("ext2commit", commit_thread, NULL))
+        kprintf("EXT2: cannot start the commit thread\n");
 }

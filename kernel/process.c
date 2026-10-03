@@ -2019,6 +2019,7 @@ static int commit_file(struct vm_area *area, uint64_t page) {
     uint64_t index = (page - area->start + area->offset) / 4096ULL;
     if (index >= (node->length + 4095ULL) / 4096ULL)
         return commit_zero(page, area->page_flags | PAGE_USER | PAGE_PRESENT);
+    vfs_prefetch(node, index * 4096ULL, 4096ULL);
     uint64_t physical = vfs_page_physical(node, index) & ~0xFFFULL;
     if (!physical) return 0;
     if (pmm_page_refcount(physical) == 0 && pmm_page_ref(physical) != 0) return 0;

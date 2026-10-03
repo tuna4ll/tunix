@@ -1,9 +1,10 @@
 # The root filesystem (ext3)
 
 The root is a real ext3 filesystem on the second partition of the boot disk.
-The kernel mounts it at boot and writes through to it: reads, `mmap` and `exec`
-are served from RAM, every mutation reaches the disk as it happens, and what
-you edit is still there next boot.
+The kernel mounts it at boot and writes back to it the way Linux does: reads,
+`mmap` and `exec` are served from RAM, a `write()` returns once the bytes are in
+the page cache, and the disk catches up within a few seconds -- or at once, for
+`fsync`, `sync` and `umount`. What you edit is still there next boot.
 
 ## Where it comes from
 
@@ -86,43 +87,76 @@ superblock says where the oldest live transaction starts and what sequence to
 expect there. That is the whole protocol; there is nothing else to agree on,
 which is why a log this kernel wrote is one e2fsck reads.
 
-### What a mutation costs now
+### How changes reach the disk
 
-Every write goes to the log first, file contents included -- what ext3 calls
-`data=journal`. Metadata goes through `meta_write()` and a file's blocks go
-through `run_flush()`, and neither reaches the disk directly any more: they
-stage the block, and `flush_meta()` -- which already ran at the end of every
-create, unlink and rename -- commits whatever is staged as one transaction:
+The journal runs in ext3's default mode, `data=ordered`: metadata goes through
+the log, file contents are written straight to where they belong, and they are
+written before the transaction that makes them reachable commits.
 
-1. descriptor, blocks, commit block, then a device flush
-2. `needs_recovery` set in the filesystem superblock, the journal superblock
-   pointed at the transaction, flush
-3. the blocks written where they actually belong, flush
-4. the journal emptied, `needs_recovery` cleared, flush
+Metadata lives in a buffer cache (`buf_get()`, `buf_zero()`, `buf_mark()` in
+`kernel/fs/ext2.c`): one entry per block, hashed, on an LRU list, eight
+megabytes per volume. A create, unlink or rename changes buffers and marks them
+dirty; nothing is written yet. The superblock and group descriptors are kept in
+memory and compared against the last copy written, so only a descriptor block
+whose counts changed goes out.
 
-Step 3 is the only part that existed before. The rest is the price: everything
-is written twice, and there are four cache flushes where there used to be none.
+`volume_commit()` gathers every dirty buffer, sorts them by block number and
+hands them to `ext3_journal_commit()` as one transaction:
 
-The staging area is 256 blocks -- fewer with 1 KiB blocks, whose descriptor
-holds only 126 tags -- so a transaction carries up to a megabyte, and
-both halves of the doubled write go out in runs rather than a block at a time.
-The blocks of a file are usually consecutive on the disk and always consecutive
-in the log, so a megabyte of file contents is a handful of calls at each end.
-Writing 64 MiB took 2.9 seconds with the contents journalled against 2.9
-without -- but that is an emulated disk with the host's page cache behind it,
-and the second write is exactly the kind of cost such a cache hides. Do not
-read it as free.
+1. descriptor blocks and the blocks they name, gathered into runs, then a
+   device flush
+2. the commit block, flush -- from here the transaction survives a crash
+3. the blocks written to where they belong, flush
+4. the journal superblock moved past the transaction, flush
 
-What it buys is that there is no moment when the disk holds half of a change,
-and that now covers what is *in* the file as well as where it is. Crash before
-step 2 and the transaction never happened; crash during step 3 -- the window
-that used to be the dangerous one -- and the next mount finds a committed
-transaction the disk has not caught up with, and applies it.
+A transaction may carry more blocks than one descriptor names; it simply has
+several descriptors before its commit block. `needs_recovery` is set in the
+filesystem superblock when the volume is mounted and cleared when it is
+unmounted, not once per transaction.
 
-Because the log is checkpointed at the end of every transaction rather than
-left to fill, only one transaction is ever live, and it always starts at the
-first log block. A 64 MiB journal is far more than this needs; it is the size
-mke2fs chose and there is no reason to argue with it.
+A commit happens when the volume has had something dirty for five seconds (the
+`ext2commit` thread checks once a second), when the dirty buffers reach half
+the journal or half the buffer cache, on `fsync`, `sync` and `msync(MS_SYNC)`,
+and on unmount and power-off. xbps unpacking a package therefore costs one
+commit every few seconds instead of four cache flushes per file.
+
+A block freed in the running transaction is not handed out again until that
+transaction has committed (`free_block()` queues it; `volume_commit()` releases
+it). Otherwise a crash could replay the old owner's metadata on top of data the
+new owner had already written there -- the reason ext3 on Linux has the same
+rule.
+
+### Writing file contents
+
+`write()` copies into the page cache, marks the pages dirty and puts the file on
+a list. The `flush` kernel thread (`kernel/fs/vfs.c`) writes a file back once it
+has been dirty for five seconds, or sooner when the dirty pages pass five per
+cent of memory. Each batch of up to 32 pages is copied out under the VFS lock
+and written under the ext2 lock alone, so a slow disk does not hold up the rest
+of the filesystem. A program that writes faster than the disk takes it is made
+to wait in `vfs_balance_dirty()` once dirty pages pass ten per cent of memory
+(128 MiB at most), the way Linux throttles a writer.
+
+A batch knows which inode and which truncate generation it was taken from, and
+`ext2_writeback()` drops it if the file has since been deleted or truncated;
+the pages it carried are marked dirty again if they still exist.
+
+Reading a page that is not in the cache goes to the disk without the VFS lock
+held (`vfs_prefetch()`), and the page is put in the cache only if nothing
+filled that slot meanwhile.
+
+### What the old way cost
+
+Before this, every `write()` went through the log with its contents
+(`data=journal`) and committed on the spot, with four cache flushes and the
+superblock and every group descriptor rewritten each time, all while one lock
+over the whole kernel was held. Writing 24 MiB to a USB stick limited to
+2 MB/s and 60 writes a second (`support/tests/iolatency-kerneltest.sh`) took
+307 seconds, and in that time a thread sleeping 5 ms woke up to 3.2 seconds
+late -- which on the real laptop was the mouse and the clock stopping during
+`xbps-install`. The same test now returns from `write()` in 17 ms, the sleeping
+thread is at most 19 ms late, and reading a cached file on the root meanwhile
+takes at most 104 ms. The `fsync` at the end takes as long as the stick needs.
 
 ### Replay
 
@@ -132,6 +166,9 @@ log twice: once to find where it ends and to collect revoked blocks, once to
 write the blocks of every transaction that has a commit block. A descriptor
 without a commit after it is a transaction that was interrupted, and it is
 where the replay stops.
+
+A transaction whose blocks do not fit in one descriptor has several, and the
+walk continues through them to the commit block.
 
 Two details of the format matter and are handled. A block whose first four
 bytes happen to be the journal's own magic is written to the log with those
@@ -198,13 +235,15 @@ GPT so that one disk boots either firmware.
 
 ## What is not here
 
-- **One transaction at a time.** The log is checkpointed immediately rather
-  than batched, so a write does not amortise against the one after it.
+- **One live transaction.** A transaction is checkpointed as soon as it has
+  committed, so the log never holds more than one; batching comes from how long
+  a transaction stays open, not from keeping several in the log.
 - **No revoke blocks are written.** They are understood on the way in, which is
-  what matters for replaying a log Linux left behind, but this kernel frees a
-  metadata block and reuses it without recording that the old contents must not
-  come back. Nothing here reuses a block within one transaction, which is the
-  case that would need it.
+  what matters for replaying a log Linux left behind. This kernel does not need
+  them: a freed block is not reused before its transaction commits, and a
+  committed transaction is checkpointed before the next one starts.
+- **One lock for every ext2 volume.** The ext2 lock serialises all mounted ext2
+  and ext3 volumes, so two disks are not written in parallel.
 - **No extents, no 64-bit block numbers.** Block numbers are 32 bits, so a
   filesystem ends at 16 TiB with 4 KiB blocks, and `i_blocks` counts sectors in
   32 bits, so a single file ends at 2 TiB.
@@ -212,9 +251,9 @@ GPT so that one disk boots either firmware.
   disk a directory is written linearly.
 - **No orphan list.** A file deleted while open is freed when it closes; if the
   machine dies first, `e2fsck` finds the inode and frees it.
-- **The cache is not bounded in advance.** It grows until an allocation fails
-  and only then drops clean pages, so a long write leaves the machine near
-  full even though nothing is lost.
+- **Clean pages are not bounded in advance.** The cache grows until an
+  allocation fails and only then drops clean pages. Dirty pages are bounded: a
+  writer waits once they pass ten per cent of memory.
 - **`fsck` on the running root** is not something to do; the fstab entry has
   pass 0 for exactly that reason.
 
@@ -245,9 +284,9 @@ disk. A page is fetched by `ext2_fetch_page()` when something reads or writes
 it, and a hole reads as zeros without touching the medium at all. `truncate -s
 2G` costs nothing: the file is two gigabytes long and holds no pages.
 
-**Only what changed is written.** `file_write_range()` walks the pages of the
-range and writes the ones whose dirty bit is set, then clears it. Before, every
-write-back rewrote the whole file.
+**Only what changed is written.** Write-back takes the pages whose dirty bit is
+set and clears it; a clean page is never written. Before, every write-back
+rewrote the whole file.
 
 **Memory comes back a page at a time.** `vfs_drop_clean_pages()` frees the
 pages of a file that are clean, because the disk can hand them back. A dirty

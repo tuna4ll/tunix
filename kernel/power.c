@@ -6,6 +6,7 @@
 #endif
 #include "include/cpu.h"
 #include "include/ext2.h"
+#include "include/vfs.h"
 #include "include/platform.h"
 #include "include/power.h"
 
@@ -14,7 +15,7 @@ extern void kprintf(const char *fmt, ...);
 static int button_handled = 1;
 
 static void flush_disks(void) {
-    (void)ext2fs_sync();
+    (void)vfs_sync();
     (void)ext2fs_shutdown();
 #if defined(__x86_64__)
     (void)ata_flush_cache();

@@ -19,10 +19,11 @@ struct ext3_journal *ext3_journal_open(const struct ext3_journal_ops *ops,
 void ext3_journal_close(struct ext3_journal *journal);
 int ext3_journal_active(const struct ext3_journal *journal);
 int ext3_journal_recover(struct ext3_journal *journal);
-int ext3_journal_stage(struct ext3_journal *journal, uint32_t block, const void *data);
-int ext3_journal_peek(const struct ext3_journal *journal, uint32_t block, void *out);
-int ext3_journal_commit(struct ext3_journal *journal);
+int ext3_journal_begin(struct ext3_journal *journal);
+int ext3_journal_end(struct ext3_journal *journal);
+int ext3_journal_commit(struct ext3_journal *journal, uint32_t count,
+                        const uint32_t *targets, uint8_t *const *data);
 uint32_t ext3_journal_length(const struct ext3_journal *journal);
-uint32_t ext3_journal_staged(const struct ext3_journal *journal);
+uint32_t ext3_journal_capacity(const struct ext3_journal *journal);
 
 #endif

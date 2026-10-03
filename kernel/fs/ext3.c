@@ -25,7 +25,7 @@ extern void kprintf(const char *fmt, ...);
 #define EXT3_HEADER_BYTES 12U
 #define EXT3_TAG_BYTES 8U
 #define EXT3_UUID_BYTES 16U
-#define EXT3_STAGE_LIMIT 256U
+#define EXT3_GATHER_BLOCKS 32U
 
 struct revoke_entry {
     uint32_t block;
@@ -45,11 +45,11 @@ struct ext3_journal {
 
     uint32_t *mapped;
     uint32_t mapped_count;
+    int open_for_writes;
 
-    uint8_t *stage_data;
-    uint32_t *stage_block;
-    uint32_t stage_count;
-    uint32_t stage_capacity;
+    uint8_t *gather;
+    uint32_t gather_start;
+    uint32_t gather_count;
 
     struct revoke_entry *revokes;
     uint32_t revoke_count;
@@ -90,10 +90,6 @@ static int needs_escape(const void *data) {
     const uint8_t *bytes = (const uint8_t *)data;
     return bytes[0] == 0xC0U && bytes[1] == 0x3BU &&
            bytes[2] == 0x39U && bytes[3] == 0x98U;
-}
-
-static uint8_t *staged_at(const struct ext3_journal *journal, uint32_t index) {
-    return journal->stage_data + (size_t)index * journal->block_size;
 }
 
 static uint32_t step(const struct ext3_journal *journal, uint32_t position) {
@@ -158,8 +154,7 @@ void ext3_journal_close(struct ext3_journal *journal) {
     if (!journal) return;
     revokes_clear(journal);
     kfree(journal->mapped);
-    kfree(journal->stage_data);
-    kfree(journal->stage_block);
+    kfree(journal->gather);
     kfree(journal);
 }
 
@@ -171,8 +166,12 @@ uint32_t ext3_journal_length(const struct ext3_journal *journal) {
     return journal ? journal->length : 0;
 }
 
-uint32_t ext3_journal_staged(const struct ext3_journal *journal) {
-    return journal ? journal->stage_count : 0;
+uint32_t ext3_journal_capacity(const struct ext3_journal *journal) {
+    if (!journal) return 0;
+    uint32_t space = journal->length - journal->first;
+    uint32_t tags = (journal->block_size - EXT3_HEADER_BYTES) / EXT3_TAG_BYTES;
+    uint32_t usable = space > 2U ? space - 2U : 0;
+    return usable - (usable + tags) / (tags + 1U);
 }
 
 static int write_run(struct ext3_journal *journal, uint32_t block, uint32_t count,
@@ -215,16 +214,10 @@ struct ext3_journal *ext3_journal_open(const struct ext3_journal_ops *ops,
         goto fail;
     if (!journal->sequence) journal->sequence = 1U;
 
-    uint32_t capacity = (block_size - EXT3_HEADER_BYTES) / EXT3_TAG_BYTES;
-    if (capacity > EXT3_STAGE_LIMIT) capacity = EXT3_STAGE_LIMIT;
-    if (capacity + 2U > journal->length - journal->first)
-        capacity = journal->length - journal->first - 2U;
-    uint32_t wanted = journal->first + capacity + 2U;
+    uint32_t wanted = journal->length;
     journal->mapped = (uint32_t *)kmalloc(wanted * sizeof(uint32_t));
-    journal->stage_block = (uint32_t *)kmalloc(capacity * sizeof(uint32_t));
-    journal->stage_data = (uint8_t *)kmalloc((size_t)capacity * block_size);
-    if (!journal->mapped || !journal->stage_block || !journal->stage_data) goto fail;
-    journal->stage_capacity = capacity;
+    journal->gather = (uint8_t *)kmalloc((size_t)EXT3_GATHER_BLOCKS * block_size);
+    if (!journal->mapped || !journal->gather) goto fail;
 
     for (uint32_t index = 0; index < wanted; index++) {
         uint32_t disk = 0;
@@ -367,104 +360,119 @@ int ext3_journal_recover(struct ext3_journal *journal) {
     return status;
 }
 
-int ext3_journal_peek(const struct ext3_journal *journal, uint32_t block, void *out) {
-    if (!journal) return -1;
-    for (uint32_t index = 0; index < journal->stage_count; index++) {
-        if (journal->stage_block[index] != block) continue;
-        memcpy(out, staged_at(journal, index), journal->block_size);
-        return 0;
-    }
-    return -1;
-}
-
-int ext3_journal_stage(struct ext3_journal *journal, uint32_t block, const void *data) {
+int ext3_journal_begin(struct ext3_journal *journal) {
     if (!journal || journal->busy) return -1;
-    for (uint32_t index = 0; index < journal->stage_count; index++) {
-        if (journal->stage_block[index] != block) continue;
-        memcpy(staged_at(journal, index), data, journal->block_size);
-        return 0;
-    }
-    if (journal->stage_count == journal->stage_capacity &&
-        ext3_journal_commit(journal) != 0) return -1;
-    journal->stage_block[journal->stage_count] = block;
-    memcpy(staged_at(journal, journal->stage_count), data, journal->block_size);
-    journal->stage_count++;
+    if (journal->open_for_writes) return 0;
+    if (write_journal_superblock(journal, journal->first, journal->sequence) != 0) return -1;
+    if (device_flush(journal) != 0) return -1;
+    journal->open_for_writes = 1;
     return 0;
 }
 
-int ext3_journal_commit(struct ext3_journal *journal) {
-    if (!journal || journal->busy) return -1;
-    uint32_t count = journal->stage_count;
-    if (!count) return 0;
+int ext3_journal_end(struct ext3_journal *journal) {
+    if (!journal || !journal->open_for_writes) return 0;
+    if (write_journal_superblock(journal, 0, journal->sequence) != 0) return -1;
+    if (device_flush(journal) != 0) return -1;
+    journal->open_for_writes = 0;
+    return 0;
+}
 
-    journal->busy = 1;
+static int gather_flush(struct ext3_journal *journal) {
+    if (!journal->gather_count) return 0;
+    int status = write_run(journal, journal->gather_start, journal->gather_count,
+                           journal->gather);
+    journal->gather_count = 0;
+    return status;
+}
+
+static int gather_add(struct ext3_journal *journal, uint32_t disk_block, const void *data) {
+    if (journal->gather_count &&
+        (disk_block != journal->gather_start + journal->gather_count ||
+         journal->gather_count == EXT3_GATHER_BLOCKS) &&
+        gather_flush(journal) != 0) return -1;
+    if (!journal->gather_count) journal->gather_start = disk_block;
+    memcpy(journal->gather + (size_t)journal->gather_count * journal->block_size, data,
+           journal->block_size);
+    journal->gather_count++;
+    return 0;
+}
+
+static int write_log_block(struct ext3_journal *journal, uint32_t *position,
+                           const void *data) {
+    uint32_t disk;
+    if (log_locate(journal, *position, &disk) != 0) return -1;
+    if (gather_add(journal, disk, data) != 0) return -1;
+    *position = step(journal, *position);
+    return 0;
+}
+
+static int log_transaction(struct ext3_journal *journal, uint32_t count,
+                           const uint32_t *targets, uint8_t *const *data) {
     uint32_t block_size = journal->block_size;
+    uint32_t tags_per_block = (block_size - EXT3_HEADER_BYTES) / EXT3_TAG_BYTES;
     uint32_t sequence = journal->sequence;
     uint32_t position = journal->first;
-    int status = -1;
 
-    memset(work, 0, block_size);
-    put_header(work, JBD_DESCRIPTOR_BLOCK, sequence);
-    for (uint32_t index = 0; index < count; index++) {
-        uint8_t *tag = work + EXT3_HEADER_BYTES + index * EXT3_TAG_BYTES;
-        uint16_t flags = JBD_FLAG_SAME_UUID;
-        if (needs_escape(staged_at(journal, index))) flags |= JBD_FLAG_ESCAPE;
-        if (index + 1U == count) flags |= JBD_FLAG_LAST_TAG;
-        store_be32(tag, journal->stage_block[index]);
-        store_be16(tag + 4U, 0);
-        store_be16(tag + 6U, flags);
-    }
-    if (log_write(journal, position, work) != 0) goto done;
-    position = step(journal, position);
-
-    for (uint32_t index = 0; index < count; ) {
-        if (needs_escape(staged_at(journal, index))) {
-            memcpy(scratch, staged_at(journal, index), block_size);
-            store_be32(scratch, 0);
-            if (log_write(journal, position, scratch) != 0) goto done;
-            position = step(journal, position);
-            index++;
-            continue;
+    for (uint32_t done = 0; done < count;) {
+        uint32_t batch = count - done;
+        if (batch > tags_per_block) batch = tags_per_block;
+        memset(work, 0, block_size);
+        put_header(work, JBD_DESCRIPTOR_BLOCK, sequence);
+        for (uint32_t index = 0; index < batch; index++) {
+            uint8_t *tag = work + EXT3_HEADER_BYTES + index * EXT3_TAG_BYTES;
+            uint16_t flags = JBD_FLAG_SAME_UUID;
+            if (needs_escape(data[done + index])) flags |= JBD_FLAG_ESCAPE;
+            if (index + 1U == batch) flags |= JBD_FLAG_LAST_TAG;
+            store_be32(tag, targets[done + index]);
+            store_be16(tag + 4U, 0);
+            store_be16(tag + 6U, flags);
         }
-        uint32_t run = 1;
-        while (index + run < count &&
-               !needs_escape(staged_at(journal, index + run)) &&
-               position + run < journal->mapped_count &&
-               journal->mapped[position + run] == journal->mapped[position] + run) run++;
-        if (write_run(journal, journal->mapped[position], run,
-                      staged_at(journal, index)) != 0) goto done;
-        position += run;
-        if (position >= journal->length) position = journal->first;
-        index += run;
+        if (write_log_block(journal, &position, work) != 0) return -1;
+        for (uint32_t index = 0; index < batch; index++) {
+            const uint8_t *source = data[done + index];
+            if (needs_escape(source)) {
+                memcpy(scratch, source, block_size);
+                store_be32(scratch, 0);
+                source = scratch;
+            }
+            if (write_log_block(journal, &position, source) != 0) return -1;
+        }
+        done += batch;
     }
+    if (gather_flush(journal) != 0 || device_flush(journal) != 0) return -1;
 
     memset(work, 0, block_size);
     put_header(work, JBD_COMMIT_BLOCK, sequence);
-    if (log_write(journal, position, work) != 0) goto done;
-    if (device_flush(journal) != 0) goto done;
+    if (log_write(journal, position, work) != 0) return -1;
+    return device_flush(journal);
+}
 
-    if (journal->ops.mark && journal->ops.mark(journal->context, 1) != 0) goto done;
-    if (write_journal_superblock(journal, journal->first, sequence) != 0) goto done;
-    if (device_flush(journal) != 0) goto done;
+static int checkpoint(struct ext3_journal *journal, uint32_t count,
+                      const uint32_t *targets, uint8_t *const *data) {
+    for (uint32_t index = 0; index < count; index++)
+        if (gather_add(journal, targets[index], data[index]) != 0) return -1;
+    if (gather_flush(journal) != 0 || device_flush(journal) != 0) return -1;
+    if (write_journal_superblock(journal, journal->first, journal->sequence + 1U) != 0)
+        return -1;
+    return device_flush(journal);
+}
 
-    for (uint32_t index = 0; index < count; ) {
-        uint32_t run = 1;
-        while (index + run < count &&
-               journal->stage_block[index + run] == journal->stage_block[index] + run) run++;
-        if (write_run(journal, journal->stage_block[index], run,
-                      staged_at(journal, index)) != 0) goto done;
-        index += run;
+int ext3_journal_commit(struct ext3_journal *journal, uint32_t count,
+                        const uint32_t *targets, uint8_t *const *data) {
+    if (!journal || journal->busy) return -1;
+    if (!count) return 0;
+    if (ext3_journal_begin(journal) != 0) return -1;
+    uint32_t capacity = ext3_journal_capacity(journal);
+    if (!capacity) return -1;
+    journal->busy = 1;
+    int status = 0;
+    for (uint32_t done = 0; done < count && status == 0;) {
+        uint32_t batch = count - done;
+        if (batch > capacity) batch = capacity;
+        status = log_transaction(journal, batch, targets + done, data + done);
+        if (status == 0) status = checkpoint(journal, batch, targets + done, data + done);
+        done += batch;
     }
-    if (device_flush(journal) != 0) goto done;
-
-    if (write_journal_superblock(journal, 0, sequence + 1U) != 0) goto done;
-    if (journal->ops.mark && journal->ops.mark(journal->context, 0) != 0) goto done;
-    if (device_flush(journal) != 0) goto done;
-
-    journal->stage_count = 0;
-    status = 0;
-
-done:
     journal->busy = 0;
     if (status != 0) kprintf("EXT3: journal commit failed\n");
     return status;

@@ -74,6 +74,14 @@ int strcmp(const char *a, const char *b) {
     return (unsigned char)*a - (unsigned char)*b;
 }
 
+int memcmp(const void *a, const void *b, size_t count) {
+    const unsigned char *left = (const unsigned char *)a;
+    const unsigned char *right = (const unsigned char *)b;
+    for (size_t index = 0; index < count; index++)
+        if (left[index] != right[index]) return left[index] < right[index] ? -1 : 1;
+    return 0;
+}
+
 int strncmp(const char *a, const char *b, size_t count) {
     while (count && *a && *a == *b) { a++; b++; count--; }
     if (!count) return 0;

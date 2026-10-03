@@ -167,6 +167,8 @@ void kmain(const struct boot_info *boot) {
         panic("no init");
     }
     workqueue_init();
+    vfs_start_writeback();
+    ext2fs_start();
     timer_init();
     arch_route_timer();
     smp_init();

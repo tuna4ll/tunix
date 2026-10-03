@@ -123,7 +123,27 @@ struct vfs_node {
     uint32_t flock_shared;
     uint64_t posix_lock_pid;
     int posix_lock_write;
+    uint32_t io_generation;
+    uint32_t dirty_pages;
+    uint8_t wb_listed;
+    uint64_t wb_since;
+    struct vfs_node *wb_next;
+    struct vfs_node *wb_prev;
 };
+
+struct vfs_writeback {
+    uint32_t ino;
+    uint32_t generation;
+    uint64_t length;
+    uint32_t atime;
+    uint32_t mtime;
+    uint32_t ctime;
+    uint32_t count;
+    const uint64_t *indices;
+    uint8_t *const *pages;
+};
+
+#define VFS_WRITEBACK_STALE 1
 
 struct dirent {
     char name[VFS_NAME_MAX + 1];
@@ -154,19 +174,20 @@ struct vfs_persist_ops {
     void (*removed)(struct vfs_node *node);
     void (*moved)(struct vfs_node *node, struct vfs_node *old_parent,
                   const char *old_name);
-    void (*written)(struct vfs_node *node, uint64_t offset, uint64_t size);
     void (*truncated)(struct vfs_node *node);
     void (*meta_changed)(struct vfs_node *node);
     void (*linked)(struct vfs_node *link);
     void (*released)(struct vfs_node *node);
     int (*fetch)(struct vfs_node *node);
     int (*fetch_page)(struct vfs_node *node, uint64_t index, void *out);
+    int (*writeback)(struct vfs_node *node, const struct vfs_writeback *batch);
+    int (*sync_node)(struct vfs_node *node);
+    int (*sync_all)(void);
 };
 
 void vfs_set_persist_ops(const struct vfs_persist_ops *ops);
 void vfs_lock_acquire(void);
 void vfs_lock_release(void);
-int vfs_lock_try(void);
 void vfs_notify_meta_changed(struct vfs_node *node);
 
 int vfs_fault_in(struct vfs_node *node);
@@ -178,6 +199,11 @@ void *vfs_page_peek(struct vfs_node *node, uint64_t index);
 uint64_t vfs_page_physical(struct vfs_node *node, uint64_t index);
 int vfs_page_is_dirty(struct vfs_node *node, uint64_t index);
 void vfs_page_clear_dirty(struct vfs_node *node, uint64_t index);
+void vfs_start_writeback(void);
+void vfs_prefetch(struct vfs_node *node, uint64_t offset, uint64_t size);
+void vfs_balance_dirty(void);
+int vfs_fsync(struct vfs_node *node);
+int vfs_sync(void);
 uint64_t vfs_page_span(struct vfs_node *node);
 void vfs_release_data(struct vfs_node *node);
 uint64_t vfs_drop_clean_pages(struct vfs_node *node);

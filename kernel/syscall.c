@@ -2627,7 +2627,7 @@ static int64_t sys_fsync(int fd) {
     uint32_t node_type = file->node->flags & 0xFFU;
     if (node_type == VFS_FILE || node_type == VFS_DIRECTORY || node_type == VFS_BLOCKDEVICE) {
         vfs_flush_mapped(file->node);
-        if (ext2fs_owns(file->node) && ext2fs_fsync_node(file->node) != 0) return -EIO;
+        if (ext2fs_owns(file->node) && vfs_fsync(file->node) != 0) return -EIO;
         return 0;
     }
     return -EINVAL;
@@ -3650,6 +3650,7 @@ static int64_t sys_msync(uint64_t address, uint64_t length, int flags) {
     if (address >= USER_ADDRESS_LIMIT || length > USER_ADDRESS_LIMIT - address)
         return -ENOMEM;
     if (!process_sync_file_areas(address, address + length)) return -ENOMEM;
+    if ((flags & MS_SYNC) && vfs_sync() != 0) return -EIO;
     return 0;
 }
 
@@ -5712,7 +5713,7 @@ static void syscall_run(struct syscall_frame *frame) {
         case SYS_FSYNC: SYSCALL_RET(frame) = (uint64_t)sys_fsync((int)SYSCALL_ARG0(frame)); break;
         case SYS_FDATASYNC: SYSCALL_RET(frame) = (uint64_t)sys_fsync((int)SYSCALL_ARG0(frame)); break;
         case SYS_SYNCFS: SYSCALL_RET(frame) = (uint64_t)sys_fsync((int)SYSCALL_ARG0(frame)); break;
-        case SYS_SYNC: SYSCALL_RET(frame) = (uint64_t)ext2fs_sync(); break;
+        case SYS_SYNC: SYSCALL_RET(frame) = (uint64_t)vfs_sync(); break;
         case SYS_INIT_MODULE:
             SYSCALL_RET(frame) = (uint64_t)sys_init_module(SYSCALL_ARG0(frame),
                                                            SYSCALL_ARG1(frame),
@@ -6194,6 +6195,18 @@ static void syscall_run(struct syscall_frame *frame) {
 _Static_assert(sizeof(struct syscall_frame) == 144, "syscall_entry.S assumes 144");
 #endif
 
+static int syscall_writes_data(uint64_t number) {
+    switch (number) {
+        case SYS_WRITE:
+        case SYS_WRITEV:
+        case SYS_PWRITE64:
+        case SYS_PWRITEV:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
 #define VERBOSE_SYSCALL_LIMIT 24U
 
 void syscall_dispatch(struct syscall_frame *frame) {
@@ -6214,6 +6227,7 @@ void syscall_dispatch(struct syscall_frame *frame) {
 
     syscall_run(frame);
     syscall_release_pins_of(caller);
+    if (syscall_writes_data(syscall_number) && process_current() == caller) vfs_balance_dirty();
     struct syscall_frame *resumed = frame;
     uint64_t stack_top = cpu_current()->kernel_rsp;
     if (stack_top) {
