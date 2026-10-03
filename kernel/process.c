@@ -1262,10 +1262,22 @@ static void mark_dead(struct process *process) {
     reap_pending = 1;
 }
 
+static void kick_idle_for(const struct process *process) {
+    unsigned cpus = smp_cpu_count();
+    for (unsigned index = 0; index < cpus && index < SMP_MAX_CPUS; index++) {
+        struct cpu *cpu = percpu_slot(index);
+        if (!cpu || !cpu->online || cpu == cpu_current() || cpu_running(cpu)) continue;
+        if (process->affinity_set && !cpu_mask_test(&process->affinity, index)) continue;
+        smp_send_reschedule();
+        return;
+    }
+}
+
 static void wake_to_ready(struct process *process) {
     if (!process) return;
     place_waking_task(process);
     set_process_state(process, PROCESS_READY);
+    kick_idle_for(process);
 }
 
 static void signal_one_process(struct process *target, int signal_number);
@@ -2120,6 +2132,10 @@ static void resume_from_idle(struct interrupt_frame *frame) {
     }
     current->saved_frame = resume;
     arch_frame_to_interrupt(frame, &resume);
+}
+
+void process_reschedule_interrupt(struct interrupt_frame *frame) {
+    if (frame && !current) resume_from_idle(frame);
 }
 
 void process_timer_interrupt(struct interrupt_frame *frame) {

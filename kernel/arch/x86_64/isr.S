@@ -358,6 +358,13 @@ irq_lapic_timer:
     push 0xF0
     jmp isr_common_stub
 
+.global irq_reschedule
+irq_reschedule:
+    cli
+    push 0
+    push 0xF2
+    jmp isr_common_stub
+
 .global irq_invalidate_tlb
 irq_invalidate_tlb:
     cli

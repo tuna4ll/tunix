@@ -162,6 +162,7 @@ void gic_init(void) {
         cpu_local_v2();
     }
     gic_enable_interrupt(AARCH64_SGI_FLUSH);
+    gic_enable_interrupt(AARCH64_SGI_RESCHEDULE);
     kprintf("GIC: v%d with %u lines\n", aarch64_platform.gic_version, lines);
 }
 
@@ -169,6 +170,7 @@ void gic_init_secondary(unsigned index) {
     if (aarch64_platform.gic_version == 3) cpu_local_v3(index);
     else cpu_local_v2();
     gic_enable_interrupt(AARCH64_SGI_FLUSH);
+    gic_enable_interrupt(AARCH64_SGI_RESCHEDULE);
 }
 
 void gic_enable_interrupt(uint32_t intid) {
@@ -208,11 +210,19 @@ uint64_t gic_boot_redistributor_physical(void) {
     return redistributor_physical[0];
 }
 
-void gic_send_flush_ipi(void) {
+static void send_to_others(uint32_t intid) {
     if (aarch64_platform.gic_version == 3) {
-        uint64_t value = (1ULL << 40) | ((uint64_t)AARCH64_SGI_FLUSH << 24);
+        uint64_t value = (1ULL << 40) | ((uint64_t)intid << 24);
         __asm__ volatile("msr ICC_SGI1R_EL1, %0; isb" : : "r"(value) : "memory");
         return;
     }
-    write32(distributor, GICD_SGIR, (1U << 24) | AARCH64_SGI_FLUSH);
+    write32(distributor, GICD_SGIR, (1U << 24) | intid);
+}
+
+void gic_send_flush_ipi(void) {
+    send_to_others(AARCH64_SGI_FLUSH);
+}
+
+void gic_send_reschedule_ipi(void) {
+    send_to_others(AARCH64_SGI_RESCHEDULE);
 }

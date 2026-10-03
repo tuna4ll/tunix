@@ -6,10 +6,12 @@
 #include "include/percpu.h"
 #include "include/process.h"
 #include "include/smp.h"
+#include "include/time.h"
 
 extern void kprintf(const char *fmt, ...);
 
 #define MUTEX_REPORTS 16U
+#define OWNER_SPIN_NS 50000ULL
 
 static volatile uint32_t reports;
 
@@ -31,6 +33,13 @@ static struct process *holder_token(void) {
 
 static int may_sleep(void) {
     return process_current() && !cpu_current()->in_interrupt && lock_only_holds(NULL);
+}
+
+static int owner_running(const struct mutex *mutex) {
+    struct process *owner = mutex->owner;
+    if (!owner || ((uintptr_t)owner & 1U)) return 0;
+    return __atomic_load_n(&owner->on_cpu, __ATOMIC_ACQUIRE) &&
+           owner->state == PROCESS_RUNNING;
 }
 
 static void check_order(struct process *self, const struct mutex *mutex) {
@@ -108,6 +117,7 @@ void mutex_lock(struct mutex *mutex) {
         if (!sleeping) lock_report_sleep(mutex->name);
         check_order(self, mutex);
     }
+    uint64_t spin_until = 0;
     for (;;) {
         lock_acquire(&mutex->guard);
         if (!mutex->owner) {
@@ -123,11 +133,27 @@ void mutex_lock(struct mutex *mutex) {
             cpu_relax();
             continue;
         }
+        if (!mutex->first && owner_running(mutex)) {
+            lock_release(&mutex->guard);
+            uint64_t now = time_uptime_ns();
+            if (!spin_until) spin_until = now + OWNER_SPIN_NS;
+            if (now < spin_until) {
+                smp_service_flush();
+                cpu_relax();
+                continue;
+            }
+            lock_acquire(&mutex->guard);
+            if (!mutex->owner) {
+                lock_release(&mutex->guard);
+                continue;
+            }
+        }
         struct mutex_waiter waiter = {NULL, self, 0};
         if (mutex->last) mutex->last->next = &waiter;
         else mutex->first = &waiter;
         mutex->last = &waiter;
         lock_release(&mutex->guard);
+        self->waiting_for = mutex;
         while (!__atomic_load_n(&waiter.granted, __ATOMIC_ACQUIRE)) {
             process_prepare_wait(&waiter, 0);
             if (__atomic_load_n(&waiter.granted, __ATOMIC_ACQUIRE)) {
@@ -137,6 +163,7 @@ void mutex_lock(struct mutex *mutex) {
             process_wait();
             process_finish_wait();
         }
+        self->waiting_for = NULL;
         remember(self, mutex);
         return;
     }

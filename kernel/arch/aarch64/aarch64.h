@@ -15,6 +15,7 @@
 #define AARCH64_RAM_RANGES 32U
 #define AARCH64_MAX_CPUS 256U
 #define AARCH64_SGI_FLUSH 1U
+#define AARCH64_SGI_RESCHEDULE 2U
 #define AARCH64_MAX_SD 4U
 
 struct fdt_node {
@@ -116,6 +117,7 @@ uint64_t aarch64_syscall_number(uint64_t generic);
 void gic_init(void);
 void gic_init_secondary(unsigned index);
 void gic_send_flush_ipi(void);
+void gic_send_reschedule_ipi(void);
 void gic_enable_interrupt(uint32_t intid);
 uint32_t gic_acknowledge(void);
 void gic_end_of_interrupt(uint32_t intid);

@@ -232,6 +232,7 @@ struct process {
     struct file_pins pins;
     struct mutex *held_mutexes[PROCESS_HELD_MUTEXES];
     uint32_t held_mutex_count;
+    const struct mutex *waiting_for;
 };
 
 #define PROCESS_RESTARTED INT64_MIN
@@ -366,6 +367,7 @@ int process_may_sleep(void);
 void process_kernel_yield(void);
 struct process *process_create_kthread(const char *name, void (*body)(void *), void *argument);
 void process_user_resume(void);
+void process_reschedule_interrupt(struct interrupt_frame *frame);
 void process_idle_entry(void);
 void process_kthread_start(void (*body)(void *), void *argument) __attribute__((noreturn));
 void arch_switch_stack(uint64_t *save_sp, uint64_t next_sp);

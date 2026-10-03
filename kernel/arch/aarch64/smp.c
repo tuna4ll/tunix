@@ -41,6 +41,10 @@ void smp_service_flush(void) {
     __atomic_store_n(&self->flush_pending, 0, __ATOMIC_RELEASE);
 }
 
+void smp_send_reschedule(void) {
+    gic_send_reschedule_ipi();
+}
+
 void smp_flush_interrupt(void) {
     smp_service_flush();
 }

@@ -61,6 +61,11 @@ static void isr_dispatch(struct interrupt_frame *regs) {
         process_timer_interrupt(regs);
         return;
     }
+    if (regs->int_no == SMP_RESCHEDULE_VECTOR) {
+        apic_send_eoi();
+        process_reschedule_interrupt(regs);
+        return;
+    }
     if (regs->int_no == PIC_MASTER_VECTOR + 1U ||
         regs->int_no == PIC_SLAVE_VECTOR + 4U) {
         interrupt_acknowledge((unsigned)regs->int_no);
@@ -245,6 +250,10 @@ void isr_handler(struct interrupt_frame *regs) {
             shown++;
         }
         panic("double fault");
+    }
+    if (regs->int_no == SMP_RESCHEDULE_VECTOR && cpu_current()->current) {
+        apic_send_eoi();
+        return;
     }
     if (regs->int_no == SMP_TIMER_VECTOR && !cpu_current()->current &&
         !process_ready_pending()) {

@@ -130,6 +130,16 @@ int aarch64_irq(struct interrupt_frame *frame) {
         return 0;
     }
 
+    if (intid == AARCH64_SGI_RESCHEDULE) {
+        gic_end_of_interrupt(intid);
+        if (cpu_current()->current) return 0;
+        kernel_enter_from_isr();
+        cpu_current()->in_interrupt++;
+        process_reschedule_interrupt(frame);
+        cpu_current()->in_interrupt--;
+        relocate_user_frame(frame);
+        return 1;
+    }
     int timer = intid == aarch64_platform.timer_interrupt;
     if (timer) aarch64_timer_rearm();
     gic_end_of_interrupt(intid);
