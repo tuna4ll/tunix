@@ -14,6 +14,7 @@
 #include "../../include/input.h"
 #include "../../include/usb.h"
 #include "../../include/xhci.h"
+#include "../../include/lock.h"
 
 extern void kprintf(const char *fmt, ...);
 
@@ -391,6 +392,8 @@ static int storage_entries;
 static int storage_capacity;
 static int servicing;
 static int booted;
+
+static struct lock xhci_lock = LOCK_INITIALIZER("xhci", LOCK_RANK_BUS);
 
 static const struct usb_host xhci_usb_host;
 
@@ -1406,12 +1409,15 @@ static int any_work(struct xhci_host *host) {
 }
 
 void xhci_poll(void) {
+    if (!lock_try_acquire(&xhci_lock)) return;
     for (unsigned index = 0; index < host_count; index++) pump(hosts[index]);
-    if (servicing || !booted) return;
-    servicing = 1;
-    for (unsigned index = 0; index < host_count; index++)
-        if (any_work(hosts[index])) service(hosts[index]);
-    servicing = 0;
+    if (!servicing && booted) {
+        servicing = 1;
+        for (unsigned index = 0; index < host_count; index++)
+            if (any_work(hosts[index])) service(hosts[index]);
+        servicing = 0;
+    }
+    lock_release(&xhci_lock);
 }
 
 static void check_health(struct xhci_host *host) {
@@ -1430,7 +1436,9 @@ static void interrupt(void *context) {
         write32(host->operational + XHCI_USBSTS, USBSTS_EVENT_INTERRUPT);
     uint32_t iman = read32(host->interrupter + XHCI_IMAN);
     if (iman & IMAN_PENDING) write32(host->interrupter + XHCI_IMAN, iman);
+    if (!lock_try_acquire(&xhci_lock)) return;
     pump(host);
+    lock_release(&xhci_lock);
 }
 
 static int hid_present(uint8_t protocol) {
@@ -1449,14 +1457,30 @@ static int hid_present(uint8_t protocol) {
 int xhci_keyboard_present(void) { return hid_present(HID_KEYBOARD); }
 int xhci_pointer_present(void) { return hid_present(HID_MOUSE); }
 
-static int storage_count(void) { return storage_entries; }
+static int storage_count_unlocked(void) {
+    return storage_entries;
+}
 
-static int storage_transfer(int index, int in, uint64_t physical, uint32_t length) {
+static int storage_count(void) {
+    lock_acquire(&xhci_lock);
+    int status = storage_count_unlocked();
+    lock_release(&xhci_lock);
+    return status;
+}
+
+static int storage_transfer_unlocked(int index, int in, uint64_t physical, uint32_t length) {
     if (index < 0 || index >= storage_entries || !storage_table[index].device) return -1;
     return bulk(storage_table[index].device, in, physical, length);
 }
 
-static int storage_reset(int index) {
+static int storage_transfer(int index, int in, uint64_t physical, uint32_t length) {
+    lock_acquire(&xhci_lock);
+    int status = storage_transfer_unlocked(index, in, physical, length);
+    lock_release(&xhci_lock);
+    return status;
+}
+
+static int storage_reset_unlocked(int index) {
     if (index < 0 || index >= storage_entries || !storage_table[index].device) return -1;
     struct usb_device *device = storage_table[index].device;
     if (control(device, REQUEST_TYPE_CLASS_INTERFACE, REQUEST_STORAGE_RESET, 0,
@@ -1471,9 +1495,23 @@ static int storage_reset(int index) {
     return 0;
 }
 
-static int storage_present(int index) {
+static int storage_reset(int index) {
+    lock_acquire(&xhci_lock);
+    int status = storage_reset_unlocked(index);
+    lock_release(&xhci_lock);
+    return status;
+}
+
+static int storage_present_unlocked(int index) {
     return index >= 0 && index < storage_entries && storage_table[index].device != NULL &&
            !storage_table[index].device->disconnected;
+}
+
+static int storage_present(int index) {
+    lock_acquire(&xhci_lock);
+    int status = storage_present_unlocked(index);
+    lock_release(&xhci_lock);
+    return status;
 }
 
 static const struct usb_host xhci_usb_host = {
@@ -1658,7 +1696,7 @@ static int bring_up(struct xhci_host *host) {
     return 0;
 }
 
-int xhci_init(void) {
+static int xhci_init_unlocked(void) {
     struct pci_device device;
     for (unsigned nth = 0;; nth++) {
         if (pci_find_nth_class(PCI_CLASS_SERIAL_BUS, PCI_SUBCLASS_USB, nth, &device) != 0) break;
@@ -1723,4 +1761,11 @@ int xhci_init(void) {
     usb_register_host(&xhci_usb_host);
     booted = 1;
     return 0;
+}
+
+int xhci_init(void) {
+    lock_acquire(&xhci_lock);
+    int status = xhci_init_unlocked();
+    lock_release(&xhci_lock);
+    return status;
 }

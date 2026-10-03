@@ -12,6 +12,7 @@
 #include "../../include/kstring.h"
 #include "../../include/usb.h"
 #include "../../include/ehci.h"
+#include "../../include/lock.h"
 
 extern void kprintf(const char *fmt, ...);
 
@@ -1086,13 +1087,22 @@ static struct ehci_device *storage_device(int index, struct ehci **host_out) {
     return NULL;
 }
 
-static int ehci_storage_count(void) {
+static struct lock ehci_lock = LOCK_INITIALIZER("ehci", LOCK_RANK_BUS);
+
+static int ehci_storage_count_unlocked(void) {
     int count = 0;
     for (unsigned which = 0; which < controller_count; which++)
         for (unsigned at = 0; at < MAX_DEVICES; at++)
             if (controllers[which]->devices[at].used &&
                 controllers[which]->devices[at].is_storage) count++;
     return count;
+}
+
+static int ehci_storage_count(void) {
+    lock_acquire(&ehci_lock);
+    int status = ehci_storage_count_unlocked();
+    lock_release(&ehci_lock);
+    return status;
 }
 
 static int clear_endpoint_halt(struct ehci *host, struct ehci_device *device,
@@ -1130,11 +1140,13 @@ static void service_pipe(struct ehci_pipe *pipe) {
 }
 
 void ehci_poll(void) {
+    if (!lock_try_acquire(&ehci_lock)) return;
     for (unsigned index = 0; index < pipe_capacity; index++)
         if (pipes[index] && pipes[index]->used) service_pipe(pipes[index]);
+    lock_release(&ehci_lock);
 }
 
-static int ehci_bulk_transfer(int index, int in, uint64_t physical,
+static int ehci_bulk_transfer_unlocked(int index, int in, uint64_t physical,
                               uint32_t length) {
     struct ehci *host = NULL;
     struct ehci_device *device = storage_device(index, &host);
@@ -1186,9 +1198,17 @@ static int ehci_bulk_transfer(int index, int in, uint64_t physical,
     return 0;
 }
 
+static int ehci_bulk_transfer(int index, int in, uint64_t physical,
+                              uint32_t length) {
+    lock_acquire(&ehci_lock);
+    int status = ehci_bulk_transfer_unlocked(index, in, physical, length);
+    lock_release(&ehci_lock);
+    return status;
+}
+
 #define BULK_ONLY_RESET 0xFFU
 
-static int ehci_reset_recovery(int index) {
+static int ehci_reset_recovery_unlocked(int index) {
     struct ehci *host = NULL;
     struct ehci_device *device = storage_device(index, &host);
     if (!device) return -1;
@@ -1200,6 +1220,13 @@ static int ehci_reset_recovery(int index) {
     device->bulk_in_toggle = 0;
     device->bulk_out_toggle = 0;
     return 0;
+}
+
+static int ehci_reset_recovery(int index) {
+    lock_acquire(&ehci_lock);
+    int status = ehci_reset_recovery_unlocked(index);
+    lock_release(&ehci_lock);
+    return status;
 }
 
 static const struct usb_host ehci_host = {
@@ -1248,7 +1275,7 @@ static int start_one(const struct pci_device *device, struct ehci *host) {
     return 0;
 }
 
-int ehci_init(void) {
+static int ehci_init_unlocked(void) {
     struct pci_device device;
     for (unsigned nth = 0;
          pci_find_nth_class(PCI_CLASS_SERIAL_BUS, PCI_SUBCLASS_USB, nth,
@@ -1307,4 +1334,11 @@ int ehci_init(void) {
 
     if (ehci_storage_count()) usb_register_host(&ehci_host);
     return 0;
+}
+
+int ehci_init(void) {
+    lock_acquire(&ehci_lock);
+    int status = ehci_init_unlocked();
+    lock_release(&ehci_lock);
+    return status;
 }

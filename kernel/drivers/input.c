@@ -18,6 +18,7 @@ extern void kprintf(const char *fmt, ...);
 #include "../include/vt.h"
 #include "../include/tunix/input_event.h"
 #include "../include/lock.h"
+#include "../include/usb_storage.h"
 
 static struct lock input_lock = LOCK_INITIALIZER("input", LOCK_RANK_INPUT);
 
@@ -617,6 +618,7 @@ void input_poll(void) {
     cpu_irq_restore(flags);
     xhci_poll();
     ehci_poll();
+    usb_storage_poll();
 }
 
 void input_irq(void) {

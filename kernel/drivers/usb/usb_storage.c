@@ -10,6 +10,7 @@
 #include "../../include/usb_storage.h"
 #include "../../include/vmm.h"
 #include "../../include/usb.h"
+#include "../../include/lock.h"
 
 extern void kprintf(const char *fmt, ...);
 
@@ -146,6 +147,8 @@ static int run_command(struct usb_disk *disk, const uint8_t *command,
     return -1;
 }
 
+static struct lock storage_lock = LOCK_INITIALIZER("usb storage", LOCK_RANK_BLOCK);
+
 static void put_be32(uint8_t *out, uint32_t value) {
     out[0] = (uint8_t)(value >> 24);
     out[1] = (uint8_t)(value >> 16);
@@ -179,7 +182,7 @@ static int transfer_sectors(struct usb_disk *disk, uint64_t lba, uint32_t count,
     return 0;
 }
 
-static int usb_read(void *context, uint64_t lba, uint32_t count, void *destination) {
+static int usb_read_unlocked(void *context, uint64_t lba, uint32_t count, void *destination) {
     struct usb_disk *disk = (struct usb_disk *)context;
     uint8_t *out = (uint8_t *)destination;
     while (count) {
@@ -195,7 +198,14 @@ static int usb_read(void *context, uint64_t lba, uint32_t count, void *destinati
     return 0;
 }
 
-static int usb_write(void *context, uint64_t lba, uint32_t count, const void *source) {
+static int usb_read(void *context, uint64_t lba, uint32_t count, void *destination) {
+    lock_acquire(&storage_lock);
+    int status = usb_read_unlocked(context, lba, count, destination);
+    lock_release(&storage_lock);
+    return status;
+}
+
+static int usb_write_unlocked(void *context, uint64_t lba, uint32_t count, const void *source) {
     struct usb_disk *disk = (struct usb_disk *)context;
     const uint8_t *in = (const uint8_t *)source;
     while (count) {
@@ -209,6 +219,13 @@ static int usb_write(void *context, uint64_t lba, uint32_t count, const void *so
         count -= chunk;
     }
     return 0;
+}
+
+static int usb_write(void *context, uint64_t lba, uint32_t count, const void *source) {
+    lock_acquire(&storage_lock);
+    int status = usb_write_unlocked(context, lba, count, source);
+    lock_release(&storage_lock);
+    return status;
 }
 
 static int wait_until_ready(struct usb_disk *disk) {
@@ -309,18 +326,33 @@ static int attach_disk(int index) {
     return registered;
 }
 
+static int attached_slots;
+static int attaching;
+
 void usb_storage_init(void) {
     int present = usb_storage_count();
+    lock_acquire(&storage_lock);
     for (int index = 0; index < present; index++) (void)attach_disk(index);
-    initialized = 1;
+    lock_release(&storage_lock);
+    attached_slots = present;
+    __atomic_store_n(&initialized, 1, __ATOMIC_RELEASE);
 }
 
-void usb_storage_attach(int index) {
-    if (!initialized) return;
-    int before = block_device_count();
-    int registered = attach_disk(index);
-    if (registered < 0) return;
-    partition_scan_disk(registered);
-    int after = block_device_count();
-    for (int device = before; device < after; device++) devfs_add_block(device);
+void usb_storage_poll(void) {
+    if (!__atomic_load_n(&initialized, __ATOMIC_ACQUIRE)) return;
+    if (__atomic_load_n(&attached_slots, __ATOMIC_ACQUIRE) >= usb_storage_count()) return;
+    if (__atomic_exchange_n(&attaching, 1, __ATOMIC_ACQUIRE)) return;
+    while (attached_slots < usb_storage_count()) {
+        int index = attached_slots;
+        __atomic_store_n(&attached_slots, index + 1, __ATOMIC_RELEASE);
+        int before = block_device_count();
+        lock_acquire(&storage_lock);
+        int registered = attach_disk(index);
+        lock_release(&storage_lock);
+        if (registered < 0) continue;
+        partition_scan_disk(registered);
+        int after = block_device_count();
+        for (int device = before; device < after; device++) devfs_add_block(device);
+    }
+    __atomic_store_n(&attaching, 0, __ATOMIC_RELEASE);
 }
