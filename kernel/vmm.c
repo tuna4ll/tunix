@@ -35,9 +35,9 @@ extern int process_grow_user_stack(uint64_t fault_address);
 
 static struct lock tables_lock = LOCK_INITIALIZER("page tables", LOCK_RANK_KERNEL_MAP);
 static uint64_t kernel_cr3_physical;
-static uint64_t boot_space_slots[64];
+static uint64_t boot_space_slots[512];
 static uint64_t *space_slots = boot_space_slots;
-static uint64_t space_capacity = 64;
+static uint64_t space_capacity = 512;
 static uint64_t space_count;
 
 static int physical_direct_range_valid(uint64_t physical, size_t length) {
@@ -119,15 +119,21 @@ static int space_add(uint64_t value) {
     if (!value || space_known(value)) return 0;
     if ((space_count + 1) * 2 > space_capacity) {
         uint64_t capacity = space_capacity * 2;
-        uint64_t *slots = (uint64_t *)kmalloc(capacity * sizeof(uint64_t));
-        if (!slots) return -1;
+        uint64_t pages = capacity * sizeof(uint64_t) / 4096ULL;
+        uint64_t physical = (uint64_t)pmm_alloc_pages(pages, 4096);
+        uint64_t *slots = physical ? (uint64_t *)vmm_phys_to_virt(physical) : NULL;
+        if (!slots) {
+            if (physical) pmm_free_pages((void *)physical, pages);
+            return -1;
+        }
         memset(slots, 0, capacity * sizeof(uint64_t));
         for (uint64_t index = 0; index < space_capacity; index++)
             if (space_slots[index]) space_place(slots, capacity, space_slots[index]);
         uint64_t *old = space_slots;
+        uint64_t old_pages = space_capacity * sizeof(uint64_t) / 4096ULL;
         space_slots = slots;
         space_capacity = capacity;
-        if (old != boot_space_slots) kfree(old);
+        if (old != boot_space_slots) pmm_free_pages((void *)vmm_virt_to_phys_direct(old), old_pages);
     }
     space_place(space_slots, space_capacity, value);
     space_count++;
