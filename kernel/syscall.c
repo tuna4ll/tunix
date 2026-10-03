@@ -823,16 +823,16 @@ static int write_stages_large(const struct file *file) {
 }
 
 
-struct file_pins {
-    struct file **files;
-    unsigned count;
-    unsigned capacity;
-};
+static struct file_pins spare_pins[SMP_MAX_CPUS];
+static struct file_pins orphan_pins[SMP_MAX_CPUS];
 
-static struct file_pins pinned[SMP_MAX_CPUS];
+static struct file_pins *pins_here(void) {
+    struct process *process = process_current();
+    return process ? &process->pins : &spare_pins[cpu_current()->index];
+}
 
 static int pin_file(struct file *file) {
-    struct file_pins *pins = &pinned[cpu_current()->index];
+    struct file_pins *pins = pins_here();
     if (pins->count == pins->capacity) {
         unsigned capacity = pins->capacity ? pins->capacity * 2U : 16U;
         struct file **files = (struct file **)kmalloc(capacity * sizeof(*files));
@@ -861,9 +861,30 @@ void syscall_unref_later(struct file *file) {
     if (pin_file(file) != 0) file_unref(file);
 }
 
-void syscall_release_pins(void) {
-    struct file_pins *pins = &pinned[cpu_current()->index];
+static void release_set(struct file_pins *pins) {
     while (pins->count) file_unref(pins->files[--pins->count]);
+}
+
+void syscall_release_pins_of(struct process *process) {
+    if (process) release_set(&process->pins);
+}
+
+void syscall_release_pins(void) {
+    release_set(pins_here());
+}
+
+void syscall_orphan_pins(struct process *process) {
+    struct file_pins *orphans = &orphan_pins[cpu_current()->index];
+    if (!process || !process->pins.count || orphans->count) return;
+    struct file_pins swap = *orphans;
+    *orphans = process->pins;
+    process->pins = swap;
+}
+
+void syscall_release_orphans(void) {
+    unsigned index = cpu_current()->index;
+    release_set(&orphan_pins[index]);
+    release_set(&spare_pins[index]);
 }
 
 static int64_t sys_write(int fd, uint64_t user_buffer, size_t length) {
@@ -6177,6 +6198,7 @@ _Static_assert(sizeof(struct syscall_frame) == 144, "syscall_entry.S assumes 144
 
 void syscall_dispatch(struct syscall_frame *frame) {
     uint64_t syscall_number = SYSCALL_NR(frame);
+    struct process *caller = process_current();
     defer_kernel_enter();
     kernel_overlap_sample();
     process_note_syscall_entry();
@@ -6191,7 +6213,7 @@ void syscall_dispatch(struct syscall_frame *frame) {
     }
 
     syscall_run(frame);
-    syscall_release_pins();
+    syscall_release_pins_of(caller);
     struct syscall_frame *resumed = frame;
     uint64_t stack_top = cpu_current()->kernel_rsp;
     if (stack_top) {

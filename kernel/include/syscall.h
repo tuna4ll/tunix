@@ -52,18 +52,25 @@ _Static_assert(__builtin_offsetof(struct syscall_frame, elr) == 248, "entry writ
 _Static_assert(__builtin_offsetof(struct syscall_frame, spsr) == 256, "entry writes spsr at 256");
 _Static_assert(__builtin_offsetof(struct syscall_frame, sp_el0) == 264, "entry writes sp_el0 at 264");
 
-void syscall_release_pins(void);
-struct file;
-void syscall_unref_later(struct file *file);
-
 #endif
 
 void syscall_init(void);
 void syscall_set_kernel_stack(uint64_t stack_top);
 void syscall_dispatch(struct syscall_frame *frame);
 
-void syscall_release_pins(void);
 struct file;
+struct process;
+
+struct file_pins {
+    struct file **files;
+    unsigned count;
+    unsigned capacity;
+};
+
+void syscall_release_pins(void);
+void syscall_release_pins_of(struct process *process);
+void syscall_orphan_pins(struct process *process);
+void syscall_release_orphans(void);
 void syscall_unref_later(struct file *file);
 
 #endif

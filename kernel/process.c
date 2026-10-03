@@ -1168,6 +1168,44 @@ struct process *process_create_from_path(const char *path) {
     return process;
 }
 
+struct process *process_create_kthread(const char *name, void (*body)(void *),
+                                       void *argument) {
+    struct process *process = (struct process *)kmalloc(sizeof(*process));
+    if (!process) return NULL;
+    memset(process, 0, sizeof(*process));
+    memcpy(process->rlimits, default_rlimits, sizeof(process->rlimits));
+    process->pid = __atomic_fetch_add(&next_pid, 1, __ATOMIC_RELAXED);
+    process->tgid = process->pid;
+    process->pgid = 0;
+    process->sid = 0;
+    process->is_kthread = 1;
+    process->signal_stack_flags = SS_DISABLE;
+    process->timerslack_ns = DEFAULT_TIMERSLACK_NS;
+    process->cwd = vfs_root;
+    vfs_node_ref(process->cwd);
+    strncpy(process->name, name, sizeof(process->name) - 1);
+    process->cr3 = vmm_kernel_cr3();
+    process->start_time_ns = time_uptime_ns();
+    process->signal_blocked = ~0ULL;
+    fpu_init_state(process);
+    if (allocate_kernel_stack(process) != 0) {
+        vfs_node_unref(process->cwd);
+        free_process_struct(process);
+        return NULL;
+    }
+    process->kernel_sp = arch_context_init(process->kernel_stack_top, 0, arch_kthread_entry,
+                                           (uint64_t)body, (uint64_t)argument);
+    process->kernel_suspended = 1;
+    process->sched_depth = 1;
+    {
+        SCHED_LOCKED;
+        enqueue(process);
+        set_process_state(process, PROCESS_READY);
+    }
+    procfs_register_process(process);
+    return process;
+}
+
 struct process *process_current(void) { return current; }
 uint64_t process_current_pid(void) { return current ? current->tgid : 0; }
 uint64_t process_current_tid(void) { return current ? current->pid : 0; }
@@ -1265,6 +1303,11 @@ static void wake_expired_timers(uint64_t now) {
         } else if (item->state == PROCESS_BLOCKED && item->futex_wait_active &&
                    item->futex_wait_deadline_ns != UINT64_MAX) {
             note_deadline(item->futex_wait_deadline_ns);
+        }
+        if (item->state == PROCESS_BLOCKED && item->kernel_waiting &&
+            item->kernel_wait_deadline_ns) {
+            if (now >= item->kernel_wait_deadline_ns) wake_to_ready(item);
+            else note_deadline(item->kernel_wait_deadline_ns);
         }
         item = item->next;
     } while (item != queue);
@@ -1513,16 +1556,7 @@ static void activate_process(struct process *process) {
     fpu_restore(process);
 }
 
-static int switch_to_next(struct syscall_frame *frame, struct process *after) {
-    struct process *next = next_runnable(after);
-    if (!next) return -1;
-    *frame = next->saved_frame;
-    activate_process(next);
-    return 0;
-}
-
-static void go_idle(void) __attribute__((noreturn));
-static void go_idle(void) {
+static void leave_for_idle(void) {
     if (current) {
         arch_save_thread_pointers(current);
         fpu_save(current);
@@ -1533,10 +1567,159 @@ static void go_idle(void) {
     cpu_current()->address_space = 0;
     set_kernel_stack(cpu_current()->idle_stack_top);
     syscall_set_kernel_stack(cpu_current()->idle_stack_top);
+}
+
+static uint64_t enter_next(struct process *next) {
+    cpu_current()->in_interrupt = 0;
+    if (!next) {
+        leave_for_idle();
+        defer_cpu_reset(0);
+        return arch_context_init(cpu_current()->idle_stack_top, 0, arch_idle_entry, 0, 0);
+    }
+    activate_process(next);
+    if (next->kernel_suspended) {
+        next->kernel_suspended = 0;
+        defer_unpark(&next->defer_park);
+        lock_set_depth(&sched_lock, next->sched_depth);
+        return next->kernel_sp;
+    }
+    defer_cpu_reset(1);
+    return arch_context_init(next->kernel_stack_top, sizeof(struct syscall_frame),
+                             arch_user_resume_entry, 0, 0);
+}
+
+static void switch_away(struct process *prev, struct process *next) {
+    if (!lock_only_holds(&sched_lock)) lock_report_sleep("the scheduler");
+    prev->sched_depth = lock_depth(&sched_lock);
+    defer_park(&prev->defer_park);
+    prev->kernel_suspended = 1;
+    prev->voluntary_switches++;
+    uint64_t target = enter_next(next);
+    arch_switch_stack(&prev->kernel_sp, target);
+}
+
+static void abandon_to(struct process *next) __attribute__((noreturn));
+static void abandon_to(struct process *next) {
+    syscall_orphan_pins(current);
+    uint64_t target = enter_next(next);
+    arch_switch_stack(NULL, target);
+    __builtin_unreachable();
+}
+
+static void resume_by_frame(struct syscall_frame *frame, struct process *next) {
+    if (next->kernel_suspended) abandon_to(next);
+    *frame = next->saved_frame;
+    activate_process(next);
+}
+
+static int switch_to_next(struct syscall_frame *frame, struct process *after) {
+    struct process *next = next_runnable(after);
+    if (!next) return -1;
+    resume_by_frame(frame, next);
+    return 0;
+}
+
+static void go_idle(void) __attribute__((noreturn));
+static void go_idle(void) {
+    struct process *leaving = current;
+    leave_for_idle();
     lock_drop(&sched_lock);
-    syscall_release_pins();
+    syscall_release_pins_of(leaving);
+    syscall_release_orphans();
     lock_check_released("the kernel for idle");
     cpu_enter_idle(cpu_current()->idle_stack_top);
+}
+
+static void after_switch(void) {
+    process_finish_switch();
+    syscall_release_orphans();
+}
+
+void process_idle_entry(void) {
+    process_finish_switch();
+    lock_drop(&sched_lock);
+    syscall_release_orphans();
+    lock_check_released("the kernel for idle");
+}
+
+void process_user_resume(void) {
+    process_finish_switch();
+    lock_drop(&sched_lock);
+    syscall_release_orphans();
+    struct syscall_frame resume = current->saved_frame;
+    process_prepare_user_return(&resume);
+    if (!current || current->state != PROCESS_RUNNING) {
+        SCHED_LOCKED;
+        go_idle();
+    }
+    current->saved_frame = resume;
+    *(struct syscall_frame *)(cpu_current()->kernel_rsp - sizeof(resume)) = resume;
+}
+
+void process_kthread_start(void (*body)(void *), void *argument) {
+    process_finish_switch();
+    lock_drop(&sched_lock);
+    syscall_release_orphans();
+    body(argument);
+    for (;;) {
+        process_prepare_wait(current, 0);
+        process_wait();
+        process_finish_wait();
+    }
+}
+
+int process_may_sleep(void) {
+    struct process *self = current;
+    return self && !cpu_current()->in_interrupt && lock_only_holds(NULL);
+}
+
+void process_prepare_wait(const void *channel, uint64_t deadline_ns) {
+    SCHED_LOCKED;
+    struct process *self = current;
+    if (!self) return;
+    self->kernel_waiting = 1;
+    self->wait_channel = channel;
+    self->kernel_wait_deadline_ns = deadline_ns;
+    set_process_state(self, PROCESS_BLOCKED);
+    wait_link(self, (uint64_t)(uintptr_t)channel);
+    if (deadline_ns) note_deadline(deadline_ns);
+}
+
+void process_wait(void) {
+    if (!current) return;
+    if (cpu_current()->in_interrupt || !lock_only_holds(NULL)) lock_report_sleep("a wait");
+    {
+        SCHED_LOCKED;
+        struct process *self = current;
+        if (self->state == PROCESS_BLOCKED) switch_away(self, next_runnable(self));
+    }
+    after_switch();
+}
+
+void process_finish_wait(void) {
+    SCHED_LOCKED;
+    struct process *self = current;
+    if (!self) return;
+    if (self->state != PROCESS_RUNNING) set_process_state(self, PROCESS_RUNNING);
+    self->kernel_waiting = 0;
+    self->wait_channel = NULL;
+    self->kernel_wait_deadline_ns = 0;
+}
+
+void process_kernel_yield(void) {
+    if (!current || !process_may_sleep()) return;
+    {
+        SCHED_LOCKED;
+        struct process *self = current;
+        set_process_state(self, PROCESS_READY);
+        struct process *next = next_runnable(self);
+        if (!next || next == self) {
+            set_process_state(self, PROCESS_RUNNING);
+            return;
+        }
+        switch_away(self, next);
+    }
+    after_switch();
 }
 
 void process_start_first(void) {
@@ -1918,17 +2101,23 @@ int process_fault_from_interrupt(struct interrupt_frame *frame, int signal_numbe
     return 1;
 }
 
+static int next_pending_signal(struct process *process);
+
+static int needs_user_work(struct process *process) {
+    return process->group_exit_pending ||
+           (!process->in_signal && next_pending_signal(process) != 0);
+}
+
 static void resume_from_idle(struct interrupt_frame *frame) {
     struct syscall_frame resume;
     {
         SCHED_LOCKED;
         struct process *next = next_runnable(NULL);
         if (!next) return;
+        if (next->kernel_suspended || needs_user_work(next)) abandon_to(next);
         activate_process(next);
         resume = next->saved_frame;
     }
-    process_prepare_user_return(&resume);
-    if (!current || current->state != PROCESS_RUNNING) go_idle();
     current->saved_frame = resume;
     arch_frame_to_interrupt(frame, &resume);
 }
@@ -1954,6 +2143,7 @@ void process_timer_interrupt(struct interrupt_frame *frame) {
         struct process *next = next_runnable(preempted);
         if (next && next != preempted) {
             preempted->involuntary_switches++;
+            if (next->kernel_suspended) abandon_to(next);
             resume = next->saved_frame;
             activate_process(next);
         } else {
@@ -1965,9 +2155,9 @@ void process_timer_interrupt(struct interrupt_frame *frame) {
             current = preempted;
         }
     }
+    if (current && needs_user_work(current)) abandon_to(current);
     lock_release(&sched_lock);
 
-    process_prepare_user_return(&resume);
     if (!current || current->state != PROCESS_RUNNING) return;
     current->saved_frame = resume;
     arch_frame_to_interrupt(frame, &resume);
@@ -1985,8 +2175,7 @@ void process_yield_from_syscall(struct syscall_frame *frame) {
         set_process_state(yielding, PROCESS_RUNNING);
         return;
     }
-    *frame = next->saved_frame;
-    activate_process(next);
+    resume_by_frame(frame, next);
 }
 
 void process_run_child_first_from_syscall(struct syscall_frame *frame, uint64_t child_pid) {
@@ -1995,7 +2184,7 @@ void process_run_child_first_from_syscall(struct syscall_frame *frame, uint64_t 
 
     struct process *parent = current;
     struct process *child = process_find(child_pid);
-    if (!child || child->state != PROCESS_READY || child->on_cpu ||
+    if (!child || child->state != PROCESS_READY || child->on_cpu || child->kernel_suspended ||
         (child->ppid != parent->pid &&
          !(child->is_thread && child->tgid == parent->tgid))) return;
 
@@ -2472,6 +2661,19 @@ int process_wake_all(const void *channel) {
     return process_wake_all_locked(channel);
 }
 
+int process_wake_one(const void *channel) {
+    SCHED_LOCKED;
+    wake_bump();
+    struct process *item = wait_buckets[wait_bucket_of((uint64_t)(uintptr_t)channel)];
+    for (; item; item = item->wait_next) {
+        if (item->state != PROCESS_BLOCKED || item->wait_channel != channel) continue;
+        item->wait_channel = NULL;
+        wake_to_ready(item);
+        return 1;
+    }
+    return 0;
+}
+
 static int io_waiter_urgent(const struct process *item, uint64_t *now) {
     if (!item->io_watch_armed) return 1;
     if (__atomic_load_n(&item->signal_pending, __ATOMIC_RELAXED) & ~item->signal_blocked)
@@ -2687,7 +2889,8 @@ static void terminate_sibling_threads(int status) {
             item->exit_status = status;
             item->is_thread = 1;
             item->group_exit_pending = 1;
-            if (item->state == PROCESS_BLOCKED || item->state == PROCESS_STOPPED) {
+            if ((item->state == PROCESS_BLOCKED && !item->kernel_waiting) ||
+                item->state == PROCESS_STOPPED) {
                 item->futex_wait_active = 0;
                 item->wait4_active = 0;
                 item->wait_channel = NULL;
@@ -2823,8 +3026,7 @@ int64_t process_waitpid_from_syscall(struct syscall_frame *frame, int64_t pid,
                     set_process_state(parent, PROCESS_RUNNING);
                     return PROCESS_RESTARTED;
                 }
-                *frame = next->saved_frame;
-                activate_process(next);
+                resume_by_frame(frame, next);
                 return PROCESS_RESTARTED;
             }
             set_process_state(parent, PROCESS_BLOCKED);
@@ -2924,7 +3126,7 @@ static void signal_one_process(struct process *target, int signal_number) {
         notify_parent_of_job_change(target);
     }
     __atomic_fetch_or(&target->signal_pending, signal_bit(signal_number), __ATOMIC_RELEASE);
-    if (target->state == PROCESS_BLOCKED &&
+    if (target->state == PROCESS_BLOCKED && !target->kernel_waiting &&
         (signal_number != SIGCHLD ||
          (!target->wait4_active && signal_reaches_waiter(target, SIGCHLD)))) {
         target->futex_wait_active = 0;
@@ -2962,6 +3164,7 @@ static int send_signal(int64_t pid, int signal_number, int checked) {
     if (pid > 0) {
         struct process *target = process_find((uint64_t)pid);
         if (!target) return -ESRCH;
+        if (target->is_kthread) return checked ? -EPERM : 0;
         if (checked && !may_signal(target)) return -EPERM;
         signal_one_process(target, signal_number);
         if (checked) record_sender(target, signal_number);
@@ -2975,7 +3178,7 @@ static int send_signal(int64_t pid, int signal_number, int checked) {
     struct process *target = queue;
     do {
         int match = pid == -1 ? target->pid != 1 : target->pgid == group;
-        if (match && target->state != PROCESS_DEAD) {
+        if (match && target->state != PROCESS_DEAD && !target->is_kthread) {
             if (checked && !may_signal(target)) refused = 1;
             else {
                 signal_one_process(target, signal_number);

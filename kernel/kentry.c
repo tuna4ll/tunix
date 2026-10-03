@@ -3,6 +3,8 @@
 #include "include/defer.h"
 #include "include/kentry.h"
 #include "include/process.h"
+#include "include/syscall.h"
+#include "include/mutex.h"
 
 static int overlap_tracking;
 static volatile uint32_t overlap_peak;
@@ -42,6 +44,8 @@ void kernel_leave_from_isr(void) {
 
 void kernel_exit(void) {
     process_finish_switch();
+    syscall_release_orphans();
+    mutex_check_released("the kernel");
     process_io_recheck();
     defer_kernel_leave();
     defer_poll();
@@ -49,5 +53,6 @@ void kernel_exit(void) {
 
 void kernel_exit_from_isr(void) {
     process_finish_switch();
+    syscall_release_orphans();
     kernel_leave_from_isr();
 }

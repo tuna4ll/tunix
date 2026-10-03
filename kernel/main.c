@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include "include/workqueue.h"
 #include "include/boot.h"
 #include "include/build_config.h"
 #include "include/block.h"
@@ -165,6 +166,7 @@ void kmain(const struct boot_info *boot) {
         kprintf("TUNIX: cannot start %s\n", init_path);
         panic("no init");
     }
+    workqueue_init();
     timer_init();
     arch_route_timer();
     smp_init();

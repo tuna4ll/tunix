@@ -38,6 +38,7 @@ struct cpu {
     volatile int online;
     struct process *switch_owner;
     uint8_t switching;
+    uint32_t in_interrupt;
 };
 
 _Static_assert(__builtin_offsetof(struct cpu, kernel_rsp) == 0, "syscall_entry.S reads gs:0");

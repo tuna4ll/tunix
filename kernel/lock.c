@@ -151,6 +151,28 @@ void lock_check_released(const char *where) {
     }
 }
 
+unsigned lock_depth(const struct lock *lock) {
+    return lock_held(lock) ? lock->depth : 0;
+}
+
+void lock_set_depth(struct lock *lock, unsigned depth) {
+    if (lock_held(lock) && depth) lock->depth = depth;
+}
+
+int lock_only_holds(const struct lock *lock) {
+    struct held_locks *mine = &held[cpu_current()->index];
+    if (!lock) return mine->count == 0;
+    return mine->count == 1 && mine->locks[0] == lock;
+}
+
+void lock_report_sleep(const char *what) {
+    struct held_locks *mine = &held[cpu_current()->index];
+    if (__atomic_fetch_add(&order_reports, 1, __ATOMIC_RELAXED) >= ORDER_REPORTS) return;
+    kprintf("LOCK: cpu %u sleeps in %s holding %u lock(s), first %s\n",
+            cpu_current()->index, what, (unsigned)mine->count,
+            mine->count ? mine->locks[0]->name : "none");
+}
+
 void lock_drop(struct lock *lock) {
     if (!lock_held(lock)) return;
     lock->depth = 1;

@@ -139,6 +139,7 @@ int aarch64_irq(struct interrupt_frame *frame) {
         return 0;
     }
     kernel_enter_from_isr();
+    cpu_current()->in_interrupt++;
     if (timer) {
         if (cpu_current()->index == 0) timer_irq(frame);
         else process_timer_interrupt(frame);
@@ -147,6 +148,7 @@ int aarch64_irq(struct interrupt_frame *frame) {
     } else {
         irq_dispatch(IRQ_VECTOR_FIRST + intid);
     }
+    cpu_current()->in_interrupt--;
     relocate_user_frame(frame);
     return 1;
 }

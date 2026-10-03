@@ -1,6 +1,7 @@
     .section .text
     .globl  cpu_enter_idle
     .globl  cpu_idle_park
+    .globl  idle_loop
 
 cpu_enter_idle:
     msr     daifset, #2

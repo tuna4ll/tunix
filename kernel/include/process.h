@@ -3,6 +3,10 @@
 
 #include <stdint.h>
 #include "lock.h"
+#include "defer.h"
+#include "mutex.h"
+
+#define PROCESS_HELD_MUTEXES 16U
 #include "cred.h"
 #include "percpu.h"
 #include "file.h"
@@ -217,6 +221,17 @@ struct process {
     uint8_t struct_orphaned;
     uint32_t refs;
     uint64_t wake_snapshot;
+
+    uint64_t kernel_sp;
+    uint64_t kernel_wait_deadline_ns;
+    uint32_t sched_depth;
+    uint8_t kernel_suspended;
+    uint8_t kernel_waiting;
+    uint8_t is_kthread;
+    struct defer_park defer_park;
+    struct file_pins pins;
+    struct mutex *held_mutexes[PROCESS_HELD_MUTEXES];
+    uint32_t held_mutex_count;
 };
 
 #define PROCESS_RESTARTED INT64_MIN
@@ -344,7 +359,23 @@ int64_t process_futex_wait(struct syscall_frame *frame, uint64_t address,
 int process_futex_wake(uint64_t address, int maximum, uint32_t bitset, int shared);
 
 int process_sleep_on(struct syscall_frame *frame, const void *channel);
+void process_prepare_wait(const void *channel, uint64_t deadline_ns);
+void process_wait(void);
+void process_finish_wait(void);
+int process_may_sleep(void);
+void process_kernel_yield(void);
+struct process *process_create_kthread(const char *name, void (*body)(void *), void *argument);
+void process_user_resume(void);
+void process_idle_entry(void);
+void process_kthread_start(void (*body)(void *), void *argument) __attribute__((noreturn));
+void arch_switch_stack(uint64_t *save_sp, uint64_t next_sp);
+uint64_t arch_context_init(uint64_t stack_top, uint64_t reserve, void (*entry)(void),
+                           uint64_t first, uint64_t second);
+void arch_user_resume_entry(void);
+void arch_kthread_entry(void);
+void arch_idle_entry(void);
 int process_wake_all(const void *channel);
+int process_wake_one(const void *channel);
 const void *process_io_wait_channel(void);
 int process_wake_io(void);
 uint32_t process_get_umask(void);

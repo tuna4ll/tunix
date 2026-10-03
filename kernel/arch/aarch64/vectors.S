@@ -120,6 +120,15 @@ el0_sync:
 3:  RESTORE_FRAME
     eret
 
+    .globl  el0_return_to_user
+el0_return_to_user:
+    mrs     x9, tpidr_el1
+    ldr     x10, [x9, #CPU_KERNEL_RSP]
+    sub     sp, x10, #FRAME_SIZE
+    bl      kernel_exit
+    RESTORE_FRAME
+    eret
+
 unexpected_el1t:
     SAVE_FRAME
     mov     x0, sp

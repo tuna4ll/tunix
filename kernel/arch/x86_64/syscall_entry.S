@@ -2,6 +2,7 @@
 .section .text
 .global syscall_entry
 .global process_enter_user
+.global syscall_return_to_user
 .extern syscall_dispatch
 .extern kernel_exit
 
@@ -41,6 +42,7 @@ syscall_entry:
     call syscall_dispatch
 
     /* Move onto the resumed process's stack before letting the old one go. */
+syscall_return_to_user:
     mov rsp, qword ptr gs:[CPU_KERNEL_RSP]
     sub rsp, 144
     call kernel_exit

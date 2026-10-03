@@ -18,6 +18,7 @@ enum lock_rank {
     LOCK_RANK_INPUT = 48,
     LOCK_RANK_FILES = 50,
     LOCK_RANK_PAGE_TABLES = 60,
+    LOCK_RANK_MUTEX = 69,
     LOCK_RANK_SCHED = 70,
     LOCK_RANK_EVENTS = 72,
     LOCK_RANK_REGISTRY = 74,
@@ -46,5 +47,9 @@ void lock_drop(struct lock *lock);
 int lock_held(const struct lock *lock);
 unsigned lock_depth_here(void);
 void lock_check_released(const char *where);
+unsigned lock_depth(const struct lock *lock);
+void lock_set_depth(struct lock *lock, unsigned depth);
+int lock_only_holds(const struct lock *lock);
+void lock_report_sleep(const char *what);
 
 #endif

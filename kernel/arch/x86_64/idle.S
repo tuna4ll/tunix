@@ -2,6 +2,7 @@
 .section .text
 .global cpu_enter_idle
 .global cpu_idle_park
+.global idle_loop
 .extern kernel_exit
 
 cpu_enter_idle:

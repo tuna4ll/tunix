@@ -16,6 +16,7 @@ static volatile uint64_t generation = 1;
 static struct lock pending_lock = LOCK_INITIALIZER("deferred frees", LOCK_RANK_LEAF);
 static struct defer_item *pending;
 static volatile uint64_t pending_count;
+static struct defer_park *parked;
 
 void defer_kernel_enter(void) {
     struct quiescence *self = &cpus[cpu_current()->index];
@@ -34,6 +35,48 @@ unsigned defer_cpus_in_kernel(void) {
 
 int defer_in_kernel(void) {
     return cpus[cpu_current()->index].depth != 0;
+}
+
+void defer_park(struct defer_park *park) {
+    struct quiescence *self = &cpus[cpu_current()->index];
+    park->depth = self->depth;
+    park->entered = self->entered;
+    if (park->depth) {
+        lock_acquire(&pending_lock);
+        park->prev = NULL;
+        park->next = parked;
+        if (parked) parked->prev = park;
+        parked = park;
+        park->listed = 1;
+        lock_release(&pending_lock);
+    }
+    __atomic_store_n(&self->depth, 0, __ATOMIC_RELEASE);
+}
+
+void defer_unpark(struct defer_park *park) {
+    struct quiescence *self = &cpus[cpu_current()->index];
+    __atomic_store_n(&self->entered, park->entered, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&self->depth, park->depth, __ATOMIC_SEQ_CST);
+    if (!park->listed) return;
+    lock_acquire(&pending_lock);
+    if (park->prev) park->prev->next = park->next;
+    else parked = park->next;
+    if (park->next) park->next->prev = park->prev;
+    park->prev = park->next = NULL;
+    park->listed = 0;
+    lock_release(&pending_lock);
+}
+
+void defer_cpu_reset(uint32_t depth) {
+    struct quiescence *self = &cpus[cpu_current()->index];
+    if (!depth) {
+        __atomic_store_n(&self->depth, 0, __ATOMIC_RELEASE);
+        return;
+    }
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    __atomic_store_n(&self->entered, __atomic_load_n(&generation, __ATOMIC_SEQ_CST),
+                     __ATOMIC_SEQ_CST);
+    __atomic_store_n(&self->depth, depth, __ATOMIC_SEQ_CST);
 }
 
 void defer_kernel_leave(void) {
@@ -84,6 +127,8 @@ void defer_poll(void) {
     uint64_t oldest = oldest_in_kernel();
     struct defer_item *ready = NULL;
     lock_acquire(&pending_lock);
+    for (struct defer_park *park = parked; park; park = park->next)
+        if (park->entered < oldest) oldest = park->entered;
     for (struct defer_item **link = &pending; *link;) {
         struct defer_item *item = *link;
         if (item->generation <= oldest) {

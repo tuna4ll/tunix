@@ -253,7 +253,10 @@ void isr_handler(struct interrupt_frame *regs) {
         return;
     }
     kernel_enter_from_isr();
+    int interrupt = regs->int_no >= 32U;
+    if (interrupt) cpu_current()->in_interrupt++;
     isr_dispatch(regs);
+    if (interrupt) cpu_current()->in_interrupt--;
     if ((regs->cs & 3U) == 3U) {
         uint64_t stack_top = cpu_current()->kernel_rsp;
         if (stack_top) {
