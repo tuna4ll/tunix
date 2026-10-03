@@ -66,14 +66,16 @@ report that re-armed the keyboard, and the keyboard fell silent.
 
 The pump runs from the controller's interrupt -- MSI-X, or MSI when that is all
 the controller offers -- from every wait, and from the input poll, so a
-controller without message interrupts still works, only less promptly.
+controller without message interrupts still works, only less promptly. A
+transfer or command that is waited for does not spin: the waiter drops the
+controller lock and sleeps, and the pump that sees its completion wakes it.
 
 **Hubs and hot-plug.** USB 2 hubs are followed to the specification's five
 tiers: ports powered, reset through class requests, and each device given its
 route string and, when it is low or full speed behind a high-speed hub, the
 transaction translator it hangs from. A hub's status-change endpoint and the
-controller's port change events feed the same service step, which runs from the
-input poll: a new connection is debounced for 100 ms, reset and enumerated; a
+controller's port change events feed the same service step, which the input
+poll hands to the `kworker` thread: a new connection is debounced for 100 ms, reset and enumerated; a
 disconnection removes the device and everything behind it, releases any keys a
 keyboard was holding, and disables its slot. A transfer to a device whose port
 reported a change stops waiting at once instead of timing out.

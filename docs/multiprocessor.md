@@ -275,76 +275,118 @@ system call and interrupt, because its process queue, VFS tree and page tables
 were written for one processor at a time. Every subsystem now has a lock of its
 own, and system calls and interrupts enter the kernel without taking anything.
 
-All of them are `struct lock` (`kernel/lock.c`): a fair ticket lock that the
-same processor may take again, with a rank. A processor may only take a lock of
-a higher rank than every lock it already holds; breaking that order prints
+There are two kinds of lock.
+
+A **spinlock** (`struct lock`, `kernel/lock.c`) is a fair ticket lock that the
+same processor may take again. It is held for a short stretch of code and never
+across anything that sleeps.
+
+A **mutex** (`struct mutex`, `kernel/mutex.c`) is owned by a process. A process
+that finds one taken sleeps and the processor runs something else; when the
+owner lets go, the mutex is handed to the process that has waited longest, so a
+thread that takes it in a loop cannot starve the others. It may be held across
+disk I/O, user copies and anything else that sleeps, and it may be taken again
+by its owner. Interrupt handlers and the tick never take one; code that might
+run there uses `mutex_trylock()`.
+
+Both have a rank. A processor may only take a spinlock ranked above every
+spinlock it holds, a process may only take a mutex ranked above every mutex it
+holds, and nothing may sleep -- take a mutex, wait for I/O -- while holding a
+spinlock. Breaking a rule prints, once per pair,
 
 ```
 LOCK: cpu 1 takes heap (rank 75) while holding page tables (rank 80)
+LOCK: pid 30 takes vfs (rank 20) while holding ext2 (rank 25)
+LOCK: cpu 2 sleeps in vfs holding 1 lock(s), first xhci
 ```
 
-once per pair and carries on. A processor that waits longer than twenty
-seconds prints who holds the lock and what else they hold. Returning to user
-mode or going idle with a lock still held is reported too.
+and carries on. A processor that waits longer than twenty seconds for a
+spinlock prints who holds it and what else they hold. Returning to user mode or
+going idle with a lock still held is reported too.
 
 The ranks, outermost first (`kernel/include/lock.h`):
 
-| Rank | Locks |
-| --- | --- |
-| 6 | terminals: tty, vt, pty |
-| 8 | DRM |
-| 10 | a process's address space |
-| 12 | modules |
-| 17 | an open file's offset |
-| 20 | the VFS tree, page cache and filesystems |
-| 30 | pipes, sockets, epoll, eventfd and the other descriptor objects |
-| 35 | the network stack |
-| 40 | sound, virtio-gpu |
-| 44 | disk drivers |
-| 45 | USB controllers |
-| 48 | input |
-| 50 | a process's descriptor table |
-| 60 | page tables of an address space |
-| 70 | the scheduler |
-| 72 | eventfs |
-| 74 | device tables: block devices, USB hosts, PCI bindings |
-| 75 | heap |
-| 80 | kernel page tables |
-| 85 | physical pages |
-| 90 | leaves: PCI config space, IRQ slots, entropy, deferred frees |
+| Rank | Mutexes | Spinlocks |
+| --- | --- | --- |
+| 6 | terminals: tty, vt, pty | |
+| 8 | DRM | |
+| 9 | an open file's offset | |
+| 10 | a process's address space | |
+| 18 | modules | |
+| 20 | the VFS tree and page cache | |
+| 25 | ext2 and ext3 volumes | |
+| 30 | | pipes, sockets, epoll, eventfd and the other descriptor objects |
+| 35 | | the network stack |
+| 40 | | sound, virtio-gpu |
+| 44 | disk drivers, USB storage | |
+| 45 | xHCI and EHCI transfers | xHCI and EHCI rings and registers |
+| 48 | | input |
+| 50 | | a process's descriptor table |
+| 60 | | page tables of an address space |
+| 69 | | the guard inside every mutex |
+| 70 | | the scheduler |
+| 72 | | eventfs |
+| 74 | | device tables: block devices, USB hosts, PCI bindings |
+| 75 | | heap |
+| 80 | | kernel page tables |
+| 85 | | physical pages |
+| 90 | | leaves: PCI config space, IRQ slots, entropy, deferred frees, work queue |
 
-Nothing blocks while holding a lock. A call that has to wait rewinds and gives
-the processor away; it is resumed from the start once woken, and the wake
-sequence taken at entry means a wake that lands between the check and the
-sleep is not lost.
+### Sleeping inside the kernel
 
-User memory is copied under the address space lock. A lock ranked above it
-cannot be held across a copy, so those subsystems (input, sound) drop their own
-lock around the copy and check their state again after it.
+A process can stop in the middle of a system call and continue later on any
+processor. `process_prepare_wait()` marks it blocked on a channel, the caller
+checks its condition once more, and `process_wait()` saves the callee-saved
+registers and the stack pointer (`arch_switch_stack()` in
+`kernel/arch/*/switch.S`) and switches to whatever is runnable next. A wake-up
+that lands between the check and the wait finds the process already blocked, so
+it is never lost. Signals do not interrupt such a wait; the call finishes and
+the signal is taken on the way back to user mode.
 
-Pointers into the VFS tree stay valid for as long as the system call that read
-them: nodes and names are freed through `kernel/defer.c`, which waits until
-every processor that was inside the kernel when the object was dropped has left
-it.
+The older way is still there for waits that last as long as a user likes -- a
+read on an empty pipe, `poll`, `futex`: the call is rewound, the process gives
+the processor away and starts the call again when woken, holding nothing in the
+meantime.
 
-Work that may not run in interrupt context under a producer's lock is queued
-and done later with no locks held: keys go from the keyboard driver to the
-terminals through a queue drained on the next tick, and a USB disk that appears
-is attached outside the controller lock.
+The scheduler resumes either kind. A process chosen by the tick or from an idle
+processor that is stopped inside the kernel is entered by switching to its
+stack; one that is in user mode gets a small frame at the top of its kernel
+stack that returns to user mode through the system call exit path.
 
-The tick skips the sound and network poll when another processor is already
-inside them (`lock_try_acquire`); those are polled again by whoever holds the
-lock. The USB poll waits for its turn instead: hub changes and new devices are
-only handled from the tick, and a disk being read on three processors would
-otherwise keep the controller lock busy long enough to lose a new keyboard's
-first keys. The ticket lock guarantees the tick its turn after one transfer.
+What belongs to a processor rather than a process moves with the switch: the
+file pins a system call holds are per process, and a process asleep in the
+kernel is counted as still inside it by `kernel/defer.c`, so nothing it read
+under RCU-style protection is freed while it sleeps.
 
-The xHCI interrupt does the opposite and returns at once when the lock is
-taken: whoever holds it is already draining the event ring. Waiting there was
-measured to cost seconds of timer ticks. Every completion of a disk transfer on
-another processor raises one, device vectors outrank the timer's, and with
-three disks being read the first processor spent its time queueing for the lock
+The timer interrupt never sleeps. When the process it is about to return to has
+a signal to deliver or is being killed, it is sent through the system call exit
+path in process context instead, because both may need locks that sleep.
+
+### Waiting for hardware
+
+A driver waiting for a disk calls `io_poll()` (`kernel/iowait.c`): it spins for
+half a millisecond, which covers most SSD commands, and after that sleeps and
+looks again every millisecond or on every tick. The disk drivers hold their
+mutex across a command; the USB host drivers drop their spinlock while they
+sleep and are woken by the event ring (xHCI) or the tick (EHCI, which has no
+completion interrupt here).
+
+The tick only pumps the USB event rings and never waits for a controller: it
+takes the controller spinlock with `lock_try_acquire()` and skips the round if
+someone else has it, because that someone is draining the same ring. Hub
+changes found there are handed to `kworker`, which enumerates the new device
+with the transfer mutex held. The xHCI interrupt handler follows the same rule.
+Waiting in either place was measured to cost seconds of timer ticks: every
+completion of a disk transfer on another processor raises an interrupt, device
+vectors outrank the timer's, and the first processor spent its time queueing
 inside the handler while the tick waited behind it.
+
+### Kernel threads
+
+Three processes run only in the kernel: `kworker` does work queued from
+interrupt context (terminal input, attaching a USB disk, USB hub changes),
+`flush` writes dirty file pages back, and `ext2commit` commits the journal.
+They show up in `ps`, cannot be signalled, and sleep between jobs.
 
 `/proc/overlap` reports the largest number of processors seen inside the kernel
 at once since it was last reset (write `1` to reset, `0` to stop). The SMP part
