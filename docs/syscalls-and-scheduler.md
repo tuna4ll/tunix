@@ -74,8 +74,8 @@ whichever process *this* processor is running.
 
 ## Dispatch table
 
-`syscall_dispatch` takes the kernel lock, and `syscall_dispatch_locked`
-(`kernel/syscall.c`) is a single `switch` on `frame->rax`. On every call it
+`syscall_dispatch` notes the entry, takes no lock, and calls `syscall_run`
+(`kernel/syscall.c`), a single `switch` on `frame->rax`. On every call it
 first accounts CPU time for the caller (`process_account_runtime`) and frees
 any processes left in `PROCESS_DEAD` state by a previous switch
 (`process_reap_deferred`), then dispatches. Implemented syscalls fall into

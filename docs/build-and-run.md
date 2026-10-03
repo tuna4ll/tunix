@@ -219,7 +219,7 @@ from "userland ran and is stuck in the kernel".
 
 `Tunix (one processor)` is the same image with `nosmp` on the command line. It is for a machine that will not
 finish booting: everything the other processors bring with them -- the TLB
-shootdown, the contention on the kernel lock, one of them running init while
+shootdown, lock contention between processors, one of them running init while
 the first idles -- stops being a suspect.
 
 The kernel says which way it went, and then what it did with init:

@@ -22,10 +22,10 @@ Read readiness includes queued records and pending loss reports. EventFS uses a
 per-subscriber wait channel, while Tunix poll, select, and epoll also wake from
 the kernel's shared I/O wait channel.
 
-The kernel lock serializes subscription, publication, reading, and close. Its
-lock order is kernel lock followed by the process wake oplock. Formatting,
-allocation, user copies, and scheduler sleep never happen while an EventFS
-queue lock is held because EventFS has no second queue lock. A close unlinks and
+The eventfs lock serializes subscription, publication, reading, and close. It
+ranks after the scheduler lock, because emitters may already hold that, so
+readers are woken only once the eventfs lock is dropped. User copies never
+happen while it is held. A close unlinks and
 wakes a subscriber before freeing it, clearing any sleeping process's channel.
 
 Root subscribers receive all records. Other subscribers only receive process,
@@ -50,10 +50,9 @@ block or USB unregister/hot-remove path, so the `remove` producer API exists but
 has no fabricated call site. A future unregister path must emit before freeing
 its device metadata.
 
-All current producer paths are serialized by the exclusive kernel lock. A
-future subsystem allowed to publish from a shared-lock or lockless context must
-first add a per-channel lock or deferred publication rather than calling the
-current API directly.
+A producer may publish while holding any lock ranked before eventfs (72); one
+that holds a lock ranked after it, such as the heap or the device tables, has
+to publish after dropping that lock, as block registration does.
 
 Run the queue and protocol unit tests from the repository root:
 

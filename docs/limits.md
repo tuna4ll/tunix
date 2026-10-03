@@ -46,6 +46,7 @@ both architectures. Filesystems have their own, `support/tests/ext2-kerneltest.s
 | USB disks | 4 | unbounded |
 | DRM | 64 framebuffers, 32 blobs, 8 GL contexts | unbounded |
 | sysfs, PCI bindings, FAT volumes, eventfs subscribers | 64, 24, 4, 64 | unbounded |
+| Kernel lock | one lock around every system call and interrupt | a lock per subsystem ([multiprocessor.md](multiprocessor.md#locking)) |
 
 ## Kept on purpose
 
@@ -55,6 +56,4 @@ space for processors.
 
 ## Still there
 
-- One kernel lock. With more virtual processors than host cores the ticket
-  lock convoys; on real cores it does not.
 - ext2 has no extents or 64-bit block numbers: 16 TiB per filesystem.

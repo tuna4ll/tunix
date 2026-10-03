@@ -133,7 +133,8 @@ allocating      31 ms        waiting for the host   609 ms
 
 So the copies are nothing, and the driver spent between 60 and 73 per cent of
 every second inside a spin waiting for the host to finish a command, with the
-kernel lock held, so no other processor could run kernel code either. There
+single kernel lock of the time held, so no other processor could run kernel
+code either. There
 were about seventeen of those round trips per frame.
 
 A request that carries no answer does not need waiting for. Submissions now
@@ -151,7 +152,7 @@ waiting for the host   206 ms/s   ->   20 ms/s
 second before, 115 after. The waiting *was* the host rendering, so removing it
 gives the guest its processor back rather than more frames. What is faster is
 everything else on the machine, which is no longer queued behind a driver that
-holds the kernel lock for two thirds of every second.
+held the only lock for two thirds of every second.
 
 Two things make posting safe. Ordering: this queue is answered in order, so a
 command that reads back data, and any caller that waits, sees everything posted
@@ -177,11 +178,10 @@ failing about half the time has not failed since.
 **A queue interrupt that anything waits on.** The device has a vector, bound
 through MSI-X, and the driver asks it not to use it: the available ring carries
 `VIRTQ_AVAIL_F_NO_INTERRUPT` while a request is being waited out. Sleeping
-instead of spinning would mean giving back a processor that is holding the
-kernel lock, so every other processor would stop too and the machine would wait
-exactly as long, having also stopped. It was tried, and it cost SuperTuxKart its
-whole start-up. The wait becomes a sleep when that lock is no longer the whole
-kernel's.
+instead of spinning was tried when the kernel still had one lock, and it cost
+SuperTuxKart its whole start-up. The spin now holds only the DRM and virtio-gpu
+locks, so the rest of the machine keeps running; turning it into a sleep would
+mean rewinding the ioctl, which the command state is not built for.
 
 **A fence.** Waiting for one resource waits for every submission, because
 nothing here records which submission touched what. It is never wrong, only

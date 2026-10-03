@@ -8,14 +8,14 @@ reflects the code as it exists today.
 ## Every spin with interrupts off has to service the flush
 
 A processor asking the others to drop cached translations sets a flag on each
-of them, sends an interrupt, and waits. It does that holding the kernel lock,
-because the page tables being edited are the ones they are running on.
+of them, sends an interrupt, and waits. It does that holding the page table
+lock, because the page tables being edited are the ones they are running on.
 
 So a processor spinning anywhere with interrupts disabled cannot be reached by
 that interrupt, and has to call `smp_service_flush()` inside its own wait loop.
-`wait_for_turn()` always did. The console locks, when they were added, did not
--- and what that produced on a real machine was the whole thing stopping in
-the first thirty tickets of the boot:
+`lock_acquire()` does. The console locks, when they were added back in the days
+of the single kernel lock, did not -- and what that produced on a real machine
+was the whole thing stopping in the first thirty tickets of the boot:
 
 ```
 KLOCK: cpu 1 stuck waiting for ticket 28: next 31 serving 27 shared 0
@@ -27,51 +27,40 @@ spinning for a lock with its interrupts off.
 
 The wait is bounded now as well. A processor that is marked online and never
 answers -- one that came up, said so and then went wrong -- used to take the
-machine with it, holding the one lock everything else needs and printing
-nothing. It gets two seconds, then a line saying so, and the flush is given up
+machine with it, holding a lock everything else needs and printing nothing. It gets two seconds, then a line saying so, and the flush is given up
 on: a processor with stale translations is a worse machine than a correct one
 and a much better one than a dead one.
 
-## The lock says when it is not coming
+## A lock says when it is not coming
 
-Two ways the kernel lock can be lost for good, and both are silent from
-outside. An unlock with nothing held moves the ticket queue past a ticket
-nobody was serving, so every later attempt waits for a turn that has already
-gone by; a shared holder that leaves without decrementing keeps every exclusive
-waiter out. Either way the machine stops on somebody's next syscall having
-printed nothing at all.
+A lock can be lost for good in ways that are silent from outside: a release
+with nothing held moves the ticket queue past a ticket nobody was serving, so
+every later attempt waits for a turn that has already gone by. Either way the
+machine stops on somebody's next system call having printed nothing at all.
 
 So a wait longer than twenty seconds says what it is waiting for, once per
 processor, and goes on waiting:
 
 ```
-KLOCK: cpu 3 stuck waiting for ticket 26302: next 26309 serving 26301 shared 0
-KLOCK: cpu 0 holds 0 doing 20020
+LOCK: cpu 3 stuck on vfs ticket 26302, serving 26301, held by cpu 0
+LOCK:   cpu 0 holds vfs
 ```
 
-`doing` is a breadcrumb the few places that take the lock leave behind, because
-there is no stack to walk from another processor: `0x1nnnn` is syscall `nnn`,
-`0x2nnnn` interrupt vector `nnn`, `0x30000` the first process being started and
-`0x40000` going idle. Knowing a processor is not giving the lock back is half a
-diagnosis; the half that matters is what it is holding it for.
+Knowing a processor is not giving a lock back is half a diagnosis; the half
+that matters is what else it is holding, so every lock the holder has is
+listed. A release of a lock the processor does not hold, and a return to user
+mode with a lock still held, are reported the same way.
 
-Twenty seconds rather than five because the lock is held across block reads,
-and a root filesystem on a USB stick makes some of those genuinely slow --
-five caught weston loading itself.
-
-The bug it was written to find was real and was in the interrupt path. The
-handler took the lock only when it was free, because an interrupt can land on
-a processor already inside the kernel; the entry stub released it
-unconditionally on the way out. So such an interrupt handed back a lock it
-never took. `kernel_lock_from_isr()` and `kernel_unlock_from_isr()` are the
-pair that agree with each other.
+Twenty seconds rather than five because the VFS lock is held across block
+reads, and a root filesystem on a USB stick makes some of those genuinely slow.
 
 ## The console is a shared device too
 
 Two things write into the same screen from two directions: a terminal a program
-is writing to, under the kernel lock, and the kernel log, which is not under it
-at all -- kprintf() is reachable from an interrupt handler and from the fault
-path, and taking the kernel lock there would be a deadlock rather than a fix.
+is writing to, under the terminal lock, and the kernel log, which is not under
+it at all -- kprintf() is reachable from an interrupt handler, from the fault
+path and from under any other lock, and taking the terminal lock there would be
+a deadlock rather than a fix.
 
 So the terminal has a lock of its own, and kprintf() has a second one that
 makes a whole message atomic. Without the first, the cell model and the cursor
@@ -144,8 +133,8 @@ boot with `hwreport` on four processors is enough to show what it costs:
 ```
 
 -- a module file the report could not read while udev, on another processor,
-read it seconds later. `kmain` takes the kernel lock around the report now, and
-gives it back before the first process runs.
+read it seconds later. The filesystems have a lock of their own now, so the
+report and udev can read the same file at once.
 
 ## Finding the processors
 
@@ -158,9 +147,9 @@ machine with hyperthreading disabled in its BIOS leaves gaps.
 `SMP_MAX_CPUS` (256, `kernel/include/percpu.h`) is the ceiling: the xAPIC id
 space. Only small per-processor scalars are sized by it; idle stacks and the
 GDT, TSS and fault stack are allocated for processors that exist, and affinity
-is a 256-bit `struct cpu_mask`. Idle processors skip the kernel lock on their
+is a 256-bit `struct cpu_mask`. Idle processors skip the scheduler on their
 tick when nothing is ready, so a machine with many cores does not queue every
-idle tick behind the ticket lock.
+idle tick behind the scheduler lock.
 
 ## Bringing one up
 
@@ -279,57 +268,97 @@ more runnable processes than busy processors — is the case where throughput is
 not the constraint. A processor that blocks picks the next runnable process
 itself, immediately, exactly as before.
 
-## The kernel lock
+## Locking
 
-The kernel began with one ticket lock because its process queue, VFS tree and
-page tables were all written under the assumption that only one processor could
-touch them. That lock remains the safe fallback for an unaudited path, but it is
-no longer the only way into the kernel. `kernel/klock.c` is now a fair
-reader/writer gate: audited operations enter shared, while a queued exclusive
-operation keeps its ticket and prevents a stream of new readers from starving
+There is no kernel lock. The kernel began with one ticket lock around every
+system call and interrupt, because its process queue, VFS tree and page tables
+were written for one processor at a time. Every subsystem now has a lock of its
+own, and system calls and interrupts enter the kernel without taking anything.
+
+All of them are `struct lock` (`kernel/lock.c`): a fair ticket lock that the
+same processor may take again, with a rank. A processor may only take a lock of
+a higher rank than every lock it already holds; breaking that order prints
+
+```
+LOCK: cpu 1 takes heap (rank 75) while holding page tables (rank 80)
+```
+
+once per pair and carries on. A processor that waits longer than twenty
+seconds prints who holds the lock and what else they hold. Returning to user
+mode or going idle with a lock still held is reported too.
+
+The ranks, outermost first (`kernel/include/lock.h`):
+
+| Rank | Locks |
+| --- | --- |
+| 6 | terminals: tty, vt, pty |
+| 8 | DRM |
+| 10 | a process's address space |
+| 12 | modules |
+| 17 | an open file's offset |
+| 20 | the VFS tree, page cache and filesystems |
+| 30 | pipes, sockets, epoll, eventfd and the other descriptor objects |
+| 35 | the network stack |
+| 40 | sound, virtio-gpu |
+| 44 | disk drivers |
+| 45 | USB controllers |
+| 48 | input |
+| 50 | a process's descriptor table |
+| 60 | page tables of an address space |
+| 70 | the scheduler |
+| 72 | eventfs |
+| 74 | device tables: block devices, USB hosts, PCI bindings |
+| 75 | heap |
+| 80 | kernel page tables |
+| 85 | physical pages |
+| 90 | leaves: PCI config space, IRQ slots, entropy, deferred frees |
+
+Nothing blocks while holding a lock. A call that has to wait rewinds and gives
+the processor away; it is resumed from the start once woken, and the wake
+sequence taken at entry means a wake that lands between the check and the
+sleep is not lost.
+
+User memory is copied under the address space lock. A lock ranked above it
+cannot be held across a copy, so those subsystems (input, sound) drop their own
+lock around the copy and check their state again after it.
+
+Pointers into the VFS tree stay valid for as long as the system call that read
+them: nodes and names are freed through `kernel/defer.c`, which waits until
+every processor that was inside the kernel when the object was dropped has left
 it.
 
-The reader state is per CPU and cache-line aligned. A global reader counter
-would admit several processors logically but force every entry and exit to
-write the same cache line, merely moving the serialisation into the cache
-coherency protocol. An exclusive holder scans the per-CPU counters after its
-ticket comes up; shared holders only write their own line. The ordering around
-the ticket check is sequentially consistent so a reader and writer cannot both
-miss one another and enter incompatible modes.
+Work that may not run in interrupt context under a producer's lock is queued
+and done later with no locks held: keys go from the keyboard driver to the
+terminals through a queue drained on the next tick, and a USB disk that appears
+is attached outside the controller lock.
 
-Shared mode is deliberately an audit boundary, not a promise that every kernel
-object has suddenly become concurrent. An exclusive holder excludes all shared
-holders, so a converted path only has to be safe against the other converted
-paths. There are two kinds of protection inside that boundary:
+The tick skips the sound and network poll when another processor is already
+inside them (`lock_try_acquire`); those are polled again by whoever holds the
+lock. The USB poll waits for its turn instead: hub changes and new devices are
+only handled from the tick, and a disk being read on three processors would
+otherwise keep the controller lock busy long enough to lose a new keyboard's
+first keys. The ticket lock guarantees the tick its turn after one transfer.
 
-* per-object locks cover open-file offsets, pipes and Unix socket channels, so
-  traffic through unrelated objects remains independent;
-* `oplock` covers brief access to genuinely global state such as the process
-  queue and physical page allocator.
+The xHCI interrupt does the opposite and returns at once when the lock is
+taken: whoever holds it is already draining the event ring. Waiting there was
+measured to cost seconds of timer ticks. Every completion of a disk transfer on
+another processor raises one, device vectors outrank the timer's, and with
+three disks being read the first processor spent its time queueing for the lock
+inside the handler while the tick waited behind it.
 
-The shared set currently includes pipe and Unix-stream `read`, `write`,
-`readv` and `writev`, stateless character devices, identity calls such as
-`getpid`, clock calls, `uname`, `getcpu` and `membarrier`. A blocking I/O call
-that gets `EAGAIN` gives shared mode back and restarts through the exclusive
-scheduler path. Closing descriptors, changing credentials, mapping memory and
-other unaudited operations still take the writer side.
-
-`/proc/klock` reports `shared_peak` in addition to exclusive hold times. The
-SMP part of `perftest` pins four workers to four processors, checks that the
-peak reaches four, verifies bytes sent concurrently over four independent Unix
-socket channels, and runs exclusive `dup`/`close` operations against continuous
-shared readers. The test fails if overlap, data integrity or writer progress is
-lost.
+`/proc/overlap` reports the largest number of processors seen inside the kernel
+at once since it was last reset (write `1` to reset, `0` to stop). The SMP part
+of `perftest` pins four workers to four processors, checks that the peak reaches
+four, verifies bytes sent concurrently over four independent Unix socket
+channels, and runs `dup`/`close` against continuous readers.
+`smp-stress-kerneltest` runs four threads through pipes, sockets, files,
+`/proc`, `mmap` and `fork` at once and fails on a wrong byte or any `LOCK:`
+line in the kernel log.
 
 One consequence shows up in `isr_dispatch`: interrupts are acknowledged before
 they are handled, not after. A tick that ends up parking the processor — the
 last process on it exited — never returns to the handler, and a controller
 still waiting to be told the last interrupt finished will not send another.
-
-An interrupt arriving over an exclusive holder is already protected by that
-holder. One arriving over a shared holder keeps the reader claim in place and
-uses a small interrupt-only lock, so interrupt handlers do not run together
-while the rest of the shared operation remains protected from writers.
 
 ### The frame the return path is standing on
 
@@ -356,13 +385,14 @@ going back to the idle loop is on a stack of this processor's own already.
 
 Moving the frame is not enough on its own, and the first version of this got it
 wrong. A C function's *own* return address is also on the stack it is trying to
-get off, so neither of those two may drop the lock: the `ret` that follows
-would read a stack that another processor is free to reap and hand back to the
-allocator by then — and since the heap gives pages back to the physical
-allocator, that read can fault outright. Both return with the lock still held,
-and the assembly drops it after `rsp` has moved. That is also why the
-translation-flush interrupt has a stub of its own rather than a case in the
-common one: it must not go near the lock at all.
+get off, so neither of those two may let the previous process go: the `ret`
+that follows would read a stack that another processor is free to reap and
+hand back to the allocator by then — and since the heap gives pages back to the
+physical allocator, that read can fault outright. Both return with the old
+process still marked as running here, and the assembly calls `kernel_exit`,
+which releases it (`process_finish_switch`), only after `rsp` has moved. That
+is also why the translation-flush interrupt has a stub of its own rather than a
+case in the common one.
 
 ## Cached translations
 
@@ -380,24 +410,26 @@ pages. It marks each processor that has this address space loaded, sends one
 message, and waits for all of them to answer.
 
 The waiting is what makes it safe, and it is also where a naive implementation
-deadlocks: a processor waiting for the kernel lock has interrupts off and can
-never take the message. So there are two places a request is answered — the
-interrupt stub, which never touches the lock, and `kernel_lock`'s wait loop,
-which checks the flag on every spin. Between them, every state a processor can
-be in is covered:
+deadlocks: a processor inside the kernel has interrupts off and can never take
+the message. So a request is answered in three places — the interrupt stub,
+the wait loop of every lock, and the asker's own wait, which answers requests
+aimed at itself while it waits for the others:
 
 | Where it is | How it answers |
 | --- | --- |
 | User mode | Takes the interrupt straight away |
 | Idle loop | Takes the interrupt straight away |
-| Waiting for the kernel lock | Answers in the wait loop |
+| Waiting for a lock | Answers in the wait loop |
+| Waiting for its own flush | Answers in the flush wait |
+| Running kernel code | Answers at the next lock wait or on the way out |
 | About to `iretq` back to user | Interrupt fires as `IF` comes back on |
 
-It cannot be holding the lock, because the processor asking is.
+A processor running kernel code that neither waits nor leaves — a driver
+polling its hardware — delays the asker but cannot hold it forever, because
+nothing it waits for depends on the asker.
 
-Which processors are looking at a space cannot change underneath the asker:
-only a processor inside the kernel changes its own, and the asker holds the
-lock. A process whose address space is on one processor only — every
+Which processors are looking at a space is read atomically; one that loads the
+space after the asker read the set has also loaded the new tables. A process whose address space is on one processor only — every
 single-threaded program — costs nothing but a loop over eight slots.
 
 ### Faults that are no longer errors
@@ -501,8 +533,8 @@ That shape is a triple fault: the processor could not deliver a fault, could not
 deliver the double fault that followed, and gave up. Nothing is printed because
 nothing gets to run. The fix for *seeing* it is an IST stack: vector 8 is given
 a stack of its own in `gdt.c`, so a double fault is delivered on memory the
-original failure cannot have broken, and `isr_handler` reports it before taking
-the kernel lock — the processor may well have been holding it.
+original failure cannot have broken, and `isr_handler` reports it before
+anything that takes a lock — the processor may well have been holding one.
 
 The first one it caught said:
 

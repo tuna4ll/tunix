@@ -245,20 +245,15 @@ went from 4.0 GB/s to 4.6 GB/s.
 page takes the same time whatever the kernel does, because it is waiting on
 discord.com rather than on this machine.
 
-The kernel lock is no longer an all-kernel serial bottleneck. Its shared side
-uses per-CPU reader state, and the common identity/time calls plus pipe and Unix
-socket stream I/O can execute on several processors at once. Unix socket data
-is protected per channel, so four independent IPC channels do not meet at a
-replacement global lock; the performance test checks both four-way kernel
-overlap and the bytes delivered. The exclusive ticket remains as the fallback
-and as the starvation-free boundary around code that has not been converted.
+There is no kernel lock any more. Every subsystem has its own
+([multiprocessor.md](multiprocessor.md#locking)), so system calls on different
+objects run on several processors at once. Unix socket data is protected per
+channel, so four independent IPC channels do not meet at a global lock; the
+performance test checks both four-way kernel overlap and the bytes delivered.
 
-There is still useful lock decomposition work beyond this point. Blocking
-`poll`, futex waits, Internet sockets and user page faults still enter
-exclusively; page-table and scheduler ownership need finer locks before those
-can safely join the shared set. Anonymous memory is committed sixteen pages at
-a time and socket buffers hold 64 KiB, so those remaining paths cross the
-exclusive boundary less often in the meantime.
+Some locks are still wide: the VFS lock covers the whole tree and page cache,
+the network stack has one lock, and each USB controller one. Those are where
+contention would show next.
 
 ## OpenGL, and the two things it needed
 

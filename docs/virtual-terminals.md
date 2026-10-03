@@ -240,10 +240,11 @@ if (inb(0x3FD) & 1U) return inb(0x3F8);   /* line status bit 0: a byte waits */
 
 in a loop until it said no. On a machine with nothing decoding 0x3F8 every read
 answers 0xFF, and 0xFF says a byte is waiting as loudly as a real byte does --
-so the loop never ended. It ran inside the timer interrupt, holding the kernel
-lock, which is a machine that stops a fraction of a second after the first
-tick, having printed whatever it had already printed, with no fault and no
-message. Every other processor then piled up behind the lock:
+so the loop never ended. It ran inside the timer interrupt, holding the single
+kernel lock Tunix had then, which is a machine that stops a fraction of a
+second after the first tick, having printed whatever it had already printed,
+with no fault and no message. Every other processor then piled up behind the
+lock:
 
 ```
 KLOCK: cpu 1 stuck waiting for ticket 28: next 31 serving 27 shared 0
