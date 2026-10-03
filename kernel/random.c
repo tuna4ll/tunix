@@ -3,7 +3,7 @@
 #include "include/cpu.h"
 #include "include/kstring.h"
 #include "include/random.h"
-#include "include/spinlock.h"
+#include "include/lock.h"
 #include "include/time.h"
 
 #define RANDOM_RESEED_INTERVAL (1024U * 1024U)
@@ -15,7 +15,7 @@ struct sha256_ctx {
     size_t block_length;
 };
 
-static spinlock_t random_lock;
+static struct lock random_lock = LOCK_INITIALIZER("random", LOCK_RANK_LEAF);
 static uint32_t chacha_state[16];
 static uint64_t generated_bytes;
 static int seeded;
@@ -228,18 +228,17 @@ static void reseed_locked(const void *extra, size_t extra_length) {
 }
 
 void random_init(void) {
-    spinlock_init(&random_lock);
     memset(chacha_state, 0, sizeof(chacha_state));
-    spinlock_acquire(&random_lock);
+    lock_acquire(&random_lock);
     reseed_locked(NULL, 0);
-    spinlock_release(&random_lock);
+    lock_release(&random_lock);
 }
 
 void random_mix(const void *buffer, size_t length) {
     if (!buffer || !length) return;
-    spinlock_acquire(&random_lock);
+    lock_acquire(&random_lock);
     reseed_locked(buffer, length);
-    spinlock_release(&random_lock);
+    lock_release(&random_lock);
 }
 
 void random_get_bytes(void *buffer, size_t length) {
@@ -247,7 +246,7 @@ void random_get_bytes(void *buffer, size_t length) {
     uint8_t *output = (uint8_t *)buffer;
     uint8_t block[64];
 
-    spinlock_acquire(&random_lock);
+    lock_acquire(&random_lock);
     if (!seeded || generated_bytes >= RANDOM_RESEED_INTERVAL) reseed_locked(NULL, 0);
     while (length) {
         chacha_block(block);
@@ -263,7 +262,7 @@ void random_get_bytes(void *buffer, size_t length) {
     chacha_state[14] ^= load32_le(block + 32U);
     chacha_state[15] ^= load32_le(block + 36U);
     memset(block, 0, sizeof(block));
-    spinlock_release(&random_lock);
+    lock_release(&random_lock);
 }
 
 int random_is_seeded(void) {

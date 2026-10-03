@@ -13,6 +13,7 @@
 #include "../include/pci.h"
 #include "../include/sysfs.h"
 #include "../include/vmm.h"
+#include "../include/lock.h"
 
 #define PCI_COMMAND 0x04U
 #define PCI_STATUS_HAS_CAPABILITIES (1U << 4)
@@ -45,14 +46,21 @@ static uint32_t pci_address(uint8_t bus, uint8_t slot, uint8_t function, uint8_t
            ((uint32_t)function << 8) | (offset & 0xFCU);
 }
 
+static struct lock config_lock = LOCK_INITIALIZER("pci config", LOCK_RANK_LEAF);
+
 uint32_t pci_config_read32(uint8_t bus, uint8_t slot, uint8_t function, uint8_t offset) {
+    lock_acquire(&config_lock);
     outl(PCI_ADDRESS, pci_address(bus, slot, function, offset));
-    return inl(PCI_DATA);
+    uint32_t value = inl(PCI_DATA);
+    lock_release(&config_lock);
+    return value;
 }
 
 void pci_config_write32(uint8_t bus, uint8_t slot, uint8_t function, uint8_t offset, uint32_t value) {
+    lock_acquire(&config_lock);
     outl(PCI_ADDRESS, pci_address(bus, slot, function, offset));
     outl(PCI_DATA, value);
+    lock_release(&config_lock);
 }
 
 #else
@@ -198,6 +206,7 @@ struct pci_binding {
 static struct pci_binding *bindings;
 static unsigned binding_capacity;
 static struct pci_driver *drivers;
+static struct lock binding_lock = LOCK_INITIALIZER("pci bindings", LOCK_RANK_REGISTRY);
 
 static struct pci_binding *binding_of(uint8_t bus, uint8_t slot, uint8_t function) {
     for (unsigned index = 0; index < binding_capacity; index++) {
@@ -211,8 +220,11 @@ static struct pci_binding *binding_of(uint8_t bus, uint8_t slot, uint8_t functio
 
 const char *pci_device_driver(const struct pci_device *device) {
     if (!device) return NULL;
+    lock_acquire(&binding_lock);
     struct pci_binding *binding = binding_of(device->bus, device->slot, device->function);
-    return binding ? binding->driver->name : NULL;
+    const char *name = binding ? binding->driver->name : NULL;
+    lock_release(&binding_lock);
+    return name;
 }
 
 static int identifier_matches(const struct pci_device_id *id,
@@ -225,12 +237,16 @@ static int identifier_matches(const struct pci_device_id *id,
 }
 
 static void bind_device(const struct pci_device *device, struct pci_driver *driver) {
+    lock_acquire(&binding_lock);
     unsigned index = 0;
     while (index < binding_capacity && bindings[index].driver) index++;
     if (index == binding_capacity) {
         unsigned capacity = binding_capacity ? binding_capacity * 2 : 32;
         struct pci_binding *grown = kmalloc(capacity * sizeof(*grown));
-        if (!grown) return;
+        if (!grown) {
+            lock_release(&binding_lock);
+            return;
+        }
         memset(grown, 0, capacity * sizeof(*grown));
         if (binding_capacity) memcpy(grown, bindings, binding_capacity * sizeof(*grown));
         kfree(bindings);
@@ -241,6 +257,7 @@ static void bind_device(const struct pci_device *device, struct pci_driver *driv
     bindings[index].slot = device->slot;
     bindings[index].function = device->function;
     bindings[index].driver = driver;
+    lock_release(&binding_lock);
     sysfs_pci_bound(device, driver->name);
 }
 
@@ -257,10 +274,15 @@ static void probe_one(const struct pci_device *device, void *context) {
 
 int pci_register_driver(struct pci_driver *driver) {
     if (!driver || !driver->name || !driver->ids) return -1;
+    lock_acquire(&binding_lock);
     for (struct pci_driver *known = drivers; known; known = known->next)
-        if (known == driver) return -1;
+        if (known == driver) {
+            lock_release(&binding_lock);
+            return -1;
+        }
     driver->next = drivers;
     drivers = driver;
+    lock_release(&binding_lock);
     sysfs_pci_driver_added(driver->name);
     pci_for_each_device(probe_one, driver);
     return 0;
@@ -268,19 +290,29 @@ int pci_register_driver(struct pci_driver *driver) {
 
 void pci_unregister_driver(struct pci_driver *driver) {
     if (!driver) return;
-    for (unsigned index = 0; index < binding_capacity; index++) {
-        struct pci_binding *binding = &bindings[index];
-        if (binding->driver != driver) continue;
+    for (;;) {
+        lock_acquire(&binding_lock);
+        struct pci_binding *binding = NULL;
+        for (unsigned index = 0; index < binding_capacity && !binding; index++)
+            if (bindings[index].driver == driver) binding = &bindings[index];
+        if (!binding) {
+            lock_release(&binding_lock);
+            break;
+        }
+        uint8_t bus = binding->bus, slot = binding->slot, function = binding->function;
+        binding->driver = NULL;
+        lock_release(&binding_lock);
         struct pci_device device;
-        fill_device(&device, binding->bus, binding->slot, binding->function);
+        fill_device(&device, bus, slot, function);
         if (driver->remove) driver->remove(&device);
         sysfs_pci_unbound(&device);
-        binding->driver = NULL;
     }
+    lock_acquire(&binding_lock);
     struct pci_driver **link = &drivers;
     while (*link && *link != driver) link = &(*link)->next;
     if (*link) *link = driver->next;
     driver->next = NULL;
+    lock_release(&binding_lock);
     sysfs_pci_driver_removed(driver->name);
 }
 
