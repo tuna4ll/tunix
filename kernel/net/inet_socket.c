@@ -244,6 +244,7 @@ static uint16_t next_ephemeral = 49152;
 static size_t socket_total;
 
 size_t inet_socket_count(void) {
+    NET_LOCKED;
     return socket_total;
 }
 
@@ -1001,6 +1002,7 @@ static int timer_pending(const struct inet_socket *s) {
 }
 
 void inet_socket_tcp_timer_poll(void) {
+    NET_LOCKED;
     uint64_t now = time_uptime_ns();
     struct inet_socket *s = timed_sockets;
     while (s) {
@@ -1071,6 +1073,7 @@ void inet_socket_receive_tcp(uint32_t source, uint16_t source_port, uint32_t des
                              uint16_t destination_port, uint32_t seq, uint32_t ack, uint8_t flags,
                              uint16_t window, const struct net_tcp_options *options,
                              const uint8_t *payload, size_t length) {
+    NET_LOCKED;
     if (connections.buckets) {
         uint32_t key = connection_key_of(destination_port, source, source_port);
         for (struct inet_socket *s = connections.buckets[key & connections.mask]; s;
@@ -1105,6 +1108,7 @@ void inet_socket_receive_tcp(uint32_t source, uint16_t source_port, uint32_t des
 }
 
 struct inet_socket *inet_socket_create(int domain, int type, int protocol) {
+    NET_LOCKED;
     int base_type = type & 0xFU;
     if (domain == TUNIX_AF_INET) {
         if (base_type == TUNIX_SOCK_STREAM) {
@@ -1134,6 +1138,7 @@ struct inet_socket *inet_socket_create(int domain, int type, int protocol) {
 
 void inet_socket_ref(struct inet_socket *socket) { if (socket) socket->refs++; }
 void inet_socket_unref(struct inet_socket *socket) {
+    NET_LOCKED;
     if (!socket || --socket->refs > 0) return;
     report_close(socket);
 
@@ -1160,6 +1165,7 @@ static int local_port_conflict(struct inet_socket *socket, uint32_t address, uin
 }
 
 int inet_socket_bind(struct inet_socket *socket, const void *address, size_t length) {
+    NET_LOCKED;
     if (!socket || !address) return -EINVAL;
     if (socket->domain == TUNIX_AF_INET) {
         if (length < sizeof(struct tunix_sockaddr_in)) return -EINVAL;
@@ -1190,14 +1196,17 @@ int inet_socket_bind(struct inet_socket *socket, const void *address, size_t len
 }
 
 int inet_socket_is_stream(const struct inet_socket *socket) {
+    NET_LOCKED;
     return socket && socket->type == TUNIX_SOCK_STREAM;
 }
 
 int inet_socket_is_listener(struct inet_socket *socket) {
+    NET_LOCKED;
     return socket && socket->listening;
 }
 
 int inet_socket_listen(struct inet_socket *socket, int backlog) {
+    NET_LOCKED;
     if (!socket || socket->domain != TUNIX_AF_INET ||
         socket->type != TUNIX_SOCK_STREAM) return -EOPNOTSUPP;
     if (socket->tcp) return -EINVAL;
@@ -1209,6 +1218,7 @@ int inet_socket_listen(struct inet_socket *socket, int backlog) {
 }
 
 struct inet_socket *inet_socket_accept(struct inet_socket *listener) {
+    NET_LOCKED;
     if (!listener || !listener->listening) return NULL;
     net_poll();
     for (struct inet_socket *s = listener->pending; s; s = s->sibling) {
@@ -1225,6 +1235,7 @@ struct inet_socket *inet_socket_accept(struct inet_socket *listener) {
 
 int inet_socket_connect(struct inet_socket *socket, const void *address, size_t length,
                         uint64_t pid, uint32_t uid) {
+    NET_LOCKED;
     if (!socket || socket->domain != TUNIX_AF_INET || !address ||
         length < sizeof(struct tunix_sockaddr_in)) return -EINVAL;
     const struct tunix_sockaddr_in *in = (const struct tunix_sockaddr_in *)address;
@@ -1243,6 +1254,7 @@ int inet_socket_connect(struct inet_socket *socket, const void *address, size_t 
 
 void inet_socket_report_accept(struct inet_socket *socket, uint64_t pid,
                                uint32_t uid) {
+    NET_LOCKED;
     if (!socket || socket->event_open) return;
     socket->event_pid = pid;
     socket->event_uid = uid;
@@ -1278,6 +1290,7 @@ static int enqueue(struct inet_socket *socket, const void *data, size_t length,
 
 int64_t inet_socket_sendto(struct inet_socket *socket, const void *data, size_t length, int flags,
                            const void *address, size_t address_length) {
+    NET_LOCKED;
     (void)flags;
     if (!socket || !data) return -EINVAL;
     if (socket->type == TUNIX_SOCK_STREAM) return tcp_send(socket, data, length);
@@ -1338,6 +1351,7 @@ int64_t inet_socket_sendto(struct inet_socket *socket, const void *data, size_t 
 
 int64_t inet_socket_recvfrom(struct inet_socket *socket, void *data, size_t length, int flags,
                              void *address, size_t *address_length) {
+    NET_LOCKED;
     if (!socket || !data) return -EINVAL;
     if (socket->type == TUNIX_SOCK_STREAM) return tcp_recv(socket, data, length, flags);
     if (socket->read_shutdown) return 0;
@@ -1362,14 +1376,17 @@ int64_t inet_socket_recvfrom(struct inet_socket *socket, void *data, size_t leng
 }
 
 int inet_socket_wants_ttl(struct inet_socket *socket) {
+    NET_LOCKED;
     return socket && socket->recv_ttl;
 }
 
 uint8_t inet_socket_last_ttl(struct inet_socket *socket) {
+    NET_LOCKED;
     return socket ? socket->last_ttl : 0;
 }
 
 int inet_socket_getsockname(struct inet_socket *socket, void *address, size_t *length) {
+    NET_LOCKED;
     if (!socket || !address || !length) return -EINVAL;
     if (socket->domain != TUNIX_AF_INET || *length < sizeof(struct tunix_sockaddr_in)) return -EINVAL;
     struct tunix_sockaddr_in in;
@@ -1383,6 +1400,7 @@ int inet_socket_getsockname(struct inet_socket *socket, void *address, size_t *l
 }
 
 int inet_socket_getpeername(struct inet_socket *socket, void *address, size_t *length) {
+    NET_LOCKED;
     if (!socket || !socket->connected) return -ENOTCONN;
     if (!address || !length || *length < sizeof(struct tunix_sockaddr_in)) return -EINVAL;
     struct tunix_sockaddr_in in;
@@ -1410,6 +1428,7 @@ static void report_refused_option(const char *what, int level, int option) {
 
 int inet_socket_setsockopt(struct inet_socket *socket, int level, int option,
                            const void *value, size_t length) {
+    NET_LOCKED;
     if (!socket) return -EINVAL;
     if (level == SOL_SOCKET) {
         if (option == SO_BROADCAST && value && length >= sizeof(int)) {
@@ -1469,6 +1488,7 @@ int inet_socket_setsockopt(struct inet_socket *socket, int level, int option,
 
 int inet_socket_getsockopt(struct inet_socket *socket, int level, int option,
                            void *value, size_t *length) {
+    NET_LOCKED;
     if (!socket || !value || !length || *length < sizeof(int)) return -EINVAL;
     int result = 0;
     if (level == SOL_SOCKET && option == SO_ERROR) {
@@ -1513,11 +1533,13 @@ static void set_sockaddr(uint8_t *where, uint32_t address) {
 }
 
 int inet_socket_ioctl(struct inet_socket *socket, unsigned long request, void *argument) {
+    NET_LOCKED;
     if (!socket) return -EINVAL;
     return net_interface_ioctl(request, argument);
 }
 
 int net_interface_ioctl(unsigned long request, void *argument) {
+    NET_LOCKED;
     if (!argument) return -EINVAL;
     uint8_t *arg = (uint8_t *)argument;
     const struct net_config *cfg = net_get_config();
@@ -1576,6 +1598,7 @@ int net_interface_ioctl(unsigned long request, void *argument) {
 }
 
 int inet_socket_read_ready(struct inet_socket *socket) {
+    NET_LOCKED;
     net_poll();
     if (!socket) return 0;
 
@@ -1593,6 +1616,7 @@ int inet_socket_read_ready(struct inet_socket *socket) {
     return socket->read_shutdown || socket->queue_first != NULL;
 }
 int inet_socket_write_ready(struct inet_socket *socket) {
+    NET_LOCKED;
     const struct net_config *cfg = net_get_config();
     if (!socket) return 0;
     if (socket->tcp) {
@@ -1605,9 +1629,11 @@ int inet_socket_write_ready(struct inet_socket *socket) {
     return !socket->write_shutdown && cfg->link_up && cfg->interface_up;
 }
 int inet_socket_peer_closed(struct inet_socket *socket) {
+    NET_LOCKED;
     return socket && socket->tcp && (socket->tcp->peer_fin || socket->tcp->pending_error);
 }
 int inet_socket_shutdown(struct inet_socket *socket, int how) {
+    NET_LOCKED;
     if (!socket) return -EINVAL;
     if (how < 0 || how > 2) return -EINVAL;
     if (socket->tcp) {
@@ -1624,14 +1650,17 @@ int inet_socket_shutdown(struct inet_socket *socket, int how) {
     return 0;
 }
 int64_t inet_socket_read(struct inet_socket *socket, size_t length, void *data) {
+    NET_LOCKED;
     return inet_socket_recvfrom(socket, data, length, 0, NULL, NULL);
 }
 int64_t inet_socket_write(struct inet_socket *socket, size_t length, const void *data) {
+    NET_LOCKED;
     return inet_socket_sendto(socket, data, length, 0, NULL, 0);
 }
 
 void inet_socket_receive_udp(const uint8_t *payload, size_t length, uint32_t source,
                              uint16_t source_port, uint32_t destination, uint16_t destination_port) {
+    NET_LOCKED;
     struct tunix_sockaddr_in address;
     memset(&address, 0, sizeof(address));
     address.family = TUNIX_AF_INET;
@@ -1650,6 +1679,7 @@ void inet_socket_receive_udp(const uint8_t *payload, size_t length, uint32_t sou
 
 void inet_socket_receive_ipv4(const uint8_t *packet, size_t length, uint8_t protocol,
                               uint32_t source, uint32_t destination) {
+    NET_LOCKED;
     (void)destination;
     struct tunix_sockaddr_in address;
     memset(&address, 0, sizeof(address));
@@ -1677,6 +1707,7 @@ void inet_socket_receive_ipv4(const uint8_t *packet, size_t length, uint8_t prot
 }
 
 void inet_socket_receive_ethernet(const uint8_t *frame, size_t length, uint16_t ethertype) {
+    NET_LOCKED;
     if (length < 14 || !packet_sockets) return;
     struct tunix_sockaddr_ll address;
     memset(&address, 0, sizeof(address));
@@ -1712,6 +1743,7 @@ static void text_hex8(char *buffer, size_t capacity, size_t *length, uint32_t va
 }
 
 void inet_socket_proc_udp(char *buffer, size_t capacity, size_t *length) {
+    NET_LOCKED;
     text_string(buffer, capacity, length, "  sl  local_address rem_address   st\n");
     unsigned slot = 0;
     for (struct inet_socket *s = all_sockets; s; s = s->all_next) {
@@ -1725,6 +1757,7 @@ void inet_socket_proc_udp(char *buffer, size_t capacity, size_t *length) {
     }
 }
 void inet_socket_proc_raw(char *buffer, size_t capacity, size_t *length) {
+    NET_LOCKED;
     text_string(buffer, capacity, length, "  sl  local_address rem_address   st\n");
     unsigned slot = 0;
     for (struct inet_socket *s = all_sockets; s; s = s->all_next) {
@@ -1735,6 +1768,7 @@ void inet_socket_proc_raw(char *buffer, size_t capacity, size_t *length) {
     }
 }
 void inet_socket_proc_tcp(char *buffer, size_t capacity, size_t *length) {
+    NET_LOCKED;
     static const char *const codes[] = {
         "07", "02", "03", "01", "04", "05", "0B", "06", "08", "09"
     };

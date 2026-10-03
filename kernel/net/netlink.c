@@ -1,5 +1,3 @@
-/* Minimal AF_NETLINK support. */
-
 #include <stddef.h>
 #include <stdint.h>
 #include "../include/heap.h"
@@ -9,7 +7,6 @@
 #include "../include/net/net.h"
 #include "../include/process.h"
 
-
 #define EAGAIN 11
 #define ENOENT 2
 #define EINVAL 22
@@ -18,8 +15,6 @@
 
 #define NL_MSG_PEEK 0x2
 #define NL_MSG_TRUNC 0x20
-
-/* Netlink constants. */
 
 #define NETLINK_GENERIC 16
 
@@ -130,10 +125,9 @@ struct rtmsg {
 
 #define NLMSG_ALIGN(len) (((len) + 3U) & ~3U)
 
-/* Netlink sockets queue datagrams. */
 struct netlink_datagram {
     struct netlink_datagram *next;
-    /* Source metadata belongs to each datagram. */
+
     uint32_t source_portid;
     uint32_t source_groups;
     struct netlink_credentials source_credentials;
@@ -146,13 +140,13 @@ struct netlink_socket {
     int protocol;
     uint32_t portid;
     int bound;
-    /* Multicast group mask. */
+
     uint32_t groups;
     int passcred;
     struct netlink_credentials last_credentials;
     struct netlink_datagram *rx_head;
     struct netlink_datagram *rx_tail;
-    /* Registry link. */
+
     struct netlink_socket *registry_next;
 };
 
@@ -160,6 +154,7 @@ static uint32_t netlink_next_portid = 0;
 static struct netlink_socket *netlink_registry = NULL;
 
 struct netlink_socket *netlink_socket_create(int protocol) {
+    NET_LOCKED;
     if (protocol != TUNIX_NETLINK_ROUTE && protocol != TUNIX_NETLINK_SOCK_DIAG &&
         protocol != TUNIX_NETLINK_KOBJECT_UEVENT && protocol != NETLINK_GENERIC) return NULL;
     struct netlink_socket *socket = (struct netlink_socket *)kmalloc(sizeof(*socket));
@@ -173,10 +168,12 @@ struct netlink_socket *netlink_socket_create(int protocol) {
 }
 
 void netlink_socket_ref(struct netlink_socket *socket) {
+    NET_LOCKED;
     if (socket) socket->refs++;
 }
 
 void netlink_socket_unref(struct netlink_socket *socket) {
+    NET_LOCKED;
     if (!socket || socket->refs <= 0) return;
     if (--socket->refs != 0) return;
     for (struct netlink_socket **at = &netlink_registry; *at; at = &(*at)->registry_next) {
@@ -196,32 +193,37 @@ static uint32_t netlink_assign_portid(struct netlink_socket *socket) {
 }
 
 int netlink_socket_bind(struct netlink_socket *socket, const void *address, size_t length) {
+    NET_LOCKED;
     if (!socket) return -EINVAL;
     const struct tunix_sockaddr_nl *nl = (const struct tunix_sockaddr_nl *)address;
     if (nl && length >= sizeof(*nl) && nl->pid) socket->portid = nl->pid;
     else netlink_assign_portid(socket);
-    /* Zero groups means no subscription. */
+
     if (nl && length >= sizeof(*nl)) socket->groups = nl->groups;
     socket->bound = 1;
     return 0;
 }
 
 void netlink_socket_set_passcred(struct netlink_socket *socket, int on) {
+    NET_LOCKED;
     if (socket) socket->passcred = on ? 1 : 0;
 }
 
 int netlink_socket_get_passcred(struct netlink_socket *socket) {
+    NET_LOCKED;
     return socket ? socket->passcred : 0;
 }
 
 void netlink_socket_last_credentials(struct netlink_socket *socket,
                                      struct netlink_credentials *out) {
+    NET_LOCKED;
     if (!out) return;
     if (!socket) { memset(out, 0, sizeof(*out)); return; }
     *out = socket->last_credentials;
 }
 
 int netlink_socket_getsockname(struct netlink_socket *socket, void *address, size_t *length) {
+    NET_LOCKED;
     if (!socket || !address || !length) return -EINVAL;
     struct tunix_sockaddr_nl nl;
     memset(&nl, 0, sizeof(nl));
@@ -232,8 +234,6 @@ int netlink_socket_getsockname(struct netlink_socket *socket, void *address, siz
     *length = sizeof(nl);
     return 0;
 }
-
-/* Response builder. */
 
 struct nl_builder {
     uint8_t *buf;
@@ -256,7 +256,7 @@ static struct nlmsghdr *nl_msg_begin(struct nl_builder *b, uint16_t type, uint16
     b->msg_start = b->len;
     struct nlmsghdr *header = (struct nlmsghdr *)(b->buf + b->len);
     memset(header, 0, sizeof(*header));
-    /* Keep partial headers parseable. */
+
     header->nlmsg_len = (uint32_t)(sizeof(*header) + family_length);
     header->nlmsg_type = type;
     header->nlmsg_flags = flags;
@@ -278,7 +278,7 @@ static void nl_attr(struct nl_builder *b, uint16_t type, const void *data, size_
     attr->rta_len = (uint16_t)total;
     attr->rta_type = type;
     if (length) memcpy(b->buf + b->len + sizeof(*attr), data, length);
-    /* Align attributes while preserving rta_len. */
+
     size_t padded = NLMSG_ALIGN(total);
     for (size_t pad = total; pad < padded; pad++) b->buf[b->len + pad] = 0;
     b->len += padded;
@@ -287,7 +287,6 @@ static void nl_attr(struct nl_builder *b, uint16_t type, const void *data, size_
 static void nl_msg_end(struct nl_builder *b, struct nlmsghdr *header) {
     if (!header) return;
     if (b->overflow) {
-        /* Drop partial messages. */
         b->len = b->msg_start;
         return;
     }
@@ -315,10 +314,7 @@ static void nl_put_error(struct nl_builder *b, uint32_t seq, uint32_t pid,
     nl_msg_end(b, header);
 }
 
-/* Interface projection. */
-
 static uint8_t netmask_prefix(uint32_t netmask_network_order) {
-    /* Count the network-order prefix bits. */
     uint8_t prefix = 0;
     const uint8_t *bytes = (const uint8_t *)&netmask_network_order;
     for (int i = 0; i < 4; i++) {
@@ -350,7 +346,6 @@ static void emit_link(struct nl_builder *b, uint32_t seq, uint32_t pid, uint16_t
     nl_msg_end(b, header);
 }
 
-/* Kernel interface descriptions. */
 struct link_description {
     int index;
     const char *name;
@@ -386,7 +381,6 @@ static unsigned collect_links(struct link_description *links,
     return 2;
 }
 
-/* Read IFLA_IFNAME from a request. */
 static const char *request_link_name(const struct nlmsghdr *request) {
     if (request->nlmsg_len < sizeof(*request) + sizeof(struct ifinfomsg)) return NULL;
     const uint8_t *base = (const uint8_t *)request;
@@ -402,7 +396,6 @@ static const char *request_link_name(const struct nlmsghdr *request) {
     return NULL;
 }
 
-/* Dump all links or answer one lookup. */
 static int dump_links(struct nl_builder *b, uint32_t seq, uint32_t pid,
                       const struct nlmsghdr *request) {
     struct link_description links[2];
@@ -488,20 +481,16 @@ static void emit_route(struct nl_builder *b, uint32_t seq, uint32_t pid, uint8_t
 static int dump_routes(struct nl_builder *b, uint32_t seq, uint32_t pid) {
     const struct net_config *config = net_get_config();
     if (config->address && config->netmask) {
-        /* Emit the connected route. */
         uint32_t network = config->address & config->netmask;
         emit_route(b, seq, pid, netmask_prefix(config->netmask), &network, NULL,
                    &config->address, NETLINK_INDEX_ETH0, RT_SCOPE_LINK, RTPROT_KERNEL);
     }
     if (config->gateway) {
-        /* Emit the default route. */
         emit_route(b, seq, pid, 0, NULL, &config->gateway, NULL,
                    NETLINK_INDEX_ETH0, RT_SCOPE_UNIVERSE, RTPROT_BOOT);
     }
     return 1;
 }
-
-/* Dispatch netlink requests. */
 
 static const void *request_attr(const struct nlmsghdr *request, size_t header_length,
                                 uint16_t wanted, size_t *value_length) {
@@ -590,7 +579,6 @@ static int handle_route_request(struct nl_builder *b, const struct nlmsghdr *req
 
 static int handle_diag_request(struct nl_builder *b, const struct nlmsghdr *request,
                                uint32_t portid) {
-    /* Return an empty socket dump. */
     (void)b;
     (void)request;
     (void)portid;
@@ -599,12 +587,10 @@ static int handle_diag_request(struct nl_builder *b, const struct nlmsghdr *requ
 
 static int handle_generic_request(struct nl_builder *b, const struct nlmsghdr *request,
                                   uint32_t portid) {
-    /* Report unavailable generic families. */
     nl_put_error(b, request->nlmsg_seq, portid, request, -ENOENT);
     return 0;
 }
 
-/* Queue one nonempty datagram. */
 static int nl_rx_queue_from(struct netlink_socket *socket, const uint8_t *data,
                             size_t length, uint32_t source_portid,
                             uint32_t source_groups,
@@ -626,12 +612,10 @@ static int nl_rx_queue_from(struct netlink_socket *socket, const uint8_t *data,
     return 0;
 }
 
-/* Queue a kernel reply. */
 static int nl_rx_queue(struct netlink_socket *socket, const uint8_t *data, size_t length) {
     return nl_rx_queue_from(socket, data, length, 0, 0, NULL);
 }
 
-/* Multicast a uevent. */
 static void netlink_uevent_multicast(uint32_t groups, const void *data, size_t length,
                                      uint32_t source_portid,
                                      const struct netlink_credentials *credentials,
@@ -647,7 +631,6 @@ static void netlink_uevent_multicast(uint32_t groups, const void *data, size_t l
     }
 }
 
-/* Unicast a uevent. */
 static void netlink_uevent_unicast(uint32_t portid, const void *data, size_t length,
                                    uint32_t source_portid,
                                    const struct netlink_credentials *credentials,
@@ -665,7 +648,8 @@ static void netlink_uevent_unicast(uint32_t portid, const void *data, size_t len
 }
 
 void netlink_uevent_broadcast(const void *message, size_t length) {
-    /* Broadcast as the kernel. */
+    NET_LOCKED;
+
     struct netlink_credentials kernel = {0, 0, 0};
     netlink_uevent_multicast(1U << (TUNIX_UEVENT_GROUP_KERNEL - 1), message, length,
                              0, &kernel, NULL);
@@ -673,13 +657,13 @@ void netlink_uevent_broadcast(const void *message, size_t length) {
 
 int64_t netlink_socket_sendto(struct netlink_socket *socket, const void *data, size_t length,
                               int flags, const void *address, size_t address_length) {
+    NET_LOCKED;
     (void)flags;
     (void)address;
     (void)address_length;
     if (!socket) return -EINVAL;
     uint32_t portid = netlink_assign_portid(socket);
 
-    /* Route uevent datagrams. */
     if (socket->protocol == TUNIX_NETLINK_KOBJECT_UEVENT) {
         const struct tunix_sockaddr_nl *destination =
             (const struct tunix_sockaddr_nl *)address;
@@ -719,7 +703,6 @@ int64_t netlink_socket_sendto(struct netlink_socket *socket, const void *data, s
         else
             dump = handle_diag_request(&builder, request, portid);
 
-        /* Queue dump terminators separately. */
         nl_rx_queue(socket, builder.buf, builder.len);
         builder.len = 0;
         builder.overflow = 0;
@@ -738,12 +721,12 @@ int64_t netlink_socket_sendto(struct netlink_socket *socket, const void *data, s
 
 int64_t netlink_socket_recvfrom(struct netlink_socket *socket, void *data, size_t length,
                                 int flags, void *address, size_t *address_length) {
+    NET_LOCKED;
     if (!socket) return -EINVAL;
     struct netlink_datagram *datagram = socket->rx_head;
     if (!datagram) return -EAGAIN;
     size_t available = datagram->length;
 
-    /* Preserve datagram read semantics. */
     size_t copy = available < length ? available : length;
     if (copy) memcpy(data, datagram->data, copy);
 
@@ -761,7 +744,7 @@ int64_t netlink_socket_recvfrom(struct netlink_socket *socket, void *data, size_
         struct tunix_sockaddr_nl nl;
         memset(&nl, 0, sizeof(nl));
         nl.family = TUNIX_AF_NETLINK;
-        /* Preserve source identity. */
+
         nl.pid = source_portid;
         nl.groups = source_groups;
         size_t addr_copy = *address_length < sizeof(nl) ? *address_length : sizeof(nl);
@@ -772,18 +755,22 @@ int64_t netlink_socket_recvfrom(struct netlink_socket *socket, void *data, size_
 }
 
 int64_t netlink_socket_read(struct netlink_socket *socket, size_t length, void *data) {
+    NET_LOCKED;
     return netlink_socket_recvfrom(socket, data, length, 0, NULL, NULL);
 }
 
 int64_t netlink_socket_write(struct netlink_socket *socket, size_t length, const void *data) {
+    NET_LOCKED;
     return netlink_socket_sendto(socket, data, length, 0, NULL, 0);
 }
 
 int netlink_socket_read_ready(struct netlink_socket *socket) {
+    NET_LOCKED;
     return socket && socket->rx_head != NULL;
 }
 
 int netlink_socket_write_ready(struct netlink_socket *socket) {
+    NET_LOCKED;
     (void)socket;
     return 1;
 }

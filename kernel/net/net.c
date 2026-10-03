@@ -94,6 +94,8 @@ struct loopback_packet {
     uint8_t data[];
 };
 
+struct lock net_lock = LOCK_INITIALIZER("net", LOCK_RANK_NET);
+
 static struct loopback_packet *loopback_first;
 static struct loopback_packet *loopback_last;
 static size_t loopback_bytes;
@@ -162,6 +164,7 @@ static int address_is_local(uint32_t address) {
 }
 
 uint32_t net_source_for(uint32_t destination) {
+    NET_LOCKED;
     if (net_is_loopback(destination)) return net_htonl(NET_LOOPBACK_ADDRESS);
     return config.address;
 }
@@ -202,6 +205,7 @@ static int loopback_enqueue(const void *packet, size_t length) {
 }
 
 size_t net_path_mtu(uint32_t destination) {
+    NET_LOCKED;
     return address_is_local(destination) ? NET_LOOPBACK_MTU : NET_MTU;
 }
 
@@ -233,6 +237,7 @@ static const uint8_t *arp_lookup(uint32_t ip) {
 
 int net_send_ethernet(const uint8_t destination[6], uint16_t type,
                          const void *payload, size_t length) {
+    NET_LOCKED;
     if (!config.interface_up || length > NET_MTU) return -1;
     uint8_t frame[1514];
     struct ethernet_header *header = (struct ethernet_header *)frame;
@@ -247,6 +252,7 @@ int net_send_ethernet(const uint8_t destination[6], uint16_t type,
 }
 
 int net_send_raw_ethernet(const void *frame, size_t length) {
+    NET_LOCKED;
     if (!config.interface_up || !frame || length < 14U || length > 1514U) return -1;
     if (adapter_transmit(frame, length) != 0) return -1;
     stack_tx++;
@@ -325,6 +331,7 @@ static int send_fragments(const uint8_t *mac, uint32_t destination, uint8_t prot
 
 int net_send_ipv4(uint32_t destination, uint8_t protocol, const void *payload, size_t length,
                   uint8_t ttl, int header_included) {
+    NET_LOCKED;
     if (!payload) return -1;
     if (header_included) {
         if (length < sizeof(struct ipv4_header) || length > NET_IPV4_MAX) return -1;
@@ -387,6 +394,7 @@ static uint16_t udp_checksum(uint32_t source, uint32_t destination,
 
 int net_send_udp(uint32_t source, uint16_t source_port, uint32_t destination,
                  uint16_t destination_port, const void *payload, size_t length) {
+    NET_LOCKED;
     (void)source;
     size_t total = sizeof(struct udp_header) + length;
     if (total > NET_IPV4_MAX - sizeof(struct ipv4_header)) return -1;
@@ -449,6 +457,7 @@ int net_send_tcp(uint32_t source, uint16_t source_port, uint32_t destination,
                  uint16_t destination_port, uint32_t seq, uint32_t ack, uint8_t flags,
                  uint16_t window, const struct net_tcp_options *options,
                  const void *payload, size_t length) {
+    NET_LOCKED;
     (void)source;
     uint8_t option_bytes[8];
     size_t option_length = put_tcp_options(option_bytes, options);
@@ -699,6 +708,7 @@ static void receive_frame(const uint8_t *frame, size_t length) {
 }
 
 int net_register_adapter(const struct net_adapter *card) {
+    NET_LOCKED;
     if (adapter || !card || !card->transmit || !card->poll) return -1;
     adapter = card;
     memcpy(config.mac, card->mac, sizeof(config.mac));
@@ -712,6 +722,7 @@ int net_register_adapter(const struct net_adapter *card) {
 }
 
 void net_unregister_adapter(const struct net_adapter *card) {
+    NET_LOCKED;
     if (!adapter || (card && card != adapter)) return;
     adapter = NULL;
     config.link_up = 0;
@@ -727,6 +738,7 @@ void net_init(void) {
 }
 
 void net_enable_interrupts(void) {
+    NET_LOCKED;
     interrupts_wanted = 1;
     if (boot_command_line_flag("nonetirq")) return;
     if (!adapter || !adapter->enable_interrupts) return;
@@ -736,14 +748,16 @@ void net_enable_interrupts(void) {
 }
 
 int net_adapter_interrupts(void) {
+    NET_LOCKED;
     if (!adapter || boot_command_line_flag("nonetirq")) return 0;
     if (!adapter->interrupt_vector) return 0;
     return adapter->interrupt_vector() != 0;
 }
 
 void net_tick(void) {
-    if (!adapter || net_adapter_interrupts()) return;
-    net_poll();
+    if (!lock_try_acquire(&net_lock)) return;
+    if (adapter && !net_adapter_interrupts()) net_poll();
+    lock_release(&net_lock);
 }
 
 static void loopback_drain(void) {
@@ -763,6 +777,7 @@ static void loopback_drain(void) {
 }
 
 void net_poll(void) {
+    NET_LOCKED;
     loopback_drain();
     if (!adapter) return;
     adapter->poll(receive_frame);
@@ -786,11 +801,13 @@ uint64_t net_rx_bytes(void) { return stack_rx_bytes; }
 uint64_t net_tx_bytes(void) { return stack_tx_bytes; }
 
 uint64_t net_rx_dropped(void) {
+    NET_LOCKED;
     uint64_t adapter_drops = adapter && adapter->rx_dropped ? adapter->rx_dropped() : 0;
     return stack_drop + loopback_dropped + adapter_drops;
 }
 
 size_t net_arp_snapshot(struct net_arp_record *records, size_t capacity) {
+    NET_LOCKED;
     size_t count = 0;
     for (unsigned i = 0; i < ARP_CACHE_SIZE; i++) {
         if (!arp_cache[i].ip) continue;

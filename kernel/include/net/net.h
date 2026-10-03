@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "../lock.h"
 
 #define NET_MTU 1500U
 #define NET_LOOPBACK_MTU 65536U
@@ -94,5 +95,15 @@ uint64_t net_tx_bytes(void);
 uint64_t net_tx_packets(void);
 uint64_t net_rx_dropped(void);
 size_t net_arp_snapshot(struct net_arp_record *records, size_t capacity);
+
+extern struct lock net_lock;
+
+static inline void net_guard_release(int *unused) {
+    (void)unused;
+    lock_release(&net_lock);
+}
+
+#define NET_LOCKED \
+    __attribute__((cleanup(net_guard_release))) int net_guard = (lock_acquire(&net_lock), 0)
 
 #endif
