@@ -127,8 +127,11 @@ int tty_poll_lock(void);
 #define TTY_LOCKED \
     __attribute__((cleanup(tty_guard_release))) int tty_guard = (mutex_lock(&tty_lock), 0)
 
+static inline void tty_poll_release(int *locked) {
+    if (*locked) mutex_unlock(&tty_lock);
+}
+
 #define TTY_POLL_LOCKED \
-    if (!tty_poll_lock()) return 1; \
-    __attribute__((cleanup(tty_guard_release))) int tty_guard = 0
+    __attribute__((cleanup(tty_poll_release))) int tty_guard = tty_poll_lock()
 
 #endif
