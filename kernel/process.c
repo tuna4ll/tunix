@@ -572,7 +572,14 @@ static void futex_note(char kind, uint64_t address, int woken, int maximum, unsi
 void process_dump_all(void) {
     SCHED_LOCKED;
     process_dump_wakes();
-    kprintf("PROCESSES:" "\n");
+    kprintf("PROCESSES: ready %u ticks %u\n", ready_processes, (unsigned)timer_ticks());
+    for (unsigned index = 0; index < SMP_MAX_CPUS; index++) {
+        struct cpu *cpu = percpu_slot(index);
+        if (!cpu || !cpu->online) continue;
+        struct process *running = cpu_running(cpu);
+        kprintf("  cpu %u runs %d%s\n", index, running ? (int)running->pid : -1,
+                cpu->switching ? " switching" : "");
+    }
     if (!queue) return;
     struct process *item = queue;
     do {
@@ -595,6 +602,23 @@ void process_dump_all(void) {
                     (unsigned)now);
         }
         if (item->wait_channel) kprintf(" chan=%p", (const void *)item->wait_channel);
+        if (item->kernel_waiting) kprintf(" in-kernel");
+        if (item->waiting_for) {
+            struct process *owner = item->waiting_for->owner;
+            kprintf(" mutex=%s owner=%d", item->waiting_for->name,
+                    owner && !((uintptr_t)owner & 1U) ? (int)owner->pid : -1);
+        }
+        if (item->kernel_suspended) kprintf(" suspended");
+        if (item->on_ready_list) kprintf(" listed");
+        if (item->affinity_set) {
+            kprintf(" cpus=");
+            for (unsigned index = 0; index < smp_cpu_count(); index++)
+                if (cpu_mask_test(&item->affinity, index)) kprintf("%u,", index);
+        }
+        if (item->on_cpu) kprintf(" on-cpu");
+        for (uint32_t index = 0; index < item->held_mutex_count && index < PROCESS_HELD_MUTEXES;
+             index++)
+            kprintf(" holds=%s", item->held_mutexes[index]->name);
         if (item->syscall_rewound) kprintf(" rewound");
         kprintf(" at %s+%p" "\n", object, (void *)offset);
         item = item->next;
