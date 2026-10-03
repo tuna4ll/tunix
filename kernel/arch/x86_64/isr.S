@@ -4,7 +4,7 @@
 .global tss_flush
 .global idt_load
 .extern isr_handler
-.extern kernel_unlock_from_isr
+.extern kernel_leave_from_isr
 .extern kernel_exit_from_isr
 .extern smp_flush_interrupt
 
@@ -295,7 +295,7 @@ isr_common_stub:
     jmp 4f
 3:
     sub rsp, 8
-    call kernel_unlock_from_isr
+    call kernel_leave_from_isr
     add rsp, 8
 4:
     pop rax

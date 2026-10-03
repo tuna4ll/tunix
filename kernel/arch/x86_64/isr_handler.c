@@ -4,7 +4,7 @@
 #include "../../include/power.h"
 #include "../../include/interrupt.h"
 #include "../../include/irq.h"
-#include "../../include/klock.h"
+#include "../../include/kentry.h"
 #include "../../include/percpu.h"
 #include "../../include/pic.h"
 #include "../../include/apic.h"
@@ -252,8 +252,7 @@ void isr_handler(struct interrupt_frame *regs) {
         smp_service_flush();
         return;
     }
-    klock_note(KLOCK_NOTE_INTERRUPT | (uint32_t)regs->int_no);
-    kernel_lock_from_isr();
+    kernel_enter_from_isr();
     isr_dispatch(regs);
     if ((regs->cs & 3U) == 3U) {
         uint64_t stack_top = cpu_current()->kernel_rsp;

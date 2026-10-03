@@ -25,6 +25,13 @@ void defer_kernel_enter(void) {
                      __ATOMIC_SEQ_CST);
 }
 
+unsigned defer_cpus_in_kernel(void) {
+    unsigned inside = 0;
+    for (unsigned index = 0; index < SMP_MAX_CPUS; index++)
+        if (__atomic_load_n(&cpus[index].depth, __ATOMIC_RELAXED)) inside++;
+    return inside;
+}
+
 int defer_in_kernel(void) {
     return cpus[cpu_current()->index].depth != 0;
 }

@@ -2,7 +2,6 @@
 
 #include "../../include/boot.h"
 #include "../../include/cpu.h"
-#include "../../include/klock.h"
 #include "../../include/percpu.h"
 #include "../../include/process.h"
 #include "../../include/smp.h"
@@ -145,7 +144,6 @@ void smp_init(void) {
         return;
     }
 
-    kernel_lock();
     unsigned index = 1;
     unsigned described = aarch64_platform.cpu_count;
     if (described > AARCH64_MAX_CPUS) described = AARCH64_MAX_CPUS;
@@ -157,6 +155,5 @@ void smp_init(void) {
         index++;
     }
     online_cpus = percpu_online_count();
-    kernel_unlock();
     kprintf("SMP: %u of %u processors running\n", online_cpus, aarch64_platform.cpu_count);
 }

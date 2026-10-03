@@ -15,7 +15,7 @@
 #include "include/framebuffer.h"
 #include "include/input.h"
 #include "include/heap.h"
-#include "include/klock.h"
+#include "include/kentry.h"
 #include "include/klog.h"
 #include "include/percpu.h"
 #include "include/defer.h"
@@ -4265,7 +4265,7 @@ static int64_t sys_syslog(int action, uint64_t user_buffer, int length) {
 
         uint64_t offset = held > want ? held - want : 0;
         if (want > held - offset) want = held - offset;
-        static char staging[1024];
+        char staging[512];
         size_t produced = 0;
         while (produced < want) {
             size_t chunk = want - produced;
@@ -5136,7 +5136,7 @@ MEMORY_SYSCALL(shmat, (int a, uint64_t b, int c), (a, b, c))
 MEMORY_SYSCALL(shmdt, (uint64_t a), (a))
 MEMORY_SYSCALL(brk, (uint64_t a), (a))
 
-static void syscall_dispatch_locked(struct syscall_frame *frame) {
+static void syscall_run(struct syscall_frame *frame) {
     if (!frame) return;
     process_reap_deferred();
 
@@ -6173,142 +6173,12 @@ static void syscall_dispatch_locked(struct syscall_frame *frame) {
 _Static_assert(sizeof(struct syscall_frame) == 144, "syscall_entry.S assumes 144");
 #endif
 
-static int file_may_share(const struct file *file) {
-    if (!file) return 0;
-    if (file->kind == FILE_KIND_PIPE_READ || file->kind == FILE_KIND_PIPE_WRITE)
-        return 1;
-    if (file->kind == FILE_KIND_SOCKET) return 1;
-    if (file->kind != FILE_KIND_VFS || !file->node) return 0;
-    if ((file->node->flags & 0xFFU) != VFS_CHARDEVICE) return 0;
-    return file->node->stateless != 0;
-}
-
-static int syscall_try_shared(struct syscall_frame *frame) {
-    uint64_t number = SYSCALL_NR(frame);
-    switch (number) {
-        case SYS_GETPID:
-            SYSCALL_RET(frame) = process_current_pid();
-            return 1;
-        case SYS_GETTID:
-            SYSCALL_RET(frame) = process_current_tid();
-            return 1;
-        case SYS_GETPPID:
-            SYSCALL_RET(frame) = process_current_ppid();
-            return 1;
-        case SYS_GETPGRP:
-            SYSCALL_RET(frame) = process_current() ? process_current()->pgid : 0;
-            return 1;
-        case SYS_GETUID:
-            SYSCALL_RET(frame) = cred_current() ? cred_current()->uid : 0;
-            return 1;
-        case SYS_GETGID:
-            SYSCALL_RET(frame) = cred_current() ? cred_current()->gid : 0;
-            return 1;
-        case SYS_GETEUID:
-            SYSCALL_RET(frame) = cred_current() ? cred_current()->euid : 0;
-            return 1;
-        case SYS_GETEGID:
-            SYSCALL_RET(frame) = cred_current() ? cred_current()->egid : 0;
-            return 1;
-        case SYS_UNAME:
-            SYSCALL_RET(frame) = (uint64_t)sys_uname(SYSCALL_ARG0(frame));
-            return 1;
-        case SYS_GETTIMEOFDAY:
-            SYSCALL_RET(frame) = (uint64_t)sys_gettimeofday(SYSCALL_ARG0(frame));
-            return 1;
-        case SYS_CLOCK_GETTIME:
-            SYSCALL_RET(frame) = (uint64_t)sys_clock_gettime(
-                (int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame));
-            return 1;
-        case SYS_CLOCK_GETRES: {
-            struct linux_timespec value = {0, 1000000};
-            SYSCALL_RET(frame) = SYSCALL_ARG1(frame) &&
-                copy_to_user(SYSCALL_ARG1(frame), &value, sizeof(value)) != 0
-                    ? (uint64_t)-(int64_t)EFAULT : 0;
-            return 1;
-        }
-        case SYS_TIME: {
-            int64_t seconds = (int64_t)time_epoch_seconds();
-            if (SYSCALL_ARG0(frame) &&
-                copy_to_user(SYSCALL_ARG0(frame), &seconds, sizeof(seconds)) != 0)
-                SYSCALL_RET(frame) = (uint64_t)-(int64_t)EFAULT;
-            else SYSCALL_RET(frame) = (uint64_t)seconds;
-            return 1;
-        }
-        case SYS_GETCPU: {
-            uint32_t cpu = cpu_current() ? cpu_current()->index : 0;
-            uint32_t node = 0;
-            if (SYSCALL_ARG0(frame) &&
-                copy_to_user(SYSCALL_ARG0(frame), &cpu, sizeof(cpu)) != 0)
-                SYSCALL_RET(frame) = (uint64_t)-(int64_t)EFAULT;
-            else if (SYSCALL_ARG1(frame) &&
-                     copy_to_user(SYSCALL_ARG1(frame), &node, sizeof(node)) != 0)
-                SYSCALL_RET(frame) = (uint64_t)-(int64_t)EFAULT;
-            else SYSCALL_RET(frame) = 0;
-            return 1;
-        }
-        case SYS_MEMBARRIER:
-            SYSCALL_RET(frame) = 0;
-            return 1;
-        default:
-            break;
-    }
-
-    int fd = (int)SYSCALL_ARG0(frame);
-    struct process *process = process_current();
-    if (!process || !process->files || fd < 0 || fd >= PROCESS_FD_CAPACITY(process)) return 0;
-    struct file *file = fd_file(fd);
-    if (!file_may_share(file)) return 0;
-
-    int64_t result;
-    if (number == SYS_READ)
-        result = sys_read(fd, SYSCALL_ARG1(frame), (size_t)SYSCALL_ARG2(frame));
-    else if (number == SYS_WRITE)
-        result = sys_write(fd, SYSCALL_ARG1(frame), (size_t)SYSCALL_ARG2(frame));
-    else
-        result = sys_readv_writev(fd, SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame),
-                                  number == SYS_WRITEV);
-
-    if (result == -EAGAIN && !(file->flags & O_NONBLOCK)) return 0;
-    if (result == -EAGAIN) file->edge_generation++;
-
-    SYSCALL_RET(frame) = (uint64_t)result;
-    return 1;
-}
-
-static int syscall_number_may_share(uint64_t number) {
-    switch (number) {
-        case SYS_READ:
-        case SYS_WRITE:
-        case SYS_READV:
-        case SYS_WRITEV:
-        case SYS_GETPID:
-        case SYS_GETTID:
-        case SYS_GETPPID:
-        case SYS_GETPGRP:
-        case SYS_GETUID:
-        case SYS_GETGID:
-        case SYS_GETEUID:
-        case SYS_GETEGID:
-        case SYS_UNAME:
-        case SYS_GETTIMEOFDAY:
-        case SYS_CLOCK_GETTIME:
-        case SYS_CLOCK_GETRES:
-        case SYS_TIME:
-        case SYS_GETCPU:
-        case SYS_MEMBARRIER:
-            return 1;
-        default:
-            return 0;
-    }
-}
-
 #define VERBOSE_SYSCALL_LIMIT 24U
 
 void syscall_dispatch(struct syscall_frame *frame) {
     uint64_t syscall_number = SYSCALL_NR(frame);
     defer_kernel_enter();
-    klock_note(KLOCK_NOTE_SYSCALL | (uint32_t)SYSCALL_NR(frame));
+    kernel_overlap_sample();
     process_note_syscall_entry();
 
     if (boot_verbose()) {
@@ -6320,24 +6190,7 @@ void syscall_dispatch(struct syscall_frame *frame) {
         }
     }
 
-    if (syscall_number_may_share(SYSCALL_NR(frame))) {
-        kernel_lock_shared();
-        if (syscall_try_shared(frame)) {
-            syscall_release_pins();
-            uint64_t top = cpu_current()->kernel_rsp;
-            if (top) {
-                struct syscall_frame *resumed =
-                    (struct syscall_frame *)(top - sizeof(*frame));
-                if (resumed != frame) *resumed = *frame;
-            }
-            return;
-        }
-        syscall_release_pins();
-        kernel_unlock_shared();
-    }
-
-    kernel_lock();
-    syscall_dispatch_locked(frame);
+    syscall_run(frame);
     syscall_release_pins();
     struct syscall_frame *resumed = frame;
     uint64_t stack_top = cpu_current()->kernel_rsp;

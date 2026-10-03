@@ -80,31 +80,31 @@ done
 kill $QEMU 2>/dev/null || true
 wait $QEMU 2>/dev/null || true
 
-grep -aE "^(PERF|SYSCALL|SMPCALL|SMPSOCKET|SMPMIX|PIPE|FAULT|FORK|FORKNOWAIT|THREAD|FILE|STARTUP|SHOOTDOWN|ONCE|ORPHAN|SYSLOG|MMAP|FUTEX|OOM|DF|KLOCK|KLOCKBOOT)" "$LOG" || {
+grep -aE "^(PERF|SYSCALL|SMPCALL|SMPSOCKET|SMPMIX|PIPE|FAULT|FORK|FORKNOWAIT|THREAD|FILE|STARTUP|SHOOTDOWN|ONCE|ORPHAN|SYSLOG|MMAP|FUTEX|OOM|DF)" "$LOG" || {
 	echo "perftest: the machine printed no results; $LOG has the boot" >&2
 	exit 1
 }
 
 EXPECTED_WORKERS=$CPUS
 [ "$EXPECTED_WORKERS" -le 4 ] || EXPECTED_WORKERS=4
-SHARED_PEAK=$(sed -n "s/^SMPCALL workers=$EXPECTED_WORKERS .* shared_peak=\([0-9][0-9]*\)$/\1/p" "$LOG" | tail -1)
+OVERLAP=$(sed -n "s/^SMPCALL workers=$EXPECTED_WORKERS .* overlap=\([0-9][0-9]*\)$/\1/p" "$LOG" | tail -1)
 if [ "$EXPECTED_WORKERS" -gt 1 ] &&
-   { [ -z "$SHARED_PEAK" ] || [ "$SHARED_PEAK" -lt "$EXPECTED_WORKERS" ]; }; then
-	echo "perftest: only ${SHARED_PEAK:-0}/$EXPECTED_WORKERS processors overlapped in the kernel" >&2
+   { [ -z "$OVERLAP" ] || [ "$OVERLAP" -lt "$EXPECTED_WORKERS" ]; }; then
+	echo "perftest: only ${OVERLAP:-0}/$EXPECTED_WORKERS processors overlapped in the kernel" >&2
 	exit 1
 fi
 
 EXPECTED_READERS=$((EXPECTED_WORKERS - 1))
-MIX_RESULT=$(sed -n "s/^SMPMIX readers=$EXPECTED_READERS .* errors=\([0-9][0-9]*\) .* shared_peak=\([0-9][0-9]*\)$/\1 \2/p" "$LOG" | tail -1)
+MIX_RESULT=$(sed -n "s/^SMPMIX readers=$EXPECTED_READERS .* errors=\([0-9][0-9]*\) .* overlap=\([0-9][0-9]*\)$/\1 \2/p" "$LOG" | tail -1)
 MIX_ERRORS=${MIX_RESULT%% *}
 MIX_PEAK=${MIX_RESULT##* }
 if [ -z "$MIX_RESULT" ] || [ "$MIX_ERRORS" -ne 0 ] ||
    { [ "$EXPECTED_READERS" -gt 1 ] && [ "$MIX_PEAK" -lt "$EXPECTED_READERS" ]; }; then
-	echo "perftest: mixed shared/exclusive lock stress failed (${MIX_RESULT:-missing})" >&2
+	echo "perftest: parallel dup and close stress failed (${MIX_RESULT:-missing})" >&2
 	exit 1
 fi
 
-SOCKET_RESULT=$(sed -n "s/^SMPSOCKET workers=$EXPECTED_WORKERS .* errors=\([0-9][0-9]*\) shared_peak=\([0-9][0-9]*\)$/\1 \2/p" "$LOG" | tail -1)
+SOCKET_RESULT=$(sed -n "s/^SMPSOCKET workers=$EXPECTED_WORKERS .* errors=\([0-9][0-9]*\) overlap=\([0-9][0-9]*\)$/\1 \2/p" "$LOG" | tail -1)
 SOCKET_ERRORS=${SOCKET_RESULT%% *}
 SOCKET_PEAK=${SOCKET_RESULT##* }
 if [ -z "$SOCKET_RESULT" ] || [ "$SOCKET_ERRORS" -ne 0 ] ||

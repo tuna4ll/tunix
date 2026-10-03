@@ -12,6 +12,7 @@ struct defer_item {
 void defer_kernel_enter(void);
 void defer_kernel_leave(void);
 int defer_in_kernel(void);
+unsigned defer_cpus_in_kernel(void);
 void defer_release(struct defer_item *item, void (*release)(struct defer_item *item));
 void *defer_alloc(uint64_t size);
 void defer_free(void *pointer);

@@ -99,7 +99,7 @@ el0_irq:
     sub     sp, x10, #FRAME_SIZE
 3:  bl      kernel_exit_from_isr
     b       2f
-1:  bl      kernel_unlock_from_isr
+1:  bl      kernel_leave_from_isr
 2:  RESTORE_FRAME
     eret
 

@@ -335,9 +335,7 @@ void kfree(void* ptr) {
 }
 
 int heap_under_pressure(void) {
-    lock_acquire(&heap_lock);
-    int pressed = heap_allocated >= heap_pressure_size();
-    lock_release(&heap_lock);
+    int pressed = __atomic_load_n(&heap_allocated, __ATOMIC_RELAXED) >= heap_pressure_size();
     return pressed || pmm_free_page_count() < HEAP_FREE_PAGES_FLOOR;
 }
 

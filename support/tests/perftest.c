@@ -351,10 +351,10 @@ static void test_smp_syscalls(unsigned workers) {
     }
     while (__atomic_load_n(&smp_call_ready, __ATOMIC_ACQUIRE) < helpers) { }
 
-    int klock = (int)syscall3(SYS_open, (s64)"/proc/klock", 1, 0);
-    if (klock >= 0) {
-        (void)syscall3(SYS_write, klock, (s64)"1", 1);
-        (void)syscall1(SYS_close, klock);
+    int overlap_fd = (int)syscall3(SYS_open, (s64)"/proc/overlap", 1, 0);
+    if (overlap_fd >= 0) {
+        (void)syscall3(SYS_write, overlap_fd, (s64)"1", 1);
+        (void)syscall1(SYS_close, overlap_fd);
     }
     u64 begun = now_ns();
     __atomic_store_n(&smp_call_start, 1, __ATOMIC_RELEASE);
@@ -363,11 +363,11 @@ static void test_smp_syscalls(unsigned workers) {
     while (__atomic_load_n(&smp_call_done, __ATOMIC_ACQUIRE) < helpers) { }
     u64 elapsed = now_ns() - begun;
     u64 calls = (u64)(helpers + 1) * SMP_CALL_ROUNDS;
-    u64 shared_peak = proc_value("/proc/klock", "shared_peak");
-    klock = (int)syscall3(SYS_open, (s64)"/proc/klock", 1, 0);
-    if (klock >= 0) {
-        (void)syscall3(SYS_write, klock, (s64)"0", 1);
-        (void)syscall1(SYS_close, klock);
+    u64 overlap = proc_value("/proc/overlap", "peak");
+    overlap_fd = (int)syscall3(SYS_open, (s64)"/proc/overlap", 1, 0);
+    if (overlap_fd >= 0) {
+        (void)syscall3(SYS_write, overlap_fd, (s64)"0", 1);
+        (void)syscall1(SYS_close, overlap_fd);
     }
 
     put("SMPCALL workers=");
@@ -376,8 +376,8 @@ static void test_smp_syscalls(unsigned workers) {
     put_number(elapsed ? calls * 1000000000UL / elapsed : 0);
     put(" elapsed_ms=");
     put_fixed(elapsed / 1000UL, 3);
-    put(" shared_peak=");
-    put_number(shared_peak);
+    put(" overlap=");
+    put_number(overlap);
     put("\n");
 }
 
@@ -461,21 +461,21 @@ static void test_smp_sockets(unsigned workers) {
     }
     while (__atomic_load_n(&smp_socket_ready, __ATOMIC_ACQUIRE) < helpers) { }
 
-    int klock = (int)syscall3(SYS_open, (s64)"/proc/klock", 1, 0);
-    if (klock >= 0) {
-        (void)syscall3(SYS_write, klock, (s64)"1", 1);
-        (void)syscall1(SYS_close, klock);
+    int overlap_fd = (int)syscall3(SYS_open, (s64)"/proc/overlap", 1, 0);
+    if (overlap_fd >= 0) {
+        (void)syscall3(SYS_write, overlap_fd, (s64)"1", 1);
+        (void)syscall1(SYS_close, overlap_fd);
     }
     u64 begun = now_ns();
     __atomic_store_n(&smp_socket_start, 1, __ATOMIC_RELEASE);
     smp_socket_rounds(0);
     while (__atomic_load_n(&smp_socket_done, __ATOMIC_ACQUIRE) < helpers) { }
     u64 elapsed = now_ns() - begun;
-    u64 shared_peak = proc_value("/proc/klock", "shared_peak");
-    klock = (int)syscall3(SYS_open, (s64)"/proc/klock", 1, 0);
-    if (klock >= 0) {
-        (void)syscall3(SYS_write, klock, (s64)"0", 1);
-        (void)syscall1(SYS_close, klock);
+    u64 overlap = proc_value("/proc/overlap", "peak");
+    overlap_fd = (int)syscall3(SYS_open, (s64)"/proc/overlap", 1, 0);
+    if (overlap_fd >= 0) {
+        (void)syscall3(SYS_write, overlap_fd, (s64)"0", 1);
+        (void)syscall1(SYS_close, overlap_fd);
     }
 
     for (unsigned worker = 0; worker < helpers + 1; worker++) {
@@ -489,8 +489,8 @@ static void test_smp_sockets(unsigned workers) {
     put_number(elapsed ? roundtrips * 1000000000UL / elapsed : 0);
     put(" errors=");
     put_number(__atomic_load_n(&smp_socket_errors, __ATOMIC_RELAXED));
-    put(" shared_peak=");
-    put_number(shared_peak);
+    put(" overlap=");
+    put_number(overlap);
     put("\n");
 }
 
@@ -534,10 +534,10 @@ static void test_smp_mixed(unsigned workers) {
     }
     while (__atomic_load_n(&smp_mix_ready, __ATOMIC_ACQUIRE) < helpers) { }
 
-    int klock = (int)syscall3(SYS_open, (s64)"/proc/klock", 1, 0);
-    if (klock >= 0) {
-        (void)syscall3(SYS_write, klock, (s64)"1", 1);
-        (void)syscall1(SYS_close, klock);
+    int overlap_fd = (int)syscall3(SYS_open, (s64)"/proc/overlap", 1, 0);
+    if (overlap_fd >= 0) {
+        (void)syscall3(SYS_write, overlap_fd, (s64)"1", 1);
+        (void)syscall1(SYS_close, overlap_fd);
     }
     int expected = (int)syscall1(SYS_dup, 0);
     if (expected >= 0) (void)syscall1(SYS_close, expected);
@@ -551,11 +551,11 @@ static void test_smp_mixed(unsigned workers) {
     u64 elapsed = now_ns() - begun;
     __atomic_store_n(&smp_mix_stop, 1, __ATOMIC_RELEASE);
     while (__atomic_load_n(&smp_mix_done, __ATOMIC_ACQUIRE) < helpers) { }
-    u64 shared_peak = proc_value("/proc/klock", "shared_peak");
-    klock = (int)syscall3(SYS_open, (s64)"/proc/klock", 1, 0);
-    if (klock >= 0) {
-        (void)syscall3(SYS_write, klock, (s64)"0", 1);
-        (void)syscall1(SYS_close, klock);
+    u64 overlap = proc_value("/proc/overlap", "peak");
+    overlap_fd = (int)syscall3(SYS_open, (s64)"/proc/overlap", 1, 0);
+    if (overlap_fd >= 0) {
+        (void)syscall3(SYS_write, overlap_fd, (s64)"0", 1);
+        (void)syscall1(SYS_close, overlap_fd);
     }
 
     put("SMPMIX readers=");
@@ -568,8 +568,8 @@ static void test_smp_mixed(unsigned workers) {
     put_number(errors);
     put(" elapsed_ms=");
     put_fixed(elapsed / 1000UL, 3);
-    put(" shared_peak=");
-    put_number(shared_peak);
+    put(" overlap=");
+    put_number(overlap);
     put("\n");
 }
 
@@ -710,31 +710,6 @@ static void test_fork_once(unsigned rounds) {
     put_number(unknown);
     put("\n");
 }
-
-static void report_lock_holds_as(const char *tag) {
-    int fd = (int)syscall3(SYS_open, (s64)"/proc/klock", 0, 0);
-    if (fd < 0) return;
-    static char text[4096];
-    s64 got = syscall3(SYS_read, fd, (s64)text, sizeof(text) - 1);
-    (void)syscall1(SYS_close, fd);
-    if (got <= 0) return;
-    s64 start = 0;
-    for (s64 at = 0; at <= got; at++) {
-        if (at != got && text[at] != '\n') continue;
-        if (at > start) {
-            text[at] = 0;
-            put(tag);
-            put(" ");
-            put(text + start);
-            put("\n");
-        }
-        start = at + 1;
-    }
-}
-
-static void report_lock_holds(void) { report_lock_holds_as("KLOCK"); }
-
-static void report_boot_lock_holds(void) { report_lock_holds_as("KLOCKBOOT"); }
 
 static void test_orphan_reaped(unsigned rounds) {
     unsigned made = 0;
@@ -1078,21 +1053,7 @@ static int run_all(void) {
     test_unmap_shootdown(8192, 0);
     test_unmap_shootdown(8192, 3);
     test_file_read(20000);
-    report_boot_lock_holds();
-    int klock = (int)syscall3(SYS_open, (s64)"/proc/klock", 1 , 0);
-    if (klock >= 0) {
-        (void)syscall3(SYS_write, klock, (s64)"1", 1);
-        (void)syscall1(SYS_close, klock);
-    }
     test_startup_reads(400);
-    report_lock_holds();
-    if (klock >= 0) {
-        klock = (int)syscall3(SYS_open, (s64)"/proc/klock", 1 , 0);
-        if (klock >= 0) {
-            (void)syscall3(SYS_write, klock, (s64)"0", 1);
-            (void)syscall1(SYS_close, klock);
-        }
-    }
     test_syslog();
     test_shared_mapping();
     test_shared_futex();

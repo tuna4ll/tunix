@@ -9,7 +9,7 @@
 #include "include/gdt.h"
 #include "include/heap.h"
 #include "include/interrupt.h"
-#include "include/klock.h"
+#include "include/defer.h"
 #include "include/lock.h"
 #include "include/usercopy.h"
 
@@ -1053,7 +1053,7 @@ static void install_console(struct process *process) {
 
 static char *copy_text(const char *text) {
     size_t length = strlen(text ? text : "");
-    char *copy = (char *)kmalloc(length + 1);
+    char *copy = (char *)defer_alloc(length + 1);
     if (copy) memcpy(copy, text ? text : "", length + 1);
     return copy;
 }
@@ -1064,15 +1064,15 @@ static void set_exe_path(struct process *process, struct vfs_node *file,
     if (resolved && file && vfs_node_path(file, resolved, VFS_PATH_MAX) == 0) path = resolved;
     char *copy = copy_text(path);
     if (!copy) return;
-    kfree(process->exe_path);
-    process->exe_path = copy;
+    char *previous = __atomic_exchange_n(&process->exe_path, copy, __ATOMIC_ACQ_REL);
+    defer_free(previous);
 }
 
 static void free_process_struct(struct process *process) {
     cred_groups_release(&process->cred);
     kfree(process->io_watch_fd);
     kfree(process->io_watch_events);
-    kfree(process->exe_path);
+    defer_free(process->exe_path);
     kfree(process);
 }
 
@@ -1523,7 +1523,6 @@ static int switch_to_next(struct syscall_frame *frame, struct process *after) {
 
 static void go_idle(void) __attribute__((noreturn));
 static void go_idle(void) {
-    klock_note(KLOCK_NOTE_IDLE);
     if (current) {
         arch_save_thread_pointers(current);
         fpu_save(current);
@@ -1541,8 +1540,6 @@ static void go_idle(void) {
 }
 
 void process_start_first(void) {
-    klock_note(KLOCK_NOTE_FIRST_RUN);
-    kernel_lock();
     go_idle();
 }
 

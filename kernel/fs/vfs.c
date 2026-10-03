@@ -201,6 +201,7 @@ uint64_t vfs_reclaim_file_data(struct vfs_node *node) {
 }
 
 void vfs_trim_cache(uint64_t budget) {
+    if (!budget || __atomic_load_n(&cached_bytes, __ATOMIC_RELAXED) <= budget) return;
     VFS_LOCKED;
     static uint64_t retry_above;
 

@@ -6,7 +6,6 @@
 #include "../include/cred.h"
 #include "../include/pipe.h"
 #include "../include/process.h"
-#include "../include/klock.h"
 #include "../include/lock.h"
 #include "../include/syscall.h"
 #include "../include/spinlock.h"

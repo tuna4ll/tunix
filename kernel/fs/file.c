@@ -2,7 +2,6 @@
 #include <stdint.h>
 #include "../include/file.h"
 #include "../include/pipe.h"
-#include "../include/klock.h"
 
 static int64_t file_read_locked(struct file *file, size_t size, void *buffer);
 static int64_t file_write_locked(struct file *file, size_t size, const void *buffer);

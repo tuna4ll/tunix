@@ -258,7 +258,7 @@ uint32_t pmm_page_refcount(uint64_t physical) {
 
 uint64_t pmm_total_page_count(void) { return total_pages; }
 uint64_t pmm_usable_page_count(void) { return usable_pages; }
-uint64_t pmm_free_page_count(void) { return free_pages; }
+uint64_t pmm_free_page_count(void) { return __atomic_load_n(&free_pages, __ATOMIC_RELAXED); }
 
 uint64_t pmm_release_reserved(uint64_t physical, uint64_t length) {
     if (!length) return 0;

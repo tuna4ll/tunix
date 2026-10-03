@@ -12,7 +12,7 @@
 #include "../include/boot.h"
 #include "../include/block.h"
 #include "../include/input.h"
-#include "../include/klock.h"
+#include "../include/kentry.h"
 #include "../include/module.h"
 #include "../include/procfs.h"
 #include "../include/random.h"
@@ -198,36 +198,22 @@ static int64_t proc_inputlog_read(struct vfs_node *node, uint64_t offset,
 
 static void text_hex32(struct text_buffer *text, uint32_t value);
 
-static int64_t proc_klock_read(struct vfs_node *node, uint64_t offset,
-                               size_t size, void *output) {
+static int64_t proc_overlap_read(struct vfs_node *node, uint64_t offset,
+                                 size_t size, void *output) {
     (void)node;
     TEXT_BUFFER text = {0};
-    text_string(&text, "shared_peak ");
-    text_unsigned(&text, klock_shared_peak());
+    text_string(&text, "peak ");
+    text_unsigned(&text, kernel_overlap_peak());
     text_char(&text, '\n');
-    text_string(&text, "note count total_us max_us\n");
-    for (unsigned index = 0; index < KLOCK_HOLD_SLOTS; index++) {
-        struct klock_hold hold;
-        if (klock_statistics(index, &hold) != 0) continue;
-        text_string(&text, "0x");
-        text_hex32(&text, hold.note);
-        text_char(&text, ' ');
-        text_unsigned(&text, hold.count);
-        text_char(&text, ' ');
-        text_unsigned(&text, hold.total_ns / 1000ULL);
-        text_char(&text, ' ');
-        text_unsigned(&text, hold.max_ns / 1000ULL);
-        text_char(&text, '\n');
-    }
     return text_read(&text, offset, size, output);
 }
 
-static int64_t proc_klock_write(struct vfs_node *node, uint64_t offset,
-                                size_t size, const void *input) {
+static int64_t proc_overlap_write(struct vfs_node *node, uint64_t offset,
+                                  size_t size, const void *input) {
     (void)node; (void)offset;
     const char *text = (const char *)input;
-    if (size && text && text[0] == '0') klock_statistics_stop();
-    else klock_statistics_start();
+    if (size && text && text[0] == '0') kernel_overlap_stop();
+    else kernel_overlap_start();
     return (int64_t)size;
 }
 
@@ -1009,10 +995,10 @@ void procfs_init(void) {
         abi_gaps->mode = 0644;
         abi_gaps->write = proc_abi_gaps_write;
     }
-    struct vfs_node *klock = virtual_file(root, "klock", proc_klock_read, 0);
-    if (klock) {
-        klock->mode = 0644;
-        klock->write = proc_klock_write;
+    struct vfs_node *overlap = virtual_file(root, "overlap", proc_overlap_read, 0);
+    if (overlap) {
+        overlap->mode = 0644;
+        overlap->write = proc_overlap_write;
     }
     virtual_file(root, "version", proc_version_read, 0);
     virtual_file(root, "mounts", proc_mounts_read, 0);

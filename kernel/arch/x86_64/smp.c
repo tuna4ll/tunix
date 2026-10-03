@@ -7,7 +7,6 @@
 #include "../../include/cpu.h"
 #include "../../include/gdt.h"
 #include "../../include/idt.h"
-#include "../../include/klock.h"
 #include "../../include/kstring.h"
 #include "../../include/percpu.h"
 #include "../../include/pmm.h"
@@ -195,9 +194,7 @@ void smp_init(void) {
         return;
     }
 
-    kernel_lock();
     if (map_trampoline_page() != 0) {
-        kernel_unlock();
         kprintf("SMP: could not map the trampoline\n");
         return;
     }
@@ -217,7 +214,6 @@ void smp_init(void) {
 
     if (!missing) unmap_trampoline_page();
     online_cpus = percpu_online_count();
-    kernel_unlock();
     kprintf("SMP: %u of %u processors running\n", online_cpus,
             (unsigned)machine->cpu_count);
     if (online_cpus > 1 && !time_tsc_is_invariant())

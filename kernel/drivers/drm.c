@@ -1,7 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "../include/cpu.h"
-#include "../include/klock.h"
 #include "../include/percpu.h"
 #include "../include/drm.h"
 #include "../include/file.h"
@@ -1852,7 +1851,6 @@ int64_t drm_file_ioctl(struct file *file, unsigned long request,
                        uint64_t user_argument) {
     if (!drm_ready) return -ENOTTY;
     if (IOCTL_TYPE(request) != (unsigned)DRM_IOCTL_TYPE) return -ENOTTY;
-    klock_note(KLOCK_NOTE_IOCTL | (uint32_t)IOCTL_NR(request));
     drm_enter();
     int64_t answer = drm_dispatch_ioctl(file, request, user_argument);
     drm_leave();

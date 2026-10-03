@@ -1,7 +1,7 @@
 #include <stdint.h>
 
 #include "../../include/irq.h"
-#include "../../include/klock.h"
+#include "../../include/kentry.h"
 #include "../../include/percpu.h"
 #include "../../include/process.h"
 #include "../../include/process_arch.h"
@@ -94,8 +94,7 @@ int aarch64_el0_sync(struct syscall_frame *frame) {
 
     uint64_t far = read_far();
     struct interrupt_frame *interrupted = (struct interrupt_frame *)frame;
-    klock_note(KLOCK_NOTE_INTERRUPT | class);
-    kernel_lock_from_isr();
+    kernel_enter_from_isr();
     user_fault(interrupted, esr, far);
     relocate_user_frame(interrupted);
     return 2;
@@ -139,8 +138,7 @@ int aarch64_irq(struct interrupt_frame *frame) {
         smp_service_flush();
         return 0;
     }
-    klock_note(KLOCK_NOTE_INTERRUPT | (intid & 0xFFFFU));
-    kernel_lock_from_isr();
+    kernel_enter_from_isr();
     if (timer) {
         if (cpu_current()->index == 0) timer_irq(frame);
         else process_timer_interrupt(frame);
