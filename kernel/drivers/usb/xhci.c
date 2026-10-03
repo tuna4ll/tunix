@@ -14,7 +14,11 @@
 #include "../../include/input.h"
 #include "../../include/usb.h"
 #include "../../include/xhci.h"
+#include "../../include/iowait.h"
 #include "../../include/lock.h"
+#include "../../include/mutex.h"
+#include "../../include/process.h"
+#include "../../include/workqueue.h"
 
 extern void kprintf(const char *fmt, ...);
 
@@ -375,6 +379,7 @@ struct xhci_host {
     uint64_t root_changed[4];
     uint64_t root_seen[MAX_PORTS];
     int pumping;
+    int wake_waiters;
     int failed;
     unsigned vector;
 };
@@ -390,10 +395,10 @@ static unsigned host_capacity;
 static struct storage_entry *storage_table;
 static int storage_entries;
 static int storage_capacity;
-static int servicing;
 static int booted;
 
 static struct lock xhci_lock = LOCK_INITIALIZER("xhci", LOCK_RANK_BUS);
+static struct mutex xhci_ops = MUTEX_INITIALIZER("xhci operations", LOCK_RANK_BUS);
 
 static const struct usb_host xhci_usb_host;
 
@@ -412,17 +417,25 @@ static void write64(uint64_t address, uint64_t value) {
 
 static uint64_t now(void) { return time_uptime_ns(); }
 
+#define SPIN_BEFORE_NAP_NS 200000ULL
+
 static void pause_ns(uint64_t nanoseconds) {
-    uint64_t until = now() + nanoseconds;
-    while (now() < until) cpu_relax();
+    uint64_t started = now();
+    uint64_t until = started + nanoseconds;
+    while (now() < until) {
+        if (now() - started < SPIN_BEFORE_NAP_NS) cpu_relax();
+        else io_nap(&xhci_lock);
+    }
 }
 
 static int wait_bits(uint64_t address, uint32_t mask, uint32_t wanted, uint64_t timeout) {
-    uint64_t deadline = now() + timeout;
+    uint64_t started = now();
+    uint64_t deadline = started + timeout;
     for (;;) {
         if ((read32(address) & mask) == wanted) return 0;
         if (now() >= deadline) return -1;
-        cpu_relax();
+        if (now() - started < SPIN_BEFORE_NAP_NS) cpu_relax();
+        else io_nap(&xhci_lock);
     }
 }
 
@@ -558,6 +571,7 @@ static void transfer_event(struct xhci_host *host, const struct trb *event) {
         device->results[dci].done = 1;
         device->results[dci].code = code;
         device->results[dci].residual = residual;
+        host->wake_waiters = 1;
         return;
     }
 
@@ -593,6 +607,7 @@ static void transfer_event(struct xhci_host *host, const struct trb *event) {
     device->results[dci].done = 1;
     device->results[dci].code = code;
     device->results[dci].residual = residual;
+    host->wake_waiters = 1;
 }
 
 static void mark_disconnected(struct xhci_host *host, uint32_t port) {
@@ -618,6 +633,7 @@ static void pump(struct xhci_host *host) {
         consumed++;
         uint32_t type = (event.control >> TRB_TYPE_SHIFT) & TRB_TYPE_MASK;
         if (type == TRB_TYPE_COMMAND_COMPLETION) {
+            host->wake_waiters = 1;
             host->command_done = 1;
             host->command_code = (event.status >> TRB_COMPLETION_SHIFT) & TRB_COMPLETION_MASK;
             host->command_slot = (event.control >> EVENT_SLOT_SHIFT) & 0xFFU;
@@ -628,8 +644,10 @@ static void pump(struct xhci_host *host) {
             if (port && port <= host->max_ports) {
                 host->root_changed[port / 64U] |= 1ULL << (port % 64U);
                 uint32_t status = read32(port_register(host, port));
-                if (!(status & PORTSC_CONNECTED) || (status & PORTSC_CONNECT_CHANGE))
+                if (!(status & PORTSC_CONNECTED) || (status & PORTSC_CONNECT_CHANGE)) {
                     mark_disconnected(host, port);
+                    host->wake_waiters = 1;
+                }
             }
         } else if (type == TRB_TYPE_HOST_CONTROLLER_EVENT) {
             kprintf("XHCI%u: controller event %u\n", host->index,
@@ -640,6 +658,16 @@ static void pump(struct xhci_host *host) {
         write64(host->interrupter + XHCI_ERDP,
                 ring_position(&host->events) | ERDP_EVENT_HANDLER_BUSY);
     host->pumping = 0;
+    if (host->wake_waiters) {
+        host->wake_waiters = 0;
+        process_wake_all(host);
+    }
+}
+
+static int command_answered(void *context) {
+    struct xhci_host *host = (struct xhci_host *)context;
+    pump(host);
+    return host->command_done || host->failed;
 }
 
 static int command(struct xhci_host *host, uint32_t type, uint64_t parameter,
@@ -648,30 +676,33 @@ static int command(struct xhci_host *host, uint32_t type, uint64_t parameter,
     host->command_done = 0;
     enqueue(&host->commands, parameter, 0, type, control);
     ring_doorbell(host, 0, 0);
-    uint64_t deadline = now() + COMMAND_TIMEOUT_NS;
-    while (!host->command_done) {
-        pump(host);
-        if (host->command_done) break;
-        if (now() >= deadline) {
-            check_health(host);
-            kprintf("XHCI%u: command %u was never answered\n", host->index, (unsigned)type);
-            return -1;
-        }
-        cpu_relax();
+    if (io_poll_dropping(command_answered, host, COMMAND_TIMEOUT_NS, &xhci_lock, host) != 0 ||
+        !host->command_done) {
+        check_health(host);
+        kprintf("XHCI%u: command %u was never answered\n", host->index, (unsigned)type);
+        return -1;
     }
     if (slot_out) *slot_out = host->command_slot;
     return host->command_code == CODE_SUCCESS ? 0 : -(int)host->command_code;
 }
 
+struct result_wait {
+    struct usb_device *device;
+    uint32_t dci;
+};
+
+static int result_posted(void *context) {
+    struct result_wait *wait = (struct result_wait *)context;
+    pump(wait->device->host);
+    return wait->device->results[wait->dci].done || wait->device->disconnected ||
+           wait->device->host->failed;
+}
+
 static uint32_t wait_result(struct usb_device *device, uint32_t dci, uint64_t timeout,
                             uint32_t *residual) {
-    uint64_t deadline = now() + timeout;
-    for (;;) {
-        pump(device->host);
-        if (device->results[dci].done) break;
-        if (device->disconnected || device->host->failed || now() >= deadline) return CODE_TIMEOUT;
-        cpu_relax();
-    }
+    struct result_wait wait = {device, dci};
+    (void)io_poll_dropping(result_posted, &wait, timeout, &xhci_lock, device->host);
+    if (!device->results[dci].done) return CODE_TIMEOUT;
     if (residual) *residual = device->results[dci].residual;
     return device->results[dci].code;
 }
@@ -1240,12 +1271,14 @@ static int root_reset(struct xhci_host *host, uint32_t port, uint32_t *portsc) {
         return 0;
     }
     write32(address, (status & PORTSC_NEUTRAL) | PORTSC_RESET);
-    uint64_t deadline = now() + PORT_RESET_TIMEOUT_NS;
+    uint64_t started = now();
+    uint64_t deadline = started + PORT_RESET_TIMEOUT_NS;
     for (;;) {
         status = read32(address);
         if (!(status & PORTSC_RESET) && (status & PORTSC_ENABLED)) break;
         if (!(status & PORTSC_CONNECTED) || now() >= deadline) return -1;
-        cpu_relax();
+        if (now() - started < SPIN_BEFORE_NAP_NS) cpu_relax();
+        else io_nap(&xhci_lock);
     }
     write32(address, (status & PORTSC_NEUTRAL) | (status & PORTSC_CHANGES));
     pause_ns(RESET_RECOVERY_NS);
@@ -1408,16 +1441,27 @@ static int any_work(struct xhci_host *host) {
     return 0;
 }
 
-void xhci_poll(void) {
+static void service_hosts(void *unused) {
+    (void)unused;
+    mutex_lock(&xhci_ops);
     lock_acquire(&xhci_lock);
-    for (unsigned index = 0; index < host_count; index++) pump(hosts[index]);
-    if (!servicing && booted) {
-        servicing = 1;
-        for (unsigned index = 0; index < host_count; index++)
-            if (any_work(hosts[index])) service(hosts[index]);
-        servicing = 0;
+    for (unsigned index = 0; index < host_count; index++)
+        if (any_work(hosts[index])) service(hosts[index]);
+    lock_release(&xhci_lock);
+    mutex_unlock(&xhci_ops);
+}
+
+static struct work service_work = WORK_INITIALIZER(service_hosts, NULL);
+
+void xhci_poll(void) {
+    if (!lock_try_acquire(&xhci_lock)) return;
+    int work = 0;
+    for (unsigned index = 0; index < host_count; index++) {
+        pump(hosts[index]);
+        if (booted && any_work(hosts[index])) work = 1;
     }
     lock_release(&xhci_lock);
+    if (work) work_queue(&service_work);
 }
 
 static void check_health(struct xhci_host *host) {
@@ -1474,9 +1518,11 @@ static int storage_transfer_unlocked(int index, int in, uint64_t physical, uint3
 }
 
 static int storage_transfer(int index, int in, uint64_t physical, uint32_t length) {
+    mutex_lock(&xhci_ops);
     lock_acquire(&xhci_lock);
     int status = storage_transfer_unlocked(index, in, physical, length);
     lock_release(&xhci_lock);
+    mutex_unlock(&xhci_ops);
     return status;
 }
 
@@ -1496,9 +1542,11 @@ static int storage_reset_unlocked(int index) {
 }
 
 static int storage_reset(int index) {
+    mutex_lock(&xhci_ops);
     lock_acquire(&xhci_lock);
     int status = storage_reset_unlocked(index);
     lock_release(&xhci_lock);
+    mutex_unlock(&xhci_ops);
     return status;
 }
 
@@ -1764,8 +1812,10 @@ static int xhci_init_unlocked(void) {
 }
 
 int xhci_init(void) {
+    mutex_lock(&xhci_ops);
     lock_acquire(&xhci_lock);
     int status = xhci_init_unlocked();
     lock_release(&xhci_lock);
+    mutex_unlock(&xhci_ops);
     return status;
 }

@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include "include/drm.h"
 #include "include/interrupt.h"
+#include "include/iowait.h"
 #include "include/net/net.h"
 #include "include/process.h"
 #include "include/sound.h"
@@ -22,6 +23,7 @@ void timer_irq(struct interrupt_frame *frame) {
     if ((ticks % (TIMER_FREQUENCY_HZ / 30U)) == 0U && vt_console_in_front())
         drm_console_present();
     sound_tick();
+    io_poll_tick();
     process_wake_io();
     process_io_recheck();
     process_timer_interrupt(frame);

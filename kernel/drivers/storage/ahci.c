@@ -8,7 +8,9 @@
 #include "../../include/kstring.h"
 #include "../../include/pci.h"
 #include "../../include/vmm.h"
+#include "../../include/iowait.h"
 #include "../../include/lock.h"
+#include "../../include/mutex.h"
 
 extern void kprintf(const char *fmt, ...);
 
@@ -105,7 +107,7 @@ struct ahci_port {
     uint8_t *page;
     uint64_t sectors;
     char name[16];
-    struct lock lock;
+    struct mutex lock;
 };
 
 static unsigned port_count;
@@ -168,12 +170,20 @@ static int build_prdt(struct ahci_command_table *table, const void *buffer,
     return (int)used;
 }
 
+static int command_settled(void *context) {
+    struct ahci_port *port = (struct ahci_port *)context;
+    return !(read32(port->registers + PORT_CI) & 1U) ||
+           (read32(port->registers + PORT_IS) & 0x40000000U);
+}
+
+static int device_idle(void *context) {
+    struct ahci_port *port = (struct ahci_port *)context;
+    return !(read32(port->registers + PORT_TFD) & (TFD_BSY | TFD_DRQ));
+}
+
 static int wait_for_completion(struct ahci_port *port) {
-    for (uint32_t spin = 0; spin < AHCI_WAIT_SPINS; spin++) {
-        if (!(read32(port->registers + PORT_CI) & 1U)) break;
-        if (read32(port->registers + PORT_IS) & 0x40000000U) return -1;
-        pause_cpu();
-    }
+    if (io_poll(command_settled, port, IO_TIMEOUT_NS) != 0) return -1;
+    if (read32(port->registers + PORT_IS) & 0x40000000U) return -1;
     if (read32(port->registers + PORT_CI) & 1U) return -1;
     uint32_t status = read32(port->registers + PORT_TFD);
     if (status & (TFD_ERR | TFD_BSY | TFD_DRQ)) return -1;
@@ -220,10 +230,7 @@ static int issue(struct ahci_port *port, uint8_t command, uint64_t lba,
     write32(port->registers + PORT_IS, 0xFFFFFFFFU);
     write32(port->registers + PORT_SERR, 0xFFFFFFFFU);
 
-    for (uint32_t spin = 0; spin < AHCI_WAIT_SPINS; spin++) {
-        if (!(read32(port->registers + PORT_TFD) & (TFD_BSY | TFD_DRQ))) break;
-        pause_cpu();
-    }
+    (void)io_poll(device_idle, port, IO_TIMEOUT_NS);
     write32(port->registers + PORT_CI, 1U);
     return wait_for_completion(port);
 }
@@ -244,9 +251,9 @@ static int ahci_read_unlocked(void *context, uint64_t lba, uint32_t count, void 
 
 static int ahci_read(void *context, uint64_t lba, uint32_t count, void *destination) {
     struct ahci_port *port = (struct ahci_port *)context;
-    lock_acquire(&port->lock);
+    mutex_lock(&port->lock);
     int status = ahci_read_unlocked(context, lba, count, destination);
-    lock_release(&port->lock);
+    mutex_unlock(&port->lock);
     return status;
 }
 
@@ -266,9 +273,9 @@ static int ahci_write_unlocked(void *context, uint64_t lba, uint32_t count, cons
 
 static int ahci_write(void *context, uint64_t lba, uint32_t count, const void *source) {
     struct ahci_port *port = (struct ahci_port *)context;
-    lock_acquire(&port->lock);
+    mutex_lock(&port->lock);
     int status = ahci_write_unlocked(context, lba, count, source);
-    lock_release(&port->lock);
+    mutex_unlock(&port->lock);
     return status;
 }
 
@@ -278,9 +285,9 @@ static int ahci_flush_unlocked(void *context) {
 
 static int ahci_flush(void *context) {
     struct ahci_port *port = (struct ahci_port *)context;
-    lock_acquire(&port->lock);
+    mutex_lock(&port->lock);
     int status = ahci_flush_unlocked(context);
-    lock_release(&port->lock);
+    mutex_unlock(&port->lock);
     return status;
 }
 
@@ -310,7 +317,7 @@ static void bring_up_port(uint64_t hba, unsigned index) {
     struct ahci_port *port = kmalloc(sizeof(*port));
     if (!port) return;
     memset(port, 0, sizeof(*port));
-    lock_init(&port->lock, "ahci port", LOCK_RANK_BLOCK);
+    mutex_init(&port->lock, "ahci port", LOCK_RANK_BLOCK);
     port->registers = registers;
 
     if (stop_port(port) != 0) {

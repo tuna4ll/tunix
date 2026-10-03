@@ -7,7 +7,9 @@
 #include "../include/kstring.h"
 #include "../include/pci.h"
 #include "../include/vmm.h"
+#include "../include/iowait.h"
 #include "../include/lock.h"
+#include "../include/mutex.h"
 
 #define ATA_DATA       0x1F0
 #define ATA_SECCOUNT0  0x1F2
@@ -53,7 +55,7 @@ static int dma_probe_state;
 static uint16_t dma_io_base;
 static struct ata_prd dma_prdt[ATA_DMA_MAX_PRDS] __attribute__((aligned(16)));
 
-static struct lock ata_lock = LOCK_INITIALIZER("ata", LOCK_RANK_BLOCK);
+static struct mutex ata_lock = MUTEX_INITIALIZER("ata", LOCK_RANK_BLOCK);
 
 static inline uint64_t ata_pointer_physical(const void *pointer, uint64_t length) {
     return vmm_dma_physical(pointer, length);
@@ -73,23 +75,27 @@ static inline void ata_write_words(const uint16_t *source, size_t word_count) {
                      : "memory");
 }
 
+static int ata_idle(void *unused) {
+    (void)unused;
+    return !(inb(ATA_STATUS) & ATA_SR_BSY);
+}
+
 static int ata_wait_not_busy(void) {
-    for (uint32_t timeout = 0; timeout < 10000000U; timeout++) {
-        uint8_t status = inb(ATA_STATUS);
-        if (!(status & ATA_SR_BSY)) return status;
-        cpu_relax();
-    }
-    return -1;
+    if (io_poll(ata_idle, NULL, IO_TIMEOUT_NS) != 0) return -1;
+    return inb(ATA_STATUS);
+}
+
+static int ata_data_or_error(void *unused) {
+    (void)unused;
+    uint8_t status = inb(ATA_STATUS);
+    return (status & (ATA_SR_ERR | ATA_SR_DF)) ||
+           (!(status & ATA_SR_BSY) && (status & ATA_SR_DRQ));
 }
 
 static int ata_wait_drq(void) {
-    for (uint32_t timeout = 0; timeout < 10000000U; timeout++) {
-        uint8_t status = inb(ATA_STATUS);
-        if (status & (ATA_SR_ERR | ATA_SR_DF)) return -1;
-        if (!(status & ATA_SR_BSY) && (status & ATA_SR_DRQ)) return 0;
-        cpu_relax();
-    }
-    return -1;
+    if (io_poll(ata_data_or_error, NULL, IO_TIMEOUT_NS) != 0) return -1;
+    uint8_t status = inb(ATA_STATUS);
+    return (status & (ATA_SR_ERR | ATA_SR_DF)) ? -1 : 0;
 }
 
 static void ata_soft_reset(void) {
@@ -143,6 +149,14 @@ static int ata_build_prdt(uint64_t destination, uint32_t byte_count) {
     return 0;
 }
 
+static int ata_dma_settled(void *context) {
+    uint16_t status_port = *(const uint16_t *)context;
+    uint8_t bus_status = inb(status_port);
+    uint8_t ata_status = inb(ATA_STATUS);
+    if ((bus_status & BM_STATUS_ERROR) || (ata_status & (ATA_SR_ERR | ATA_SR_DF))) return 1;
+    return !(bus_status & BM_STATUS_ACTIVE) && !(ata_status & ATA_SR_BSY);
+}
+
 static int ata_dma_transfer_chunk(uint32_t lba, uint32_t sectors,
                                   uint64_t buffer_physical, int to_device) {
     uint32_t bytes = sectors * ATA_SECTOR_SIZE;
@@ -175,17 +189,11 @@ static int ata_dma_transfer_chunk(uint32_t lba, uint32_t sectors,
     outb(command_port, (uint8_t)(direction | BM_COMMAND_START));
 
     int result = -1;
-    for (uint32_t timeout = 0; timeout < 100000000U; timeout++) {
+    if (io_poll(ata_dma_settled, &status_port, IO_TIMEOUT_NS) == 0) {
         uint8_t bus_status = inb(status_port);
         uint8_t ata_status = inb(ATA_STATUS);
-        if ((bus_status & BM_STATUS_ERROR) || (ata_status & (ATA_SR_ERR | ATA_SR_DF))) {
-            break;
-        }
-        if (!(bus_status & BM_STATUS_ACTIVE) && !(ata_status & ATA_SR_BSY)) {
+        if (!(bus_status & BM_STATUS_ERROR) && !(ata_status & (ATA_SR_ERR | ATA_SR_DF)))
             result = 0;
-            break;
-        }
-        cpu_relax();
     }
 
     outb(command_port, direction);
@@ -314,9 +322,9 @@ static int ata_flush_cache_unlocked(void) {
 }
 
 int ata_flush_cache(void) {
-    lock_acquire(&ata_lock);
+    mutex_lock(&ata_lock);
     int status = ata_flush_cache_unlocked();
-    lock_release(&ata_lock);
+    mutex_unlock(&ata_lock);
     return status;
 }
 
@@ -390,9 +398,9 @@ static int ata_block_read_unlocked(void *context, uint64_t lba, uint32_t count, 
 }
 
 static int ata_block_read(void *context, uint64_t lba, uint32_t count, void *destination) {
-    lock_acquire(&ata_lock);
+    mutex_lock(&ata_lock);
     int status = ata_block_read_unlocked(context, lba, count, destination);
-    lock_release(&ata_lock);
+    mutex_unlock(&ata_lock);
     return status;
 }
 
@@ -404,9 +412,9 @@ static int ata_block_write_unlocked(void *context, uint64_t lba, uint32_t count,
 }
 
 static int ata_block_write(void *context, uint64_t lba, uint32_t count, const void *source) {
-    lock_acquire(&ata_lock);
+    mutex_lock(&ata_lock);
     int status = ata_block_write_unlocked(context, lba, count, source);
-    lock_release(&ata_lock);
+    mutex_unlock(&ata_lock);
     return status;
 }
 

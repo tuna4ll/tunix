@@ -11,6 +11,7 @@
 #include "../../include/vmm.h"
 #include "../../include/usb.h"
 #include "../../include/lock.h"
+#include "../../include/mutex.h"
 #include "../../include/workqueue.h"
 
 extern void kprintf(const char *fmt, ...);
@@ -148,7 +149,7 @@ static int run_command(struct usb_disk *disk, const uint8_t *command,
     return -1;
 }
 
-static struct lock storage_lock = LOCK_INITIALIZER("usb storage", LOCK_RANK_BLOCK);
+static struct mutex storage_lock = MUTEX_INITIALIZER("usb storage", LOCK_RANK_BLOCK);
 
 static void put_be32(uint8_t *out, uint32_t value) {
     out[0] = (uint8_t)(value >> 24);
@@ -200,9 +201,9 @@ static int usb_read_unlocked(void *context, uint64_t lba, uint32_t count, void *
 }
 
 static int usb_read(void *context, uint64_t lba, uint32_t count, void *destination) {
-    lock_acquire(&storage_lock);
+    mutex_lock(&storage_lock);
     int status = usb_read_unlocked(context, lba, count, destination);
-    lock_release(&storage_lock);
+    mutex_unlock(&storage_lock);
     return status;
 }
 
@@ -223,9 +224,9 @@ static int usb_write_unlocked(void *context, uint64_t lba, uint32_t count, const
 }
 
 static int usb_write(void *context, uint64_t lba, uint32_t count, const void *source) {
-    lock_acquire(&storage_lock);
+    mutex_lock(&storage_lock);
     int status = usb_write_unlocked(context, lba, count, source);
-    lock_release(&storage_lock);
+    mutex_unlock(&storage_lock);
     return status;
 }
 
@@ -332,9 +333,9 @@ static int attaching;
 
 void usb_storage_init(void) {
     int present = usb_storage_count();
-    lock_acquire(&storage_lock);
+    mutex_lock(&storage_lock);
     for (int index = 0; index < present; index++) (void)attach_disk(index);
-    lock_release(&storage_lock);
+    mutex_unlock(&storage_lock);
     attached_slots = present;
     __atomic_store_n(&initialized, 1, __ATOMIC_RELEASE);
 }
@@ -346,9 +347,9 @@ static void attach_pending(void *unused) {
         int index = attached_slots;
         __atomic_store_n(&attached_slots, index + 1, __ATOMIC_RELEASE);
         int before = block_device_count();
-        lock_acquire(&storage_lock);
+        mutex_lock(&storage_lock);
         int registered = attach_disk(index);
-        lock_release(&storage_lock);
+        mutex_unlock(&storage_lock);
         if (registered < 0) continue;
         partition_scan_disk(registered);
         int after = block_device_count();

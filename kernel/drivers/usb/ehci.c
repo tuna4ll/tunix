@@ -12,7 +12,9 @@
 #include "../../include/kstring.h"
 #include "../../include/usb.h"
 #include "../../include/ehci.h"
+#include "../../include/iowait.h"
 #include "../../include/lock.h"
+#include "../../include/mutex.h"
 
 extern void kprintf(const char *fmt, ...);
 
@@ -257,19 +259,31 @@ static uint64_t port_register(const struct ehci *host, unsigned port) {
     return host->operational + EHCI_PORTSC + port * 4U;
 }
 
+static struct lock ehci_lock = LOCK_INITIALIZER("ehci", LOCK_RANK_BUS);
+static struct mutex ehci_ops = MUTEX_INITIALIZER("ehci operations", LOCK_RANK_BUS);
+
+#define SPIN_BEFORE_NAP_NS 1000000ULL
+
+static void relax_or_nap(uint64_t started) {
+    if (time_uptime_ns() - started < SPIN_BEFORE_NAP_NS) cpu_relax();
+    else io_nap(&ehci_lock);
+}
+
 static int wait_for(uint64_t address, uint32_t mask, uint32_t wanted,
                     uint64_t timeout_ns) {
-    uint64_t deadline = time_uptime_ns() + timeout_ns;
+    uint64_t started = time_uptime_ns();
+    uint64_t deadline = started + timeout_ns;
     for (;;) {
         if ((mmio_read32(address) & mask) == wanted) return 0;
         if (time_uptime_ns() >= deadline) return -1;
-        cpu_relax();
+        relax_or_nap(started);
     }
 }
 
 static void delay_ns(uint64_t nanoseconds) {
-    uint64_t deadline = time_uptime_ns() + nanoseconds;
-    while (time_uptime_ns() < deadline) cpu_relax();
+    uint64_t started = time_uptime_ns();
+    uint64_t deadline = started + nanoseconds;
+    while (time_uptime_ns() < deadline) relax_or_nap(started);
 }
 
 #define DMA_ALLOCATION_ATTEMPTS 64
@@ -555,7 +569,7 @@ static int run_qtds(struct ehci *host, struct ehci_device *device,
             kicked = 1;
             async_kick(host);
         }
-        cpu_relax();
+        relax_or_nap(started);
     }
 
     dma_store32(&work_qh->overlay_next, LINK_TERMINATE);
@@ -1087,7 +1101,6 @@ static struct ehci_device *storage_device(int index, struct ehci **host_out) {
     return NULL;
 }
 
-static struct lock ehci_lock = LOCK_INITIALIZER("ehci", LOCK_RANK_BUS);
 
 static int ehci_storage_count_unlocked(void) {
     int count = 0;
@@ -1140,7 +1153,7 @@ static void service_pipe(struct ehci_pipe *pipe) {
 }
 
 void ehci_poll(void) {
-    lock_acquire(&ehci_lock);
+    if (!lock_try_acquire(&ehci_lock)) return;
     for (unsigned index = 0; index < pipe_capacity; index++)
         if (pipes[index] && pipes[index]->used) service_pipe(pipes[index]);
     lock_release(&ehci_lock);
@@ -1200,9 +1213,11 @@ static int ehci_bulk_transfer_unlocked(int index, int in, uint64_t physical,
 
 static int ehci_bulk_transfer(int index, int in, uint64_t physical,
                               uint32_t length) {
+    mutex_lock(&ehci_ops);
     lock_acquire(&ehci_lock);
     int status = ehci_bulk_transfer_unlocked(index, in, physical, length);
     lock_release(&ehci_lock);
+    mutex_unlock(&ehci_ops);
     return status;
 }
 
@@ -1223,9 +1238,11 @@ static int ehci_reset_recovery_unlocked(int index) {
 }
 
 static int ehci_reset_recovery(int index) {
+    mutex_lock(&ehci_ops);
     lock_acquire(&ehci_lock);
     int status = ehci_reset_recovery_unlocked(index);
     lock_release(&ehci_lock);
+    mutex_unlock(&ehci_ops);
     return status;
 }
 
@@ -1337,8 +1354,10 @@ static int ehci_init_unlocked(void) {
 }
 
 int ehci_init(void) {
+    mutex_lock(&ehci_ops);
     lock_acquire(&ehci_lock);
     int status = ehci_init_unlocked();
     lock_release(&ehci_lock);
+    mutex_unlock(&ehci_ops);
     return status;
 }

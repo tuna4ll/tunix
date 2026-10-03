@@ -8,7 +8,9 @@
 #include "../../include/nvme.h"
 #include "../../include/pci.h"
 #include "../../include/vmm.h"
+#include "../../include/iowait.h"
 #include "../../include/lock.h"
+#include "../../include/mutex.h"
 
 extern void kprintf(const char *fmt, ...);
 
@@ -76,7 +78,7 @@ struct nvme_queue {
 };
 
 struct nvme_controller {
-    struct lock lock;
+    struct mutex lock;
     uint64_t registers;
     uint32_t doorbell_stride;
     uint8_t *pages;
@@ -143,6 +145,12 @@ static void allocate_queue(struct nvme_controller *controller, struct nvme_queue
     queue->completion_doorbell = doorbell_of(controller, id, 1);
 }
 
+static int completion_posted(void *context) {
+    struct nvme_queue *queue = (struct nvme_queue *)context;
+    volatile struct nvme_completion *entry = &queue->completion[queue->completion_head];
+    return (entry->status & 1U) == queue->phase;
+}
+
 static int submit(struct nvme_controller *controller, struct nvme_queue *queue,
                   struct nvme_command *command) {
     uint16_t id = controller->next_command_id++;
@@ -153,18 +161,14 @@ static int submit(struct nvme_controller *controller, struct nvme_queue *queue,
     queue->submission_tail = (queue->submission_tail + 1U) % QUEUE_ENTRIES;
     write32(controller->registers + queue->submission_doorbell, queue->submission_tail);
 
-    for (uint32_t spin = 0; spin < NVME_WAIT_SPINS; spin++) {
-        volatile struct nvme_completion *entry = &queue->completion[queue->completion_head];
-        uint16_t status = entry->status;
-        if ((status & 1U) == queue->phase && entry->command_id == id) {
-            queue->completion_head = (queue->completion_head + 1U) % QUEUE_ENTRIES;
-            if (!queue->completion_head) queue->phase ^= 1U;
-            write32(controller->registers + queue->completion_doorbell, queue->completion_head);
-            return (int)(status >> 1);
-        }
-        cpu_relax();
-    }
-    return -1;
+    if (io_poll(completion_posted, queue, IO_TIMEOUT_NS) != 0) return -1;
+    volatile struct nvme_completion *entry = &queue->completion[queue->completion_head];
+    uint16_t status = entry->status;
+    if (entry->command_id != id) return -1;
+    queue->completion_head = (queue->completion_head + 1U) % QUEUE_ENTRIES;
+    if (!queue->completion_head) queue->phase ^= 1U;
+    write32(controller->registers + queue->completion_doorbell, queue->completion_head);
+    return (int)(status >> 1);
 }
 
 static int build_prp(struct nvme_controller *controller, struct nvme_command *command,
@@ -245,9 +249,9 @@ static int nvme_read_unlocked(void *context, uint64_t lba, uint32_t count, void 
 
 static int nvme_read(void *context, uint64_t lba, uint32_t count, void *destination) {
     struct nvme_namespace *space = context;
-    lock_acquire(&space->controller->lock);
+    mutex_lock(&space->controller->lock);
     int status = nvme_read_unlocked(context, lba, count, destination);
-    lock_release(&space->controller->lock);
+    mutex_unlock(&space->controller->lock);
     return status;
 }
 
@@ -281,9 +285,9 @@ static int nvme_write_unlocked(void *context, uint64_t lba, uint32_t count, cons
 
 static int nvme_write(void *context, uint64_t lba, uint32_t count, const void *source) {
     struct nvme_namespace *space = context;
-    lock_acquire(&space->controller->lock);
+    mutex_lock(&space->controller->lock);
     int status = nvme_write_unlocked(context, lba, count, source);
-    lock_release(&space->controller->lock);
+    mutex_unlock(&space->controller->lock);
     return status;
 }
 
@@ -298,9 +302,9 @@ static int nvme_flush_unlocked(void *context) {
 
 static int nvme_flush(void *context) {
     struct nvme_namespace *space = context;
-    lock_acquire(&space->controller->lock);
+    mutex_lock(&space->controller->lock);
     int status = nvme_flush_unlocked(context);
-    lock_release(&space->controller->lock);
+    mutex_unlock(&space->controller->lock);
     return status;
 }
 
@@ -409,7 +413,7 @@ static void bring_up(const struct pci_device *pci) {
     struct nvme_controller *controller = kmalloc(sizeof(*controller));
     if (!controller) return;
     memset(controller, 0, sizeof(*controller));
-    lock_init(&controller->lock, "nvme", LOCK_RANK_BLOCK);
+    mutex_init(&controller->lock, "nvme", LOCK_RANK_BLOCK);
     controller->next_command_id = 1;
     controller->index = controller_count;
     controller->registers = vmm_map_device(base, 0x2000U);

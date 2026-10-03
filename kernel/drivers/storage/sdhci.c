@@ -5,7 +5,9 @@
 #include "../../include/cpu.h"
 #include "../../include/sdhci.h"
 #include "../../include/time.h"
+#include "../../include/iowait.h"
 #include "../../include/lock.h"
+#include "../../include/mutex.h"
 
 extern void kprintf(const char *fmt, ...);
 
@@ -67,7 +69,7 @@ extern void kprintf(const char *fmt, ...);
 #define DATA_TIMEOUT_NS 5000000000ULL
 
 struct sdhci_host {
-    struct lock lock;
+    struct mutex lock;
     uint64_t base;
     uint64_t clock_hz;
     int quirks;
@@ -93,14 +95,22 @@ static void write_register(const struct sdhci_host *host, uint32_t offset, uint3
     if (host->quirks & SDHCI_QUIRK_WRITE_DELAY) settle_ns(20000ULL);
 }
 
+struct register_wait {
+    const struct sdhci_host *host;
+    uint32_t offset;
+    uint32_t mask;
+    uint32_t wanted;
+};
+
+static int bits_match(void *context) {
+    const struct register_wait *wait = (const struct register_wait *)context;
+    return (read_register(wait->host, wait->offset) & wait->mask) == wait->wanted;
+}
+
 static int wait_bits(const struct sdhci_host *host, uint32_t offset, uint32_t mask,
                      uint32_t wanted, uint64_t timeout_ns) {
-    uint64_t deadline = time_uptime_ns() + timeout_ns;
-    while ((read_register(host, offset) & mask) != wanted) {
-        if (time_uptime_ns() >= deadline) return -1;
-        cpu_relax();
-    }
-    return 0;
+    struct register_wait wait = {host, offset, mask, wanted};
+    return io_poll(bits_match, &wait, timeout_ns);
 }
 
 static int reset(const struct sdhci_host *host, uint32_t which) {
@@ -298,9 +308,9 @@ static int sdhci_transfer_unlocked(void *context, uint64_t lba, uint32_t count, 
 
 static int sdhci_transfer(void *context, uint64_t lba, uint32_t count, uint8_t *buffer, int write) {
     struct sdhci_host *host = context;
-    lock_acquire(&host->lock);
+    mutex_lock(&host->lock);
     int status = sdhci_transfer_unlocked(context, lba, count, buffer, write);
-    lock_release(&host->lock);
+    mutex_unlock(&host->lock);
     return status;
 }
 
@@ -315,7 +325,7 @@ static int sdhci_write(void *context, uint64_t lba, uint32_t count, const void *
 int sdhci_attach(uint64_t registers, uint64_t clock_hz, int quirks) {
     if (!registers || host_count >= MAX_HOSTS) return -1;
     struct sdhci_host *host = &hosts[host_count];
-    lock_init(&host->lock, "sdhci", LOCK_RANK_BLOCK);
+    mutex_init(&host->lock, "sdhci", LOCK_RANK_BLOCK);
     host->base = registers;
     host->quirks = quirks;
     uint64_t capability_clock = ((read_register(host, REG_CAPABILITIES) >> 8) & 0xFFU) * 1000000ULL;
