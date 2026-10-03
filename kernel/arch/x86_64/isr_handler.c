@@ -126,7 +126,7 @@ static void isr_dispatch(struct interrupt_frame *regs) {
         faulted_name[sizeof(faulted_name) - 1U] = 0;
         if (!faulted) faulted_name[0] = 0;
 
-        struct vm_area *area = process_find_area(fault_rip);
+        struct vm_area *area = (regs->cs & 3U) == 3U ? process_find_area(fault_rip) : NULL;
         const char *object = "?";
         uint64_t within = fault_rip;
         if (module_address_owner(fault_rip, &object, &within) == 0) {
