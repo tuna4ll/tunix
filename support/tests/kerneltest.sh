@@ -79,4 +79,6 @@ if ! grep -a "^$show" "$work/serial.log"; then
     exit 1
 fi
 [ -n "${KEEP_IMAGE:-}" ] && cp "$work/tunix.img" "$KEEP_IMAGE"
-grep -aq "^$marker PASS" "$work/serial.log"
+grep -aq "^$marker PASS" "$work/serial.log" && exit 0
+tail -60 "$work/serial.log" | grep -av "^$show"
+exit 1

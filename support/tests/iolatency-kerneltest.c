@@ -153,12 +153,16 @@ static void run(void) {
     for (u64 offset = 0; fd >= 0 && offset < WRITE_BYTES; offset += CHUNK_BYTES) {
         fill(offset);
         if (syscall3(SYS_WRITE, fd, (s64)chunk, CHUNK_BYTES) != (s64)CHUNK_BYTES) {
+            put("IOLAT write failed\n");
             failures++;
             break;
         }
     }
     u64 written = now_ns();
-    if (fd >= 0 && syscall1(SYS_FSYNC, fd) != 0) failures++;
+    if (fd >= 0 && syscall1(SYS_FSYNC, fd) != 0) {
+        put("IOLAT fsync failed\n");
+        failures++;
+    }
     u64 synced = now_ns();
     if (fd >= 0) (void)syscall1(SYS_CLOSE, fd);
 
@@ -170,13 +174,22 @@ static void run(void) {
         fill(offset);
         if (syscall3(SYS_READ, fd, (s64)back, CHUNK_BYTES) != (s64)CHUNK_BYTES ||
             !same(chunk, back, CHUNK_BYTES)) {
+            put("IOLAT read back differs at ");
+            put_number(offset);
+            put("\n");
             failures++;
             break;
         }
     }
     if (fd >= 0) (void)syscall1(SYS_CLOSE, fd);
     else failures++;
-    if (syscall2(SYS_UMOUNT2, (s64)"/stick", 0) != 0) failures++;
+    s64 unmounted = syscall2(SYS_UMOUNT2, (s64)"/stick", 0);
+    if (unmounted != 0) {
+        put("IOLAT umount failed ");
+        put_number((u64)-unmounted);
+        put("\n");
+        failures++;
+    }
 
     put_ms("IOLAT write_ms=", written - begun);
     put_ms(" fsync_ms=", synced - written);
