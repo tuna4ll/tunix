@@ -1625,6 +1625,10 @@ static uint64_t enter_next(struct process *next) {
 }
 
 static void switch_away(struct process *prev, struct process *next) {
+    if (next == prev) {
+        set_process_state(prev, PROCESS_RUNNING);
+        return;
+    }
     if (!lock_only_holds(&sched_lock)) lock_report_sleep("the scheduler");
     prev->sched_depth = lock_depth(&sched_lock);
     defer_park(&prev->defer_park);
