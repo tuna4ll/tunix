@@ -280,9 +280,9 @@ GPT so that one disk boots either firmware.
   disk a directory is written linearly.
 - **No orphan list.** A file deleted while open is freed when it closes; if the
   machine dies first, `e2fsck` finds the inode and frees it.
-- **Clean pages are not bounded in advance.** The cache grows until an
-  allocation fails and only then drops clean pages. Dirty pages are bounded: a
-  writer waits once they pass ten per cent of memory.
+- **No LRU for clean pages.** The cache is trimmed by how long ago a file was
+  last used, whole files at a time, once it passes half of memory. Dirty pages
+  are bounded separately: a writer waits once they pass ten per cent of memory.
 - **`fsck` on the running root** is not something to do; the fstab entry has
   pass 0 for exactly that reason.
 
@@ -319,8 +319,11 @@ rewrote the whole file.
 
 **Memory comes back a page at a time.** `vfs_drop_clean_pages()` frees the
 pages of a file that are clean, because the disk can hand them back. A dirty
-page stays until it has been written. The cache fills memory as a cache should
-and gives it up when an allocation would otherwise fail.
+page stays until it has been written. Clean pages of files nobody has touched
+for a while are dropped once the cache passes half of memory, and all of them
+when free memory runs low. The ceiling used to be a sixteenth of memory and at
+most 128 MiB, which on a laptop meant reading the same libraries off the stick
+again every few minutes.
 
 ### What the pages cost
 

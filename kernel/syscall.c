@@ -5045,9 +5045,8 @@ static int64_t sys_inotify_rm_watch(int fd, int descriptor) {
 static uint64_t file_cache_budget(void) {
     static uint64_t budget;
     if (budget) return budget;
-    budget = pmm_usable_page_count() * PMM_PAGE_SIZE / 16ULL;
+    budget = pmm_usable_page_count() * PMM_PAGE_SIZE / 2ULL;
     if (budget < 32ULL * 1024 * 1024) budget = 32ULL * 1024 * 1024;
-    if (budget > 128ULL * 1024 * 1024) budget = 128ULL * 1024 * 1024;
     return budget;
 }
 
