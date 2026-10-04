@@ -309,9 +309,28 @@ A 2.6 GiB file now writes on a 3 GiB machine, survives a reboot and reads back
 with the checksum it was written with.
 
 **Only what is touched is read.** Opening a file used to pull all of it off the
-disk. A page is fetched by `ext2_fetch_page()` when something reads or writes
-it, and a hole reads as zeros without touching the medium at all. `truncate -s
-2G` costs nothing: the file is two gigabytes long and holds no pages.
+disk. A page is fetched when something reads or writes it, and a hole reads as
+zeros without touching the medium at all. `truncate -s 2G` costs nothing: the
+file is two gigabytes long and holds no pages.
+
+**What is read is read in bulk.** A page fault or a `read()` fetches the whole
+aligned 128 KiB window around the page (`VFS_READAHEAD_PAGES`), the way Linux
+reads ahead and reads around. `ext2_fetch_pages()` maps every block of the
+window under the ext2 lock in one pass and then reads each run of adjacent
+blocks with one request, without the lock. Before, starting a program faulted
+its binary and libraries in one 4 KiB page at a time, and each page was a USB
+command of its own. On a root stick where a command costs 2.5 ms (QEMU,
+xHCI), the first run of each program took:
+
+| | a page per command | read ahead, 64 KiB commands |
+| --- | --- | --- |
+| `fastfetch` | 1930 ms | 60 ms |
+| `python3` importing five modules | 5292 ms | 724 ms |
+| `git --version` | 3956 ms | 178 ms |
+| `cat` of a 45 MB library | 23.8 s | 1.3 s |
+
+The second run of each takes milliseconds either way; it is served from the
+cache.
 
 **Only what changed is written.** Write-back takes the pages whose dirty bit is
 set and clears it; a clean page is never written. Before, every write-back

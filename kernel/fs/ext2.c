@@ -1772,37 +1772,71 @@ void ext2fs_balance(void) {
     (void)commit_volumes(1, 0);
 }
 
-static int map_read(uint32_t ino, uint64_t index, uint32_t *blocks) {
+static int map_read(uint32_t ino, uint64_t first, uint32_t pages, uint32_t *blocks) {
     struct ext2_inode inode;
     if (inode_read(ino, &inode) != 0) return -1;
     uint32_t per_page = VFS_PAGE_SIZE / fs->block_size;
-    uint64_t first = index * per_page;
-    if (first + per_page - 1U > 0xFFFFFFFFULL) return -1;
-    for (uint32_t part = 0; part < per_page; part++) {
+    uint64_t first_block = first * per_page;
+    uint64_t count = (uint64_t)pages * per_page;
+    if (first_block + count - 1U > 0xFFFFFFFFULL) return -1;
+    for (uint64_t part = 0; part < count; part++) {
         int dirty = 0;
-        int64_t block = inode_bmap(&inode, (uint32_t)(first + part), 0, &dirty);
+        int64_t block = inode_bmap(&inode, (uint32_t)(first_block + part), 0, &dirty);
         if (block < 0) return -1;
         blocks[part] = (uint32_t)block;
     }
     return 0;
 }
 
-static int read_mapped(struct ext2_volume *volume, const uint32_t *blocks, uint8_t *out) {
+static int read_mapped(struct ext2_volume *volume, const uint32_t *blocks, uint32_t count,
+                       uint8_t *const *pages, uint8_t *bounce) {
     uint32_t block_size = volume->block_size;
     uint32_t per_page = VFS_PAGE_SIZE / block_size;
-    for (uint32_t part = 0; part < per_page;) {
-        if (!blocks[part]) {
-            memset(out + (size_t)part * block_size, 0, block_size);
-            part++;
+    uint32_t per_run = EXT2_RUN_BYTES / block_size;
+    for (uint32_t at = 0; at < count;) {
+        uint8_t *target = pages[at / per_page] + (size_t)(at % per_page) * block_size;
+        if (!blocks[at]) {
+            memset(target, 0, block_size);
+            at++;
             continue;
         }
         uint32_t run = 1;
-        while (part + run < per_page && blocks[part + run] == blocks[part] + run) run++;
-        if (volume_read(volume, blocks[part], run, out + (size_t)part * block_size) != 0)
-            return -1;
-        part += run;
+        while (at + run < count && run < per_run && blocks[at + run] == blocks[at] + run) run++;
+        if (volume_read(volume, blocks[at], run, bounce) != 0) return -1;
+        for (uint32_t part = 0; part < run; part++) {
+            uint32_t slot = at + part;
+            memcpy(pages[slot / per_page] + (size_t)(slot % per_page) * block_size,
+                   bounce + (size_t)part * block_size, block_size);
+        }
+        at += run;
     }
     return 0;
+}
+
+static int ext2_fetch_pages(struct vfs_node *node, uint64_t first, uint32_t count,
+                            uint8_t *const *pages) {
+    if (!count || !pages) return -1;
+    uint32_t *blocks = (uint32_t *)kmalloc((size_t)count * (VFS_PAGE_SIZE / 1024U) * sizeof(*blocks));
+    uint8_t *bounce = (uint8_t *)kmalloc(EXT2_RUN_BYTES);
+    int status = -1;
+    uint32_t mapped = 0;
+    struct ext2_volume *volume = NULL;
+    if (blocks && bounce) {
+        mutex_lock(&ext2_lock);
+        volume = volume_of(node);
+        if (volume) {
+            struct ext2_volume *saved = enter(volume);
+            status = map_read(node->disk_inode, first, count, blocks);
+            mapped = count * (uint32_t)(VFS_PAGE_SIZE / fs->block_size);
+            if (fs->buffer_count > fs->buffer_limit) buffers_trim();
+            fs = saved;
+        }
+        mutex_unlock(&ext2_lock);
+    }
+    if (status == 0) status = read_mapped(volume, blocks, mapped, pages, bounce);
+    kfree(blocks);
+    kfree(bounce);
+    return status;
 }
 
 static int ext2_fetch_data(struct vfs_node *node) {
@@ -1811,20 +1845,8 @@ static int ext2_fetch_data(struct vfs_node *node) {
 }
 
 static int ext2_fetch_page(struct vfs_node *node, uint64_t index, void *out) {
-    if (!out) return -1;
-    uint32_t blocks[VFS_PAGE_SIZE / 1024U];
-    mutex_lock(&ext2_lock);
-    struct ext2_volume *volume = volume_of(node);
-    int status = -1;
-    if (volume) {
-        struct ext2_volume *saved = enter(volume);
-        status = map_read(node->disk_inode, index, blocks);
-        if (fs->buffer_count > fs->buffer_limit) buffers_trim();
-        fs = saved;
-    }
-    mutex_unlock(&ext2_lock);
-    if (status == 0) status = read_mapped(volume, blocks, (uint8_t *)out);
-    return status;
+    uint8_t *page = (uint8_t *)out;
+    return ext2_fetch_pages(node, index, 1, &page);
 }
 
 static const struct vfs_persist_ops ext2_persist_ops = {
@@ -1837,6 +1859,7 @@ static const struct vfs_persist_ops ext2_persist_ops = {
     .released = ext2_event_released,
     .fetch = ext2_fetch_data,
     .fetch_page = ext2_fetch_page,
+    .fetch_pages = ext2_fetch_pages,
     .writeback = ext2_writeback,
     .sync_node = ext2_sync_node,
     .sync_all = ext2_sync_all,

@@ -180,6 +180,8 @@ struct vfs_persist_ops {
     void (*released)(struct vfs_node *node);
     int (*fetch)(struct vfs_node *node);
     int (*fetch_page)(struct vfs_node *node, uint64_t index, void *out);
+    int (*fetch_pages)(struct vfs_node *node, uint64_t first, uint32_t count,
+                       uint8_t *const *pages);
     int (*writeback)(struct vfs_node *node, const struct vfs_writeback *batch);
     int (*sync_node)(struct vfs_node *node);
     int (*sync_all)(void);
@@ -201,6 +203,7 @@ int vfs_page_is_dirty(struct vfs_node *node, uint64_t index);
 void vfs_page_clear_dirty(struct vfs_node *node, uint64_t index);
 void vfs_start_writeback(void);
 void vfs_prefetch(struct vfs_node *node, uint64_t offset, uint64_t size);
+#define VFS_READAHEAD_PAGES 32ULL
 void vfs_balance_dirty(void);
 int vfs_fsync(struct vfs_node *node);
 int vfs_sync(void);

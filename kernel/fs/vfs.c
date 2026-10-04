@@ -776,7 +776,14 @@ uint64_t vfs_page_span(struct vfs_node *node) {
     return span;
 }
 
-#define PREFETCH_PAGES 32U
+#define PREFETCH_PAGES 64U
+
+static int fetch_run(struct vfs_node *node, uint64_t first, uint32_t count, uint8_t *const *pages) {
+    if (persist_ops->fetch_pages) return persist_ops->fetch_pages(node, first, count, pages);
+    for (uint32_t index = 0; index < count; index++)
+        if (persist_ops->fetch_page(node, first + index, pages[index]) != 0) return -1;
+    return 0;
+}
 
 void vfs_prefetch(struct vfs_node *node, uint64_t offset, uint64_t size) {
     if (!node || !size || !persist_ops || !persist_ops->fetch_page) return;
@@ -799,17 +806,21 @@ void vfs_prefetch(struct vfs_node *node, uint64_t offset, uint64_t size) {
         generation = node->io_generation;
         node->refs++;
     }
-    unsigned fetched = 0;
-    for (unsigned index = 0; index < count; index++) {
+    unsigned allocated = 0;
+    while (allocated < count) {
         void *physical = pmm_alloc_page();
         if (!physical) break;
-        pages[index] = (uint8_t *)vmm_phys_to_virt((uint64_t)physical);
-        if (persist_ops->fetch_page(node, indices[index], pages[index]) != 0) {
-            pmm_free_page(physical);
-            break;
-        }
-        fetched++;
+        pages[allocated++] = (uint8_t *)vmm_phys_to_virt((uint64_t)physical);
     }
+    unsigned fetched = 0;
+    while (fetched < allocated) {
+        unsigned run = 1;
+        while (fetched + run < allocated && indices[fetched + run] == indices[fetched] + run) run++;
+        if (fetch_run(node, indices[fetched], run, &pages[fetched]) != 0) break;
+        fetched += run;
+    }
+    for (unsigned index = fetched; index < allocated; index++)
+        pmm_free_page((void *)vmm_virt_to_phys_direct(pages[index]));
     VFS_LOCKED;
     for (unsigned index = 0; index < fetched; index++) {
         int installed = 0;
@@ -828,8 +839,15 @@ void vfs_prefetch(struct vfs_node *node, uint64_t offset, uint64_t size) {
     vfs_node_unref(node);
 }
 
+static void readahead(struct vfs_node *node, uint64_t offset, uint64_t size) {
+    uint64_t window = VFS_READAHEAD_PAGES * VFS_PAGE_SIZE;
+    uint64_t end = offset + (size ? size : 1U);
+    for (uint64_t at = offset / window * window; at < end; at += window)
+        vfs_prefetch(node, at, window);
+}
+
 static int64_t memory_read(struct vfs_node *node, uint64_t offset, size_t size, void *buffer) {
-    vfs_prefetch(node, offset, size);
+    readahead(node, offset, size);
     VFS_LOCKED;
     if (!node || !buffer || offset >= node->length) return 0;
     uint64_t available = node->length - offset;
