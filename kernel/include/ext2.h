@@ -23,6 +23,7 @@ int ext2fs_mount(const char *source, const char *mount_name, struct vfs_node **r
 void ext2fs_unmount(struct vfs_node *root);
 int ext2fs_owns(const struct vfs_node *node);
 void ext2fs_start(void);
+void ext2fs_balance(void);
 int ext2fs_journalled(const struct vfs_node *node);
 int ext2fs_shutdown(void);
 

@@ -100,8 +100,10 @@ dirty; nothing is written yet. The superblock and group descriptors are kept in
 memory and compared against the last copy written, so only a descriptor block
 whose counts changed goes out.
 
-`volume_commit()` gathers every dirty buffer, sorts them by block number and
-hands them to `ext3_journal_commit()` as one transaction:
+A commit copies every dirty buffer into a snapshot, sorted by block number,
+while it holds the ext2 lock, marks the buffers clean and in flight, and lets
+the lock go. The snapshot is then handed to `ext3_journal_commit()` as one
+transaction:
 
 1. descriptor blocks and the blocks they name, gathered into runs, then a
    device flush
@@ -114,11 +116,23 @@ several descriptors before its commit block. `needs_recovery` is set in the
 filesystem superblock when the volume is mounted and cleared when it is
 unmounted, not once per transaction.
 
+None of those writes happens under the ext2 lock. A buffer changed while its
+snapshot is on the way to the disk is simply dirty again and goes out with the
+next transaction, and a buffer in flight is never evicted, so nothing reads the
+old copy back from the disk before the new one lands. Commits are ordered
+against each other and against file data by a second lock, `ext2 io`, which is
+held only by whoever is writing: the commit thread, a data write-back, `fsync`
+and unmount. Creating, renaming and deleting files, and reading them, need only
+the ext2 lock and wait for memory work, not for the stick.
+
 A commit happens when the volume has had something dirty for five seconds (the
 `ext2commit` thread checks once a second), when the dirty buffers reach half
 the journal or half the buffer cache, on `fsync`, `sync` and `msync(MS_SYNC)`,
 and on unmount and power-off. xbps unpacking a package therefore costs one
-commit every few seconds instead of four cache flushes per file.
+commit every few seconds instead of four cache flushes per file. A program that
+changes metadata faster than the disk takes it -- twice the threshold without a
+commit -- does the next commit itself at the end of its system call, holding no
+other lock, the way a writer is throttled for file data.
 
 A block freed in the running transaction is not handed out again until that
 transaction has committed (`free_block()` queues it; `volume_commit()` releases
@@ -131,9 +145,11 @@ rule.
 `write()` copies into the page cache, marks the pages dirty and puts the file on
 a list. The `flush` kernel thread (`kernel/fs/vfs.c`) writes a file back once it
 has been dirty for five seconds, or sooner when the dirty pages pass five per
-cent of memory. Each batch of up to 32 pages is copied out under the VFS lock
-and written under the ext2 lock alone, so a slow disk does not hold up the rest
-of the filesystem. A program that writes faster than the disk takes it is made
+cent of memory. Each batch of up to 32 pages is copied out under the VFS lock;
+its blocks are allocated and the inode updated under the ext2 lock, and the data
+is written with only `ext2 io` held. The metadata that points at new blocks
+cannot commit before those blocks are written, since the commit needs the same
+lock -- ordered mode, as on Linux. A program that writes faster than the disk takes it is made
 to wait in `vfs_balance_dirty()` once dirty pages pass ten per cent of memory
 (128 MiB at most), the way Linux throttles a writer.
 
@@ -143,7 +159,8 @@ the pages it carried are marked dirty again if they still exist.
 
 Reading a page that is not in the cache goes to the disk without the VFS lock
 held (`vfs_prefetch()`), and the page is put in the cache only if nothing
-filled that slot meanwhile.
+filled that slot meanwhile. The ext2 lock is held only while the page's blocks
+are looked up, not while they are read.
 
 ### What the old way cost
 
@@ -157,6 +174,18 @@ late -- which on the real laptop was the mouse and the clock stopping during
 `xbps-install`. The same test now returns from `write()` in 17 ms, the sleeping
 thread is at most 19 ms late, and reading a cached file on the root meanwhile
 takes at most 104 ms. The `fsync` at the end takes as long as the stick needs.
+
+That test writes one file. `xbps-install -Sy gimp` onto a root on a USB stick
+(QEMU, xHCI, 8 MB/s and 100 writes a second) still stopped the Weston clock for
+three to thirteen seconds at a time, dozens of times. Measuring every lock held
+or waited on for more than 50 ms showed why: the commit thread and the data
+write-back held the ext2 lock for up to 400 ms while the stick worked, every
+metadata change asked for an immediate commit, and renames and deletes holding
+the VFS lock waited behind them -- with `weston-desktop-shell` queued behind
+those in its own lookups and page faults. With the disk work moved out from
+under the lock the same install ran for fifteen minutes and the clock never
+stood still for more than two seconds -- and that once, just after switching
+back to the desktop.
 
 ### Replay
 
@@ -242,8 +271,8 @@ GPT so that one disk boots either firmware.
   what matters for replaying a log Linux left behind. This kernel does not need
   them: a freed block is not reused before its transaction commits, and a
   committed transaction is checkpointed before the next one starts.
-- **One lock for every ext2 volume.** The ext2 lock serialises all mounted ext2
-  and ext3 volumes, so two disks are not written in parallel.
+- **One lock for every ext2 volume.** The ext2 lock and `ext2 io` are shared by
+  all mounted ext2 and ext3 volumes, so two disks are not written in parallel.
 - **No extents, no 64-bit block numbers.** Block numbers are 32 bits, so a
   filesystem ends at 16 TiB with 4 KiB blocks, and `i_blocks` counts sectors in
   32 bits, so a single file ends at 2 TiB.

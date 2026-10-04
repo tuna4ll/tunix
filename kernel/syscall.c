@@ -6207,6 +6207,28 @@ static int syscall_writes_data(uint64_t number) {
     }
 }
 
+static int syscall_changes_files(uint64_t number) {
+    switch (number) {
+        case SYS_FTRUNCATE:
+        case SYS_FALLOCATE:
+        case SYS_RENAME:
+        case SYS_RENAMEAT:
+        case SYS_RENAMEAT2:
+        case SYS_MKDIR:
+        case SYS_MKDIRAT:
+        case SYS_RMDIR:
+        case SYS_LINK:
+        case SYS_LINKAT:
+        case SYS_UNLINK:
+        case SYS_UNLINKAT:
+        case SYS_SYMLINK:
+        case SYS_SYMLINKAT:
+            return 1;
+        default:
+            return syscall_writes_data(number);
+    }
+}
+
 #define VERBOSE_SYSCALL_LIMIT 24U
 
 void syscall_dispatch(struct syscall_frame *frame) {
@@ -6228,6 +6250,7 @@ void syscall_dispatch(struct syscall_frame *frame) {
     syscall_run(frame);
     syscall_release_pins_of(caller);
     if (syscall_writes_data(syscall_number) && process_current() == caller) vfs_balance_dirty();
+    if (syscall_changes_files(syscall_number) && process_current() == caller) ext2fs_balance();
     struct syscall_frame *resumed = frame;
     uint64_t stack_top = cpu_current()->kernel_rsp;
     if (stack_top) {

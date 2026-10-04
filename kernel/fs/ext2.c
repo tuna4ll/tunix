@@ -169,6 +169,7 @@ struct ext2_buffer {
     struct ext2_buffer *lru_next;
     uint32_t block;
     uint8_t dirty;
+    uint8_t writing;
     uint8_t data[];
 };
 
@@ -228,8 +229,11 @@ static struct ext2_volume *fs;
 static uint8_t meta_buf[EXT2_MAX_BLOCK_SIZE];
 static uint8_t data_buf[EXT2_MAX_BLOCK_SIZE];
 static uint8_t bulk_buf[EXT2_RUN_BYTES];
+static uint8_t io_buf[EXT2_RUN_BYTES];
 
+static struct mutex ext2_io_lock = MUTEX_INITIALIZER("ext2 io", LOCK_RANK_EXT2_IO);
 static struct mutex ext2_lock = MUTEX_INITIALIZER("ext2", LOCK_RANK_EXT2);
+static volatile int commit_behind;
 
 static void ext2_guard_release(int *unused) {
     (void)unused;
@@ -382,6 +386,7 @@ static struct ext2_buffer *buffer_create(uint32_t block) {
     if (!buffer) return NULL;
     buffer->block = block;
     buffer->dirty = 0;
+    buffer->writing = 0;
     uint32_t bucket = buffer_bucket(block);
     buffer->hash_next = fs->buffers[bucket];
     fs->buffers[bucket] = buffer;
@@ -450,7 +455,7 @@ static void buffers_trim(void) {
     struct ext2_buffer *buffer = fs->lru_tail;
     while (buffer && fs->buffer_count > fs->buffer_limit) {
         struct ext2_buffer *previous = buffer->lru_prev;
-        if (!buffer->dirty) buffer_destroy(buffer);
+        if (!buffer->dirty && !buffer->writing) buffer_destroy(buffer);
         buffer = previous;
     }
 }
@@ -534,55 +539,96 @@ static void sort_blocks(uint32_t *targets, uint8_t **data, uint32_t count) {
     }
 }
 
-static int write_sorted(const uint32_t *targets, uint8_t *const *data, uint32_t count) {
-    uint32_t per_run = EXT2_RUN_BYTES / fs->block_size;
-    for (uint32_t index = 0; index < count;) {
-        uint32_t run = 1;
-        memcpy(bulk_buf, data[index], fs->block_size);
-        while (index + run < count && run < per_run &&
-               targets[index + run] == targets[index] + run) {
-            memcpy(bulk_buf + (size_t)run * fs->block_size, data[index + run], fs->block_size);
-            run++;
-        }
-        if (write_blocks(targets[index], run, bulk_buf) != 0) return -1;
-        index += run;
-    }
-    return 0;
-}
+struct commit_plan {
+    uint32_t count;
+    uint32_t *targets;
+    uint8_t **data;
+    uint8_t *snapshot;
+};
 
-static int volume_commit(void) {
+static int commit_prepare(struct commit_plan *plan) {
+    memset(plan, 0, sizeof(*plan));
     apply_pending_frees();
     if (stage_groups() != 0 || stage_superblock() != 0) return -1;
     fs->last_commit_ns = time_uptime_ns();
     uint32_t count = fs->dirty_buffers;
     if (!count) return 0;
-    uint32_t *targets = (uint32_t *)kmalloc(count * sizeof(*targets));
-    uint8_t **data = (uint8_t **)kmalloc(count * sizeof(*data));
-    int status = -1;
-    if (targets && data) {
-        uint32_t found = 0;
-        for (struct ext2_buffer *buffer = fs->lru_head; buffer && found < count;
-             buffer = buffer->lru_next) {
-            if (!buffer->dirty) continue;
-            targets[found] = buffer->block;
-            data[found] = buffer->data;
-            found++;
-        }
-        sort_blocks(targets, data, found);
-        status = fs->journal ? ext3_journal_commit(fs->journal, found, targets, data)
-                             : write_sorted(targets, data, found);
-        if (status == 0) {
-            for (uint32_t index = 0; index < found; index++) {
-                struct ext2_buffer *buffer = buffer_of(data[index]);
-                if (!buffer->dirty) continue;
-                buffer->dirty = 0;
-                fs->dirty_buffers--;
-            }
-        }
+    plan->targets = (uint32_t *)kmalloc(count * sizeof(*plan->targets));
+    plan->data = (uint8_t **)kmalloc(count * sizeof(*plan->data));
+    plan->snapshot = (uint8_t *)kmalloc((size_t)count * fs->block_size);
+    if (!plan->targets || !plan->data || !plan->snapshot) return -1;
+    uint32_t found = 0;
+    for (struct ext2_buffer *buffer = fs->lru_head; buffer && found < count;
+         buffer = buffer->lru_next) {
+        if (!buffer->dirty) continue;
+        plan->targets[found] = buffer->block;
+        plan->data[found] = buffer->data;
+        found++;
     }
-    kfree(targets);
-    kfree(data);
+    sort_blocks(plan->targets, plan->data, found);
+    for (uint32_t index = 0; index < found; index++) {
+        struct ext2_buffer *buffer = buffer_of(plan->data[index]);
+        uint8_t *copy = plan->snapshot + (size_t)index * fs->block_size;
+        memcpy(copy, buffer->data, fs->block_size);
+        plan->data[index] = copy;
+        buffer->dirty = 0;
+        buffer->writing = 1;
+        fs->dirty_buffers--;
+    }
+    plan->count = found;
+    return 0;
+}
+
+static int commit_write(struct ext2_volume *volume, const struct commit_plan *plan) {
+    if (!plan->count) return 0;
+    if (volume->journal)
+        return ext3_journal_commit(volume->journal, plan->count, plan->targets, plan->data);
+    uint32_t per_run = EXT2_RUN_BYTES / volume->block_size;
+    for (uint32_t index = 0; index < plan->count;) {
+        uint32_t run = 1;
+        while (index + run < plan->count && run < per_run &&
+               plan->targets[index + run] == plan->targets[index] + run) run++;
+        if (volume_write(volume, plan->targets[index], run, plan->data[index]) != 0) return -1;
+        index += run;
+    }
+    return 0;
+}
+
+static void commit_finish(struct commit_plan *plan, int status) {
+    for (uint32_t index = 0; index < plan->count; index++) {
+        struct ext2_buffer *buffer = buffer_find(plan->targets[index]);
+        if (!buffer) continue;
+        buffer->writing = 0;
+        if (status != 0) buf_mark(buffer->data);
+    }
+    kfree(plan->targets);
+    kfree(plan->data);
+    kfree(plan->snapshot);
     buffers_trim();
+}
+
+static int volume_commit(void) {
+    struct commit_plan plan;
+    int status = commit_prepare(&plan);
+    if (status == 0) status = commit_write(fs, &plan);
+    commit_finish(&plan, status);
+    return status;
+}
+
+static void report_failure(const char *what, const char *name);
+
+static int commit_volume(struct ext2_volume *volume) {
+    struct ext2_volume *saved = enter(volume);
+    struct commit_plan plan;
+    int status = commit_prepare(&plan);
+    fs = saved;
+    mutex_unlock(&ext2_lock);
+    if (status == 0) status = commit_write(volume, &plan);
+    mutex_lock(&ext2_lock);
+    saved = enter(volume);
+    commit_finish(&plan, status);
+    if (status != 0) report_failure("commit", "metadata");
+    fs = saved;
     return status;
 }
 
@@ -598,9 +644,10 @@ static uint32_t commit_threshold(void) {
 static void commit_kick(void);
 
 static int flush_meta(void) {
-    if (fs->dirty_buffers + fs->pending_free_count / 64U >= commit_threshold())
-        return volume_commit();
-    commit_kick();
+    uint32_t threshold = commit_threshold();
+    uint32_t load = fs->dirty_buffers + fs->pending_free_count / 64U;
+    if (load >= threshold) commit_kick();
+    if (load >= 2U * threshold) __atomic_store_n(&commit_behind, 1, __ATOMIC_RELEASE);
     return 0;
 }
 
@@ -1575,26 +1622,81 @@ static void ext2_event_meta_changed(struct vfs_node *node) {
     op_leave(saved);
 }
 
+static int volume_needs_commit(void);
+
+struct data_extent {
+    uint32_t block;
+    uint32_t bytes;
+    const uint8_t *source;
+};
+
+static int map_page(struct ext2_inode *inode, uint64_t length, uint64_t index,
+                    const uint8_t *page, struct data_extent *out, uint32_t *used,
+                    int *allocated) {
+    uint32_t block_size = fs->block_size;
+    for (uint32_t part = 0; part < VFS_PAGE_SIZE / block_size; part++) {
+        uint64_t start = index * VFS_PAGE_SIZE + (uint64_t)part * block_size;
+        if (start >= length) break;
+        uint64_t file_block = start / block_size;
+        failed_stage = "block map";
+        if (file_block > 0xFFFFFFFFULL) return -1;
+        int dirty = 0;
+        int64_t block = inode_bmap(inode, (uint32_t)file_block, 1, &dirty);
+        if (block <= 0) return -1;
+        if (dirty) *allocated = 1;
+        uint64_t available = length - start;
+        out[*used].block = (uint32_t)block;
+        out[*used].bytes = available < block_size ? (uint32_t)available : block_size;
+        out[*used].source = page + (size_t)part * block_size;
+        (*used)++;
+    }
+    return 0;
+}
+
+static int write_extents(struct ext2_volume *volume, const struct data_extent *extents,
+                         uint32_t count) {
+    uint32_t block_size = volume->block_size;
+    uint32_t capacity = EXT2_RUN_BYTES / block_size;
+    for (uint32_t index = 0; index < count;) {
+        uint32_t run = 0;
+        while (index + run < count && run < capacity &&
+               extents[index + run].block == extents[index].block + run) {
+            const struct data_extent *extent = &extents[index + run];
+            uint8_t *slot = io_buf + (size_t)run * block_size;
+            memcpy(slot, extent->source, extent->bytes);
+            if (extent->bytes < block_size) memset(slot + extent->bytes, 0, block_size - extent->bytes);
+            run++;
+        }
+        if (volume_write(volume, extents[index].block, run, io_buf) != 0) return -1;
+        index += run;
+    }
+    return 0;
+}
+
 static int ext2_writeback(struct vfs_node *node, const struct vfs_writeback *batch) {
+    mutex_lock(&ext2_io_lock);
     mutex_lock(&ext2_lock);
     struct ext2_volume *volume = active_volume_of(node);
     if (!volume || node->disk_inode != batch->ino ||
         node->io_generation != batch->generation) {
         mutex_unlock(&ext2_lock);
+        mutex_unlock(&ext2_io_lock);
         return VFS_WRITEBACK_STALE;
     }
     struct ext2_volume *saved = enter(volume);
-    int status = -1;
+    uint32_t per_page = VFS_PAGE_SIZE / fs->block_size;
+    struct data_extent *extents =
+        (struct data_extent *)kmalloc((size_t)batch->count * per_page * sizeof(*extents));
+    uint32_t used = 0;
+    int status = extents ? -1 : -ENOMEM;
     int allocated = 0;
     struct ext2_inode inode;
     failed_stage = "inode read";
-    if (inode_read(batch->ino, &inode) == 0) {
-        struct run_writer run = {0, 0};
+    if (extents && inode_read(batch->ino, &inode) == 0) {
         status = 0;
         for (uint32_t index = 0; index < batch->count && status == 0; index++)
-            status = write_page(&inode, batch->length, batch->indices[index],
-                                batch->pages[index], &run, &allocated);
-        if (run_flush(&run) != 0) status = -1;
+            status = map_page(&inode, batch->length, batch->indices[index],
+                              batch->pages[index], extents, &used, &allocated);
         if (batch->length > inode_size_of(&inode)) inode_set_size(&inode, batch->length);
         if (batch->atime > inode.i_atime) inode.i_atime = batch->atime;
         if (batch->mtime > inode.i_mtime) inode.i_mtime = batch->mtime;
@@ -1602,67 +1704,101 @@ static int ext2_writeback(struct vfs_node *node, const struct vfs_writeback *bat
         failed_stage = "inode write";
         if (inode_write(batch->ino, &inode) != 0) status = -1;
     }
+    if (allocated) flush_meta();
     if (status != 0) report_failure("write back", node->name);
-    else if (allocated) flush_meta();
     fs = saved;
     mutex_unlock(&ext2_lock);
+    if (used && write_extents(volume, extents, used) != 0) {
+        mutex_lock(&ext2_lock);
+        saved = enter(volume);
+        failed_stage = "data write";
+        report_failure("write back", node->name);
+        fs = saved;
+        mutex_unlock(&ext2_lock);
+        status = -1;
+    }
+    mutex_unlock(&ext2_io_lock);
+    kfree(extents);
     return status;
 }
 
-static int volume_sync(void) {
-    int status = volume_commit();
-    if (volume_flush(fs) != 0) status = -1;
+static int commit_volumes(int force, int flush) {
+    int status = 0;
+    mutex_lock(&ext2_io_lock);
+    mutex_lock(&ext2_lock);
+    uint64_t now = time_uptime_ns();
+    int behind = 0;
+    for (struct ext2_volume *volume = volumes; volume; volume = volume->next) {
+        if (volume->loading) continue;
+        struct ext2_volume *saved = enter(volume);
+        int due = volume_needs_commit() &&
+                  (force || now - fs->last_commit_ns >= EXT2_COMMIT_INTERVAL_NS ||
+                   fs->dirty_buffers + fs->pending_free_count / 64U >= commit_threshold());
+        fs = saved;
+        if (due && commit_volume(volume) != 0) status = -1;
+        saved = enter(volume);
+        if (fs->buffer_count > fs->buffer_limit) buffers_trim();
+        if (fs->dirty_buffers + fs->pending_free_count / 64U >= 2U * commit_threshold())
+            behind = 1;
+        fs = saved;
+    }
+    __atomic_store_n(&commit_behind, behind, __ATOMIC_RELEASE);
+    mutex_unlock(&ext2_lock);
+    if (flush) {
+        for (struct ext2_volume *volume = volumes; volume; volume = volume->next)
+            if (!volume->loading && volume_flush(volume) != 0) status = -1;
+    }
+    mutex_unlock(&ext2_io_lock);
     return status;
 }
 
 static int ext2_sync_node(struct vfs_node *node) {
+    mutex_lock(&ext2_io_lock);
     mutex_lock(&ext2_lock);
     struct ext2_volume *volume = volume_of(node);
-    int status = 0;
-    if (volume) {
-        struct ext2_volume *saved = enter(volume);
-        status = volume_sync();
-        fs = saved;
-    }
+    int status = volume ? commit_volume(volume) : 0;
     mutex_unlock(&ext2_lock);
+    if (volume && volume_flush(volume) != 0) status = -1;
+    mutex_unlock(&ext2_io_lock);
     return status;
 }
 
 static int ext2_sync_all(void) {
-    mutex_lock(&ext2_lock);
-    int status = 0;
-    for (struct ext2_volume *volume = volumes; volume; volume = volume->next) {
-        if (volume->loading) continue;
-        struct ext2_volume *saved = enter(volume);
-        if (volume_sync() != 0) status = -1;
-        fs = saved;
-    }
-    mutex_unlock(&ext2_lock);
-    return status;
+    return commit_volumes(1, 1);
 }
 
-static int read_page(uint32_t ino, uint64_t index, uint8_t *out) {
+void ext2fs_balance(void) {
+    if (!__atomic_load_n(&commit_behind, __ATOMIC_ACQUIRE) || !process_may_sleep()) return;
+    (void)commit_volumes(1, 0);
+}
+
+static int map_read(uint32_t ino, uint64_t index, uint32_t *blocks) {
     struct ext2_inode inode;
     if (inode_read(ino, &inode) != 0) return -1;
-    uint32_t block_size = fs->block_size;
-    uint32_t per_page = VFS_PAGE_SIZE / block_size;
+    uint32_t per_page = VFS_PAGE_SIZE / fs->block_size;
     uint64_t first = index * per_page;
     if (first + per_page - 1U > 0xFFFFFFFFULL) return -1;
-    uint32_t part = 0;
-    while (part < per_page) {
+    for (uint32_t part = 0; part < per_page; part++) {
         int dirty = 0;
         int64_t block = inode_bmap(&inode, (uint32_t)(first + part), 0, &dirty);
         if (block < 0) return -1;
-        if (block == 0) {
+        blocks[part] = (uint32_t)block;
+    }
+    return 0;
+}
+
+static int read_mapped(struct ext2_volume *volume, const uint32_t *blocks, uint8_t *out) {
+    uint32_t block_size = volume->block_size;
+    uint32_t per_page = VFS_PAGE_SIZE / block_size;
+    for (uint32_t part = 0; part < per_page;) {
+        if (!blocks[part]) {
             memset(out + (size_t)part * block_size, 0, block_size);
             part++;
             continue;
         }
         uint32_t run = 1;
-        while (part + run < per_page &&
-               inode_bmap(&inode, (uint32_t)(first + part + run), 0, &dirty) ==
-                   block + run) run++;
-        if (read_blocks_raw((uint32_t)block, run, out + (size_t)part * block_size) != 0)
+        while (part + run < per_page && blocks[part + run] == blocks[part] + run) run++;
+        if (volume_read(volume, blocks[part], run, out + (size_t)part * block_size) != 0)
             return -1;
         part += run;
     }
@@ -1675,11 +1811,19 @@ static int ext2_fetch_data(struct vfs_node *node) {
 }
 
 static int ext2_fetch_page(struct vfs_node *node, uint64_t index, void *out) {
+    if (!out) return -1;
+    uint32_t blocks[VFS_PAGE_SIZE / 1024U];
+    mutex_lock(&ext2_lock);
     struct ext2_volume *volume = volume_of(node);
-    if (!volume || !out) return -1;
-    struct ext2_volume *saved = op_enter(volume);
-    int status = read_page(node->disk_inode, index, (uint8_t *)out);
-    op_leave(saved);
+    int status = -1;
+    if (volume) {
+        struct ext2_volume *saved = enter(volume);
+        status = map_read(node->disk_inode, index, blocks);
+        if (fs->buffer_count > fs->buffer_limit) buffers_trim();
+        fs = saved;
+    }
+    mutex_unlock(&ext2_lock);
+    if (status == 0) status = read_mapped(volume, blocks, (uint8_t *)out);
     return status;
 }
 
@@ -2240,6 +2384,7 @@ int ext2fs_mount(const char *source, const char *mount_name, struct vfs_node **r
 
 void ext2fs_unmount(struct vfs_node *root) {
     VFS_GUARD;
+    mutex_lock(&ext2_io_lock);
     mutex_lock(&ext2_lock);
     struct ext2_volume *volume = volumes;
     while (volume && volume->root != root) volume = volume->next;
@@ -2252,6 +2397,7 @@ void ext2fs_unmount(struct vfs_node *root) {
         volume_destroy(volume);
     }
     mutex_unlock(&ext2_lock);
+    mutex_unlock(&ext2_io_lock);
 }
 
 int ext2fs_owns(const struct vfs_node *node) {
@@ -2287,13 +2433,16 @@ int ext2fs_stats(const struct vfs_node *node, struct ext2_fs_stats *out) {
 
 int ext2fs_shutdown(void) {
     VFS_GUARD;
-    EXT2_LOCKED;
+    mutex_lock(&ext2_io_lock);
+    mutex_lock(&ext2_lock);
     int status = 0;
     for (struct ext2_volume *volume = volumes; volume; volume = volume->next) {
         struct ext2_volume *saved = enter(volume);
         if (volume_shutdown() != 0) status = -1;
         fs = saved;
     }
+    mutex_unlock(&ext2_lock);
+    mutex_unlock(&ext2_io_lock);
     return status;
 }
 
@@ -2318,20 +2467,7 @@ static void commit_thread(void *unused) {
         if (!__atomic_load_n(&commit_requested, __ATOMIC_ACQUIRE)) process_wait();
         process_finish_wait();
         int urgent = __atomic_exchange_n(&commit_requested, 0, __ATOMIC_ACQ_REL);
-        uint64_t now = time_uptime_ns();
-        mutex_lock(&ext2_lock);
-        for (struct ext2_volume *volume = volumes; volume; volume = volume->next) {
-            if (volume->loading) continue;
-            struct ext2_volume *saved = enter(volume);
-            if (volume_needs_commit() &&
-                (urgent || now - fs->last_commit_ns >= EXT2_COMMIT_INTERVAL_NS)) {
-                if (volume_commit() != 0) report_failure("commit", "metadata");
-            } else if (fs->buffer_count > fs->buffer_limit) {
-                buffers_trim();
-            }
-            fs = saved;
-        }
-        mutex_unlock(&ext2_lock);
+        (void)commit_volumes(urgent, 0);
     }
 }
 

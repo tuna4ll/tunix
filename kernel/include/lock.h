@@ -10,6 +10,7 @@ enum lock_rank {
     LOCK_RANK_MEMORY = 10,
     LOCK_RANK_MODULES = 18,
     LOCK_RANK_VFS = 20,
+    LOCK_RANK_EXT2_IO = 23,
     LOCK_RANK_EXT2 = 25,
     LOCK_RANK_OBJECT = 30,
     LOCK_RANK_NET = 35,

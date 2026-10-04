@@ -314,6 +314,7 @@ The ranks, outermost first (`kernel/include/lock.h`):
 | 10 | a process's address space | |
 | 18 | modules | |
 | 20 | the VFS tree and page cache | |
+| 23 | ext2 disk writes: commits, write-back, fsync | |
 | 25 | ext2 and ext3 volumes | |
 | 30 | | pipes, sockets, epoll, eventfd and the other descriptor objects |
 | 35 | | the network stack |
