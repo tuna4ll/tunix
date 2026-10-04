@@ -3209,7 +3209,7 @@ static int send_signal(int64_t pid, int signal_number, int checked) {
     if (pid > 0) {
         struct process *target = process_find((uint64_t)pid);
         if (!target) return -ESRCH;
-        if (target->is_kthread) return checked ? -EPERM : 0;
+        if (target->is_kthread) return checked && !may_signal(target) ? -EPERM : 0;
         if (checked && !may_signal(target)) return -EPERM;
         signal_one_process(target, signal_number);
         if (checked) record_sender(target, signal_number);
