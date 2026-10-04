@@ -1251,6 +1251,7 @@ static const struct usb_host ehci_host = {
     .storage_count = ehci_storage_count,
     .bulk_transfer = ehci_bulk_transfer,
     .reset_recovery = ehci_reset_recovery,
+    .max_transfer = 16384U,
 };
 
 static int start_one(const struct pci_device *device, struct ehci *host) {

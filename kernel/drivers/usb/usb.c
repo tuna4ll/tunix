@@ -7,6 +7,8 @@
 #include "../../include/usb_storage.h"
 #include "../../include/lock.h"
 
+#define USB_DEFAULT_TRANSFER 16384U
+
 struct storage_slot {
     const struct usb_host *host;
     int local;
@@ -92,6 +94,12 @@ int usb_storage_present(int index) {
     struct storage_slot slot;
     if (slot_at(index, &slot) != 0) return 0;
     return slot.host->present ? slot.host->present(slot.local) : 1;
+}
+
+uint32_t usb_max_transfer(int index) {
+    struct storage_slot slot;
+    if (slot_at(index, &slot) != 0) return 0;
+    return slot.host->max_transfer ? slot.host->max_transfer : USB_DEFAULT_TRANSFER;
 }
 
 int usb_bulk_transfer(int index, int in, uint64_t physical, uint32_t length) {

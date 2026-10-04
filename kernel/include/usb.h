@@ -9,6 +9,7 @@ struct usb_host {
     int (*bulk_transfer)(int index, int in, uint64_t physical, uint32_t length);
     int (*reset_recovery)(int index);
     int (*present)(int index);
+    uint32_t max_transfer;
 };
 
 void usb_register_host(const struct usb_host *host);
@@ -18,5 +19,6 @@ int usb_storage_count(void);
 int usb_bulk_transfer(int index, int in, uint64_t physical, uint32_t length);
 int usb_reset_recovery(int index);
 int usb_storage_present(int index);
+uint32_t usb_max_transfer(int index);
 
 #endif

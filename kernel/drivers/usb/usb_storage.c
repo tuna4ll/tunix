@@ -29,8 +29,7 @@ extern void kprintf(const char *fmt, ...);
 #define SCSI_READ_10 0x28U
 #define SCSI_WRITE_10 0x2AU
 
-#define STAGING_BYTES 16384U
-#define STAGING_SECTORS (STAGING_BYTES / BLOCK_SECTOR_SIZE)
+#define STAGING_BYTES 65536U
 #define STAGING_WRITE_SECTORS (4096U / BLOCK_SECTOR_SIZE)
 
 struct command_block_wrapper {
@@ -56,6 +55,7 @@ struct usb_disk {
     uint64_t sectors;
     uint32_t block_bytes;
     uint32_t sectors_per_block;
+    uint32_t read_sectors;
     char name[16];
 };
 
@@ -193,7 +193,7 @@ static int usb_read_unlocked(void *context, uint64_t lba, uint32_t count, void *
     struct usb_disk *disk = (struct usb_disk *)context;
     uint8_t *out = (uint8_t *)destination;
     while (count) {
-        uint32_t chunk = count > STAGING_SECTORS ? STAGING_SECTORS : count;
+        uint32_t chunk = count > disk->read_sectors ? disk->read_sectors : count;
         if (chunk % disk->sectors_per_block)
             chunk -= chunk % disk->sectors_per_block;
         if (!chunk) return -1;
@@ -282,7 +282,7 @@ static int ensure_pages(void) {
     wrapper_physical = (uint64_t)pmm_alloc_page();
     if (!wrapper_physical) return -1;
     wrapper_page = (uint8_t *)vmm_phys_to_virt(wrapper_physical);
-    staging_page = (uint8_t *)dma_alloc(STAGING_BYTES, 4096, &staging_physical);
+    staging_page = (uint8_t *)dma_alloc(STAGING_BYTES, STAGING_BYTES, &staging_physical);
     if (!wrapper_page || !staging_page || !staging_physical) return -1;
     memset(wrapper_page, 0, 4096);
     return 0;
@@ -295,6 +295,9 @@ static int attach_disk(int index) {
     memset(disk, 0, sizeof(*disk));
     disk->controller_index = index;
     disk->sectors_per_block = 1;
+    uint32_t limit = usb_max_transfer(index);
+    if (!limit || limit > STAGING_BYTES) limit = STAGING_BYTES;
+    disk->read_sectors = limit / BLOCK_SECTOR_SIZE;
 
     uint8_t command[6];
     memset(command, 0, sizeof(command));

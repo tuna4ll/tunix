@@ -1568,6 +1568,7 @@ static const struct usb_host xhci_usb_host = {
     .bulk_transfer = storage_transfer,
     .reset_recovery = storage_reset,
     .present = storage_present,
+    .max_transfer = 65536U,
 };
 
 static void take_from_firmware(struct xhci_host *host) {

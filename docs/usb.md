@@ -340,6 +340,12 @@ lock over and queues behind it. The pieces of one write may reach the stick
 with a read in between; nothing reads a block while it is being written, since
 the page or buffer it comes from is still in memory.
 
+A read goes out in pieces as large as the controller takes in one descriptor:
+64 KiB on xHCI, where a transfer TRB may carry that much as long as it does
+not cross a 64 KiB boundary -- the staging buffer is aligned so it never does
+-- and 16 KiB on EHCI, the most one qTD describes from a buffer that starts on
+a page. Writes stay at 4 KiB.
+
 ## The shape of the driver
 
 The asynchronous schedule and nothing else. Two queue heads sit in a ring --
