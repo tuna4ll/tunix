@@ -327,6 +327,19 @@ already gone wrong.
 The log is capped at eight lines. It is painted on the console, so a message
 per failed block is not a diagnostic but a second failure on top of the first.
 
+## A read does not wait for a whole write
+
+One storage lock covers a stick, because the command, the data and the status
+of a transfer have to go out in order and share one staging page. A write is
+split into 4 KiB commands, so a 128 KiB write-back is 32 of them, and a read
+that arrived after the first used to wait for all 32 -- on a slow stick,
+hundreds of milliseconds for every page a program faulted in, which is how a
+shell took a minute to print its prompt during `xbps-install`. A writer now
+checks between commands whether a reader is waiting and, if one is, hands the
+lock over and queues behind it. The pieces of one write may reach the stick
+with a read in between; nothing reads a block while it is being written, since
+the page or buffer it comes from is still in memory.
+
 ## The shape of the driver
 
 The asynchronous schedule and nothing else. Two queue heads sit in a ring --

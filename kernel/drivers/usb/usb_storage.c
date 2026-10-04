@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "../../include/block.h"
+#include "../../include/cpu.h"
 #include "../../include/devfs.h"
 #include "../../include/partition.h"
 #include "../../include/dma.h"
@@ -12,6 +13,7 @@
 #include "../../include/usb.h"
 #include "../../include/lock.h"
 #include "../../include/mutex.h"
+#include "../../include/time.h"
 #include "../../include/workqueue.h"
 
 extern void kprintf(const char *fmt, ...);
@@ -150,6 +152,9 @@ static int run_command(struct usb_disk *disk, const uint8_t *command,
 }
 
 static struct mutex storage_lock = MUTEX_INITIALIZER("usb storage", LOCK_RANK_BLOCK);
+static volatile uint32_t readers_waiting;
+
+#define READER_HANDOFF_NS 1000000ULL
 
 static void put_be32(uint8_t *out, uint32_t value) {
     out[0] = (uint8_t)(value >> 24);
@@ -201,7 +206,9 @@ static int usb_read_unlocked(void *context, uint64_t lba, uint32_t count, void *
 }
 
 static int usb_read(void *context, uint64_t lba, uint32_t count, void *destination) {
+    __atomic_fetch_add(&readers_waiting, 1, __ATOMIC_ACQ_REL);
     mutex_lock(&storage_lock);
+    __atomic_fetch_sub(&readers_waiting, 1, __ATOMIC_ACQ_REL);
     int status = usb_read_unlocked(context, lba, count, destination);
     mutex_unlock(&storage_lock);
     return status;
@@ -219,6 +226,14 @@ static int usb_write_unlocked(void *context, uint64_t lba, uint32_t count, const
         in += (size_t)chunk * BLOCK_SECTOR_SIZE;
         lba += chunk;
         count -= chunk;
+        if (count && __atomic_load_n(&readers_waiting, __ATOMIC_ACQUIRE) &&
+            mutex_held(&storage_lock)) {
+            unsigned depth = mutex_release_all(&storage_lock);
+            uint64_t until = time_uptime_ns() + READER_HANDOFF_NS;
+            while (__atomic_load_n(&readers_waiting, __ATOMIC_ACQUIRE) && time_uptime_ns() < until)
+                cpu_relax();
+            mutex_reacquire(&storage_lock, depth);
+        }
     }
     return 0;
 }
