@@ -20,6 +20,7 @@ void apic_enable_local(void);
 
 void apic_send_init(uint32_t apic_id);
 void apic_send_startup(uint32_t apic_id, uint8_t page);
+void apic_send_ipi(uint32_t apic_id, uint8_t vector);
 void apic_send_ipi_to_others(uint8_t vector);
 
 void apic_timer_calibration(unsigned index, uint64_t *measured_hz,

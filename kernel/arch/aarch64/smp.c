@@ -45,6 +45,11 @@ void smp_send_reschedule(void) {
     gic_send_reschedule_ipi();
 }
 
+void smp_send_reschedule_to(unsigned index) {
+    struct cpu *cpu = percpu_slot(index);
+    if (cpu && cpu->online) gic_send_reschedule_to(cpu->apic_id);
+}
+
 void smp_flush_interrupt(void) {
     smp_service_flush();
 }

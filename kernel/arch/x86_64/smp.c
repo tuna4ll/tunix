@@ -57,6 +57,11 @@ void smp_send_reschedule(void) {
     apic_send_ipi_to_others(SMP_RESCHEDULE_VECTOR);
 }
 
+void smp_send_reschedule_to(unsigned index) {
+    struct cpu *cpu = percpu_slot(index);
+    if (cpu && cpu->online) apic_send_ipi(cpu->apic_id, SMP_RESCHEDULE_VECTOR);
+}
+
 void smp_flush_interrupt(void) {
     apic_send_eoi();
     smp_service_flush();

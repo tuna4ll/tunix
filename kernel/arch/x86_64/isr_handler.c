@@ -253,10 +253,6 @@ void isr_handler(struct interrupt_frame *regs) {
         }
         panic("double fault");
     }
-    if (regs->int_no == SMP_RESCHEDULE_VECTOR && cpu_current()->current) {
-        apic_send_eoi();
-        return;
-    }
     if (regs->int_no == SMP_TIMER_VECTOR) {
         apic_send_eoi();
         unsigned due = timer_local_expired();

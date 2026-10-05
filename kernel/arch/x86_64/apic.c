@@ -169,6 +169,10 @@ void apic_send_startup(uint32_t apic_id, uint8_t page) {
     if (active) send_command(apic_id, ICR_MODE_STARTUP | ICR_LEVEL_ASSERT | page);
 }
 
+void apic_send_ipi(uint32_t apic_id, uint8_t vector) {
+    if (active) send_command(apic_id, vector);
+}
+
 void apic_send_ipi_to_others(uint8_t vector) {
     if (!active) return;
     lapic_write(LAPIC_ICR_LOW, ICR_SHORTHAND_OTHERS | ICR_LEVEL_ASSERT | vector);

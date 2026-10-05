@@ -226,3 +226,14 @@ void gic_send_flush_ipi(void) {
 void gic_send_reschedule_ipi(void) {
     send_to_others(AARCH64_SGI_RESCHEDULE);
 }
+
+void gic_send_reschedule_to(uint64_t mpidr) {
+    if (aarch64_platform.gic_version != 3 || (mpidr & 0xFFU) >= 16U) {
+        send_to_others(AARCH64_SGI_RESCHEDULE);
+        return;
+    }
+    uint64_t value = (((mpidr >> 32) & 0xFFULL) << 48) | (((mpidr >> 16) & 0xFFULL) << 32) |
+                     ((uint64_t)AARCH64_SGI_RESCHEDULE << 24) | (((mpidr >> 8) & 0xFFULL) << 16) |
+                     (1ULL << (mpidr & 0xFU));
+    __asm__ volatile("msr ICC_SGI1R_EL1, %0; isb" : : "r"(value) : "memory");
+}

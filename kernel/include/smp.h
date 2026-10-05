@@ -19,5 +19,6 @@ void smp_service_flush(void);
 
 void smp_flush_interrupt(void);
 void smp_send_reschedule(void);
+void smp_send_reschedule_to(unsigned index);
 
 #endif

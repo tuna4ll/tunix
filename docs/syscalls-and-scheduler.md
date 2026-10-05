@@ -200,9 +200,14 @@ them out of each other's way:
   larger than the six-tick target, the period expands so every task can receive
   at least one tick. Real-time tasks retain their five-tick quantum.
 - On each tick, an ordinary task is also preempted if another runnable task is
-  over one tick behind in virtual runtime. This is the wake-up path: an
-  interactive task that slept while CPU-bound work ran gets the processor at
-  the next tick instead of waiting for the entire runnable set to rotate.
+  over one tick behind in virtual runtime.
+- Waking a task does not wait for that tick. If no processor is idle, the
+  waker picks the processor whose task the woken one would preempt (a lower
+  real-time priority, or more than one tick ahead in virtual runtime) and sends
+  that processor alone a reschedule interrupt, which runs the same check at
+  once. An interactive task that slept while CPU-bound work ran gets a
+  processor within microseconds; `support/tests/wakelat-kerneltest.sh`
+  measures it.
 - `sched_setaffinity` stores a non-empty mask limited to online CPUs;
   `sched_getaffinity` reports the selected thread's effective mask. Masks are
   inherited by fork and clone, and a task excluded from its current CPU is

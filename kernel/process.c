@@ -1287,15 +1287,41 @@ static void mark_dead(struct process *process) {
     reap_pending = 1;
 }
 
+static int wakeup_preempts(const struct process *woken, const struct process *running) {
+    if (!running || running->state != PROCESS_RUNNING) return 0;
+    if (woken->rt_priority != running->rt_priority)
+        return woken->rt_priority > running->rt_priority;
+    if (woken->rt_priority) return 0;
+    return (int64_t)(woken->virtual_runtime_ns + SCHED_WAKEUP_GRANULARITY_NS -
+                     running->virtual_runtime_ns) < 0;
+}
+
+static int busier_victim(const struct process *candidate, const struct process *chosen) {
+    if (!chosen) return 1;
+    if (candidate->rt_priority != chosen->rt_priority)
+        return candidate->rt_priority < chosen->rt_priority;
+    return (int64_t)(candidate->virtual_runtime_ns - chosen->virtual_runtime_ns) > 0;
+}
+
 static void kick_idle_for(const struct process *process) {
     unsigned cpus = smp_cpu_count();
+    unsigned victim = SMP_MAX_CPUS;
+    const struct process *victim_running = NULL;
     for (unsigned index = 0; index < cpus && index < SMP_MAX_CPUS; index++) {
         struct cpu *cpu = percpu_slot(index);
-        if (!cpu || !cpu->online || cpu == cpu_current() || cpu_running(cpu)) continue;
+        if (!cpu || !cpu->online || cpu == cpu_current()) continue;
         if (process->affinity_set && !cpu_mask_test(&process->affinity, index)) continue;
-        smp_send_reschedule();
-        return;
+        struct process *running = cpu_running(cpu);
+        if (!running) {
+            smp_send_reschedule_to(index);
+            return;
+        }
+        if (wakeup_preempts(process, running) && busier_victim(running, victim_running)) {
+            victim = index;
+            victim_running = running;
+        }
     }
+    if (victim < SMP_MAX_CPUS) smp_send_reschedule_to(victim);
 }
 
 static void wake_to_ready(struct process *process) {
@@ -2165,10 +2191,6 @@ static void resume_from_idle(struct interrupt_frame *frame) {
     arch_frame_to_interrupt(frame, &resume);
 }
 
-void process_reschedule_interrupt(struct interrupt_frame *frame) {
-    if (frame && !current) resume_from_idle(frame);
-}
-
 static void preempt_from_interrupt(struct interrupt_frame *frame, int tick) {
     if (!frame) return;
     if (!current) {
@@ -2215,6 +2237,10 @@ void process_timer_interrupt(struct interrupt_frame *frame) {
 }
 
 void process_deadline_interrupt(struct interrupt_frame *frame) {
+    preempt_from_interrupt(frame, 0);
+}
+
+void process_reschedule_interrupt(struct interrupt_frame *frame) {
     preempt_from_interrupt(frame, 0);
 }
 
