@@ -407,6 +407,7 @@ static int place_initial_stack(struct process *process,
     }
     process->arg_start = argc ? argv_addresses[0] : arg_end;
     process->arg_end = arg_end;
+    process->env_end = platform_address;
 
     sp &= ~15ULL;
     uint64_t execfn = argc ? argv_addresses[0] : 0;

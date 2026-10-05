@@ -141,6 +141,7 @@ struct process {
     uint64_t voluntary_switches;
     uint64_t arg_start;
     uint64_t arg_end;
+    uint64_t env_end;
     struct vfs_node *cwd;
     struct vfs_node *root;
     struct pty_pair *controlling_pty;
@@ -182,6 +183,7 @@ struct process {
     uint64_t signal_saved_mask;
     uint64_t signal_wait_mask_saved;
     int signal_wait_mask_active;
+    uint64_t syscall_record[9];
     int in_signal;
     struct syscall_frame signal_saved_frame;
     uint64_t signal_context_address;

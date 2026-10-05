@@ -197,6 +197,7 @@ static int64_t proc_inputlog_read(struct vfs_node *node, uint64_t offset,
 }
 
 static void text_hex32(struct text_buffer *text, uint32_t value);
+static void text_hex64_lower(struct text_buffer *text, uint64_t value);
 
 static int64_t proc_overlap_read(struct vfs_node *node, uint64_t offset,
                                  size_t size, void *output) {
@@ -456,6 +457,63 @@ static int64_t proc_mounts_read(struct vfs_node *node, uint64_t offset,
         if (mount->flags & VFS_MS_NODEV) text_string(&text, ",nodev");
         if (mount->flags & VFS_MS_NOEXEC) text_string(&text, ",noexec");
         text_string(&text, " 0 0\n");
+    }
+    return text_read(&text, offset, size, output);
+}
+
+static void text_mount_path(struct text_buffer *text, const char *path) {
+    for (; *path; path++) {
+        char c = *path;
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\\') {
+            text_char(text, '\\');
+            text_char(text, (char)('0' + ((c >> 6) & 7)));
+            text_char(text, (char)('0' + ((c >> 3) & 7)));
+            text_char(text, (char)('0' + (c & 7)));
+        } else {
+            text_char(text, c);
+        }
+    }
+}
+
+static int mount_contains(const char *outer, const char *inner) {
+    size_t length = strlen(outer);
+    if (length == 1 && outer[0] == '/') return inner[0] == '/' && inner[1] != '\0';
+    return strncmp(outer, inner, length) == 0 && inner[length] == '/';
+}
+
+static int64_t proc_mountinfo_read(struct vfs_node *node, uint64_t offset,
+                                   size_t size, void *output) {
+    (void)node;
+    TEXT_BUFFER text = {0};
+    unsigned index = 0;
+    for (const struct vfs_mount *mount = vfs_mounts(); mount; mount = mount->next, index++) {
+        unsigned parent = 20U + index;
+        size_t best = 0;
+        unsigned candidate = 0;
+        for (const struct vfs_mount *outer = vfs_mounts(); outer; outer = outer->next, candidate++) {
+            if (outer == mount || !mount_contains(outer->target, mount->target)) continue;
+            size_t length = strlen(outer->target);
+            if (length >= best) {
+                best = length;
+                parent = 20U + candidate;
+            }
+        }
+        text_unsigned(&text, 20U + index);
+        text_char(&text, ' ');
+        text_unsigned(&text, parent);
+        text_string(&text, " 0:");
+        text_unsigned(&text, 20U + index);
+        text_string(&text, " / ");
+        text_mount_path(&text, mount->target);
+        text_string(&text, (mount->flags & VFS_MS_RDONLY) ? " ro" : " rw");
+        if (mount->flags & VFS_MS_NOSUID) text_string(&text, ",nosuid");
+        if (mount->flags & VFS_MS_NODEV) text_string(&text, ",nodev");
+        if (mount->flags & VFS_MS_NOEXEC) text_string(&text, ",noexec");
+        text_string(&text, " - ");
+        text_string(&text, mount->type);
+        text_char(&text, ' ');
+        text_mount_path(&text, mount->source[0] ? mount->source : "none");
+        text_string(&text, (mount->flags & VFS_MS_RDONLY) ? " ro\n" : " rw\n");
     }
     return text_read(&text, offset, size, output);
 }
@@ -812,6 +870,41 @@ static int64_t proc_pid_comm_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
+static int64_t proc_pid_mem_read(struct vfs_node *node, uint64_t offset,
+                                 size_t size, void *output) {
+    PROCESS_REF process = process_get(node_pid(node));
+    if (!process) return -3;
+    const struct credentials *reader = cred_current();
+    if (reader && reader->euid != 0 && reader->euid != process->cred.uid) return -13;
+    MEMORY_REF memory = process_memory_get(process);
+    if (!memory) return 0;
+    if (offset >= USER_ADDRESS_LIMIT) return -5;
+    if (size > USER_ADDRESS_LIMIT - offset) size = (size_t)(USER_ADDRESS_LIMIT - offset);
+    if (size > 65536) size = 65536;
+    mutex_lock(&memory->lock);
+    int status = vmm_copy_from_space(memory->cr3, output, offset, size);
+    mutex_unlock(&memory->lock);
+    return status == 0 ? (int64_t)size : -5;
+}
+
+static int64_t proc_pid_syscall_read(struct vfs_node *node, uint64_t offset,
+                                     size_t size, void *output) {
+    PROCESS_REF process = process_get(node_pid(node));
+    if (!process) return 0;
+    TEXT_BUFFER text = {0};
+    if (process->state == PROCESS_RUNNING) {
+        text_string(&text, "running\n");
+    } else {
+        text_unsigned(&text, process->syscall_record[0]);
+        for (unsigned index = 1; index < 9; index++) {
+            text_string(&text, " 0x");
+            text_hex64_lower(&text, process->syscall_record[index]);
+        }
+        text_char(&text, '\n');
+    }
+    return text_read(&text, offset, size, output);
+}
+
 static int64_t proc_cmdline_read(struct vfs_node *node, uint64_t offset,
                                  size_t size, void *output) {
     PROCESS_REF process = process_get(node_pid(node));
@@ -822,6 +915,23 @@ static int64_t proc_cmdline_read(struct vfs_node *node, uint64_t offset,
     if (size > available) size = (size_t)available;
     mutex_lock(&memory->lock);
     int status = vmm_copy_from_space(memory->cr3, output, process->arg_start + offset, size);
+    mutex_unlock(&memory->lock);
+    return status == 0 ? (int64_t)size : 0;
+}
+
+static int64_t proc_environ_read(struct vfs_node *node, uint64_t offset,
+                                 size_t size, void *output) {
+    PROCESS_REF process = process_get(node_pid(node));
+    if (!process) return -3;
+    const struct credentials *reader = cred_current();
+    if (reader && reader->euid != 0 && reader->euid != process->cred.uid) return -13;
+    MEMORY_REF memory = process_memory_get(process);
+    if (!memory || process->env_end <= process->arg_end ||
+        offset >= process->env_end - process->arg_end) return 0;
+    uint64_t available = process->env_end - process->arg_end - offset;
+    if (size > available) size = (size_t)available;
+    mutex_lock(&memory->lock);
+    int status = vmm_copy_from_space(memory->cr3, output, process->arg_end + offset, size);
     mutex_unlock(&memory->lock);
     return status == 0 ? (int64_t)size : 0;
 }
@@ -1073,6 +1183,25 @@ static void populate_process_files(struct vfs_node *directory, uint64_t pid) {
     if (!vfs_find_child(directory, "statm")) virtual_file(directory, "statm", proc_pid_statm_read, pid);
     if (!vfs_find_child(directory, "comm")) virtual_file(directory, "comm", proc_pid_comm_read, pid);
     if (!vfs_find_child(directory, "maps")) virtual_file(directory, "maps", proc_pid_maps_read, pid);
+    if (!vfs_find_child(directory, "syscall")) virtual_file(directory, "syscall", proc_pid_syscall_read, pid);
+    if (!vfs_find_child(directory, "mountinfo")) virtual_file(directory, "mountinfo", proc_mountinfo_read, pid);
+    if (!vfs_find_child(directory, "mounts")) virtual_file(directory, "mounts", proc_mounts_read, pid);
+    if (!vfs_find_child(directory, "environ")) {
+        struct vfs_node *environ = virtual_file(directory, "environ", proc_environ_read, pid);
+        if (environ) {
+            environ->mode = 0400;
+            environ->uid = directory->uid;
+            environ->gid = directory->gid;
+        }
+    }
+    if (!vfs_find_child(directory, "mem")) {
+        struct vfs_node *mem = virtual_file(directory, "mem", proc_pid_mem_read, pid);
+        if (mem) {
+            mem->mode = 0600;
+            mem->uid = directory->uid;
+            mem->gid = directory->gid;
+        }
+    }
 }
 
 void procfs_register_process(struct process *process) {
@@ -1128,6 +1257,11 @@ void procfs_unregister_process(uint64_t pid) {
     task_path(pid, "/statm", path); (void)vfs_remove(path, 0);
     task_path(pid, "/maps", path); (void)vfs_remove(path, 0);
     task_path(pid, "/comm", path); (void)vfs_remove(path, 0);
+    task_path(pid, "/syscall", path); (void)vfs_remove(path, 0);
+    task_path(pid, "/mountinfo", path); (void)vfs_remove(path, 0);
+    task_path(pid, "/mounts", path); (void)vfs_remove(path, 0);
+    task_path(pid, "/mem", path); (void)vfs_remove(path, 0);
+    task_path(pid, "/environ", path); (void)vfs_remove(path, 0);
     task_path(pid, NULL, path); (void)vfs_remove(path, 1);
     decimal_path(pid, "/task", path); (void)vfs_remove(path, 1);
     decimal_path(pid, "/status", path); (void)vfs_remove(path, 0);
@@ -1136,6 +1270,11 @@ void procfs_unregister_process(uint64_t pid) {
     decimal_path(pid, "/statm", path); (void)vfs_remove(path, 0);
     decimal_path(pid, "/maps", path); (void)vfs_remove(path, 0);
     decimal_path(pid, "/comm", path); (void)vfs_remove(path, 0);
+    decimal_path(pid, "/syscall", path); (void)vfs_remove(path, 0);
+    decimal_path(pid, "/mountinfo", path); (void)vfs_remove(path, 0);
+    decimal_path(pid, "/mounts", path); (void)vfs_remove(path, 0);
+    decimal_path(pid, "/mem", path); (void)vfs_remove(path, 0);
+    decimal_path(pid, "/environ", path); (void)vfs_remove(path, 0);
     decimal_path(pid, "/exe", path); (void)vfs_remove(path, 0);
     decimal_path(pid, "/cwd", path); (void)vfs_remove(path, 0);
     decimal_path(pid, "/root", path); (void)vfs_remove(path, 0);

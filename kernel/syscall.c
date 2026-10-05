@@ -6256,6 +6256,18 @@ void syscall_dispatch(struct syscall_frame *frame) {
         }
     }
 
+    if (caller) {
+        uint64_t *record = caller->syscall_record;
+        record[0] = SYSCALL_NATIVE_NR(frame);
+        record[1] = SYSCALL_ARG0(frame);
+        record[2] = SYSCALL_ARG1(frame);
+        record[3] = SYSCALL_ARG2(frame);
+        record[4] = SYSCALL_ARG3(frame);
+        record[5] = SYSCALL_ARG4(frame);
+        record[6] = SYSCALL_ARG5(frame);
+        record[7] = SYSCALL_USER_SP(frame);
+        record[8] = SYSCALL_IP(frame);
+    }
     syscall_run(frame);
     syscall_release_pins_of(caller);
     if (syscall_writes_data(syscall_number) && process_current() == caller) vfs_balance_dirty();

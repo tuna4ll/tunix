@@ -2545,6 +2545,7 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame,
     child->last_scheduled_ns = 0;
     child->arg_start = parent->arg_start;
     child->arg_end = parent->arg_end;
+    child->env_end = parent->env_end;
     if (allocate_kernel_stack(child) != 0) {
         memory_unref(child->memory);
         free_process_struct(child);
@@ -2645,6 +2646,7 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
     child->start_time_ns = time_uptime_ns();
     child->arg_start = parent->arg_start;
     child->arg_end = parent->arg_end;
+    child->env_end = parent->env_end;
     if (allocate_kernel_stack(child) != 0) {
         memory_unref(child->memory);
         free_process_struct(child);
@@ -3061,6 +3063,7 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
     current->mmap_base = image.mmap_base;
     current->arg_start = image.arg_start;
     current->arg_end = image.arg_end;
+    current->env_end = image.env_end;
     current->fs_base = 0;
     current->gs_base = 0;
     current->signal_stack_pointer = 0;
