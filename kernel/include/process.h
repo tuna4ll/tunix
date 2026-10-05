@@ -366,6 +366,7 @@ void process_prepare_wait(const void *channel, uint64_t deadline_ns);
 void process_wait(void);
 void process_finish_wait(void);
 int process_may_sleep(void);
+void process_preempt_point(void);
 void process_kernel_yield(void);
 struct process *process_create_kthread(const char *name, void (*body)(void *), void *argument);
 void process_user_resume(void);

@@ -1789,6 +1789,28 @@ void process_kernel_yield(void) {
     after_switch();
 }
 
+void process_preempt_point(void) {
+    struct process *self = current;
+    if (!self || self->state != PROCESS_RUNNING || !process_may_sleep()) return;
+    struct cpu *cpu = cpu_current();
+    if (!cpu->timer_local || time_uptime_ns() < cpu->timer_programmed_ns) return;
+    unsigned due = timer_local_expired();
+    if (due & TIMER_LOCAL_DEADLINE) timer_run_deadlines();
+    process_account_runtime();
+    int yield;
+    {
+        SCHED_LOCKED;
+        if ((due & TIMER_LOCAL_TICK) && self->time_slice_ticks) self->time_slice_ticks--;
+        yield = !self->time_slice_ticks || higher_priority_waiting(self) ||
+                ordinary_should_preempt(self);
+    }
+    if (yield) process_kernel_yield();
+    SCHED_LOCKED;
+    if (!self->time_slice_ticks)
+        self->time_slice_ticks = self->rt_priority ? PROCESS_DEFAULT_QUANTUM_TICKS
+                                                   : ordinary_slice_ticks(self);
+}
+
 void process_start_first(void) {
     go_idle();
 }

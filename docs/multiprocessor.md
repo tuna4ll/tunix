@@ -368,6 +368,14 @@ file pins a system call holds are per process, and a process asleep in the
 kernel is counted as still inside it by `kernel/defer.c`, so nothing it read
 under RCU-style protection is freed while it sleeps.
 
+Interrupts stay off while a processor is in the kernel, so a long system
+call used to hold every timer on its processor until it returned. A `read`,
+`write`, `pread` or `pwrite` now stops every 64 KiB, at a point where it holds
+no lock, and looks at its local timer (`process_preempt_point`): deadlines that
+passed are expired there, and the call gives the processor away if the
+scheduler would have. Copying megabytes out of the page cache no longer keeps a
+sleeper on that processor milliseconds past its deadline.
+
 The timer interrupt never sleeps. When the process it is about to return to has
 a signal to deliver or is being killed, it is sent through the system call exit
 path in process context instead, because both may need locks that sleep.

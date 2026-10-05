@@ -906,6 +906,7 @@ static int64_t sys_write(int fd, uint64_t user_buffer, size_t length) {
 
     size_t completed = 0;
     int64_t failure = 0;
+    unsigned rounds = 0;
 
     if (!length) {
         int64_t written = file_write(file, 0, buffer);
@@ -931,6 +932,7 @@ static int64_t sys_write(int fd, uint64_t user_buffer, size_t length) {
         }
         completed += (size_t)written;
         if ((size_t)written < chunk) break;
+        if ((++rounds & 15U) == 0) process_preempt_point();
     }
 
     if (buffer != stage) kfree(buffer);
@@ -950,7 +952,10 @@ static int64_t sys_read(int fd, uint64_t user_buffer, size_t length) {
     if (!process || fd < 0 || fd >= PROCESS_FD_CAPACITY(process) || !fd_file(fd)) return -EBADF;
     uint8_t buffer[4096];
     size_t completed = 0;
+    unsigned rounds = 0;
     while (completed < length) {
+        if (rounds && (rounds & 15U) == 0) process_preempt_point();
+        rounds++;
         size_t chunk = length - completed;
         if (chunk > sizeof(buffer)) chunk = sizeof(buffer);
         int64_t amount = file_read(fd_file(fd), chunk, buffer);
@@ -5103,7 +5108,10 @@ static int64_t sys_pread_pwrite(int fd, uint64_t user_buffer, size_t length, uin
     if (!positional_file(file)) return -EBADF;
     uint8_t buffer[4096];
     size_t completed = 0;
+    unsigned rounds = 0;
     while (completed < length) {
+        if (rounds && (rounds & 15U) == 0) process_preempt_point();
+        rounds++;
         size_t chunk = length - completed;
         if (chunk > sizeof(buffer)) chunk = sizeof(buffer);
         int64_t amount;
