@@ -3,6 +3,12 @@ typedef long s64;
 
 #include "tunix_syscall.h"
 
+#if defined(__x86_64__)
+#define STACK_SLOT 8
+#else
+#define STACK_SLOT 16
+#endif
+
 #define SYS_WRITE 1
 #define SYS_NANOSLEEP 35
 #define SYS_FUTEX 202
@@ -192,7 +198,7 @@ static void spinner(void) {
 
 static void start_spinners(void) {
     for (unsigned index = 0; index < SPINNERS; index++) {
-        char *top = stacks[index] + sizeof(stacks[index]) - 16;
+        char *top = stacks[index] + sizeof(stacks[index]) - STACK_SLOT;
         *(void **)top = (void *)spinner;
         next_spinner = index;
         if (spawn_thread(THREAD_FLAGS, top) < 0) {
