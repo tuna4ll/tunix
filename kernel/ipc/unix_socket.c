@@ -22,6 +22,11 @@
 #define EPIPE 32
 
 #define EMSGSIZE 90
+#define ENOBUFS 105
+#define EISCONN 106
+#define EOPNOTSUPP 95
+#define UNIX_DGRAM_BYTES_MAX (256U * 1024U)
+#define UNIX_DGRAM_COUNT_MAX 512
 
 #define UNIX_PENDING_MAX 4096
 #define UNIX_RIGHTS_MAX UNIX_MAX_RIGHTS
@@ -71,8 +76,24 @@ struct unix_channel {
     int b_write_shutdown;
 };
 
+struct unix_dgram {
+    struct unix_dgram *next;
+    size_t length;
+    struct unix_credentials sender;
+    char from[108];
+    uint8_t data[];
+};
+
 struct unix_socket {
     int refs;
+    int peer_refs;
+    int dgram;
+    struct unix_dgram *rx_head;
+    struct unix_dgram *rx_tail;
+    size_t rx_bytes;
+    int rx_count;
+    char last_from[108];
+    struct unix_socket *dgram_peer;
     int listening;
     int connected;
     int seqpacket;
@@ -281,13 +302,14 @@ static void listener_unregister(struct unix_socket *socket) {
     }
 }
 
-struct unix_socket *unix_socket_create(int seqpacket) {
+struct unix_socket *unix_socket_create(int kind) {
     UNIX_LOCKED;
     struct unix_socket *socket = (struct unix_socket *)kmalloc(sizeof(*socket));
     if (!socket) return NULL;
     memset(socket, 0, sizeof(*socket));
     socket->refs = 1;
-    socket->seqpacket = seqpacket ? 1 : 0;
+    socket->seqpacket = kind ? 1 : 0;
+    socket->dgram = kind == UNIX_KIND_DGRAM;
     socket->backlog = 128;
     return socket;
 }
@@ -308,6 +330,10 @@ void unix_socket_set_credentials(struct unix_socket *socket, int32_t pid,
 int unix_socket_get_peer_credentials(struct unix_socket *socket,
                                      struct unix_credentials *credentials) {
     UNIX_LOCKED;
+    if (socket && credentials && socket->dgram && socket->dgram_peer) {
+        *credentials = socket->dgram_peer->credentials;
+        return 0;
+    }
     if (!socket || !credentials || !socket->connected || !socket->channel)
         return -ENOTCONN;
     *credentials = socket->side == 0 ? socket->channel->b_credentials :
@@ -320,7 +346,10 @@ int unix_socket_get_name(struct unix_socket *socket, int peer,
     UNIX_LOCKED;
     if (!socket || !address || !length) return -EINVAL;
     const char *path = socket->path;
-    if (peer) {
+    if (peer && socket->dgram) {
+        if (!socket->dgram_peer) return -ENOTCONN;
+        path = socket->dgram_peer->path;
+    } else if (peer) {
         if (!socket->connected || !socket->channel) return -ENOTCONN;
         path = socket->side == 0 ? socket->channel->b_path :
                                    socket->channel->a_path;
@@ -398,6 +427,26 @@ void unix_socket_ref(struct unix_socket *socket) {
     if (socket) socket->refs++;
 }
 
+static void dgram_release(struct unix_socket *socket) {
+    while (socket->rx_head) {
+        struct unix_dgram *message = socket->rx_head;
+        socket->rx_head = message->next;
+        kfree(message);
+    }
+    socket->rx_tail = NULL;
+    socket->rx_bytes = 0;
+    socket->rx_count = 0;
+}
+
+static void dgram_peer_put(struct unix_socket *peer) {
+    if (!peer || peer->peer_refs <= 0) return;
+    peer->peer_refs--;
+    if (!peer->refs && !peer->peer_refs) {
+        kfree(peer->key);
+        kfree(peer);
+    }
+}
+
 void unix_socket_unref(struct unix_socket *socket) {
     UNIX_LOCKED;
     if (!socket || socket->refs <= 0) return;
@@ -405,6 +454,13 @@ void unix_socket_unref(struct unix_socket *socket) {
     if (socket->refs != 0) return;
 
     listener_unregister(socket);
+    if (socket->dgram) {
+        dgram_release(socket);
+        struct unix_socket *peer = socket->dgram_peer;
+        socket->dgram_peer = NULL;
+        dgram_peer_put(peer);
+        if (socket->peer_refs) return;
+    }
     while (socket->pending_head) {
         struct unix_socket *pending = socket->pending_head;
         socket->pending_head = pending->pending_next;
@@ -476,6 +532,10 @@ int unix_socket_bind(struct unix_socket *socket, const struct tunix_sockaddr_un 
     if (!socket->key) return -EAGAIN;
     memcpy(socket->key, key, key_length + 1);
     strncpy(socket->path, path, sizeof(socket->path) - 1);
+    if (socket->dgram) {
+        socket->next_listener = listener_list;
+        listener_list = socket;
+    }
     return 0;
 }
 
@@ -495,6 +555,67 @@ int unix_socket_listen(struct unix_socket *socket, int backlog) {
     return 0;
 }
 
+static struct unix_socket *find_dgram(const char *key) {
+    for (struct unix_socket *bound = listener_list; bound; bound = bound->next_listener) {
+        if (bound->dgram && bound->refs > 0 && bound->key && strcmp(bound->key, key) == 0)
+            return bound;
+    }
+    return NULL;
+}
+
+static int dgram_deliver(struct unix_socket *from, struct unix_socket *target, size_t size,
+                         const void *buffer) {
+    if (!target || target->refs <= 0) return -ECONNREFUSED;
+    if (size > UNIX_DGRAM_BYTES_MAX) return -EMSGSIZE;
+    if (target->rx_count >= UNIX_DGRAM_COUNT_MAX ||
+        target->rx_bytes + size > UNIX_DGRAM_BYTES_MAX) return -EAGAIN;
+    struct unix_dgram *message = (struct unix_dgram *)kmalloc(sizeof(*message) + (size ? size : 1));
+    if (!message) return -ENOBUFS;
+    message->next = NULL;
+    message->length = size;
+    const struct credentials *self = cred_current();
+    message->sender.pid = (int32_t)process_current_pid();
+    message->sender.uid = self ? self->euid : 0U;
+    message->sender.gid = self ? self->egid : 0U;
+    memcpy(message->from, from->path, sizeof(message->from));
+    if (size) memcpy(message->data, buffer, size);
+    if (target->rx_tail) target->rx_tail->next = message;
+    else target->rx_head = message;
+    target->rx_tail = message;
+    target->rx_count++;
+    target->rx_bytes += size;
+    return 0;
+}
+
+int64_t unix_socket_sendto(struct unix_socket *socket, size_t size, const void *buffer,
+                           const struct tunix_sockaddr_un *address, size_t length,
+                           const char *resolved) {
+    UNIX_LOCKED;
+    if (!socket) return -EINVAL;
+    if (!socket->dgram) return socket->connected ? -EISCONN : -EOPNOTSUPP;
+    char path[108];
+    int status = copy_path(path, address, length);
+    if (status < 0) return status;
+    struct unix_socket *target = find_dgram(path[0] == '\x01' || !resolved ? path : resolved);
+    if (!target) return -ECONNREFUSED;
+    status = dgram_deliver(socket, target, size, buffer);
+    return status < 0 ? status : (int64_t)size;
+}
+
+int unix_socket_is_dgram(struct unix_socket *socket) {
+    UNIX_LOCKED;
+    return socket && socket->dgram;
+}
+
+void unix_socket_last_source(struct unix_socket *socket, char path[108]) {
+    UNIX_LOCKED;
+    if (!socket) {
+        path[0] = '\0';
+        return;
+    }
+    memcpy(path, socket->last_from, 108);
+}
+
 static struct unix_socket *find_listener(const char *key) {
     for (struct unix_socket *bound = listener_list; bound; bound = bound->next_listener) {
         if (bound->listening && bound->key && strcmp(bound->key, key) == 0) return bound;
@@ -506,10 +627,19 @@ int unix_socket_connect(struct unix_socket *socket, const struct tunix_sockaddr_
                         size_t length, const char *resolved) {
     UNIX_LOCKED;
     if (!socket) return -EINVAL;
-    if (socket->connected) return -EALREADY;
+    if (socket->connected && !socket->dgram) return -EALREADY;
     char path[108];
     int status = copy_path(path, address, length);
     if (status < 0) return status;
+    if (socket->dgram) {
+        struct unix_socket *target = find_dgram(path[0] == '\x01' || !resolved ? path : resolved);
+        if (!target) return -ECONNREFUSED;
+        struct unix_socket *previous = socket->dgram_peer;
+        target->peer_refs++;
+        socket->dgram_peer = target;
+        dgram_peer_put(previous);
+        return 0;
+    }
     struct unix_socket *listener = find_listener(path[0] == '\x01' || !resolved ? path : resolved);
     if (!listener || listener->pending_count >= listener->backlog) return -ECONNREFUSED;
 
@@ -568,6 +698,21 @@ struct unix_socket *unix_socket_accept(struct unix_socket *socket) {
 static int64_t unix_socket_read_data(struct unix_socket *socket, size_t size,
                                      void *buffer, size_t *consumed) {
     if (consumed) *consumed = 0;
+    if (socket && socket->dgram) {
+        struct unix_dgram *message = socket->rx_head;
+        if (!message) return -EAGAIN;
+        socket->rx_head = message->next;
+        if (!socket->rx_head) socket->rx_tail = NULL;
+        socket->rx_count--;
+        socket->rx_bytes -= message->length;
+        size_t deliver = size < message->length ? size : message->length;
+        if (deliver) memcpy(buffer, message->data, deliver);
+        socket->last_sender = message->sender;
+        memcpy(socket->last_from, message->from, sizeof(socket->last_from));
+        if (consumed) *consumed = message->length;
+        kfree(message);
+        return (int64_t)deliver;
+    }
     if (!socket || !socket->connected || !socket->channel) return -ENOTCONN;
     if (own_read_shutdown(socket)) return 0;
     struct pipe_buffer *pipe = incoming(socket);
@@ -616,6 +761,11 @@ int64_t unix_socket_read(struct unix_socket *socket, size_t size, void *buffer) 
 
 static int64_t unix_socket_write_locked(struct unix_socket *socket, size_t size,
                                         const void *buffer) {
+    if (socket && socket->dgram) {
+        if (!socket->dgram_peer) return -ENOTCONN;
+        int status = dgram_deliver(socket, socket->dgram_peer, size, buffer);
+        return status < 0 ? status : (int64_t)size;
+    }
     if (!socket || !socket->connected || !socket->channel) return -ENOTCONN;
     if (own_write_shutdown(socket) || peer_read_shutdown(socket) || !peer_open(socket)) return -EPIPE;
     struct pipe_buffer *pipe = outgoing(socket);
@@ -664,6 +814,7 @@ int64_t unix_socket_send_with_rights(struct unix_socket *socket, size_t size,
                                      size_t file_count) {
     UNIX_LOCKED;
     if (file_count > UNIX_RIGHTS_MAX) return -EINVAL;
+    if (socket && socket->dgram && file_count) return -EOPNOTSUPP;
     struct unix_ancillary_queue *queue = outgoing_ancillary(socket);
     if (file_count && (!queue || queue->count >= UNIX_QUEUE_MAX)) return -EAGAIN;
     struct unix_ancillary *message = NULL;
@@ -718,6 +869,7 @@ void unix_socket_last_sender(struct unix_socket *socket,
 int unix_socket_read_ready(struct unix_socket *socket) {
     UNIX_LOCKED;
     if (!socket) return 0;
+    if (socket->dgram) return socket->rx_head != NULL;
     if (socket->listening) return socket->pending_count > 0;
     if (!socket->connected || !socket->channel) return 0;
     if (own_read_shutdown(socket)) return 1;
@@ -730,6 +882,7 @@ int unix_socket_read_ready(struct unix_socket *socket) {
 
 size_t unix_socket_read_available(struct unix_socket *socket) {
     UNIX_LOCKED;
+    if (socket && socket->dgram) return socket->rx_head ? socket->rx_head->length : 0;
     if (!socket || socket->listening || !socket->connected || !socket->channel)
         return 0;
     if (socket->seqpacket) {
@@ -743,6 +896,12 @@ size_t unix_socket_read_available(struct unix_socket *socket) {
 
 int unix_socket_write_ready(struct unix_socket *socket) {
     UNIX_LOCKED;
+    if (socket && socket->dgram) {
+        struct unix_socket *peer = socket->dgram_peer;
+        if (!peer) return 1;
+        return peer->refs <= 0 || (peer->rx_count < UNIX_DGRAM_COUNT_MAX &&
+                                   peer->rx_bytes < UNIX_DGRAM_BYTES_MAX);
+    }
     if (!socket || !socket->connected || !socket->channel || !peer_open(socket)) return 0;
     if (own_write_shutdown(socket) || peer_read_shutdown(socket)) return 0;
     return outgoing(socket)->count < PIPE_CAPACITY;

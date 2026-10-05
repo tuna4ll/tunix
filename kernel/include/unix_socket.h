@@ -24,7 +24,16 @@ struct tunix_sockaddr_un {
     char path[108];
 };
 
-struct unix_socket *unix_socket_create(int seqpacket);
+#define UNIX_KIND_STREAM 0
+#define UNIX_KIND_SEQPACKET 1
+#define UNIX_KIND_DGRAM 2
+
+struct unix_socket *unix_socket_create(int kind);
+int64_t unix_socket_sendto(struct unix_socket *socket, size_t size, const void *buffer,
+                           const struct tunix_sockaddr_un *address, size_t length,
+                           const char *resolved);
+int unix_socket_is_dgram(struct unix_socket *socket);
+void unix_socket_last_source(struct unix_socket *socket, char path[108]);
 void unix_socket_set_credentials(struct unix_socket *socket, int32_t pid, uint32_t uid, uint32_t gid);
 int unix_socket_get_peer_credentials(struct unix_socket *socket, struct unix_credentials *credentials);
 int unix_socket_get_name(struct unix_socket *socket, int peer,

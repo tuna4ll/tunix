@@ -1570,7 +1570,8 @@ static int64_t sys_socket(int domain, int type, int protocol) {
         if ((base_type != TUNIX_SOCK_STREAM && base_type != TUNIX_SOCK_SEQPACKET &&
              base_type != TUNIX_SOCK_DGRAM) || protocol != 0) return -EOPNOTSUPP;
         struct unix_socket *socket =
-            unix_socket_create(base_type != TUNIX_SOCK_STREAM);
+            unix_socket_create(base_type == TUNIX_SOCK_STREAM ? UNIX_KIND_STREAM :
+                               base_type == TUNIX_SOCK_DGRAM ? UNIX_KIND_DGRAM : UNIX_KIND_SEQPACKET);
         if (!socket) return -ENOMEM;
 
         unix_socket_set_credentials(socket, process ? (int32_t)process->pid : 0,
@@ -1824,18 +1825,67 @@ static uint8_t *stage_message(size_t length) {
     return (uint8_t *)kmalloc(length ? length : 1U);
 }
 
+static int64_t unix_send_to_path(struct unix_socket *socket, const void *data, size_t length,
+                                 uint64_t user_address, uint64_t address_length) {
+    struct tunix_sockaddr_un address;
+    int status = copy_sockaddr_un(user_address, address_length, &address);
+    if (status < 0) return status;
+    VFS_PATH_SCOPED resolved = NULL;
+    if (address.path[0]) {
+        status = resolve_socket_path(&address, &resolved);
+        if (status != 0) return status;
+        if (!vfs_lookup(resolved)) return -ENOENT;
+    }
+    return unix_socket_sendto(socket, length, data, &address, (size_t)address_length, resolved);
+}
+
+static uint32_t unix_source_address(struct unix_socket *socket,
+                                    struct tunix_sockaddr_un *address) {
+    memset(address, 0, sizeof(*address));
+    address->family = TUNIX_AF_UNIX;
+    uint32_t actual = sizeof(address->family);
+    if (!unix_socket_is_dgram(socket)) return actual;
+    char path[108];
+    unix_socket_last_source(socket, path);
+    if (path[0] == '\x01') {
+        size_t name = strlen(path + 1);
+        memcpy(address->path + 1, path + 1, name);
+        actual += 1U + (uint32_t)name;
+    } else if (path[0]) {
+        size_t name = strlen(path);
+        memcpy(address->path, path, name + 1);
+        actual += (uint32_t)name + 1U;
+    }
+    return actual;
+}
+
+static int64_t unix_report_source(struct unix_socket *socket, uint64_t user_address,
+                                  uint64_t user_address_length) {
+    if (!user_address_length) return 0;
+    uint32_t supplied = 0;
+    if (copy_from_user(&supplied, user_address_length, sizeof(supplied)) != 0) return -EFAULT;
+    struct tunix_sockaddr_un address;
+    uint32_t actual = unix_source_address(socket, &address);
+    if (user_address && supplied) {
+        uint32_t copy = supplied < actual ? supplied : actual;
+        if (copy_to_user(user_address, &address, copy) != 0) return -EFAULT;
+    }
+    return copy_to_user(user_address_length, &actual, sizeof(actual)) == 0 ? 0 : -EFAULT;
+}
+
 static int64_t sys_sendto(int fd, uint64_t user_data, size_t length, int flags,
                           uint64_t user_address, uint64_t address_length) {
     struct unix_socket *unix_value = socket_from_fd(fd);
     if (unix_value) {
         (void)flags;
-        (void)user_address;
-        (void)address_length;
         if (length > SOCKET_MESSAGE_MAX) length = SOCKET_MESSAGE_MAX;
         uint8_t *data = stage_message(length);
         if (!data) return -ENOMEM;
-        int64_t result = length && copy_from_user(data, user_data, length) != 0
-                             ? -EFAULT : unix_socket_write(unix_value, length, data);
+        int64_t result;
+        if (length && copy_from_user(data, user_data, length) != 0) result = -EFAULT;
+        else if (user_address && unix_socket_is_dgram(unix_value))
+            result = unix_send_to_path(unix_value, data, length, user_address, address_length);
+        else result = unix_socket_write(unix_value, length, data);
         kfree(data);
         return result;
     }
@@ -1887,11 +1937,8 @@ static int64_t sys_recvfrom(int fd, uint64_t user_data, size_t length, int flags
         if (result > 0 && copy_to_user(user_data, data, (size_t)result) != 0) result = -EFAULT;
         kfree(data);
         if (result < 0) return result;
-        if (user_address_length) {
-            uint32_t zero = 0;
-            if (copy_to_user(user_address_length, &zero, sizeof(zero)) != 0) return -EFAULT;
-        }
-        return result;
+        int64_t reported = unix_report_source(unix_value, user_address, user_address_length);
+        return reported < 0 ? reported : result;
     }
     struct netlink_socket *netlink = netlink_socket_from_fd(fd);
     if (netlink) {
@@ -2062,6 +2109,12 @@ static int64_t sys_sendmsg(int fd, uint64_t user_message, int flags) {
         return status;
     }
 
+    if (unix_value && message.name && unix_socket_is_dgram(unix_value)) {
+        int64_t result = unix_send_to_path(unix_value, data, length, message.name,
+                                           message.name_length);
+        if (data != stage) kfree(data);
+        return result;
+    }
     if (unix_value) {
         if (message.name) return -EISDIR;
         struct file *files[UNIX_MAX_RIGHTS] = {0};
@@ -2313,7 +2366,15 @@ static int64_t sys_recvmsg(int fd, uint64_t user_message, int flags) {
             return -EFAULT;
         }
         if (data != stage) { kfree(data); data = stage; }
-        message.name_length = 0;
+        if (message.name && unix_socket_is_dgram(unix_value)) {
+            struct tunix_sockaddr_un source;
+            uint32_t actual = unix_source_address(unix_value, &source);
+            uint32_t copy = message.name_length < actual ? message.name_length : actual;
+            if (copy && copy_to_user(message.name, &source, copy) != 0) return -EFAULT;
+            message.name_length = actual;
+        } else {
+            message.name_length = 0;
+        }
         message.flags = 0;
         int status = write_unix_control(&message, unix_value, files, file_count, flags);
         if (status < 0) return status;
@@ -2461,7 +2522,8 @@ static int64_t sys_getsockopt(int fd, int level, int option,
         if (option == SO_TYPE || option == SO_ERROR || option == SO_ACCEPTCONN ||
             option == SO_SNDBUF || option == SO_RCVBUF) {
             if (supplied < sizeof(int32_t)) return -EINVAL;
-            int32_t value = option == SO_TYPE ? (unix_socket_is_seqpacket(unix_value)
+            int32_t value = option == SO_TYPE ? (unix_socket_is_dgram(unix_value) ? TUNIX_SOCK_DGRAM :
+                                                 unix_socket_is_seqpacket(unix_value)
                                                  ? TUNIX_SOCK_SEQPACKET : TUNIX_SOCK_STREAM) :
                 (option == SO_ACCEPTCONN ? unix_socket_is_listener(unix_value) :
                  ((option == SO_SNDBUF || option == SO_RCVBUF) ? (int32_t)PIPE_CAPACITY : 0));
