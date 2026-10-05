@@ -556,6 +556,49 @@ static void test_thread(void) {
 }
 
 #define CROWD 100
+static volatile unsigned pi_word;
+static volatile unsigned pi_owner_seen;
+static volatile int pi_thread_done;
+static char pi_stack[16384] __attribute__((aligned(16)));
+static u64 pi_block[4];
+
+static s64 pi_contender(void) {
+    s64 locked = sys(NR_FUTEX, (u64)&pi_word, 6 | 128, 0, 0, 0);
+    pi_owner_seen = pi_word & 0x3fffffffU;
+    s64 unlocked = sys(NR_FUTEX, (u64)&pi_word, 7 | 128, 0, 0, 0);
+    pi_thread_done = locked == 0 && unlocked == 0 ? 1 : -1;
+    sys(NR_EXIT, 0, 0, 0, 0, 0);
+    return 0;
+}
+
+static void test_pi_futex(void) {
+    u64 tid = (u64)sys(NR_GETTID, 0, 0, 0, 0, 0);
+    pi_word = 0;
+    s64 locked = sys(NR_FUTEX, (u64)&pi_word, 6 | 128, 0, 0, 0);
+    check("lock_pi takes a free lock", locked == 0 && (pi_word & 0x3fffffffU) == tid, locked);
+    s64 retry = sys(NR_FUTEX, (u64)&pi_word, 8 | 128, 0, 0, 0);
+    check("trylock_pi on a held lock", retry == -EAGAIN || retry == -35, retry);
+    pi_block[0] = (u64)pi_block;
+    u64 flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SETTLS;
+    s64 contender = clone_thread(flags, (u64)pi_stack + sizeof(pi_stack), (u64)pi_block, pi_contender);
+    for (int spin = 0; spin < 20000 && !(pi_word & 0x80000000U); spin++)
+        sys(NR_SCHED_YIELD, 0, 0, 0, 0, 0);
+    check("a contender marks the lock as waited on", (pi_word & 0x80000000U) != 0, pi_word);
+    s64 unlocked = sys(NR_FUTEX, (u64)&pi_word, 7 | 128, 0, 0, 0);
+    for (int spin = 0; spin < 20000 && !pi_thread_done; spin++)
+        sys(NR_SCHED_YIELD, 0, 0, 0, 0, 0);
+    check("unlock_pi hands the lock to the waiter", unlocked == 0 && pi_thread_done == 1 &&
+          pi_owner_seen == (unsigned)contender, pi_thread_done);
+    s64 stranger = sys(NR_FUTEX, (u64)&pi_word, 7 | 128, 0, 0, 0);
+    check("unlock_pi by a non-owner", stranger == -EPERM, stranger);
+
+    static volatile unsigned first, second;
+    first = 0;
+    second = 2;
+    s64 woken = sys6(NR_FUTEX, (u64)&first, 5 | 128, 1, 1, (u64)&second, (1U << 28) | (5U << 12));
+    check("wake_op updates the second word", woken == 0 && second == 7, (s64)second);
+}
+
 static volatile s64 forked_by_thread;
 static volatile s64 forking_thread_done;
 static char forker_stack[16384] __attribute__((aligned(16)));
@@ -1033,6 +1076,7 @@ void start_c(u64 *stack) {
     test_fork_and_switches();
     test_thread();
     test_group_children();
+    test_pi_futex();
     test_siginfo();
     test_signal_waits();
     test_signal_codes();

@@ -35,6 +35,7 @@ static int signal_would_act(const struct process *process, int signal_number);
 #define EINTR 4
 #define EINVAL 22
 #define ESRCH 3
+#define EDEADLK 35
 #define EPERM 1
 #define EACCES 13
 #define EAGAIN 11
@@ -43,6 +44,7 @@ static int signal_would_act(const struct process *process, int signal_number);
 #define SIGSEGV 11
 #define FUTEX_OWNER_DIED 0x40000000U
 #define FUTEX_TID_MASK 0x3fffffffU
+#define FUTEX_WAITERS 0x80000000U
 #define ROBUST_LIST_LIMIT 2048U
 #define DEFAULT_TIMERSLACK_NS 50000ULL
 #define PROCESS_DEFAULT_QUANTUM_TICKS 5U
@@ -1361,7 +1363,8 @@ static void wake_expired_timers(uint64_t now) {
             item->futex_wait_address = 0;
             item->futex_wait_key = 0;
             item->futex_wait_deadline_ns = 0;
-            SYSCALL_RET(&item->saved_frame) = (uint64_t)-(int64_t)ETIMEDOUT;
+            if (!item->syscall_rewound)
+                SYSCALL_RET(&item->saved_frame) = (uint64_t)-(int64_t)ETIMEDOUT;
             wake_to_ready(item);
         } else if (item->state == PROCESS_BLOCKED && item->futex_wait_active &&
                    item->futex_wait_deadline_ns != UINT64_MAX) {
@@ -2768,6 +2771,146 @@ int64_t process_futex_wait(struct syscall_frame *frame, uint64_t address,
     return 0;
 }
 
+static volatile uint32_t *user_futex_word(uint64_t address) {
+    if (!current || (address & 3U) || address >= USER_ADDRESS_LIMIT) return NULL;
+    uint32_t probe;
+    if (copy_from_user(&probe, address, sizeof(probe)) != 0) return NULL;
+    uint64_t physical = 0, flags = 0;
+    if (vmm_translate(current->cr3, address, &physical, &flags) != 0) return NULL;
+    if (!(flags & PAGE_WRITE)) {
+        if (!process_handle_cow_fault(address)) return NULL;
+        if (vmm_translate(current->cr3, address, &physical, &flags) != 0 || !(flags & PAGE_WRITE))
+            return NULL;
+    }
+    return (volatile uint32_t *)vmm_phys_to_virt(physical);
+}
+
+static int pi_sleep(struct syscall_frame *frame, uint64_t address, uint32_t expected,
+                    volatile uint32_t *word, int64_t timeout_ns, int shared,
+                    uint64_t syscall_number) {
+    uint64_t key = shared ? futex_shared_key(address) : 0;
+    SCHED_LOCKED;
+    if (__atomic_load_n(word, __ATOMIC_ACQUIRE) != expected) return 0;
+    struct process *waiting = current;
+    SYSCALL_RESTART(frame, syscall_number);
+    waiting->syscall_rewound = 1;
+    waiting->syscall_force_restart = 1;
+    waiting->saved_frame = *frame;
+    set_process_state(waiting, PROCESS_BLOCKED);
+    waiting->futex_wait_active = 1;
+    waiting->futex_wait_address = address;
+    waiting->futex_wait_key = key;
+    waiting->futex_wait_expected = expected;
+    waiting->futex_wait_bitset = FUTEX_BITSET_MATCH_ANY;
+    waiting->futex_wait_deadline_ns = timeout_ns < 0 ? UINT64_MAX :
+        time_uptime_ns() + (uint64_t)timeout_ns;
+    wait_link(waiting, address);
+    key_link(waiting, key);
+    if (timeout_ns >= 0) note_deadline(waiting->futex_wait_deadline_ns);
+    waiting->voluntary_switches++;
+    if (switch_to_next(frame, waiting) != 0) go_idle();
+    return 1;
+}
+
+int64_t process_futex_lock_pi(struct syscall_frame *frame, uint64_t address,
+                              int64_t deadline_ns, int trylock, int shared,
+                              uint64_t syscall_number) {
+    volatile uint32_t *word = user_futex_word(address);
+    if (!word) return -EFAULT;
+    uint32_t tid = (uint32_t)current->pid;
+    for (;;) {
+        uint32_t value = __atomic_load_n(word, __ATOMIC_ACQUIRE);
+        uint32_t owner = value & FUTEX_TID_MASK;
+        if (!owner) {
+            uint32_t desired = tid | (value & (FUTEX_WAITERS | FUTEX_OWNER_DIED));
+            if (__atomic_compare_exchange_n(word, &value, desired, 0, __ATOMIC_ACQ_REL,
+                                            __ATOMIC_ACQUIRE)) {
+                current->syscall_force_restart = 0;
+                return 0;
+            }
+            continue;
+        }
+        if (owner == tid) {
+            current->syscall_force_restart = 0;
+            return -EDEADLK;
+        }
+        int holder_alive;
+        {
+            SCHED_LOCKED;
+            struct process *holder = process_find(owner);
+            holder_alive = holder && holder->state != PROCESS_DEAD;
+        }
+        if (!holder_alive) {
+            current->syscall_force_restart = 0;
+            return -ESRCH;
+        }
+        if (trylock) return -EAGAIN;
+        if (!(value & FUTEX_WAITERS)) {
+            if (!__atomic_compare_exchange_n(word, &value, value | FUTEX_WAITERS, 0,
+                                             __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+                continue;
+            value |= FUTEX_WAITERS;
+        }
+        int64_t timeout_ns = -1;
+        if (deadline_ns >= 0) {
+            uint64_t now = time_realtime_ns();
+            if (now >= (uint64_t)deadline_ns) {
+                current->syscall_force_restart = 0;
+                return -ETIMEDOUT;
+            }
+            timeout_ns = (int64_t)((uint64_t)deadline_ns - now);
+        }
+        if (pi_sleep(frame, address, value, word, timeout_ns, shared, syscall_number))
+            return PROCESS_RESTARTED;
+    }
+}
+
+int64_t process_futex_unlock_pi(uint64_t address, int shared) {
+    volatile uint32_t *word = user_futex_word(address);
+    if (!word) return -EFAULT;
+    uint32_t value = __atomic_load_n(word, __ATOMIC_ACQUIRE);
+    if ((value & FUTEX_TID_MASK) != (uint32_t)current->pid) return -EPERM;
+    __atomic_store_n(word, 0, __ATOMIC_RELEASE);
+    if (value & FUTEX_WAITERS)
+        (void)process_futex_wake(address, INT32_MAX, FUTEX_BITSET_MATCH_ANY, shared);
+    return 0;
+}
+
+static int wake_op_compare(int cmp, int32_t value, int32_t argument) {
+    switch (cmp) {
+    case 0: return value == argument;
+    case 1: return value != argument;
+    case 2: return value < argument;
+    case 3: return value <= argument;
+    case 4: return value > argument;
+    case 5: return value >= argument;
+    default: return 0;
+    }
+}
+
+int64_t process_futex_wake_op(uint64_t address, int wake, uint64_t second, int wake_second,
+                              uint32_t encoded, int shared) {
+    unsigned op = (encoded >> 28) & 7U;
+    unsigned cmp = (encoded >> 24) & 15U;
+    uint32_t oparg = (encoded >> 12) & 0xFFFU;
+    int32_t cmparg = (int32_t)(encoded & 0xFFFU);
+    if (encoded & 0x80000000U) oparg = 1U << (oparg & 31U);
+    if (cmp > 5U || op > 4U) return -EINVAL;
+    volatile uint32_t *word = user_futex_word(second);
+    if (!word) return -EFAULT;
+    uint32_t old = __atomic_load_n(word, __ATOMIC_ACQUIRE);
+    for (;;) {
+        uint32_t next = op == 0 ? oparg : op == 1 ? old + oparg : op == 2 ? (old | oparg)
+                      : op == 3 ? (old & ~oparg) : (old ^ oparg);
+        if (__atomic_compare_exchange_n(word, &old, next, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            break;
+    }
+    int64_t woken = process_futex_wake(address, wake, FUTEX_BITSET_MATCH_ANY, shared);
+    if (wake_op_compare((int)cmp, (int32_t)old, cmparg))
+        woken += process_futex_wake(second, wake_second, FUTEX_BITSET_MATCH_ANY, shared);
+    return woken;
+}
+
 int process_sleep_on(struct syscall_frame *frame, const void *channel) {
     if (!current || !frame || !channel) return -EAGAIN;
     SCHED_LOCKED;
@@ -2961,7 +3104,7 @@ static int futex_wake_list(struct process *item, int by_key, uint64_t address, u
             item->futex_wait_address = 0;
             item->futex_wait_key = 0;
             item->futex_wait_deadline_ns = 0;
-            SYSCALL_RET(&item->saved_frame) = 0;
+            if (!item->syscall_rewound) SYSCALL_RET(&item->saved_frame) = 0;
             wake_to_ready(item);
             woken++;
         }

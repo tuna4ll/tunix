@@ -376,6 +376,12 @@ int process_may_sleep(void);
 void process_preempt_point(void);
 int process_take_signal(uint64_t set, int32_t *info);
 int64_t process_send_thread_signal(int64_t tgid, int64_t tid, int signal_number);
+int64_t process_futex_lock_pi(struct syscall_frame *frame, uint64_t address,
+                              int64_t deadline_ns, int trylock, int shared,
+                              uint64_t syscall_number);
+int64_t process_futex_unlock_pi(uint64_t address, int shared);
+int64_t process_futex_wake_op(uint64_t address, int wake, uint64_t second, int wake_second,
+                              uint32_t encoded, int shared);
 void process_kernel_yield(void);
 struct process *process_create_kthread(const char *name, void (*body)(void *), void *argument);
 void process_user_resume(void);

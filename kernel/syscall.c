@@ -533,6 +533,13 @@ struct linux_clone_args {
 #define FUTEX_WAKE 1
 
 #define FUTEX_WAIT_BITSET 9
+#define FUTEX_REQUEUE 3
+#define FUTEX_CMP_REQUEUE 4
+#define FUTEX_WAKE_OP 5
+#define FUTEX_LOCK_PI 6
+#define FUTEX_UNLOCK_PI 7
+#define FUTEX_TRYLOCK_PI 8
+#define FUTEX_LOCK_PI2 13
 #define FUTEX_WAKE_BITSET 10
 #define FUTEX_PRIVATE_FLAG 128
 
@@ -6051,6 +6058,47 @@ static void syscall_run(struct syscall_frame *frame) {
                 int64_t result = process_futex_wait(frame, SYSCALL_ARG0(frame), (uint32_t)SYSCALL_ARG2(frame),
                                                     timeout_ns, bitset, shared);
                 if (process_current() == futex_caller) SYSCALL_RET(frame) = (uint64_t)result;
+            } else if (command == FUTEX_LOCK_PI || command == FUTEX_LOCK_PI2 ||
+                       command == FUTEX_TRYLOCK_PI) {
+                int64_t deadline = -1;
+                if (command != FUTEX_TRYLOCK_PI && SYSCALL_ARG3(frame)) {
+                    struct linux_timespec timeout;
+                    if (copy_from_user(&timeout, SYSCALL_ARG3(frame), sizeof(timeout)) != 0) {
+                        SYSCALL_RET(frame) = (uint64_t)-(int64_t)EFAULT;
+                        break;
+                    }
+                    if (timeout.tv_sec < 0 || timeout.tv_nsec < 0 || timeout.tv_nsec >= 1000000000LL) {
+                        SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINVAL;
+                        break;
+                    }
+                    deadline = timeout.tv_sec * 1000000000LL + timeout.tv_nsec;
+                    if (command == FUTEX_LOCK_PI2 && !(operation & FUTEX_CLOCK_REALTIME))
+                        deadline += (int64_t)(time_realtime_ns() - time_uptime_ns());
+                }
+                struct process *locker = process_current();
+                int64_t result = process_futex_lock_pi(frame, SYSCALL_ARG0(frame), deadline,
+                                                       command == FUTEX_TRYLOCK_PI, shared, SYS_FUTEX);
+                if (result != PROCESS_RESTARTED && process_current() == locker)
+                    SYSCALL_RET(frame) = (uint64_t)result;
+            } else if (command == FUTEX_UNLOCK_PI) {
+                SYSCALL_RET(frame) = (uint64_t)process_futex_unlock_pi(SYSCALL_ARG0(frame), shared);
+            } else if (command == FUTEX_REQUEUE || command == FUTEX_CMP_REQUEUE) {
+                uint32_t current_value = 0;
+                if (command == FUTEX_CMP_REQUEUE &&
+                    (copy_from_user(&current_value, SYSCALL_ARG0(frame), sizeof(current_value)) != 0 ||
+                     current_value != (uint32_t)SYSCALL_ARG5(frame))) {
+                    SYSCALL_RET(frame) = (uint64_t)-(int64_t)EAGAIN;
+                    break;
+                }
+                int wake = (int)SYSCALL_ARG2(frame);
+                int requeue = (int)SYSCALL_ARG3(frame);
+                int total = wake > INT32_MAX - requeue ? INT32_MAX : wake + requeue;
+                SYSCALL_RET(frame) = (uint64_t)process_futex_wake(SYSCALL_ARG0(frame), total,
+                                                                  FUTEX_BITSET_MATCH_ANY, shared);
+            } else if (command == FUTEX_WAKE_OP) {
+                SYSCALL_RET(frame) = (uint64_t)process_futex_wake_op(SYSCALL_ARG0(frame), (int)SYSCALL_ARG2(frame),
+                                                                     SYSCALL_ARG4(frame), (int)SYSCALL_ARG3(frame),
+                                                                     (uint32_t)SYSCALL_ARG5(frame), shared);
             } else {
                 SYSCALL_RET(frame) = (uint64_t)-(int64_t)ENOSYS;
             }
