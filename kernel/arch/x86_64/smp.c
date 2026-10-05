@@ -148,7 +148,7 @@ void smp_ap_entry(uint64_t index) {
     syscall_init();
     apic_enable_local();
     percpu_slot((unsigned)index)->apic_id = apic_local_id();
-    apic_timer_start(TIMER_FREQUENCY_HZ, SMP_TIMER_VECTOR);
+    timer_local_start(1);
     percpu_mark_online((unsigned)index);
     process_run_idle();
 }

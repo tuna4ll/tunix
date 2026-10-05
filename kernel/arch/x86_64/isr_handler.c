@@ -57,8 +57,10 @@ static void isr_dispatch(struct interrupt_frame *regs) {
         return;
     }
     if (regs->int_no == SMP_TIMER_VECTOR) {
-        apic_send_eoi();
-        process_timer_interrupt(regs);
+        unsigned due = cpu_current()->timer_due;
+        if (due & TIMER_LOCAL_DEADLINE) timer_run_deadlines();
+        if (due & TIMER_LOCAL_TICK) process_timer_interrupt(regs);
+        else process_deadline_interrupt(regs);
         return;
     }
     if (regs->int_no == SMP_RESCHEDULE_VECTOR) {
@@ -255,11 +257,15 @@ void isr_handler(struct interrupt_frame *regs) {
         apic_send_eoi();
         return;
     }
-    if (regs->int_no == SMP_TIMER_VECTOR && !cpu_current()->current &&
-        !process_ready_pending()) {
+    if (regs->int_no == SMP_TIMER_VECTOR) {
         apic_send_eoi();
-        smp_service_flush();
-        return;
+        unsigned due = timer_local_expired();
+        cpu_current()->timer_due = (uint8_t)due;
+        if (!(due & TIMER_LOCAL_DEADLINE) && !cpu_current()->current &&
+            !process_ready_pending()) {
+            smp_service_flush();
+            return;
+        }
     }
     kernel_enter_from_isr();
     int interrupt = regs->int_no >= 32U;

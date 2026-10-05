@@ -258,15 +258,24 @@ interrupts taken at CPL 0 as well, so the frame can be replaced wholesale with
 a process's and the `iretq` lands in user mode — which is how an idle processor
 picks up work with no context to unwind (`resume_from_idle`).
 
-The first processor is driven by the PIT, as it always was. Every other one is
-preempted by its own local APIC timer, whose rate nothing reports and so is
-measured against the TSC at bring-up.
+The first processor is driven by the PIT, as it always was. Every processor
+also has its local timer (the local APIC on x86, the virtual generic timer on
+aarch64) in one-shot mode, programmed for whichever comes first: its next
+scheduler tick or the earliest wake-up it was asked to keep. The first
+processor's local timer only keeps wake-ups, since the PIT ticks it.
 
-The latency for an idle processor to notice new work is therefore up to one
-tick, 4 ms. There is no reschedule message, because the case it would cover —
-more runnable processes than busy processors — is the case where throughput is
-not the constraint. A processor that blocks picks the next runnable process
-itself, immediately, exactly as before.
+A wake-up is any deadline a sleeper is waiting on: `nanosleep`, a `poll`,
+`epoll_wait` or `select` timeout, a futex timeout, `setitimer`, an armed
+`timerfd`, or a kernel wait with a limit. The processor that records one arms
+its own timer for it, and when it fires it expires every deadline that has
+passed, wherever it was recorded (`timer_run_deadlines`). So a sleeper wakes
+within microseconds of its deadline instead of on the next 4 ms tick, and the
+woken task preempts the one running there if it is further behind
+(`process_deadline_interrupt`). `support/tests/timerlat-kerneltest.sh` measures
+it.
+
+An idle processor is told about new work with a reschedule interrupt. A
+processor that blocks picks the next runnable process itself, immediately.
 
 ## Locking
 

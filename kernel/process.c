@@ -285,6 +285,7 @@ static void set_process_state(struct process *process, int state) {
 
 static void note_deadline(uint64_t deadline) {
     if (deadline && deadline < earliest_deadline) earliest_deadline = deadline;
+    timer_note_deadline(deadline);
 }
 
 static void pid_link(struct process *process) {
@@ -2168,7 +2169,7 @@ void process_reschedule_interrupt(struct interrupt_frame *frame) {
     if (frame && !current) resume_from_idle(frame);
 }
 
-void process_timer_interrupt(struct interrupt_frame *frame) {
+static void preempt_from_interrupt(struct interrupt_frame *frame, int tick) {
     if (!frame) return;
     if (!current) {
         resume_from_idle(frame);
@@ -2180,9 +2181,9 @@ void process_timer_interrupt(struct interrupt_frame *frame) {
     arch_frame_from_interrupt(&current->saved_frame, frame);
 
     struct syscall_frame resume = current->saved_frame;
-    if (current->time_slice_ticks) current->time_slice_ticks--;
+    if (tick && current->time_slice_ticks) current->time_slice_ticks--;
     lock_acquire(&sched_lock);
-    if (!current->time_slice_ticks || higher_priority_waiting(current) ||
+    if ((tick && !current->time_slice_ticks) || higher_priority_waiting(current) ||
         ordinary_should_preempt(current) || !allowed_on_this_cpu(current)) {
         struct process *preempted = current;
         set_process_state(preempted, PROCESS_READY);
@@ -2207,6 +2208,14 @@ void process_timer_interrupt(struct interrupt_frame *frame) {
     if (!current || current->state != PROCESS_RUNNING) return;
     current->saved_frame = resume;
     arch_frame_to_interrupt(frame, &resume);
+}
+
+void process_timer_interrupt(struct interrupt_frame *frame) {
+    preempt_from_interrupt(frame, 1);
+}
+
+void process_deadline_interrupt(struct interrupt_frame *frame) {
+    preempt_from_interrupt(frame, 0);
 }
 
 void process_yield_from_syscall(struct syscall_frame *frame) {
@@ -2747,6 +2756,7 @@ static int wake_bucket(const void *channel, const void *exact, uint64_t *now) {
                     wake_to_ready(item);
                     woken++;
                 } else {
+                    if (item->io_wait_active) timer_note_deadline(item->io_wait_deadline_ns);
                     __atomic_store_n(&io_recheck_pending, 1, __ATOMIC_RELEASE);
                 }
             }
@@ -2893,6 +2903,12 @@ int process_futex_wake(uint64_t address, int maximum, uint32_t bitset, int share
                                 bitset, maximum, woken);
     futex_note('K', address, woken, maximum, 0);
     return woken;
+}
+
+void process_expire_deadlines(void) {
+    SCHED_LOCKED;
+    wake_expired_timers(time_uptime_ns());
+    timer_note_deadline(earliest_deadline);
 }
 
 int process_ready_pending(void) {

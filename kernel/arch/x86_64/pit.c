@@ -16,4 +16,5 @@ void arch_timer_start(unsigned hz) {
     outb(PIT_COMMAND, PIT_MODE_RATE_GENERATOR);
     outb(PIT_CHANNEL0, (uint8_t)(divisor & 0xFFU));
     outb(PIT_CHANNEL0, (uint8_t)(divisor >> 8));
+    timer_local_start(0);
 }

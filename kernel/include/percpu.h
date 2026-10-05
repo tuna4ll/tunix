@@ -39,6 +39,11 @@ struct cpu {
     struct process *switch_owner;
     uint8_t switching;
     uint32_t in_interrupt;
+    uint8_t timer_local;
+    uint8_t timer_due;
+    uint64_t timer_next_tick_ns;
+    uint64_t timer_deadline_ns;
+    uint64_t timer_programmed_ns;
 };
 
 _Static_assert(__builtin_offsetof(struct cpu, kernel_rsp) == 0, "syscall_entry.S reads gs:0");

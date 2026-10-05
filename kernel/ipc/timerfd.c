@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include "../include/heap.h"
 #include "../include/time.h"
+#include "../include/timer.h"
 #include "../include/timerfd.h"
 #include "../include/lock.h"
 
@@ -45,6 +46,16 @@ static int timespec_to_ns(int64_t sec, int64_t nsec, uint64_t *out) {
 static void ns_to_timespec(uint64_t value, int64_t *sec, int64_t *nsec) {
     *sec = (int64_t)(value / 1000000000ULL);
     *nsec = (int64_t)(value % 1000000000ULL);
+}
+
+static void arm(const struct timerfd_context *context) {
+    uint64_t when = context->next_expiration_ns;
+    if (!when || when == UINT64_MAX) return;
+    if (context->clock_id == CLOCK_REALTIME) {
+        uint64_t offset = time_realtime_ns() - time_uptime_ns();
+        when = when > offset ? when - offset : 1;
+    }
+    timer_note_deadline(when);
 }
 
 static void refresh(struct timerfd_context *context) {
@@ -129,6 +140,7 @@ int timerfd_settime(struct timerfd_context *context, int flags,
         uint64_t now = clock_now(context->clock_id);
         context->next_expiration_ns = UINT64_MAX - now < initial ? UINT64_MAX : now + initial;
     }
+    arm(context);
     return 0;
 }
 
@@ -136,7 +148,10 @@ int64_t timerfd_read(struct timerfd_context *context, size_t size, void *buffer)
     TIMERFD_LOCKED;
     if (!context || !buffer || size != sizeof(uint64_t)) return -EINVAL;
     refresh(context);
-    if (!context->pending_expirations) return -EAGAIN;
+    if (!context->pending_expirations) {
+        arm(context);
+        return -EAGAIN;
+    }
     *(uint64_t *)buffer = context->pending_expirations;
     context->pending_expirations = 0;
     return (int64_t)sizeof(uint64_t);
@@ -145,5 +160,6 @@ int64_t timerfd_read(struct timerfd_context *context, size_t size, void *buffer)
 int timerfd_read_ready(struct timerfd_context *context) {
     TIMERFD_LOCKED;
     refresh(context);
+    if (context) arm(context);
     return context && context->pending_expirations != 0;
 }

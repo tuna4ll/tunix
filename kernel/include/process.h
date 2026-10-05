@@ -281,6 +281,7 @@ void process_start_first(void) __attribute__((noreturn));
 void process_run_idle(void) __attribute__((noreturn));
 void process_yield_from_syscall(struct syscall_frame *frame);
 void process_timer_interrupt(struct interrupt_frame *frame);
+void process_deadline_interrupt(struct interrupt_frame *frame);
 int process_map_area(uint64_t start, uint64_t end, uint64_t page_flags,
                      uint32_t kind, struct file *file, uint64_t offset);
 void process_unmap_area(uint64_t start, uint64_t end);
@@ -299,6 +300,7 @@ int process_fault_from_interrupt(struct interrupt_frame *frame, int signal_numbe
 void process_run_child_first_from_syscall(struct syscall_frame *frame, uint64_t child_pid);
 void process_reap_deferred(void);
 void process_io_recheck(void);
+void process_expire_deadlines(void);
 struct process *process_poll_subject(void);
 struct file *file_table_get(struct file_table *table, int fd);
 void file_table_ref(struct file_table *table);

@@ -31,6 +31,7 @@
 #include "include/syscall.h"
 #include "include/ext2.h"
 #include "include/time.h"
+#include "include/timer.h"
 #include "include/tty.h"
 #include "include/uts.h"
 #include "include/vt.h"
@@ -997,6 +998,7 @@ static int retry_io_wait(struct syscall_frame *frame, uint64_t syscall_number,
         waiting->io_wait_deadline_ns = timeout_ns < 0 ? UINT64_MAX :
             saturating_add_u64(now, (uint64_t)timeout_ns);
     }
+    timer_note_deadline(waiting->io_wait_deadline_ns);
 
     if (waiting->io_wait_deadline_ns != UINT64_MAX &&
         now >= waiting->io_wait_deadline_ns) {

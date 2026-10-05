@@ -141,17 +141,20 @@ int aarch64_irq(struct interrupt_frame *frame) {
         return 1;
     }
     int timer = intid == aarch64_platform.timer_interrupt;
-    if (timer) aarch64_timer_rearm();
+    unsigned due = timer ? timer_local_expired() : 0;
     gic_end_of_interrupt(intid);
-    if (timer && cpu_current()->index != 0 && !cpu_current()->current &&
-        !process_ready_pending()) {
+    if (timer && !(due & TIMER_LOCAL_DEADLINE) && !cpu_current()->current &&
+        !process_ready_pending() &&
+        !(cpu_current()->index == 0 && (due & TIMER_LOCAL_TICK))) {
         smp_service_flush();
         return 0;
     }
     kernel_enter_from_isr();
     cpu_current()->in_interrupt++;
     if (timer) {
-        if (cpu_current()->index == 0) timer_irq(frame);
+        if (due & TIMER_LOCAL_DEADLINE) timer_run_deadlines();
+        if (!(due & TIMER_LOCAL_TICK)) process_deadline_interrupt(frame);
+        else if (cpu_current()->index == 0) timer_irq(frame);
         else process_timer_interrupt(frame);
     } else if (intid >= 8192U) {
         irq_dispatch(IRQ_VECTOR_FIRST + (intid - 8192U));

@@ -295,7 +295,9 @@ in reverse (`resume_from_idle`): it came from kernel mode, but long mode pushes
 `SS:RSP` for those interrupts too, so the frame can be replaced with a
 process's and the `iret` lands in user space. That is how an idle processor
 picks up work. Processors other than the first are ticked by their own local
-APIC timer rather than the PIT, which is wired to one of them.
+timer rather than the PIT, which is wired to one of them; the same timer also
+fires at the earliest sleeper's deadline (see
+[Multiprocessor](multiprocessor.md#idling)).
 
 ### Voluntary and blocking transitions
 

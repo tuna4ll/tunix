@@ -126,7 +126,6 @@ uint64_t gic_boot_redistributor_physical(void);
 void its_init(void);
 int its_ready(void);
 int its_bind_msi(uint32_t device_id, uint32_t event, uint64_t *address);
-void aarch64_timer_rearm(void);
 void aarch64_pci_init(void);
 struct boot_framebuffer_info;
 void aarch64_display_reserve(void);

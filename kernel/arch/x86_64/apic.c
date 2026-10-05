@@ -6,7 +6,9 @@
 #include "../../include/cpu.h"
 #include "../../include/percpu.h"
 #include "../../include/pic.h"
+#include "../../include/smp.h"
 #include "../../include/time.h"
+#include "../../include/timer.h"
 #include "../../include/vmm.h"
 
 extern void kprintf(const char *fmt, ...);
@@ -33,10 +35,10 @@ extern void kprintf(const char *fmt, ...);
 #define ICR_DESTINATION_SHIFT 24U
 
 #define LVT_MASKED (1U << 16)
-#define LVT_PERIODIC (1U << 17)
 #define TIMER_DIVIDE_16 0x3U
 #define TIMER_DIVISOR 16U
 #define CALIBRATION_MS 20ULL
+#define TIMER_MAX_DELAY_NS 1000000000ULL
 #define LAPIC_SPURIOUS_ENABLE (1U << 8)
 #define LAPIC_SPURIOUS_VECTOR 0xFFU
 #define LAPIC_ID_SHIFT 24U
@@ -176,8 +178,13 @@ void apic_send_ipi_to_others(uint8_t vector) {
 static uint64_t timer_measured_hz[SMP_MAX_CPUS];
 static uint32_t timer_initial_count[SMP_MAX_CPUS];
 
-void apic_timer_start(uint32_t hz, uint8_t vector) {
-    if (!active || !hz) return;
+static uint64_t lapic_hz(void) {
+    unsigned index = cpu_current() ? cpu_current()->index : 0;
+    return index < SMP_MAX_CPUS ? timer_measured_hz[index] : 0;
+}
+
+int arch_local_timer_start(void) {
+    if (!active) return -1;
 
     lapic_write(LAPIC_TIMER_DIVIDE, TIMER_DIVIDE_16);
     lapic_write(LAPIC_LVT_TIMER, LVT_MASKED);
@@ -191,17 +198,26 @@ void apic_timer_start(uint32_t hz, uint8_t vector) {
 
     uint64_t elapsed = 0xFFFFFFFFULL - remaining;
     uint64_t per_second = (elapsed * 1000ULL) / CALIBRATION_MS;
-    uint32_t count = per_second > hz ? (uint32_t)(per_second / hz) : 1U;
+    if (per_second < 1000000ULL) return -1;
 
     unsigned index = cpu_current() ? cpu_current()->index : 0;
     if (index < SMP_MAX_CPUS) {
         timer_measured_hz[index] = per_second;
-        timer_initial_count[index] = count;
+        timer_initial_count[index] = (uint32_t)(per_second / TIMER_FREQUENCY_HZ);
     }
 
     lapic_write(LAPIC_TIMER_DIVIDE, TIMER_DIVIDE_16);
-    lapic_write(LAPIC_LVT_TIMER, LVT_PERIODIC | vector);
-    lapic_write(LAPIC_TIMER_INITIAL, count);
+    lapic_write(LAPIC_LVT_TIMER, SMP_TIMER_VECTOR);
+    return 0;
+}
+
+void arch_local_timer_program(uint64_t delay_ns) {
+    if (!active) return;
+    if (delay_ns > TIMER_MAX_DELAY_NS) delay_ns = TIMER_MAX_DELAY_NS;
+    uint64_t count = (delay_ns * lapic_hz() + 999999999ULL) / 1000000000ULL;
+    if (!count) count = 1;
+    if (count > 0xFFFFFFFFULL) count = 0xFFFFFFFFULL;
+    lapic_write(LAPIC_TIMER_INITIAL, (uint32_t)count);
 }
 
 void apic_timer_calibration(unsigned index, uint64_t *measured_hz,
