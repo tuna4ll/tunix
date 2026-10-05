@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
+#include "../include/cgroup.h"
 #include "../include/cred.h"
 #include "../include/defer.h"
 #include "../include/heap.h"
@@ -63,6 +64,12 @@ void vfs_stamp_times(struct vfs_node *node, uint32_t which) {
     if (which & VFS_TIME_ATIME) node->atime = now;
     if (which & VFS_TIME_MTIME) node->mtime = now;
     if (which & VFS_TIME_CTIME) node->ctime = now;
+}
+
+static void directory_changed(struct vfs_node *directory) {
+    if (!directory) return;
+    vfs_stamp_times(directory, VFS_TIME_MTIME | VFS_TIME_CTIME);
+    if (directory->disk_inode) PERSIST(meta_changed, directory);
 }
 
 void vfs_notify_meta_changed(struct vfs_node *node) {
@@ -948,6 +955,7 @@ struct vfs_node *vfs_create_file(const char *path, const void *data,
         vfs_free_node(node);
         return NULL;
     }
+    directory_changed(parent);
     inotify_notify(parent, TUNIX_IN_CREATE, name, 0);
     PERSIST(created, node);
     adopt_into_parent(node);
@@ -971,6 +979,7 @@ struct vfs_node *vfs_create_file_node(const char *path, uint32_t mode) {
         return NULL;
     }
     cred_stamp_new_node(node);
+    directory_changed(parent);
     inotify_notify(parent, TUNIX_IN_CREATE, name, 0);
     PERSIST(created, node);
     adopt_into_parent(node);
@@ -992,6 +1001,7 @@ struct vfs_node *vfs_create_directory(const char *path, uint32_t mode) {
         return NULL;
     }
     cred_stamp_new_node(node);
+    directory_changed(parent);
     inotify_notify(parent, TUNIX_IN_CREATE, name, 0);
     PERSIST(created, node);
     adopt_into_parent(node);
@@ -1020,6 +1030,7 @@ struct vfs_node *vfs_create_symlink(const char *path, const char *target,
         return NULL;
     }
     cred_stamp_new_node(node);
+    directory_changed(parent);
     inotify_notify(parent, TUNIX_IN_CREATE, name, 0);
     PERSIST(created, node);
     adopt_into_parent(node);
@@ -1042,6 +1053,7 @@ struct vfs_node *vfs_create_fifo(const char *path, uint32_t mode) {
     }
     cred_stamp_new_node(node);
     node->mode = mode & 07777U;
+    directory_changed(parent);
     inotify_notify(parent, TUNIX_IN_CREATE, name, 0);
     return node;
 }
@@ -1062,6 +1074,7 @@ struct vfs_node *vfs_create_socket_node(const char *path, uint32_t mode) {
     }
     cred_stamp_new_node(node);
     node->mode = mode & 07777U;
+    directory_changed(parent);
     inotify_notify(parent, TUNIX_IN_CREATE, name, 0);
     return node;
 }
@@ -1121,6 +1134,7 @@ int vfs_link(struct vfs_node *target, const char *path) {
     if (!link) return -1;
 
     vfs_stamp_times(target, VFS_TIME_CTIME);
+    directory_changed(parent);
     inotify_notify(parent, TUNIX_IN_CREATE, name, 0);
     PERSIST(linked, link);
     return 0;
@@ -1211,6 +1225,7 @@ int vfs_remove(const char *path, int remove_directory) {
     if (remove_directory) {
         if (kind != VFS_DIRECTORY || node->children) return -1;
     } else if (kind == VFS_DIRECTORY) return -1;
+    directory_changed(parent);
     inotify_notify(parent, TUNIX_IN_DELETE, name, 0);
     if (body->links <= 1) {
         inotify_notify(body, TUNIX_IN_DELETE_SELF, NULL, 0);
@@ -1246,6 +1261,7 @@ int vfs_rename(const char *old_path, const char *new_path) {
         if (existing_kind == VFS_DIRECTORY && existing->children) return -1;
         struct vfs_node *body =
             existing->link_target ? existing->link_target : existing;
+        directory_changed(new_parent);
         inotify_notify(new_parent, TUNIX_IN_DELETE, new_name, 0);
         if (body->links <= 1) {
             inotify_notify(body, TUNIX_IN_DELETE_SELF, NULL, 0);
@@ -1257,6 +1273,8 @@ int vfs_rename(const char *old_path, const char *new_path) {
     }
     if (old_parent == new_parent && strcmp(old_name, new_name) == 0) return 0;
     uint32_t cookie = inotify_next_cookie();
+    directory_changed(old_parent);
+    if (new_parent != old_parent) directory_changed(new_parent);
     inotify_notify(old_parent, TUNIX_IN_MOVED_FROM, old_name, cookie);
     inotify_notify(new_parent, TUNIX_IN_MOVED_TO, new_name, cookie);
     inotify_notify(node->link_target ? node->link_target : node,
@@ -1360,15 +1378,58 @@ static int tree_busy(struct vfs_node *top) {
     return 0;
 }
 
+static int option_number(const char *value, size_t length, int base, uint32_t *out) {
+    uint32_t number = 0;
+    if (!length) return -1;
+    for (size_t index = 0; index < length; index++) {
+        uint32_t digit = (uint32_t)(value[index] - '0');
+        if (value[index] < '0' || digit >= (uint32_t)base) return -1;
+        number = number * (uint32_t)base + digit;
+    }
+    *out = number;
+    return 0;
+}
+
+static void apply_tmpfs_options(struct vfs_node *root, const char *options) {
+    if (!options) return;
+    const char *at = options;
+    while (*at) {
+        const char *end = at;
+        while (*end && *end != ',') end++;
+        size_t length = (size_t)(end - at);
+        uint32_t value;
+        if (length > 5 && memcmp(at, "mode=", 5) == 0 &&
+            option_number(at + 5, length - 5, 8, &value) == 0)
+            root->mode = (root->mode & ~07777U) | (value & 07777U);
+        else if (length > 4 && memcmp(at, "uid=", 4) == 0 &&
+                 option_number(at + 4, length - 4, 10, &value) == 0)
+            root->uid = value;
+        else if (length > 4 && memcmp(at, "gid=", 4) == 0 &&
+                 option_number(at + 4, length - 4, 10, &value) == 0)
+            root->gid = value;
+        at = *end ? end + 1 : end;
+    }
+}
+
 static int mount_is_pseudo(const char *type) {
     return strcmp(type, "proc") == 0 || strcmp(type, "sysfs") == 0 ||
            strcmp(type, "devtmpfs") == 0 || strcmp(type, "devfs") == 0 ||
            strcmp(type, "eventfs") == 0;
 }
 
+static int canonical_target(const char *target, char *out) {
+    struct vfs_node *node = vfs_lookup(target);
+    if (!node) return -VFS_ENOENT;
+    if (vfs_node_path(node, out, VFS_PATH_MAX) != 0) return -VFS_EINVAL;
+    return 0;
+}
+
 int vfs_mount(const char *source, const char *target, const char *type,
-              uint32_t flags) {
+              uint32_t flags, const char *options) {
     VFS_LOCKED;
+    VFS_PATH_SCOPED canonical = vfs_path_buffer();
+    if (canonical && target && target[0] == '/' && canonical_target(target, canonical) == 0)
+        target = canonical;
     if (!target || !type || target[0] != '/') return -VFS_EINVAL;
     if (flags & ~(VFS_MS_SUPPORTED | VFS_MS_IGNORED)) return -VFS_EINVAL;
     flags &= ~VFS_MS_IGNORED;
@@ -1379,13 +1440,13 @@ int vfs_mount(const char *source, const char *target, const char *type,
         existing->flags = flags & ~VFS_MS_REMOUNT;
         return 0;
     }
-    if (existing) return -VFS_EBUSY;
+    if (existing && !existing->mountpoint) return -VFS_EBUSY;
 
     struct vfs_node *at = vfs_lookup(target);
     if (!at) return -VFS_ENOENT;
     if ((at->flags & 0xFFU) != VFS_DIRECTORY) return -VFS_ENOTDIR;
     if (at == vfs_root) return -VFS_EBUSY;
-    if (at->mounted) return -VFS_EBUSY;
+    while (at->mounted) at = at->mounted;
 
     struct vfs_node *root = NULL;
     int owns_root = 0;
@@ -1402,6 +1463,7 @@ int vfs_mount(const char *source, const char *target, const char *type,
         root->mode = at->mode;
         root->uid = at->uid;
         root->gid = at->gid;
+        apply_tmpfs_options(root, options);
         owns_root = 1;
     } else if (strcmp(type, "vfat") == 0 || strcmp(type, "fat") == 0 ||
                strcmp(type, "msdos") == 0) {
@@ -1414,6 +1476,10 @@ int vfs_mount(const char *source, const char *target, const char *type,
             if (root) free_tree(root);
             return status;
         }
+        owns_root = 1;
+    } else if (strcmp(type, "cgroup2") == 0 || strcmp(type, "cgroup") == 0) {
+        int status = cgroupfs_mount(type, options, at->name, &root);
+        if (status != 0) return status;
         owns_root = 1;
     } else if (mount_is_pseudo(type)) {
         return -VFS_EBUSY;
@@ -1449,18 +1515,25 @@ int vfs_mount(const char *source, const char *target, const char *type,
     return 0;
 }
 
-int vfs_umount(const char *target) {
+int vfs_umount(const char *target, int detach) {
     VFS_LOCKED;
     if (!target) return -VFS_EINVAL;
+    VFS_PATH_SCOPED canonical = vfs_path_buffer();
+    if (canonical && target[0] == '/' && canonical_target(target, canonical) == 0)
+        target = canonical;
     struct vfs_mount *previous = NULL;
-    struct vfs_mount *entry = mount_table;
-    while (entry && strcmp(entry->target, target) != 0) {
-        previous = entry;
-        entry = entry->next;
+    struct vfs_mount *entry = NULL;
+    struct vfs_mount *before = NULL;
+    for (struct vfs_mount *walk = mount_table; walk; before = walk, walk = walk->next) {
+        if (strcmp(walk->target, target) != 0) continue;
+        entry = walk;
+        previous = before;
     }
     if (!entry) return -VFS_EINVAL;
     if (!entry->mountpoint) return -VFS_EPERM;
-    if (entry->owns_root && tree_busy(entry->root)) return -VFS_EBUSY;
+    int busy = entry->owns_root && tree_busy(entry->root);
+    if (busy && !detach) return -VFS_EBUSY;
+    if (cgroupfs_magic(entry->root) && cgroupfs_unmount(entry->root) != 0) return -VFS_EBUSY;
     for (struct vfs_node *node = wb_head; node;) {
         struct vfs_node *next = node->wb_next;
         writeback_node(node);
@@ -1473,7 +1546,7 @@ int vfs_umount(const char *target) {
     else mount_table = entry->next;
     fatfs_unmount(entry->root);
     ext2fs_unmount(entry->root);
-    if (entry->owns_root) free_tree(entry->root);
+    if (entry->owns_root && !busy) free_tree(entry->root);
     kfree(entry);
     return 0;
 }

@@ -1,3 +1,4 @@
+#include "../include/cgroup.h"
 #include <stddef.h>
 #include <stdint.h>
 #include "../include/abi_gaps.h"
@@ -905,6 +906,18 @@ static int64_t proc_pid_syscall_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
+static int64_t proc_pid_cgroup_read(struct vfs_node *node, uint64_t offset,
+                                    size_t size, void *output) {
+    PROCESS_REF process = process_get(node_pid(node));
+    if (!process) return 0;
+    char description[512];
+    size_t length = cgroup_describe(process, description, sizeof(description));
+    if (offset >= length) return 0;
+    if (size > length - offset) size = length - (size_t)offset;
+    memcpy(output, description + offset, size);
+    return (int64_t)size;
+}
+
 static int64_t proc_cmdline_read(struct vfs_node *node, uint64_t offset,
                                  size_t size, void *output) {
     PROCESS_REF process = process_get(node_pid(node));
@@ -1183,6 +1196,7 @@ static void populate_process_files(struct vfs_node *directory, uint64_t pid) {
     if (!vfs_find_child(directory, "statm")) virtual_file(directory, "statm", proc_pid_statm_read, pid);
     if (!vfs_find_child(directory, "comm")) virtual_file(directory, "comm", proc_pid_comm_read, pid);
     if (!vfs_find_child(directory, "maps")) virtual_file(directory, "maps", proc_pid_maps_read, pid);
+    if (!vfs_find_child(directory, "cgroup")) virtual_file(directory, "cgroup", proc_pid_cgroup_read, pid);
     if (!vfs_find_child(directory, "syscall")) virtual_file(directory, "syscall", proc_pid_syscall_read, pid);
     if (!vfs_find_child(directory, "mountinfo")) virtual_file(directory, "mountinfo", proc_mountinfo_read, pid);
     if (!vfs_find_child(directory, "mounts")) virtual_file(directory, "mounts", proc_mounts_read, pid);
@@ -1257,6 +1271,7 @@ void procfs_unregister_process(uint64_t pid) {
     task_path(pid, "/statm", path); (void)vfs_remove(path, 0);
     task_path(pid, "/maps", path); (void)vfs_remove(path, 0);
     task_path(pid, "/comm", path); (void)vfs_remove(path, 0);
+    task_path(pid, "/cgroup", path); (void)vfs_remove(path, 0);
     task_path(pid, "/syscall", path); (void)vfs_remove(path, 0);
     task_path(pid, "/mountinfo", path); (void)vfs_remove(path, 0);
     task_path(pid, "/mounts", path); (void)vfs_remove(path, 0);
@@ -1270,6 +1285,7 @@ void procfs_unregister_process(uint64_t pid) {
     decimal_path(pid, "/statm", path); (void)vfs_remove(path, 0);
     decimal_path(pid, "/maps", path); (void)vfs_remove(path, 0);
     decimal_path(pid, "/comm", path); (void)vfs_remove(path, 0);
+    decimal_path(pid, "/cgroup", path); (void)vfs_remove(path, 0);
     decimal_path(pid, "/syscall", path); (void)vfs_remove(path, 0);
     decimal_path(pid, "/mountinfo", path); (void)vfs_remove(path, 0);
     decimal_path(pid, "/mounts", path); (void)vfs_remove(path, 0);

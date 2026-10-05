@@ -599,6 +599,20 @@ static void test_pi_futex(void) {
     check("wake_op updates the second word", woken == 0 && second == 7, (s64)second);
 }
 
+static void test_directory_mtime(void) {
+    sys(NR_MKDIRAT, (u64)AT_FDCWD, (u64)"/tmp/mtime", 0755, 0, 0);
+    u64 before[16], after[16];
+    sys(NR_NEWFSTATAT, (u64)AT_FDCWD, (u64)"/tmp/mtime", (u64)before, 0, 0);
+    struct timespec pause = {1, 200000000};
+    sys(NR_NANOSLEEP, (u64)&pause, 0, 0, 0, 0);
+    s64 fd = sys(NR_OPENAT, (u64)AT_FDCWD, (u64)"/tmp/mtime/entry", 0101, 0600, 0);
+    if (fd >= 0) sys(NR_CLOSE, (u64)fd, 0, 0, 0, 0);
+    sys(NR_NEWFSTATAT, (u64)AT_FDCWD, (u64)"/tmp/mtime", (u64)after, 0, 0);
+    check("creating an entry updates the directory mtime",
+          after[STAT_MTIME_WORD] > before[STAT_MTIME_WORD],
+          (s64)(after[STAT_MTIME_WORD] - before[STAT_MTIME_WORD]));
+}
+
 static volatile s64 forked_by_thread;
 static volatile s64 forking_thread_done;
 static char forker_stack[16384] __attribute__((aligned(16)));
@@ -1076,6 +1090,7 @@ void start_c(u64 *stack) {
     test_fork_and_switches();
     test_thread();
     test_group_children();
+    test_directory_mtime();
     test_pi_futex();
     test_siginfo();
     test_signal_waits();

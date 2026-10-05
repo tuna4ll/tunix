@@ -163,8 +163,8 @@ struct vfs_mount {
 };
 
 int vfs_mount(const char *source, const char *target, const char *type,
-              uint32_t flags);
-int vfs_umount(const char *target);
+              uint32_t flags, const char *options);
+int vfs_umount(const char *target, int detach);
 void vfs_mount_builtin(const char *source, const char *target, const char *type,
                        struct vfs_node *root);
 const struct vfs_mount *vfs_mounts(void);

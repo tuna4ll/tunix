@@ -7,6 +7,7 @@
 #include "mutex.h"
 
 #define PROCESS_HELD_MUTEXES 16U
+#include "cgroup.h"
 #include "cred.h"
 #include "percpu.h"
 #include "file.h"
@@ -84,6 +85,7 @@ struct process_rlimit {
 #define PROCESS_FPU_STATE_SIZE 2560
 
 struct process {
+    struct cgroup *cgroups[CGROUP_HIERARCHIES];
     uint64_t pid;
     uint64_t tgid;
     uint64_t ppid;
@@ -382,6 +384,8 @@ int64_t process_futex_lock_pi(struct syscall_frame *frame, uint64_t address,
 int64_t process_futex_unlock_pi(uint64_t address, int shared);
 int64_t process_futex_wake_op(uint64_t address, int wake, uint64_t second, int wake_second,
                               uint32_t encoded, int shared);
+int process_is_live(const struct process *process);
+void process_for_each(int (*visit)(struct process *process, void *context), void *context);
 void process_kernel_yield(void);
 struct process *process_create_kthread(const char *name, void (*body)(void *), void *argument);
 void process_user_resume(void);

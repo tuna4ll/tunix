@@ -32,6 +32,7 @@
 #include "include/ext2.h"
 #include "include/time.h"
 #include "include/timer.h"
+#include "include/cgroup.h"
 #include "include/tty.h"
 #include "include/uts.h"
 #include "include/vt.h"
@@ -676,6 +677,8 @@ typedef char linux_statx_size_check[(sizeof(struct linux_statx) == 256) ? 1 : -1
 #define EXT2_SUPER_MAGIC 0xEF53U
 #define PROC_SUPER_MAGIC 0x9FA0U
 #define TMPFS_MAGIC 0x01021994U
+#define SYSFS_MAGIC 0x62656572U
+#define DEVPTS_SUPER_MAGIC 0x00001CD1U
 
 struct linux_iovec {
     uint64_t base;
@@ -2865,6 +2868,17 @@ static int64_t stat_path(int dirfd, uint64_t user_path, uint64_t user_stat, int 
     return copy_to_user(user_stat, &stat, sizeof(stat)) == 0 ? 0 : -EFAULT;
 }
 
+static uint32_t pseudo_magic(const struct vfs_node *root) {
+    for (const struct vfs_mount *entry = vfs_mounts(); entry; entry = entry->next) {
+        if (entry->root != root) continue;
+        if (strcmp(entry->type, "proc") == 0) return PROC_SUPER_MAGIC;
+        if (strcmp(entry->type, "sysfs") == 0) return SYSFS_MAGIC;
+        if (strcmp(entry->type, "devpts") == 0) return DEVPTS_SUPER_MAGIC;
+        return 0;
+    }
+    return 0;
+}
+
 static void fill_statfs(struct vfs_node *node, struct linux_statfs *out) {
     memset(out, 0, sizeof(*out));
 
@@ -2872,6 +2886,20 @@ static void fill_statfs(struct vfs_node *node, struct linux_statfs *out) {
 
     struct vfs_node *volatile_root = NULL;
     for (struct vfs_node *walk = node; walk; walk = walk->parent) {
+        uint32_t cgroup_magic = cgroupfs_magic(walk);
+        if (cgroup_magic) {
+            out->f_type = cgroup_magic;
+            out->f_bsize = PMM_PAGE_SIZE;
+            out->f_frsize = PMM_PAGE_SIZE;
+            return;
+        }
+        uint32_t pseudo = pseudo_magic(walk);
+        if (pseudo) {
+            out->f_type = pseudo;
+            out->f_bsize = PMM_PAGE_SIZE;
+            out->f_frsize = PMM_PAGE_SIZE;
+            return;
+        }
         if (walk->flags & VFS_VOLATILE) volatile_root = walk;
 
         if (walk->parent == walk) break;
@@ -3206,6 +3234,12 @@ static int64_t sys_unlink_at(int dirfd, uint64_t user_path, int flags) {
     if (node->flags & VFS_READONLY) return -EROFS;
     if ((flags & AT_REMOVEDIR) && kind != VFS_DIRECTORY) return -ENOTDIR;
     if (!(flags & AT_REMOVEDIR) && kind == VFS_DIRECTORY) return -EISDIR;
+    if ((flags & AT_REMOVEDIR) && cgroupfs_is_cgroup(node)) {
+        int allowed = cred_may_remove(path, node);
+        if (allowed != 0) return allowed;
+        int released = cgroupfs_rmdir(node);
+        if (released != 0) return released;
+    }
     if ((flags & AT_REMOVEDIR) && node->children) return -ENOTEMPTY;
     int permitted = cred_may_remove(path, node);
     if (permitted != 0) return permitted;
@@ -3265,7 +3299,6 @@ static int64_t sys_link_at(int old_dirfd, uint64_t user_old_path,
 
 static int64_t sys_mount(uint64_t user_source, uint64_t user_target,
                          uint64_t user_type, uint64_t flags, uint64_t user_data) {
-    (void)user_data;
     const struct credentials *cred = cred_current();
     if (cred && cred->euid != 0) return -EPERM;
     if (flags > 0xFFFFFFFFULL) return -EINVAL;
@@ -3281,19 +3314,24 @@ static int64_t sys_mount(uint64_t user_source, uint64_t user_target,
     if (status != 0) return status;
     if (user_type && copy_string_from_user(type, sizeof(type), user_type) < 0)
         return -EFAULT;
+    char options[256];
+    options[0] = '\0';
+    if (user_data && (strcmp(type, "cgroup") == 0 || strcmp(type, "cgroup2") == 0 ||
+                      strcmp(type, "tmpfs") == 0 || strcmp(type, "ramfs") == 0) &&
+        copy_string_from_user(options, sizeof(options), user_data) < 0)
+        return -EFAULT;
     return vfs_mount(user_source ? source : NULL, target,
-                     user_type ? type : "", (uint32_t)flags);
+                     user_type ? type : "", (uint32_t)flags, options);
 }
 
 static int64_t sys_umount2(uint64_t user_target, int flags) {
-    (void)flags;
     const struct credentials *cred = cred_current();
     if (cred && cred->euid != 0) return -EPERM;
     VFS_PATH_SCOPED target = vfs_path_buffer();
     if (!target) return -ENOMEM;
     int status = copy_user_path(user_target, target);
     if (status != 0) return status;
-    return vfs_umount(target);
+    return vfs_umount(target, (flags & 2) != 0);
 }
 
 static int64_t sys_mknodat(int dirfd, uint64_t user_path, uint32_t mode,

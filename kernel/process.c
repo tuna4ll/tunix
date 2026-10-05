@@ -1096,6 +1096,7 @@ static void set_exe_path(struct process *process, struct vfs_node *file,
 }
 
 static void free_process_struct(struct process *process) {
+    cgroup_drop(process);
     cred_groups_release(&process->cred);
     kfree(process->io_watch_fd);
     kfree(process->io_watch_events);
@@ -1792,6 +1793,21 @@ void process_kernel_yield(void) {
     after_switch();
 }
 
+int process_is_live(const struct process *process) {
+    return process && process->state != PROCESS_ZOMBIE && process->state != PROCESS_DEAD;
+}
+
+void process_for_each(int (*visit)(struct process *process, void *context), void *context) {
+    SCHED_LOCKED;
+    if (!queue) return;
+    struct process *item = queue;
+    do {
+        struct process *next = item->next;
+        if (visit(item, context)) return;
+        item = next;
+    } while (item != queue);
+}
+
 void process_preempt_point(void) {
     struct process *self = current;
     if (!self || self->state != PROCESS_RUNNING || !process_may_sleep()) return;
@@ -2485,6 +2501,7 @@ void process_exit_from_syscall(struct syscall_frame *frame, int status) {
         (void)process_futex_wake(clear_address, 1, FUTEX_BITSET_MATCH_ANY, 1);
     }
     process_release_files(exiting);
+    cgroup_exit(exiting);
     if (!exiting->is_thread)
         vt_process_exited(exiting->pid,
                           exiting->sid == exiting->pid ? exiting->sid : 0);
@@ -2533,6 +2550,7 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame,
     child->virtual_runtime_ns = parent->virtual_runtime_ns;
     child->affinity = parent->affinity;
     child->affinity_set = parent->affinity_set;
+    cgroup_fork(parent, child);
     child->signal_stack_pointer = parent->signal_stack_pointer;
     child->signal_stack_size = parent->signal_stack_size;
     child->signal_stack_flags = parent->signal_stack_flags;
@@ -2658,6 +2676,7 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
     child->virtual_runtime_ns = parent->virtual_runtime_ns;
     child->affinity = parent->affinity;
     child->affinity_set = parent->affinity_set;
+    cgroup_fork(parent, child);
     child->signal_stack_flags = SS_DISABLE;
     child->dumpable = parent->dumpable;
     child->no_new_privs = parent->no_new_privs;
