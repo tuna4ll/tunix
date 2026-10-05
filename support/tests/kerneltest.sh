@@ -16,6 +16,7 @@ mkdir -p "$work/root/sbin" "$work/root/proc" "$work/root/dev" "$work/root/tmp"
 mkdir -p "$work/root/usr/share/weston/wallpapers"
 cp base-files/overlay/usr/share/weston/wallpapers/tunix.png \
     "$work/root/usr/share/weston/wallpapers/tunix.png"
+[ -n "${ROOT_FILES:-}" ] && cp -a $ROOT_FILES "$work/root/"
 
 compiler=cc
 flags="${CFLAGS_EXTRA:-} -Isupport/tests"
