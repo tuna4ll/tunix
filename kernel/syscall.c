@@ -227,6 +227,10 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define SYS_CAPGET 125
 #define SYS_CAPSET 126
 #define SYS_SIGALTSTACK 131
+#define SYS_PAUSE 34
+#define SYS_RT_SIGPENDING 127
+#define SYS_RT_SIGTIMEDWAIT 128
+#define SYS_RT_SIGSUSPEND 130
 #define SYS_ARCH_PRCTL 158
 #define SYS_PRCTL 157
 #define SYS_GETTID 186
@@ -980,6 +984,7 @@ static int file_write_ready(struct file *file) {
 
 static void clear_io_wait(struct process *process) {
     if (!process) return;
+    process->syscall_no_restart = 0;
     process->io_wait_active = 0;
     process->io_wait_syscall = 0;
     process->io_wait_deadline_ns = 0;
@@ -989,6 +994,17 @@ static void clear_io_wait(struct process *process) {
 static uint64_t saturating_add_u64(uint64_t left, uint64_t right) {
     if (UINT64_MAX - left < right) return UINT64_MAX;
     return left + right;
+}
+
+static int never_restarted(uint64_t syscall_number) {
+    switch (syscall_number) {
+    case SYS_POLL: case SYS_PPOLL: case SYS_SELECT: case SYS_PSELECT6:
+    case SYS_EPOLL_WAIT: case SYS_EPOLL_PWAIT: case SYS_NANOSLEEP: case SYS_CLOCK_NANOSLEEP:
+    case SYS_PAUSE: case SYS_RT_SIGSUSPEND: case SYS_RT_SIGTIMEDWAIT:
+        return 1;
+    default:
+        return 0;
+    }
 }
 
 static int retry_io_wait(struct syscall_frame *frame, uint64_t syscall_number,
@@ -1019,6 +1035,7 @@ static int retry_io_wait(struct syscall_frame *frame, uint64_t syscall_number,
 
     SYSCALL_RESTART(frame, syscall_number);
     waiting->syscall_rewound = 1;
+    waiting->syscall_no_restart = never_restarted(syscall_number);
 
     if (process_sleep_on(frame, process_io_wait_channel()) != 0)
         process_yield_from_syscall(frame);
@@ -5658,8 +5675,12 @@ static void syscall_run(struct syscall_frame *frame) {
         }
         case SYS_KILL: SYSCALL_RET(frame) = (uint64_t)process_send_signal_checked((int64_t)SYSCALL_ARG0(frame), (int)SYSCALL_ARG1(frame)); break;
 
-        case SYS_TKILL: SYSCALL_RET(frame) = (uint64_t)process_send_signal_checked((int64_t)SYSCALL_ARG0(frame), (int)SYSCALL_ARG1(frame)); break;
-        case SYS_TGKILL: SYSCALL_RET(frame) = (uint64_t)process_send_signal_checked((int64_t)SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame)); break;
+        case SYS_TKILL: SYSCALL_RET(frame) = (uint64_t)process_send_thread_signal(0, (int64_t)SYSCALL_ARG0(frame), (int)SYSCALL_ARG1(frame)); break;
+        case SYS_TGKILL:
+            SYSCALL_RET(frame) = (int64_t)SYSCALL_ARG0(frame) <= 0 ? (uint64_t)-(int64_t)EINVAL
+                : (uint64_t)process_send_thread_signal((int64_t)SYSCALL_ARG0(frame), (int64_t)SYSCALL_ARG1(frame),
+                                                        (int)SYSCALL_ARG2(frame));
+            break;
         case SYS_UNAME: SYSCALL_RET(frame) = (uint64_t)sys_uname(SYSCALL_ARG0(frame)); break;
         case SYS_SYSLOG:
             SYSCALL_RET(frame) = (uint64_t)sys_syslog((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame),
@@ -6165,6 +6186,88 @@ static void syscall_run(struct syscall_frame *frame) {
                                              (uint32_t)SYSCALL_ARG3(frame), SYSCALL_ARG4(frame));
             break;
         case SYS_RSEQ: SYSCALL_RET(frame) = (uint64_t)-(int64_t)ENOSYS; break;
+        case SYS_PAUSE: {
+            struct process *process = process_current();
+            process->syscall_no_restart = 1;
+            io_watch_begin(process);
+            if (!retry_io_wait(frame, SYS_PAUSE, -1)) SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINTR;
+            break;
+        }
+        case SYS_RT_SIGSUSPEND: {
+            struct process *process = process_current();
+            uint64_t mask;
+            if (SYSCALL_ARG1(frame) != sizeof(mask)) {
+                SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINVAL;
+                break;
+            }
+            if (copy_from_user(&mask, SYSCALL_ARG0(frame), sizeof(mask)) != 0) {
+                SYSCALL_RET(frame) = (uint64_t)-(int64_t)EFAULT;
+                break;
+            }
+            process_swap_signal_mask(mask);
+            process->syscall_no_restart = 1;
+            io_watch_begin(process);
+            if (!retry_io_wait(frame, SYS_RT_SIGSUSPEND, -1))
+                SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINTR;
+            if (!process->syscall_rewound) process_restore_signal_mask();
+            break;
+        }
+        case SYS_RT_SIGPENDING: {
+            struct process *process = process_current();
+            if (SYSCALL_ARG1(frame) != sizeof(uint64_t)) {
+                SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINVAL;
+                break;
+            }
+            uint64_t blocked = process->signal_wait_mask_active ? process->signal_wait_mask_saved
+                                                                : process->signal_blocked;
+            uint64_t pending = __atomic_load_n(&process->signal_pending, __ATOMIC_ACQUIRE) & blocked;
+            SYSCALL_RET(frame) = copy_to_user(SYSCALL_ARG0(frame), &pending, sizeof(pending)) == 0
+                                     ? 0 : (uint64_t)-(int64_t)EFAULT;
+            break;
+        }
+        case SYS_RT_SIGTIMEDWAIT: {
+            struct process *process = process_current();
+            uint64_t set;
+            if (SYSCALL_ARG3(frame) != sizeof(set)) {
+                SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINVAL;
+                break;
+            }
+            if (copy_from_user(&set, SYSCALL_ARG0(frame), sizeof(set)) != 0) {
+                SYSCALL_RET(frame) = (uint64_t)-(int64_t)EFAULT;
+                break;
+            }
+            set &= ~((1ULL << (SIGKILL - 1)) | (1ULL << (SIGSTOP - 1)));
+            int32_t info[SIGNAL_SIGINFO_SIZE / 4];
+            int taken = process_take_signal(set, info);
+            if (taken) {
+                process->signal_waited = 0;
+                process->syscall_no_restart = 0;
+                clear_io_wait(process);
+                if (SYSCALL_ARG1(frame) && copy_to_user(SYSCALL_ARG1(frame), info, sizeof(info)) != 0)
+                    SYSCALL_RET(frame) = (uint64_t)-(int64_t)EFAULT;
+                else
+                    SYSCALL_RET(frame) = (uint64_t)taken;
+                break;
+            }
+            int64_t timeout_ns = read_timespec_timeout_ns(SYSCALL_ARG2(frame));
+            if (timeout_ns < -1 || timeout_ns == 0) {
+                clear_io_wait(process);
+                SYSCALL_RET(frame) = (uint64_t)(timeout_ns ? timeout_ns : -(int64_t)EAGAIN);
+                break;
+            }
+            process->signal_waited = set;
+            process->syscall_no_restart = 1;
+            io_watch_begin(process);
+            if (!retry_io_wait(frame, SYS_RT_SIGTIMEDWAIT, timeout_ns)) {
+                process->signal_waited = 0;
+                process->syscall_no_restart = 0;
+                SYSCALL_RET(frame) = (uint64_t)-(int64_t)EAGAIN;
+            } else if (!process->syscall_rewound) {
+                process->signal_waited = 0;
+                process->syscall_no_restart = 0;
+            }
+            break;
+        }
         case SYS_FACCESSAT2:
             SYSCALL_RET(frame) = (uint64_t)sys_faccess_at((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame),
                                                   (int)SYSCALL_ARG2(frame), (int)SYSCALL_ARG3(frame));

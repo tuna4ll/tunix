@@ -96,6 +96,7 @@ int64_t signalfd_read(struct signalfd_context *context, size_t size, void *buffe
         if (process->signal_user_sent & bit) {
             out[produced].ssi_pid = process->signal_sender_pid[signal_number - 1];
             out[produced].ssi_uid = process->signal_sender_uid[signal_number - 1];
+            out[produced].ssi_code = process->signal_sender_code[signal_number - 1];
             process->signal_user_sent &= ~bit;
             process->signal_sender_pid[signal_number - 1] = 0;
             process->signal_sender_uid[signal_number - 1] = 0;

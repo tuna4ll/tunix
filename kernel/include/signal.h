@@ -37,6 +37,7 @@
 
 #define SI_USER   0
 #define SI_KERNEL 0x80
+#define SI_TKILL  (-6)
 
 #define SIGNAL_SIGINFO_SIZE 128
 #if defined(__x86_64__)

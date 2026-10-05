@@ -33,6 +33,18 @@ typedef long s64;
 #define NR_CONNECT 42
 #define NR_SETSOCKOPT 54
 #define NR_RECVMSG 47
+#define NR_CLOSE 3
+#define NR_RT_SIGPROCMASK 14
+#define NR_RT_SIGPENDING 127
+#define NR_RT_SIGTIMEDWAIT 128
+#define NR_RT_SIGSUSPEND 130
+#define NR_TGKILL 234
+#define NR_GETPPID 110
+#define NR_MKDIRAT 258
+#define NR_FUTEX 202
+#define NR_NEWFSTATAT 262
+#define STAT_MTIME_WORD 11
+#define NR_GETTID 186
 #define EPOLL_PACKED __attribute__((packed))
 #define UCONTEXT_RET_OFFSET (40 + 13 * 8)
 #define TRAP_LENGTH 2
@@ -68,6 +80,18 @@ typedef long s64;
 #define NR_EPOLL_CTL 21
 #define NR_GETRUSAGE 165
 #define NR_SOCKETPAIR 199
+#define NR_CLOSE 57
+#define NR_RT_SIGPROCMASK 135
+#define NR_RT_SIGPENDING 136
+#define NR_RT_SIGTIMEDWAIT 137
+#define NR_RT_SIGSUSPEND 133
+#define NR_TGKILL 131
+#define NR_GETPPID 173
+#define NR_MKDIRAT 34
+#define NR_FUTEX 98
+#define NR_NEWFSTATAT 79
+#define STAT_MTIME_WORD 11
+#define NR_GETTID 178
 #define EPOLL_PACKED
 #define UCONTEXT_RET_OFFSET (176 + 8)
 #define TRAP_LENGTH 4
@@ -81,6 +105,11 @@ typedef long s64;
 #define SIGUSR1 10
 #define SIGUSR2 12
 #define EINTR 4
+#define EAGAIN 11
+#define SIG_BLOCK 0
+#define SIG_SETMASK 2
+#define POLLIN 0x001
+#define POLLHUP 0x010
 #define EPERM 1
 #define EPROTONOSUPPORT 93
 #define CAP_VERSION_3 0x20080522U
@@ -526,6 +555,39 @@ static void test_thread(void) {
     check("thread tls and stack", thread_result == 1, thread_result);
 }
 
+#define CROWD 100
+static volatile s64 forked_by_thread;
+static volatile s64 forking_thread_done;
+static char forker_stack[16384] __attribute__((aligned(16)));
+static u64 forker_block[4];
+
+static s64 forker_main(void) {
+    s64 child = sys(NR_CLONE, SIGCHLD, 0, 0, 0, 0);
+    if (child == 0) {
+        s64 parent = sys(NR_GETPPID, 0, 0, 0, 0, 0);
+        sys(NR_EXIT, parent == forking_thread_done ? 7 : 8, 0, 0, 0, 0);
+    }
+    forked_by_thread = child;
+    sys(NR_EXIT, 0, 0, 0, 0, 0);
+    return 0;
+}
+
+static void test_group_children(void) {
+    forked_by_thread = 0;
+    forking_thread_done = sys(NR_GETPID, 0, 0, 0, 0, 0);
+    forker_block[0] = (u64)forker_block;
+    u64 flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SETTLS;
+    s64 tid = clone_thread(flags, (u64)forker_stack + sizeof(forker_stack), (u64)forker_block,
+                           forker_main);
+    for (int spin = 0; spin < 20000 && !forked_by_thread; spin++)
+        sys(NR_SCHED_YIELD, 0, 0, 0, 0, 0);
+    int status = 0;
+    s64 reaped = forked_by_thread > 0
+        ? sys(NR_WAIT4, (u64)forked_by_thread, (u64)&status, 0, 0, 0) : -1;
+    check("a thread's child belongs to the process", tid > 0 && reaped == forked_by_thread &&
+          ((status >> 8) & 0xFF) == 7, reaped * 1000 + ((status >> 8) & 0xFF));
+}
+
 static volatile int handler_signal;
 static volatile int handler_info_signal;
 static volatile u64 handler_ip;
@@ -757,6 +819,203 @@ static void finish(void) {
     for (;;) sleep_ms(1000);
 }
 
+static volatile int code_seen;
+static volatile int sender_seen;
+
+static void code_handler(int signal_number, int *info, void *context) {
+    (void)signal_number;
+    (void)context;
+    code_seen = info ? info[2] : 99;
+    sender_seen = info ? info[4] : 0;
+}
+
+static void test_signal_codes(void) {
+    struct sigaction action;
+    action.handler = (u64)code_handler;
+    action.flags = SA_SIGINFO | SA_RESTORER;
+    action.restorer = (u64)restorer;
+    action.mask = 0;
+    sys(NR_RT_SIGACTION, SIGUSR2, (u64)&action, 0, 8, 0);
+    u64 pid = (u64)sys(NR_GETPID, 0, 0, 0, 0, 0);
+    u64 tid = (u64)sys(NR_GETTID, 0, 0, 0, 0, 0);
+    code_seen = 99;
+    sys(NR_TGKILL, pid, tid, SIGUSR2, 0, 0);
+    check("tgkill reports SI_TKILL and the sender", code_seen == -6 && sender_seen == (int)pid,
+          code_seen);
+    code_seen = 99;
+    sys(NR_KILL, pid, SIGUSR2, 0, 0, 0);
+    check("kill reports SI_USER", code_seen == 0, code_seen);
+    s64 wrong = sys(NR_TGKILL, pid + 100000, tid, SIGUSR2, 0, 0);
+    check("tgkill checks the thread group", wrong == -3, wrong);
+}
+
+static volatile s64 wait_handler_hits;
+
+static void wait_handler(int signal_number, int *info, void *context) {
+    (void)info;
+    (void)context;
+    if (signal_number == SIGUSR1) wait_handler_hits++;
+}
+
+static s64 fork_signaller(u64 target, int signal_number, s64 delay_ns) {
+    s64 child = sys(NR_CLONE, SIGCHLD, 0, 0, 0, 0);
+    if (child == 0) {
+        struct timespec delay = {0, delay_ns};
+        sys(NR_NANOSLEEP, (u64)&delay, 0, 0, 0, 0);
+        if (signal_number) sys(NR_KILL, target, (u64)signal_number, 0, 0, 0);
+        sys(NR_EXIT, 0, 0, 0, 0, 0);
+    }
+    return child;
+}
+
+static u64 elapsed_ms(const struct timespec *start) {
+    struct timespec now;
+    sys(NR_CLOCK_GETTIME, 1, (u64)&now, 0, 0, 0);
+    return (u64)((now.seconds - start->seconds) * 1000 +
+                 (now.nanoseconds - start->nanoseconds) / 1000000);
+}
+
+static void test_signal_waits(void) {
+    u64 pid = (u64)sys(NR_GETPID, 0, 0, 0, 0, 0);
+    u64 bit_usr1 = 1UL << (SIGUSR1 - 1), bit_usr2 = 1UL << (SIGUSR2 - 1);
+    u64 bit_chld = 1UL << (SIGCHLD - 1);
+    u64 original;
+    sys(NR_RT_SIGPROCMASK, SIG_BLOCK, 0, (u64)&original, 8, 0);
+    u64 blocked = original | bit_usr1 | bit_usr2 | bit_chld;
+    sys(NR_RT_SIGPROCMASK, SIG_SETMASK, (u64)&blocked, 0, 8, 0);
+
+    sys(NR_KILL, pid, SIGUSR2, 0, 0, 0);
+    u64 pending = 0;
+    s64 result = sys(NR_RT_SIGPENDING, (u64)&pending, 8, 0, 0, 0);
+    check("sigpending reports a blocked signal", result == 0 && (pending & bit_usr2), (s64)pending);
+    int info[32];
+    struct timespec zero = {0, 0};
+    result = sys(NR_RT_SIGTIMEDWAIT, (u64)&bit_usr2, (u64)info, (u64)&zero, 8, 0);
+    check("sigtimedwait takes a pending signal", result == SIGUSR2 && info[0] == SIGUSR2 &&
+          info[4] == (int)pid, result);
+    pending = ~0UL;
+    sys(NR_RT_SIGPENDING, (u64)&pending, 8, 0, 0, 0);
+    check("sigtimedwait consumed it", !(pending & bit_usr2), (s64)pending);
+
+    struct timespec start;
+    sys(NR_CLOCK_GETTIME, 1, (u64)&start, 0, 0, 0);
+    struct timespec short_wait = {0, 50000000};
+    result = sys(NR_RT_SIGTIMEDWAIT, (u64)&bit_usr2, 0, (u64)&short_wait, 8, 0);
+    u64 waited = elapsed_ms(&start);
+    check("sigtimedwait times out", result == -EAGAIN && waited >= 45 && waited < 1000, result);
+
+    s64 child = fork_signaller(0, 0, 20000000);
+    struct timespec long_wait = {5, 0};
+    sys(NR_CLOCK_GETTIME, 1, (u64)&start, 0, 0, 0);
+    result = sys(NR_RT_SIGTIMEDWAIT, (u64)&bit_chld, (u64)info, (u64)&long_wait, 8, 0);
+    waited = elapsed_ms(&start);
+    check("sigtimedwait wakes for a blocked SIGCHLD", result == SIGCHLD && waited < 1000,
+          result * 10000 + (s64)waited);
+    int status = 0;
+    sys(NR_WAIT4, (u64)child, (u64)&status, 0, 0, 0);
+
+    struct sigaction action;
+    action.handler = (u64)wait_handler;
+    action.flags = SA_SIGINFO | SA_RESTORER | SA_RESTART;
+    action.restorer = (u64)restorer;
+    action.mask = 0;
+    sys(NR_RT_SIGACTION, SIGUSR1, (u64)&action, 0, 8, 0);
+
+    wait_handler_hits = 0;
+    child = fork_signaller(pid, SIGUSR1, 30000000);
+    u64 open_mask = original & ~bit_usr1;
+    result = sys(NR_RT_SIGSUSPEND, (u64)&open_mask, 8, 0, 0, 0);
+    u64 after = 0;
+    sys(NR_RT_SIGPROCMASK, SIG_BLOCK, 0, (u64)&after, 8, 0);
+    check("sigsuspend returns EINTR after the handler", result == -EINTR && wait_handler_hits == 1,
+          result * 10 + wait_handler_hits);
+    check("sigsuspend restores the mask", after == blocked, (s64)after);
+    sys(NR_WAIT4, (u64)child, (u64)&status, 0, 0, 0);
+
+    wait_handler_hits = 0;
+    child = fork_signaller(pid, SIGUSR1, 30000000);
+    struct timespec poll_wait = {5, 0};
+    result = sys6(NR_PPOLL, 0, 0, (u64)&poll_wait, (u64)&open_mask, 8, 0);
+    after = 0;
+    sys(NR_RT_SIGPROCMASK, SIG_BLOCK, 0, (u64)&after, 8, 0);
+    check("ppoll delivers a signal its mask opened", result == -EINTR && wait_handler_hits == 1,
+          result * 10 + wait_handler_hits);
+    check("ppoll restores the mask", after == blocked, (s64)after);
+    sys(NR_WAIT4, (u64)child, (u64)&status, 0, 0, 0);
+
+    int ends[2];
+    sys(NR_PIPE2, (u64)ends, 0, 0, 0, 0);
+    sys(NR_CLOSE, (u64)ends[1], 0, 0, 0, 0);
+    struct { int fd; short events; short revents; } entry = {ends[0], POLLIN, 0};
+    result = sys6(NR_PPOLL, (u64)&entry, 1, (u64)&zero, 0, 8, 0);
+    check("closed empty pipe is POLLHUP only", result == 1 && entry.revents == POLLHUP,
+          entry.revents);
+    sys(NR_CLOSE, (u64)ends[0], 0, 0, 0, 0);
+
+    sys(NR_RT_SIGPROCMASK, SIG_SETMASK, (u64)&original, 0, 8, 0);
+}
+
+#define STORM 4
+static volatile int storm_stop;
+static volatile int storm_tids[STORM];
+static volatile u64 storm_rounds[STORM];
+static volatile int storm_done[STORM];
+static volatile int storm_next;
+static char storm_stacks[STORM][16384] __attribute__((aligned(16)));
+static u64 storm_blocks[STORM][4];
+
+static s64 storm_member(void) {
+    int self = storm_next;
+    storm_tids[self] = (int)sys(NR_GETTID, 0, 0, 0, 0, 0);
+    struct timespec nap = {0, 50000};
+    while (!storm_stop) {
+        sys(NR_NANOSLEEP, (u64)&nap, 0, 0, 0, 0);
+        storm_rounds[self]++;
+    }
+    storm_done[self] = 1;
+    sys(NR_EXIT, 0, 0, 0, 0, 0);
+    return 0;
+}
+
+static void test_tgkill_storm(void) {
+    struct sigaction action;
+    action.handler = (u64)wait_handler;
+    action.flags = SA_SIGINFO | SA_RESTORER | SA_RESTART;
+    action.restorer = (u64)restorer;
+    action.mask = 0;
+    sys(NR_RT_SIGACTION, SIGUSR1, (u64)&action, 0, 8, 0);
+    u64 pid = (u64)sys(NR_GETPID, 0, 0, 0, 0, 0);
+    u64 flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SETTLS;
+    for (int index = 0; index < STORM; index++) {
+        storm_blocks[index][0] = (u64)storm_blocks[index];
+        storm_next = index;
+        clone_thread(flags, (u64)storm_stacks[index] + sizeof(storm_stacks[index]),
+                     (u64)storm_blocks[index], storm_member);
+        for (int spin = 0; spin < 20000 && !storm_tids[index]; spin++)
+            sys(NR_SCHED_YIELD, 0, 0, 0, 0, 0);
+    }
+    for (int round = 0; round < 20000; round++)
+        sys(NR_TGKILL, pid, (u64)storm_tids[round % STORM], SIGUSR1, 0, 0);
+    u64 before[STORM];
+    for (int index = 0; index < STORM; index++) before[index] = storm_rounds[index];
+    struct timespec settle = {0, 300000000};
+    sys(NR_NANOSLEEP, (u64)&settle, 0, 0, 0, 0);
+    int moving = 1;
+    for (int index = 0; index < STORM; index++)
+        if (storm_rounds[index] == before[index]) moving = 0;
+    storm_stop = 1;
+    struct timespec start;
+    sys(NR_CLOCK_GETTIME, 1, (u64)&start, 0, 0, 0);
+    int finished = 0;
+    while (elapsed_ms(&start) < 3000) {
+        finished = 1;
+        for (int index = 0; index < STORM; index++) if (!storm_done[index]) finished = 0;
+        if (finished) break;
+        sys(NR_SCHED_YIELD, 0, 0, 0, 0, 0);
+    }
+    check("threads keep running through a tgkill storm", moving && finished, (s64)elapsed_ms(&start));
+}
+
 void start_c(u64 *stack) {
     s64 argc = (s64)stack[0];
     char **argv = (char **)(stack + 1);
@@ -773,7 +1032,11 @@ void start_c(u64 *stack) {
     test_idle_poll_sleeps();
     test_fork_and_switches();
     test_thread();
+    test_group_children();
     test_siginfo();
+    test_signal_waits();
+    test_signal_codes();
+    test_tgkill_storm();
     test_trap_resume();
     test_blocked_read("read interrupted without SA_RESTART", 0, -EINTR);
     test_blocked_read("read restarted with SA_RESTART", SA_RESTART, 1);
