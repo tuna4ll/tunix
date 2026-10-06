@@ -27,6 +27,11 @@ extern void kprintf(const char *fmt, ...);
 
 #define VIRTIO_GPU_DEVICE_ID 0x1050U
 #define VIRTIO_GPU_CONTROL_QUEUE 0U
+#define VIRTIO_GPU_CURSOR_QUEUE 1U
+#define VIRTIO_GPU_CMD_UPDATE_CURSOR 0x0300U
+#define VIRTIO_GPU_CMD_MOVE_CURSOR 0x0301U
+#define CURSOR_SLOTS 16U
+#define CURSOR_SLOT_BYTES 64U
 
 #define VIRTIO_GPU_CMD_GET_DISPLAY_INFO 0x0100U
 #define VIRTIO_GPU_CMD_RESOURCE_CREATE_2D 0x0101U
@@ -245,6 +250,23 @@ static uint8_t *commands;
 
 static struct virtio_device device;
 static struct virtio_queue control;
+static struct virtio_queue cursorq;
+static int cursor_ready;
+static uint8_t *cursor_arena;
+static uint64_t cursor_arena_physical;
+static uint64_t cursor_sequence[CURSOR_SLOTS];
+
+struct virtio_gpu_update_cursor {
+    struct virtio_gpu_ctrl_hdr hdr;
+    uint32_t scanout_id;
+    int32_t x;
+    int32_t y;
+    uint32_t pos_padding;
+    uint32_t resource_id;
+    uint32_t hot_x;
+    uint32_t hot_y;
+    uint32_t padding;
+};
 static uint32_t next_resource_id = 1;
 static uint32_t scanout_resource;
 static uint32_t display_width;
@@ -389,6 +411,66 @@ static void wait_for_room(unsigned needed) {
         target = sequences[release - 1];
     }
     (void)wait_completed(target);
+}
+
+static void begin(uint32_t type);
+static void set_rect(struct virtio_gpu_rect *r, uint32_t width, uint32_t height);
+static int submit(uint32_t request_bytes, const void *payload, uint32_t payload_bytes,
+                  uint32_t response_bytes);
+
+static int cursor_post(uint32_t type, uint32_t resource, int32_t x, int32_t y,
+                       uint32_t hot_x, uint32_t hot_y) {
+    if (!cursor_ready) return -1;
+    virtio_queue_reclaim(&cursorq);
+    for (unsigned index = 0; index < CURSOR_SLOTS; index++) {
+        if (cursor_sequence[index] > cursorq.completed) continue;
+        struct virtio_gpu_update_cursor *command =
+            (struct virtio_gpu_update_cursor *)(cursor_arena + (uint64_t)index * CURSOR_SLOT_BYTES);
+        memset(command, 0, sizeof(*command));
+        command->hdr.type = type;
+        command->x = x;
+        command->y = y;
+        command->resource_id = resource;
+        command->hot_x = hot_x;
+        command->hot_y = hot_y;
+        struct virtio_buffer buffer;
+        buffer.physical = cursor_arena_physical + (uint64_t)index * CURSOR_SLOT_BYTES;
+        buffer.length = sizeof(*command);
+        if (virtio_queue_post(&cursorq, &buffer, 1, 1) != 0) return -1;
+        cursor_sequence[index] = cursorq.posted;
+        return 0;
+    }
+    return -1;
+}
+
+int virtgpu_cursor_available(void) {
+    VIRTGPU_LOCKED;
+    return ready && cursor_ready;
+}
+
+int virtgpu_cursor_set(uint32_t resource, uint32_t stride_pixels, int upload, int32_t x, int32_t y,
+                       uint32_t hot_x, uint32_t hot_y) {
+    uint64_t target = 0;
+    if (resource && upload) {
+        wait_for_room(1);
+        VIRTGPU_LOCKED;
+        if (!ready) return -1;
+        begin(VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D);
+        set_rect(&request.transfer.r, stride_pixels < 64U ? stride_pixels : 64U, 64U);
+        request.transfer.resource_id = resource;
+        if (submit_async(sizeof(request.transfer), NULL, 0) != 0 &&
+            submit(sizeof(request.transfer), NULL, 0, sizeof(struct virtio_gpu_ctrl_hdr)) != 0)
+            return -1;
+        target = control.posted;
+    }
+    if (target) (void)wait_completed(target);
+    VIRTGPU_LOCKED;
+    return cursor_post(VIRTIO_GPU_CMD_UPDATE_CURSOR, resource, x, y, hot_x, hot_y);
+}
+
+int virtgpu_cursor_move(int32_t x, int32_t y) {
+    VIRTGPU_LOCKED;
+    return cursor_post(VIRTIO_GPU_CMD_MOVE_CURSOR, 0, x, y, 0, 0);
 }
 
 int virtgpu_flush_pending(void) {
@@ -694,6 +776,10 @@ int virtgpu_init(void) {
         virtio_pci_set_failed(&device);
         return -1;
     }
+    cursor_arena = (uint8_t *)dma_alloc((uint64_t)CURSOR_SLOTS * CURSOR_SLOT_BYTES, 0,
+                                        &cursor_arena_physical);
+    if (cursor_arena && virtio_pci_setup_queue(&device, &cursorq, VIRTIO_GPU_CURSOR_QUEUE) == 0)
+        cursor_ready = 1;
     virtio_pci_set_driver_ok(&device);
 
     if (query_display_info() != 0) {

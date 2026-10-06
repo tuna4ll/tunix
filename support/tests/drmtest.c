@@ -76,6 +76,7 @@ static void put_signed(s64 value) {
 #define NR_MODE_SETPROPERTY 0xab
 #define NR_MODE_CLOSEFB 0xd0
 #define NR_SET_MASTER 0x1e
+#define NR_MODE_CURSOR2 0xbb
 
 #define DRM_MODE_OBJECT_CRTC 0xcccccccc
 #define DRM_MODE_OBJECT_CONNECTOR 0xc0c0c0c0
@@ -725,6 +726,35 @@ static void test_close_fb(void) {
     (void)call(IOWR(NR_MODE_DESTROY_DUMB, struct drm_mode_destroy_dumb), &drop);
 }
 
+struct drm_mode_cursor2 {
+    u32 flags, crtc_id; s32 x, y; u32 width, height, handle; s32 hot_x, hot_y;
+};
+
+static void test_cursor(void) {
+    struct drm_mode_create_dumb create;
+    for (unsigned i = 0; i < sizeof(create); i++) ((char *)&create)[i] = 0;
+    create.width = 64; create.height = 64; create.bpp = 32;
+    if (call(IOWR(NR_MODE_CREATE_DUMB, struct drm_mode_create_dumb), &create) != 0) return;
+    struct drm_mode_cursor2 cursor = { 1, 1, 100, 80, 64, 64, create.handle, 3, 1 };
+    s64 set = call(IOWR(NR_MODE_CURSOR2, struct drm_mode_cursor2), &cursor);
+    struct drm_mode_cursor2 move = { 2, 1, 140, 90, 0, 0, 0, 0, 0 };
+    s64 moved = call(IOWR(NR_MODE_CURSOR2, struct drm_mode_cursor2), &move);
+    struct drm_mode_cursor2 wrong = { 1, 1, 0, 0, 32, 32, create.handle, 0, 0 };
+    s64 refused = call(IOWR(NR_MODE_CURSOR2, struct drm_mode_cursor2), &wrong);
+    struct drm_mode_cursor2 hide = { 1, 1, 0, 0, 0, 0, 0, 0, 0 };
+    s64 hidden = call(IOWR(NR_MODE_CURSOR2, struct drm_mode_cursor2), &hide);
+    int hardware = set == 0 && moved == 0 && refused == -22 && hidden == 0;
+    int absent = set == -6 && moved == -6 && refused == -6 && hidden == -6;
+    put("CURSOR set=");
+    put_signed(set);
+    put(" move=");
+    put_signed(moved);
+    put(hardware ? " hardware" : absent ? " absent" : " mixed");
+    put(hardware || absent ? " PASS\n" : " FAIL\n");
+    struct drm_mode_destroy_dumb drop = { create.handle, 0 };
+    (void)call(IOWR(NR_MODE_DESTROY_DUMB, struct drm_mode_destroy_dumb), &drop);
+}
+
 static void test_set_master(void) {
     s64 root = syscall3(SYS_ioctl, card, (s64)IOC(0, 'd', NR_SET_MASTER, 0), 0);
     int channel[2];
@@ -764,6 +794,7 @@ static int run(void) {
     test_connector_props();
     test_close_fb();
     test_set_master();
+    test_cursor();
     test_atomic_modeset();
     test_blob_zero();
     test_handle_isolation();

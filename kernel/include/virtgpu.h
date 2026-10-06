@@ -6,6 +6,10 @@
 int virtgpu_init(void);
 int virtgpu_available(void);
 int virtgpu_flush_pending(void);
+int virtgpu_cursor_available(void);
+int virtgpu_cursor_set(uint32_t resource, uint32_t stride_pixels, int upload, int32_t x, int32_t y,
+                       uint32_t hot_x, uint32_t hot_y);
+int virtgpu_cursor_move(int32_t x, int32_t y);
 uint64_t virtgpu_interrupt_count(void);
 
 int virtgpu_virgl_available(void);

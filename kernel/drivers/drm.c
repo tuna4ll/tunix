@@ -38,6 +38,7 @@ extern void kprintf(const char *fmt, ...);
 #define EFAULT 14
 #define EPERM 1
 #define EAGAIN 11
+#define ENXIO 6
 #define EBADF 9
 #define EMFILE 24
 #define EIO 5
@@ -72,7 +73,7 @@ extern void kprintf(const char *fmt, ...);
 #define DRM_NR_MODE_CLOSEFB 0xd0
 #define DRM_NR_MODE_PAGE_FLIP 0xb0
 #define DRM_NR_MODE_CURSOR 0xa3
-#define DRM_NR_MODE_CURSOR2 0xa4
+#define DRM_NR_MODE_CURSOR2 0xbb
 #define DRM_NR_MODE_ATOMIC 0xbc
 #define DRM_NR_MODE_CREATEPROPBLOB 0xbd
 #define DRM_NR_MODE_DESTROYPROPBLOB 0xbe
@@ -723,13 +724,44 @@ static int64_t ioctl_getfb(const struct file *client, uint64_t user_argument) {
     return copy_to_user(user_argument, &request, sizeof(request)) == 0 ? 0 : -EFAULT;
 }
 
+#define DRM_MODE_CURSOR_BO 0x01U
+#define DRM_MODE_CURSOR_MOVE 0x02U
+#define DRM_CURSOR_SIZE 64U
+
+static int32_t cursor_x;
+static int32_t cursor_y;
+
 static int64_t ioctl_cursor(const struct file *client, uint64_t user_argument, int cursor2) {
-    struct drm_mode_cursor request;
-    if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
-    (void)cursor2;
-    if (request.crtc_id != DRM_CRTC_ID) return -ENOENT;
-    if ((request.flags & 1U) && request.handle && !buffer_of(client, request.handle))
-        return -ENOENT;
+    struct { struct drm_mode_cursor base; int32_t hot_x; int32_t hot_y; } request;
+    memset(&request, 0, sizeof(request));
+    if (copy_from_user(&request, user_argument,
+                       cursor2 ? sizeof(request) : sizeof(request.base)) != 0) return -EFAULT;
+    if (request.base.crtc_id != DRM_CRTC_ID) return -ENOENT;
+    if (!virtgpu_cursor_available()) return -ENXIO;
+    if (request.base.flags & DRM_MODE_CURSOR_MOVE) {
+        cursor_x = request.base.x;
+        cursor_y = request.base.y;
+    }
+    if (request.base.flags & DRM_MODE_CURSOR_BO) {
+        if (!request.base.handle)
+            return virtgpu_cursor_set(0, 0, 0, cursor_x, cursor_y, 0, 0) == 0 ? 0 : -EIO;
+        struct drm_dumb_buffer *buffer = buffer_of(client, request.base.handle);
+        if (!buffer) return -ENOENT;
+        if (request.base.width != DRM_CURSOR_SIZE || request.base.height != DRM_CURSOR_SIZE ||
+            buffer->pitch / 4U < DRM_CURSOR_SIZE || buffer->height < DRM_CURSOR_SIZE)
+            return -EINVAL;
+        if (!buffer->virtio_resource) {
+            buffer->virtio_resource = virtgpu_resource_create(buffer->pitch / 4U, buffer->height,
+                                                              buffer->pages, buffer->page_count);
+            if (!buffer->virtio_resource) return -ENOMEM;
+        }
+        uint32_t hot_x = request.hot_x > 0 ? (uint32_t)request.hot_x : 0;
+        uint32_t hot_y = request.hot_y > 0 ? (uint32_t)request.hot_y : 0;
+        return virtgpu_cursor_set(buffer->virtio_resource, buffer->pitch / 4U, !buffer->rendered,
+                                  cursor_x, cursor_y, hot_x, hot_y) == 0 ? 0 : -EIO;
+    }
+    if (request.base.flags & DRM_MODE_CURSOR_MOVE)
+        return virtgpu_cursor_move(cursor_x, cursor_y) == 0 ? 0 : -EIO;
     return 0;
 }
 
@@ -1983,6 +2015,7 @@ static int64_t drm_dispatch_ioctl(struct file *file, unsigned long request,
     case DRM_NR_SET_CLIENT_CAP: return ioctl_set_client_cap(user_argument);
     case DRM_NR_SET_VERSION: return 0;
     case DRM_NR_DROP_MASTER:
+        if (virtgpu_cursor_available()) (void)virtgpu_cursor_set(0, 0, 0, 0, 0, 0, 0);
         active_fb_id = 0;
         virtgpu_scanout_disable();
         scanout_current = 0;
