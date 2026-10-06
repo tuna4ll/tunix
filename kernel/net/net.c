@@ -8,6 +8,7 @@
 #include "../include/net/inet_socket.h"
 #include "../include/net/net.h"
 #include "../include/net/virtio_net.h"
+#include "../include/workqueue.h"
 
 extern void kprintf(const char *fmt, ...);
 
@@ -754,9 +755,26 @@ int net_adapter_interrupts(void) {
     return adapter->interrupt_vector() != 0;
 }
 
+static void loopback_drain(void);
+static void run_tcp_timers(void);
+
+static void net_service(void *unused) {
+    (void)unused;
+    NET_LOCKED;
+    loopback_drain();
+    run_tcp_timers();
+}
+
+static struct work net_service_work = WORK_INITIALIZER(net_service, NULL);
+
 void net_tick(void) {
+    static unsigned beats;
     if (!lock_try_acquire(&net_lock)) return;
-    if (adapter && !net_adapter_interrupts()) net_poll();
+    if (adapter && !net_adapter_interrupts()) {
+        net_poll();
+    } else if (loopback_first || (++beats % 5U == 0U && inet_socket_timers_armed())) {
+        work_queue(&net_service_work);
+    }
     lock_release(&net_lock);
 }
 
@@ -776,18 +794,19 @@ static void loopback_drain(void) {
     draining = 0;
 }
 
+static void run_tcp_timers(void) {
+    static int timing;
+    if (timing) return;
+    timing = 1;
+    inet_socket_tcp_timer_poll();
+    timing = 0;
+}
+
 void net_poll(void) {
     NET_LOCKED;
     loopback_drain();
-    if (!adapter) return;
-    adapter->poll(receive_frame);
-
-    static int timing;
-    if (!timing) {
-        timing = 1;
-        inet_socket_tcp_timer_poll();
-        timing = 0;
-    }
+    if (adapter) adapter->poll(receive_frame);
+    run_tcp_timers();
 }
 const struct net_config *net_get_config(void) { return &config; }
 void net_set_address(uint32_t value) { config.address = value; }

@@ -1001,6 +1001,10 @@ static int timer_pending(const struct inet_socket *s) {
            (s->listener && tcp->state == TCP_CLOSED);
 }
 
+int inet_socket_timers_armed(void) {
+    return __atomic_load_n(&timed_sockets, __ATOMIC_RELAXED) != NULL;
+}
+
 void inet_socket_tcp_timer_poll(void) {
     NET_LOCKED;
     uint64_t now = time_uptime_ns();

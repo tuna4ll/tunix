@@ -76,6 +76,7 @@ void inet_socket_receive_tcp(uint32_t source, uint16_t source_port, uint32_t des
                              uint16_t window, const struct net_tcp_options *options,
                              const uint8_t *payload, size_t length);
 void inet_socket_tcp_timer_poll(void);
+int inet_socket_timers_armed(void);
 int inet_socket_peer_closed(struct inet_socket *socket);
 size_t inet_socket_count(void);
 void inet_socket_proc_udp(char *buffer, size_t capacity, size_t *length);
