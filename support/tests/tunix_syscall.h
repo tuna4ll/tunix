@@ -146,6 +146,11 @@ static inline s64 syscall6(s64 n, s64 a, s64 b, s64 c, s64 d, s64 e, s64 f) {
     case 103: return tunix_svc(116, a, b, c, d, e, f);
     case 105: return tunix_svc(146, a, b, c, d, e, f);
     case 117: return tunix_svc(147, a, b, c, d, e, f);
+    case 188: return tunix_svc(5, a, b, c, d, e, f);
+    case 191: return tunix_svc(8, a, b, c, d, e, f);
+    case 194: return tunix_svc(11, a, b, c, d, e, f);
+    case 197: return tunix_svc(14, a, b, c, d, e, f);
+    case 90: return tunix_svc(53, TUNIX_AT_FDCWD, a, b, 0, 0, 0);
     case 313: return tunix_svc(273, a, b, c, d, e, f);
     case 141: return tunix_svc(140, a, b, c, d, e, f);
     case 169: return tunix_svc(142, a, b, c, d, e, f);

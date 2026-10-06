@@ -50,6 +50,7 @@
                         VFS_MS_STRICTATIME | VFS_MS_LAZYTIME)
 
 struct vfs_node;
+struct vfs_acl;
 struct file;
 struct pipe_buffer;
 
@@ -130,6 +131,7 @@ struct vfs_node {
     uint64_t wb_since;
     struct vfs_node *wb_next;
     struct vfs_node *wb_prev;
+    struct vfs_acl *acl;
 };
 
 struct vfs_writeback {

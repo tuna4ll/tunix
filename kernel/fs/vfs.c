@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
+#include "../include/acl.h"
 #include "../include/cgroup.h"
 #include "../include/cred.h"
 #include "../include/defer.h"
@@ -396,6 +397,7 @@ void vfs_free_node(struct vfs_node *node) {
     if (!node) return;
     cursor_forget(node);
     index_drop(node);
+    acl_release(node);
     defer_free(node->name);
     defer_free(node);
 }

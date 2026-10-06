@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
+#include "include/acl.h"
 #include "include/cred.h"
 #include "include/heap.h"
 #include "include/kstring.h"
@@ -56,7 +57,10 @@ int cred_may(const struct vfs_node *node, uint32_t want) {
     if (!cred || !want) return 0;
 
     uint32_t allowed;
-    if (cred->fsuid == node->uid) allowed = (node->mode >> 6) & 7U;
+    int decided = 0;
+    int granted = acl_permission(node, cred, want, &decided);
+    if (decided) allowed = granted ? want : 0;
+    else if (cred->fsuid == node->uid) allowed = (node->mode >> 6) & 7U;
     else if (in_file_group(cred, node->gid)) allowed = (node->mode >> 3) & 7U;
     else allowed = node->mode & 7U;
     if ((allowed & want) == want) return 0;

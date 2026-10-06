@@ -32,6 +32,7 @@
 #include "include/ext2.h"
 #include "include/time.h"
 #include "include/timer.h"
+#include "include/acl.h"
 #include "include/cgroup.h"
 #include "include/tty.h"
 #include "include/uts.h"
@@ -3128,18 +3129,61 @@ static int64_t sys_getcwd(uint64_t user_buffer, size_t size) {
     return copy_to_user(user_buffer, visible, length) == 0 ? (int64_t)length : -EFAULT;
 }
 
-static int64_t xattr_target_exists(uint64_t user_path, int follow) {
+#define XATTR_GET 0
+#define XATTR_SET 1
+#define XATTR_REMOVE 2
+#define XATTR_LIST 3
+#define XATTR_VALUE_MAX 65536U
+
+static int64_t xattr_on_node(struct vfs_node *node, int op, uint64_t user_name,
+                             uint64_t user_value, size_t size, int flags) {
+    char name[256];
+    if (op != XATTR_LIST) {
+        int64_t copied = copy_string_from_user(name, sizeof(name), user_name);
+        if (copied < 0) return copied == -2 ? -ERANGE : -EFAULT;
+        if (!name[0]) return -ERANGE;
+    }
+    if (size > XATTR_VALUE_MAX) {
+        if (op == XATTR_SET) return -E2BIG;
+        size = XATTR_VALUE_MAX;
+    }
+    if (!node) return op == XATTR_SET ? -EOPNOTSUPP : op == XATTR_LIST ? 0 : -ENODATA;
+    uint8_t *buffer = size ? (uint8_t *)kmalloc(size) : NULL;
+    if (size && !buffer) return -ENOMEM;
+    int64_t result;
+    if (op == XATTR_SET) {
+        result = size && copy_from_user(buffer, user_value, size) != 0 ? -EFAULT
+                 : acl_xattr_set(node, name, buffer, size, flags);
+    } else if (op == XATTR_REMOVE) {
+        result = acl_xattr_remove(node, name);
+    } else {
+        result = op == XATTR_GET ? acl_xattr_get(node, name, buffer, size)
+                                 : acl_xattr_list(node, (char *)buffer, size);
+        if (result > 0 && size && copy_to_user(user_value, buffer, (size_t)result) != 0)
+            result = -EFAULT;
+    }
+    if (buffer) kfree(buffer);
+    return result;
+}
+
+static int64_t xattr_path(uint64_t user_path, int follow, int op, uint64_t user_name,
+                          uint64_t user_value, size_t size, int flags) {
     VFS_PATH_SCOPED path = NULL;
     int status = copy_path_at(AT_FDCWD, user_path, &path);
     if (status != 0) return status;
     struct vfs_node *node = follow ? vfs_lookup(path) : vfs_lookup_nofollow(path);
-    return node ? 0 : -ENOENT;
+    if (!node) return -ENOENT;
+    int permitted = cred_may_search(path);
+    if (permitted != 0) return permitted;
+    return xattr_on_node(node, op, user_name, user_value, size, flags);
 }
 
-static int64_t xattr_descriptor_exists(int fd) {
-    struct process *process = process_current();
-    if (!process || !process->files || fd < 0 || fd >= PROCESS_FD_CAPACITY(process)) return -EBADF;
-    return fd_file(fd) ? 0 : -EBADF;
+static int64_t xattr_descriptor(int fd, int op, uint64_t user_name, uint64_t user_value,
+                                size_t size, int flags) {
+    struct file *file = fd_file(fd);
+    if (!file) return -EBADF;
+    struct vfs_node *node = file->kind == FILE_KIND_VFS ? file->node : NULL;
+    return xattr_on_node(node, op, user_name, user_value, size, flags);
 }
 
 static int64_t sys_chroot(uint64_t user_path) {
@@ -5905,39 +5949,45 @@ static void syscall_run(struct syscall_frame *frame) {
         case SYS_FCHDIR: SYSCALL_RET(frame) = (uint64_t)sys_fchdir((int)SYSCALL_ARG0(frame)); break;
         case SYS_CHROOT: SYSCALL_RET(frame) = (uint64_t)sys_chroot(SYSCALL_ARG0(frame)); break;
         case SYS_SETXATTR:
-        case SYS_LSETXATTR: {
-            int64_t status = xattr_target_exists(SYSCALL_ARG0(frame), syscall_number == SYS_SETXATTR);
-            SYSCALL_RET(frame) = (uint64_t)(status != 0 ? status : -(int64_t)EOPNOTSUPP);
+        case SYS_LSETXATTR:
+            SYSCALL_RET(frame) = (uint64_t)xattr_path(SYSCALL_ARG0(frame), syscall_number == SYS_SETXATTR,
+                                                      XATTR_SET, SYSCALL_ARG1(frame), SYSCALL_ARG2(frame),
+                                                      (size_t)SYSCALL_ARG3(frame), (int)SYSCALL_ARG4(frame));
             break;
-        }
-        case SYS_FSETXATTR: {
-            int64_t status = xattr_descriptor_exists((int)SYSCALL_ARG0(frame));
-            SYSCALL_RET(frame) = (uint64_t)(status != 0 ? status : -(int64_t)EOPNOTSUPP);
+        case SYS_FSETXATTR:
+            SYSCALL_RET(frame) = (uint64_t)xattr_descriptor((int)SYSCALL_ARG0(frame), XATTR_SET,
+                                                            SYSCALL_ARG1(frame), SYSCALL_ARG2(frame),
+                                                            (size_t)SYSCALL_ARG3(frame), (int)SYSCALL_ARG4(frame));
             break;
-        }
         case SYS_GETXATTR:
         case SYS_LGETXATTR:
-        case SYS_REMOVEXATTR:
-        case SYS_LREMOVEXATTR: {
-            int follow = syscall_number == SYS_GETXATTR || syscall_number == SYS_REMOVEXATTR;
-            int64_t status = xattr_target_exists(SYSCALL_ARG0(frame), follow);
-            SYSCALL_RET(frame) = (uint64_t)(status != 0 ? status : -(int64_t)ENODATA);
+            SYSCALL_RET(frame) = (uint64_t)xattr_path(SYSCALL_ARG0(frame), syscall_number == SYS_GETXATTR,
+                                                      XATTR_GET, SYSCALL_ARG1(frame), SYSCALL_ARG2(frame),
+                                                      (size_t)SYSCALL_ARG3(frame), 0);
             break;
-        }
         case SYS_FGETXATTR:
-        case SYS_FREMOVEXATTR: {
-            int64_t status = xattr_descriptor_exists((int)SYSCALL_ARG0(frame));
-            SYSCALL_RET(frame) = (uint64_t)(status != 0 ? status : -(int64_t)ENODATA);
+            SYSCALL_RET(frame) = (uint64_t)xattr_descriptor((int)SYSCALL_ARG0(frame), XATTR_GET,
+                                                            SYSCALL_ARG1(frame), SYSCALL_ARG2(frame),
+                                                            (size_t)SYSCALL_ARG3(frame), 0);
             break;
-        }
+        case SYS_REMOVEXATTR:
+        case SYS_LREMOVEXATTR:
+            SYSCALL_RET(frame) = (uint64_t)xattr_path(SYSCALL_ARG0(frame), syscall_number == SYS_REMOVEXATTR,
+                                                      XATTR_REMOVE, SYSCALL_ARG1(frame), 0, 0, 0);
+            break;
+        case SYS_FREMOVEXATTR:
+            SYSCALL_RET(frame) = (uint64_t)xattr_descriptor((int)SYSCALL_ARG0(frame), XATTR_REMOVE,
+                                                            SYSCALL_ARG1(frame), 0, 0, 0);
+            break;
         case SYS_LISTXATTR:
-        case SYS_LLISTXATTR: {
-            int64_t status = xattr_target_exists(SYSCALL_ARG0(frame), syscall_number == SYS_LISTXATTR);
-            SYSCALL_RET(frame) = (uint64_t)status;
+        case SYS_LLISTXATTR:
+            SYSCALL_RET(frame) = (uint64_t)xattr_path(SYSCALL_ARG0(frame), syscall_number == SYS_LISTXATTR,
+                                                      XATTR_LIST, 0, SYSCALL_ARG1(frame),
+                                                      (size_t)SYSCALL_ARG2(frame), 0);
             break;
-        }
         case SYS_FLISTXATTR:
-            SYSCALL_RET(frame) = (uint64_t)xattr_descriptor_exists((int)SYSCALL_ARG0(frame));
+            SYSCALL_RET(frame) = (uint64_t)xattr_descriptor((int)SYSCALL_ARG0(frame), XATTR_LIST, 0,
+                                                            SYSCALL_ARG1(frame), (size_t)SYSCALL_ARG2(frame), 0);
             break;
         case SYS_RENAME: SYSCALL_RET(frame) = (uint64_t)sys_rename_at(AT_FDCWD, SYSCALL_ARG0(frame), AT_FDCWD, SYSCALL_ARG1(frame), 0); break;
         case SYS_MKDIR: SYSCALL_RET(frame) = (uint64_t)sys_mkdir_at(AT_FDCWD, SYSCALL_ARG0(frame), SYSCALL_ARG1(frame)); break;
