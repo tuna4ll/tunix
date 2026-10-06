@@ -1359,7 +1359,8 @@ static int64_t ioctl_obj_get_properties(uint64_t user_argument) {
 }
 
 static int present_via_virtgpu(const struct drm_framebuffer *fb,
-                               struct drm_dumb_buffer *buffer) {
+                               struct drm_dumb_buffer *buffer,
+                               const struct drm_damage *damage) {
     uint32_t stride_pixels = buffer->pitch / 4U;
     if (!stride_pixels || !buffer->height) return -1;
     if (!buffer->virtio_resource) {
@@ -1369,8 +1370,27 @@ static int present_via_virtgpu(const struct drm_framebuffer *fb,
     }
     uint32_t width = fb->width < stride_pixels ? fb->width : stride_pixels;
     uint32_t height = fb->height < buffer->height ? fb->height : buffer->height;
-    return virtgpu_present(buffer->virtio_resource, width, height,
-                           !buffer->rendered);
+    struct virtgpu_rect bounds = { 0, 0, 0, 0 };
+    if (damage && damage->count) {
+        int32_t left = INT32_MAX, top = INT32_MAX, right = INT32_MIN, bottom = INT32_MIN;
+        for (uint32_t index = 0; index < damage->count; index++) {
+            const struct drm_mode_rect *rect = &damage->rects[index];
+            if (rect->x1 < left) left = rect->x1;
+            if (rect->y1 < top) top = rect->y1;
+            if (rect->x2 > right) right = rect->x2;
+            if (rect->y2 > bottom) bottom = rect->y2;
+        }
+        if (left < 0) left = 0;
+        if (top < 0) top = 0;
+        if (right > left && bottom > top) {
+            bounds.x = (uint32_t)left;
+            bounds.y = (uint32_t)top;
+            bounds.width = (uint32_t)(right - left);
+            bounds.height = (uint32_t)(bottom - top);
+        }
+    }
+    return virtgpu_present(buffer->virtio_resource, stride_pixels, width, height,
+                           bounds.width ? &bounds : NULL, !buffer->rendered);
 }
 
 static int64_t drm_dispatch_ioctl(struct file *file, unsigned long request,
@@ -1422,7 +1442,15 @@ static int present_framebuffer(const struct file *client, uint32_t fb_id,
         return 0;
     }
 
-    if (virtgpu_available() && present_via_virtgpu(fb, buffer) == 0) return 0;
+    if (virtgpu_available()) {
+        static uint32_t last_virtgpu_fb;
+        const struct drm_damage *partial = scanout_current && last_virtgpu_fb == fb_id ? damage : NULL;
+        if (present_via_virtgpu(fb, buffer, partial) == 0) {
+            last_virtgpu_fb = fb_id;
+            scanout_current = 1;
+            return 0;
+        }
+    }
 
     uint8_t *scanout = framebuffer_scanout();
     if (!scanout) return -EPERM;

@@ -2,6 +2,7 @@
 #include <stdint.h>
 
 #include "../../include/heap.h"
+#include "../../include/cpu.h"
 #include "../../include/dma.h"
 #include "../../include/kstring.h"
 #include "../../include/time.h"
@@ -9,6 +10,8 @@
 #include "../../include/virtio.h"
 #include "../../include/vmm.h"
 #include "../../include/lock.h"
+#include "../../include/percpu.h"
+#include "../../include/process.h"
 
 static struct lock virtgpu_lock = LOCK_INITIALIZER("virtio-gpu", LOCK_RANK_DEVICE);
 
@@ -327,10 +330,75 @@ static int submit_async(uint32_t request_bytes, const void *payload,
     return 0;
 }
 
-int virtgpu_flush_pending(void) {
+#define COMPLETION_POLL_NS 2000000ULL
+#define COMPLETION_TIMEOUT_NS 2000000000ULL
+
+static const char completion_channel;
+
+static int may_sleep_here(void) {
+    return process_current() && !cpu_current()->in_interrupt && lock_only_holds(NULL);
+}
+
+static int completed_through(uint64_t target) {
     VIRTGPU_LOCKED;
-    if (!ready) return 0;
-    return virtio_queue_drain(&control);
+    virtio_queue_reclaim(&control);
+    return control.completed >= target;
+}
+
+static int wait_completed(uint64_t target) {
+    uint64_t deadline = time_uptime_ns() + COMPLETION_TIMEOUT_NS;
+    while (!completed_through(target)) {
+        if (time_uptime_ns() > deadline) return -1;
+        if (!may_sleep_here()) {
+            cpu_relax();
+            continue;
+        }
+        process_prepare_wait(&completion_channel, time_uptime_ns() + COMPLETION_POLL_NS);
+        if (completed_through(target)) {
+            process_finish_wait();
+            break;
+        }
+        process_wait();
+        process_finish_wait();
+    }
+    return 0;
+}
+
+static void wait_for_room(unsigned needed) {
+    if (!may_sleep_here()) return;
+    uint64_t target = 0;
+    {
+        VIRTGPU_LOCKED;
+        if (!ready || !async_ready()) return;
+        virtio_queue_reclaim(&control);
+        unsigned busy = 0;
+        uint64_t sequences[ASYNC_SLOTS];
+        for (unsigned index = 0; index < ASYNC_SLOTS; index++)
+            if (async_slots[index].sequence > control.completed)
+                sequences[busy++] = async_slots[index].sequence;
+        if (ASYNC_SLOTS - busy >= needed) return;
+        unsigned release = needed - (ASYNC_SLOTS - busy);
+        for (unsigned round = 0; round < release; round++) {
+            unsigned lowest = round;
+            for (unsigned index = round + 1; index < busy; index++)
+                if (sequences[index] < sequences[lowest]) lowest = index;
+            uint64_t swap = sequences[round];
+            sequences[round] = sequences[lowest];
+            sequences[lowest] = swap;
+        }
+        target = sequences[release - 1];
+    }
+    (void)wait_completed(target);
+}
+
+int virtgpu_flush_pending(void) {
+    uint64_t target;
+    {
+        VIRTGPU_LOCKED;
+        if (!ready) return 0;
+        target = control.posted;
+    }
+    return wait_completed(target);
 }
 
 static int submit(uint32_t request_bytes, const void *payload, uint32_t payload_bytes,
@@ -546,6 +614,7 @@ int virtgpu_transfer_3d(uint32_t context, uint32_t resource,
                         const struct virtgpu_box *box, uint64_t offset,
                         uint32_t level, uint32_t stride, uint32_t layer_stride,
                         int to_host) {
+    wait_for_room(1);
     VIRTGPU_LOCKED;
     if (!virtgpu_virgl_available() || !resource || !box) return -1;
 
@@ -565,6 +634,7 @@ int virtgpu_transfer_3d(uint32_t context, uint32_t resource,
 }
 
 int virtgpu_submit_3d(uint32_t context, const void *buffer, uint32_t bytes) {
+    wait_for_room(1);
     VIRTGPU_LOCKED;
     if (!virtgpu_virgl_available() || !context || !buffer) return -1;
     if (!bytes || bytes > MAX_COMMAND_BYTES) return -1;
@@ -583,9 +653,9 @@ int virtgpu_submit_3d(uint32_t context, const void *buffer, uint32_t bytes) {
 static uint64_t completions;
 
 static void control_queue_interrupt(void *context) {
-    VIRTGPU_LOCKED;
     (void)context;
-    completions++;
+    __atomic_add_fetch(&completions, 1, __ATOMIC_RELAXED);
+    (void)process_wake_all(&completion_channel);
 }
 
 uint64_t virtgpu_interrupt_count(void) { return completions; }
@@ -690,10 +760,19 @@ static void set_rect(struct virtio_gpu_rect *r, uint32_t width, uint32_t height)
     r->height = height;
 }
 
-int virtgpu_present(uint32_t resource, uint32_t width, uint32_t height,
-                    int upload) {
+int virtgpu_present(uint32_t resource, uint32_t stride_pixels, uint32_t width, uint32_t height,
+                    const struct virtgpu_rect *damage, int upload) {
+    wait_for_room(3);
     VIRTGPU_LOCKED;
     if (!ready || !resource || !width || !height) return -1;
+    struct virtio_gpu_rect dirty;
+    set_rect(&dirty, width, height);
+    if (damage && damage->width && damage->height && damage->x < width && damage->y < height) {
+        dirty.x = damage->x;
+        dirty.y = damage->y;
+        dirty.width = damage->width < width - damage->x ? damage->width : width - damage->x;
+        dirty.height = damage->height < height - damage->y ? damage->height : height - damage->y;
+    }
 
     if (scanout_resource != resource) {
         begin(VIRTIO_GPU_CMD_SET_SCANOUT);
@@ -707,7 +786,8 @@ int virtgpu_present(uint32_t resource, uint32_t width, uint32_t height,
 
     if (upload) {
         begin(VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D);
-        set_rect(&request.transfer.r, width, height);
+        request.transfer.r = dirty;
+        request.transfer.offset = ((uint64_t)dirty.y * stride_pixels + dirty.x) * 4U;
         request.transfer.resource_id = resource;
         if (submit_async(sizeof(request.transfer), NULL, 0) != 0 &&
             submit(sizeof(request.transfer), NULL, 0,
@@ -715,7 +795,7 @@ int virtgpu_present(uint32_t resource, uint32_t width, uint32_t height,
     }
 
     begin(VIRTIO_GPU_CMD_RESOURCE_FLUSH);
-    set_rect(&request.flush.r, width, height);
+    request.flush.r = dirty;
     request.flush.resource_id = resource;
     if (submit_async(sizeof(request.flush), NULL, 0) == 0) return 0;
     return submit(sizeof(request.flush), NULL, 0, sizeof(struct virtio_gpu_ctrl_hdr));
@@ -739,7 +819,7 @@ int virtgpu_console_present(uint64_t physical, uint32_t stride_pixels,
         kfree(pages);
         if (!console_resource) return -1;
     }
-    return virtgpu_present(console_resource, width, height, 1);
+    return virtgpu_present(console_resource, stride_pixels, width, height, NULL, 1);
 }
 
 void virtgpu_scanout_disable(void) {
