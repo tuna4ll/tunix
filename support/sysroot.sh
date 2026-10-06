@@ -1,14 +1,4 @@
 #!/bin/bash
-#
-# Assemble the root filesystem.
-#
-# Tunix builds no userland of its own. Everything above the kernel is a Void
-# Linux package, installed into a directory here by Void's own package manager,
-# so what the machine runs is a stock glibc distribution rather than a hundred
-# hand-written build scripts.
-#
-# Three things go in: Void's base ROOTFS tarball, the packages named by
-# $VOID_INSTALL, and base-files/ from this repo laid over the result.
 set -euo pipefail
 
 SYSROOT=${1:?usage: sysroot.sh SYSROOT CACHE}
@@ -30,18 +20,11 @@ if [ "$(id -u)" != 0 ]; then
 	exit 1
 fi
 
-# A directory that cannot record ownership or the setuid bit cannot hold a root
-# filesystem: sudo and su would ship unprivileged, and every file in the image
-# would belong to root. Windows drives mounted into WSL are the usual way to
-# end up here, and the failure is silent -- chmod succeeds and changes nothing
-# -- so it is worth one probe up front.
 check_permissions() {
 	local probe="$1/.permission-probe"
 	mkdir -p "$1"
 	rm -f "$probe"
 	: > "$probe"
-	# chown before chmod: changing the owner clears the setuid bit, so the
-	# other order fails this check on a filesystem that is perfectly fine.
 	chown 1:1 "$probe"
 	chmod 4750 "$probe"
 	local mode owner
@@ -64,11 +47,6 @@ fetch() {
 	mv "$2.part" "$2"
 }
 
-# --- the tools --------------------------------------------------------------
-#
-# xbps is taken as Void's own statically linked build rather than as a host
-# package: it exists for every distribution this way, and it is the same
-# version of the tool that made the repository it is about to read.
 check_permissions "$(dirname "$SYSROOT")"
 
 fetch "$MIRROR/static/xbps-static-static-$XBPS_STATIC_VERSION.x86_64-musl.tar.xz" \
@@ -81,43 +59,25 @@ fi
 
 fetch "$MIRROR/live/current/void-$ARCH-ROOTFS-$ROOTFS_DATE.tar.xz" "$ROOTFS_TARBALL"
 
-# --- the base ---------------------------------------------------------------
-
 echo ":: unpacking the base rootfs"
 rm -rf "$SYSROOT"
 mkdir -p "$SYSROOT"
 tar -xJpf "$ROOTFS_TARBALL" -C "$SYSROOT"
 
-# The tarball's xbps.d points at whatever mirror it was built against; ours
-# has to be the one the packages are actually coming from.
 mkdir -p "$SYSROOT/etc/xbps.d"
 REPOSITORY="$MIRROR/current"
 [ "$ARCH" = x86_64 ] || REPOSITORY="$MIRROR/current/$ARCH"
 printf 'repository=%s\n' "$REPOSITORY" > "$SYSROOT/etc/xbps.d/00-repository-main.conf"
 
-# --- the packages -----------------------------------------------------------
-
 export XBPS_ARCH=$ARCH
 XBPS="$XBPS_DIR/usr/bin"
 
-# The downloaded packages live in the cache beside the tarballs rather than in
-# the sysroot's own /var/cache/xbps, which this script deletes at the top of
-# every run. Adding one package would otherwise fetch the other three hundred
-# megabytes over again.
-# Absolute, always. xbps resolves a relative cache directory against the root it
-# is installing into, so the default `build/cache` put three hundred megabytes
-# of downloaded packages *inside* the sysroot -- and from there into the image,
-# which is where a 185 MiB /build/cache came from.
 mkdir -p "$CACHE/packages"
 PACKAGES=$(cd "$CACHE/packages" && pwd)
 xbps_install() {
 	"$XBPS/xbps-install" -c "$PACKAGES" -r "$SYSROOT" "$@"
 }
 
-# xbps first and on its own. The base tarball is cut a few times a year and the
-# repository moves on without it; xbps refuses to install anything at all into a
-# root whose own xbps package is older than the repository format, and says so
-# with an error that does not mention the tarball.
 echo ":: updating xbps"
 xbps_install -S -y -u xbps
 echo ":: updating the base"
@@ -128,70 +88,34 @@ xbps_install -S -y $INSTALL
 if [ -n "$REMOVE" ]; then
 	"$XBPS/xbps-remove" -R -y -r "$SYSROOT" $REMOVE
 fi
-# Orphans, if there are any. xbps-remove -O exits 255 when it finds nothing to
-# do and says nothing about it, so an empty run is not a failure here.
 "$XBPS/xbps-remove" -O -y -r "$SYSROOT" || true
-
-# --- what makes it Tunix ----------------------------------------------------
 
 echo ":: applying base-files"
 cp -a base-files/overlay/. "$SYSROOT/"
 
-# Appended rather than copied: Void's own packages own these files and add
-# their system users to them, so replacing them would delete those.
 for file in passwd group shadow; do
 	[ -f "base-files/append/$file" ] || continue
 	cat "base-files/append/$file" >> "$SYSROOT/etc/$file"
 done
 
-# One password for both accounts, and it is in the repository in plain sight:
-# this is a machine you boot in an emulator to look at, not one anybody logs
-# into over a network.
 PASSWORD_HASH=$(sed -n 's/^tunix:\([^:]*\):.*/\1/p' base-files/append/shadow)
 sed -i "s|^root:[^:]*:|root:$PASSWORD_HASH:|" "$SYSROOT/etc/shadow"
-# And bash for root as well. Void gives it /bin/sh, which is dash: no history,
-# no completion, and a different set of surprises from the shell the other
-# account and every script on the image are written for.
 sed -i 's|^\(root:.*\):/bin/sh$|\1:/bin/bash|' "$SYSROOT/etc/passwd"
-# Void puts wheel at gid 4, not the 10 it is on most distributions, so the
-# gid is taken from the file rather than written into it.
 sed -i 's|^wheel:x:\([0-9]*\):.*|wheel:x:\1:tunix|' "$SYSROOT/etc/group"
-# _seatd owns the socket seatd listens on, and weston asks that socket for the
-# display and the input devices rather than opening them itself. The group is
-# created by the seatd package, so only the membership is written here.
 sed -i 's|^_seatd:x:\([0-9]*\):.*|_seatd:x:\1:tunix|' "$SYSROOT/etc/group"
-# The sound devices are 0660 root:audio, so an account that is not in the group
-# has no sound at all -- and nothing says so: a program opens the card, is
-# refused, and reports that it found none.
 sed -i 's|^audio:x:\([0-9]*\):.*|audio:x:\1:tunix|' "$SYSROOT/etc/group"
 
 chown -R 1000:1000 "$SYSROOT/home/tunix"
 chmod 0700 "$SYSROOT/home/tunix"
 chmod 0755 "$SYSROOT/etc/rc.local"
-# The services this repo adds. A checkout on a filesystem with no execute bit
-# leaves these unrunnable, and runit reports that as a service that keeps
-# failing to start rather than as a permission problem.
 for service in base-files/overlay/etc/sv/*/run base-files/overlay/etc/sv/*/log/run; do
 	[ -f "$service" ] || continue
 	chmod 0755 "$SYSROOT${service#base-files/overlay}"
 done
-# sudo refuses to read a sudoers directory anyone could write to, and says so
-# by reporting that the user is not in the sudoers file at all. The mode has
-# to be set here because a checkout on a Windows filesystem reports every
-# directory as 0777 and cp -a faithfully copies that.
 chmod 0750 "$SYSROOT/etc/sudoers.d"
 chmod 0440 "$SYSROOT/etc/sudoers.d/tunix"
-# sudo ignores policy files that are writable by, or owned by, the account
-# they authorize. The overlay comes from the checkout and may therefore carry
-# the builder's uid; normalize both objects to root before the filesystem is
-# packed into the image.
 chown 0:0 "$SYSROOT/etc/sudoers.d" "$SYSROOT/etc/sudoers.d/tunix"
 
-# /dev, /proc, /sys, /run and /tmp belong to the kernel, which fills them in at
-# boot. Whatever a package left in them here would sit underneath and shadow
-# the real thing -- an install script that redirected to /dev/null left a
-# twenty-byte regular file there, and every `>/dev/null` in the system then
-# failed with EACCES.
 echo ":: clearing the pseudo-filesystem mount points"
 for directory in dev proc sys run tmp; do
 	rm -rf "${SYSROOT:?}/$directory"
@@ -199,9 +123,6 @@ for directory in dev proc sys run tmp; do
 done
 chmod 1777 "$SYSROOT/tmp"
 
-# Cleared first, so the list in base-files/services is the whole answer rather
-# than an addition to whatever the runit-void package happened to enable --
-# which is six gettys and udevd.
 echo ":: enabling services"
 rm -rf "$SYSROOT/etc/runit/runsvdir/default"
 mkdir -p "$SYSROOT/etc/runit/runsvdir/default"
@@ -212,7 +133,7 @@ while read -r service; do
 		exit 1
 	fi
 	ln -sfn "/etc/sv/$service" "$SYSROOT/etc/runit/runsvdir/default/$service"
-done < base-files/services
+done < <(cat base-files/services "base-files/services-${DESKTOP:-gnome}" 2>/dev/null)
 
 if [ -f base-files/remove ]; then
 	echo ":: trimming"

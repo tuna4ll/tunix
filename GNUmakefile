@@ -102,6 +102,8 @@ clean:
 distclean:
 	rm -rf $(BUILD)
 
+USERNS ?= $(if $(filter 0,$(shell id -u)),,unshare --map-auto --map-root-user)
+
 CACHE         ?= $(BUILD)/cache
 SYSROOT       ?= $(BUILD)/sysroot
 SYSROOT_STAMP := $(BUILD)/.sysroot
@@ -115,8 +117,15 @@ VOID_INSTALL ?= base-files bash coreutils util-linux findutils diffutils \
 	$(VOID_INSTALL_GRAPHICAL) $(VOID_INSTALL_BROWSER) $(VOID_INSTALL_GAMES) \
 	$(VOID_INSTALL_TOOLCHAIN)
 
-VOID_INSTALL_GRAPHICAL ?= weston mesa-dri xorg-server-xwayland xkeyboard-config dejavu-fonts-ttf \
-	seatd xcursor-vanilla-dmz
+DESKTOP ?= gnome
+
+VOID_INSTALL_GRAPHICAL ?= mesa-dri xorg-server-xwayland xkeyboard-config dejavu-fonts-ttf \
+	xcursor-vanilla-dmz $(VOID_INSTALL_DESKTOP_$(DESKTOP))
+
+VOID_INSTALL_DESKTOP_gnome ?= dbus elogind polkit gdm gnome-core gnome-console \
+	gnome-text-editor gnome-system-monitor gnome-calculator
+
+VOID_INSTALL_DESKTOP_weston ?= weston seatd
 
 VOID_INSTALL_BROWSER ?= firefox
 
@@ -133,14 +142,14 @@ sysroot: $(SYSROOT_STAMP)
 
 SYSROOT_RECIPE := $(BUILD)/sysroot-recipe
 $(shell mkdir -p $(BUILD); printf '%s\n' '$(VOID_MIRROR)' '$(VOID_ROOTFS_DATE)' \
-	'$(VOID_INSTALL)' '$(VOID_REMOVE)' > $(SYSROOT_RECIPE).tmp; \
+	'$(VOID_INSTALL)' '$(VOID_REMOVE)' '$(DESKTOP)' > $(SYSROOT_RECIPE).tmp; \
 	cmp -s $(SYSROOT_RECIPE).tmp $(SYSROOT_RECIPE) 2>/dev/null \
 		&& rm -f $(SYSROOT_RECIPE).tmp \
 		|| mv $(SYSROOT_RECIPE).tmp $(SYSROOT_RECIPE))
 
 $(SYSROOT_STAMP): support/sysroot.sh $(BASE_FILES) $(SYSROOT_RECIPE) | $(BUILD)
-	VOID_MIRROR='$(VOID_MIRROR)' VOID_ROOTFS_DATE='$(VOID_ROOTFS_DATE)' \
-	VOID_INSTALL='$(VOID_INSTALL)' VOID_REMOVE='$(VOID_REMOVE)' \
+	$(USERNS) env VOID_MIRROR='$(VOID_MIRROR)' VOID_ROOTFS_DATE='$(VOID_ROOTFS_DATE)' \
+	VOID_INSTALL='$(VOID_INSTALL)' VOID_REMOVE='$(VOID_REMOVE)' DESKTOP='$(DESKTOP)' \
 		support/sysroot.sh $(SYSROOT) $(CACHE)
 	@touch $@
 
@@ -157,7 +166,7 @@ IMAGE_TABLE ?= gpt
 IMAGE_SLACK_MIB ?= 4096
 
 $(IMAGE): $(KERNEL) $(MODULES) $(LIMINE_EXE) support/limine.conf support/image.sh $(SYSROOT_STAMP)
-	TABLE='$(IMAGE_TABLE)' ROOT_SLACK_MIB='$(IMAGE_SLACK_MIB)' \
+	$(USERNS) env TABLE='$(IMAGE_TABLE)' ROOT_SLACK_MIB='$(IMAGE_SLACK_MIB)' \
 	MODULES='$(BUILD)/modules' RELEASE='$(KERNEL_RELEASE)' \
 		support/image.sh $@ $(KERNEL) $(LIMINE_DIR) support/limine.conf $(SYSROOT)
 
@@ -322,7 +331,6 @@ $(AARCH64_MODULES) $(AARCH64_TEST_MODULES): GNUmakefile
 
 QEMU_AARCH64_CORE_DISKS ?=
 
-USERNS ?= $(if $(filter 0,$(shell id -u)),,unshare --map-auto --map-root-user)
 SYSROOT_AARCH64 ?= $(BUILD)/sysroot-aarch64
 SYSROOT_AARCH64_STAMP := $(BUILD)/.sysroot-aarch64
 IMAGE_AARCH64 := $(BUILD)/tunix-aarch64.img
@@ -333,7 +341,7 @@ sysroot-aarch64: $(SYSROOT_AARCH64_STAMP)
 $(SYSROOT_AARCH64_STAMP): support/sysroot.sh $(BASE_FILES) $(SYSROOT_RECIPE) | $(BUILD)
 	$(USERNS) env VOID_ARCH=aarch64 VOID_MIRROR='$(VOID_MIRROR)' \
 		VOID_ROOTFS_DATE='$(VOID_ROOTFS_DATE)' VOID_INSTALL='$(VOID_INSTALL)' \
-		VOID_REMOVE='$(VOID_REMOVE)' support/sysroot.sh $(SYSROOT_AARCH64) $(CACHE)
+		VOID_REMOVE='$(VOID_REMOVE)' DESKTOP='$(DESKTOP)' support/sysroot.sh $(SYSROOT_AARCH64) $(CACHE)
 	@touch $@
 
 image-aarch64: $(IMAGE_AARCH64)

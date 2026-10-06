@@ -1,7 +1,4 @@
-# Enabled runit services.
 agetty-tty2
 agetty-tty3
 agetty-tty4
-seatd
 dhcpcd
-weston

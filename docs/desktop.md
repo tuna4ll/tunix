@@ -1,14 +1,15 @@
-# The graphical session
+# The Weston session
 
-Tunix boots into [Weston](https://gitlab.freedesktop.org/wayland/weston), the
-reference Wayland compositor, running as the `tunix` user. It is Void's own
+The default image boots into GNOME; see [GNOME](gnome.md). `make DESKTOP=weston`
+builds this one instead: [Weston](https://gitlab.freedesktop.org/wayland/weston),
+the reference Wayland compositor, running as the `tunix` user. It is Void's own
 `weston` package: nothing in it was built here and nothing in it is patched.
 
 ![Weston on Tunix](../screenshots/weston.png)
 
 ```sh
-make run-gpu     # a window, with the desktop in it
-make run         # the same image, without one
+make DESKTOP=weston run-gpu     # a window, with the desktop in it
+make DESKTOP=weston run         # the same image, without one
 ```
 
 Ctrl+Alt+F2 leaves the desktop for a text console and Ctrl+Alt+F1 comes back.
