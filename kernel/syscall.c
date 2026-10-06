@@ -34,6 +34,8 @@
 #include "include/timer.h"
 #include "include/acl.h"
 #include "include/cgroup.h"
+#include "include/lock.h"
+#include "include/workqueue.h"
 #include "include/tty.h"
 #include "include/uts.h"
 #include "include/vt.h"
@@ -889,18 +891,71 @@ void syscall_release_pins(void) {
     release_set(pins_here());
 }
 
+static int defer_set(struct file_pins *pins);
+
 void syscall_orphan_pins(struct process *process) {
     struct file_pins *orphans = &orphan_pins[cpu_current()->index];
-    if (!process || !process->pins.count || orphans->count) return;
+    if (!process || !process->pins.count) return;
+    if (orphans->count && defer_set(orphans) != 0) return;
     struct file_pins swap = *orphans;
     *orphans = process->pins;
     process->pins = swap;
 }
 
+struct deferred_pins {
+    struct file_pins pins;
+    struct deferred_pins *next;
+};
+
+static struct lock deferred_pins_lock = LOCK_INITIALIZER("deferred pins", LOCK_RANK_LEAF);
+static struct deferred_pins *deferred_head;
+
+static void release_deferred_pins(void *unused) {
+    (void)unused;
+    lock_acquire(&deferred_pins_lock);
+    struct deferred_pins *list = deferred_head;
+    deferred_head = NULL;
+    lock_release(&deferred_pins_lock);
+    while (list) {
+        struct deferred_pins *next = list->next;
+        release_set(&list->pins);
+        kfree(list->pins.files);
+        kfree(list);
+        list = next;
+    }
+}
+
+static struct work deferred_pins_work = WORK_INITIALIZER(release_deferred_pins, NULL);
+
+static int defer_set(struct file_pins *pins) {
+    if (!pins->count) return 0;
+    struct deferred_pins *node = (struct deferred_pins *)kmalloc(sizeof(*node));
+    if (!node) return -1;
+    node->pins = *pins;
+    memset(pins, 0, sizeof(*pins));
+    lock_acquire(&deferred_pins_lock);
+    node->next = deferred_head;
+    deferred_head = node;
+    lock_release(&deferred_pins_lock);
+    work_queue(&deferred_pins_work);
+    return 0;
+}
+
+static int orphans_may_block(void) {
+    struct process *self = process_current();
+    return self && !cpu_current()->in_interrupt && !self->kernel_waiting && !self->waiting_for &&
+           !self->held_mutex_count;
+}
+
 void syscall_release_orphans(void) {
-    unsigned index = cpu_current()->index;
-    release_set(&orphan_pins[index]);
-    release_set(&spare_pins[index]);
+    struct cpu *cpu = cpu_current();
+    if (!orphans_may_block()) {
+        defer_set(&orphan_pins[cpu->index]);
+        defer_set(&spare_pins[cpu->index]);
+        return;
+    }
+    release_set(&orphan_pins[cpu->index]);
+    release_set(&spare_pins[cpu->index]);
 }
 
 static int64_t sys_write(int fd, uint64_t user_buffer, size_t length) {

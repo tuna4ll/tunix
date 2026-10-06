@@ -1724,7 +1724,7 @@ static void go_idle(void) {
     struct process *leaving = current;
     leave_for_idle();
     lock_drop(&sched_lock);
-    syscall_release_pins_of(leaving);
+    syscall_orphan_pins(leaving);
     syscall_release_orphans();
     lock_check_released("the kernel for idle");
     cpu_enter_idle(cpu_current()->idle_stack_top);
