@@ -73,6 +73,7 @@ static void put_signed(s64 value) {
 #define NR_MODE_CREATEPROPBLOB 0xbd
 #define NR_MODE_DESTROYPROPBLOB 0xbe
 #define NR_MODE_GETCONNECTOR 0xa7
+#define NR_MODE_SETPROPERTY 0xab
 #define NR_MODE_CLOSEFB 0xd0
 #define NR_SET_MASTER 0x1e
 
@@ -656,6 +657,20 @@ static void test_damage_clips(u32 fb_id, u32 blob_id, unsigned short width,
     (void)call(IOWR(NR_MODE_DESTROYPROPBLOB, struct drm_mode_destroy_blob), &kill);
 }
 
+static int property_named(u32 id, const char *want) {
+    struct drm_mode_get_property property;
+    for (unsigned i = 0; i < sizeof(property); i++) ((char *)&property)[i] = 0;
+    property.prop_id = id;
+    if (call(IOWR(NR_MODE_GETPROPERTY, struct drm_mode_get_property), &property) != 0) return 0;
+    for (unsigned i = 0; i < 32; i++) {
+        if (property.name[i] != want[i]) return 0;
+        if (!want[i]) return 1;
+    }
+    return 0;
+}
+
+struct drm_connector_set_property { u64 value; u32 prop_id; u32 connector_id; };
+
 static void test_connector_props(void) {
     u32 props[8];
     u64 values[8];
@@ -666,20 +681,23 @@ static void test_connector_props(void) {
     connector.prop_values_ptr = (u64)values;
     connector.count_props = 8;
     s64 result = call(IOWR(NR_MODE_GETCONNECTOR, struct drm_mode_get_connector), &connector);
-    struct drm_mode_get_property property;
-    for (unsigned i = 0; i < sizeof(property); i++) ((char *)&property)[i] = 0;
-    if (result == 0 && connector.count_props) {
-        property.prop_id = props[0];
-        (void)call(IOWR(NR_MODE_GETPROPERTY, struct drm_mode_get_property), &property);
+    int crtc = 0, dpms = 0;
+    u32 dpms_id = 0;
+    for (u32 index = 0; result == 0 && index < connector.count_props && index < 8; index++) {
+        if (property_named(props[index], "CRTC_ID")) crtc = 1;
+        if (property_named(props[index], "DPMS")) { dpms = 1; dpms_id = props[index]; }
     }
-    int named = property.name[0] == 'C' && property.name[1] == 'R' && property.name[2] == 'T' &&
-                property.name[3] == 'C' && property.name[4] == '_' && property.name[5] == 'I' &&
-                property.name[6] == 'D' && !property.name[7];
+    struct drm_connector_set_property on = { 0, dpms_id, 2 };
+    s64 set = dpms ? call(IOWR(NR_MODE_SETPROPERTY, struct drm_connector_set_property), &on) : -1;
+    struct drm_connector_set_property bad = { 9, dpms_id, 2 };
+    s64 refused = call(IOWR(NR_MODE_SETPROPERTY, struct drm_connector_set_property), &bad);
     put("CONNPROPS result=");
     put_signed(result);
     put(" count=");
     put_signed(connector.count_props);
-    put(result == 0 && connector.count_props == 1 && named ? " PASS\n" : " FAIL\n");
+    put(" set=");
+    put_signed(set);
+    put(result == 0 && crtc && dpms && set == 0 && refused == -22 ? " PASS\n" : " FAIL\n");
 }
 
 static void test_close_fb(void) {

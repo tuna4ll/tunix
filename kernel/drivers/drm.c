@@ -228,6 +228,7 @@ typedef char drm_virtgpu_get_caps_size_check[
 #define DRM_PROP_PLANE_CRTC_W 22
 #define DRM_PROP_PLANE_CRTC_H 23
 #define DRM_PROP_PLANE_FB_DAMAGE_CLIPS 24
+#define DRM_PROP_CONNECTOR_DPMS 25
 #define DRM_PROP_PLANE_FIRST_RECT DRM_PROP_PLANE_SRC_X
 #define DRM_PROP_PLANE_LAST_RECT DRM_PROP_PLANE_CRTC_H
 
@@ -972,13 +973,37 @@ static int64_t ioctl_version(uint64_t user_argument) {
 #define DRM_CLIENT_CAP_STEREO_3D 1
 #define DRM_CLIENT_CAP_UNIVERSAL_PLANES 2
 #define DRM_CLIENT_CAP_ATOMIC 3
+#define DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT 6
 
 static int64_t ioctl_set_client_cap(uint64_t user_argument) {
     struct drm_set_client_cap { uint64_t capability; uint64_t value; } request;
     if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
     if (request.capability != DRM_CLIENT_CAP_UNIVERSAL_PLANES &&
-        request.capability != DRM_CLIENT_CAP_ATOMIC) return -EOPNOTSUPP;
+        request.capability != DRM_CLIENT_CAP_ATOMIC &&
+        request.capability != DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT) return -EOPNOTSUPP;
     return 0;
+}
+
+static uint32_t connector_dpms;
+
+static int64_t set_connector_property(uint32_t connector_id, uint32_t prop_id, uint64_t value) {
+    if (connector_id != DRM_CONNECTOR_ID) return -ENOENT;
+    if (prop_id != DRM_PROP_CONNECTOR_DPMS || value > 3U) return -EINVAL;
+    connector_dpms = (uint32_t)value;
+    return 0;
+}
+
+static int64_t ioctl_connector_set_property(uint64_t user_argument) {
+    struct { uint64_t value; uint32_t prop_id; uint32_t connector_id; } request;
+    if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
+    return set_connector_property(request.connector_id, request.prop_id, request.value);
+}
+
+static int64_t ioctl_obj_set_property(uint64_t user_argument) {
+    struct { uint64_t value; uint32_t prop_id; uint32_t obj_id; uint32_t obj_type; } request;
+    if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
+    if (request.obj_type != DRM_MODE_OBJECT_CONNECTOR) return -EINVAL;
+    return set_connector_property(request.obj_id, request.prop_id, request.value);
 }
 
 static int64_t ioctl_get_cap(uint64_t user_argument) {
@@ -1031,22 +1056,22 @@ static int64_t ioctl_get_connector(uint64_t user_argument) {
     struct drm_mode_modeinfo mode;
     fill_mode(&mode);
     uint32_t encoder = DRM_ENCODER_ID;
-    uint32_t prop = DRM_PROP_CONNECTOR_CRTC_ID;
-    uint64_t prop_value = active_fb_id ? DRM_CRTC_ID : 0;
+    uint32_t prop[2] = { DRM_PROP_CONNECTOR_CRTC_ID, DRM_PROP_CONNECTOR_DPMS };
+    uint64_t prop_value[2] = { active_fb_id ? DRM_CRTC_ID : 0, connector_dpms };
 
     if (copy_array_out(connector.modes_ptr, connector.count_modes, &mode,
                        sizeof(mode), 1) != 0 ||
         copy_array_out(connector.encoders_ptr, connector.count_encoders, &encoder,
                        sizeof(encoder), 1) != 0 ||
-        copy_array_out(connector.props_ptr, connector.count_props, &prop,
-                       sizeof(prop), 1) != 0 ||
-        copy_array_out(connector.prop_values_ptr, connector.count_props, &prop_value,
-                       sizeof(prop_value), 1) != 0)
+        copy_array_out(connector.props_ptr, connector.count_props, prop,
+                       sizeof(prop[0]), 2) != 0 ||
+        copy_array_out(connector.prop_values_ptr, connector.count_props, prop_value,
+                       sizeof(prop_value[0]), 2) != 0)
         return -EFAULT;
 
     connector.count_modes = 1;
     connector.count_encoders = 1;
-    connector.count_props = 1;
+    connector.count_props = 2;
     connector.encoder_id = DRM_ENCODER_ID;
     connector.connector_type = DRM_MODE_CONNECTOR_VIRTUAL;
     connector.connector_type_id = 1;
@@ -1253,6 +1278,23 @@ static int64_t ioctl_get_property(uint64_t user_argument) {
                            sizeof(range[0]), 2) != 0) return -EFAULT;
         return copy_to_user(user_argument, &property, sizeof(property)) == 0 ? 0 : -EFAULT;
     }
+    if (property.prop_id == DRM_PROP_CONNECTOR_DPMS) {
+        static const char *const dpms_names[] = { "On", "Standby", "Suspend", "Off" };
+        struct drm_mode_property_enum levels[4];
+        memset(levels, 0, sizeof(levels));
+        for (unsigned index = 0; index < 4U; index++) {
+            levels[index].value = index;
+            strncpy(levels[index].name, dpms_names[index], DRM_PROP_NAME_LEN - 1);
+        }
+        if (copy_array_out(property.enum_blob_ptr, property.count_enum_blobs,
+                           levels, sizeof(levels[0]), 4) != 0) return -EFAULT;
+        memset(property.name, 0, sizeof(property.name));
+        strncpy(property.name, "DPMS", sizeof(property.name) - 1);
+        property.flags = DRM_MODE_PROP_ENUM;
+        property.count_values = 0;
+        property.count_enum_blobs = 4;
+        return copy_to_user(user_argument, &property, sizeof(property)) == 0 ? 0 : -EFAULT;
+    }
     if (property.prop_id != DRM_PROP_TYPE_ID) return -ENOENT;
 
     struct drm_mode_property_enum choices[3];
@@ -1300,7 +1342,8 @@ static int64_t ioctl_obj_get_properties(uint64_t user_argument) {
         ids[1] = DRM_PROP_CRTC_MODE_ID; values[1] = 0; count = 2;
     } else if (request.obj_type == DRM_MODE_OBJECT_CONNECTOR) {
         if (request.obj_id != DRM_CONNECTOR_ID) return -ENOENT;
-        ids[0] = DRM_PROP_CONNECTOR_CRTC_ID; values[0] = active_fb_id ? DRM_CRTC_ID : 0; count = 1;
+        ids[0] = DRM_PROP_CONNECTOR_CRTC_ID; values[0] = active_fb_id ? DRM_CRTC_ID : 0;
+        ids[1] = DRM_PROP_CONNECTOR_DPMS; values[1] = connector_dpms; count = 2;
     } else if (request.obj_type == DRM_MODE_OBJECT_ENCODER) {
         if (request.obj_id != DRM_ENCODER_ID) return -ENOENT;
     } else {
@@ -1932,8 +1975,8 @@ static int64_t drm_dispatch_ioctl(struct file *file, unsigned long request,
     case DRM_NR_MODE_GETPLANE: return ioctl_get_plane(user_argument);
     case DRM_NR_MODE_GETPROPERTY: return ioctl_get_property(user_argument);
     case DRM_NR_MODE_OBJ_GETPROPERTIES: return ioctl_obj_get_properties(user_argument);
-    case DRM_NR_MODE_SETPROPERTY:
-    case DRM_NR_MODE_OBJ_SETPROPERTY:
+    case DRM_NR_MODE_SETPROPERTY: return ioctl_connector_set_property(user_argument);
+    case DRM_NR_MODE_OBJ_SETPROPERTY: return ioctl_obj_set_property(user_argument);
     case DRM_NR_MODE_SETPLANE: return -EINVAL;
     case DRM_NR_MODE_GETRESOURCES: return ioctl_get_resources(user_argument);
     case DRM_NR_MODE_GETCONNECTOR: return ioctl_get_connector(user_argument);
