@@ -453,7 +453,7 @@ uint32_t file_poll_events_nested(struct file *file, uint32_t requested,
     if (!file) return pollerr;
     uint32_t events = 0;
     if (file->kind == FILE_KIND_PIPE_READ) {
-        if (file->pipe && (file->pipe->count > 0 || file->pipe->writers == 0)) events |= pollin;
+        if (file->pipe && file->pipe->count > 0) events |= pollin;
         if (file->pipe && file->pipe->writers == 0) events |= pollhup;
     } else if (file->kind == FILE_KIND_PIPE_WRITE) {
         if (!file->pipe || file->pipe->readers == 0) events |= pollerr;

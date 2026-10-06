@@ -19,6 +19,7 @@ static int signal_would_act(const struct process *process, int signal_number);
 #include "include/percpu.h"
 #include "include/pmm.h"
 #include "include/process.h"
+#include "include/workqueue.h"
 #include "include/process_arch.h"
 #include "include/procfs.h"
 #include "include/smp.h"
@@ -881,8 +882,7 @@ void file_table_ref(struct file_table *table) {
     if (table) __atomic_add_fetch(&table->refs, 1, __ATOMIC_RELAXED);
 }
 
-void file_table_unref(struct file_table *table) {
-    if (!table || __atomic_sub_fetch(&table->refs, 1, __ATOMIC_ACQ_REL) > 0) return;
+static void file_table_destroy(struct file_table *table) {
     for (int fd = 0; fd < table->capacity; fd++) {
         struct file *file = table->fds[fd];
         if (!file) continue;
@@ -891,6 +891,35 @@ void file_table_unref(struct file_table *table) {
         file_unref(file);
     }
     file_table_free(table);
+}
+
+void file_table_unref(struct file_table *table) {
+    if (!table || __atomic_sub_fetch(&table->refs, 1, __ATOMIC_ACQ_REL) > 0) return;
+    file_table_destroy(table);
+}
+
+static struct file_table *dead_tables;
+
+static void reap_dead_tables(void *unused) {
+    (void)unused;
+    struct file_table *table = __atomic_exchange_n(&dead_tables, NULL, __ATOMIC_ACQ_REL);
+    while (table) {
+        struct file_table *next = table->dead_next;
+        file_table_destroy(table);
+        table = next;
+    }
+}
+
+static struct work dead_table_work = WORK_INITIALIZER(reap_dead_tables, NULL);
+
+static void file_table_unref_deferred(struct file_table *table) {
+    if (!table || __atomic_sub_fetch(&table->refs, 1, __ATOMIC_ACQ_REL) > 0) return;
+    struct file_table *head = __atomic_load_n(&dead_tables, __ATOMIC_RELAXED);
+    do {
+        table->dead_next = head;
+    } while (!__atomic_compare_exchange_n(&dead_tables, &head, table, 1, __ATOMIC_RELEASE,
+                                          __ATOMIC_RELAXED));
+    work_queue(&dead_table_work);
 }
 
 void file_table_close_on_exec(struct file_table *table) {
@@ -3024,8 +3053,7 @@ struct process *process_poll_subject(void) {
     return subject ? subject : current;
 }
 
-static int io_files_ready(struct process *item) {
-    struct file_table *table = item->files;
+static int io_files_ready(struct process *item, struct file_table *table) {
     if (!table) return 1;
     for (unsigned index = 0; index < item->io_watch_count; index++) {
         struct file *file = file_table_get(table, item->io_watch_fd[index]);
@@ -3037,36 +3065,53 @@ static int io_files_ready(struct process *item) {
     return 0;
 }
 
-void process_io_recheck(void) {
-    if (!__atomic_exchange_n(&io_recheck_pending, 0, __ATOMIC_ACQ_REL)) return;
-    struct process *candidates[64];
+static uint64_t io_recheck_epoch = 1;
+static uint32_t io_recheck_running;
+
+static unsigned io_recheck_batch(struct process **candidates, struct file_table **tables,
+                                 unsigned limit, int *more) {
+    SCHED_LOCKED;
     unsigned count = 0;
-    {
-        SCHED_LOCKED;
+    *more = 0;
+    for (int pass = 0; pass < 2 && !count; pass++) {
         struct process *item = wait_buckets[wait_bucket_of((uint64_t)(uintptr_t)&io_wait_token)];
         for (; item; item = item->wait_next) {
             if (item->state != PROCESS_BLOCKED || item->wait_channel != &io_wait_token) continue;
-            if (count == sizeof(candidates) / sizeof(candidates[0])) {
-                __atomic_store_n(&io_recheck_pending, 1, __ATOMIC_RELEASE);
+            if (item->io_recheck_epoch == io_recheck_epoch) continue;
+            if (count == limit) {
+                *more = 1;
                 break;
             }
+            item->io_recheck_epoch = io_recheck_epoch;
             item->refs++;
-            if (item->files) file_table_ref(item->files);
+            tables[count] = item->files;
+            if (tables[count]) file_table_ref(tables[count]);
             candidates[count++] = item;
         }
+        if (!count) io_recheck_epoch++;
     }
+    return count;
+}
+
+void process_io_recheck(void) {
+    if (!__atomic_load_n(&io_recheck_pending, __ATOMIC_ACQUIRE)) return;
+    if (__atomic_exchange_n(&io_recheck_running, 1, __ATOMIC_ACQ_REL)) return;
+    __atomic_store_n(&io_recheck_pending, 0, __ATOMIC_RELEASE);
+    struct process *candidates[64];
+    struct file_table *tables[64];
+    int more = 0;
+    unsigned count = io_recheck_batch(candidates, tables, 64, &more);
+    if (more) __atomic_store_n(&io_recheck_pending, 1, __ATOMIC_RELEASE);
     uint8_t ready[64];
     for (unsigned index = 0; index < count; index++) {
         poll_subjects[cpu_current()->index] = candidates[index];
-        ready[index] = (uint8_t)io_files_ready(candidates[index]);
+        ready[index] = (uint8_t)io_files_ready(candidates[index], tables[index]);
     }
     poll_subjects[cpu_current()->index] = NULL;
-    struct file_table *tables[64];
     {
         SCHED_LOCKED;
         for (unsigned index = 0; index < count; index++) {
             struct process *item = candidates[index];
-            tables[index] = item->files;
             if (ready[index] && item->state == PROCESS_BLOCKED &&
                 item->wait_channel == &io_wait_token) {
                 item->wait_channel = NULL;
@@ -3075,9 +3120,10 @@ void process_io_recheck(void) {
         }
     }
     for (unsigned index = 0; index < count; index++) {
-        if (tables[index]) file_table_unref(tables[index]);
+        file_table_unref_deferred(tables[index]);
         process_put(candidates[index]);
     }
+    __atomic_store_n(&io_recheck_running, 0, __ATOMIC_RELEASE);
 }
 
 struct wake_record { uint64_t address; int woken; int pid; int max; char kind; unsigned value; };

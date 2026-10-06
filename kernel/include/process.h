@@ -75,6 +75,7 @@ struct file_table {
     int capacity;
     struct file **fds;
     uint8_t *fd_flags;
+    struct file_table *dead_next;
 };
 
 struct process_rlimit {
@@ -191,6 +192,7 @@ struct process {
     uint8_t syscall_no_restart;
     uint8_t group_wait_pending;
     uint8_t syscall_force_restart;
+    uint64_t io_recheck_epoch;
     int in_signal;
     struct syscall_frame signal_saved_frame;
     uint64_t signal_context_address;

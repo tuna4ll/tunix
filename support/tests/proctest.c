@@ -555,7 +555,56 @@ static void test_thread(void) {
     check("thread tls and stack", thread_result == 1, thread_result);
 }
 
+static u64 elapsed_ms(const struct timespec *start);
+
 #define CROWD 100
+static int crowd_pipes[CROWD][2];
+static volatile int crowd_woken[CROWD];
+static volatile int crowd_next;
+static volatile int crowd_taken;
+static char crowd_stacks[CROWD][8192] __attribute__((aligned(16)));
+static u64 crowd_blocks[CROWD][4];
+
+static s64 crowd_member(void) {
+    int self = crowd_next;
+    crowd_taken = self + 1;
+    struct { int fd; short events; short revents; } entry = {crowd_pipes[self][0], POLLIN, 0};
+    s64 result = sys6(NR_PPOLL, (u64)&entry, 1, 0, 0, 8, 0);
+    crowd_woken[self] = result == 1 ? 1 : -1;
+    sys(NR_EXIT, 0, 0, 0, 0, 0);
+    return 0;
+}
+
+static void test_crowded_poll(void) {
+    u64 flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SETTLS;
+    for (int index = 0; index < CROWD; index++) sys(NR_PIPE2, (u64)crowd_pipes[index], 0, 0, 0, 0);
+    for (int index = 0; index < CROWD; index++) {
+        crowd_blocks[index][0] = (u64)crowd_blocks[index];
+        crowd_next = index;
+        clone_thread(flags, (u64)crowd_stacks[index] + sizeof(crowd_stacks[index]),
+                     (u64)crowd_blocks[index], crowd_member);
+        for (int spin = 0; spin < 20000 && crowd_taken != index + 1; spin++)
+            sys(NR_SCHED_YIELD, 0, 0, 0, 0, 0);
+    }
+    struct timespec settle = {0, 200000000};
+    sys(NR_NANOSLEEP, (u64)&settle, 0, 0, 0, 0);
+    struct timespec start;
+    sys(NR_CLOCK_GETTIME, 1, (u64)&start, 0, 0, 0);
+    char byte = 1;
+    sys(NR_WRITE, (u64)crowd_pipes[0][1], (u64)&byte, 1, 0, 0);
+    while (!crowd_woken[0] && elapsed_ms(&start) < 2000) sys(NR_SCHED_YIELD, 0, 0, 0, 0, 0);
+    u64 waited = elapsed_ms(&start);
+    check("the first of a hundred pollers wakes", crowd_woken[0] == 1 && waited < 1000, (s64)waited);
+    for (int index = 1; index < CROWD; index++)
+        sys(NR_WRITE, (u64)crowd_pipes[index][1], (u64)&byte, 1, 0, 0);
+    for (int spin = 0; spin < 20000; spin++) {
+        int done = 1;
+        for (int index = 0; index < CROWD; index++) if (!crowd_woken[index]) done = 0;
+        if (done) break;
+        sys(NR_SCHED_YIELD, 0, 0, 0, 0, 0);
+    }
+}
+
 static volatile unsigned pi_word;
 static volatile unsigned pi_owner_seen;
 static volatile int pi_thread_done;
@@ -1092,6 +1141,7 @@ void start_c(u64 *stack) {
     test_group_children();
     test_directory_mtime();
     test_pi_futex();
+    test_crowded_poll();
     test_siginfo();
     test_signal_waits();
     test_signal_codes();
