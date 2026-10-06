@@ -392,6 +392,8 @@ static int64_t file_read_locked(struct file *file, size_t size, void *buffer) {
         return signalfd_read(file->signalfd, size, buffer);
     if (file->kind == FILE_KIND_EVENTFS)
         return eventfs_read(file->eventfs, size, buffer);
+    if (file->kind == FILE_KIND_VFS && file->node && file->node->file_ioctl == drm_file_ioctl)
+        return drm_file_read(file, size, buffer);
 
     if (file->kind == FILE_KIND_MEMFD) {
         int64_t moved = memfd_read(file->memfd, file->offset, size, buffer);
@@ -493,7 +495,9 @@ uint32_t file_poll_events_nested(struct file *file, uint32_t requested,
     } else if (file->kind == FILE_KIND_VFS && file->node) {
         if (__atomic_load_n(&file->node->notify_generation, __ATOMIC_ACQUIRE) != file->notify_seen)
             events |= pollerr | 0x002U;
-        if (file->node->read_ready ? file->node->read_ready(file->node) :
+        if (file->node->file_ioctl == drm_file_ioctl) {
+            if (drm_file_read_ready(file)) events |= pollin;
+        } else if (file->node->read_ready ? file->node->read_ready(file->node) :
             ((file->node->flags & 0xFFU) != VFS_CHARDEVICE)) events |= pollin;
         if (!file->node->write_ready || file->node->write_ready(file->node))
             events |= pollout;

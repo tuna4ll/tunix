@@ -14,6 +14,7 @@ typedef int s32;
 #define SYS_wait4 61
 #define SYS_nanosleep 35
 #define SYS_pipe 22
+#define SYS_setuid 105
 #define SYS_clock_gettime 228
 #define CLOCK_MONOTONIC 1
 
@@ -71,6 +72,9 @@ static void put_signed(s64 value) {
 #define NR_MODE_GETFB 0xad
 #define NR_MODE_CREATEPROPBLOB 0xbd
 #define NR_MODE_DESTROYPROPBLOB 0xbe
+#define NR_MODE_GETCONNECTOR 0xa7
+#define NR_MODE_CLOSEFB 0xd0
+#define NR_SET_MASTER 0x1e
 
 #define DRM_MODE_OBJECT_CRTC 0xcccccccc
 #define DRM_MODE_OBJECT_CONNECTOR 0xc0c0c0c0
@@ -123,6 +127,13 @@ struct drm_mode_modeinfo {
     unsigned short hdisplay, hsync_start, hsync_end, htotal, hskew;
     unsigned short vdisplay, vsync_start, vsync_end, vtotal, vscan;
     u32 vrefresh, flags, type; char name[32];
+};
+
+struct drm_mode_get_connector {
+    u64 encoders_ptr; u64 modes_ptr; u64 props_ptr; u64 prop_values_ptr;
+    u32 count_modes, count_props, count_encoders;
+    u32 encoder_id, connector_id, connector_type, connector_type_id;
+    u32 connection, mm_width, mm_height, subpixel, pad;
 };
 
 struct drm_mode_atomic {
@@ -260,6 +271,18 @@ static void test_atomic_modeset(void) {
         put_signed((s64)*(u64 *)(event + 8));
     }
     put("\n");
+
+    int other = (int)syscall3(SYS_open, (s64)"/dev/dri/card0", O_RDWR | O_NONBLOCK, 0);
+    s64 stolen = syscall3(SYS_read, other, (s64)event, sizeof(event));
+    report("MODESET commit-again", call(IOWR(NR_MODE_ATOMIC, struct drm_mode_atomic), &atomic));
+    stolen = syscall3(SYS_read, other, (s64)event, sizeof(event));
+    got = syscall3(SYS_read, card, (s64)event, sizeof(event));
+    put("CLIENTEVENTS other_read=");
+    put_signed(stolen);
+    put(" owner_read=");
+    put_signed(got);
+    put(other >= 0 && stolen == -11 && got >= 16 && *(u64 *)(event + 8) == 0xABCDEF ? " PASS\n" : " FAIL\n");
+    (void)syscall1(SYS_close, other);
 
     test_present_latency(fb.fb_id, blob.blob_id, width, height, 200);
     test_damage_clips(fb.fb_id, blob.blob_id, width, height, 200);
@@ -633,6 +656,81 @@ static void test_damage_clips(u32 fb_id, u32 blob_id, unsigned short width,
     (void)call(IOWR(NR_MODE_DESTROYPROPBLOB, struct drm_mode_destroy_blob), &kill);
 }
 
+static void test_connector_props(void) {
+    u32 props[8];
+    u64 values[8];
+    struct drm_mode_get_connector connector;
+    for (unsigned i = 0; i < sizeof(connector); i++) ((char *)&connector)[i] = 0;
+    connector.connector_id = 2;
+    connector.props_ptr = (u64)props;
+    connector.prop_values_ptr = (u64)values;
+    connector.count_props = 8;
+    s64 result = call(IOWR(NR_MODE_GETCONNECTOR, struct drm_mode_get_connector), &connector);
+    struct drm_mode_get_property property;
+    for (unsigned i = 0; i < sizeof(property); i++) ((char *)&property)[i] = 0;
+    if (result == 0 && connector.count_props) {
+        property.prop_id = props[0];
+        (void)call(IOWR(NR_MODE_GETPROPERTY, struct drm_mode_get_property), &property);
+    }
+    int named = property.name[0] == 'C' && property.name[1] == 'R' && property.name[2] == 'T' &&
+                property.name[3] == 'C' && property.name[4] == '_' && property.name[5] == 'I' &&
+                property.name[6] == 'D' && !property.name[7];
+    put("CONNPROPS result=");
+    put_signed(result);
+    put(" count=");
+    put_signed(connector.count_props);
+    put(result == 0 && connector.count_props == 1 && named ? " PASS\n" : " FAIL\n");
+}
+
+static void test_close_fb(void) {
+    struct drm_mode_create_dumb create;
+    for (unsigned i = 0; i < sizeof(create); i++) ((char *)&create)[i] = 0;
+    create.width = 64; create.height = 64; create.bpp = 32;
+    if (call(IOWR(NR_MODE_CREATE_DUMB, struct drm_mode_create_dumb), &create) != 0) return;
+    struct drm_mode_fb_cmd2 fb;
+    for (unsigned i = 0; i < sizeof(fb); i++) ((char *)&fb)[i] = 0;
+    fb.width = 64; fb.height = 64; fb.pixel_format = 0x34325258;
+    fb.handles[0] = create.handle; fb.pitches[0] = create.pitch;
+    if (call(IOWR(NR_MODE_ADDFB2, struct drm_mode_fb_cmd2), &fb) != 0) return;
+    u32 closing[2] = { fb.fb_id, 0 };
+    s64 closed = call(IOWR(NR_MODE_CLOSEFB, u32[2]), closing);
+    struct drm_mode_fb_cmd query;
+    for (unsigned i = 0; i < sizeof(query); i++) ((char *)&query)[i] = 0;
+    query.fb_id = fb.fb_id;
+    s64 gone = call(IOWR(NR_MODE_GETFB, struct drm_mode_fb_cmd), &query);
+    put("CLOSEFB closed=");
+    put_signed(closed);
+    put(" getfb=");
+    put_signed(gone);
+    put(closed == 0 && gone != 0 ? " PASS\n" : " FAIL\n");
+    struct drm_mode_destroy_dumb drop = { create.handle, 0 };
+    (void)call(IOWR(NR_MODE_DESTROY_DUMB, struct drm_mode_destroy_dumb), &drop);
+}
+
+static void test_set_master(void) {
+    s64 root = syscall3(SYS_ioctl, card, (s64)IOC(0, 'd', NR_SET_MASTER, 0), 0);
+    int channel[2];
+    if (syscall1(SYS_pipe, (s64)channel) != 0) return;
+    s64 child = syscall1(SYS_fork, 0);
+    if (child == 0) {
+        (void)syscall1(SYS_close, channel[0]);
+        (void)syscall1(SYS_setuid, 1000);
+        s64 user = syscall3(SYS_ioctl, card, (s64)IOC(0, 'd', NR_SET_MASTER, 0), 0);
+        (void)syscall3(SYS_write, channel[1], (s64)&user, sizeof(user));
+        (void)syscall1(SYS_exit_group, 0);
+    }
+    (void)syscall1(SYS_close, channel[1]);
+    s64 user = 0;
+    (void)syscall3(SYS_read, channel[0], (s64)&user, sizeof(user));
+    (void)syscall1(SYS_close, channel[0]);
+    (void)syscall4(SYS_wait4, child, 0, 0, 0);
+    put("MASTER root=");
+    put_signed(root);
+    put(" user=");
+    put_signed(user);
+    put(root == 0 && user == -1 ? " PASS\n" : " FAIL\n");
+}
+
 static int run(void) {
     card = (int)syscall3(SYS_open, (s64)"/dev/dri/card0", O_RDWR | O_NONBLOCK, 0);
     open_results();
@@ -645,6 +743,9 @@ static int run(void) {
     test_atomic_advertised();
     test_plane_properties();
     test_atomic_commit();
+    test_connector_props();
+    test_close_fb();
+    test_set_master();
     test_atomic_modeset();
     test_blob_zero();
     test_handle_isolation();

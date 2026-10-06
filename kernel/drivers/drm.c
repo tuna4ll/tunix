@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "../include/cpu.h"
+#include "../include/cred.h"
 #include "../include/percpu.h"
 #include "../include/drm.h"
 #include "../include/file.h"
@@ -11,6 +12,7 @@
 #include "../include/pmm.h"
 #include "../include/process.h"
 #include "../include/usercopy.h"
+#include "../include/vt.h"
 #include "../include/virtgpu.h"
 #include "../include/vmm.h"
 #include "../include/lock.h"
@@ -67,6 +69,7 @@ extern void kprintf(const char *fmt, ...);
 #define DRM_NR_MODE_GETFB 0xad
 #define DRM_NR_MODE_ADDFB 0xae
 #define DRM_NR_MODE_RMFB 0xaf
+#define DRM_NR_MODE_CLOSEFB 0xd0
 #define DRM_NR_MODE_PAGE_FLIP 0xb0
 #define DRM_NR_MODE_CURSOR 0xa3
 #define DRM_NR_MODE_CURSOR2 0xa4
@@ -237,6 +240,10 @@ typedef char drm_virtgpu_get_caps_size_check[
 #define DRM_MODE_PROP_RANGE (1 << 1)
 #define DRM_MODE_PROP_BLOB (1 << 4)
 #define DRM_MODE_PROP_ENUM (1 << 3)
+#define DRM_MODE_PROP_OBJECT (1 << 6)
+#define DRM_MODE_PROP_SIGNED_RANGE (2 << 6)
+#define DRM_MODE_PROP_ATOMIC 0x80000000U
+#define DRM_MODE_OBJECT_FB 0xfbfbfbfbULL
 
 #define DRM_PLANE_TYPE_OVERLAY 0
 #define DRM_PLANE_TYPE_PRIMARY 1
@@ -497,7 +504,8 @@ struct drm_framebuffer {
 };
 
 #define DRM_EVENT_FLIP_COMPLETE 0x02
-#define DRM_MAX_EVENTS 256
+#define DRM_MAX_EVENTS 64
+#define DRM_EVENT_QUEUES 32
 
 struct drm_event {
     uint32_t type;
@@ -513,10 +521,15 @@ struct drm_event_vblank {
     uint32_t crtc_id;
 };
 
-static struct drm_event_vblank events[DRM_MAX_EVENTS];
-static uint32_t event_head;
-static uint32_t event_tail;
-static uint32_t event_count;
+struct drm_event_queue {
+    const struct file *owner;
+    struct drm_event_vblank events[DRM_MAX_EVENTS];
+    uint32_t head;
+    uint32_t tail;
+    uint32_t count;
+};
+
+static struct drm_event_queue event_queues[DRM_EVENT_QUEUES];
 static uint32_t flip_sequence;
 
 static const char drm_display_owner;
@@ -576,7 +589,7 @@ void drm_init(void) {
     next_fb_id = 1;
     next_blob_id = 1;
     active_fb_id = 0;
-    event_head = event_tail = event_count = 0;
+    memset(event_queues, 0, sizeof(event_queues));
     flip_sequence = 0;
     open_count = 0;
     next_render_context = 1;
@@ -736,7 +749,7 @@ static int scanout_current;
 
 static int present_framebuffer(const struct file *client, uint32_t fb_id,
                                const struct drm_damage *damage);
-static void queue_flip_event(uint64_t user_data);
+static void queue_flip_event(const struct file *client, uint64_t user_data);
 
 static int plane_rectangle_ok(uint32_t property, uint64_t value) {
     switch (property) {
@@ -864,7 +877,7 @@ static int64_t ioctl_atomic(const struct file *client, uint64_t user_argument) {
         if (status != 0) return status;
         active_fb_id = new_fb;
     }
-    if (request.flags & DRM_MODE_PAGE_FLIP_EVENT) queue_flip_event(request.user_data);
+    if (request.flags & DRM_MODE_PAGE_FLIP_EVENT) queue_flip_event(client, request.user_data);
     return 0;
 }
 
@@ -1018,16 +1031,22 @@ static int64_t ioctl_get_connector(uint64_t user_argument) {
     struct drm_mode_modeinfo mode;
     fill_mode(&mode);
     uint32_t encoder = DRM_ENCODER_ID;
+    uint32_t prop = DRM_PROP_CONNECTOR_CRTC_ID;
+    uint64_t prop_value = active_fb_id ? DRM_CRTC_ID : 0;
 
     if (copy_array_out(connector.modes_ptr, connector.count_modes, &mode,
                        sizeof(mode), 1) != 0 ||
         copy_array_out(connector.encoders_ptr, connector.count_encoders, &encoder,
-                       sizeof(encoder), 1) != 0)
+                       sizeof(encoder), 1) != 0 ||
+        copy_array_out(connector.props_ptr, connector.count_props, &prop,
+                       sizeof(prop), 1) != 0 ||
+        copy_array_out(connector.prop_values_ptr, connector.count_props, &prop_value,
+                       sizeof(prop_value), 1) != 0)
         return -EFAULT;
 
     connector.count_modes = 1;
     connector.count_encoders = 1;
-    connector.count_props = 0;
+    connector.count_props = 1;
     connector.encoder_id = DRM_ENCODER_ID;
     connector.connector_type = DRM_MODE_CONNECTOR_VIRTUAL;
     connector.connector_type_id = 1;
@@ -1195,27 +1214,19 @@ static int64_t ioctl_get_property(uint64_t user_argument) {
         property.count_enum_blobs = 0;
         return copy_to_user(user_argument, &property, sizeof(property)) == 0 ? 0 : -EFAULT;
     }
-    if (property.prop_id == DRM_PROP_PLANE_CRTC_ID || property.prop_id == DRM_PROP_PLANE_FB_ID) {
+    if (property.prop_id == DRM_PROP_PLANE_CRTC_ID || property.prop_id == DRM_PROP_PLANE_FB_ID ||
+        property.prop_id == DRM_PROP_CONNECTOR_CRTC_ID) {
         memset(property.name, 0, sizeof(property.name));
-        strncpy(property.name, property.prop_id == DRM_PROP_PLANE_CRTC_ID ? "CRTC_ID" : "FB_ID",
+        strncpy(property.name, property.prop_id == DRM_PROP_PLANE_FB_ID ? "FB_ID" : "CRTC_ID",
                 sizeof(property.name) - 1);
-        property.flags = DRM_MODE_PROP_RANGE;
-        property.count_values = 2;
+        property.flags = DRM_MODE_PROP_OBJECT | DRM_MODE_PROP_ATOMIC;
+        property.count_values = 1;
         property.count_enum_blobs = 0;
-        uint64_t range[2] = { 0, 0xFFFFFFFFULL };
-        if (copy_array_out(property.values_ptr, property.count_values, range,
-                           sizeof(range[0]), 2) != 0) return -EFAULT;
-        return copy_to_user(user_argument, &property, sizeof(property)) == 0 ? 0 : -EFAULT;
-    }
-    if (property.prop_id == DRM_PROP_CONNECTOR_CRTC_ID) {
-        memset(property.name, 0, sizeof(property.name));
-        strncpy(property.name, "CRTC_ID", sizeof(property.name) - 1);
-        property.flags = DRM_MODE_PROP_RANGE;
-        property.count_values = 2;
-        property.count_enum_blobs = 0;
-        uint64_t range[2] = { 0, DRM_CRTC_ID };
-        if (copy_array_out(property.values_ptr, property.count_values, range,
-                           sizeof(range[0]), 2) != 0) return -EFAULT;
+        uint64_t object_type[1] = {
+            property.prop_id == DRM_PROP_PLANE_FB_ID ? DRM_MODE_OBJECT_FB : DRM_MODE_OBJECT_CRTC
+        };
+        if (copy_array_out(property.values_ptr, property.count_values, object_type,
+                           sizeof(object_type[0]), 1) != 0) return -EFAULT;
         return copy_to_user(user_argument, &property, sizeof(property)) == 0 ? 0 : -EFAULT;
     }
     if (property.prop_id >= DRM_PROP_PLANE_FIRST_RECT &&
@@ -1227,10 +1238,17 @@ static int64_t ioctl_get_property(uint64_t user_argument) {
         memset(property.name, 0, sizeof(property.name));
         strncpy(property.name, rectangle_names[property.prop_id - DRM_PROP_PLANE_FIRST_RECT],
                 sizeof(property.name) - 1);
-        property.flags = DRM_MODE_PROP_RANGE;
+        int signed_position = property.prop_id == DRM_PROP_PLANE_CRTC_X ||
+                              property.prop_id == DRM_PROP_PLANE_CRTC_Y;
+        int crtc_size = property.prop_id == DRM_PROP_PLANE_CRTC_W ||
+                        property.prop_id == DRM_PROP_PLANE_CRTC_H;
+        property.flags = signed_position ? DRM_MODE_PROP_SIGNED_RANGE : DRM_MODE_PROP_RANGE;
         property.count_values = 2;
         property.count_enum_blobs = 0;
-        uint64_t range[2] = { 0, 0xFFFFFFFFULL };
+        uint64_t range[2] = {
+            signed_position ? (uint64_t)(int64_t)INT32_MIN : 0,
+            signed_position || crtc_size ? (uint64_t)INT32_MAX : 0xFFFFFFFFULL
+        };
         if (copy_array_out(property.values_ptr, property.count_values, range,
                            sizeof(range[0]), 2) != 0) return -EFAULT;
         return copy_to_user(user_argument, &property, sizeof(property)) == 0 ? 0 : -EFAULT;
@@ -1424,13 +1442,27 @@ static int64_t ioctl_dirty_fb(const struct file *client, uint64_t user_argument)
     return present_framebuffer(client, cmd.fb_id, NULL);
 }
 
-static void queue_flip_event(uint64_t user_data) {
-    if (event_count == DRM_MAX_EVENTS) {
-        event_head = (event_head + 1U) % DRM_MAX_EVENTS;
-        event_count--;
+static struct drm_event_queue *event_queue_of(const struct file *client, int create) {
+    struct drm_event_queue *spare = NULL;
+    for (unsigned index = 0; index < DRM_EVENT_QUEUES; index++) {
+        if (event_queues[index].owner == client) return &event_queues[index];
+        if (!spare && !event_queues[index].owner) spare = &event_queues[index];
+    }
+    if (!create || !spare) return NULL;
+    spare->owner = client;
+    spare->head = spare->tail = spare->count = 0;
+    return spare;
+}
+
+static void queue_flip_event(const struct file *client, uint64_t user_data) {
+    struct drm_event_queue *queue = event_queue_of(client, 1);
+    if (!queue) return;
+    if (queue->count == DRM_MAX_EVENTS) {
+        queue->head = (queue->head + 1U) % DRM_MAX_EVENTS;
+        queue->count--;
     }
     uint64_t now = time_uptime_ns();
-    struct drm_event_vblank *event = &events[event_tail];
+    struct drm_event_vblank *event = &queue->events[queue->tail];
     memset(event, 0, sizeof(*event));
     event->base.type = DRM_EVENT_FLIP_COMPLETE;
     event->base.length = sizeof(*event);
@@ -1439,31 +1471,46 @@ static void queue_flip_event(uint64_t user_data) {
     event->tv_usec = (uint32_t)((now % 1000000000ULL) / 1000ULL);
     event->sequence = ++flip_sequence;
     event->crtc_id = DRM_CRTC_ID;
-    event_tail = (event_tail + 1U) % DRM_MAX_EVENTS;
-    event_count++;
+    queue->tail = (queue->tail + 1U) % DRM_MAX_EVENTS;
+    __atomic_add_fetch(&queue->count, 1, __ATOMIC_RELEASE);
+    (void)process_wake_io();
 }
 
-int64_t drm_device_read(struct vfs_node *node, uint64_t offset,
-                        size_t size, void *buffer) {
+int64_t drm_file_read(struct file *file, size_t size, void *buffer) {
     DRM_LOCKED;
-    (void)node;
-    (void)offset;
     if (!buffer) return -EINVAL;
+    struct drm_event_queue *queue = event_queue_of(file, 0);
     size_t produced = 0;
     uint8_t *out = (uint8_t *)buffer;
-    while (event_count && size - produced >= sizeof(struct drm_event_vblank)) {
-        memcpy(out + produced, &events[event_head], sizeof(struct drm_event_vblank));
-        event_head = (event_head + 1U) % DRM_MAX_EVENTS;
-        event_count--;
+    while (queue && queue->count && size - produced >= sizeof(struct drm_event_vblank)) {
+        memcpy(out + produced, &queue->events[queue->head], sizeof(struct drm_event_vblank));
+        queue->head = (queue->head + 1U) % DRM_MAX_EVENTS;
+        queue->count--;
         produced += sizeof(struct drm_event_vblank);
     }
     if (!produced) return -EAGAIN;
     return (int64_t)produced;
 }
 
+int drm_file_read_ready(struct file *file) {
+    for (unsigned index = 0; index < DRM_EVENT_QUEUES; index++)
+        if (event_queues[index].owner == file)
+            return __atomic_load_n(&event_queues[index].count, __ATOMIC_ACQUIRE) != 0;
+    return 0;
+}
+
+int64_t drm_device_read(struct vfs_node *node, uint64_t offset,
+                        size_t size, void *buffer) {
+    (void)node;
+    (void)offset;
+    (void)size;
+    (void)buffer;
+    return -EAGAIN;
+}
+
 int drm_device_read_ready(struct vfs_node *node) {
     (void)node;
-    return __atomic_load_n(&event_count, __ATOMIC_RELAXED) != 0;
+    return 0;
 }
 
 static int64_t ioctl_page_flip(const struct file *client, uint64_t user_argument) {
@@ -1473,7 +1520,7 @@ static int64_t ioctl_page_flip(const struct file *client, uint64_t user_argument
     int status = present_framebuffer(client, flip.fb_id, NULL);
     if (status != 0) return status;
     active_fb_id = flip.fb_id;
-    if (flip.flags & DRM_MODE_PAGE_FLIP_EVENT) queue_flip_event(flip.user_data);
+    if (flip.flags & DRM_MODE_PAGE_FLIP_EVENT) queue_flip_event(client, flip.user_data);
     return 0;
 }
 
@@ -1871,6 +1918,12 @@ static int64_t drm_dispatch_ioctl(struct file *file, unsigned long request,
         (void)framebuffer_release_graphics(&drm_display_owner, 0);
         return 0;
     case DRM_NR_SET_MASTER:
+        if (!cred_is_root()) return -EPERM;
+        if (framebuffer_claim_graphics(&drm_display_owner) == 0) {
+            framebuffer_resume_graphics();
+            vt_display_claimed();
+        }
+        return 0;
     case DRM_NR_GET_MAGIC:
     case DRM_NR_AUTH_MAGIC: return 0;
     case DRM_NR_PRIME_HANDLE_TO_FD: return ioctl_prime_handle_to_fd(file, user_argument);
@@ -1900,7 +1953,8 @@ static int64_t drm_dispatch_ioctl(struct file *file, unsigned long request,
     case DRM_NR_MODE_DESTROY_DUMB: return ioctl_destroy_dumb(file, user_argument);
     case DRM_NR_MODE_ADDFB: return ioctl_addfb(file, user_argument);
     case DRM_NR_MODE_ADDFB2: return ioctl_addfb2(file, user_argument);
-    case DRM_NR_MODE_RMFB: return ioctl_rmfb(file, user_argument);
+    case DRM_NR_MODE_RMFB:
+    case DRM_NR_MODE_CLOSEFB: return ioctl_rmfb(file, user_argument);
     case DRM_NR_GEM_CLOSE: return ioctl_gem_close(file, user_argument);
 
     case DRM_NR_VIRTGPU_GETPARAM:
@@ -1978,7 +2032,6 @@ void drm_device_close(struct vfs_node *node) {
     if (open_count) open_count--;
     if (!open_count) {
         active_fb_id = 0;
-        event_head = event_tail = event_count = 0;
         render_contexts_release();
         virtgpu_scanout_disable();
         scanout_current = 0;
@@ -2001,6 +2054,8 @@ void drm_file_close(struct file *file) {
     for (unsigned index = 0; index < blob_capacity; index++)
         if (blobs[index].id && blobs[index].owner == file)
             blob_release(&blobs[index]);
+    struct drm_event_queue *queue = event_queue_of(file, 0);
+    if (queue) memset(queue, 0, sizeof(*queue));
     for (uint32_t index = 0; index < buffer_capacity; index++)
         if (buffers[index] && buffers[index]->handle && buffers[index]->owner == file)
             buffer_release(buffers[index]);
