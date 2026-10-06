@@ -3068,16 +3068,23 @@ static int io_files_ready(struct process *item, struct file_table *table) {
 static uint64_t io_recheck_epoch = 1;
 static uint32_t io_recheck_running;
 
+static int io_recheck_listed(struct process **candidates, unsigned count, const struct process *item) {
+    for (unsigned index = 0; index < count; index++)
+        if (candidates[index] == item) return 1;
+    return 0;
+}
+
 static unsigned io_recheck_batch(struct process **candidates, struct file_table **tables,
                                  unsigned limit, int *more) {
     SCHED_LOCKED;
     unsigned count = 0;
     *more = 0;
-    for (int pass = 0; pass < 2 && !count; pass++) {
+    for (int pass = 0; pass < 2 && !*more; pass++) {
         struct process *item = wait_buckets[wait_bucket_of((uint64_t)(uintptr_t)&io_wait_token)];
         for (; item; item = item->wait_next) {
             if (item->state != PROCESS_BLOCKED || item->wait_channel != &io_wait_token) continue;
             if (item->io_recheck_epoch == io_recheck_epoch) continue;
+            if (pass && io_recheck_listed(candidates, count, item)) continue;
             if (count == limit) {
                 *more = 1;
                 break;
@@ -3088,7 +3095,7 @@ static unsigned io_recheck_batch(struct process **candidates, struct file_table 
             if (tables[count]) file_table_ref(tables[count]);
             candidates[count++] = item;
         }
-        if (!count) io_recheck_epoch++;
+        if (!*more && !pass) io_recheck_epoch++;
     }
     return count;
 }
