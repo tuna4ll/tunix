@@ -62,6 +62,7 @@ struct file {
     uint32_t dmabuf_handle;
     int flock_type;
     uint32_t edge_generation;
+    uint32_t notify_seen;
 };
 
 int64_t file_pread(struct file *file, uint64_t offset, size_t size, void *buffer);

@@ -5,6 +5,7 @@ struct module;
 struct pci_device;
 
 void sysfs_init(void);
+void sysfs_console_switched(void);
 void sysfs_module_added(struct module *module);
 void sysfs_module_removed(const char *name);
 void sysfs_pci_bound(const struct pci_device *device, const char *driver);

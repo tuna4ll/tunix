@@ -8,6 +8,7 @@
 #include "../include/kstring.h"
 #include "../include/process.h"
 #include "../include/signal.h"
+#include "../include/sysfs.h"
 #include "../include/terminal.h"
 #include "../include/serial.h"
 #include "../include/tty.h"
@@ -145,6 +146,7 @@ static void finish_switch(unsigned target) {
         (void)process_send_signal((int64_t)to->owner_pid, to->mode.acqsig);
 
     (void)process_wake_all(&switch_channel);
+    sysfs_console_switched();
 }
 
 int vt_switch(unsigned index) {

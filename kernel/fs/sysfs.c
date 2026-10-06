@@ -11,6 +11,7 @@
 #include "../include/net/netlink.h"
 #include "../include/sound.h"
 #include "../include/sysfs.h"
+#include "../include/vt.h"
 #include "../include/vfs.h"
 
 static void vfs_guard_release(int *unused) {
@@ -520,16 +521,19 @@ static void publish_device(const char *name, const char *devname,
     link[used] = '\0';
     (void)vfs_create_symlink(link, class_path, 0);
 
-    char target[64];
+    char target[128];
     used = 0;
     append_string(target, sizeof(target), &used, "../../devices/");
     append_string(target, sizeof(target), &used, name);
     target[used] = '\0';
 
+    const char *base = name;
+    for (const char *at = name; *at; at++)
+        if (*at == '/') base = at + 1;
     used = 0;
     append_string(link, sizeof(link), &used, class_path);
     append_string(link, sizeof(link), &used, "/");
-    append_string(link, sizeof(link), &used, name);
+    append_string(link, sizeof(link), &used, base);
     link[used] = '\0';
     (void)vfs_create_symlink(link, target, 0);
 
@@ -747,6 +751,97 @@ void sysfs_remove_sound(void) {
     remove_published("pcmC0D0p");
 }
 
+static void publish_input_parent(const char *name, const char *label) {
+    char path[128];
+    size_t used = 0;
+    append_string(path, sizeof(path), &used, "/sys/devices/");
+    append_string(path, sizeof(path), &used, name);
+    path[used] = '\0';
+    if (!vfs_mkdir_p(path)) return;
+
+    char uevent[160];
+    size_t length = 0;
+    append_string(uevent, sizeof(uevent), &length, "NAME=\"");
+    append_string(uevent, sizeof(uevent), &length, label);
+    append_string(uevent, sizeof(uevent), &length, "\"\nSUBSYSTEM=input\n");
+    char file[160];
+    used = 0;
+    append_string(file, sizeof(file), &used, path);
+    append_string(file, sizeof(file), &used, "/uevent");
+    file[used] = '\0';
+    char devpath[128];
+    size_t devpath_used = 0;
+    append_string(devpath, sizeof(devpath), &devpath_used, "/devices/");
+    append_string(devpath, sizeof(devpath), &devpath_used, name);
+    devpath[devpath_used] = '\0';
+    (void)register_uevent(devpath, file, uevent, length);
+
+    char text[64];
+    length = 0;
+    append_string(text, sizeof(text), &length, label);
+    append_string(text, sizeof(text), &length, "\n");
+    used = 0;
+    append_string(file, sizeof(file), &used, path);
+    append_string(file, sizeof(file), &used, "/name");
+    file[used] = '\0';
+    (void)vfs_create_file(file, text, length, 0, 1);
+
+    (void)vfs_mkdir_p("/sys/class/input");
+    char link[160];
+    used = 0;
+    append_string(link, sizeof(link), &used, path);
+    append_string(link, sizeof(link), &used, "/subsystem");
+    link[used] = '\0';
+    (void)vfs_create_symlink(link, "/sys/class/input", 0);
+
+    const char *base = name;
+    for (const char *at = name; *at; at++)
+        if (*at == '/') base = at + 1;
+    char target[128];
+    used = 0;
+    append_string(target, sizeof(target), &used, "../../devices/");
+    append_string(target, sizeof(target), &used, name);
+    target[used] = '\0';
+    used = 0;
+    append_string(link, sizeof(link), &used, "/sys/class/input/");
+    append_string(link, sizeof(link), &used, base);
+    link[used] = '\0';
+    (void)vfs_create_symlink(link, target, 0);
+}
+
+static struct vfs_node *tty0_active;
+
+static int64_t tty0_active_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                void *output) {
+    (void)node;
+    char text[16];
+    size_t length = 0;
+    append_string(text, sizeof(text), &length, "tty");
+    append_number(text, sizeof(text), &length, vt_active_index());
+    append_string(text, sizeof(text), &length, "\n");
+    return attribute_reply(text, length, offset, size, output);
+}
+
+static void publish_console(void) {
+    struct vfs_node *directory = vfs_mkdir_p("/sys/devices/virtual/tty/tty0");
+    if (!directory) return;
+    struct vfs_node *node = vfs_alloc_node("active", VFS_FILE);
+    if (!node) return;
+    node->mode = 0444;
+    node->read = tty0_active_read;
+    if (vfs_attach(directory, node) != 0) {
+        vfs_free_node(node);
+        return;
+    }
+    tty0_active = node;
+    if (vfs_mkdir_p("/sys/class/tty"))
+        (void)vfs_create_symlink("/sys/class/tty/tty0", "../../devices/virtual/tty/tty0", 0);
+}
+
+void sysfs_console_switched(void) {
+    vfs_notify(tty0_active);
+}
+
 void sysfs_init(void) {
     struct vfs_node *sys = vfs_mkdir_p("/sys");
     if (!sys) return;
@@ -758,6 +853,7 @@ void sysfs_init(void) {
     if (!vfs_mkdir_p("/sys/module")) return;
 
     publish_pci_bus();
+    publish_console();
 
     if (drm_available()) {
         int rendering = virtgpu_virgl_available();
@@ -777,15 +873,23 @@ void sysfs_init(void) {
     }
 
     for (unsigned device = 0; device < 2U; device++) {
-        char name[32];
+        char parent[48];
+        size_t parent_used = 0;
+        append_string(parent, sizeof(parent), &parent_used, "virtual/input/input");
+        append_number(parent, sizeof(parent), &parent_used, device);
+        parent[parent_used] = '\0';
+        publish_input_parent(parent, device == 0U ? "Tunix keyboard" : "Tunix mouse");
+
+        char name[64];
         size_t used = 0;
-        append_string(name, sizeof(name), &used, "event");
+        append_string(name, sizeof(name), &used, parent);
+        append_string(name, sizeof(name), &used, "/event");
         append_number(name, sizeof(name), &used, device);
         name[used] = '\0';
         char devname[40];
         size_t devname_used = 0;
-        append_string(devname, sizeof(devname), &devname_used, "input/");
-        append_string(devname, sizeof(devname), &devname_used, name);
+        append_string(devname, sizeof(devname), &devname_used, "input/event");
+        append_number(devname, sizeof(devname), &devname_used, device);
         devname[devname_used] = '\0';
 
         const char *tags = device == 0U

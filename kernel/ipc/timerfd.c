@@ -19,6 +19,7 @@ static void timerfd_guard_release(int *unused) {
 #define EAGAIN 11
 #define EINVAL 22
 #define TFD_TIMER_ABSTIME 1
+#define TFD_TIMER_CANCEL_ON_SET 2
 #define CLOCK_REALTIME 0
 #define CLOCK_MONOTONIC 1
 #define CLOCK_BOOTTIME 7
@@ -122,7 +123,10 @@ int timerfd_settime(struct timerfd_context *context, int flags,
                     const struct tunix_itimerspec *new_value,
                     struct tunix_itimerspec *old_value) {
     TIMERFD_LOCKED;
-    if (!context || !new_value || (flags & ~TFD_TIMER_ABSTIME)) return -EINVAL;
+    if (!context || !new_value ||
+        (flags & ~(TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET))) return -EINVAL;
+    if ((flags & TFD_TIMER_CANCEL_ON_SET) &&
+        (context->clock_id != CLOCK_REALTIME || !(flags & TFD_TIMER_ABSTIME))) return -EINVAL;
     if (old_value && timerfd_gettime(context, old_value) != 0) return -EINVAL;
     uint64_t interval;
     uint64_t initial;

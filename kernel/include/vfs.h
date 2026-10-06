@@ -124,6 +124,7 @@ struct vfs_node {
     uint64_t posix_lock_pid;
     int posix_lock_write;
     uint32_t io_generation;
+    uint32_t notify_generation;
     uint32_t dirty_pages;
     uint8_t wb_listed;
     uint64_t wb_since;
@@ -164,6 +165,7 @@ struct vfs_mount {
 
 int vfs_mount(const char *source, const char *target, const char *type,
               uint32_t flags, const char *options);
+void vfs_notify(struct vfs_node *node);
 int vfs_umount(const char *target, int detach);
 void vfs_mount_builtin(const char *source, const char *target, const char *type,
                        struct vfs_node *root);

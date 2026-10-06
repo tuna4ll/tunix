@@ -1749,6 +1749,12 @@ int vfs_sync(void) {
     return persist_ops && persist_ops->sync_all ? persist_ops->sync_all() : 0;
 }
 
+void vfs_notify(struct vfs_node *node) {
+    if (!node) return;
+    __atomic_add_fetch(&node->notify_generation, 1, __ATOMIC_ACQ_REL);
+    (void)process_wake_io();
+}
+
 int64_t vfs_read(struct vfs_node *node, uint64_t offset, size_t size, void *buffer) {
     if (!node || !node->read) return -1;
     return node->read(node, offset, size, buffer);

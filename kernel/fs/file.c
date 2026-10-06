@@ -44,6 +44,7 @@ struct file *file_open_node(struct vfs_node *node, uint32_t flags) {
     file->kind = FILE_KIND_VFS;
     file->flags = flags;
     file->node = node;
+    file->notify_seen = __atomic_load_n(&node->notify_generation, __ATOMIC_ACQUIRE);
 
     vfs_node_ref(node);
 
@@ -398,6 +399,7 @@ static int64_t file_read_locked(struct file *file, size_t size, void *buffer) {
         return moved;
     }
     if (file->kind != FILE_KIND_VFS || !file->node) return -EBADF;
+    file->notify_seen = __atomic_load_n(&file->node->notify_generation, __ATOMIC_ACQUIRE);
     int64_t result = vfs_read(file->node, file->offset, size, buffer);
     if (result > 0) file->offset += (uint64_t)result;
     return result;
@@ -489,6 +491,8 @@ uint32_t file_poll_events_nested(struct file *file, uint32_t requested,
     } else if (file->kind == FILE_KIND_EVENTFS) {
         if (eventfs_read_ready(file->eventfs)) events |= pollin;
     } else if (file->kind == FILE_KIND_VFS && file->node) {
+        if (__atomic_load_n(&file->node->notify_generation, __ATOMIC_ACQUIRE) != file->notify_seen)
+            events |= pollerr | 0x002U;
         if (file->node->read_ready ? file->node->read_ready(file->node) :
             ((file->node->flags & 0xFFU) != VFS_CHARDEVICE)) events |= pollin;
         if (!file->node->write_ready || file->node->write_ready(file->node))
