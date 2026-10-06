@@ -1770,7 +1770,9 @@ void process_kthread_start(void (*body)(void *), void *argument) {
 
 int process_may_sleep(void) {
     struct process *self = current;
-    return self && !cpu_current()->in_interrupt && lock_only_holds(NULL);
+    if (!self || cpu_current()->in_interrupt || !lock_only_holds(NULL)) return 0;
+    uint64_t here = (uint64_t)(uintptr_t)__builtin_frame_address(0);
+    return here >= self->kernel_stack_base && here < self->kernel_stack_top;
 }
 
 void process_prepare_wait(const void *channel, uint64_t deadline_ns) {

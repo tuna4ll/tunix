@@ -943,7 +943,7 @@ static int defer_set(struct file_pins *pins) {
 
 static int orphans_may_block(void) {
     struct process *self = process_current();
-    return self && !cpu_current()->in_interrupt && !self->kernel_waiting && !self->waiting_for &&
+    return self && process_may_sleep() && !self->kernel_waiting && !self->waiting_for &&
            !self->held_mutex_count;
 }
 

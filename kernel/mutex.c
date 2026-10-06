@@ -32,7 +32,7 @@ static struct process *holder_token(void) {
 }
 
 static int may_sleep(void) {
-    return process_current() && !cpu_current()->in_interrupt && lock_only_holds(NULL);
+    return process_may_sleep();
 }
 
 static int owner_running(const struct mutex *mutex) {

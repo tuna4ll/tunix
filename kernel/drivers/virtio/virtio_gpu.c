@@ -336,7 +336,7 @@ static int submit_async(uint32_t request_bytes, const void *payload,
 static const char completion_channel;
 
 static int may_sleep_here(void) {
-    return process_current() && !cpu_current()->in_interrupt && lock_only_holds(NULL);
+    return process_may_sleep();
 }
 
 static int completed_through(uint64_t target) {
