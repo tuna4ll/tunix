@@ -150,7 +150,7 @@ int timerfd_settime(struct timerfd_context *context, int flags,
 
 int64_t timerfd_read(struct timerfd_context *context, size_t size, void *buffer) {
     TIMERFD_LOCKED;
-    if (!context || !buffer || size != sizeof(uint64_t)) return -EINVAL;
+    if (!context || !buffer || size < sizeof(uint64_t)) return -EINVAL;
     refresh(context);
     if (!context->pending_expirations) {
         arm(context);

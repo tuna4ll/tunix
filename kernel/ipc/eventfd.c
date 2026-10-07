@@ -38,7 +38,7 @@ void eventfd_destroy(struct eventfd_context *context) {
 
 int64_t eventfd_read(struct eventfd_context *context, size_t size, void *buffer) {
     EVENTFD_LOCKED;
-    if (!context || !buffer || size != sizeof(uint64_t)) return -EINVAL;
+    if (!context || !buffer || size < sizeof(uint64_t)) return -EINVAL;
     if (context->counter == 0) return -EAGAIN;
     uint64_t value;
     if (context->semaphore) {
@@ -54,7 +54,7 @@ int64_t eventfd_read(struct eventfd_context *context, size_t size, void *buffer)
 
 int64_t eventfd_write(struct eventfd_context *context, size_t size, const void *buffer) {
     EVENTFD_LOCKED;
-    if (!context || !buffer || size != sizeof(uint64_t)) return -EINVAL;
+    if (!context || !buffer || size < sizeof(uint64_t)) return -EINVAL;
     uint64_t value = *(const uint64_t *)buffer;
     if (value == UINT64_MAX) return -EINVAL;
     if (UINT64_MAX - 1U - context->counter < value) return -EAGAIN;
