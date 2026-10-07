@@ -414,6 +414,7 @@ static void wait_for_room(unsigned needed) {
 }
 
 static void begin(uint32_t type);
+static void resource_destroy_now(uint32_t resource);
 static void set_rect(struct virtio_gpu_rect *r, uint32_t width, uint32_t height);
 static int submit(uint32_t request_bytes, const void *payload, uint32_t payload_bytes,
                   uint32_t response_bytes);
@@ -684,7 +685,7 @@ uint32_t virtgpu_resource_create_3d(const struct virtgpu_resource_3d *spec,
 
     if (pages && page_count &&
         attach_backing(resource, pages, page_count, bytes) != 0) {
-        virtgpu_resource_destroy(resource);
+        resource_destroy_now(resource);
         return 0;
     }
 
@@ -819,7 +820,7 @@ uint32_t virtgpu_resource_create(uint32_t width, uint32_t height,
 
     if (attach_backing(resource, pages, page_count,
                        (uint64_t)width * 4ULL * height) != 0) {
-        virtgpu_resource_destroy(resource);
+        resource_destroy_now(resource);
         return 0;
     }
 
@@ -827,16 +828,35 @@ uint32_t virtgpu_resource_create(uint32_t width, uint32_t height,
     return resource;
 }
 
-void virtgpu_resource_destroy(uint32_t resource) {
+static void resource_destroy_now(uint32_t resource) {
     VIRTGPU_LOCKED;
     if (!ready || !resource) return;
     if (scanout_resource == resource) virtgpu_scanout_disable();
-    begin(VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING);
-    request.unref.resource_id = resource;
-    (void)submit(sizeof(request.unref), NULL, 0, sizeof(struct virtio_gpu_ctrl_hdr));
     begin(VIRTIO_GPU_CMD_RESOURCE_UNREF);
     request.unref.resource_id = resource;
     (void)submit(sizeof(request.unref), NULL, 0, sizeof(struct virtio_gpu_ctrl_hdr));
+}
+
+uint64_t virtgpu_resource_release(uint32_t resource) {
+    wait_for_room(1);
+    VIRTGPU_LOCKED;
+    if (!ready || !resource) return 0;
+    if (scanout_resource == resource) virtgpu_scanout_disable();
+    begin(VIRTIO_GPU_CMD_RESOURCE_UNREF);
+    request.unref.resource_id = resource;
+    if (submit_async(sizeof(request.unref), NULL, 0) == 0) return control.posted;
+    (void)submit(sizeof(request.unref), NULL, 0, sizeof(struct virtio_gpu_ctrl_hdr));
+    return 0;
+}
+
+int virtgpu_sequence_done(uint64_t sequence) {
+    if (!sequence) return 1;
+    return completed_through(sequence);
+}
+
+int virtgpu_wait_sequence(uint64_t sequence) {
+    if (!sequence) return 0;
+    return wait_completed(sequence);
 }
 
 static void set_rect(struct virtio_gpu_rect *r, uint32_t width, uint32_t height) {

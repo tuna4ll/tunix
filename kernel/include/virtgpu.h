@@ -63,7 +63,9 @@ uint32_t virtgpu_display_height(void);
 
 uint32_t virtgpu_resource_create(uint32_t width, uint32_t height,
                                  const uint64_t *pages, uint64_t page_count);
-void virtgpu_resource_destroy(uint32_t resource);
+uint64_t virtgpu_resource_release(uint32_t resource);
+int virtgpu_sequence_done(uint64_t sequence);
+int virtgpu_wait_sequence(uint64_t sequence);
 struct virtgpu_rect {
     uint32_t x;
     uint32_t y;

@@ -502,6 +502,12 @@ struct drm_import {
     uint32_t handle;
 };
 
+struct drm_retired {
+    uint64_t *pages;
+    uint64_t page_count;
+    uint64_t sequence;
+};
+
 struct drm_framebuffer {
     uint32_t id;
     const struct file *owner;
@@ -564,6 +570,9 @@ struct drm_render_context {
 static struct drm_render_context *render_contexts;
 static struct drm_import *imports;
 static int import_capacity;
+static struct drm_retired *retired;
+static int retired_capacity;
+static int retired_count;
 static int context_capacity;
 
 static void *grow_table(void *table, size_t element, size_t *capacity) {
@@ -933,14 +942,48 @@ static int64_t ioctl_atomic(const struct file *client, uint64_t user_argument) {
     return 0;
 }
 
+static void pages_free(uint64_t *pages, uint64_t page_count) {
+    for (uint64_t index = 0; index < page_count; index++)
+        if (pages[index]) pmm_free_page((void *)pages[index]);
+    kfree(pages);
+}
+
+static void retired_reap(void) {
+    if (!retired_count) return;
+    for (int index = 0; index < retired_capacity; index++) {
+        if (!retired[index].pages || !virtgpu_sequence_done(retired[index].sequence)) continue;
+        pages_free(retired[index].pages, retired[index].page_count);
+        memset(&retired[index], 0, sizeof(retired[index]));
+        retired_count--;
+    }
+}
+
+static void pages_retire(uint64_t *pages, uint64_t page_count, uint64_t sequence) {
+    if (!pages) return;
+    if (virtgpu_sequence_done(sequence)) {
+        pages_free(pages, page_count);
+        return;
+    }
+    for (;;) {
+        for (int index = 0; index < retired_capacity; index++) {
+            if (retired[index].pages) continue;
+            retired[index].pages = pages;
+            retired[index].page_count = page_count;
+            retired[index].sequence = sequence;
+            retired_count++;
+            return;
+        }
+        if (grow_int_table((void **)&retired, sizeof(*retired), &retired_capacity) != 0) break;
+    }
+    (void)virtgpu_wait_sequence(sequence);
+    pages_free(pages, page_count);
+}
+
 static void buffer_release(struct drm_dumb_buffer *buffer) {
     if (!buffer || !buffer->handle) return;
     if (buffer->refs > 1) { buffer->refs--; return; }
-    if (buffer->virtio_resource) virtgpu_resource_destroy(buffer->virtio_resource);
-    for (uint64_t index = 0; index < buffer->page_count; index++) {
-        if (buffer->pages[index]) pmm_free_page((void *)buffer->pages[index]);
-    }
-    kfree(buffer->pages);
+    uint64_t sequence = buffer->virtio_resource ? virtgpu_resource_release(buffer->virtio_resource) : 0;
+    pages_retire(buffer->pages, buffer->page_count, sequence);
     memset(buffer, 0, sizeof(*buffer));
 }
 
@@ -1954,7 +1997,7 @@ static int64_t ioctl_virtgpu_resource_create(const struct file *client, uint64_t
         return -ENOMEM;
     }
     if (virtgpu_context_attach(context, resource, 1) != 0) {
-        virtgpu_resource_destroy(resource);
+        buffer->virtio_resource = resource;
         buffer_release(buffer);
         return -EIO;
     }
@@ -2054,6 +2097,7 @@ int64_t drm_file_ioctl(struct file *file, unsigned long request,
 
 static int64_t drm_dispatch_ioctl(struct file *file, unsigned long request,
                                   uint64_t user_argument) {
+    retired_reap();
     switch (IOCTL_NR(request)) {
     case DRM_NR_VERSION: return ioctl_version(user_argument);
     case DRM_NR_GET_CAP: return ioctl_get_cap(user_argument);
@@ -2205,6 +2249,7 @@ void drm_file_close(struct file *file) {
             blob_release(&blobs[index]);
     struct drm_event_queue *queue = event_queue_of(file, 0);
     if (queue) memset(queue, 0, sizeof(*queue));
+    retired_reap();
     for (int index = 0; index < import_capacity; index++) {
         if (imports[index].file != file) continue;
         struct drm_dumb_buffer *buffer = buffer_find(imports[index].handle);
