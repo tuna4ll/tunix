@@ -12,6 +12,7 @@ extern void kprintf(const char *fmt, ...);
 
 #define MUTEX_REPORTS 16U
 #define OWNER_SPIN_NS 50000ULL
+#define STEALS_BEFORE_HANDOFF 4U
 
 static volatile uint32_t reports;
 
@@ -19,6 +20,8 @@ struct mutex_waiter {
     struct mutex_waiter *next;
     struct process *process;
     volatile int granted;
+    volatile int woken;
+    unsigned lost;
 };
 
 static int may_report(void) {
@@ -118,6 +121,7 @@ void mutex_lock(struct mutex *mutex) {
         check_order(self, mutex);
     }
     uint64_t spin_until = 0;
+    struct mutex_waiter waiter = {NULL, self, 0, 0, 0};
     for (;;) {
         lock_acquire(&mutex->guard);
         if (!mutex->owner) {
@@ -133,7 +137,7 @@ void mutex_lock(struct mutex *mutex) {
             cpu_relax();
             continue;
         }
-        if (!mutex->first && owner_running(mutex)) {
+        if ((!mutex->first || waiter.lost) && owner_running(mutex)) {
             lock_release(&mutex->guard);
             uint64_t now = time_uptime_ns();
             if (!spin_until) spin_until = now + OWNER_SPIN_NS;
@@ -148,15 +152,23 @@ void mutex_lock(struct mutex *mutex) {
                 continue;
             }
         }
-        struct mutex_waiter waiter = {NULL, self, 0};
-        if (mutex->last) mutex->last->next = &waiter;
-        else mutex->first = &waiter;
-        mutex->last = &waiter;
+        waiter.next = NULL;
+        waiter.granted = 0;
+        waiter.woken = 0;
+        if (waiter.lost) {
+            waiter.next = mutex->first;
+            mutex->first = &waiter;
+            if (!mutex->last) mutex->last = &waiter;
+        } else {
+            if (mutex->last) mutex->last->next = &waiter;
+            else mutex->first = &waiter;
+            mutex->last = &waiter;
+        }
         lock_release(&mutex->guard);
         self->waiting_for = mutex;
-        while (!__atomic_load_n(&waiter.granted, __ATOMIC_ACQUIRE)) {
+        while (!__atomic_load_n(&waiter.woken, __ATOMIC_ACQUIRE)) {
             process_prepare_wait(&waiter, 0);
-            if (__atomic_load_n(&waiter.granted, __ATOMIC_ACQUIRE)) {
+            if (__atomic_load_n(&waiter.woken, __ATOMIC_ACQUIRE)) {
                 process_finish_wait();
                 break;
             }
@@ -164,8 +176,12 @@ void mutex_lock(struct mutex *mutex) {
             process_finish_wait();
         }
         self->waiting_for = NULL;
-        remember(self, mutex);
-        return;
+        if (__atomic_load_n(&waiter.granted, __ATOMIC_ACQUIRE)) {
+            remember(self, mutex);
+            return;
+        }
+        waiter.lost++;
+        spin_until = 0;
     }
 }
 
@@ -181,17 +197,21 @@ void mutex_unlock(struct mutex *mutex) {
     if (self) forget(self, mutex);
     lock_acquire(&mutex->guard);
     struct mutex_waiter *next = mutex->first;
+    struct process *woken = NULL;
+    mutex->owner = NULL;
     if (next) {
         mutex->first = next->next;
         if (!mutex->first) mutex->last = NULL;
-        mutex->owner = next->process;
-        mutex->depth = 1;
-        __atomic_store_n(&next->granted, 1, __ATOMIC_RELEASE);
-    } else {
-        mutex->owner = NULL;
+        if (next->lost >= STEALS_BEFORE_HANDOFF) {
+            mutex->owner = next->process;
+            mutex->depth = 1;
+            __atomic_store_n(&next->granted, 1, __ATOMIC_RELEASE);
+        }
+        woken = next->process;
+        __atomic_store_n(&next->woken, 1, __ATOMIC_RELEASE);
     }
     lock_release(&mutex->guard);
-    if (next) process_wake_all(next);
+    if (woken) process_wake_one(next);
 }
 
 unsigned mutex_release_all(struct mutex *mutex) {
