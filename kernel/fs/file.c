@@ -477,7 +477,7 @@ uint32_t file_poll_events_nested(struct file *file, uint32_t requested,
         if (pty_write_ready(file->pty, master)) events |= pollout;
     } else if (file->kind == FILE_KIND_INPUT) {
         if (input_reader_ready(file->input_reader)) events |= pollin;
-    } else if (file->kind == FILE_KIND_FRAMEBUFFER) {
+    } else if (file->kind == FILE_KIND_FRAMEBUFFER || file->kind == FILE_KIND_DMABUF) {
         events |= pollin | pollout;
     } else if (file->kind == FILE_KIND_EVENTFD) {
         if (eventfd_read_ready(file->eventfd)) events |= pollin;
