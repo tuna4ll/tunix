@@ -12,7 +12,8 @@ make DESKTOP=gnome run-virgl  # boot it on the host GPU through virgl
 ```
 
 Log in as `tunix` / `tunix`. Rendering is llvmpipe unless the machine has a
-virtio-gpu with virgl, so the shell is usable but not fast.
+virtio-gpu with virgl; through virgl the shell holds 60 fps and GTK apps open
+in about a second (see [virtio-gpu](virtio-gpu.md#under-gnome)).
 
 ## What runs
 

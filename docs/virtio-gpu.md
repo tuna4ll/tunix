@@ -36,11 +36,12 @@ the driver walks that chain to find the common configuration, the notification
 area and the device configuration. `virtio_pci.c` maps whichever BARs those name
 into the shared device window described in `kernel/include/vmm.h`.
 
-The transport is **polled**. After a kick it spins on the used ring with a two
-second deadline, the same bargain the RTL8139 driver makes, and for the same
-reason: there is one request outstanding at a time and nothing to gain from an
-interrupt. One request also means the descriptor table needs no allocator — a
-chain is always taken from the head.
+Requests are **posted and left**: each carries its own request, payload and
+response memory from a pool of slots, descriptors come from a free list, and a
+caller that needs an answer sleeps until the control queue's MSI-X interrupt
+says the host got that far. Every posted request has a sequence number, and the
+queue is answered in order, so "the host is done with this" is one comparison.
+Only probing, capsets and context creation still wait for an answer inline.
 
 ## What presenting looks like
 
@@ -156,9 +157,51 @@ held the only lock for two thirds of every second.
 
 Two things make posting safe. Ordering: this queue is answered in order, so a
 command that reads back data, and any caller that waits, sees everything posted
-before it. And `DRM_IOCTL_VIRTGPU_WAIT`, which used to answer yes without
-looking and now drains the queue: mesa marks a resource busy when a submission
-mentions it and asks here before touching it again.
+before it. And `DRM_IOCTL_VIRTGPU_WAIT`: mesa marks a resource busy when a
+submission mentions it and asks here before touching it again.
+
+## Fences
+
+Every buffer remembers the last request that mentioned it: an execbuffer marks
+each handle in its `bo_handles` list, a transfer marks its own buffer. `WAIT`
+then waits for that request and nothing later, the way Linux waits on a
+buffer's reservation object.
+
+`VIRTGPU_WAIT_NOWAIT` is an answer, not a wait. mesa asks it before it reuses a
+cached buffer and before it maps one, expecting to hear "busy" at once and do
+something else. It used to be ignored, so each of those questions drained the
+whole queue; now it compares two numbers. A real wait drops the DRM lock while
+it sleeps, so one client's wait no longer stalls every other client's ioctls,
+mutter's page flips included.
+
+Freeing a buffer posts `RESOURCE_UNREF` and leaves; the host detaches the
+backing itself. The pages are handed back to the allocator only once the host
+has answered, from a short list reaped at the next ioctl. Before this, each
+destroy was two requests (detach, unref) spun out in line, about 900 a second
+under GNOME.
+
+## Page flips
+
+A flip event is delivered on the first 60 Hz vblank after the host has
+finished the flush that showed the frame, and carries that vblank's time and
+count. Delivering it inside the flip ioctl, as this driver used to, told mutter
+the frame was on screen before the host had seen it and gave it nothing to pace
+itself by: depending on the boot it either drew several hundred frames a second
+or settled below 60. With real vblank times it holds 60.
+
+## dma-buf and PRIME
+
+A dma-buf fd polls readable and writable. Nothing here keeps implicit fences on
+a dma-buf, so it is always idle, and that is what Linux answers for an idle one.
+It used to answer `POLLERR`, and mutter, which waits for a client's buffer to
+poll readable before it uses it, waited forever: the first frame from any GL
+client froze the whole shell.
+
+Importing a buffer with `PRIME_FD_TO_HANDLE` takes a reference of its own, one
+per importing file, dropped by that file's `GEM_CLOSE` or by closing it.
+Without that, mutter closing the handle it imported a client's buffer through
+dropped the exporter's reference, and the buffer was freed while the client's
+dma-buf fd still named it.
 
 ## The crash that was blamed on mesa
 
@@ -173,19 +216,35 @@ The table is 4096 entries now and a handle is one more than the slot it names,
 so finding one is a subtraction rather than a walk. The lap that had been
 failing about half the time has not failed since.
 
+## Under GNOME
+
+`make DESKTOP=gnome run-virgl`, measured headless (`egl-headless`, VNC) on
+three fresh boots of each kernel, the same image otherwise; launch times average
+a cold and a warm launch. "Before" already has the dma-buf poll fix, since
+without it no GL client gets a frame out.
+
+| | before | after |
+| --- | --- | --- |
+| compositor, `weston-simple-egl` | 85 fps (63 / 191) | 59.5 fps, all three boots |
+| compositor, `weston-simple-egl -b` | 92 fps (50 / 226) | 60.1 fps |
+| `weston-simple-egl -b` itself | 205 fps | 1819 fps |
+| gnome-text-editor, first frame | 3.1 s | 1.3 s |
+| gnome-calculator, first frame | 3.2 s | 1.2 s |
+| nautilus, first frame | 4.9 s | 1.1 s |
+
+The spread before is the point: each boot fell into one of two modes and stayed
+there. Two of the causes were outside this driver. Every readiness check on an
+input or tty fd read the PS/2 and serial ports, a trap into QEMU for each one,
+taken under the same QEMU lock virgl renders under; it is now once a
+millisecond at most. And `copy_from_user` takes the address-space mutex, which
+used to be handed straight to a sleeping waiter, so gnome-shell's threads could
+fall into a convoy that lasted the whole boot. A released mutex now goes to
+whoever is running, with a hand-off only for a waiter that has lost four times.
+
 ## What is deliberately not here
 
-**A queue interrupt that anything waits on.** The device has a vector, bound
-through MSI-X, and the driver asks it not to use it: the available ring carries
-`VIRTQ_AVAIL_F_NO_INTERRUPT` while a request is being waited out. Sleeping
-instead of spinning was tried when the kernel still had one lock, and it cost
-SuperTuxKart its whole start-up. The spin now holds only the DRM and virtio-gpu
-locks, so the rest of the machine keeps running; turning it into a sleep would
-mean rewinding the ioctl, which the command state is not built for.
-
-**A fence.** Waiting for one resource waits for every submission, because
-nothing here records which submission touched what. It is never wrong, only
-sometimes more than was asked for.
+**Sync files.** Execbuffer answers `fence_fd = -1`; nothing here exports a
+fence as a file. mesa falls back to `WAIT`, which is now per buffer.
 
 **A second scanout.** DRM reports one CRTC and one connector, so there is
 nothing above this that could ask for one.
