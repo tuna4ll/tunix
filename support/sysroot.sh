@@ -92,6 +92,7 @@ fi
 
 echo ":: applying base-files"
 cp -a base-files/overlay/. "$SYSROOT/"
+[ -d "base-files/overlay-${DESKTOP:-weston}" ] && cp -a "base-files/overlay-${DESKTOP:-weston}/." "$SYSROOT/"
 
 for file in passwd group shadow; do
 	[ -f "base-files/append/$file" ] || continue
@@ -133,7 +134,7 @@ while read -r service; do
 		exit 1
 	fi
 	ln -sfn "/etc/sv/$service" "$SYSROOT/etc/runit/runsvdir/default/$service"
-done < <(cat base-files/services "base-files/services-${DESKTOP:-gnome}" 2>/dev/null)
+done < <(cat base-files/services "base-files/services-${DESKTOP:-weston}" 2>/dev/null)
 
 if [ -f base-files/remove ]; then
 	echo ":: trimming"

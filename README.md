@@ -3,7 +3,7 @@
 A Unix-like operating system for x86_64: a kernel written from scratch, booted
 by Limine, running an unmodified Void Linux userland on top of it.
 
-![GNOME on Tunix](screenshots/gnome.png)
+![Weston on Tunix](screenshots/weston.png)
 
 Nothing above the kernel is written here. The image is Void's own glibc
 packages, installed by Void's own package manager, on Void's own init. When one
@@ -17,10 +17,10 @@ scheduling across every processor the firmware describes, ELF and a dynamic
 linker, signals, and a Linux-compatible syscall table.
 
 On top of it, runit as PID 1 with udevd and agetty, Void's bash, coreutils,
-sudo, curl and htop, and a GNOME 48 desktop: GDM, gnome-shell and mutter on
-atomic KMS, with dbus, elogind and polkit under them. elogind runs on the
-kernel's own cgroup2 and named cgroup hierarchies. `make DESKTOP=weston` builds
-the older Weston desktop instead.
+sudo, curl and htop, and a Weston desktop that gets the display through seatd,
+with Firefox a click away on the panel. `make DESKTOP=gnome` builds a GNOME 48
+desktop instead: GDM, gnome-shell and mutter on atomic KMS, with dbus, elogind
+and polkit on the kernel's own cgroup2 hierarchies. See [GNOME](docs/gnome.md).
 
 Loadable modules, so `lsmod`, `modprobe` and `lspci -k` answer what they answer
 on Linux: the sound and RTL8139 drivers are `.ko` files that udev loads from the
@@ -45,10 +45,11 @@ The first build downloads a Void rootfs and about 600 MiB of packages. The
 sysroot has to be built as root, on a filesystem that can hold ownership and the
 setuid bit. See [Build and Run](docs/build-and-run.md) if yours cannot.
 
-It boots into the GDM login screen; `tunix` / `tunix` opens the GNOME session.
-The login screen is on Ctrl+Alt+F7 and the session it starts on F5. Ctrl+Alt+F2
-leaves either for a text console, where you can log in as `tunix` / `tunix` or
-`root` / `tunix`.
+It boots into Weston with Firefox already open. Ctrl+Alt+F2 leaves it for a
+text console, where you can
+log in as `tunix` / `tunix` or `root` / `tunix`, and Ctrl+Alt+F1 goes back.
+With `DESKTOP=gnome` it boots into the GDM login screen on Ctrl+Alt+F7 instead,
+and the session it starts runs on F5.
 
 | The boot menu | A text console |
 | --- | --- |

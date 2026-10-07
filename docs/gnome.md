@@ -1,14 +1,14 @@
 # GNOME
 
-The image boots into GDM and logs into GNOME 48: gnome-shell and mutter as the
+`make DESKTOP=gnome` builds an image that boots into GDM and logs into GNOME 48: gnome-shell and mutter as the
 Wayland compositor on the kernel's atomic KMS device, Xwayland for X clients,
 and Void's own GNOME packages around them. Nothing in it is patched.
 
 ![GNOME on Tunix](../screenshots/gnome.png)
 
 ```sh
-make                    # DESKTOP=gnome is the default
-make DESKTOP=weston     # the Weston desktop described in desktop.md
+make DESKTOP=gnome            # build the GNOME image
+make DESKTOP=gnome run-virgl  # boot it on the host GPU through virgl
 ```
 
 Log in as `tunix` / `tunix`. Rendering is llvmpipe unless the machine has a
@@ -16,7 +16,8 @@ virtio-gpu with virgl, so the shell is usable but not fast.
 
 ## What runs
 
-Four runit services, listed in `base-files/services-gnome`:
+Four runit services, listed in `base-files/services-gnome`, and the files in
+`base-files/overlay-gnome` laid over the sysroot:
 
 | Service | Why |
 | --- | --- |
