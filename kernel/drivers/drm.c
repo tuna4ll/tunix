@@ -495,6 +495,7 @@ struct drm_dumb_buffer {
     uint8_t rendered;
     uint8_t owner_closed;
     uint32_t refs;
+    uint64_t busy_until;
 };
 
 struct drm_import {
@@ -573,6 +574,7 @@ static int import_capacity;
 static struct drm_retired *retired;
 static int retired_capacity;
 static int retired_count;
+static uint64_t untracked_busy_until;
 static int context_capacity;
 
 static void *grow_table(void *table, size_t element, size_t *capacity) {
@@ -2050,12 +2052,36 @@ static int64_t ioctl_virtgpu_transfer(const struct file *client, uint64_t user_a
     if (virtgpu_transfer_3d(render_context(), buffer->virtio_resource, &box,
                             query.offset, query.level, query.stride,
                             query.layer_stride, to_host) != 0) return -EIO;
+    buffer->busy_until = virtgpu_posted();
     return 0;
 }
 
 #define DRM_MAX_COMMAND_BYTES (1024U * 1024U)
+#define VIRTGPU_WAIT_NOWAIT 0x1U
 
-static int64_t ioctl_virtgpu_execbuffer(uint64_t user_argument) {
+static void mark_busy(const struct file *client, uint64_t user_handles, uint32_t count,
+                      uint64_t sequence) {
+    if (!count || !user_handles) {
+        untracked_busy_until = sequence;
+        return;
+    }
+    uint32_t handles[64];
+    for (uint32_t done = 0; done < count;) {
+        uint32_t chunk = count - done < 64U ? count - done : 64U;
+        if (copy_from_user(handles, user_handles + (uint64_t)done * sizeof(handles[0]),
+                           chunk * sizeof(handles[0])) != 0) {
+            untracked_busy_until = sequence;
+            return;
+        }
+        for (uint32_t index = 0; index < chunk; index++) {
+            struct drm_dumb_buffer *buffer = buffer_of(client, handles[index]);
+            if (buffer) buffer->busy_until = sequence;
+        }
+        done += chunk;
+    }
+}
+
+static int64_t ioctl_virtgpu_execbuffer(const struct file *client, uint64_t user_argument) {
     struct drm_virtgpu_execbuffer query;
     if (copy_from_user(&query, user_argument, sizeof(query)) != 0) return -EFAULT;
     if (!query.command || !query.size) return -EINVAL;
@@ -2073,6 +2099,7 @@ static int64_t ioctl_virtgpu_execbuffer(uint64_t user_argument) {
     int submitted = virtgpu_submit_3d(context, staging, query.size);
     kfree(staging);
     if (submitted != 0) return -EIO;
+    mark_busy(client, query.bo_handles, query.num_bo_handles, virtgpu_posted());
 
     query.fence_fd = -1;
     return copy_to_user(user_argument, &query, sizeof(query)) == 0 ? 0 : -EFAULT;
@@ -2081,8 +2108,16 @@ static int64_t ioctl_virtgpu_execbuffer(uint64_t user_argument) {
 static int64_t ioctl_virtgpu_wait(const struct file *client, uint64_t user_argument) {
     struct drm_virtgpu_3d_wait query;
     if (copy_from_user(&query, user_argument, sizeof(query)) != 0) return -EFAULT;
-    if (!buffer_of(client, query.handle)) return -ENOENT;
-    return virtgpu_flush_pending() == 0 ? 0 : -EBUSY;
+    struct drm_dumb_buffer *buffer = buffer_of(client, query.handle);
+    if (!buffer) return -ENOENT;
+    uint64_t target = buffer->busy_until > untracked_busy_until ? buffer->busy_until
+                                                                : untracked_busy_until;
+    if (query.flags & VIRTGPU_WAIT_NOWAIT) return virtgpu_sequence_done(target) ? 0 : -EBUSY;
+    if (virtgpu_sequence_done(target)) return 0;
+    drm_leave();
+    int status = virtgpu_wait_sequence(target);
+    drm_enter();
+    return status == 0 ? 0 : -EBUSY;
 }
 
 int64_t drm_file_ioctl(struct file *file, unsigned long request,
@@ -2172,7 +2207,7 @@ static int64_t drm_dispatch_ioctl(struct file *file, unsigned long request,
             return ioctl_virtgpu_transfer(file, user_argument, 0);
         case DRM_NR_VIRTGPU_TRANSFER_TO_HOST:
             return ioctl_virtgpu_transfer(file, user_argument, 1);
-        case DRM_NR_VIRTGPU_EXECBUFFER: return ioctl_virtgpu_execbuffer(user_argument);
+        case DRM_NR_VIRTGPU_EXECBUFFER: return ioctl_virtgpu_execbuffer(file, user_argument);
         default: return ioctl_virtgpu_wait(file, user_argument);
         }
     case DRM_NR_VIRTGPU_RESOURCE_CREATE_BLOB:

@@ -854,6 +854,11 @@ int virtgpu_sequence_done(uint64_t sequence) {
     return completed_through(sequence);
 }
 
+uint64_t virtgpu_posted(void) {
+    VIRTGPU_LOCKED;
+    return ready ? control.posted : 0;
+}
+
 int virtgpu_wait_sequence(uint64_t sequence) {
     if (!sequence) return 0;
     return wait_completed(sequence);
