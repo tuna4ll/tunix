@@ -185,6 +185,7 @@ QEMU_AUDIO  ?= -audiodev $(QEMU_AUDIO_BACKEND)$(COMMA)id=snd0 \
 	-device intel-hda -device hda-output,audiodev=snd0
 QEMU_NET    ?= -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
 QEMU_DISPLAY ?= -display gtk,grab-on-hover=on
+QEMU_POINTER ?= -device qemu-xhci,id=pointer -device usb-tablet,bus=pointer.0
 QEMU_COMMON  = -machine q35,accel=kvm:tcg -cpu host -smp $(QEMU_SMP) \
 	-m $(QEMU_MEMORY) -drive format=raw,file=$(IMAGE),if=none,id=disk0 \
 	-device ide-hd,drive=disk0,bus=ide.0 \
@@ -211,12 +212,12 @@ $(OVMF_VARS): $(OVMF)
 run: $(IMAGE)
 	$(AUDIO_NOTE)
 	rm -f $(BUILD)/serial.log
-	$(QEMU) $(QEMU_COMMON) $(QEMU_DISPLAY) -serial file:$(BUILD)/serial.log -monitor none
+	$(QEMU) $(QEMU_COMMON) $(QEMU_POINTER) $(QEMU_DISPLAY) -serial file:$(BUILD)/serial.log -monitor none
 
 run-uefi: $(IMAGE) $(OVMF) $(OVMF_VARS)
 	$(AUDIO_NOTE)
 	rm -f $(BUILD)/serial.log
-	$(QEMU) $(QEMU_COMMON) $(QEMU_DISPLAY) -serial file:$(BUILD)/serial.log -monitor none \
+	$(QEMU) $(QEMU_COMMON) $(QEMU_POINTER) $(QEMU_DISPLAY) -serial file:$(BUILD)/serial.log -monitor none \
 		-drive if=pflash,unit=0,format=raw,readonly=on,file=$(OVMF) \
 		-drive if=pflash,unit=1,format=raw,file=$(OVMF_VARS)
 
@@ -225,7 +226,7 @@ QEMU_GPU ?= -vga none -device virtio-vga,xres=1280,yres=720 \
 run-gpu: $(IMAGE)
 	$(AUDIO_NOTE)
 	rm -f $(BUILD)/serial.log
-	$(QEMU) $(QEMU_COMMON) $(QEMU_GPU) -serial file:$(BUILD)/serial.log -monitor none
+	$(QEMU) $(QEMU_COMMON) $(QEMU_POINTER) $(QEMU_GPU) -serial file:$(BUILD)/serial.log -monitor none
 
 QEMU_VIRGL ?= -vga none -device virtio-vga-gl,xres=1280,yres=720 \
 	-display sdl,gl=on
@@ -234,7 +235,7 @@ QEMU_GL_ENV ?= $(if $(wildcard /dev/dri),,\
 run-virgl: $(IMAGE)
 	$(AUDIO_NOTE)
 	rm -f $(BUILD)/serial.log
-	$(QEMU_GL_ENV) $(QEMU) $(QEMU_COMMON) $(QEMU_VIRGL) \
+	$(QEMU_GL_ENV) $(QEMU) $(QEMU_COMMON) $(QEMU_POINTER) $(QEMU_VIRGL) \
 		-serial file:$(BUILD)/serial.log -monitor none
 
 headless: $(IMAGE)
