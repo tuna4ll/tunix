@@ -656,6 +656,18 @@ void input_poll(void) {
     usb_storage_poll();
 }
 
+#define READY_POLL_INTERVAL_NS 1000000ULL
+
+static uint64_t last_ready_poll;
+
+int input_poll_due(void) {
+    uint64_t now = time_uptime_ns();
+    uint64_t last = __atomic_load_n(&last_ready_poll, __ATOMIC_RELAXED);
+    if (now - last < READY_POLL_INTERVAL_NS) return 0;
+    return __atomic_compare_exchange_n(&last_ready_poll, &last, now, 0,
+                                       __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+}
+
 void input_irq(void) {
     lock_acquire(&input_lock);
     input_drain_controller();
@@ -732,7 +744,7 @@ void input_scancode_close(void) {
 }
 
 int input_scancodes_ready(void) {
-    input_poll();
+    if (input_poll_due()) input_poll();
     INPUT_LOCKED;
     uint64_t flags = cpu_irq_save();
     int ready = raw_count != 0;
@@ -805,7 +817,7 @@ void input_reader_close(struct input_reader *reader) {
 }
 
 int input_reader_ready(struct input_reader *reader) {
-    input_poll();
+    if (input_poll_due()) input_poll();
     INPUT_LOCKED;
     if (!reader) return 0;
     uint64_t flags = cpu_irq_save();

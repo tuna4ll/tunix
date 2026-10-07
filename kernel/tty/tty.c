@@ -627,7 +627,7 @@ static int canonical_input_complete(struct tty *tty) {
 int tty_input_ready(struct tty *tty) {
     TTY_POLL_LOCKED;
     if (!tty) return 0;
-    if (process_may_sleep()) vt_poll_input();
+    if (process_may_sleep() && input_poll_due()) vt_poll_input();
     if (tty->input_interrupted) return 1;
     if (!(tty->termios.lflag & TTY_ICANON)) return tty->input_count != 0;
     return canonical_input_complete(tty);

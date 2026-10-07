@@ -9,6 +9,7 @@ struct tunix_input_device_info;
 
 void input_init(void);
 void input_poll(void);
+int input_poll_due(void);
 void input_dispatch_console(void);
 int input_console_pending(void);
 
