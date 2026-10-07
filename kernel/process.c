@@ -637,6 +637,21 @@ struct process *process_find(uint64_t pid) {
     return NULL;
 }
 
+int process_pidfd_target(uint64_t pid, uint64_t *start_ns) {
+    SCHED_LOCKED;
+    struct process *found = process_find(pid);
+    if (!found) return -ESRCH;
+    if (found->is_thread) return -EINVAL;
+    *start_ns = found->start_time_ns;
+    return 0;
+}
+
+int process_pidfd_exited(uint64_t pid, uint64_t start_ns) {
+    SCHED_LOCKED;
+    struct process *found = process_find(pid);
+    return !found || found->start_time_ns != start_ns || found->state == PROCESS_ZOMBIE;
+}
+
 struct process *process_get(uint64_t pid) {
     SCHED_LOCKED;
     struct process *found = process_find(pid);
@@ -2131,7 +2146,8 @@ static int commit_file(struct vm_area *area, uint64_t page) {
 }
 
 static int commit_memfd(struct vm_area *area, uint64_t page) {
-    if (!area->file || area->file->kind != FILE_KIND_MEMFD) return 0;
+    if (!area->file || (area->file->kind != FILE_KIND_MEMFD &&
+                        area->file->kind != FILE_KIND_IO_URING)) return 0;
     if (vmm_translate(current->cr3, page, NULL, NULL) == 0) return 1;
     uint64_t index = (page - area->start + area->offset) / 4096ULL;
     if (index * 4096ULL >= memfd_size(area->file->memfd)) return 0;
@@ -2418,6 +2434,7 @@ static void notify_parent_of_exit(struct process *child) {
     sibling_to_front(child);
     __atomic_fetch_or(&parent->signal_pending, signal_bit(SIGCHLD), __ATOMIC_RELEASE);
     wake_waiting_parent(parent);
+    __atomic_store_n(&io_recheck_pending, 1, __ATOMIC_RELEASE);
 }
 
 static void notify_parent_of_job_change(struct process *child) {

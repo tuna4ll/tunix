@@ -8,6 +8,7 @@ static int64_t file_write_locked(struct file *file, size_t size, const void *buf
 #include "../include/heap.h"
 
 extern uint64_t process_current_pid(void);
+extern int process_pidfd_exited(uint64_t pid, uint64_t start_ns);
 #include "../include/kstring.h"
 #include "../include/drm.h"
 #include "../include/framebuffer.h"
@@ -16,6 +17,7 @@ extern uint64_t process_current_pid(void);
 #include "../include/timerfd.h"
 #include "../include/epoll.h"
 #include "../include/inotify.h"
+#include "../include/io_uring.h"
 #include "../include/input.h"
 #include "../include/memfd.h"
 #include "../include/signalfd.h"
@@ -196,6 +198,22 @@ struct file *file_create_inotify(struct inotify_context *context, uint32_t flags
     return file;
 }
 
+struct file *file_create_io_uring(struct io_uring_context *context) {
+    struct file *file = file_create_special(FILE_KIND_IO_URING, 0);
+    if (!file) return NULL;
+    file->io_uring = context;
+    file->memfd = io_uring_memory(context);
+    return file;
+}
+
+struct file *file_create_pidfd(uint64_t pid, uint64_t start_ns, uint32_t flags) {
+    struct file *file = file_create_special(FILE_KIND_PIDFD, flags);
+    if (!file) return NULL;
+    file->pidfd_pid = pid;
+    file->pidfd_start_ns = start_ns;
+    return file;
+}
+
 struct file *file_create_pty_endpoint(struct pty_pair *pty, int master,
                                       struct vfs_node *node, uint32_t flags) {
     if (!pty || !node) return NULL;
@@ -317,6 +335,8 @@ void file_unref(struct file *file) {
         signalfd_destroy(file->signalfd);
     if (file->kind == FILE_KIND_EVENTFS && file->eventfs)
         eventfs_unsubscribe(file->eventfs);
+    if (file->kind == FILE_KIND_IO_URING && file->io_uring)
+        io_uring_destroy(file->io_uring);
     if (file->kind == FILE_KIND_DMABUF)
         drm_buffer_put(file->dmabuf_handle);
     if (file->kind == FILE_KIND_SOCKET && file->socket)
@@ -492,6 +512,10 @@ uint32_t file_poll_events_nested(struct file *file, uint32_t requested,
         if (inotify_read_ready(file->inotify)) events |= pollin;
     } else if (file->kind == FILE_KIND_EVENTFS) {
         if (eventfs_read_ready(file->eventfs)) events |= pollin;
+    } else if (file->kind == FILE_KIND_IO_URING) {
+        events |= io_uring_poll(file->io_uring, pollin | pollout);
+    } else if (file->kind == FILE_KIND_PIDFD) {
+        if (process_pidfd_exited(file->pidfd_pid, file->pidfd_start_ns)) events |= pollin;
     } else if (file->kind == FILE_KIND_VFS && file->node) {
         if (__atomic_load_n(&file->node->notify_generation, __ATOMIC_ACQUIRE) != file->notify_seen)
             events |= pollerr | 0x002U;

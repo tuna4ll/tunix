@@ -8,6 +8,7 @@
 #include "include/timerfd.h"
 #include "include/epoll.h"
 #include "include/inotify.h"
+#include "include/io_uring.h"
 #include "include/memfd.h"
 #include "include/module.h"
 #include "include/signalfd.h"
@@ -287,6 +288,11 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136, "syscall frame r
 #define SYS_MEMFD_CREATE 319
 #define SYS_STATX 332
 #define SYS_RSEQ 334
+#define SYS_PIDFD_SEND_SIGNAL 424
+#define SYS_IO_URING_SETUP 425
+#define SYS_IO_URING_ENTER 426
+#define SYS_IO_URING_REGISTER 427
+#define SYS_PIDFD_OPEN 434
 #define SYS_CLONE3 435
 #define SYS_CLOSE_RANGE 436
 #define CLOSE_RANGE_CLOEXEC (1U << 2)
@@ -1067,6 +1073,7 @@ static int never_restarted(uint64_t syscall_number) {
     case SYS_POLL: case SYS_PPOLL: case SYS_SELECT: case SYS_PSELECT6:
     case SYS_EPOLL_WAIT: case SYS_EPOLL_PWAIT: case SYS_NANOSLEEP: case SYS_CLOCK_NANOSLEEP:
     case SYS_PAUSE: case SYS_RT_SIGSUSPEND: case SYS_RT_SIGTIMEDWAIT:
+    case SYS_IO_URING_ENTER:
         return 1;
     default:
         return 0;
@@ -3775,6 +3782,25 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
             return (int64_t)base;
         }
 
+        if (file->kind == FILE_KIND_IO_URING) {
+            uint64_t object_offset;
+            if (!(flags & MAP_SHARED) ||
+                io_uring_map_offset(file->io_uring, offset, length, &object_offset) != 0)
+                return -EINVAL;
+            if (map_shared_object(process, base, base + length, file->memfd,
+                                  object_offset, page_flags, 0) != 0) {
+                unmap_pages(process, base, base + length);
+                return -ENOMEM;
+            }
+            (void)process_map_area(base, base + length, page_flags, VM_MEMFD, file,
+                                   object_offset);
+            if (advance_mmap_base) {
+                process->mmap_base = base + length + 4096;
+                if (process->memory) process->memory->mmap_base = process->mmap_base;
+            }
+            return (int64_t)base;
+        }
+
         if (file->kind == FILE_KIND_DMABUF) {
             if (!(flags & MAP_SHARED)) return -EINVAL;
             return map_device(process, file, base, length, offset, page_flags,
@@ -5390,6 +5416,328 @@ MEMORY_SYSCALL(shmat, (int a, uint64_t b, int c), (a, b, c))
 MEMORY_SYSCALL(shmdt, (uint64_t a), (a))
 MEMORY_SYSCALL(brk, (uint64_t a), (a))
 
+#define ETIME 62
+#define EISCONN 106
+#define EALREADY 114
+
+#define IORING_ENTER_GETEVENTS (1U << 0)
+#define IORING_ENTER_SQ_WAKEUP (1U << 1)
+#define IORING_ENTER_SQ_WAIT (1U << 2)
+#define IORING_ENTER_EXT_ARG (1U << 3)
+#define IORING_REGISTER_PROBE 8U
+#define IORING_REGISTER_ENABLE_RINGS 12U
+#define P_PIDFD 3
+
+struct ring_getevents_arg {
+    uint64_t sigmask;
+    uint32_t sigmask_sz;
+    uint32_t min_wait_usec;
+    uint64_t ts;
+};
+
+struct ring_probe_header {
+    uint8_t last_op;
+    uint8_t ops_len;
+    uint16_t resv;
+    uint32_t resv2[3];
+};
+
+struct ring_probe_op {
+    uint8_t op;
+    uint8_t resv;
+    uint16_t flags;
+    uint32_t resv2;
+};
+
+static int ring_seekable(struct file *file) {
+    if (!file) return 0;
+    if (file->kind == FILE_KIND_MEMFD) return 1;
+    if (file->kind != FILE_KIND_VFS || !file->node) return 0;
+    uint32_t type = file->node->flags & 0xFFU;
+    return type == VFS_FILE || type == VFS_BLOCKDEVICE;
+}
+
+static int64_t ring_wait_for(struct io_uring_op *op, struct file *file, int64_t result,
+                             uint32_t events, int dontwait) {
+    if (result != -EAGAIN || !file || (file->flags & O_NONBLOCK) || dontwait) return result;
+    op->watch = events;
+    return IO_URING_PENDING;
+}
+
+static int64_t ring_execute(struct io_uring_op *op) {
+    struct process *process = process_current();
+    int fd = op->fd;
+    struct file *file = process && fd >= 0 && fd < PROCESS_FD_CAPACITY(process) ? fd_file(fd) : NULL;
+    int dontwait = (op->op_flags & MSG_DONTWAIT) != 0;
+    int64_t result;
+    op->watch = 0;
+    switch (op->opcode) {
+    case IORING_OP_READ:
+    case IORING_OP_WRITE: {
+        int writing = op->opcode == IORING_OP_WRITE;
+        if (!file) return -EBADF;
+        if (op->off != UINT64_MAX && ring_seekable(file))
+            result = sys_pread_pwrite(fd, op->addr, op->len, op->off, writing);
+        else
+            result = writing ? sys_write(fd, op->addr, op->len) : sys_read(fd, op->addr, op->len);
+        return ring_wait_for(op, file, result, writing ? POLLOUT : POLLIN, 0);
+    }
+    case IORING_OP_READV:
+    case IORING_OP_WRITEV: {
+        int writing = op->opcode == IORING_OP_WRITEV;
+        if (!file) return -EBADF;
+        if (op->off != UINT64_MAX && ring_seekable(file))
+            result = sys_preadv_pwritev(fd, op->addr, (int)op->len, op->off, writing);
+        else
+            result = sys_readv_writev(fd, op->addr, (int)op->len, writing);
+        return ring_wait_for(op, file, result, writing ? POLLOUT : POLLIN, 0);
+    }
+    case IORING_OP_FSYNC:
+    case IORING_OP_SYNC_FILE_RANGE:
+        return sys_fsync(fd);
+    case IORING_OP_POLL_ADD: {
+        if (!file) return -EBADF;
+        uint32_t wanted = (op->op_flags & 0xFFFFU) | POLLERR | POLLHUP;
+        uint32_t revents = file_poll_events(file, wanted) & wanted;
+        if (revents) return revents;
+        op->watch = wanted;
+        return IO_URING_PENDING;
+    }
+    case IORING_OP_SENDMSG:
+        result = sys_sendmsg(fd, op->addr, (int)op->op_flags);
+        return ring_wait_for(op, file, result, POLLOUT, dontwait);
+    case IORING_OP_RECVMSG:
+        result = sys_recvmsg(fd, op->addr, (int)op->op_flags);
+        return ring_wait_for(op, file, result, POLLIN, dontwait);
+    case IORING_OP_SEND:
+        result = sys_sendto(fd, op->addr, op->len, (int)op->op_flags, 0, 0);
+        return ring_wait_for(op, file, result, POLLOUT, dontwait);
+    case IORING_OP_RECV:
+        result = sys_recvfrom(fd, op->addr, op->len, (int)op->op_flags, 0, 0);
+        return ring_wait_for(op, file, result, POLLIN, dontwait);
+    case IORING_OP_ACCEPT:
+        result = sys_accept(fd, op->addr, op->off, (int)op->op_flags);
+        return ring_wait_for(op, file, result, POLLIN, 0);
+    case IORING_OP_CONNECT:
+        result = sys_connect(fd, op->addr, op->off);
+        if (op->attempts && result == -EISCONN) return 0;
+        if ((result == -EINPROGRESS || result == -EALREADY) && file &&
+            !(file->flags & O_NONBLOCK)) {
+            op->attempts = 1;
+            op->watch = POLLOUT;
+            return IO_URING_PENDING;
+        }
+        return ring_wait_for(op, file, result, POLLOUT, 0);
+    case IORING_OP_FALLOCATE:
+        return sys_fallocate(fd, (int)op->len, op->off, op->addr);
+    case IORING_OP_OPENAT:
+        return open_at(fd, op->addr, SYSCALL_OPEN_FLAGS_IN(op->op_flags), op->len);
+    case IORING_OP_CLOSE:
+        if (file && file->kind == FILE_KIND_IO_URING) return -EBADF;
+        return sys_close(fd);
+    case IORING_OP_STATX:
+        return sys_statx(fd, op->addr, (int)op->op_flags, op->len, op->off);
+    case IORING_OP_FADVISE:
+    case IORING_OP_MADVISE:
+        return 0;
+    case IORING_OP_EPOLL_CTL:
+        return sys_epoll_ctl(fd, (int)op->len, (int)op->off, op->addr);
+    case IORING_OP_SHUTDOWN:
+        return sys_shutdown(fd, (int)op->len);
+    case IORING_OP_RENAMEAT:
+        return sys_rename_at(fd, op->addr, (int)op->len, op->off, op->op_flags);
+    case IORING_OP_UNLINKAT:
+        return sys_unlink_at(fd, op->addr, (int)op->op_flags);
+    case IORING_OP_MKDIRAT:
+        return sys_mkdir_at(fd, op->addr, op->len);
+    case IORING_OP_SYMLINKAT:
+        return sys_symlink_at(op->addr, fd, op->off);
+    case IORING_OP_LINKAT:
+        return sys_link_at(fd, op->addr, (int)op->len, op->off, (int)op->op_flags);
+    default:
+        return -EINVAL;
+    }
+}
+
+static void ring_watch_fd(int fd, uint32_t events) {
+    io_watch_add(process_current(), fd, events);
+}
+
+static int64_t sys_io_uring_setup(uint32_t entries, uint64_t user_params) {
+    struct tunix_io_uring_params params;
+    if (!user_params || copy_from_user(&params, user_params, sizeof(params)) != 0) return -EFAULT;
+    struct io_uring_context *context = NULL;
+    int status = io_uring_create(entries, &params, &context);
+    if (status != 0) return status;
+    struct file *file = file_create_io_uring(context);
+    if (!file) {
+        io_uring_destroy(context);
+        return -ENOMEM;
+    }
+    if (copy_to_user(user_params, &params, sizeof(params)) != 0) {
+        file_unref(file);
+        return -EFAULT;
+    }
+    return install_new_file(file, 1);
+}
+
+static int64_t sys_io_uring_register(int fd, uint32_t opcode, uint64_t user_arg,
+                                     uint32_t count) {
+    struct file *file = file_from_fd(fd);
+    if (!file) return -EBADF;
+    if (file->kind != FILE_KIND_IO_URING) return -EOPNOTSUPP;
+    if (opcode == IORING_REGISTER_ENABLE_RINGS) return 0;
+    if (opcode != IORING_REGISTER_PROBE) return -EINVAL;
+    if (!user_arg || count > 256) return -EINVAL;
+    struct ring_probe_header header;
+    memset(&header, 0, sizeof(header));
+    header.last_op = IORING_OP_LAST - 1;
+    header.ops_len = (uint8_t)(count < IORING_OP_LAST ? count : IORING_OP_LAST);
+    if (copy_to_user(user_arg, &header, sizeof(header)) != 0) return -EFAULT;
+    for (uint32_t index = 0; index < header.ops_len; index++) {
+        struct ring_probe_op entry;
+        memset(&entry, 0, sizeof(entry));
+        entry.op = (uint8_t)index;
+        entry.flags = io_uring_op_supported(index) ? 1U : 0U;
+        if (copy_to_user(user_arg + sizeof(header) + index * sizeof(entry), &entry,
+                         sizeof(entry)) != 0) return -EFAULT;
+    }
+    return 0;
+}
+
+static void ring_finish_enter(struct syscall_frame *frame, int64_t result) {
+    clear_io_wait(process_current());
+    process_restore_signal_mask();
+    SYSCALL_RET(frame) = (uint64_t)result;
+}
+
+static void sys_io_uring_enter(struct syscall_frame *frame) {
+    int fd = (int)SYSCALL_ARG0(frame);
+    uint32_t to_submit = (uint32_t)SYSCALL_ARG1(frame);
+    uint32_t min_complete = (uint32_t)SYSCALL_ARG2(frame);
+    uint32_t flags = (uint32_t)SYSCALL_ARG3(frame);
+    uint64_t argument = SYSCALL_ARG4(frame);
+    uint64_t argument_size = SYSCALL_ARG5(frame);
+    struct process *process = process_current();
+    if (flags & ~(IORING_ENTER_GETEVENTS | IORING_ENTER_SQ_WAKEUP | IORING_ENTER_SQ_WAIT |
+                  IORING_ENTER_EXT_ARG)) {
+        ring_finish_enter(frame, -EINVAL);
+        return;
+    }
+    struct file *file = file_from_fd(fd);
+    if (!process || !file) {
+        ring_finish_enter(frame, -EBADF);
+        return;
+    }
+    if (file->kind != FILE_KIND_IO_URING) {
+        ring_finish_enter(frame, -EOPNOTSUPP);
+        return;
+    }
+    uint64_t sigmask = argument;
+    uint64_t sigmask_size = argument_size;
+    int64_t wait_ns = -1;
+    if (flags & IORING_ENTER_EXT_ARG) {
+        struct ring_getevents_arg extended;
+        if (argument_size != sizeof(extended)) {
+            ring_finish_enter(frame, -EINVAL);
+            return;
+        }
+        if (copy_from_user(&extended, argument, sizeof(extended)) != 0) {
+            ring_finish_enter(frame, -EFAULT);
+            return;
+        }
+        sigmask = extended.sigmask;
+        sigmask_size = extended.sigmask_sz;
+        if (extended.ts) {
+            wait_ns = read_timespec_timeout_ns(extended.ts);
+            if (wait_ns < -1) {
+                ring_finish_enter(frame, wait_ns);
+                return;
+            }
+        }
+    }
+
+    struct io_uring_context *context = file->io_uring;
+    uint64_t space = process->cr3;
+    int restarted = process->io_wait_active && process->io_wait_syscall == SYS_IO_URING_ENTER;
+    uint64_t now = time_uptime_ns();
+    io_uring_lock(context);
+    uint64_t carried_deadline = 0;
+    uint32_t carried = io_uring_take_restart(context, process->pid, &carried_deadline);
+    if (!restarted) {
+        carried = 0;
+        carried_deadline = 0;
+    }
+    uint64_t wait_deadline = carried_deadline ? carried_deadline :
+        (wait_ns < 0 ? UINT64_MAX : saturating_add_u64(now, (uint64_t)wait_ns));
+    int64_t submitted = io_uring_submit(context, to_submit, space);
+    if (submitted < 0) {
+        io_uring_unlock(context);
+        ring_finish_enter(frame, carried ? (int64_t)carried : submitted);
+        return;
+    }
+    submitted += carried;
+    uint32_t wanted = min_complete;
+    if (wanted > io_uring_cq_entries(context)) wanted = io_uring_cq_entries(context);
+    int waits = (flags & IORING_ENTER_GETEVENTS) && wanted;
+
+    for (;;) {
+        io_uring_run(context, ring_execute, space);
+        if (!waits || io_uring_completions_ready(context) >= wanted) {
+            io_uring_unlock(context);
+            ring_finish_enter(frame, submitted);
+            return;
+        }
+        if (now >= wait_deadline) {
+            io_uring_unlock(context);
+            ring_finish_enter(frame, submitted ? submitted : -ETIME);
+            return;
+        }
+        io_watch_begin(process);
+        uint64_t until = io_uring_watch(context, ring_watch_fd, space);
+        if (wait_deadline < until) until = wait_deadline;
+        if (until != UINT64_MAX && until <= now) {
+            now = time_uptime_ns();
+            continue;
+        }
+        io_uring_note_restart(context, process->pid, (uint32_t)submitted, wait_deadline);
+        io_uring_unlock(context);
+        apply_wait_signal_set(sigmask, sigmask_size);
+        int64_t timeout_ns = until == UINT64_MAX ? -1 : (int64_t)(until - now);
+        if (retry_io_wait(frame, SYS_IO_URING_ENTER, timeout_ns)) {
+            if ((int64_t)SYSCALL_RET(frame) == -EINTR) {
+                io_uring_lock(context);
+                (void)io_uring_take_restart(context, process->pid, NULL);
+                io_uring_unlock(context);
+                process_restore_signal_mask();
+                if (submitted) SYSCALL_RET(frame) = (uint64_t)submitted;
+            }
+            return;
+        }
+        io_uring_lock(context);
+        (void)io_uring_take_restart(context, process->pid, NULL);
+        now = time_uptime_ns();
+    }
+}
+
+static int64_t sys_pidfd_open(int64_t pid, uint32_t flags) {
+    if (flags & ~(uint32_t)O_NONBLOCK) return -EINVAL;
+    if (pid <= 0) return -EINVAL;
+    uint64_t start_ns = 0;
+    int status = process_pidfd_target((uint64_t)pid, &start_ns);
+    if (status != 0) return status;
+    return install_new_file(file_create_pidfd((uint64_t)pid, start_ns, flags & O_NONBLOCK), 1);
+}
+
+static int64_t sys_pidfd_send_signal(int fd, int signal_number, uint64_t user_info,
+                                     uint32_t flags) {
+    if (flags || user_info) return -EINVAL;
+    struct file *file = file_from_fd(fd);
+    if (!file || file->kind != FILE_KIND_PIDFD) return -EBADF;
+    if (process_pidfd_exited(file->pidfd_pid, file->pidfd_start_ns)) return -ESRCH;
+    return process_send_signal_checked((int64_t)file->pidfd_pid, signal_number);
+}
+
 static void syscall_run(struct syscall_frame *frame) {
     if (!frame) return;
     process_reap_deferred();
@@ -5858,9 +6206,19 @@ static void syscall_run(struct syscall_frame *frame) {
             int64_t id = (int64_t)SYSCALL_ARG1(frame);
             int options = (int)SYSCALL_ARG3(frame);
             int64_t pid_spec;
+            int pidfd_nonblocking = 0;
             if (idtype == 0) pid_spec = -1;
             else if (idtype == 1 && id > 0) pid_spec = id;
             else if (idtype == 2 && id > 0) pid_spec = -id;
+            else if (idtype == P_PIDFD) {
+                struct file *pidfd = file_from_fd((int)id);
+                if (!pidfd || pidfd->kind != FILE_KIND_PIDFD) {
+                    SYSCALL_RET(frame) = (uint64_t)-(int64_t)EBADF;
+                    break;
+                }
+                pid_spec = (int64_t)pidfd->pidfd_pid;
+                pidfd_nonblocking = (pidfd->flags & O_NONBLOCK) != 0;
+            }
             else { SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINVAL; break; }
             options &= ~(WNOTHREAD | WALLCHILDREN | WCLONE);
             if ((options & ~(WNOHANG | WNOWAIT | WEXITED | WSTOPPED | WCONTINUED)) ||
@@ -5870,7 +6228,10 @@ static void syscall_run(struct syscall_frame *frame) {
             }
             int64_t result = process_waitid_from_syscall(pid_spec, SYSCALL_ARG2(frame),
                                                          options);
-            if (result == -EAGAIN) {
+            if (result == -EAGAIN && pidfd_nonblocking) {
+                clear_io_wait(process_current());
+                SYSCALL_RET(frame) = (uint64_t)-(int64_t)EAGAIN;
+            } else if (result == -EAGAIN) {
                 if (!retry_io_wait(frame, SYS_WAITID, -1))
                     SYSCALL_RET(frame) = (uint64_t)-(int64_t)ECHILD;
             } else {
@@ -6524,6 +6885,23 @@ static void syscall_run(struct syscall_frame *frame) {
         case SYS_FACCESSAT2:
             SYSCALL_RET(frame) = (uint64_t)sys_faccess_at((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame),
                                                   (int)SYSCALL_ARG2(frame), (int)SYSCALL_ARG3(frame));
+            break;
+        case SYS_IO_URING_SETUP:
+            SYSCALL_RET(frame) = (uint64_t)sys_io_uring_setup((uint32_t)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame));
+            break;
+        case SYS_IO_URING_ENTER:
+            sys_io_uring_enter(frame);
+            break;
+        case SYS_IO_URING_REGISTER:
+            SYSCALL_RET(frame) = (uint64_t)sys_io_uring_register((int)SYSCALL_ARG0(frame), (uint32_t)SYSCALL_ARG1(frame),
+                                                                SYSCALL_ARG2(frame), (uint32_t)SYSCALL_ARG3(frame));
+            break;
+        case SYS_PIDFD_OPEN:
+            SYSCALL_RET(frame) = (uint64_t)sys_pidfd_open((int64_t)SYSCALL_ARG0(frame), (uint32_t)SYSCALL_ARG1(frame));
+            break;
+        case SYS_PIDFD_SEND_SIGNAL:
+            SYSCALL_RET(frame) = (uint64_t)sys_pidfd_send_signal((int)SYSCALL_ARG0(frame), (int)SYSCALL_ARG1(frame),
+                                                                SYSCALL_ARG2(frame), (uint32_t)SYSCALL_ARG3(frame));
             break;
         case SYS_CLOSE_RANGE: {
             struct process *process = process_current();

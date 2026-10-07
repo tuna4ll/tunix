@@ -19,6 +19,7 @@ struct inotify_context;
 struct memfd_object;
 struct signalfd_context;
 struct eventfs_subscriber;
+struct io_uring_context;
 
 #define FILE_KIND_VFS        1
 #define FILE_KIND_PIPE_READ  2
@@ -38,6 +39,8 @@ struct eventfs_subscriber;
 #define FILE_KIND_SIGNALFD    16
 #define FILE_KIND_DMABUF      17
 #define FILE_KIND_EVENTFS     18
+#define FILE_KIND_IO_URING    19
+#define FILE_KIND_PIDFD       20
 
 struct file {
     struct mutex lock;
@@ -59,6 +62,9 @@ struct file {
     struct memfd_object *memfd;
     struct signalfd_context *signalfd;
     struct eventfs_subscriber *eventfs;
+    struct io_uring_context *io_uring;
+    uint64_t pidfd_pid;
+    uint64_t pidfd_start_ns;
     uint32_t dmabuf_handle;
     int flock_type;
     uint32_t edge_generation;
@@ -79,6 +85,8 @@ struct file *file_create_memfd(struct memfd_object *object, uint32_t flags);
 struct file *file_create_signalfd(struct signalfd_context *context, uint32_t flags);
 struct file *file_create_dmabuf(uint32_t handle, uint32_t flags);
 struct file *file_create_inotify(struct inotify_context *context, uint32_t flags);
+struct file *file_create_io_uring(struct io_uring_context *context);
+struct file *file_create_pidfd(uint64_t pid, uint64_t start_ns, uint32_t flags);
 struct file *file_create_pty_endpoint(struct pty_pair *pty, int master,
                                       struct vfs_node *node, uint32_t flags);
 void file_ref(struct file *file);

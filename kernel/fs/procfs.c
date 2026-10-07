@@ -1015,6 +1015,8 @@ static void describe_file(const struct file *file, char *output, size_t capacity
         case FILE_KIND_EPOLL: kind = "anon_inode:[eventpoll]"; break;
         case FILE_KIND_INOTIFY: kind = "anon_inode:inotify"; break;
         case FILE_KIND_SIGNALFD: kind = "anon_inode:[signalfd]"; break;
+        case FILE_KIND_IO_URING: kind = "anon_inode:[io_uring]"; break;
+        case FILE_KIND_PIDFD: kind = "anon_inode:[pidfd]"; break;
         case FILE_KIND_MEMFD: kind = "/memfd:tunix"; break;
         default: break;
     }

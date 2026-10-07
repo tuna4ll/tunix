@@ -261,6 +261,8 @@ struct process *process_current(void);
 void process_dump_all(void);
 struct process *process_find(uint64_t pid);
 struct process *process_get(uint64_t pid);
+int process_pidfd_target(uint64_t pid, uint64_t *start_ns);
+int process_pidfd_exited(uint64_t pid, uint64_t start_ns);
 void process_put(struct process *process);
 int process_exists(uint64_t pid);
 void process_table_lock(void);
