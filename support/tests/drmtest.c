@@ -5,6 +5,7 @@ typedef int s32;
 
 #define SYS_read 0
 #define SYS_write 1
+#define SYS_poll 7
 #define SYS_open 2
 #define SYS_close 3
 #define SYS_mmap 9
@@ -166,6 +167,12 @@ static void report(const char *tag, s64 result) {
     put("\n");
 }
 
+static s64 read_event(int fd, void *event, u64 size) {
+    struct { s32 fd; short events, revents; } watch = { fd, 1, 0 };
+    (void)syscall3(SYS_poll, (s64)&watch, 1, 200);
+    return syscall3(SYS_read, fd, (s64)event, (s64)size);
+}
+
 static void test_version(void) {
     char name[32];
     for (int i = 0; i < 32; i++) name[i] = 0;
@@ -269,7 +276,7 @@ static void test_atomic_modeset(void) {
     report("MODESET commit", call(IOWR(NR_MODE_ATOMIC, struct drm_mode_atomic), &atomic));
 
     unsigned char event[64];
-    s64 got = syscall3(SYS_read, card, (s64)event, sizeof(event));
+    s64 got = read_event(card, event, sizeof(event));
     put("MODESET event ");
     put(got > 0 ? "bytes=" : "errno=");
     put_signed(got > 0 ? got : -got);
@@ -282,14 +289,35 @@ static void test_atomic_modeset(void) {
     int other = (int)syscall3(SYS_open, (s64)"/dev/dri/card0", O_RDWR | O_NONBLOCK, 0);
     s64 stolen = syscall3(SYS_read, other, (s64)event, sizeof(event));
     report("MODESET commit-again", call(IOWR(NR_MODE_ATOMIC, struct drm_mode_atomic), &atomic));
+    got = read_event(card, event, sizeof(event));
     stolen = syscall3(SYS_read, other, (s64)event, sizeof(event));
-    got = syscall3(SYS_read, card, (s64)event, sizeof(event));
     put("CLIENTEVENTS other_read=");
     put_signed(stolen);
     put(" owner_read=");
     put_signed(got);
     put(other >= 0 && stolen == -11 && got >= 16 && *(u64 *)(event + 8) == 0xABCDEF ? " PASS\n" : " FAIL\n");
     (void)syscall1(SYS_close, other);
+
+    u64 previous_us = 0, min_gap_us = ~0ULL;
+    u32 previous_sequence = 0, delivered = 0, sequence_ok = 1;
+    for (int frame = 0; frame < 10; frame++) {
+        if (call(IOWR(NR_MODE_ATOMIC, struct drm_mode_atomic), &atomic) != 0) break;
+        if (read_event(card, event, sizeof(event)) < 32) break;
+        u64 at_us = (u64)*(u32 *)(event + 16) * 1000000ULL + *(u32 *)(event + 20);
+        u32 sequence = *(u32 *)(event + 24);
+        if (delivered) {
+            if (at_us - previous_us < min_gap_us) min_gap_us = at_us - previous_us;
+            if (sequence <= previous_sequence) sequence_ok = 0;
+        }
+        previous_us = at_us;
+        previous_sequence = sequence;
+        delivered++;
+    }
+    put("VBLANK events=");
+    put_signed(delivered);
+    put(" min_gap_us=");
+    put_signed((s64)min_gap_us);
+    put(delivered == 10 && min_gap_us >= 16000 && sequence_ok ? " PASS\n" : " FAIL\n");
 
     test_present_latency(fb.fb_id, blob.blob_id, width, height, 200);
     test_damage_clips(fb.fb_id, blob.blob_id, width, height, 200);

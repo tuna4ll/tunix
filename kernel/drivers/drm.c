@@ -8,6 +8,7 @@
 #include "../include/framebuffer.h"
 #include "../include/heap.h"
 #include "../include/time.h"
+#include "../include/timer.h"
 #include "../include/kstring.h"
 #include "../include/pmm.h"
 #include "../include/process.h"
@@ -520,6 +521,7 @@ struct drm_framebuffer {
 
 #define DRM_EVENT_FLIP_COMPLETE 0x02
 #define DRM_MAX_EVENTS 64
+#define DRM_VBLANK_NS 16666667ULL
 #define DRM_EVENT_QUEUES 32
 
 struct drm_event {
@@ -539,6 +541,8 @@ struct drm_event_vblank {
 struct drm_event_queue {
     const struct file *owner;
     struct drm_event_vblank events[DRM_MAX_EVENTS];
+    uint64_t fences[DRM_MAX_EVENTS];
+    uint64_t due_ns[DRM_MAX_EVENTS];
     uint32_t head;
     uint32_t tail;
     uint32_t count;
@@ -1645,19 +1649,33 @@ static void queue_flip_event(const struct file *client, uint64_t user_data) {
         queue->head = (queue->head + 1U) % DRM_MAX_EVENTS;
         queue->count--;
     }
-    uint64_t now = time_uptime_ns();
     struct drm_event_vblank *event = &queue->events[queue->tail];
     memset(event, 0, sizeof(*event));
     event->base.type = DRM_EVENT_FLIP_COMPLETE;
     event->base.length = sizeof(*event);
     event->user_data = user_data;
-    event->tv_sec = (uint32_t)(now / 1000000000ULL);
-    event->tv_usec = (uint32_t)((now % 1000000000ULL) / 1000ULL);
-    event->sequence = ++flip_sequence;
+    ++flip_sequence;
     event->crtc_id = DRM_CRTC_ID;
+    uint64_t due = (time_uptime_ns() / DRM_VBLANK_NS + 1U) * DRM_VBLANK_NS;
+    queue->fences[queue->tail] = virtgpu_flip_fence();
+    queue->due_ns[queue->tail] = due;
     queue->tail = (queue->tail + 1U) % DRM_MAX_EVENTS;
+    timer_note_deadline(due);
     __atomic_add_fetch(&queue->count, 1, __ATOMIC_RELEASE);
     (void)process_wake_io();
+}
+
+#define FLIP_FENCE_PATIENCE_NS 100000000ULL
+
+static int flip_head_ready(const struct drm_event_queue *queue, int reclaim) {
+    if (!__atomic_load_n(&queue->count, __ATOMIC_ACQUIRE)) return 0;
+    uint64_t now = time_uptime_ns();
+    uint64_t due = queue->due_ns[queue->head];
+    if (now < due) return 0;
+    uint64_t fence = queue->fences[queue->head];
+    if (fence <= virtgpu_completed()) return 1;
+    if (reclaim && virtgpu_sequence_done(fence)) return 1;
+    return now - due > FLIP_FENCE_PATIENCE_NS;
 }
 
 int64_t drm_file_read(struct file *file, size_t size, void *buffer) {
@@ -1666,8 +1684,15 @@ int64_t drm_file_read(struct file *file, size_t size, void *buffer) {
     struct drm_event_queue *queue = event_queue_of(file, 0);
     size_t produced = 0;
     uint8_t *out = (uint8_t *)buffer;
-    while (queue && queue->count && size - produced >= sizeof(struct drm_event_vblank)) {
-        memcpy(out + produced, &queue->events[queue->head], sizeof(struct drm_event_vblank));
+    while (queue && flip_head_ready(queue, 1) &&
+           size - produced >= sizeof(struct drm_event_vblank)) {
+        struct drm_event_vblank *event = &queue->events[queue->head];
+        uint64_t vblank = time_uptime_ns() / DRM_VBLANK_NS;
+        uint64_t at = vblank * DRM_VBLANK_NS;
+        event->tv_sec = (uint32_t)(at / 1000000000ULL);
+        event->tv_usec = (uint32_t)((at % 1000000000ULL) / 1000ULL);
+        event->sequence = (uint32_t)vblank;
+        memcpy(out + produced, event, sizeof(struct drm_event_vblank));
         queue->head = (queue->head + 1U) % DRM_MAX_EVENTS;
         queue->count--;
         produced += sizeof(struct drm_event_vblank);
@@ -1679,7 +1704,7 @@ int64_t drm_file_read(struct file *file, size_t size, void *buffer) {
 int drm_file_read_ready(struct file *file) {
     for (unsigned index = 0; index < DRM_EVENT_QUEUES; index++)
         if (event_queues[index].owner == file)
-            return __atomic_load_n(&event_queues[index].count, __ATOMIC_ACQUIRE) != 0;
+            return flip_head_ready(&event_queues[index], 0);
     return 0;
 }
 

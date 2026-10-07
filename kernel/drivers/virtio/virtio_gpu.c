@@ -12,6 +12,7 @@
 #include "../../include/lock.h"
 #include "../../include/percpu.h"
 #include "../../include/process.h"
+#include "../../include/workqueue.h"
 
 static struct lock virtgpu_lock = LOCK_INITIALIZER("virtio-gpu", LOCK_RANK_DEVICE);
 
@@ -361,9 +362,16 @@ static int may_sleep_here(void) {
     return process_may_sleep();
 }
 
+static uint64_t completed_seen;
+
+static void reclaim_control(void) {
+    virtio_queue_reclaim(&control);
+    __atomic_store_n(&completed_seen, control.completed, __ATOMIC_RELEASE);
+}
+
 static int completed_through(uint64_t target) {
     VIRTGPU_LOCKED;
-    virtio_queue_reclaim(&control);
+    reclaim_control();
     return control.completed >= target;
 }
 
@@ -735,10 +743,26 @@ int virtgpu_submit_3d(uint32_t context, const void *buffer, uint32_t bytes) {
 
 static uint64_t completions;
 
+static void completion_reap(void *unused) {
+    (void)unused;
+    uint64_t before = __atomic_load_n(&completed_seen, __ATOMIC_ACQUIRE);
+    {
+        VIRTGPU_LOCKED;
+        if (!ready) return;
+        reclaim_control();
+    }
+    if (__atomic_load_n(&completed_seen, __ATOMIC_ACQUIRE) == before) return;
+    (void)process_wake_io();
+    process_io_recheck();
+}
+
+static struct work completion_work = WORK_INITIALIZER(completion_reap, NULL);
+
 static void control_queue_interrupt(void *context) {
     (void)context;
     __atomic_add_fetch(&completions, 1, __ATOMIC_RELAXED);
     (void)process_wake_all(&completion_channel);
+    work_queue(&completion_work);
 }
 
 uint64_t virtgpu_interrupt_count(void) { return completions; }
@@ -852,6 +876,16 @@ uint64_t virtgpu_resource_release(uint32_t resource) {
 int virtgpu_sequence_done(uint64_t sequence) {
     if (!sequence) return 1;
     return completed_through(sequence);
+}
+
+uint64_t virtgpu_completed(void) {
+    return __atomic_load_n(&completed_seen, __ATOMIC_ACQUIRE);
+}
+
+uint64_t virtgpu_flip_fence(void) {
+    VIRTGPU_LOCKED;
+    if (!ready || !device.vector || !control.interrupt_driven) return 0;
+    return control.posted;
 }
 
 uint64_t virtgpu_posted(void) {

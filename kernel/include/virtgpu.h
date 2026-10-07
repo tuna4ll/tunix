@@ -67,6 +67,8 @@ uint64_t virtgpu_resource_release(uint32_t resource);
 int virtgpu_sequence_done(uint64_t sequence);
 int virtgpu_wait_sequence(uint64_t sequence);
 uint64_t virtgpu_posted(void);
+uint64_t virtgpu_flip_fence(void);
+uint64_t virtgpu_completed(void);
 struct virtgpu_rect {
     uint32_t x;
     uint32_t y;
