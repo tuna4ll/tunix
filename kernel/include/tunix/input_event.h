@@ -7,6 +7,7 @@
 
 #define TUNIX_INPUT_DEVICE_KEYBOARD 0U
 #define TUNIX_INPUT_DEVICE_MOUSE    1U
+#define TUNIX_INPUT_DEVICE_TABLET   2U
 
 #define TUNIX_INPUT_NAME_MAX 32U
 #define TUNIX_EVIOCGINFO 0x54490001UL
@@ -25,10 +26,13 @@ struct tunix_input_device_info {
     char name[TUNIX_INPUT_NAME_MAX];
 };
 
-/* Event types and synchronization codes intentionally follow Linux evdev. */
 #define TUNIX_EV_SYN 0x00U
 #define TUNIX_EV_KEY 0x01U
 #define TUNIX_EV_REL 0x02U
+#define TUNIX_EV_ABS 0x03U
+
+#define TUNIX_ABS_X 0U
+#define TUNIX_ABS_Y 1U
 
 #define TUNIX_SYN_REPORT  0U
 #define TUNIX_SYN_DROPPED 3U
@@ -149,17 +153,6 @@ struct tunix_input_device_info {
 #define TUNIX_BTN_SIDE   0x113U
 #define TUNIX_BTN_EXTRA  0x114U
 
-/*
- * The record /dev/input/event* delivers. This is Linux's `struct input_event`
- * exactly -- 64-bit timeval followed by type/code/value -- and it has to stay
- * that way: libinput reads it straight off the descriptor into its own
- * definition, and a layout of our own would be silently misparsed rather than
- * rejected.
- *
- * The timestamp's clock is per-descriptor and selected with EVIOCSCLOCKID;
- * it is the realtime clock until a reader asks for CLOCK_MONOTONIC, which
- * libinput does immediately.
- */
 struct tunix_input_event {
     int64_t tv_sec;
     int64_t tv_usec;

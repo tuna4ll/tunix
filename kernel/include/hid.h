@@ -18,6 +18,9 @@ struct hid_mouse_layout {
     struct hid_field wheel;
     struct hid_field pan;
     uint16_t report_bits;
+    uint8_t absolute;
+    int32_t x_max;
+    int32_t y_max;
 };
 
 int hid_parse_mouse(const uint8_t *descriptor, uint32_t length, struct hid_mouse_layout *out);

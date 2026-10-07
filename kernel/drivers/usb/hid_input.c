@@ -116,6 +116,11 @@ void hid_mouse_report(const struct hid_mouse_layout *layout, const uint8_t *repo
         int dx, dy, wheel;
         uint32_t buttons;
         if (hid_decode_mouse(layout, report, length, &dx, &dy, &wheel, &buttons) != 0) return;
+        if (layout->absolute) {
+            input_external_tablet(dx, dy, layout->x_max, layout->y_max, wheel,
+                                  (uint8_t)(buttons & MOUSE_BUTTON_MASK));
+            return;
+        }
         input_external_mouse(dx, dy, wheel, (uint8_t)(buttons & MOUSE_BUTTON_MASK));
         return;
     }

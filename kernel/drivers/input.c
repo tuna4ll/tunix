@@ -413,6 +413,37 @@ void input_external_key(uint16_t keycode, int released) {
     (void)keyboard_emit_key(keycode, released);
 }
 
+static int32_t tablet_x = -1;
+static int32_t tablet_y = -1;
+static int32_t tablet_x_max = 32767;
+static int32_t tablet_y_max = 32767;
+static uint8_t tablet_buttons;
+
+void input_external_tablet(int32_t x, int32_t y, int32_t x_max, int32_t y_max, int wheel,
+                           uint8_t buttons) {
+    INPUT_LOCKED;
+    if (x_max > 0) tablet_x_max = x_max;
+    if (y_max > 0) tablet_y_max = y_max;
+    uint8_t changed = buttons ^ tablet_buttons;
+    if (x == tablet_x && y == tablet_y && !wheel && !changed) return;
+    uint64_t timestamp = time_uptime_ns();
+    if (x != tablet_x)
+        input_emit_at(TUNIX_INPUT_DEVICE_TABLET, timestamp, TUNIX_EV_ABS, TUNIX_ABS_X, x);
+    if (y != tablet_y)
+        input_emit_at(TUNIX_INPUT_DEVICE_TABLET, timestamp, TUNIX_EV_ABS, TUNIX_ABS_Y, y);
+    if (wheel)
+        input_emit_at(TUNIX_INPUT_DEVICE_TABLET, timestamp, TUNIX_EV_REL, TUNIX_REL_WHEEL, wheel);
+    static const uint16_t codes[3] = { TUNIX_BTN_LEFT, TUNIX_BTN_RIGHT, TUNIX_BTN_MIDDLE };
+    for (unsigned bit = 0; bit < 3U; bit++)
+        if (changed & (1U << bit))
+            input_emit_at(TUNIX_INPUT_DEVICE_TABLET, timestamp, TUNIX_EV_KEY, codes[bit],
+                          (buttons >> bit) & 1U);
+    tablet_x = x;
+    tablet_y = y;
+    tablet_buttons = buttons;
+    input_sync_at(TUNIX_INPUT_DEVICE_TABLET, timestamp);
+}
+
 void input_external_mouse(int dx, int dy, int wheel, uint8_t buttons) {
     INPUT_LOCKED;
     uint8_t changed = buttons ^ mouse_buttons;
@@ -670,6 +701,14 @@ int input_get_device_info(unsigned device_id, struct tunix_input_device_info *in
         memcpy(info->name, "Tunix PS/2 Mouse", sizeof("Tunix PS/2 Mouse"));
         return 0;
     }
+    if (device_id == TUNIX_INPUT_DEVICE_TABLET) {
+        info->event_types = (1U << TUNIX_EV_SYN) | (1U << TUNIX_EV_KEY) |
+                            (1U << TUNIX_EV_REL) | (1U << TUNIX_EV_ABS);
+        info->relative_axes = 1U << TUNIX_REL_WHEEL;
+        info->capabilities = TUNIX_INPUT_CAP_POINTER | TUNIX_INPUT_CAP_WHEEL;
+        memcpy(info->name, "Tunix USB Tablet", sizeof("Tunix USB Tablet"));
+        return 0;
+    }
     return -EINVAL;
 }
 
@@ -724,7 +763,8 @@ int64_t input_read_scancodes(size_t size, void *buffer) {
 
 struct input_reader *input_reader_open(unsigned device_id) {
     if (device_id != TUNIX_INPUT_DEVICE_KEYBOARD &&
-        device_id != TUNIX_INPUT_DEVICE_MOUSE)
+        device_id != TUNIX_INPUT_DEVICE_MOUSE &&
+        device_id != TUNIX_INPUT_DEVICE_TABLET)
         return NULL;
 
     struct input_reader *reader = (struct input_reader *)kmalloc(sizeof(*reader));
@@ -811,6 +851,7 @@ struct evdev_id {
 };
 
 #define BUS_I8042 0x11
+#define BUS_USB 0x03
 
 static void bitmap_set(uint8_t *bits, size_t limit, unsigned bit) {
     if (bit / 8U >= limit) return;
@@ -822,10 +863,27 @@ static void evdev_event_type_bits(unsigned device_id, uint8_t *bits, size_t limi
     bitmap_set(bits, limit, TUNIX_EV_SYN);
     bitmap_set(bits, limit, TUNIX_EV_KEY);
     if (device_id == TUNIX_INPUT_DEVICE_MOUSE) bitmap_set(bits, limit, TUNIX_EV_REL);
+    if (device_id == TUNIX_INPUT_DEVICE_TABLET) {
+        bitmap_set(bits, limit, TUNIX_EV_REL);
+        bitmap_set(bits, limit, TUNIX_EV_ABS);
+    }
+}
+
+static void evdev_abs_bits(unsigned device_id, uint8_t *bits, size_t limit) {
+    memset(bits, 0, limit);
+    if (device_id != TUNIX_INPUT_DEVICE_TABLET) return;
+    bitmap_set(bits, limit, TUNIX_ABS_X);
+    bitmap_set(bits, limit, TUNIX_ABS_Y);
 }
 
 static void evdev_key_bits(unsigned device_id, uint8_t *bits, size_t limit) {
     memset(bits, 0, limit);
+    if (device_id == TUNIX_INPUT_DEVICE_TABLET) {
+        bitmap_set(bits, limit, TUNIX_BTN_LEFT);
+        bitmap_set(bits, limit, TUNIX_BTN_RIGHT);
+        bitmap_set(bits, limit, TUNIX_BTN_MIDDLE);
+        return;
+    }
     if (device_id == TUNIX_INPUT_DEVICE_MOUSE) {
         bitmap_set(bits, limit, TUNIX_BTN_LEFT);
         bitmap_set(bits, limit, TUNIX_BTN_RIGHT);
@@ -844,6 +902,10 @@ static void evdev_key_bits(unsigned device_id, uint8_t *bits, size_t limit) {
 
 static void evdev_rel_bits(unsigned device_id, uint8_t *bits, size_t limit) {
     memset(bits, 0, limit);
+    if (device_id == TUNIX_INPUT_DEVICE_TABLET) {
+        bitmap_set(bits, limit, TUNIX_REL_WHEEL);
+        return;
+    }
     if (device_id != TUNIX_INPUT_DEVICE_MOUSE) return;
     bitmap_set(bits, limit, TUNIX_REL_X);
     bitmap_set(bits, limit, TUNIX_REL_Y);
@@ -880,8 +942,11 @@ int64_t input_reader_ioctl(struct input_reader *reader, unsigned device_id,
     }
 
     if (nr == EVIOCGID_NR) {
-        struct evdev_id id = { .bustype = BUS_I8042, .vendor = 0,
-                               .product = 0, .version = 0 };
+        struct evdev_id id = {
+            .bustype = device_id == TUNIX_INPUT_DEVICE_TABLET ? BUS_USB : BUS_I8042,
+            .vendor = device_id == TUNIX_INPUT_DEVICE_TABLET ? 0x0627 : 0,
+            .product = device_id == TUNIX_INPUT_DEVICE_TABLET ? 0x0001 : 0,
+            .version = 0 };
         return evdev_copy_out(user_argument, &id, sizeof(id), size) < 0
                    ? -EFAULT : 0;
     }
@@ -907,6 +972,7 @@ int64_t input_reader_ioctl(struct input_reader *reader, unsigned device_id,
         case 0: evdev_event_type_bits(device_id, bits, sizeof(bits)); break;
         case TUNIX_EV_KEY: evdev_key_bits(device_id, bits, sizeof(bits)); break;
         case TUNIX_EV_REL: evdev_rel_bits(device_id, bits, sizeof(bits)); break;
+        case TUNIX_EV_ABS: evdev_abs_bits(device_id, bits, sizeof(bits)); break;
         default: memset(bits, 0, sizeof(bits)); break;
         }
         return evdev_copy_out(user_argument, bits, size, size);
@@ -925,7 +991,16 @@ int64_t input_reader_ioctl(struct input_reader *reader, unsigned device_id,
         return evdev_copy_out(user_argument, bits, size, size);
     }
 
-    if (nr >= EVIOCGABS_NR && nr < EVIOCGABS_NR + 0x40U) return -EINVAL;
+    if (nr >= EVIOCGABS_NR && nr < EVIOCGABS_NR + 0x40U) {
+        unsigned axis = nr - EVIOCGABS_NR;
+        if (device_id != TUNIX_INPUT_DEVICE_TABLET ||
+            (axis != TUNIX_ABS_X && axis != TUNIX_ABS_Y)) return -EINVAL;
+        int32_t absinfo[6] = {
+            axis == TUNIX_ABS_X ? (tablet_x < 0 ? 0 : tablet_x) : (tablet_y < 0 ? 0 : tablet_y),
+            0, axis == TUNIX_ABS_X ? tablet_x_max : tablet_y_max, 0, 0, 0
+        };
+        return evdev_copy_out(user_argument, absinfo, sizeof(absinfo), size) < 0 ? -EFAULT : 0;
+    }
 
     if (nr == EVIOCSCLOCKID_NR) {
         int32_t clock_id = 0;

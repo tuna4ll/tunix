@@ -872,13 +872,14 @@ void sysfs_init(void) {
         }
     }
 
-    for (unsigned device = 0; device < 2U; device++) {
+    static const char *const input_names[] = { "Tunix keyboard", "Tunix mouse", "Tunix USB Tablet" };
+    for (unsigned device = 0; device < 3U; device++) {
         char parent[48];
         size_t parent_used = 0;
         append_string(parent, sizeof(parent), &parent_used, "virtual/input/input");
         append_number(parent, sizeof(parent), &parent_used, device);
         parent[parent_used] = '\0';
-        publish_input_parent(parent, device == 0U ? "Tunix keyboard" : "Tunix mouse");
+        publish_input_parent(parent, input_names[device]);
 
         char name[64];
         size_t used = 0;

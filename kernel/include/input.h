@@ -14,6 +14,8 @@ int input_console_pending(void);
 
 void input_external_key(uint16_t keycode, int released);
 void input_external_mouse(int dx, int dy, int wheel, uint8_t buttons);
+void input_external_tablet(int32_t x, int32_t y, int32_t x_max, int32_t y_max, int wheel,
+                           uint8_t buttons);
 void input_irq(void);
 int input_mouse_available(void);
 int input_get_device_info(unsigned device_id, struct tunix_input_device_info *info);

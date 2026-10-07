@@ -14,6 +14,7 @@
 
 #define GLOBAL_USAGE_PAGE 0x0U
 #define GLOBAL_LOGICAL_MINIMUM 0x1U
+#define GLOBAL_LOGICAL_MAXIMUM 0x2U
 #define GLOBAL_REPORT_SIZE 0x7U
 #define GLOBAL_REPORT_ID 0x8U
 #define GLOBAL_REPORT_COUNT 0x9U
@@ -45,6 +46,7 @@
 struct globals {
     uint32_t usage_page;
     int32_t logical_minimum;
+    int32_t logical_maximum;
     uint32_t report_size;
     uint32_t report_count;
     uint32_t report_id;
@@ -64,7 +66,7 @@ static void set_field(struct hid_field *field, uint32_t offset, uint32_t size, i
 }
 
 int hid_parse_mouse(const uint8_t *descriptor, uint32_t length, struct hid_mouse_layout *out) {
-    struct globals global = {0, 0, 0, 0, 0};
+    struct globals global = {0, 0, 0, 0, 0, 0};
     struct globals stack[MAX_STACK];
     unsigned stack_depth = 0;
     uint32_t usages[MAX_USAGES];
@@ -101,6 +103,10 @@ int hid_parse_mouse(const uint8_t *descriptor, uint32_t length, struct hid_mouse
             switch (tag) {
                 case GLOBAL_USAGE_PAGE: global.usage_page = data; break;
                 case GLOBAL_LOGICAL_MINIMUM: global.logical_minimum = sign_extend(data, size); break;
+                case GLOBAL_LOGICAL_MAXIMUM:
+                    global.logical_maximum = global.logical_minimum < 0 ? sign_extend(data, size)
+                                                                        : (int32_t)data;
+                    break;
                 case GLOBAL_REPORT_SIZE: global.report_size = data; break;
                 case GLOBAL_REPORT_COUNT: global.report_count = data; break;
                 case GLOBAL_REPORT_ID: global.report_id = data & 0xFFU; break;
@@ -171,6 +177,17 @@ int hid_parse_mouse(const uint8_t *descriptor, uint32_t length, struct hid_mouse
                         if (code == USAGE_WHEEL)
                             set_field(&found.wheel, field, global.report_size, is_signed);
                         if (code == USAGE_X || code == USAGE_Y) chosen = (int)id;
+                    } else if (page == PAGE_GENERIC_DESKTOP && (code == USAGE_X || code == USAGE_Y) &&
+                               (!found.x.size || found.absolute)) {
+                        if (code == USAGE_X) {
+                            set_field(&found.x, field, global.report_size, is_signed);
+                            found.x_max = global.logical_maximum;
+                        } else {
+                            set_field(&found.y, field, global.report_size, is_signed);
+                            found.y_max = global.logical_maximum;
+                        }
+                        found.absolute = 1;
+                        chosen = (int)id;
                     } else if (page == PAGE_CONSUMER && code == USAGE_AC_PAN && (data & INPUT_RELATIVE)) {
                         set_field(&found.pan, field, global.report_size, is_signed);
                     }
