@@ -77,6 +77,9 @@ static void put_signed(s64 value) {
 #define NR_MODE_CLOSEFB 0xd0
 #define NR_SET_MASTER 0x1e
 #define NR_MODE_CURSOR2 0xbb
+#define NR_GEM_CLOSE 0x09
+#define NR_PRIME_HANDLE_TO_FD 0x2d
+#define NR_PRIME_FD_TO_HANDLE 0x2e
 
 #define DRM_MODE_OBJECT_CRTC 0xcccccccc
 #define DRM_MODE_OBJECT_CONNECTOR 0xc0c0c0c0
@@ -114,6 +117,8 @@ struct drm_mode_create_dumb {
 };
 struct drm_mode_map_dumb { u32 handle, pad; u64 offset; };
 struct drm_mode_destroy_dumb { u32 handle; u32 pad; };
+struct drm_gem_close { u32 handle; u32 pad; };
+struct drm_prime_handle { u32 handle; u32 flags; s32 fd; };
 struct drm_mode_fb_cmd { u32 fb_id, width, height, pitch, bpp, depth, handle; };
 struct drm_mode_crtc {
     u64 set_connectors_ptr; u32 count_connectors;
@@ -483,6 +488,84 @@ static void test_framebuffer_lifetime(void) {
     }
 }
 
+static s64 map_word(int fd, u32 handle, u32 *value) {
+    struct drm_mode_map_dumb map;
+    for (unsigned i = 0; i < sizeof(map); i++) ((char *)&map)[i] = 0;
+    map.handle = handle;
+    s64 status = syscall3(SYS_ioctl, fd, (s64)IOWR(NR_MODE_MAP_DUMB, struct drm_mode_map_dumb), (s64)&map);
+    if (status != 0) return status;
+    s64 mapped = syscall6(SYS_mmap, 0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, (s64)map.offset);
+    if ((u64)mapped >= (u64)-4095L) return mapped;
+    *value = *(volatile u32 *)mapped;
+    return 0;
+}
+
+static void test_prime_references(void) {
+    struct drm_mode_create_dumb first;
+    for (unsigned i = 0; i < sizeof(first); i++) ((char *)&first)[i] = 0;
+    first.width = 64; first.height = 64; first.bpp = 32;
+    if (call(IOWR(NR_MODE_CREATE_DUMB, struct drm_mode_create_dumb), &first) != 0) {
+        put("PRIMEREF create failed\n");
+        return;
+    }
+    u32 seen = 0;
+    struct drm_mode_map_dumb map;
+    for (unsigned i = 0; i < sizeof(map); i++) ((char *)&map)[i] = 0;
+    map.handle = first.handle;
+    if (call(IOWR(NR_MODE_MAP_DUMB, struct drm_mode_map_dumb), &map) != 0) return;
+    s64 mapped = syscall6(SYS_mmap, 0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, card, (s64)map.offset);
+    if ((u64)mapped >= (u64)-4095L) return;
+    *(volatile u32 *)mapped = SECRET;
+
+    struct drm_prime_handle exported = { first.handle, 0, -1 };
+    if (call(IOWR(NR_PRIME_HANDLE_TO_FD, struct drm_prime_handle), &exported) != 0) {
+        put("PRIMEREF export failed\n");
+        return;
+    }
+    int other = (int)syscall3(SYS_open, (s64)"/dev/dri/card0", O_RDWR, 0);
+    struct drm_prime_handle imported = { 0, 0, exported.fd };
+    s64 status = syscall3(SYS_ioctl, other, (s64)IOWR(NR_PRIME_FD_TO_HANDLE, struct drm_prime_handle),
+                          (s64)&imported);
+    struct drm_prime_handle again = { 0, 0, exported.fd };
+    (void)syscall3(SYS_ioctl, other, (s64)IOWR(NR_PRIME_FD_TO_HANDLE, struct drm_prime_handle),
+                   (s64)&again);
+    put("PRIMEREF import ok=");
+    put_signed(status);
+    put(" same_handle=");
+    put(again.handle == imported.handle ? "yes" : "NO");
+    put("\n");
+    struct drm_gem_close close_imported = { imported.handle, 0 };
+    (void)syscall3(SYS_ioctl, other, (s64)IOWR(NR_GEM_CLOSE, struct drm_gem_close), (s64)&close_imported);
+    s64 twice = syscall3(SYS_ioctl, other, (s64)IOWR(NR_GEM_CLOSE, struct drm_gem_close),
+                         (s64)&close_imported);
+    struct drm_mode_destroy_dumb destroy = { first.handle, 0 };
+    (void)call(IOWR(NR_MODE_DESTROY_DUMB, struct drm_mode_destroy_dumb), &destroy);
+
+    s64 view = syscall6(SYS_mmap, 0, 4096, PROT_READ, MAP_SHARED, exported.fd, 0);
+    seen = (u64)view >= (u64)-4095L ? 0 : *(volatile u32 *)view;
+    put("PRIMEREF importer_close_twice=");
+    put_signed(twice);
+    put(" dmabuf_keeps_buffer=");
+    put(seen == SECRET ? "yes" : "NO");
+    put("\n");
+
+    struct drm_mode_create_dumb next;
+    for (unsigned i = 0; i < sizeof(next); i++) ((char *)&next)[i] = 0;
+    next.width = 64; next.height = 64; next.bpp = 32;
+    if (call(IOWR(NR_MODE_CREATE_DUMB, struct drm_mode_create_dumb), &next) != 0) return;
+    (void)syscall1(SYS_close, exported.fd);
+    (void)syscall1(SYS_close, other);
+    seen = 0;
+    s64 alive = map_word(card, next.handle, &seen);
+    put("PRIMEREF closing_dmabuf_spares_new_buffer=");
+    put(alive == 0 ? "yes" : "NO");
+    put(" new_reused_handle=");
+    put(next.handle == first.handle ? "yes" : "no");
+    put("\n");
+    struct drm_mode_destroy_dumb drop = { next.handle, 0 };
+    (void)call(IOWR(NR_MODE_DESTROY_DUMB, struct drm_mode_destroy_dumb), &drop);
+}
+
 static void test_size_overflow(void) {
     struct drm_mode_create_dumb create;
     for (unsigned i = 0; i < sizeof(create); i++) ((char *)&create)[i] = 0;
@@ -799,6 +882,7 @@ static int run(void) {
     test_blob_zero();
     test_handle_isolation();
     test_framebuffer_lifetime();
+    test_prime_references();
     test_size_overflow();
 
     put("DRMTEST DONE\n");

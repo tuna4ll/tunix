@@ -493,7 +493,13 @@ struct drm_dumb_buffer {
     uint64_t *pages;
     uint32_t virtio_resource;
     uint8_t rendered;
+    uint8_t owner_closed;
     uint32_t refs;
+};
+
+struct drm_import {
+    const struct file *file;
+    uint32_t handle;
 };
 
 struct drm_framebuffer {
@@ -556,6 +562,8 @@ struct drm_render_context {
     uint32_t context;
 };
 static struct drm_render_context *render_contexts;
+static struct drm_import *imports;
+static int import_capacity;
 static int context_capacity;
 
 static void *grow_table(void *table, size_t element, size_t *capacity) {
@@ -645,10 +653,21 @@ static struct drm_property_blob *blob_find(uint32_t id) {
     return NULL;
 }
 
+static struct drm_import *import_find(const struct file *client, uint32_t handle) {
+    for (int index = 0; index < import_capacity; index++)
+        if (imports[index].file == client && imports[index].handle == handle) return &imports[index];
+    return NULL;
+}
+
+static int owns_handle(const struct drm_dumb_buffer *buffer, const struct file *client) {
+    return buffer->owner == client && !buffer->owner_closed;
+}
+
 static struct drm_dumb_buffer *buffer_of(const struct file *client, uint32_t handle) {
     struct drm_dumb_buffer *buffer = buffer_find(handle);
     if (!buffer) return NULL;
-    return (buffer->owner == client || buffer->shared) ? buffer : NULL;
+    if (owns_handle(buffer, client) || import_find(client, handle)) return buffer;
+    return (buffer->shared && buffer->owner != client) ? buffer : NULL;
 }
 
 static struct drm_framebuffer *framebuffer_of(const struct file *client, uint32_t id) {
@@ -1169,7 +1188,19 @@ static int64_t ioctl_prime_handle_to_fd(const struct file *client, uint64_t user
     return copy_to_user(user_argument, &request, sizeof(request)) == 0 ? 0 : -EFAULT;
 }
 
-static int64_t ioctl_prime_fd_to_handle(uint64_t user_argument) {
+static int import_remember(const struct file *client, uint32_t handle) {
+    for (;;) {
+        for (int index = 0; index < import_capacity; index++) {
+            if (imports[index].file) continue;
+            imports[index].file = client;
+            imports[index].handle = handle;
+            return 0;
+        }
+        if (grow_int_table((void **)&imports, sizeof(*imports), &import_capacity) != 0) return -1;
+    }
+}
+
+static int64_t ioctl_prime_fd_to_handle(const struct file *client, uint64_t user_argument) {
     struct drm_prime_handle request;
     if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
     struct file *file = process_file_get(process_current(), request.fd);
@@ -1180,6 +1211,11 @@ static int64_t ioctl_prime_fd_to_handle(uint64_t user_argument) {
     if (kind != FILE_KIND_DMABUF) return -EINVAL;
     struct drm_dumb_buffer *buffer = buffer_find(handle);
     if (!buffer) return -ENOENT;
+    if (!owns_handle(buffer, client) && !import_find(client, handle)) {
+        if (buffer->refs == 0xFFFFFFFFU) return -EMFILE;
+        if (import_remember(client, handle) != 0) return -ENOMEM;
+        buffer->refs++;
+    }
 
     if (buffer->rendered && buffer->virtio_resource) {
         uint32_t context = render_context();
@@ -1684,13 +1720,25 @@ static int64_t ioctl_map_dumb(const struct file *client, uint64_t user_argument)
     return copy_to_user(user_argument, &request, sizeof(request)) == 0 ? 0 : -EFAULT;
 }
 
+static int64_t handle_close(const struct file *client, uint32_t handle) {
+    struct drm_dumb_buffer *buffer = buffer_find(handle);
+    if (!buffer) return -ENOENT;
+    struct drm_import *import = import_find(client, handle);
+    if (import) {
+        memset(import, 0, sizeof(*import));
+    } else if (owns_handle(buffer, client)) {
+        buffer->owner_closed = 1;
+    } else {
+        return -ENOENT;
+    }
+    buffer_release(buffer);
+    return 0;
+}
+
 static int64_t ioctl_destroy_dumb(const struct file *client, uint64_t user_argument) {
     struct drm_mode_destroy_dumb request;
     if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
-    struct drm_dumb_buffer *buffer = buffer_of(client, request.handle);
-    if (!buffer) return -ENOENT;
-    buffer_release(buffer);
-    return 0;
+    return handle_close(client, request.handle);
 }
 
 static int64_t ioctl_add_framebuffer(const struct file *client, uint32_t handle,
@@ -1756,10 +1804,7 @@ static int64_t ioctl_rmfb(const struct file *client, uint64_t user_argument) {
 static int64_t ioctl_gem_close(const struct file *client, uint64_t user_argument) {
     struct drm_gem_close request;
     if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
-    struct drm_dumb_buffer *buffer = buffer_of(client, request.handle);
-    if (!buffer) return -ENOENT;
-    buffer_release(buffer);
-    return 0;
+    return handle_close(client, request.handle);
 }
 
 static uint32_t render_context(void) {
@@ -2031,7 +2076,7 @@ static int64_t drm_dispatch_ioctl(struct file *file, unsigned long request,
     case DRM_NR_GET_MAGIC:
     case DRM_NR_AUTH_MAGIC: return 0;
     case DRM_NR_PRIME_HANDLE_TO_FD: return ioctl_prime_handle_to_fd(file, user_argument);
-    case DRM_NR_PRIME_FD_TO_HANDLE: return ioctl_prime_fd_to_handle(user_argument);
+    case DRM_NR_PRIME_FD_TO_HANDLE: return ioctl_prime_fd_to_handle(file, user_argument);
     case DRM_NR_MODE_GETPLANERESOURCES: return ioctl_get_plane_resources(user_argument);
     case DRM_NR_MODE_GETPLANE: return ioctl_get_plane(user_argument);
     case DRM_NR_MODE_GETPROPERTY: return ioctl_get_property(user_argument);
@@ -2160,9 +2205,17 @@ void drm_file_close(struct file *file) {
             blob_release(&blobs[index]);
     struct drm_event_queue *queue = event_queue_of(file, 0);
     if (queue) memset(queue, 0, sizeof(*queue));
+    for (int index = 0; index < import_capacity; index++) {
+        if (imports[index].file != file) continue;
+        struct drm_dumb_buffer *buffer = buffer_find(imports[index].handle);
+        memset(&imports[index], 0, sizeof(imports[index]));
+        if (buffer) buffer_release(buffer);
+    }
     for (uint32_t index = 0; index < buffer_capacity; index++)
-        if (buffers[index] && buffers[index]->handle && buffers[index]->owner == file)
+        if (buffers[index] && buffers[index]->handle && owns_handle(buffers[index], file)) {
+            buffers[index]->owner_closed = 1;
             buffer_release(buffers[index]);
+        }
     drm_leave();
 }
 
