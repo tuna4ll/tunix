@@ -84,24 +84,54 @@ power button's interrupt wants the same thing.
 ## The power button
 
 The FADT names a global interrupt for the SCI, and `acpi_power_button_enable`
-unmasks PWRBTN_EN in the PM1 event block and routes that interrupt to vector
-0x30. The routing goes through `apic_route_global`, which takes polarity and
-trigger from the MADT's overrides rather than from the ACPI default of
-level-triggered active-low -- QEMU wires its own SCI active *high* and says so
-in the table, so the default is not a safe guess.
+routes it to vector 0x30 with polarity and trigger from the MADT's overrides --
+QEMU wires its SCI active *high* and says so, so the ACPI default of
+level-triggered active-low is not a safe guess.
 
-On a press the kernel flushes and powers off. That is a policy decision made in
-the absence of anywhere better to send it: there is no power-management daemon
-here, and runit's signals mean halt and reboot rather than power off. When
-something exists to hand the event to, `power_button_pressed` is the one place
-that has to change.
+Taking the SCI means taking the machine out of legacy mode, and that hands the
+OS more than a button. On a laptop the firmware's embedded controller raises
+general-purpose events for temperature, fans, the lid and the battery, and in
+ACPI mode it waits for the OS to answer them by running AML. Tunix runs none.
+So the kernel decides first:
 
-**This path is unverified.** QEMU's `pc` machine declares a fixed-feature power
-button, everything the guest sets up reads back correct -- ACPI mode on,
-PWRBTN_EN set, the PM block's timer counting so it is demonstrably the real
-device -- and QEMU emits its own POWERDOWN event when asked, but PWRBTN_STS
-never appears in the guest. The code follows what the tables ask for; a machine
-that raises the event will be answered.
+- If the DSDT or an SSDT declares an embedded controller (`PNP0C09`) and the
+  firmware booted in legacy mode, the kernel leaves it there. The firmware keeps
+  doing what it did before any OS ran, and the button is the firmware's.
+- Otherwise it enables ACPI mode, turns off every PM1 fixed event but
+  PWRBTN_EN, clears their status, and writes zero to every GPE enable register:
+  an event nobody handles must not hold a level-triggered SCI asserted. A GPE
+  that fires anyway is cleared and masked by the interrupt and counted.
+- `acpi_button=on` or `acpi_button=off` on the command line overrides that.
+
+A press queues the power-off on a kernel worker. Flushing the disks sleeps on
+locks and on I/O, which an interrupt cannot do.
+
+`support/tests/acpi-kerneltest.sh` boots q35 four times -- plain, with an SSDT
+declaring an embedded controller, and with each override -- presses the button
+through QMP, and checks the decision, the press and whether the machine went
+off.
+
+## Temperature
+
+On Intel processors with a digital thermal sensor (CPUID 06H:EAX[0] and the
+ACPI thermal MSRs, 01H:EDX[22]) each core reads its own IA32_THERM_STATUS once
+a second from its timer tick. The limit is TjMax from MSR_TEMPERATURE_TARGET on
+the models that have it, 100 C otherwise.
+
+- Within 5 C of the limit the core runs at half speed through
+  IA32_CLOCK_MODULATION, until it is 15 C below again.
+- Within 1 C of the limit, or with the critical-temperature bit set, for three
+  seconds running, the kernel logs it and powers off through the same worker
+  as the button: flushed, rather than cut by the hardware with the disk caches
+  still in memory.
+
+The readings are `/sys/class/hwmon/hwmon0` in Linux's coretemp layout, and the
+`hwreport` boot prints them with the ACPI decision. That boot also starts a
+logger in `rc.local` that appends uptime, load, every core's temperature and
+the three busiest processes to `/tunix-thermal.log` every five seconds and
+syncs it, so a machine that switches itself off leaves the minutes before it
+on the disk. `make thermaltest` runs the thermal code on the host against a
+modelled sensor.
 
 ## Running it
 
