@@ -234,9 +234,7 @@ static void render_cell(struct terminal_screen *screen, int row, int col, int cu
 
 static void render_console(struct terminal_screen *screen) {
     if (!visible(screen)) return;
-    uint32_t width = (uint32_t)layout.columns * layout.cell_width;
-    uint32_t height = (uint32_t)layout.rows * layout.cell_height;
-    fill_background_rect(layout.content_x, layout.content_y, width, height);
+    fill_background_rect(0, 0, layout.screen_width, layout.screen_height);
     for (int row = 0; row < layout.rows; row++) {
         for (int col = 0; col < layout.columns; col++) {
             struct console_cell *cell = cell_at(screen, row, col);
