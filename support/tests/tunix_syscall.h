@@ -107,6 +107,8 @@ static inline s64 syscall6(s64 n, s64 a, s64 b, s64 c, s64 d, s64 e, s64 f) {
     case 19: return tunix_svc(65, a, b, c, d, e, f);
     case 20: return tunix_svc(66, a, b, c, d, e, f);
     case 8: return tunix_svc(62, a, b, c, d, e, f);
+    case 5: return tunix_svc(80, a, b, c, d, e, f);
+    case 260: return tunix_svc(54, a, b, c, d, e, f);
     case 7: {
         s64 timeout[2] = { c / 1000, (c % 1000) * 1000000 };
         return tunix_svc(73, a, b, c < 0 ? 0 : (s64)timeout, 0, 8, 0);
