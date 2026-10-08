@@ -33,8 +33,12 @@ extern void kprintf(const char *fmt, ...);
 #define FADT_PM1B_EVENT 60U
 #define FADT_PM1A_CONTROL 64U
 #define FADT_PM1B_CONTROL 68U
+#define FADT_GPE0_BLOCK 80U
+#define FADT_GPE1_BLOCK 84U
 #define FADT_PM1_EVENT_LENGTH 88U
 #define FADT_PM1_CONTROL_LENGTH 89U
+#define FADT_GPE0_LENGTH 92U
+#define FADT_GPE1_LENGTH 93U
 #define FADT_FLAGS 112U
 #define FADT_RESET_REGISTER 116U
 #define FADT_RESET_VALUE 128U
@@ -52,6 +56,7 @@ extern void kprintf(const char *fmt, ...);
 #define PM1_SLEEP_ENABLE 0x2000U
 
 #define PM1_POWER_BUTTON 0x0100U
+#define PM1_ALL_FIXED_STATUS 0x8731U
 
 #define AML_ZERO 0x00U
 #define AML_ONE 0x01U
@@ -59,6 +64,10 @@ extern void kprintf(const char *fmt, ...);
 #define AML_WORD_PREFIX 0x0BU
 #define AML_DWORD_PREFIX 0x0CU
 #define AML_PACKAGE 0x12U
+#define AML_EXT_PREFIX 0x5BU
+#define AML_THERMAL_ZONE 0x85U
+
+#define SSDT_SIGNATURE "SSDT"
 
 #define MADT_LOCAL_APIC 0U
 #define MADT_IO_APIC 1U
@@ -92,6 +101,7 @@ static struct acpi_machine machine;
 static int parsed;
 static struct acpi_power power;
 static int power_known;
+static struct acpi_events events;
 
 static int signature_is(const void *table, const char *expected, unsigned length) {
     const uint8_t *bytes = table;
@@ -274,6 +284,22 @@ static int parse_sleep_state(const struct acpi_header *dsdt) {
     return -1;
 }
 
+static void scan_definition_block(const struct acpi_header *table) {
+    static const uint8_t eisa_ec[] = { AML_DWORD_PREFIX, 0x41U, 0xD0U, 0x0CU, 0x09U };
+    static const char string_ec[] = "PNP0C09";
+    const uint8_t *base = (const uint8_t *)table;
+    const uint8_t *end = base + table->length;
+    for (const uint8_t *at = base + sizeof(*table); at < end; at++) {
+        if (at + sizeof(eisa_ec) <= end && memcmp(at, eisa_ec, sizeof(eisa_ec)) == 0)
+            power.embedded_controller = 1;
+        if (at + sizeof(string_ec) - 1U <= end &&
+            memcmp(at, string_ec, sizeof(string_ec) - 1U) == 0)
+            power.embedded_controller = 1;
+        if (at + 2 <= end && at[0] == AML_EXT_PREFIX && at[1] == AML_THERMAL_ZONE)
+            power.thermal_zones++;
+    }
+}
+
 static void parse_fadt(const struct acpi_header *fadt) {
     const uint8_t *base = (const uint8_t *)fadt;
     uint32_t length = fadt->length;
@@ -288,6 +314,10 @@ static void parse_fadt(const struct acpi_header *fadt) {
     power.pm1b_control = table_u32(base, length, FADT_PM1B_CONTROL);
     power.event_bytes = table_u8(base, length, FADT_PM1_EVENT_LENGTH);
     power.control_bytes = table_u8(base, length, FADT_PM1_CONTROL_LENGTH);
+    power.gpe0_block = table_u32(base, length, FADT_GPE0_BLOCK);
+    power.gpe1_block = table_u32(base, length, FADT_GPE1_BLOCK);
+    power.gpe0_length = table_u8(base, length, FADT_GPE0_LENGTH);
+    power.gpe1_length = table_u8(base, length, FADT_GPE1_LENGTH);
 
     uint32_t flags = table_u32(base, length, FADT_FLAGS);
     if (flags & FADT_RESET_SUPPORTED) {
@@ -305,11 +335,29 @@ static void parse_fadt(const struct acpi_header *fadt) {
     if (!dsdt_physical) dsdt_physical = table_u32(base, length, FADT_DSDT);
     if (dsdt_physical) {
         const struct acpi_header *dsdt = map_table(dsdt_physical);
-        if (dsdt && signature_is(dsdt->signature, DSDT_SIGNATURE, SIGNATURE_BYTES))
+        if (dsdt && signature_is(dsdt->signature, DSDT_SIGNATURE, SIGNATURE_BYTES)) {
             (void)parse_sleep_state(dsdt);
+            scan_definition_block(dsdt);
+        }
     }
 
     power_known = power.pm1a_control != 0;
+}
+
+static void scan_secondary_tables(uint64_t root_physical, int wide) {
+    const struct acpi_header *root = map_table(root_physical);
+    if (!root || !checksum_ok(root, root->length)) return;
+    uint32_t entry_bytes = wide ? 8U : 4U;
+    uint32_t count = (root->length - (uint32_t)sizeof(*root)) / entry_bytes;
+    const uint8_t *entries = (const uint8_t *)root + sizeof(*root);
+    for (uint32_t i = 0; i < count; i++) {
+        uint64_t physical = wide ? *(const uint64_t *)(entries + i * entry_bytes)
+                                 : *(const uint32_t *)(entries + i * entry_bytes);
+        const struct acpi_header *table = map_table(physical);
+        if (!table || !signature_is(table->signature, SSDT_SIGNATURE, SIGNATURE_BYTES)) continue;
+        if (!checksum_ok(table, table->length)) continue;
+        scan_definition_block(table);
+    }
 }
 
 static void parse_tables(void) {
@@ -345,6 +393,7 @@ static void parse_tables(void) {
 
     const struct acpi_header *fadt = find_table(root, wide, FADT_SIGNATURE);
     if (fadt) parse_fadt(fadt);
+    scan_secondary_tables(root, wide);
 }
 
 const struct acpi_machine *acpi_describe_machine(void) {
@@ -464,22 +513,88 @@ static uint16_t event_enable_port(uint32_t event_block) {
 #endif
 
 #if defined(__x86_64__)
+static uint32_t gpe_block_mask(uint32_t block, uint8_t length, int clear) {
+    if (!block || length < 2U) return 0;
+    uint32_t enabled = 0;
+    uint32_t half = length / 2U;
+    for (uint32_t index = 0; index < half; index++) {
+        uint16_t status_port = (uint16_t)(block + index);
+        uint16_t enable_port = (uint16_t)(block + half + index);
+        uint8_t enable = inb(enable_port);
+        if (index < 4U) enabled |= (uint32_t)enable << (index * 8U);
+        if (clear) {
+            outb(enable_port, 0);
+            outb(status_port, 0xFFU);
+        }
+    }
+    return enabled;
+}
+
+static uint32_t gpe_pending(void) {
+    uint32_t pending = 0;
+    const uint32_t blocks[2] = { power.gpe0_block, power.gpe1_block };
+    const uint8_t lengths[2] = { power.gpe0_length, power.gpe1_length };
+    for (unsigned block = 0; block < 2U; block++) {
+        if (!blocks[block] || lengths[block] < 2U) continue;
+        uint32_t half = lengths[block] / 2U;
+        for (uint32_t index = 0; index < half; index++) {
+            uint16_t status_port = (uint16_t)(blocks[block] + index);
+            uint8_t status = inb(status_port);
+            if (!status) continue;
+            pending++;
+            outb((uint16_t)(blocks[block] + half + index), 0);
+            outb(status_port, status);
+        }
+    }
+    return pending;
+}
+
+static int button_wanted(void) {
+    const char *choice = boot_command_line_value("acpi_button");
+    if (choice && strncmp(choice, "on", 2) == 0 && (choice[2] == ' ' || !choice[2])) {
+        events.decision = "on (acpi_button=on)";
+        return 1;
+    }
+    if (choice && strncmp(choice, "off", 3) == 0 && (choice[3] == ' ' || !choice[3])) {
+        events.decision = "off (acpi_button=off)";
+        return 0;
+    }
+    if (power.embedded_controller && !events.sci_enabled_at_boot) {
+        events.decision = "off: the firmware has an embedded controller to look after";
+        return 0;
+    }
+    events.decision = events.sci_enabled_at_boot ? "on: the firmware was already in acpi mode"
+                                                 : "on: no embedded controller";
+    return 1;
+}
+
 void acpi_power_button_enable(unsigned vector) {
     if (!acpi_power_info() || !power.pm1a_event) return;
+    events.sci_enabled_at_boot = (inw((uint16_t)power.pm1a_control) & PM1_SCI_ENABLED) != 0;
+    events.gpe_enabled_at_boot = gpe_block_mask(power.gpe0_block, power.gpe0_length, 0);
+    if (!button_wanted()) {
+        kprintf("ACPI: power button left to the firmware (%s)\n", events.decision);
+        return;
+    }
     if (acpi_enable() != 0) {
         kprintf("ACPI: firmware would not hand over the fixed hardware\n");
         return;
     }
+    events.handed_over = 1;
+    (void)gpe_block_mask(power.gpe0_block, power.gpe0_length, 1);
+    (void)gpe_block_mask(power.gpe1_block, power.gpe1_length, 1);
 
     uint16_t enable = event_enable_port(power.pm1a_event);
     if (!enable) return;
-    outw((uint16_t)power.pm1a_event, PM1_POWER_BUTTON);
-    outw(enable, (uint16_t)(inw(enable) | PM1_POWER_BUTTON));
+    outw(enable, 0);
+    outw((uint16_t)power.pm1a_event, PM1_ALL_FIXED_STATUS);
+    outw(enable, PM1_POWER_BUTTON);
     if (power.pm1b_event) {
         uint16_t second = event_enable_port(power.pm1b_event);
         if (second) {
-            outw((uint16_t)power.pm1b_event, PM1_POWER_BUTTON);
-            outw(second, (uint16_t)(inw(second) | PM1_POWER_BUTTON));
+            outw(second, 0);
+            outw((uint16_t)power.pm1b_event, PM1_ALL_FIXED_STATUS);
+            outw(second, PM1_POWER_BUTTON);
         }
     }
 
@@ -499,6 +614,7 @@ void acpi_power_button_enable(unsigned vector) {
 #if defined(__x86_64__)
 int acpi_sci_interrupt(void) {
     if (!power_known || !power.pm1a_event) return 0;
+    events.sci_count++;
 
     int pressed = 0;
     if (inw((uint16_t)power.pm1a_event) & PM1_POWER_BUTTON) {
@@ -509,6 +625,15 @@ int acpi_sci_interrupt(void) {
         outw((uint16_t)power.pm1b_event, PM1_POWER_BUTTON);
         pressed = 1;
     }
+    uint32_t pending = gpe_pending();
+    if (pending) {
+        events.gpe_events += pending;
+        if (!events.gpe_seen) {
+            events.gpe_seen = 1;
+            kprintf("ACPI: general-purpose event with no handler; masked\n");
+        }
+    }
+    if (pressed) events.button_events++;
     return pressed;
 }
 #else
@@ -516,3 +641,7 @@ int acpi_sci_interrupt(void) {
     return 0;
 }
 #endif
+
+const struct acpi_events *acpi_event_state(void) {
+    return &events;
+}

@@ -60,7 +60,27 @@ struct acpi_power {
     uint8_t sleep_type_a;
     uint8_t sleep_type_b;
     uint8_t sleep_known;
+
+    uint32_t gpe0_block;
+    uint32_t gpe1_block;
+    uint8_t gpe0_length;
+    uint8_t gpe1_length;
+    uint8_t embedded_controller;
+    uint32_t thermal_zones;
 };
+
+struct acpi_events {
+    int sci_enabled_at_boot;
+    int handed_over;
+    const char *decision;
+    uint64_t sci_count;
+    uint64_t gpe_events;
+    uint64_t button_events;
+    int gpe_seen;
+    uint32_t gpe_enabled_at_boot;
+};
+
+const struct acpi_events *acpi_event_state(void);
 
 const struct acpi_power *acpi_power_info(void);
 
