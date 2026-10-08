@@ -246,6 +246,7 @@ typedef char drm_virtgpu_get_caps_size_check[
 #define DRM_MODE_PROP_OBJECT (1 << 6)
 #define DRM_MODE_PROP_SIGNED_RANGE (2 << 6)
 #define DRM_MODE_PROP_ATOMIC 0x80000000U
+#define DRM_MODE_OBJECT_ANY 0
 #define DRM_MODE_OBJECT_FB 0xfbfbfbfbULL
 
 #define DRM_PLANE_TYPE_OVERLAY 0
@@ -1084,6 +1085,17 @@ static int64_t ioctl_set_client_cap(uint64_t user_argument) {
     return 0;
 }
 
+static uint32_t object_type_of(uint32_t type, uint32_t id) {
+    if (type != DRM_MODE_OBJECT_ANY) return type;
+    switch (id) {
+    case DRM_CRTC_ID: return DRM_MODE_OBJECT_CRTC;
+    case DRM_CONNECTOR_ID: return DRM_MODE_OBJECT_CONNECTOR;
+    case DRM_ENCODER_ID: return DRM_MODE_OBJECT_ENCODER;
+    case DRM_PLANE_ID: return DRM_MODE_OBJECT_PLANE;
+    default: return DRM_MODE_OBJECT_ANY;
+    }
+}
+
 static uint32_t connector_dpms;
 
 static int64_t set_connector_property(uint32_t connector_id, uint32_t prop_id, uint64_t value) {
@@ -1102,7 +1114,7 @@ static int64_t ioctl_connector_set_property(uint64_t user_argument) {
 static int64_t ioctl_obj_set_property(uint64_t user_argument) {
     struct { uint64_t value; uint32_t prop_id; uint32_t obj_id; uint32_t obj_type; } request;
     if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
-    if (request.obj_type != DRM_MODE_OBJECT_CONNECTOR) return -EINVAL;
+    if (object_type_of(request.obj_type, request.obj_id) != DRM_MODE_OBJECT_CONNECTOR) return -EINVAL;
     return set_connector_property(request.obj_id, request.prop_id, request.value);
 }
 
@@ -1434,11 +1446,13 @@ static int64_t ioctl_get_property(uint64_t user_argument) {
 static int64_t ioctl_obj_get_properties(uint64_t user_argument) {
     struct drm_mode_obj_get_properties request;
     if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
+    uint32_t type = object_type_of(request.obj_type, request.obj_id);
+    if (type == DRM_MODE_OBJECT_ANY) return -ENOENT;
 
     uint32_t count = 0;
     uint32_t ids[16];
     uint64_t values[16];
-    if (request.obj_type == DRM_MODE_OBJECT_PLANE) {
+    if (type == DRM_MODE_OBJECT_PLANE) {
         if (request.obj_id != DRM_PLANE_ID) return -ENOENT;
         ids[0] = DRM_PROP_TYPE_ID; values[0] = DRM_PLANE_TYPE_PRIMARY;
         ids[1] = DRM_PROP_PLANE_CRTC_ID; values[1] = DRM_CRTC_ID;
@@ -1453,15 +1467,15 @@ static int64_t ioctl_obj_get_properties(uint64_t user_argument) {
         ids[10] = DRM_PROP_PLANE_CRTC_H; values[10] = framebuffer_height();
         ids[11] = DRM_PROP_PLANE_FB_DAMAGE_CLIPS; values[11] = 0;
         count = 12;
-    } else if (request.obj_type == DRM_MODE_OBJECT_CRTC) {
+    } else if (type == DRM_MODE_OBJECT_CRTC) {
         if (request.obj_id != DRM_CRTC_ID) return -ENOENT;
         ids[0] = DRM_PROP_CRTC_ACTIVE; values[0] = active_fb_id != 0;
         ids[1] = DRM_PROP_CRTC_MODE_ID; values[1] = 0; count = 2;
-    } else if (request.obj_type == DRM_MODE_OBJECT_CONNECTOR) {
+    } else if (type == DRM_MODE_OBJECT_CONNECTOR) {
         if (request.obj_id != DRM_CONNECTOR_ID) return -ENOENT;
         ids[0] = DRM_PROP_CONNECTOR_CRTC_ID; values[0] = active_fb_id ? DRM_CRTC_ID : 0;
         ids[1] = DRM_PROP_CONNECTOR_DPMS; values[1] = connector_dpms; count = 2;
-    } else if (request.obj_type == DRM_MODE_OBJECT_ENCODER) {
+    } else if (type == DRM_MODE_OBJECT_ENCODER) {
         if (request.obj_id != DRM_ENCODER_ID) return -ENOENT;
     } else {
         return -EINVAL;
