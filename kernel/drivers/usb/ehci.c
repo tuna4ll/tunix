@@ -133,6 +133,8 @@ extern void kprintf(const char *fmt, ...);
 #define MAX_PORTS 15U
 #define MAX_DEVICES 127U
 #define CONFIGURATION_BYTES 512U
+#define BULK_QTDS 4U
+#define BULK_QTD_BYTES 16384U
 #define BULK_FAILURES_REPORTED 8U
 #define BULK_FAILURE_INTERVAL 64U
 
@@ -178,7 +180,7 @@ struct ehci_device {
 };
 
 typedef char ehci_qh_size_check[(sizeof(struct ehci_qh) <= 0x100) ? 1 : -1];
-typedef char ehci_qtd_size_check[(3 * sizeof(struct ehci_qtd) <= 0x100) ? 1 : -1];
+typedef char ehci_qtd_size_check[(BULK_QTDS * sizeof(struct ehci_qtd) <= 0x100) ? 1 : -1];
 
 struct ehci {
     int present;
@@ -232,6 +234,7 @@ static unsigned controller_count;
 static uint8_t *dma_page;
 static uint64_t dma_physical;
 static struct ehci_qtd *qtds;
+static struct ehci_qtd *stop_qtd;
 static uint8_t *setup_buffer;
 static uint8_t *descriptor_buffer;
 
@@ -1173,10 +1176,25 @@ static int ehci_bulk_transfer_unlocked(int index, int in, uint64_t physical,
     uint16_t packet = in ? device->bulk_in_packet : device->bulk_out_packet;
     uint8_t *toggle = in ? &device->bulk_in_toggle : &device->bulk_out_toggle;
 
-    build_qtd(&qtds[0], in ? QTD_PID_IN : QTD_PID_OUT, physical, length, *toggle);
-    int failed = run_qtds(host, device, endpoint, packet, 0, &qtds[0], &qtds[0],
+    if (!length || length > BULK_QTDS * BULK_QTD_BYTES) return -1;
+    unsigned used = 0;
+    uint32_t offset = 0;
+    uint32_t packets_before = 0;
+    while (offset < length) {
+        uint32_t chunk = length - offset > BULK_QTD_BYTES ? BULK_QTD_BYTES : length - offset;
+        build_qtd(&qtds[used], in ? QTD_PID_IN : QTD_PID_OUT, physical + offset, chunk,
+                  (int)((*toggle + packets_before) & 1U));
+        if (used) {
+            dma_store32(&qtds[used - 1].next, physical_of(&qtds[used]));
+            dma_store32(&qtds[used - 1].alternate, physical_of(stop_qtd));
+        }
+        packets_before += packet ? (chunk + packet - 1U) / packet : 0;
+        offset += chunk;
+        used++;
+    }
+    int failed = run_qtds(host, device, endpoint, packet, 0, &qtds[0], &qtds[used - 1],
                           TRANSFER_TIMEOUT_NS) != 0;
-    uint32_t token = dma_load32(&qtds[0].token);
+    uint32_t token = dma_load32(&qtds[used - 1].token);
 
     if (failed) {
         uint32_t overlay = dma_load32(&host->work_qh->overlay_token);
@@ -1204,9 +1222,15 @@ static int ehci_bulk_transfer_unlocked(int index, int in, uint64_t physical,
         return -1;
     }
 
-    uint32_t remaining = (token >> QTD_LENGTH_SHIFT) & 0x7FFFU;
-    uint32_t moved = length > remaining ? length - remaining : 0;
-    uint32_t packets = packet ? (moved + packet - 1U) / packet : 0;
+    uint32_t packets = 0;
+    offset = 0;
+    for (unsigned index = 0; index < used; index++) {
+        uint32_t chunk = length - offset > BULK_QTD_BYTES ? BULK_QTD_BYTES : length - offset;
+        uint32_t remaining = (dma_load32(&qtds[index].token) >> QTD_LENGTH_SHIFT) & 0x7FFFU;
+        uint32_t moved = chunk > remaining ? chunk - remaining : 0;
+        packets += packet ? (moved + packet - 1U) / packet : 0;
+        offset += chunk;
+    }
     *toggle = (uint8_t)((*toggle + packets) & 1U);
     return 0;
 }
@@ -1251,7 +1275,7 @@ static const struct usb_host ehci_host = {
     .storage_count = ehci_storage_count,
     .bulk_transfer = ehci_bulk_transfer,
     .reset_recovery = ehci_reset_recovery,
-    .max_transfer = 16384U,
+    .max_transfer = BULK_QTDS * BULK_QTD_BYTES,
 };
 
 static int start_one(const struct pci_device *device, struct ehci *host) {
@@ -1315,6 +1339,9 @@ static int ehci_init_unlocked(void) {
     qtds = (struct ehci_qtd *)(dma_page + 0x800);
     setup_buffer = dma_page + 0x900;
     descriptor_buffer = dma_page + 0xA00;
+    stop_qtd = (struct ehci_qtd *)(dma_page + 0xC00);
+    build_qtd(stop_qtd, QTD_PID_IN, 0, 0, 0);
+    dma_store32(&stop_qtd->token, 0);
 
     for (unsigned nth = 0;; nth++) {
         if (pci_find_nth_class(PCI_CLASS_SERIAL_BUS, PCI_SUBCLASS_USB, nth,
