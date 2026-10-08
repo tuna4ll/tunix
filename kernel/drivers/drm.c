@@ -1292,6 +1292,12 @@ static int64_t ioctl_prime_fd_to_handle(const struct file *client, uint64_t user
     return copy_to_user(user_argument, &request, sizeof(request)) == 0 ? 0 : -EFAULT;
 }
 
+int64_t drm_dmabuf_size(const struct file *file) {
+    DRM_LOCKED;
+    struct drm_dumb_buffer *buffer = file ? buffer_find(file->dmabuf_handle) : NULL;
+    return buffer ? (int64_t)buffer->size : -ENOENT;
+}
+
 int64_t drm_dmabuf_mmap(struct file *file, uint64_t cr3, uint64_t virtual_address,
                         uint64_t length, uint64_t offset, uint64_t page_flags) {
     DRM_LOCKED;

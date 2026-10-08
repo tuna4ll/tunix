@@ -22,6 +22,7 @@ int drm_device_read_ready(struct vfs_node *node);
 int64_t drm_file_read(struct file *file, size_t size, void *buffer);
 int drm_file_read_ready(struct file *file);
 void drm_buffer_put(uint32_t handle);
+int64_t drm_dmabuf_size(const struct file *file);
 int64_t drm_dmabuf_mmap(struct file *file, uint64_t cr3, uint64_t virtual_address,
                         uint64_t length, uint64_t offset, uint64_t page_flags);
 void drm_device_open(struct vfs_node *node);

@@ -3131,6 +3131,11 @@ static int64_t sys_statx(int dirfd, uint64_t user_path, int flags,
 static int64_t sys_lseek(int fd, int64_t offset, int whence) {
     struct file *file = fd_file(fd);
     if (!file) return -EBADF;
+    if (file->kind == FILE_KIND_DMABUF) {
+        if (offset != 0) return -EINVAL;
+        if (whence == SEEK_SET) return 0;
+        return whence == SEEK_END ? drm_dmabuf_size(file) : -EINVAL;
+    }
     if ((file->kind != FILE_KIND_VFS && file->kind != FILE_KIND_FRAMEBUFFER) ||
         !file->node) return -ESPIPE;
     int64_t base;
