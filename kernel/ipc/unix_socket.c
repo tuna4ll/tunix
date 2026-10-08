@@ -551,7 +551,7 @@ int unix_socket_listen(struct unix_socket *socket, int backlog) {
     socket->next_listener = listener_list;
     listener_list = socket;
     socket->listening = 1;
-    socket->backlog = backlog > 0 && backlog < UNIX_PENDING_MAX ? backlog : UNIX_PENDING_MAX;
+    socket->backlog = backlog >= 0 && backlog < UNIX_PENDING_MAX ? backlog : UNIX_PENDING_MAX;
     return 0;
 }
 
@@ -641,7 +641,8 @@ int unix_socket_connect(struct unix_socket *socket, const struct tunix_sockaddr_
         return 0;
     }
     struct unix_socket *listener = find_listener(path[0] == '\x01' || !resolved ? path : resolved);
-    if (!listener || listener->pending_count >= listener->backlog) return -ECONNREFUSED;
+    if (!listener) return -ECONNREFUSED;
+    if (listener->pending_count > listener->backlog) return -EAGAIN;
 
     struct unix_channel *channel = (struct unix_channel *)kmalloc(sizeof(*channel));
     struct unix_socket *server = unix_socket_create(socket->seqpacket);

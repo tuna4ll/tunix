@@ -1843,6 +1843,7 @@ static int64_t sys_accept(int fd, uint64_t user_address, uint64_t user_length, i
         if (!unix_socket_is_listener(listener)) return -EINVAL;
         struct unix_socket *accepted = unix_socket_accept(listener);
         if (!accepted) return -EAGAIN;
+        (void)process_wake_io();
         struct file *file = file_create_socket(accepted);
         if (!file) {
             unix_socket_unref(accepted);
@@ -6116,7 +6117,11 @@ static void syscall_run(struct syscall_frame *frame) {
             if (result == -EINPROGRESS && file && file->kind == FILE_KIND_INET_SOCKET &&
                 !(file->flags & O_NONBLOCK)) {
                 block_and_retry(frame, SYS_CONNECT, file, 1);
+            } else if (result == -EAGAIN && file && file->kind == FILE_KIND_SOCKET &&
+                       !(file->flags & O_NONBLOCK)) {
+                if (!retry_io_wait(frame, SYS_CONNECT, -1)) SYSCALL_RET(frame) = (uint64_t)result;
             } else {
+                clear_io_wait(process);
                 SYSCALL_RET(frame) = (uint64_t)result;
             }
             break;
