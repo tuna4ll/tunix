@@ -26,6 +26,7 @@ static int signal_would_act(const struct process *process, int signal_number);
 #include "include/syscall.h"
 #include "include/time.h"
 #include "include/timer.h"
+#include "include/cpufreq.h"
 #include "include/thermal.h"
 #include "include/tty.h"
 #include "include/vt.h"
@@ -2323,6 +2324,7 @@ static void preempt_from_interrupt(struct interrupt_frame *frame, int tick) {
 
 void process_timer_interrupt(struct interrupt_frame *frame) {
     thermal_tick();
+    cpufreq_tick();
     preempt_from_interrupt(frame, 1);
 }
 
