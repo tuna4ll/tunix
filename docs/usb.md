@@ -343,8 +343,15 @@ the page or buffer it comes from is still in memory.
 A read goes out in pieces as large as the controller takes in one descriptor:
 64 KiB on xHCI, where a transfer TRB may carry that much as long as it does
 not cross a 64 KiB boundary -- the staging buffer is aligned so it never does
--- and 16 KiB on EHCI, the most one qTD describes from a buffer that starts on
-a page. Writes stay at 4 KiB.
+-- and 64 KiB on EHCI too, as a chain of four 16 KiB qTDs. 16 KiB is the most
+one qTD describes from a buffer that starts on a page, and an even number of
+packets at both 512 and 64 bytes, so every qTD in the chain starts with the
+same data toggle. Every qTD but the last has its alternate pointer on an
+inactive qTD: a short packet in the middle stops the queue and fails the
+transfer instead of reading the status block into the data buffer. On QEMU
+this tripled a cold read through EHCI (18 to 58 MB/s,
+`support/tests/usbread-kerneltest.sh`, which also checks every byte). Writes
+stay at 4 KiB.
 
 ## The shape of the driver
 

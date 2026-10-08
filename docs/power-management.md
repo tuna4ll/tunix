@@ -137,9 +137,12 @@ modelled sensor.
 
 Nothing above the kernel picks a P-state here, so on Intel processors with
 Enhanced SpeedStep the kernel does: each core's first timer tick reads the
-ratio the firmware left it at and asks IA32_PERF_CTL for the highest non-turbo
-ratio from MSR_PLATFORM_INFO. A firmware that boots at the lowest ratio would
-otherwise leave every program at half speed for as long as the machine runs.
+ratio the firmware left it at and, when that is lower, asks IA32_PERF_CTL for
+the highest ratio from MSR_PLATFORM_INFO -- one above it when the processor has
+turbo and the firmware has not disabled it, which lets the hardware turbo. A
+firmware that boots at the lowest ratio would otherwise leave every program at
+half speed for as long as the machine runs; a firmware that already asked for
+turbo, as the first laptop this ran on does, is left alone.
 Nehalem and Westmere take the ratio in bits 7:0 of the register, Sandy Bridge
 and later in bits 15:8; Atoms, older parts and machines whose firmware turned
 SpeedStep off are left alone.
