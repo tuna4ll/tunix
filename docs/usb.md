@@ -331,9 +331,10 @@ per failed block is not a diagnostic but a second failure on top of the first.
 
 One storage lock covers a stick, because the command, the data and the status
 of a transfer have to go out in order and share one staging page. A write is
-split into 4 KiB commands, so a 128 KiB write-back is 32 of them, and a read
-that arrived after the first used to wait for all 32 -- on a slow stick,
-hundreds of milliseconds for every page a program faulted in, which is how a
+split into 16 KiB commands, so a 128 KiB write-back is eight of them, and a
+read that arrived after the first used to wait for all of them -- when commands
+were 4 KiB, 32 of them, and on a slow stick hundreds of milliseconds for every
+page a program faulted in, which is how a
 shell took a minute to print its prompt during `xbps-install`. A writer now
 checks between commands whether a reader is waiting and, if one is, hands the
 lock over and queues behind it. The pieces of one write may reach the stick
@@ -349,9 +350,18 @@ packets at both 512 and 64 bytes, so every qTD in the chain starts with the
 same data toggle. Every qTD but the last has its alternate pointer on an
 inactive qTD: a short packet in the middle stops the queue and fails the
 transfer instead of reading the status block into the data buffer. On QEMU
-this tripled a cold read through EHCI (18 to 58 MB/s,
-`support/tests/usbread-kerneltest.sh`, which also checks every byte). Writes
-stay at 4 KiB.
+this tripled a cold read through EHCI (18 to 55 MB/s).
+
+Writes go out in 16 KiB commands, one qTD each. They used to be 4 KiB, so that
+a read waited for at most one small command; the writer already hands the lock
+to a waiting reader between commands, so 16 KiB costs a read at most one more
+millisecond on USB 2, and QEMU's EHCI stick went from 5 to 20 MB/s. Writes do
+not use the 64 KiB chain: on a throttled stick a chained write often left the
+status stage unanswered until the ten-second timeout, a stall the old 4 KiB
+writes hit too but far less often, and 16 KiB writes never hit in the same
+test (`support/tests/iolatency-kerneltest.sh`: 112 s and two stalls before, 30
+s and none after). `support/tests/usbio-kerneltest.sh` reads a checksummed
+file, writes another, and checks every byte of it on the host afterwards.
 
 ## The shape of the driver
 
