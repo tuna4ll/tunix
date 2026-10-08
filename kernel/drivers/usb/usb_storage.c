@@ -30,7 +30,7 @@ extern void kprintf(const char *fmt, ...);
 #define SCSI_WRITE_10 0x2AU
 
 #define STAGING_BYTES 65536U
-#define STAGING_WRITE_SECTORS (4096U / BLOCK_SECTOR_SIZE)
+#define WRITE_SECTORS (16384U / BLOCK_SECTOR_SIZE)
 
 struct command_block_wrapper {
     uint32_t signature;
@@ -218,7 +218,9 @@ static int usb_write_unlocked(void *context, uint64_t lba, uint32_t count, const
     struct usb_disk *disk = (struct usb_disk *)context;
     const uint8_t *in = (const uint8_t *)source;
     while (count) {
-        uint32_t chunk = count > STAGING_WRITE_SECTORS ? STAGING_WRITE_SECTORS : count;
+        uint32_t limit = disk->read_sectors < WRITE_SECTORS ? disk->read_sectors
+                                                                     : WRITE_SECTORS;
+        uint32_t chunk = count > limit ? limit : count;
         if (chunk % disk->sectors_per_block)
             chunk -= chunk % disk->sectors_per_block;
         if (!chunk) return -1;
