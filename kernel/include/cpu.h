@@ -51,6 +51,16 @@ static inline void cpu_cpuid(uint32_t leaf, uint32_t subleaf,
                      : "a"(leaf), "c"(subleaf));
 }
 
+static inline uint64_t cpu_read_msr(uint32_t msr) {
+    uint32_t low, high;
+    __asm__ volatile("rdmsr" : "=a"(low), "=d"(high) : "c"(msr));
+    return ((uint64_t)high << 32) | low;
+}
+
+static inline void cpu_write_msr(uint32_t msr, uint64_t value) {
+    __asm__ volatile("wrmsr" : : "c"(msr), "a"((uint32_t)value), "d"((uint32_t)(value >> 32)));
+}
+
 #elif defined(__aarch64__)
 
 static inline void cpu_relax(void) {
