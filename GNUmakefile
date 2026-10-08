@@ -269,6 +269,8 @@ soundtest: $(KERNEL) $(LIMINE_EXE)
 thermaltest: | $(BUILD)
 	$(CC) -std=gnu11 -Wall -Wextra -Werror -O1 support/tests/thermaltest.c -o $(BUILD)/thermaltest
 	$(BUILD)/thermaltest
+	$(CC) -std=gnu11 -Wall -Wextra -Werror -O1 support/tests/cpufreqtest.c -o $(BUILD)/cpufreqtest
+	$(BUILD)/cpufreqtest
 
 .PHONY: atl1ctest
 atl1ctest: | $(BUILD)
