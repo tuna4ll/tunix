@@ -57,6 +57,7 @@ append_report() {
 log_thermals() {
 	log=/tunix-thermal.log
 	echo "boot $(date) $(cat /proc/cmdline)" >> "$log"
+	reported=
 	while :; do
 		line="$(cut -d' ' -f1 /proc/uptime)s load $(cut -d' ' -f1-3 /proc/loadavg)"
 		for sensor in /sys/class/hwmon/hwmon0/temp*_input; do
@@ -67,6 +68,7 @@ log_thermals() {
 		done
 		busiest=$(ps -eo pcpu=,comm= --sort=-pcpu 2>/dev/null | grep -v ' ps$' | head -3 | tr -s ' ' | tr '\n' ',')
 		events=$(grep -aE 'THERMAL|CPUFREQ|ACPI: general' /dev/kmsg 2>/dev/null | tail -1)
+		[ "$events" = "$reported" ] && events= || reported="$events"
 		echo "$line top$busiest $events" >> "$log"
 		sync "$log"
 		sleep 5
