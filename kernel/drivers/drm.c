@@ -92,6 +92,10 @@ extern void kprintf(const char *fmt, ...);
 #define DRM_NR_MODE_OBJ_SETPROPERTY 0xba
 #define DRM_NR_PRIME_HANDLE_TO_FD 0x2d
 #define DRM_NR_PRIME_FD_TO_HANDLE 0x2e
+#define DRM_NR_MODE_CREATE_LEASE 0xc6
+#define DRM_NR_MODE_LIST_LESSEES 0xc7
+#define DRM_NR_MODE_GET_LEASE 0xc8
+#define DRM_NR_MODE_REVOKE_LEASE 0xc9
 
 #define DRM_COMMAND_BASE 0x40
 #define DRM_NR_VIRTGPU_MAP (DRM_COMMAND_BASE + 0x01)
@@ -2223,6 +2227,10 @@ static int64_t drm_dispatch_ioctl(struct file *file, unsigned long request,
     case DRM_NR_MODE_RMFB:
     case DRM_NR_MODE_CLOSEFB: return ioctl_rmfb(file, user_argument);
     case DRM_NR_GEM_CLOSE: return ioctl_gem_close(file, user_argument);
+    case DRM_NR_MODE_CREATE_LEASE:
+    case DRM_NR_MODE_LIST_LESSEES:
+    case DRM_NR_MODE_GET_LEASE:
+    case DRM_NR_MODE_REVOKE_LEASE: return -EOPNOTSUPP;
 
     case DRM_NR_VIRTGPU_GETPARAM:
     case DRM_NR_VIRTGPU_GET_CAPS:
