@@ -11,6 +11,7 @@
 #include "../include/net/netlink.h"
 #include "../include/sound.h"
 #include "../include/sysfs.h"
+#include "../include/cpufreq.h"
 #include "../include/thermal.h"
 #include "../include/vt.h"
 #include "../include/vfs.h"
@@ -674,7 +675,7 @@ static void hwmon_attribute(struct vfs_node *directory, unsigned cpu, unsigned k
     (void)module_attribute(directory, name, hwmon_read, NULL, ((uint64_t)kind << 16) | cpu);
 }
 
-void sysfs_publish_thermal(unsigned cpus) {
+static void publish_thermal(unsigned cpus) {
     if (thermal_supported() <= 0 || !cpus) return;
     struct vfs_node *directory = vfs_mkdir_p("/sys/devices/platform/coretemp.0/hwmon/hwmon0");
     if (!directory) return;
@@ -687,6 +688,79 @@ void sysfs_publish_thermal(unsigned cpus) {
     if (vfs_mkdir_p("/sys/class/hwmon"))
         (void)vfs_create_symlink("/sys/class/hwmon/hwmon0",
                                  "../../devices/platform/coretemp.0/hwmon/hwmon0", 0);
+}
+
+#define CPUFREQ_CURRENT 0
+#define CPUFREQ_MIN 1
+#define CPUFREQ_MAX 2
+#define CPUFREQ_DRIVER 3
+
+static int64_t cpufreq_attribute_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                      void *output) {
+    unsigned cpu = (unsigned)(node->inode & 0xFFFFU);
+    unsigned kind = (unsigned)(node->inode >> 16);
+    const struct cpufreq_state *state = cpufreq_state();
+    char text[32];
+    size_t length = 0;
+    if (kind == CPUFREQ_DRIVER) {
+        append_string(text, sizeof(text), &length, "tunix-pstate");
+    } else if (kind == CPUFREQ_MIN || kind == CPUFREQ_MAX) {
+        uint32_t ratio = kind == CPUFREQ_MIN ? state->min_ratio : state->max_ratio;
+        append_number(text, sizeof(text), &length, (uint32_t)(state->ratio_khz * ratio));
+    } else {
+        struct cpufreq_reading reading;
+        if (cpufreq_read(cpu, &reading) != 0) return -5;
+        uint64_t khz = reading.effective_khz ? reading.effective_khz
+                                             : state->ratio_khz * reading.ratio;
+        append_number(text, sizeof(text), &length, (uint32_t)khz);
+    }
+    append_string(text, sizeof(text), &length, "\n");
+    return attribute_reply(text, length, offset, size, output);
+}
+
+static void publish_cpu_list(const char *name, unsigned cpus) {
+    char path[64];
+    size_t used = 0;
+    append_string(path, sizeof(path), &used, "/sys/devices/system/cpu/");
+    append_string(path, sizeof(path), &used, name);
+    path[used] = '\0';
+    char text[24];
+    size_t length = 0;
+    append_string(text, sizeof(text), &length, "0");
+    if (cpus > 1U) {
+        append_string(text, sizeof(text), &length, "-");
+        append_number(text, sizeof(text), &length, cpus - 1U);
+    }
+    append_string(text, sizeof(text), &length, "\n");
+    (void)vfs_create_file(path, text, length, 0, 1);
+}
+
+static void publish_cpufreq(unsigned cpus) {
+    static const char *const names[] = {
+        "scaling_cur_freq", "cpuinfo_min_freq", "cpuinfo_max_freq", "scaling_driver"
+    };
+    for (unsigned cpu = 0; cpu < cpus; cpu++) {
+        char path[80];
+        size_t used = 0;
+        append_string(path, sizeof(path), &used, "/sys/devices/system/cpu/cpu");
+        append_number(path, sizeof(path), &used, cpu);
+        append_string(path, sizeof(path), &used, "/cpufreq");
+        path[used] = '\0';
+        struct vfs_node *directory = vfs_mkdir_p(path);
+        if (!directory) return;
+        for (unsigned kind = 0; kind < 4U; kind++)
+            (void)module_attribute(directory, names[kind], cpufreq_attribute_read, NULL,
+                                   ((uint64_t)kind << 16) | cpu);
+    }
+}
+
+void sysfs_publish_cpus(unsigned cpus) {
+    if (!cpus || !vfs_mkdir_p("/sys/devices/system/cpu")) return;
+    publish_cpu_list("online", cpus);
+    publish_cpu_list("possible", cpus);
+    publish_cpu_list("present", cpus);
+    if (cpufreq_supported() > 0) publish_cpufreq(cpus);
+    publish_thermal(cpus);
 }
 
 static void holders_refresh(struct vfs_node *directory) {
