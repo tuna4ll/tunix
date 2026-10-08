@@ -457,9 +457,35 @@ static void publish_pci_parent(const char *name) {
                           (uint32_t)(config[46] | (config[47] << 8)), 4);
 }
 
-static void publish_drm_nodes(const char *name) {
+static void publish_platform_parent(const char *name) {
+    char path[192];
+    size_t used = 0;
+    append_string(path, sizeof(path), &used, "/sys/devices/");
+    append_string(path, sizeof(path), &used, name);
+    append_string(path, sizeof(path), &used, "/device");
+    path[used] = '\0';
+    if (!vfs_mkdir_p(path)) return;
+
+    char file[224];
+    (void)vfs_mkdir_p("/sys/bus/platform");
+    used = 0;
+    append_string(file, sizeof(file), &used, path);
+    append_string(file, sizeof(file), &used, "/subsystem");
+    file[used] = '\0';
+    (void)vfs_create_symlink(file, "/sys/bus/platform", 0);
+
+    static const char uevent[] =
+        "DRIVER=simple-framebuffer\nMODALIAS=platform:simple-framebuffer\n";
+    used = 0;
+    append_string(file, sizeof(file), &used, path);
+    append_string(file, sizeof(file), &used, "/uevent");
+    file[used] = '\0';
+    (void)vfs_create_file(file, uevent, sizeof(uevent) - 1, 0, 1);
+}
+
+static void publish_drm_nodes(const char *name, unsigned count) {
     static const char *const nodes[] = { "card0", "renderD128" };
-    for (unsigned index = 0; index < 2; index++) {
+    for (unsigned index = 0; index < count; index++) {
         char path[192];
         size_t used = 0;
         append_string(path, sizeof(path), &used, "/sys/devices/");
@@ -865,10 +891,13 @@ void sysfs_init(void) {
             publish_device("renderD128", "dri/renderD128", "drm",
                            "DRIVER=virtio_gpu\nDEVTYPE=drm_render_minor\n",
                            DEV_MAJOR_DRM, DEV_MINOR_DRM_RENDER0);
-            publish_drm_nodes("card0");
-            publish_drm_nodes("renderD128");
+            publish_drm_nodes("card0", 2);
+            publish_drm_nodes("renderD128", 2);
             publish_pci_parent("card0");
             publish_pci_parent("renderD128");
+        } else {
+            publish_drm_nodes("card0", 1);
+            publish_platform_parent("card0");
         }
     }
 
