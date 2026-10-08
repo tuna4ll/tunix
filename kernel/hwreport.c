@@ -16,6 +16,7 @@
 #include "include/pmm.h"
 #include "include/vmm.h"
 #include "include/smp.h"
+#include "include/thermal.h"
 #include "include/time.h"
 #include "include/vfs.h"
 
@@ -393,6 +394,63 @@ static void put_pci(struct alias_table *aliases) {
     pci_for_each_device(put_pci_device, aliases);
 }
 
+static void put_signed(int64_t value) {
+    if (value < 0) {
+        put("-");
+        put_number((uint64_t)-value);
+    } else {
+        put_number((uint64_t)value);
+    }
+}
+
+static void put_acpi(void) {
+    put("acpi\n");
+    const struct acpi_power *power = acpi_power_info();
+    if (!power) {
+        put("  fadt        none\n");
+        return;
+    }
+    const struct acpi_events *events = acpi_event_state();
+    put("  sci         "); put_number(power->sci_interrupt);
+    put(", enabled at boot "); put(events->sci_enabled_at_boot ? "yes" : "no");
+    put(", handed over "); put(events->handed_over ? "yes" : "no"); put("\n");
+    put("  power key   "); put(events->decision ? events->decision : "not set up"); put("\n");
+    put("  firmware    embedded controller "); put(power->embedded_controller ? "yes" : "no");
+    put(", thermal zones "); put_number(power->thermal_zones); put("\n");
+    put("  gpe0        "); put_hex(power->gpe0_block); put(" length "); put_number(power->gpe0_length);
+    put(", enabled at boot "); put_hex(events->gpe_enabled_at_boot); put("\n");
+    put("  gpe1        "); put_hex(power->gpe1_block); put(" length "); put_number(power->gpe1_length);
+    put("\n");
+    put("  events      sci "); put_number(events->sci_count);
+    put(", gpe "); put_number(events->gpe_events);
+    put(", button "); put_number(events->button_events); put("\n");
+}
+
+static void put_thermal(void) {
+    put("thermal\n");
+    if (thermal_supported() <= 0) {
+        put("  sensor      none (no digital thermal sensor)\n");
+        return;
+    }
+    const struct thermal_state *state = thermal_state();
+    put("  limit       "); put_signed(state->tjmax); put(" C\n");
+    put("  automatic   ");
+    put(state->automatic_control < 0 ? "not read yet" : state->automatic_control ? "on" : "OFF");
+    put(", clock modulation "); put(state->clock_modulation ? "available" : "absent"); put("\n");
+    unsigned cpus = percpu_online_count();
+    for (unsigned cpu = 0; cpu < cpus; cpu++) {
+        struct thermal_reading reading;
+        put("  cpu "); put_number(cpu); put("       ");
+        if (thermal_read(cpu, &reading) != 0) {
+            put("not sampled yet\n");
+            continue;
+        }
+        put_signed(reading.celsius); put(" C, peak "); put_signed(reading.peak); put(" C");
+        if (reading.throttled) put(", throttled");
+        put("\n");
+    }
+}
+
 static void write_to_disk(void) {
     struct vfs_node *node = vfs_create_file_node(REPORT_PATH, 0644);
     if (!node) {
@@ -420,6 +478,8 @@ void hwreport_emit(void) {
     put_processors();
     put_framebuffer();
     put_memory();
+    put_acpi();
+    put_thermal();
 
     struct alias_table *aliases = kmalloc(sizeof(*aliases));
     if (aliases) {
