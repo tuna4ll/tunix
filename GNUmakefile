@@ -265,6 +265,11 @@ inputtest: $(KERNEL) $(LIMINE_EXE)
 soundtest: $(KERNEL) $(LIMINE_EXE)
 	support/tests/soundtest.sh $(SCHEDBENCH_CPUS) $(KERNEL)
 
+.PHONY: thermaltest
+thermaltest: | $(BUILD)
+	$(CC) -std=gnu11 -Wall -Wextra -Werror -O1 support/tests/thermaltest.c -o $(BUILD)/thermaltest
+	$(BUILD)/thermaltest
+
 .PHONY: atl1ctest
 atl1ctest: | $(BUILD)
 	$(CC) -std=gnu11 -Wall -Wextra -Werror -O1 -DTUNIX_MODULE_NAME='"atl1c"' \
