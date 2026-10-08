@@ -172,6 +172,7 @@ void kmain(const struct boot_info *boot) {
     timer_init();
     arch_route_timer();
     smp_init();
+    sysfs_publish_thermal(percpu_online_count());
     hwreport_emit();
     kprintf("TUNIX: starting %s\n", init_path);
 #if TUNIX_BOOT_TIMINGS

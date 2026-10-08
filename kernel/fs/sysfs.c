@@ -11,6 +11,7 @@
 #include "../include/net/netlink.h"
 #include "../include/sound.h"
 #include "../include/sysfs.h"
+#include "../include/thermal.h"
 #include "../include/vt.h"
 #include "../include/vfs.h"
 
@@ -637,6 +638,55 @@ static struct vfs_node *module_attribute(struct vfs_node *parent, const char *na
     node->inode = tag;
     if (vfs_attach(parent, node) != 0) return NULL;
     return node;
+}
+
+#define HWMON_INPUT 0
+#define HWMON_CRIT 1
+#define HWMON_LABEL 2
+
+static int64_t hwmon_read(struct vfs_node *node, uint64_t offset, size_t size, void *output) {
+    unsigned cpu = (unsigned)(node->inode & 0xFFFFU);
+    unsigned kind = (unsigned)(node->inode >> 16);
+    char text[32];
+    size_t length = 0;
+    if (kind == HWMON_LABEL) {
+        append_string(text, sizeof(text), &length, "Core ");
+        append_number(text, sizeof(text), &length, cpu);
+    } else if (kind == HWMON_CRIT) {
+        append_number(text, sizeof(text), &length, (uint32_t)thermal_state()->tjmax * 1000U);
+    } else {
+        struct thermal_reading reading;
+        if (thermal_read(cpu, &reading) != 0 || reading.celsius < 0) return -5;
+        append_number(text, sizeof(text), &length, (uint32_t)reading.celsius * 1000U);
+    }
+    append_string(text, sizeof(text), &length, "\n");
+    return attribute_reply(text, length, offset, size, output);
+}
+
+static void hwmon_attribute(struct vfs_node *directory, unsigned cpu, unsigned kind,
+                            const char *suffix) {
+    char name[32];
+    size_t length = 0;
+    append_string(name, sizeof(name), &length, "temp");
+    append_number(name, sizeof(name), &length, cpu + 1U);
+    append_string(name, sizeof(name), &length, suffix);
+    name[length] = '\0';
+    (void)module_attribute(directory, name, hwmon_read, NULL, ((uint64_t)kind << 16) | cpu);
+}
+
+void sysfs_publish_thermal(unsigned cpus) {
+    if (thermal_supported() <= 0 || !cpus) return;
+    struct vfs_node *directory = vfs_mkdir_p("/sys/devices/platform/coretemp.0/hwmon/hwmon0");
+    if (!directory) return;
+    (void)vfs_create_file("/sys/devices/platform/coretemp.0/hwmon/hwmon0/name", "coretemp\n", 9, 0, 1);
+    for (unsigned cpu = 0; cpu < cpus; cpu++) {
+        hwmon_attribute(directory, cpu, HWMON_INPUT, "_input");
+        hwmon_attribute(directory, cpu, HWMON_CRIT, "_crit");
+        hwmon_attribute(directory, cpu, HWMON_LABEL, "_label");
+    }
+    if (vfs_mkdir_p("/sys/class/hwmon"))
+        (void)vfs_create_symlink("/sys/class/hwmon/hwmon0",
+                                 "../../devices/platform/coretemp.0/hwmon/hwmon0", 0);
 }
 
 static void holders_refresh(struct vfs_node *directory) {
