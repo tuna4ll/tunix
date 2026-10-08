@@ -209,6 +209,7 @@ void vfs_start_writeback(void);
 void vfs_prefetch(struct vfs_node *node, uint64_t offset, uint64_t size);
 #define VFS_READAHEAD_PAGES 32ULL
 void vfs_balance_dirty(void);
+uint64_t vfs_dirty_pages(void);
 int vfs_fsync(struct vfs_node *node);
 int vfs_sync(void);
 uint64_t vfs_page_span(struct vfs_node *node);

@@ -199,6 +199,15 @@ static uint64_t block_reads;
 static uint64_t block_sectors_read;
 static uint64_t block_read_ns;
 static uint64_t block_write_failures;
+static uint64_t block_writes;
+static uint64_t block_sectors_written;
+static uint64_t block_write_ns;
+
+void block_write_statistics(uint64_t *writes, uint64_t *sectors, uint64_t *nanoseconds) {
+    if (writes) *writes = __atomic_load_n(&block_writes, __ATOMIC_RELAXED);
+    if (sectors) *sectors = __atomic_load_n(&block_sectors_written, __ATOMIC_RELAXED);
+    if (nanoseconds) *nanoseconds = __atomic_load_n(&block_write_ns, __ATOMIC_RELAXED);
+}
 
 void block_statistics(uint64_t *reads, uint64_t *sectors, uint64_t *nanoseconds,
                       uint64_t *write_failures) {
@@ -232,7 +241,12 @@ int block_device_write(const struct block_device *device, uint64_t lba,
                        uint32_t count, const void *source) {
     if (!device || !device->write || !count || !source) return -1;
     if (lba + count > device->sectors) return -1;
+    uint64_t begun = time_uptime_ns();
     int status = device->write(device->context, lba, count, source);
+    uint64_t now = time_uptime_ns();
+    __atomic_fetch_add(&block_writes, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&block_sectors_written, count, __ATOMIC_RELAXED);
+    if (now > begun) __atomic_fetch_add(&block_write_ns, now - begun, __ATOMIC_RELAXED);
     if (status != 0) {
         uint64_t failures = __atomic_add_fetch(&block_write_failures, 1, __ATOMIC_RELAXED);
         if (failures <= WRITE_FAILURE_REPORT_LIMIT)

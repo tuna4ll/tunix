@@ -49,5 +49,6 @@ void block_probe(void);
 
 void block_statistics(uint64_t *reads, uint64_t *sectors, uint64_t *nanoseconds,
                       uint64_t *write_failures);
+void block_write_statistics(uint64_t *writes, uint64_t *sectors, uint64_t *nanoseconds);
 
 #endif

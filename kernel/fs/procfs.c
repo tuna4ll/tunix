@@ -146,6 +146,8 @@ static int64_t proc_meminfo_read(struct vfs_node *node, uint64_t offset,
     text_string(&text, "Buffers:        0 kB\nCached:         0 kB\n");
     text_string(&text, "SwapTotal:      0 kB\nSwapFree:       0 kB\n");
     text_string(&text, "Shmem:          0 kB\nSReclaimable:   0 kB\n");
+    text_string(&text, "Dirty:          "); text_unsigned(&text, vfs_dirty_pages() * 4U);
+    text_string(&text, " kB\n");
 
     uint64_t heap_reserved = 0;
     uint64_t heap_allocated = 0;
@@ -171,6 +173,16 @@ static int64_t proc_blockstat_read(struct vfs_node *node, uint64_t offset,
     text_unsigned(&text, nanoseconds);
     text_string(&text, "\nwrite_failures ");
     text_unsigned(&text, write_failures);
+    uint64_t writes = 0, written = 0, write_ns = 0;
+    block_write_statistics(&writes, &written, &write_ns);
+    text_string(&text, "\nwrites ");
+    text_unsigned(&text, writes);
+    text_string(&text, "\nsectors_written ");
+    text_unsigned(&text, written);
+    text_string(&text, "\nwrite_wait_ns ");
+    text_unsigned(&text, write_ns);
+    text_string(&text, "\ndirty_kb ");
+    text_unsigned(&text, vfs_dirty_pages() * 4U);
     text_char(&text, '\n');
     return text_read(&text, offset, size, output);
 }

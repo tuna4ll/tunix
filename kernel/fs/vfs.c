@@ -1703,6 +1703,10 @@ void vfs_start_writeback(void) {
         kprintf("VFS: cannot start the writeback thread\n");
 }
 
+uint64_t vfs_dirty_pages(void) {
+    return __atomic_load_n(&dirty_pages_total, __ATOMIC_RELAXED);
+}
+
 void vfs_balance_dirty(void) {
     uint64_t limit = wb_limit_pages();
     if (__atomic_load_n(&dirty_pages_total, __ATOMIC_RELAXED) <= limit) return;
