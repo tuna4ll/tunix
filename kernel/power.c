@@ -9,6 +9,7 @@
 #include "include/vfs.h"
 #include "include/platform.h"
 #include "include/power.h"
+#include "include/workqueue.h"
 
 extern void kprintf(const char *fmt, ...);
 
@@ -52,8 +53,15 @@ void power_set_button_handled(int handled) {
     button_handled = handled != 0;
 }
 
+static void power_off_from_work(void *unused) {
+    (void)unused;
+    power_off();
+}
+
+static struct work button_work = WORK_INITIALIZER(power_off_from_work, NULL);
+
 void power_button_pressed(void) {
     if (!button_handled) return;
     kprintf("POWER: power button\n");
-    power_off();
+    work_queue(&button_work);
 }
