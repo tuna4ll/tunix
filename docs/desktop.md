@@ -4,6 +4,7 @@ Tunix boots into [Weston](https://gitlab.freedesktop.org/wayland/weston), the
 reference Wayland compositor, running as the `tunix` user. `make DESKTOP=gnome`
 builds a GNOME desktop instead; see [GNOME](gnome.md). It is Void's own
 `weston` package: nothing in it was built here and nothing in it is patched.
+Wayfire can be added to either with `xbps-install`; see [Wayfire](wayfire.md).
 
 ![Weston on Tunix](../screenshots/weston.png)
 

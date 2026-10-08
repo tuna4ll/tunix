@@ -21,6 +21,8 @@ sudo, curl and htop, and a Weston desktop that gets the display through seatd,
 with Firefox a click away on the panel. `make DESKTOP=gnome` builds a GNOME 48
 desktop instead: GDM, gnome-shell and mutter on atomic KMS, with dbus, elogind
 and polkit on the kernel's own cgroup2 hierarchies. See [GNOME](docs/gnome.md).
+Wayfire installs on either with `xbps-install` and starts from a console; see
+[Wayfire](docs/wayfire.md).
 
 Loadable modules, so `lsmod`, `modprobe` and `lspci -k` answer what they answer
 on Linux: the sound and RTL8139 drivers are `.ko` files that udev loads from the
