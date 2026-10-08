@@ -133,6 +133,23 @@ syncs it, so a machine that switches itself off leaves the minutes before it
 on the disk. `make thermaltest` runs the thermal code on the host against a
 modelled sensor.
 
+## Speed
+
+Nothing above the kernel picks a P-state here, so on Intel processors with
+Enhanced SpeedStep the kernel does: each core's first timer tick reads the
+ratio the firmware left it at and asks IA32_PERF_CTL for the highest non-turbo
+ratio from MSR_PLATFORM_INFO. A firmware that boots at the lowest ratio would
+otherwise leave every program at half speed for as long as the machine runs.
+Nehalem and Westmere take the ratio in bits 7:0 of the register, Sandy Bridge
+and later in bits 15:8; Atoms, older parts and machines whose firmware turned
+SpeedStep off are left alone.
+
+Once a second each core also reads APERF and MPERF, whose ratio is the speed it
+actually ran at while it was busy. Both show up in
+`/sys/devices/system/cpu/cpuN/cpufreq/scaling_cur_freq`, in the `hwreport`
+boot's `frequency` section, and in `/tunix-thermal.log`. `make thermaltest`
+also runs this code on the host against modelled registers.
+
 ## Running it
 
 `make run` no longer passes `-no-reboot -no-shutdown`. Those flags made QEMU
