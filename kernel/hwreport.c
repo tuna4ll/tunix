@@ -16,6 +16,7 @@
 #include "include/pmm.h"
 #include "include/vmm.h"
 #include "include/smp.h"
+#include "include/cpufreq.h"
 #include "include/thermal.h"
 #include "include/time.h"
 #include "include/vfs.h"
@@ -451,6 +452,36 @@ static void put_thermal(void) {
     }
 }
 
+static void put_frequency(void) {
+    put("frequency\n");
+    if (cpufreq_supported() <= 0) {
+        put("  control     none (no enhanced speedstep this kernel drives)\n");
+        return;
+    }
+    const struct cpufreq_state *state = cpufreq_state();
+    put("  range       "); put_number(state->ratio_khz * state->min_ratio / 1000U);
+    put(" - "); put_number(state->ratio_khz * state->max_ratio / 1000U); put(" MHz, ratios ");
+    put_number(state->min_ratio); put(" - "); put_number(state->max_ratio); put("\n");
+    put("  speedstep   "); put(state->eist_enabled ? "enabled" : "DISABLED by the firmware");
+    put(", "); put(state->requested ? "full ratio requested" : "left as the firmware set it");
+    put("\n");
+    unsigned cpus = percpu_online_count();
+    for (unsigned cpu = 0; cpu < cpus; cpu++) {
+        struct cpufreq_reading reading;
+        put("  cpu "); put_number(cpu); put("       ");
+        if (cpufreq_read(cpu, &reading) != 0) {
+            put("not sampled yet\n");
+            continue;
+        }
+        put("boot ratio "); put_number(reading.boot_ratio);
+        put(", now "); put_number(reading.ratio);
+        if (reading.effective_khz) {
+            put(", running at "); put_number(reading.effective_khz / 1000U); put(" MHz");
+        }
+        put("\n");
+    }
+}
+
 static void write_to_disk(void) {
     struct vfs_node *node = vfs_create_file_node(REPORT_PATH, 0644);
     if (!node) {
@@ -480,6 +511,7 @@ void hwreport_emit(void) {
     put_memory();
     put_acpi();
     put_thermal();
+    put_frequency();
 
     struct alias_table *aliases = kmalloc(sizeof(*aliases));
     if (aliases) {
