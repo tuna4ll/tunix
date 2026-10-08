@@ -17,6 +17,10 @@ typedef int s32;
 #define SYS_pipe 22
 #define SYS_setuid 105
 #define SYS_clock_gettime 228
+#define SYS_lseek 8
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
 #define CLOCK_MONOTONIC 1
 
 #define O_RDWR 2
@@ -81,10 +85,12 @@ static void put_signed(s64 value) {
 #define NR_GEM_CLOSE 0x09
 #define NR_PRIME_HANDLE_TO_FD 0x2d
 #define NR_PRIME_FD_TO_HANDLE 0x2e
+#define NR_MODE_CREATE_LEASE 0xc6
 
 #define DRM_MODE_OBJECT_CRTC 0xcccccccc
 #define DRM_MODE_OBJECT_CONNECTOR 0xc0c0c0c0
 #define DRM_MODE_OBJECT_PLANE 0xeeeeeeee
+#define DRM_MODE_OBJECT_ANY 0
 
 #define DRM_CLIENT_CAP_ATOMIC 3
 #define DRM_CLIENT_CAP_WRITEBACK 5
@@ -120,6 +126,7 @@ struct drm_mode_map_dumb { u32 handle, pad; u64 offset; };
 struct drm_mode_destroy_dumb { u32 handle; u32 pad; };
 struct drm_gem_close { u32 handle; u32 pad; };
 struct drm_prime_handle { u32 handle; u32 flags; s32 fd; };
+struct drm_mode_create_lease { u64 object_ids; u32 object_count; u32 flags; u32 lessee_id; u32 fd; };
 struct drm_mode_fb_cmd { u32 fb_id, width, height, pitch, bpp, depth, handle; };
 struct drm_mode_crtc {
     u64 set_connectors_ptr; u32 count_connectors;
@@ -812,6 +819,87 @@ static void test_connector_props(void) {
     put(result == 0 && crtc && dpms && set == 0 && refused == -22 ? " PASS\n" : " FAIL\n");
 }
 
+static int file_contains(const char *path, const char *needle) {
+    char text[512];
+    s64 fd = syscall3(SYS_open, (s64)path, 0, 0);
+    if (fd < 0) return 0;
+    s64 length = syscall3(SYS_read, fd, (s64)text, sizeof(text) - 1);
+    (void)syscall1(SYS_close, fd);
+    if (length <= 0) return 0;
+    text[length] = 0;
+    for (s64 start = 0; start < length; start++) {
+        s64 at = 0;
+        while (needle[at] && text[start + at] == needle[at]) at++;
+        if (!needle[at]) return 1;
+    }
+    return 0;
+}
+
+static void test_wlroots_probe(void) {
+    s64 node = syscall3(SYS_open, (s64)"/sys/dev/char/226:0/device/drm", 0, 0);
+    if (node >= 0) (void)syscall1(SYS_close, node);
+    int devname = file_contains("/sys/dev/char/226:0/uevent", "DEVNAME=dri/card0");
+
+    u32 props[16];
+    u64 values[16];
+    struct drm_mode_obj_get_properties any;
+    for (unsigned i = 0; i < sizeof(any); i++) ((char *)&any)[i] = 0;
+    any.props_ptr = (u64)props;
+    any.prop_values_ptr = (u64)values;
+    any.count_props = 16;
+    any.obj_id = 4;
+    any.obj_type = DRM_MODE_OBJECT_ANY;
+    s64 found = call(IOWR(NR_MODE_OBJ_GETPROPERTIES, struct drm_mode_obj_get_properties), &any);
+    int typed = 0;
+    for (u32 index = 0; found == 0 && index < any.count_props && index < 16; index++)
+        if (property_named(props[index], "type")) typed = 1;
+    struct drm_mode_obj_get_properties stray = any;
+    stray.obj_id = 99;
+    stray.count_props = 0;
+    s64 missing = call(IOWR(NR_MODE_OBJ_GETPROPERTIES, struct drm_mode_obj_get_properties), &stray);
+
+    struct drm_mode_create_lease lease = { 0, 0, 0, 0, 0 };
+    s64 leased = call(IOWR(NR_MODE_CREATE_LEASE, struct drm_mode_create_lease), &lease);
+
+    struct drm_mode_create_dumb create;
+    for (unsigned i = 0; i < sizeof(create); i++) ((char *)&create)[i] = 0;
+    create.width = 64; create.height = 64; create.bpp = 32;
+    s64 end = -1, start = -1, current = 0;
+    if (call(IOWR(NR_MODE_CREATE_DUMB, struct drm_mode_create_dumb), &create) == 0) {
+        struct drm_prime_handle exported = { create.handle, 0, -1 };
+        if (call(IOWR(NR_PRIME_HANDLE_TO_FD, struct drm_prime_handle), &exported) == 0) {
+            end = syscall3(SYS_lseek, exported.fd, 0, SEEK_END);
+            start = syscall3(SYS_lseek, exported.fd, 0, SEEK_SET);
+            current = syscall3(SYS_lseek, exported.fd, 0, SEEK_CUR);
+            (void)syscall1(SYS_close, exported.fd);
+        }
+        struct drm_mode_destroy_dumb drop = { create.handle, 0 };
+        (void)call(IOWR(NR_MODE_DESTROY_DUMB, struct drm_mode_destroy_dumb), &drop);
+    }
+
+    put("WLROOTS sysfs_drm=");
+    put(node >= 0 ? "yes" : "NO");
+    put(" devname=");
+    put(devname ? "yes" : "NO");
+    put(" any=");
+    put_signed(found);
+    put(" any_type=");
+    put(typed ? "yes" : "NO");
+    put(" any_missing=");
+    put_signed(missing);
+    put(" lease=");
+    put_signed(leased);
+    put(" dmabuf_end=");
+    put_signed(end);
+    put(" dmabuf_set=");
+    put_signed(start);
+    put(" dmabuf_cur=");
+    put_signed(current);
+    int ok = node >= 0 && devname && found == 0 && typed && missing == -2 && leased == -95 &&
+             end == (s64)create.size && end > 0 && start == 0 && current == -22;
+    put(ok ? " PASS\n" : " FAIL\n");
+}
+
 static void test_close_fb(void) {
     struct drm_mode_create_dumb create;
     for (unsigned i = 0; i < sizeof(create); i++) ((char *)&create)[i] = 0;
@@ -903,6 +991,7 @@ static int run(void) {
     test_plane_properties();
     test_atomic_commit();
     test_connector_props();
+    test_wlroots_probe();
     test_close_fb();
     test_set_master();
     test_cursor();
