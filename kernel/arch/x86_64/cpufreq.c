@@ -9,6 +9,7 @@
 
 extern void kprintf(const char *fmt, ...);
 
+#define MSR_SMI_COUNT 0x34U
 #define MSR_PLATFORM_INFO 0xCEU
 #define MSR_MPERF 0xE7U
 #define MSR_APERF 0xE8U
@@ -73,6 +74,7 @@ int cpufreq_supported(void) {
     if (state.max_ratio < 4U || state.max_ratio > 80U) return 0;
     if (state.min_ratio < 1U || state.min_ratio > state.max_ratio) state.min_ratio = state.max_ratio;
     state.ratio_khz = time_tsc_frequency() / 1000ULL / state.max_ratio;
+    state.smi_counted = 1;
     uint64_t misc = cpu_read_msr(MSR_MISC_ENABLE);
     state.eist_enabled = (misc & MISC_ENABLE_EIST) != 0;
     state.turbo = turbo_present && !(misc & MISC_ENABLE_TURBO_DISABLE);
@@ -109,6 +111,8 @@ void cpufreq_tick(void) {
     core->sampled_ns = now ? now : 1;
     core->reading.ratio = current_ratio();
     core->reading.valid = 1;
+    if (state.smi_counted && cpu->index == 0)
+        state.smi_count = cpu_read_msr(MSR_SMI_COUNT) & 0xFFFFFFFFULL;
     if (!state.measured) return;
     uint64_t aperf = cpu_read_msr(MSR_APERF);
     uint64_t mperf = cpu_read_msr(MSR_MPERF);

@@ -28,6 +28,7 @@ static uint32_t leaf1_ecx;
 static uint32_t leaf6_ecx;
 static uint32_t leaf6_eax;
 static uint64_t platform_info;
+static uint64_t smi_count;
 static uint64_t misc_msr;
 static uint64_t perf_status[8];
 static uint64_t perf_ctl[8];
@@ -55,6 +56,7 @@ static void cpu_cpuid(uint32_t leaf, uint32_t subleaf, uint32_t *a, uint32_t *b,
 static uint64_t cpu_read_msr(uint32_t msr) {
     msr_reads++;
     switch (msr) {
+    case 0x34: return smi_count;
     case 0xCE: return platform_info;
     case 0x1A0: return misc_msr;
     case 0x198: return perf_status[running.index];
@@ -221,6 +223,18 @@ int main(void) {
     cpufreq_tick();
     check("measures-full-speed", cpufreq_read(0, &reading) == 0 &&
                                  reading.effective_khz / 1000U == 2261 && reading.ratio == 17);
+
+    reset("GenuineIntel", 0x25);
+    smi_count = 0x100000123ULL;
+    perf_status[0] = 17;
+    cpufreq_tick();
+    check("smi-count-low-32-bits", state.smi_counted && state.smi_count == 0x123);
+    running.index = 1;
+    smi_count = 0x200;
+    clock_ns += 2000000000ULL;
+    cpufreq_tick();
+    check("smi-read-on-cpu0-only", state.smi_count == 0x123);
+    smi_count = 0;
 
     reset("GenuineIntel", 0x25);
     leaf6_ecx = 0;

@@ -467,6 +467,10 @@ static void put_frequency(void) {
     put(", target ratio "); put_number(state->target_ratio);
     put(state->requested ? ", raised from the firmware's" : ", kept the firmware's");
     put("\n");
+    if (state->smi_counted) {
+        put("  smi         "); put_number(state->smi_count);
+        put(" system management interrupts since power-on\n");
+    }
     unsigned cpus = percpu_online_count();
     for (unsigned cpu = 0; cpu < cpus; cpu++) {
         struct cpufreq_reading reading;

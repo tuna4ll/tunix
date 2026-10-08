@@ -754,12 +754,26 @@ static void publish_cpufreq(unsigned cpus) {
     }
 }
 
+static int64_t smi_count_read(struct vfs_node *node, uint64_t offset, size_t size, void *output) {
+    (void)node;
+    char text[24];
+    size_t length = 0;
+    append_number(text, sizeof(text), &length, (uint32_t)cpufreq_state()->smi_count);
+    append_string(text, sizeof(text), &length, "\n");
+    return attribute_reply(text, length, offset, size, output);
+}
+
 void sysfs_publish_cpus(unsigned cpus) {
     if (!cpus || !vfs_mkdir_p("/sys/devices/system/cpu")) return;
     publish_cpu_list("online", cpus);
     publish_cpu_list("possible", cpus);
     publish_cpu_list("present", cpus);
-    if (cpufreq_supported() > 0) publish_cpufreq(cpus);
+    if (cpufreq_supported() > 0) {
+        publish_cpufreq(cpus);
+        struct vfs_node *system = vfs_mkdir_p("/sys/devices/system/cpu");
+        if (system && cpufreq_state()->smi_counted)
+            (void)module_attribute(system, "smi_count", smi_count_read, NULL, 0);
+    }
     publish_thermal(cpus);
 }
 

@@ -19,6 +19,8 @@ struct cpufreq_state {
     uint32_t target_ratio;
     int turbo;
     uint64_t ratio_khz;
+    int smi_counted;
+    uint64_t smi_count;
 };
 
 int cpufreq_supported(void);
