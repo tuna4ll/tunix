@@ -3523,9 +3523,16 @@ static int64_t sys_chmod_at(int dirfd, uint64_t user_path, uint32_t mode, int fl
     return change_mode(node, mode);
 }
 
+static int64_t sys_fchown(int fd, uint32_t uid, uint32_t gid);
+
 static int64_t sys_chown_at(int dirfd, uint64_t user_path, uint32_t uid,
                             uint32_t gid, int flags) {
-    if (flags & ~AT_SYMLINK_NOFOLLOW) return -EINVAL;
+    if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)) return -EINVAL;
+    if (flags & AT_EMPTY_PATH) {
+        char first = 0;
+        if (copy_from_user(&first, user_path, 1) != 0) return -EFAULT;
+        if (!first && dirfd >= 0) return sys_fchown(dirfd, uid, gid);
+    }
     VFS_PATH_SCOPED path = NULL;
     int status = copy_path_at(dirfd, user_path, &path);
     if (status != 0) return status;
