@@ -44,7 +44,7 @@ append_report() {
 		done
 	done
 	echo "  kernel log"
-	log=$(cat /dev/kmsg 2>/dev/null | grep -aE 'ATL1C|RTL8139|HDA|EXT2|NET:|MODULE:|BLOCK:|HWREPORT|ACPI|THERMAL|CPUFREQ' | tail -25)
+	log=$(cat /dev/kmsg 2>/dev/null | grep -aE 'ATL1C|RTL8139|HDA|EXT2|NET:|MODULE:|BLOCK:|HWREPORT|ACPI|THERMAL|CPUFREQ|EHCI|USB-STORAGE' | tail -25)
 	[ -n "$log" ] || log=$(cat /dev/kmsg 2>/dev/null | tail -25)
 	printf '%s\n' "$log" | sed 's/^/    /'
 	echo "  bound"
@@ -66,11 +66,17 @@ log_thermals() {
 		for speed in /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq; do
 			[ -r "$speed" ] && line="$line $(($(cat "$speed") / 1000))MHz"
 		done
+		set -- $(sed -n 's/^\(sectors\|sectors_written\|dirty_kb\) //p' /proc/blockstat 2>/dev/null) 0 0 0
+		smi=$(cat /sys/devices/system/cpu/smi_count 2>/dev/null || echo 0)
+		line="$line read $((($1 - ${read_before:-$1}) / 2048))MB written $((($2 - ${written_before:-$2}) / 2048))MB dirty $(($3 / 1024))MB smi $((smi - ${smi_before:-$smi}))"
+		read_before=$1 written_before=$2 smi_before=$smi
 		busiest=$(ps -eo pcpu=,comm= --sort=-pcpu 2>/dev/null | grep -v ' ps$' | head -3 | tr -s ' ' | tr '\n' ',')
-		events=$(grep -aE 'THERMAL|CPUFREQ|ACPI: general' /dev/kmsg 2>/dev/null | tail -1)
+		events=$(grep -aE 'THERMAL|CPUFREQ|ACPI: general|EHCI: bulk|USB-STORAGE|BLOCK: (read|write)' /dev/kmsg 2>/dev/null | tail -1)
 		[ "$events" = "$reported" ] && events= || reported="$events"
-		echo "$line top$busiest $events" >> "$log"
+		echo "$line sync ${synced:-0}ms top$busiest $events" >> "$log"
+		before=$(cut -d' ' -f1 /proc/uptime | tr -d .)
 		sync "$log"
+		synced=$((($(cut -d' ' -f1 /proc/uptime | tr -d .) - before) * 10))
 		sleep 5
 	done
 }
