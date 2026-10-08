@@ -4,7 +4,7 @@ set -eu
 kernel="${1:-build/kernel.elf}"
 limine="${2:-build/limine}"
 controller="${USB:-ehci}"
-work="$(mktemp -d /tmp/tunix-usbread.XXXXXX)"
+work="$(mktemp -d /tmp/tunix-usbio.XXXXXX)"
 trap 'rm -rf "$work"' EXIT
 
 head -c $((24 * 1024 * 1024)) /dev/urandom > "$work/data"
@@ -26,5 +26,15 @@ if [ "$controller" = xhci ]; then
 else
     usb="-device usb-ehci,id=usb -device usb-storage,bus=usb.0,drive=stick"
 fi
-CPUS="${CPUS:-2}" QEMU_EXTRA="$drive $usb" SHOW=USBREAD WAIT="${WAIT:-300}" \
-    support/tests/kerneltest.sh support/tests/usbread-kerneltest.c USBREAD "$kernel" "$limine"
+CPUS="${CPUS:-2}" QEMU_EXTRA="$drive $usb" SHOW=USBIO WAIT="${WAIT:-300}" \
+    support/tests/kerneltest.sh support/tests/usbio-kerneltest.c USBIO "$kernel" "$limine"
+debugfs -R "dump /written $work/written" "$work/stick.img" >/dev/null 2>&1
+python3 - "$work/written" <<'PY'
+import sys
+data = open(sys.argv[1], 'rb').read()
+expected = bytes(((at * 131) ^ (at >> 12)) & 0xFF for at in range(16 * 1024 * 1024))
+same = data == expected
+print('USBIO on the stick: %s' % ('every written byte matches' if same else 'written data DIFFERS (%d bytes)' % len(data)))
+sys.exit(0 if same else 1)
+PY
+e2fsck -fn "$work/stick.img" >/dev/null 2>&1 && echo "USBIO e2fsck clean" || { echo "USBIO e2fsck FAILED"; exit 1; }
