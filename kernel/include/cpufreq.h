@@ -16,6 +16,8 @@ struct cpufreq_state {
     int requested;
     uint32_t min_ratio;
     uint32_t max_ratio;
+    uint32_t target_ratio;
+    int turbo;
     uint64_t ratio_khz;
 };
 

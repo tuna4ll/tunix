@@ -17,6 +17,7 @@ extern void kprintf(const char *fmt, ...);
 #define MSR_MISC_ENABLE 0x1A0U
 
 #define MISC_ENABLE_EIST (1ULL << 16)
+#define MISC_ENABLE_TURBO_DISABLE (1ULL << 38)
 #define SAMPLE_NS 1000000000ULL
 
 struct core_state {
@@ -64,6 +65,7 @@ int cpufreq_supported(void) {
     if (!(c & (1U << 7))) return 0;
     cpu_cpuid(6, 0, &a, &b, &c, &d);
     state.measured = (c & 1U) != 0;
+    int turbo_present = (a & 2U) != 0;
 
     uint64_t info = cpu_read_msr(MSR_PLATFORM_INFO);
     state.max_ratio = (uint32_t)((info >> 8) & 0xFFU);
@@ -71,7 +73,10 @@ int cpufreq_supported(void) {
     if (state.max_ratio < 4U || state.max_ratio > 80U) return 0;
     if (state.min_ratio < 1U || state.min_ratio > state.max_ratio) state.min_ratio = state.max_ratio;
     state.ratio_khz = time_tsc_frequency() / 1000ULL / state.max_ratio;
-    state.eist_enabled = (cpu_read_msr(MSR_MISC_ENABLE) & MISC_ENABLE_EIST) != 0;
+    uint64_t misc = cpu_read_msr(MSR_MISC_ENABLE);
+    state.eist_enabled = (misc & MISC_ENABLE_EIST) != 0;
+    state.turbo = turbo_present && !(misc & MISC_ENABLE_TURBO_DISABLE);
+    state.target_ratio = state.max_ratio + (state.turbo ? 1U : 0U);
     support = 1;
     return 1;
 }
@@ -83,15 +88,14 @@ static uint32_t current_ratio(void) {
 static void first_sample(struct core_state *core, unsigned index) {
     core->initialised = 1;
     core->reading.boot_ratio = current_ratio();
-    if (!state.eist_enabled) return;
+    if (!state.eist_enabled || core->reading.boot_ratio >= state.target_ratio) return;
     uint64_t control = cpu_read_msr(MSR_PERF_CTL);
     control &= ~(0xFFULL << ratio_shift);
-    control |= (uint64_t)state.max_ratio << ratio_shift;
+    control |= (uint64_t)state.target_ratio << ratio_shift;
     cpu_write_msr(MSR_PERF_CTL, control);
     state.requested = 1;
-    if (core->reading.boot_ratio != state.max_ratio)
-        kprintf("CPUFREQ: cpu %u was at ratio %u, asked for %u\n", index,
-                core->reading.boot_ratio, state.max_ratio);
+    kprintf("CPUFREQ: cpu %u was at ratio %u, asked for %u\n", index,
+            core->reading.boot_ratio, state.target_ratio);
 }
 
 void cpufreq_tick(void) {

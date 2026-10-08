@@ -26,6 +26,7 @@ struct cpu {
 static struct cpu_identity machine;
 static uint32_t leaf1_ecx;
 static uint32_t leaf6_ecx;
+static uint32_t leaf6_eax;
 static uint64_t platform_info;
 static uint64_t misc_msr;
 static uint64_t perf_status[8];
@@ -48,7 +49,7 @@ static void cpu_cpuid(uint32_t leaf, uint32_t subleaf, uint32_t *a, uint32_t *b,
     *a = *b = *c = *d = 0;
     if (leaf == 0) *a = 0xB;
     if (leaf == 1) *c = leaf1_ecx;
-    if (leaf == 6) *c = leaf6_ecx;
+    if (leaf == 6) { *a = leaf6_eax; *c = leaf6_ecx; }
 }
 
 static uint64_t cpu_read_msr(uint32_t msr) {
@@ -114,6 +115,7 @@ static void reset(const char *vendor, uint32_t model) {
     machine.model_number = model;
     leaf1_ecx = 1U << 7;
     leaf6_ecx = 1;
+    leaf6_eax = 0;
     platform_info = (17ULL << 8) | (9ULL << 40);
     misc_msr = 1ULL << 16;
     memset(perf_status, 0, sizeof(perf_status));
@@ -153,11 +155,35 @@ int main(void) {
     perf_ctl[0] = (1ULL << 32) | 9;
     cpufreq_tick();
     struct cpufreq_reading reading;
-    check("arrandale-low-byte-request", perf_ctl[0] == ((1ULL << 32) | 17) && ctl_writes == 1);
+    check("arrandale-low-byte-request", perf_ctl[0] == ((1ULL << 32) | 17) && ctl_writes == 1 &&
+                                        state.target_ratio == 17 && !state.turbo);
     check("arrandale-boot-ratio-kept", cpufreq_read(0, &reading) == 0 && reading.boot_ratio == 9);
     check("arrandale-logs-the-change", strstr(last_message, "ratio 9, asked for 17") != NULL);
     check("range-from-tsc", state.ratio_khz * state.max_ratio / 1000U == 2261 &&
                             state.ratio_khz * state.min_ratio / 1000U == 1197);
+
+    reset("GenuineIntel", 0x25);
+    leaf6_eax = 2;
+    perf_status[0] = 9;
+    perf_ctl[0] = 9;
+    cpufreq_tick();
+    check("turbo-target-one-above", state.turbo && state.target_ratio == 18 && perf_ctl[0] == 18);
+
+    reset("GenuineIntel", 0x25);
+    leaf6_eax = 2;
+    perf_status[0] = 18;
+    perf_ctl[0] = 18;
+    cpufreq_tick();
+    check("firmware-turbo-left-alone", ctl_writes == 0 && !state.requested && perf_ctl[0] == 18 &&
+                                       cpufreq_read(0, &reading) == 0 && reading.boot_ratio == 18);
+
+    reset("GenuineIntel", 0x25);
+    leaf6_eax = 2;
+    misc_msr |= 1ULL << 38;
+    perf_status[0] = 18;
+    perf_ctl[0] = 18;
+    cpufreq_tick();
+    check("never-lowers-a-higher-ratio", ctl_writes == 0 && !state.turbo && perf_ctl[0] == 18);
 
     reset("GenuineIntel", 0x2A);
     platform_info = (34ULL << 8) | (16ULL << 40);

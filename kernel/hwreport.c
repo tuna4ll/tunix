@@ -463,7 +463,9 @@ static void put_frequency(void) {
     put(" - "); put_number(state->ratio_khz * state->max_ratio / 1000U); put(" MHz, ratios ");
     put_number(state->min_ratio); put(" - "); put_number(state->max_ratio); put("\n");
     put("  speedstep   "); put(state->eist_enabled ? "enabled" : "DISABLED by the firmware");
-    put(", "); put(state->requested ? "full ratio requested" : "left as the firmware set it");
+    put(", turbo "); put(state->turbo ? "available" : "absent");
+    put(", target ratio "); put_number(state->target_ratio);
+    put(state->requested ? ", raised from the firmware's" : ", kept the firmware's");
     put("\n");
     unsigned cpus = percpu_online_count();
     for (unsigned cpu = 0; cpu < cpus; cpu++) {
