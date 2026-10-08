@@ -217,6 +217,16 @@ void vt_display_released(void) {
     __atomic_store_n(&display_suspended, 0, __ATOMIC_RELAXED);
 }
 
+int vt_graphics_takeover_allowed(const void *holder, const void *claimer) {
+    uintptr_t first = (uintptr_t)&terminals[1];
+    uintptr_t last = (uintptr_t)&terminals[VT_COUNT];
+    uintptr_t at = (uintptr_t)holder;
+    if (at < first || at > last || (at - first) % sizeof(struct vt)) return 0;
+    unsigned active = __atomic_load_n(&active_index, __ATOMIC_ACQUIRE);
+    if (holder == &terminals[active]) return 0;
+    return claimer == &terminals[active] || terminals[active].kd_mode == TUNIX_KD_GRAPHICS;
+}
+
 const void *vt_graphics_mode_owner(void) {
     if (!index_valid(display_owner_index)) return NULL;
     struct vt *vt = &terminals[display_owner_index];

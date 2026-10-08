@@ -47,6 +47,7 @@ void vt_display_claimed(void);
 void vt_display_released(void);
 
 const void *vt_graphics_mode_owner(void);
+int vt_graphics_takeover_allowed(const void *holder, const void *claimer);
 
 void vt_process_exited(uint64_t pid, uint64_t sid);
 

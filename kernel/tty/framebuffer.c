@@ -84,12 +84,15 @@ int framebuffer_claim_graphics(const void *owner) {
     if (!owner) return -EINVAL;
 
     lock_acquire(&graphics_lock);
-    if (framebuffer.graphics_owner && framebuffer.graphics_owner != owner) {
+    int takeover = framebuffer.graphics_owner && framebuffer.graphics_owner != owner &&
+                   vt_graphics_takeover_allowed(framebuffer.graphics_owner, owner);
+    if (framebuffer.graphics_owner && framebuffer.graphics_owner != owner && !takeover) {
         int shared = shares_with_graphics_terminal(owner);
         lock_release(&graphics_lock);
         return shared ? 0 : -EBUSY;
     }
-    int first_claim = framebuffer.graphics_owner == NULL;
+    int first_claim = framebuffer.graphics_owner == NULL || takeover;
+    if (takeover) framebuffer.graphics_suspended = 0;
     framebuffer.graphics_owner = owner;
     lock_release(&graphics_lock);
     if (first_claim) vt_display_claimed();
