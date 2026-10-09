@@ -20,6 +20,7 @@ typedef unsigned char u8;
 #define SYS_rt_sigaction    13
 #define SYS_pread64         17
 #define SYS_nanosleep       35
+#define SYS_sync            162
 #define SYS_getpid          39
 #define SYS_sendmsg         46
 #define SYS_recvmsg         47
@@ -70,6 +71,7 @@ typedef unsigned char u8;
 #define SYS_timerfd_settime 86
 #define SYS_exit_group      94
 #define SYS_nanosleep       101
+#define SYS_sync            81
 #define SYS_clock_gettime   113
 #define SYS_kill            129
 #define SYS_rt_sigaction    134
@@ -338,6 +340,8 @@ static inline s64 sendmsg(int fd, const struct msghdr *message, int flags) {
 static inline s64 recvmsg(int fd, struct msghdr *message, int flags) {
     return SYSCALL(SYS_recvmsg, fd, message, flags, 0, 0, 0);
 }
+
+static inline s64 sync(void) { return SYSCALL(SYS_sync, 0, 0, 0, 0, 0, 0); }
 
 static inline s64 nanosleep(const struct timespec *duration) {
     return SYSCALL(SYS_nanosleep, duration, 0, 0, 0, 0, 0);

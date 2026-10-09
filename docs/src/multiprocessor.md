@@ -664,6 +664,21 @@ prints what this machine turned out to be and writes the same text to
 with no serial cable can still be asked, because the disk can be read anywhere
 else afterwards.
 
+The report does not need the desktop image. `make hwreport-image` builds
+`build/hwreport.img`, about 130 MiB, with only the kernel and a small init that
+waits after the report is written; writing it to a stick takes seconds rather
+than the minutes the full image takes. `make run-hwreport` boots it under QEMU,
+and `tools/hwreport/read.sh build/hwreport.img out/` copies the results off an
+image.
+
+Its `gpu` section lists the display controllers and saves every video BIOS it
+can find: the legacy shadow at `0xC0000`, each card's PCI ROM BAR and, on NVIDIA
+cards, the copy the display engine points at through the PRAMIN window. Each is
+written to `/tunix-vbios-*.rom` once its `55 AA` signature and checksum hold. An
+NVIDIA card also gets its chip id and VRAM size decoded and its main, bus, clock,
+GPIO, memory and display registers dumped to `/tunix-gpu-regs.bin` as
+`(start, bytes)` headers each followed by the 32-bit values.
+
 ```
 tunix hardware report
 

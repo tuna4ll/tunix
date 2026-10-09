@@ -374,3 +374,17 @@ lint: | $(LIMINE_HEADER)
 		xargs -P$(NPROC) -I{} $(CLANG_TIDY) --quiet {} -- $(LINT_FLAGS)
 	@printf '%s\n' $(MODULE_SOURCES) | \
 		xargs -P$(NPROC) -I{} $(CLANG_TIDY) --quiet {} -- $(LINT_FLAGS) -DTUNIX_MODULE_NAME='"lint"'
+
+HWREPORT_IMAGE := $(BUILD)/hwreport.img
+
+.PHONY: hwreport-image run-hwreport
+hwreport-image: $(HWREPORT_IMAGE)
+
+$(HWREPORT_IMAGE): $(KERNEL) $(LIMINE_EXE) tools/hwreport/build.sh tools/hwreport/init.c \
+		tools/hwreport/limine.conf tools/image.sh tools/tests/test.h
+	TABLE='$(IMAGE_TABLE)' tools/hwreport/build.sh $@ $(KERNEL) $(LIMINE_DIR)
+
+run-hwreport: $(HWREPORT_IMAGE)
+	$(QEMU) -machine q35,accel=kvm:tcg -cpu max -smp $(QEMU_SMP) -m $(QEMU_MEMORY) \
+		-drive format=raw,file=$(HWREPORT_IMAGE),if=none,id=disk0 \
+		-device ide-hd,drive=disk0,bus=ide.0 $(QEMU_DISPLAY) -serial stdio -monitor none
