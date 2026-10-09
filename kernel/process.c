@@ -1646,7 +1646,8 @@ void process_finish_switch(void) {
 }
 
 static void activate_process(struct process *process) {
-    if (current && current != process) {
+    int switching = current != process;
+    if (current && switching) {
         arch_save_thread_pointers(current);
         fpu_save(current);
         leave_process(current);
@@ -1666,7 +1667,7 @@ static void activate_process(struct process *process) {
         vmm_activate(process->cr3);
     }
     arch_load_thread_pointers(process->fs_base, process->gs_base);
-    fpu_restore(process);
+    if (switching) fpu_restore(process);
 }
 
 static void leave_for_idle(void) {
