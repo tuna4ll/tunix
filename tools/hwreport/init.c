@@ -144,13 +144,55 @@ static void note_span(const char *name, const struct span *span) {
     note(" us\n");
 }
 
-static s64 wait_flip(int fd) {
+struct vblanks {
+    u32 first_sequence, last_sequence, events;
+    s64 first_us, last_us;
+};
+
+static struct vblanks vblanks;
+
+static void count_vblank(const struct drm_event_vblank *event) {
+    s64 at = (s64)event->tv_sec * 1000000 + event->tv_usec;
+    if (!vblanks.events++) {
+        vblanks.first_sequence = event->sequence;
+        vblanks.first_us = at;
+    }
+    vblanks.last_sequence = event->sequence;
+    vblanks.last_us = at;
+}
+
+static void note_vblanks(void) {
+    u32 frames = vblanks.last_sequence - vblanks.first_sequence;
+    note("display: vblank period ");
+    note_number(frames ? (vblanks.last_us - vblanks.first_us) / frames : 0);
+    note(" us over ");
+    note_number(frames);
+    note(" vblanks\n");
+}
+
+static void note_file(const char *path) {
+    static char text[4096];
+    int fd = (int)open(path, O_RDONLY, 0);
+    if (fd < 0) return;
+    s64 total = 0, got;
+    while (total < (s64)sizeof(text) - 1 &&
+           (got = read(fd, text + total, sizeof(text) - 1 - (u64)total)) > 0)
+        total += got;
+    close(fd);
+    text[total] = '\0';
+    note(text);
+}
+
+static s64 wait_flip(int fd, int epoll) {
     struct drm_event_vblank event;
+    struct epoll_event ready;
     s64 start = now_ms();
     while (now_ms() - start < 500) {
-        if (read(fd, &event, sizeof(event)) == (s64)sizeof(event) && event.type == DRM_EVENT_FLIP)
+        if (read(fd, &event, sizeof(event)) == (s64)sizeof(event) && event.type == DRM_EVENT_FLIP) {
+            count_vblank(&event);
             return now_ms() - start;
-        sleep_ms(1);
+        }
+        (void)epoll_wait(epoll, &ready, 1, 500);
     }
     return -1;
 }
@@ -186,6 +228,11 @@ static void display_check(void) {
         return;
     }
 
+    int epoll = (int)epoll_create();
+    if (epoll < 0 || epoll_add(epoll, fd, EPOLLIN, 0) != 0) {
+        note("display: epoll failed\n");
+        return;
+    }
     struct span drawing = {0}, flipping = {0}, waiting = {0};
     int missed = 0;
     s64 started = now_ms();
@@ -206,7 +253,7 @@ static void display_check(void) {
             continue;
         }
         mark = now_us();
-        if (wait_flip(fd) < 0) {
+        if (wait_flip(fd, epoll) < 0) {
             missed++;
             continue;
         }
@@ -223,9 +270,12 @@ static void display_check(void) {
     note_span("draw", &drawing);
     note_span("page flip ioctl", &flipping);
     note_span("event wait", &waiting);
+    note_vblanks();
+    note_file("/proc/interrupts");
     sleep_ms(2000);
     crtc.fb_id = 0;
     (void)ioctl(fd, DRM_IOWR(DRM_SETCRTC, sizeof(crtc)), &crtc);
+    close(epoll);
     close(fd);
 }
 
