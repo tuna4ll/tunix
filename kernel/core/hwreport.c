@@ -689,11 +689,13 @@ static void put_legacy_vbios(uint8_t *buffer) {
 static void put_pci_rom(const struct pci_device *device, uint8_t *buffer) {
     uint32_t saved =
         pci_config_read32(device->bus, device->slot, device->function, PCI_ROM_REGISTER);
-    uint64_t address = saved & 0xFFFFF800U;
+    uint32_t address = saved & 0xFFFFF800U;
+    uint32_t unused = ~address & 0xFFFFF800U;
+    int sizing_mask = address >= 0xFF000000U && ((unused + 0x800U) & unused) == 0;
     put("  rom bar     ");
     put_hex(saved);
-    put("\n");
-    if (!address) {
+    put(sizing_mask ? " (never assigned)\n" : "\n");
+    if (!address || sizing_mask) {
         put_vbios("pci rom bar", "/tunix-vbios-pcirom.rom", NULL, 0);
         return;
     }
