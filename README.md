@@ -1,5 +1,7 @@
 # Tunix
 
+[![ci](https://github.com/tuna4ll/tunix/actions/workflows/ci.yml/badge.svg)](https://github.com/tuna4ll/tunix/actions/workflows/ci.yml)
+
 A Unix-like kernel for x86_64 and aarch64 that runs an unmodified Void Linux userland.
 
 ## Build and run

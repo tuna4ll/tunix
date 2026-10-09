@@ -50,7 +50,13 @@ At minimum, run:
 ```sh
 make all
 make test
+make format
+make lint
 ```
+
+`make format` rewrites the C sources with clang-format; CI runs
+`make format-check` and `make lint` with clang-format 23.1.1 and clang-tidy
+22.1.8 (`pip install clang-format==23.1.1 clang-tidy==22.1.8`).
 
 For boot or runtime changes, also run:
 

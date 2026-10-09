@@ -1,0 +1,90 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CLANG_FORMAT_VERSION: 23.1.1
+  CLANG_TIDY_VERSION: 22.1.8
+  MDBOOK_VERSION: 0.5.4
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install the aarch64 cross compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+
+      - name: x86_64, every configuration
+        run: make -j"$(nproc)" check
+
+      - name: aarch64
+        run: make -j"$(nproc)" aarch64-core modules-aarch64
+
+  style:
+    name: format and lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: install clang-format and clang-tidy
+        run: pip install "clang-format==$CLANG_FORMAT_VERSION" "clang-tidy==$CLANG_TIDY_VERSION"
+
+      - name: format
+        run: make format-check
+
+      - name: lint
+        run: make lint
+
+  test:
+    name: test (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install qemu and the image tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-system-arm \
+            gcc-aarch64-linux-gnu mtools e2fsprogs fdisk
+
+      - name: enable kvm
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: run the tests
+        run: make -j"$(nproc)" ${{ matrix.arch == 'aarch64' && 'test-aarch64' || 'test' }}
+
+  docs:
+    name: docs
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install mdbook
+        run: |
+          curl -fsSL "https://github.com/rust-lang/mdBook/releases/download/v$MDBOOK_VERSION/mdbook-v$MDBOOK_VERSION-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+      - name: build
+        run: mdbook build docs
