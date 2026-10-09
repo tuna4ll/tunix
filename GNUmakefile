@@ -6,7 +6,6 @@ ifneq ($(filter default undefined,$(origin CC)),)
   override CC := cc
 endif
 
-PYTHON  ?= python3
 QEMU    ?= qemu-system-x86_64
 
 BUILD   := build
@@ -17,14 +16,11 @@ LIMINE_DIR     := $(BUILD)/limine
 LIMINE_HEADER  := $(LIMINE_DIR)/limine.h
 LIMINE_EXE     := $(LIMINE_DIR)/limine
 
-TERMINAL_FONT_SOURCE ?= assets/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf
-TERMINAL_FONT_DATA   := $(BUILD)/generated/terminal_font_data.inc
-
 KERNEL_CFLAGS := -std=gnu11 -Wall -Wextra -Werror -ffreestanding \
 	-fno-stack-protector -fno-pic -fno-pie -fno-builtin \
 	-fno-asynchronous-unwind-tables -fno-unwind-tables -mno-red-zone -m64 \
 	-Os -ffunction-sections -fdata-sections -mcmodel=kernel -mgeneral-regs-only \
-	-Ikernel/include -I$(BUILD)/generated -I$(LIMINE_DIR) \
+	-Ikernel/include -I$(LIMINE_DIR) \
 	$(KERNEL_CFLAGS_EXTRA)
 KERNEL_LDFLAGS := -nostdlib -no-pie -Wl,-T,kernel/arch/x86_64/linker.ld \
 	-Wl,--gc-sections -Wl,--build-id=none -Wl,-z,max-page-size=0x1000
@@ -45,7 +41,7 @@ check:
 $(KERNEL): $(KERNEL_OBJECTS) kernel/arch/x86_64/linker.ld
 	$(CC) $(KERNEL_LDFLAGS) $(KERNEL_OBJECTS) -o $@
 
-$(BUILD)/%.c.o: %.c $(TERMINAL_FONT_DATA) | $(LIMINE_HEADER)
+$(BUILD)/%.c.o: %.c | $(LIMINE_HEADER)
 	@mkdir -p $(dir $@)
 	$(CC) $(KERNEL_CFLAGS) -MMD -MP -c $< -o $@
 
@@ -67,21 +63,17 @@ TEST_MODULES := $(patsubst support/tests/modules/%.c,$(BUILD)/test-modules/%.ko,
 .PHONY: modules
 modules: $(MODULES) $(TEST_MODULES)
 
-$(BUILD)/modules/%.ko: kernel/modules/%.c $(TERMINAL_FONT_DATA) | $(LIMINE_HEADER)
+$(BUILD)/modules/%.ko: kernel/modules/%.c | $(LIMINE_HEADER)
 	@mkdir -p $(dir $@)
 	$(CC) $(MODULE_CFLAGS) -MMD -MP -c $< -o $@
 
-$(BUILD)/test-modules/%.ko: support/tests/modules/%.c $(TERMINAL_FONT_DATA) | $(LIMINE_HEADER)
+$(BUILD)/test-modules/%.ko: support/tests/modules/%.c | $(LIMINE_HEADER)
 	@mkdir -p $(dir $@)
 	$(CC) $(MODULE_CFLAGS) -MMD -MP -c $< -o $@
 
 $(MODULES) $(TEST_MODULES): GNUmakefile
 
 -include $(MODULES:.ko=.d) $(TEST_MODULES:.ko=.d)
-
-$(TERMINAL_FONT_DATA): $(TERMINAL_FONT_SOURCE) support/terminal-font.py
-	@mkdir -p $(dir $@)
-	$(PYTHON) support/terminal-font.py $< $@
 
 $(KERNEL_OBJECTS): GNUmakefile
 
@@ -96,7 +88,7 @@ $(LIMINE_EXE): $(LIMINE_HEADER)
 	$(MAKE) -C $(LIMINE_DIR)
 
 clean:
-	rm -rf $(BUILD)/kernel $(BUILD)/generated $(BUILD)/modules \
+	rm -rf $(BUILD)/kernel $(BUILD)/modules \
 		$(BUILD)/test-modules $(KERNEL) $(IMAGE)
 
 distclean:
@@ -291,7 +283,7 @@ AARCH64_CORE_CFLAGS := -std=gnu11 -Wall -Wextra -Werror -ffreestanding \
 	-fno-asynchronous-unwind-tables -fno-unwind-tables -mgeneral-regs-only \
 	-mstrict-align -march=armv8-a -mno-outline-atomics -Os \
 	-ffunction-sections -fdata-sections \
-	-Ikernel/include -I$(BUILD)/generated $(KERNEL_CFLAGS_EXTRA)
+	-Ikernel/include $(KERNEL_CFLAGS_EXTRA)
 AARCH64_CORE_EXCLUDE := kernel/drivers/ata.c kernel/drivers/net/rtl8139.c
 AARCH64_CORE_SOURCES := $(filter-out $(AARCH64_CORE_EXCLUDE),$(shell find kernel -path kernel/arch -prune -o -path kernel/modules -prune -o \( -name '*.c' -o -name '*.S' \) -print)) \
 	$(shell find kernel/arch/aarch64 \( -name '*.c' -o -name '*.S' \) -print)
@@ -310,7 +302,7 @@ $(AARCH64_CORE_KERNEL): $(AARCH64_CORE_OBJECTS) kernel/arch/aarch64/linker.ld
 $(AARCH64_CORE_IMAGE): $(AARCH64_CORE_KERNEL)
 	$(AARCH64_OBJCOPY) -O binary $< $@
 
-$(AARCH64_CORE_BUILD)/%.c.o: %.c $(TERMINAL_FONT_DATA)
+$(AARCH64_CORE_BUILD)/%.c.o: %.c
 	@mkdir -p $(dir $@)
 	$(AARCH64_CC) $(AARCH64_CORE_CFLAGS) -MMD -MP -c $< -o $@
 
@@ -330,11 +322,11 @@ AARCH64_MODULE_CFLAGS = $(AARCH64_CORE_CFLAGS) -DTUNIX_MODULE_NAME='"$(notdir $*
 .PHONY: modules-aarch64
 modules-aarch64: $(AARCH64_MODULES) $(AARCH64_TEST_MODULES)
 
-$(AARCH64_CORE_BUILD)/modules/%.ko: kernel/modules/%.c $(TERMINAL_FONT_DATA)
+$(AARCH64_CORE_BUILD)/modules/%.ko: kernel/modules/%.c
 	@mkdir -p $(dir $@)
 	$(AARCH64_CC) $(AARCH64_MODULE_CFLAGS) -MMD -MP -c $< -o $@
 
-$(AARCH64_CORE_BUILD)/test-modules/%.ko: support/tests/modules/%.c $(TERMINAL_FONT_DATA)
+$(AARCH64_CORE_BUILD)/test-modules/%.ko: support/tests/modules/%.c
 	@mkdir -p $(dir $@)
 	$(AARCH64_CC) $(AARCH64_MODULE_CFLAGS) -MMD -MP -c $< -o $@
 

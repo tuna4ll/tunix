@@ -11,8 +11,9 @@
 #include "../include/terminal_font.h"
 
 #define CELL_BG_EXPLICIT 0x01U
-#define CONSOLE_BACKGROUND 0x1A1B26U
-#define CONSOLE_FOREGROUND 0xC0CAF5U
+#define CONSOLE_DEFAULT_COLOR 7
+#define CONSOLE_BACKGROUND 0x000000U
+#define CONSOLE_FOREGROUND 0xAAAAAAU
 
 struct console_cell {
     uint32_t codepoint;
@@ -39,6 +40,7 @@ struct terminal_screen {
     int col;
     int row;
     uint32_t foreground;
+    int foreground_index;
     uint32_t background;
     uint8_t background_explicit;
     uint8_t bold;
@@ -58,32 +60,11 @@ static int terminal_is_ready;
 static struct terminal_screen *active_screen;
 
 static const uint32_t ansi_palette[16] = {
-    0x15161EU, 0xF7768EU, 0x9ECE6AU, 0xE0AF68U,
-    0x7AA2F7U, 0xBB9AF7U, 0x7DCFFFU, 0xC0CAF5U,
-    0x414868U, 0xFF899DU, 0xB9F27CU, 0xF4C97AU,
-    0x8DB0FFU, 0xC7A9FFU, 0x9BE8FFU, 0xF4F7FFU
+    0x000000U, 0xAA0000U, 0x00AA00U, 0xAA5500U,
+    0x0000AAU, 0xAA00AAU, 0x00AAAAU, 0xAAAAAAU,
+    0x555555U, 0xFF5555U, 0x55FF55U, 0xFFFF55U,
+    0x5555FFU, 0xFF55FFU, 0x55FFFFU, 0xFFFFFFU
 };
-
-static uint32_t blend_rgb(uint32_t base, uint32_t overlay, uint8_t alpha) {
-    uint32_t inverse = 255U - alpha;
-    uint32_t red = (((base >> 16) & 0xFFU) * inverse +
-                    ((overlay >> 16) & 0xFFU) * alpha) / 255U;
-    uint32_t green = (((base >> 8) & 0xFFU) * inverse +
-                      ((overlay >> 8) & 0xFFU) * alpha) / 255U;
-    uint32_t blue = ((base & 0xFFU) * inverse +
-                     (overlay & 0xFFU) * alpha) / 255U;
-    return (red << 16) | (green << 8) | blue;
-}
-
-static uint32_t shade_rgb(uint32_t color, uint32_t numerator, uint32_t denominator) {
-    uint32_t red = (((color >> 16) & 0xFFU) * numerator) / denominator;
-    uint32_t green = (((color >> 8) & 0xFFU) * numerator) / denominator;
-    uint32_t blue = ((color & 0xFFU) * numerator) / denominator;
-    if (red > 255U) red = 255U;
-    if (green > 255U) green = 255U;
-    if (blue > 255U) blue = 255U;
-    return (red << 16) | (green << 8) | blue;
-}
 
 static void fill_background_rect(uint32_t x, uint32_t y, uint32_t width, uint32_t height) {
     uint32_t end_x = x + width;
@@ -97,13 +78,12 @@ static void fill_background_rect(uint32_t x, uint32_t y, uint32_t width, uint32_
 static void calculate_layout(void) {
     layout.screen_width = framebuffer_width();
     layout.screen_height = framebuffer_height();
-    uint32_t margin = 8U;
-    layout.content_x = margin;
-    layout.content_y = margin;
+    layout.content_x = 0;
+    layout.content_y = 0;
     layout.cell_width = TUNIX_TERMINAL_FONT_WIDTH;
     layout.cell_height = TUNIX_TERMINAL_FONT_HEIGHT;
-    uint32_t columns = (layout.screen_width - margin * 2U) / layout.cell_width;
-    uint32_t rows = (layout.screen_height - margin * 2U) / layout.cell_height;
+    uint32_t columns = layout.screen_width / layout.cell_width;
+    uint32_t rows = layout.screen_height / layout.cell_height;
     if (columns < 40U) columns = 40U;
     if (rows < 16U) rows = 16U;
     layout.columns = (uint16_t)columns;
@@ -124,6 +104,7 @@ static int visible(const struct terminal_screen *screen) {
 
 static void reset_attributes(struct terminal_screen *screen) {
     screen->foreground = CONSOLE_FOREGROUND;
+    screen->foreground_index = CONSOLE_DEFAULT_COLOR;
     screen->background = CONSOLE_BACKGROUND;
     screen->background_explicit = 0;
     screen->bold = 0;
@@ -187,16 +168,14 @@ static void clear_cell_background(int row, int col) {
 }
 
 static void draw_glyph_to_framebuffer(uint32_t x, uint32_t y, uint32_t codepoint,
-                                      uint32_t color, uint32_t background) {
+                                      uint32_t color) {
     const uint8_t *glyph = tunix_terminal_font_glyph(codepoint);
+    if (!glyph) return;
     uint32_t solid = framebuffer_pack_rgb(color);
     for (uint32_t row = 0; row < TUNIX_TERMINAL_FONT_HEIGHT; row++) {
-        for (uint32_t column = 0; column < TUNIX_TERMINAL_FONT_WIDTH; column++) {
-            uint8_t alpha = glyph[row * TUNIX_TERMINAL_FONT_WIDTH + column];
-            if (!alpha) continue;
-            if (alpha == 255U) framebuffer_put_native(x + column, y + row, solid);
-            else framebuffer_put_rgb(x + column, y + row,
-                                     blend_rgb(background, color, alpha));
+        uint8_t bits = glyph[row];
+        for (uint32_t column = 0; bits; column++, bits = (uint8_t)(bits << 1)) {
+            if (bits & 0x80U) framebuffer_put_native(x + column, y + row, solid);
         }
     }
 }
@@ -213,11 +192,9 @@ static void draw_cell_overlay(struct terminal_screen *screen, int row, int col,
         }
     }
     if (cell->codepoint >= 32U && cell->codepoint != 127U)
-        draw_glyph_to_framebuffer(x, y, cell->codepoint, cell->foreground,
-                                  (cell->flags & CELL_BG_EXPLICIT)
-                                      ? cell->background : CONSOLE_BACKGROUND);
+        draw_glyph_to_framebuffer(x, y, cell->codepoint, cell->foreground);
     if (cursor) {
-        uint32_t cursor_color = 0x7DCFFFU;
+        uint32_t cursor_color = CONSOLE_FOREGROUND;
         for (uint32_t py = layout.cell_height - 2U; py < layout.cell_height; py++) {
             for (uint32_t px = 0; px < layout.cell_width; px++)
                 framebuffer_put_rgb(x + px, y + py, cursor_color);
@@ -419,6 +396,8 @@ void terminal_put_codepoint(struct terminal_screen *screen, uint32_t codepoint) 
     } else if (codepoint >= 32U) {
         struct console_cell *cell = cell_at(screen, screen->row, screen->col);
         uint32_t foreground = screen->foreground;
+        if (screen->bold && screen->foreground_index >= 0 && screen->foreground_index < 8)
+            foreground = ansi_palette[screen->foreground_index + 8];
         uint32_t background = screen->background;
         uint8_t explicit_background = screen->background_explicit;
         if (screen->reverse) {
@@ -428,7 +407,7 @@ void terminal_put_codepoint(struct terminal_screen *screen, uint32_t codepoint) 
             explicit_background = 1;
         }
         cell->codepoint = codepoint;
-        cell->foreground = screen->bold ? shade_rgb(foreground, 116U, 100U) : foreground;
+        cell->foreground = foreground;
         cell->background = background;
         cell->flags = explicit_background ? CELL_BG_EXPLICIT : 0U;
         render_cell(screen, screen->row, screen->col, 0);
@@ -512,11 +491,16 @@ void terminal_set_sgr_sequence(struct terminal_screen *screen,
         else if (code == 22U) screen->bold = 0;
         else if (code == 7U) screen->reverse = 1;
         else if (code == 27U) screen->reverse = 0;
-        else if (code >= 30U && code <= 37U)
+        else if (code >= 30U && code <= 37U) {
+            screen->foreground_index = (int)(code - 30U);
             screen->foreground = ansi_palette[code - 30U];
-        else if (code >= 90U && code <= 97U)
+        } else if (code >= 90U && code <= 97U) {
+            screen->foreground_index = (int)(8U + code - 90U);
             screen->foreground = ansi_palette[8U + code - 90U];
-        else if (code == 39U) screen->foreground = CONSOLE_FOREGROUND;
+        } else if (code == 39U) {
+            screen->foreground_index = CONSOLE_DEFAULT_COLOR;
+            screen->foreground = CONSOLE_FOREGROUND;
+        }
         else if (code >= 40U && code <= 47U) {
             screen->background = ansi_palette[code - 40U];
             screen->background_explicit = 1;
@@ -529,8 +513,10 @@ void terminal_set_sgr_sequence(struct terminal_screen *screen,
         } else if ((code == 38U || code == 48U) && i + 1U < count) {
             uint32_t color = 0;
             int valid = 0;
+            int index = -1;
             if (codes[i + 1U] == 5U && i + 2U < count) {
-                color = xterm_256_color(codes[i + 2U] & 0xFFU);
+                index = (int)(codes[i + 2U] & 0xFFU);
+                color = xterm_256_color((unsigned)index);
                 i += 2U;
                 valid = 1;
             } else if (codes[i + 1U] == 2U && i + 4U < count) {
@@ -547,7 +533,10 @@ void terminal_set_sgr_sequence(struct terminal_screen *screen,
                 }
                 valid = 1;
             }
-            if (valid && code == 38U) screen->foreground = color;
+            if (valid && code == 38U) {
+                screen->foreground = color;
+                screen->foreground_index = index < 16 ? index : -1;
+            }
             else if (valid) {
                 screen->background = color;
                 screen->background_explicit = 1;
