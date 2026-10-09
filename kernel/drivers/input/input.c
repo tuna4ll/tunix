@@ -392,6 +392,14 @@ void input_external_key(uint16_t keycode, int released) {
     (void)keyboard_emit_key(keycode, released);
 }
 
+int input_report_hotkey(uint16_t keycode) {
+    INPUT_LOCKED;
+    int heard = device_has_reader(TUNIX_INPUT_DEVICE_KEYBOARD);
+    (void)keyboard_emit_key(keycode, 0);
+    (void)keyboard_emit_key(keycode, 1);
+    return heard;
+}
+
 static int32_t tablet_x = -1;
 static int32_t tablet_y = -1;
 static int32_t tablet_x_max = 32767;
@@ -876,6 +884,8 @@ static void evdev_key_bits(unsigned device_id, uint8_t *bits, size_t limit) {
     }
     for (unsigned key = TUNIX_KEY_ESC; key <= TUNIX_KEY_COMPOSE; key++)
         bitmap_set(bits, limit, key);
+    bitmap_set(bits, limit, TUNIX_KEY_BRIGHTNESSDOWN);
+    bitmap_set(bits, limit, TUNIX_KEY_BRIGHTNESSUP);
 }
 
 static void evdev_rel_bits(unsigned device_id, uint8_t *bits, size_t limit) {

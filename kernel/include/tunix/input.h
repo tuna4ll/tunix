@@ -14,6 +14,7 @@ void input_dispatch_console(void);
 int input_console_pending(void);
 
 void input_external_key(uint16_t keycode, int released);
+int input_report_hotkey(uint16_t keycode);
 void input_external_mouse(int dx, int dy, int wheel, uint8_t buttons);
 void input_external_tablet(int32_t x, int32_t y, int32_t x_max, int32_t y_max, int wheel,
                            uint8_t buttons);
