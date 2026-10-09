@@ -15,12 +15,10 @@ static uint64_t map_device_locked(uint64_t *used, uint64_t physical, uint64_t by
 #include <tunix/vmm.h>
 #include <tunix/vmm_arch.h>
 
-#define ADDRESS_MASK PTE_ADDRESS_MASK
+#define ADDRESS_MASK     PTE_ADDRESS_MASK
 #define KERNEL_HALF_BASE 0xFFFF800000000000ULL
 
-static int kernel_mapping(uint64_t virtual_address) {
-    return virtual_address >= KERNEL_HALF_BASE;
-}
+static int kernel_mapping(uint64_t virtual_address) { return virtual_address >= KERNEL_HALF_BASE; }
 
 extern void panic(const char *msg) __attribute__((noreturn));
 extern void kprintf(const char *fmt, ...);
@@ -30,7 +28,9 @@ extern int process_grow_user_stack(uint64_t fault_address);
 #if TUNIX_DEBUG_LOGS
 #define KDEBUG(...) kprintf(__VA_ARGS__)
 #else
-#define KDEBUG(...) do { } while (0)
+#define KDEBUG(...) \
+    do { \
+    } while (0)
 #endif
 
 static struct lock tables_lock = LOCK_INITIALIZER("page tables", LOCK_RANK_KERNEL_MAP);
@@ -46,11 +46,10 @@ static int physical_direct_range_valid(uint64_t physical, size_t length) {
     return pmm_physical_range_managed(physical, (uint64_t)length);
 }
 
-static void report_bad_physical(const char *operation, uint64_t physical,
-                                const void *caller) {
-    kprintf("VMM: %s physical=%p caller=%p managed_limit=%p direct_limit=%p\n",
-            operation, (void *)physical, (void *)caller,
-            (void *)pmm_managed_limit(), (void *)DIRECT_MAP_BYTES);
+static void report_bad_physical(const char *operation, uint64_t physical, const void *caller) {
+    kprintf("VMM: %s physical=%p caller=%p managed_limit=%p direct_limit=%p\n", operation,
+            (void *)physical, (void *)caller, (void *)pmm_managed_limit(),
+            (void *)DIRECT_MAP_BYTES);
 }
 
 void *vmm_phys_to_virt(uint64_t physical) {
@@ -133,7 +132,8 @@ static int space_add(uint64_t value) {
         uint64_t old_pages = space_capacity * sizeof(uint64_t) / 4096ULL;
         space_slots = slots;
         space_capacity = capacity;
-        if (old != boot_space_slots) pmm_free_pages((void *)vmm_virt_to_phys_direct(old), old_pages);
+        if (old != boot_space_slots)
+            pmm_free_pages((void *)vmm_virt_to_phys_direct(old), old_pages);
     }
     space_place(space_slots, space_capacity, value);
     space_count++;
@@ -186,8 +186,7 @@ static uint64_t *table_from_entry(uint64_t entry) {
     return page_table_pointer(pte_address(entry));
 }
 
-static uint64_t *next_table(uint64_t *table, uint16_t index,
-                            uint64_t leaf_flags, int create) {
+static uint64_t *next_table(uint64_t *table, uint16_t index, uint64_t leaf_flags, int create) {
     if (!table) return NULL;
     uint64_t entry = table[index];
     if (pte_present(entry)) {
@@ -211,27 +210,25 @@ static uint64_t *next_table(uint64_t *table, uint16_t index,
 }
 
 #if defined(__x86_64__)
-#define IA32_PAT_MSR 0x277U
-#define CPUID_FEATURES_LEAF 1U
-#define CPUID_EDX_PAT (1U << 16)
+#define IA32_PAT_MSR             0x277U
+#define CPUID_FEATURES_LEAF      1U
+#define CPUID_EDX_PAT            (1U << 16)
 #define PAT_WITH_WRITE_COMBINING 0x0007040100070406ULL
 
 static int write_combining;
 static void configure_page_attributes(void);
 
 static inline void write_msr(uint32_t msr, uint64_t value) {
-    __asm__ volatile("wrmsr" : : "c"(msr), "a"((uint32_t)value),
-                                 "d"((uint32_t)(value >> 32)));
+    __asm__ volatile("wrmsr" : : "c"(msr), "a"((uint32_t)value), "d"((uint32_t)(value >> 32)));
 }
 
-void vmm_configure_processor(void) {
-    configure_page_attributes();
-}
+void vmm_configure_processor(void) { configure_page_attributes(); }
 
 static void configure_page_attributes(void) {
     uint32_t a = 0, b = 0, c = 0, d = 0;
-    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
-                             : "a"(CPUID_FEATURES_LEAF), "c"(0));
+    __asm__ volatile("cpuid"
+                     : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
+                     : "a"(CPUID_FEATURES_LEAF), "c"(0));
     if (!(d & CPUID_EDX_PAT)) return;
     write_msr(IA32_PAT_MSR, PAT_WITH_WRITE_COMBINING);
     write_combining = 1;
@@ -239,11 +236,9 @@ static void configure_page_attributes(void) {
 #else
 static int write_combining = 1;
 
-void vmm_configure_processor(void) {
-}
+void vmm_configure_processor(void) {}
 
-static void configure_page_attributes(void) {
-}
+static void configure_page_attributes(void) {}
 #endif
 
 int vmm_write_combining_available(void) { return write_combining; }
@@ -284,13 +279,13 @@ void vmm_init(void) {
     }
     uint16_t first_slot = (uint16_t)((DIRECT_MAP_BASE >> 39) & 0x1FF);
     for (uint64_t slot = 0; slot < (DIRECT_MAP_BYTES >> 39); slot++)
-        if (slots[slot]) pml4[first_slot + slot] = pte_table(slots[slot], PAGE_PRESENT | PAGE_WRITE);
+        if (slots[slot])
+            pml4[first_slot + slot] = pte_table(slots[slot], PAGE_PRESENT | PAGE_WRITE);
     vmm_arch_write_root(kernel_cr3_physical);
 #undef early
     pmm_use_direct_map(DIRECT_MAP_BASE);
 
-    if (!pmm_page_is_allocated(kernel_cr3_physical) ||
-        space_add(kernel_cr3_physical) != 0) {
+    if (!pmm_page_is_allocated(kernel_cr3_physical) || space_add(kernel_cr3_physical) != 0) {
         panic("VMM: invalid boot CR3");
     }
     pml4 = page_table_pointer(kernel_cr3_physical);
@@ -314,8 +309,7 @@ void vmm_init(void) {
     }
 
     vmm_arch_write_root(kernel_cr3_physical);
-    KDEBUG("VMM: %u MiB direct map ready, %u MiB of room\n",
-           (unsigned)(mapped / (1024 * 1024)),
+    KDEBUG("VMM: %u MiB direct map ready, %u MiB of room\n", (unsigned)(mapped / (1024 * 1024)),
            (unsigned)(DIRECT_MAP_BYTES / (1024 * 1024)));
 }
 
@@ -375,24 +369,23 @@ void vmm_activate(uint64_t cr3_physical) {
     int known = address_space_registered(physical);
     lock_release(&tables_lock);
     if (!known) {
-        kprintf("VMM: activate rejected stale CR3=%p current=%p\n",
-                (void *)physical, (void *)vmm_arch_read_root());
+        kprintf("VMM: activate rejected stale CR3=%p current=%p\n", (void *)physical,
+                (void *)vmm_arch_read_root());
         panic("VMM: attempted to activate stale address space");
     }
     vmm_arch_write_root(physical);
 }
 
-int vmm_map_page_in(uint64_t cr3_physical, uint64_t virtual_address,
-                    uint64_t physical_address, uint64_t flags) {
+int vmm_map_page_in(uint64_t cr3_physical, uint64_t virtual_address, uint64_t physical_address,
+                    uint64_t flags) {
     lock_acquire(&tables_lock);
-    int status = vmm_map_page_in_locked(cr3_physical, virtual_address,
-                                        physical_address, flags);
+    int status = vmm_map_page_in_locked(cr3_physical, virtual_address, physical_address, flags);
     lock_release(&tables_lock);
     return status;
 }
 
 static int vmm_map_page_in_locked(uint64_t cr3_physical, uint64_t virtual_address,
-                    uint64_t physical_address, uint64_t flags) {
+                                  uint64_t physical_address, uint64_t flags) {
     uint64_t cr3 = cr3_physical & ADDRESS_MASK;
     if (!address_space_registered(cr3)) return -1;
     if ((virtual_address & 0xFFF) || (physical_address & 0xFFF)) return -1;
@@ -433,9 +426,7 @@ struct flush_batch {
 
 static struct flush_batch batches[SMP_MAX_CPUS];
 
-static struct flush_batch *my_batch(void) {
-    return &batches[cpu_current()->index];
-}
+static struct flush_batch *my_batch(void) { return &batches[cpu_current()->index]; }
 
 static void settle_batch(struct flush_batch *batch) {
     if (batch->kernel) {
@@ -453,9 +444,7 @@ static void settle_batch(struct flush_batch *batch) {
     batch->deferred_count = 0;
 }
 
-void vmm_flush_batch_begin(void) {
-    my_batch()->depth++;
-}
+void vmm_flush_batch_begin(void) { my_batch()->depth++; }
 
 void vmm_flush_batch_end(void) {
     struct flush_batch *batch = my_batch();
@@ -491,8 +480,7 @@ static void flush_others(uint64_t cr3) {
         smp_flush_address_space(cr3);
         return;
     }
-    if (batch->pending && batch->cr3 != cr3)
-        smp_flush_address_space(batch->cr3);
+    if (batch->pending && batch->cr3 != cr3) smp_flush_address_space(batch->cr3);
     batch->cr3 = cr3;
     batch->pending = 1;
 }
@@ -575,8 +563,7 @@ static void prune_locked(uint64_t cr3_physical, uint64_t start, uint64_t end) {
     vmm_flush_batch_end();
 }
 
-static int protect_page_locked(uint64_t cr3_physical, uint64_t virtual_address,
-                               uint64_t flags) {
+static int protect_page_locked(uint64_t cr3_physical, uint64_t virtual_address, uint64_t flags) {
     uint64_t cr3 = cr3_physical & ADDRESS_MASK;
     if (!address_space_registered(cr3)) return -1;
     uint64_t *pml4 = page_table_pointer(cr3);
@@ -599,8 +586,8 @@ static int protect_page_locked(uint64_t cr3_physical, uint64_t virtual_address,
     return 0;
 }
 
-static int translate_locked(uint64_t cr3_physical, uint64_t virtual_address,
-                            uint64_t *physical_out, uint64_t *flags_out) {
+static int translate_locked(uint64_t cr3_physical, uint64_t virtual_address, uint64_t *physical_out,
+                            uint64_t *flags_out) {
     uint64_t cr3 = cr3_physical & ADDRESS_MASK;
     if (!address_space_registered(cr3)) return -1;
     uint64_t *pml4 = page_table_pointer(cr3);
@@ -621,8 +608,8 @@ static int translate_locked(uint64_t cr3_physical, uint64_t virtual_address,
     effective_write &= f3;
     effective_nx |= f3 & PAGE_NX;
     if (pte_huge(e3)) {
-        if (physical_out) *physical_out =
-            (pte_address(e3) & ~0x3FFFFFFFULL) | (virtual_address & 0x3FFFFFFFULL);
+        if (physical_out)
+            *physical_out = (pte_address(e3) & ~0x3FFFFFFFULL) | (virtual_address & 0x3FFFFFFFULL);
         if (flags_out) {
             uint64_t effective = f3;
             if (!effective_user) effective &= ~PAGE_USER;
@@ -642,8 +629,8 @@ static int translate_locked(uint64_t cr3_physical, uint64_t virtual_address,
     effective_write &= f2;
     effective_nx |= f2 & PAGE_NX;
     if (pte_huge(e2)) {
-        if (physical_out) *physical_out =
-            (pte_address(e2) & ~0x1FFFFFULL) | (virtual_address & 0x1FFFFFULL);
+        if (physical_out)
+            *physical_out = (pte_address(e2) & ~0x1FFFFFULL) | (virtual_address & 0x1FFFFFULL);
         if (flags_out) {
             uint64_t effective = f2;
             if (!effective_user) effective &= ~PAGE_USER;
@@ -662,8 +649,7 @@ static int translate_locked(uint64_t cr3_physical, uint64_t virtual_address,
     effective_user &= f1;
     effective_write &= f1;
     effective_nx |= f1 & PAGE_NX;
-    if (physical_out) *physical_out =
-        pte_address(e1) | (virtual_address & 0xFFF);
+    if (physical_out) *physical_out = pte_address(e1) | (virtual_address & 0xFFF);
     if (flags_out) {
         uint64_t effective = f1;
         if (!effective_user) effective &= ~PAGE_USER;
@@ -674,8 +660,8 @@ static int translate_locked(uint64_t cr3_physical, uint64_t virtual_address,
     return 0;
 }
 
-int vmm_user_range_valid(uint64_t cr3_physical, uint64_t address,
-                         size_t length, int write_required) {
+int vmm_user_range_valid(uint64_t cr3_physical, uint64_t address, size_t length,
+                         int write_required) {
     if (!length) return 1;
     if (address >= USER_ADDRESS_LIMIT || length > USER_ADDRESS_LIMIT - address) return 0;
     uint64_t first = address & ~0xFFFULL;
@@ -685,10 +671,11 @@ int vmm_user_range_valid(uint64_t cr3_physical, uint64_t address,
         if (vmm_translate(cr3_physical, page, NULL, &flags) != 0) {
             if (cr3_physical != vmm_arch_read_root() ||
                 (!process_commit_area(page) && !process_grow_user_stack(page)) ||
-                vmm_translate(cr3_physical, page, NULL, &flags) != 0) return 0;
+                vmm_translate(cr3_physical, page, NULL, &flags) != 0)
+                return 0;
         }
-        if (!(flags & PAGE_USER) ||
-            (write_required && !(flags & (PAGE_WRITE | PAGE_COW)))) return 0;
+        if (!(flags & PAGE_USER) || (write_required && !(flags & (PAGE_WRITE | PAGE_COW))))
+            return 0;
         if (page == last) break;
     }
     return 1;
@@ -700,15 +687,15 @@ static int user_page_translate(uint64_t cr3_physical, uint64_t address, int writ
         uint64_t page = address & ~0xFFFULL;
         if (cr3_physical != vmm_arch_read_root() ||
             (!process_commit_area(page) && !process_grow_user_stack(page)) ||
-            vmm_translate(cr3_physical, address, physical, flags) != 0) return -1;
+            vmm_translate(cr3_physical, address, physical, flags) != 0)
+            return -1;
     }
-    if (!(*flags & PAGE_USER) ||
-        (write_required && !(*flags & (PAGE_WRITE | PAGE_COW)))) return -1;
+    if (!(*flags & PAGE_USER) || (write_required && !(*flags & (PAGE_WRITE | PAGE_COW)))) return -1;
     return 0;
 }
 
-int vmm_copy_from_space(uint64_t cr3_physical, void *destination,
-                        uint64_t source_user, size_t length) {
+int vmm_copy_from_space(uint64_t cr3_physical, void *destination, uint64_t source_user,
+                        size_t length) {
     if (source_user >= USER_ADDRESS_LIMIT || length > USER_ADDRESS_LIMIT - source_user) return -1;
     uint8_t *out = (uint8_t *)destination;
     while (length) {
@@ -727,21 +714,20 @@ int vmm_copy_from_space(uint64_t cr3_physical, void *destination,
     return 0;
 }
 
-int vmm_copy_to_space(uint64_t cr3_physical, uint64_t destination_user,
-                      const void *source, size_t length) {
-    if (destination_user >= USER_ADDRESS_LIMIT ||
-        length > USER_ADDRESS_LIMIT - destination_user) return -1;
+int vmm_copy_to_space(uint64_t cr3_physical, uint64_t destination_user, const void *source,
+                      size_t length) {
+    if (destination_user >= USER_ADDRESS_LIMIT || length > USER_ADDRESS_LIMIT - destination_user)
+        return -1;
     const uint8_t *in = (const uint8_t *)source;
     while (length) {
         uint64_t physical;
         uint64_t flags;
-        if (user_page_translate(cr3_physical, destination_user, 1, &physical, &flags) != 0) return -1;
+        if (user_page_translate(cr3_physical, destination_user, 1, &physical, &flags) != 0)
+            return -1;
         if (flags & PAGE_DEVICE) return -1;
         if (flags & PAGE_COW) {
-            if (vmm_handle_cow_fault(cr3_physical, destination_user & ~0xFFFULL) != 0)
-                return -1;
-            if (vmm_translate(cr3_physical, destination_user, &physical, &flags) != 0)
-                return -1;
+            if (vmm_handle_cow_fault(cr3_physical, destination_user & ~0xFFFULL) != 0) return -1;
+            if (vmm_translate(cr3_physical, destination_user, &physical, &flags) != 0) return -1;
         }
         if (!(flags & PAGE_WRITE)) return -1;
         size_t chunk = 4096 - (size_t)(destination_user & 0xFFF);
@@ -756,10 +742,8 @@ int vmm_copy_to_space(uint64_t cr3_physical, uint64_t destination_user,
     return 0;
 }
 
-void vmm_map_page(uint64_t virtual_address, uint64_t physical_address,
-                  uint16_t flags) {
-    int status = vmm_map_page_in(kernel_cr3_physical, virtual_address,
-                                 physical_address, flags);
+void vmm_map_page(uint64_t virtual_address, uint64_t physical_address, uint16_t flags) {
+    int status = vmm_map_page_in(kernel_cr3_physical, virtual_address, physical_address, flags);
     if (status != 0) panic("VMM: kernel map failed");
 }
 
@@ -887,7 +871,8 @@ static int cow_locked(uint64_t cr3_physical, uint64_t virtual_address) {
         return 0;
     }
     if ((entry_flags & (PAGE_PRESENT | PAGE_COW | PAGE_USER)) !=
-        (PAGE_PRESENT | PAGE_COW | PAGE_USER)) return -1;
+        (PAGE_PRESENT | PAGE_COW | PAGE_USER))
+        return -1;
 
     uint64_t physical = pte_address(entry);
     uint64_t flags = (entry_flags & ~PAGE_COW & ~PAGE_FILEBACKED) | PAGE_WRITE;
@@ -941,8 +926,7 @@ static void destroy_locked(uint64_t cr3_physical) {
     uint64_t physical = cr3_physical & ADDRESS_MASK;
     if (physical == kernel_cr3_physical || !physical) return;
     if (!address_space_registered(physical)) {
-        KDEBUG("VMM: duplicate/stale address-space destroy %p ignored\n",
-               (void *)physical);
+        KDEBUG("VMM: duplicate/stale address-space destroy %p ignored\n", (void *)physical);
         return;
     }
     if (physical == vmm_arch_read_root()) {
@@ -1018,8 +1002,8 @@ int vmm_protect_page_in(uint64_t cr3_physical, uint64_t virtual_address, uint64_
     return status;
 }
 
-int vmm_translate(uint64_t cr3_physical, uint64_t virtual_address,
-                  uint64_t *physical_out, uint64_t *flags_out) {
+int vmm_translate(uint64_t cr3_physical, uint64_t virtual_address, uint64_t *physical_out,
+                  uint64_t *flags_out) {
     lock_acquire(&tables_lock);
     int status = translate_locked(cr3_physical, virtual_address, physical_out, flags_out);
     lock_release(&tables_lock);

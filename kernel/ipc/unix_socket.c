@@ -11,26 +11,26 @@
 #include <tunix/spinlock.h>
 #include <tunix/unix_socket.h>
 
-#define EADDRINUSE 98
+#define EADDRINUSE   98
 #define EAFNOSUPPORT 97
-#define EAGAIN 11
-#define EALREADY 114
+#define EAGAIN       11
+#define EALREADY     114
 #define ECONNREFUSED 111
-#define EINVAL 22
+#define EINVAL       22
 #define ENAMETOOLONG 36
-#define ENOTCONN 107
-#define EPIPE 32
+#define ENOTCONN     107
+#define EPIPE        32
 
-#define EMSGSIZE 90
-#define ENOBUFS 105
-#define EISCONN 106
-#define EOPNOTSUPP 95
+#define EMSGSIZE             90
+#define ENOBUFS              105
+#define EISCONN              106
+#define EOPNOTSUPP           95
 #define UNIX_DGRAM_BYTES_MAX (256U * 1024U)
 #define UNIX_DGRAM_COUNT_MAX 512
 
 #define UNIX_PENDING_MAX 4096
-#define UNIX_RIGHTS_MAX UNIX_MAX_RIGHTS
-#define UNIX_QUEUE_MAX 4096
+#define UNIX_RIGHTS_MAX  UNIX_MAX_RIGHTS
+#define UNIX_QUEUE_MAX   4096
 
 struct unix_record_queue {
     uint32_t *lengths;
@@ -135,26 +135,22 @@ static struct pipe_buffer *outgoing(struct unix_socket *socket) {
 }
 static struct unix_record_queue *incoming_records(struct unix_socket *socket) {
     if (!socket || !socket->channel) return NULL;
-    return socket->side == 0 ? &socket->channel->records_to_a :
-                               &socket->channel->records_to_b;
+    return socket->side == 0 ? &socket->channel->records_to_a : &socket->channel->records_to_b;
 }
 
 static struct unix_record_queue *outgoing_records(struct unix_socket *socket) {
     if (!socket || !socket->channel) return NULL;
-    return socket->side == 0 ? &socket->channel->records_to_b :
-                               &socket->channel->records_to_a;
+    return socket->side == 0 ? &socket->channel->records_to_b : &socket->channel->records_to_a;
 }
 
 static struct unix_ancillary_queue *incoming_ancillary(struct unix_socket *socket) {
     if (!socket || !socket->channel) return NULL;
-    return socket->side == 0 ? &socket->channel->ancillary_to_a :
-                               &socket->channel->ancillary_to_b;
+    return socket->side == 0 ? &socket->channel->ancillary_to_a : &socket->channel->ancillary_to_b;
 }
 
 static struct unix_ancillary_queue *outgoing_ancillary(struct unix_socket *socket) {
     if (!socket || !socket->channel) return NULL;
-    return socket->side == 0 ? &socket->channel->ancillary_to_b :
-                               &socket->channel->ancillary_to_a;
+    return socket->side == 0 ? &socket->channel->ancillary_to_b : &socket->channel->ancillary_to_a;
 }
 
 static void ancillary_release(struct unix_ancillary *message) {
@@ -198,9 +194,8 @@ static int ancillary_push(struct unix_ancillary_queue *queue, struct unix_ancill
     return 0;
 }
 
-static void ancillary_consume(struct unix_ancillary_queue *queue,
-                              size_t consumed, struct file **files,
-                              size_t maximum_files, size_t *file_count) {
+static void ancillary_consume(struct unix_ancillary_queue *queue, size_t consumed,
+                              struct file **files, size_t maximum_files, size_t *file_count) {
     if (file_count) *file_count = 0;
     if (!queue || !consumed) return;
     while (queue->count > 0) {
@@ -219,8 +214,7 @@ static void ancillary_consume(struct unix_ancillary_queue *queue,
     for (int step = 0; step < queue->count; step++) ancillary_at(queue, step)->offset -= consumed;
 }
 
-static size_t ancillary_read_limit(const struct unix_ancillary_queue *queue,
-                                   size_t requested) {
+static size_t ancillary_read_limit(const struct unix_ancillary_queue *queue, size_t requested) {
     if (!queue || queue->count < 2) return requested;
     size_t boundary = ancillary_at(queue, 1)->offset;
     return boundary < requested ? boundary : requested;
@@ -270,7 +264,8 @@ static int own_read_shutdown(struct unix_socket *socket) {
 
 static int own_write_shutdown(struct unix_socket *socket) {
     if (!socket || !socket->channel) return 0;
-    return socket->side == 0 ? socket->channel->a_write_shutdown : socket->channel->b_write_shutdown;
+    return socket->side == 0 ? socket->channel->a_write_shutdown
+                             : socket->channel->b_write_shutdown;
 }
 
 static int peer_read_shutdown(struct unix_socket *socket) {
@@ -280,7 +275,8 @@ static int peer_read_shutdown(struct unix_socket *socket) {
 
 static int peer_write_open(struct unix_socket *socket) {
     if (!peer_open(socket)) return 0;
-    return socket->side == 0 ? !socket->channel->b_write_shutdown : !socket->channel->a_write_shutdown;
+    return socket->side == 0 ? !socket->channel->b_write_shutdown
+                             : !socket->channel->a_write_shutdown;
 }
 
 static void clear_pipe(struct pipe_buffer *pipe) {
@@ -314,8 +310,8 @@ struct unix_socket *unix_socket_create(int kind) {
     return socket;
 }
 
-void unix_socket_set_credentials(struct unix_socket *socket, int32_t pid,
-                                 uint32_t uid, uint32_t gid) {
+void unix_socket_set_credentials(struct unix_socket *socket, int32_t pid, uint32_t uid,
+                                 uint32_t gid) {
     UNIX_LOCKED;
     if (!socket) return;
     socket->credentials.pid = pid;
@@ -334,15 +330,14 @@ int unix_socket_get_peer_credentials(struct unix_socket *socket,
         *credentials = socket->dgram_peer->credentials;
         return 0;
     }
-    if (!socket || !credentials || !socket->connected || !socket->channel)
-        return -ENOTCONN;
-    *credentials = socket->side == 0 ? socket->channel->b_credentials :
-                                       socket->channel->a_credentials;
+    if (!socket || !credentials || !socket->connected || !socket->channel) return -ENOTCONN;
+    *credentials =
+        socket->side == 0 ? socket->channel->b_credentials : socket->channel->a_credentials;
     return 0;
 }
 
-int unix_socket_get_name(struct unix_socket *socket, int peer,
-                         struct tunix_sockaddr_un *address, size_t *length) {
+int unix_socket_get_name(struct unix_socket *socket, int peer, struct tunix_sockaddr_un *address,
+                         size_t *length) {
     UNIX_LOCKED;
     if (!socket || !address || !length) return -EINVAL;
     const char *path = socket->path;
@@ -351,8 +346,7 @@ int unix_socket_get_name(struct unix_socket *socket, int peer,
         path = socket->dgram_peer->path;
     } else if (peer) {
         if (!socket->connected || !socket->channel) return -ENOTCONN;
-        path = socket->side == 0 ? socket->channel->b_path :
-                                   socket->channel->a_path;
+        path = socket->side == 0 ? socket->channel->b_path : socket->channel->a_path;
     }
     memset(address, 0, sizeof(*address));
     address->family = TUNIX_AF_UNIX;
@@ -381,8 +375,7 @@ int unix_socket_get_passcred(struct unix_socket *socket) {
     return socket && socket->passcred;
 }
 
-int unix_socket_pair(struct unix_socket **first, struct unix_socket **second,
-                     int seqpacket) {
+int unix_socket_pair(struct unix_socket **first, struct unix_socket **second, int seqpacket) {
     UNIX_LOCKED;
     if (!first || !second) return -EINVAL;
     *first = NULL;
@@ -495,8 +488,8 @@ void unix_socket_unref(struct unix_socket *socket) {
 
 static int copy_path(char destination[108], const struct tunix_sockaddr_un *address,
                      size_t length) {
-    if (!address || length < sizeof(address->family) + 2 ||
-        address->family != TUNIX_AF_UNIX) return -EAFNOSUPPORT;
+    if (!address || length < sizeof(address->family) + 2 || address->family != TUNIX_AF_UNIX)
+        return -EAFNOSUPPORT;
     size_t maximum = length - sizeof(address->family);
     if (maximum > sizeof(address->path)) maximum = sizeof(address->path);
     int abstract = (address->path[0] == '\0');
@@ -567,8 +560,8 @@ static int dgram_deliver(struct unix_socket *from, struct unix_socket *target, s
                          const void *buffer) {
     if (!target || target->refs <= 0) return -ECONNREFUSED;
     if (size > UNIX_DGRAM_BYTES_MAX) return -EMSGSIZE;
-    if (target->rx_count >= UNIX_DGRAM_COUNT_MAX ||
-        target->rx_bytes + size > UNIX_DGRAM_BYTES_MAX) return -EAGAIN;
+    if (target->rx_count >= UNIX_DGRAM_COUNT_MAX || target->rx_bytes + size > UNIX_DGRAM_BYTES_MAX)
+        return -EAGAIN;
     struct unix_dgram *message = (struct unix_dgram *)kmalloc(sizeof(*message) + (size ? size : 1));
     if (!message) return -ENOBUFS;
     message->next = NULL;
@@ -696,8 +689,8 @@ struct unix_socket *unix_socket_accept(struct unix_socket *socket) {
     return accepted;
 }
 
-static int64_t unix_socket_read_data(struct unix_socket *socket, size_t size,
-                                     void *buffer, size_t *consumed) {
+static int64_t unix_socket_read_data(struct unix_socket *socket, size_t size, void *buffer,
+                                     size_t *consumed) {
     if (consumed) *consumed = 0;
     if (socket && socket->dgram) {
         struct unix_dgram *message = socket->rx_head;
@@ -768,7 +761,8 @@ static int64_t unix_socket_write_locked(struct unix_socket *socket, size_t size,
         return status < 0 ? status : (int64_t)size;
     }
     if (!socket || !socket->connected || !socket->channel) return -ENOTCONN;
-    if (own_write_shutdown(socket) || peer_read_shutdown(socket) || !peer_open(socket)) return -EPIPE;
+    if (own_write_shutdown(socket) || peer_read_shutdown(socket) || !peer_open(socket))
+        return -EPIPE;
     struct pipe_buffer *pipe = outgoing(socket);
     size_t available = pipe->capacity - pipe->count;
     const uint8_t *in = (const uint8_t *)buffer;
@@ -810,9 +804,8 @@ int64_t unix_socket_write(struct unix_socket *socket, size_t size, const void *b
     return result;
 }
 
-int64_t unix_socket_send_with_rights(struct unix_socket *socket, size_t size,
-                                     const void *buffer, struct file **files,
-                                     size_t file_count) {
+int64_t unix_socket_send_with_rights(struct unix_socket *socket, size_t size, const void *buffer,
+                                     struct file **files, size_t file_count) {
     UNIX_LOCKED;
     if (file_count > UNIX_RIGHTS_MAX) return -EINVAL;
     if (socket && socket->dgram && file_count) return -EOPNOTSUPP;
@@ -843,9 +836,9 @@ int64_t unix_socket_send_with_rights(struct unix_socket *socket, size_t size,
     return result;
 }
 
-int64_t unix_socket_recv_with_rights(struct unix_socket *socket, size_t size,
-                                     void *buffer, struct file **files,
-                                     size_t maximum_files, size_t *file_count) {
+int64_t unix_socket_recv_with_rights(struct unix_socket *socket, size_t size, void *buffer,
+                                     struct file **files, size_t maximum_files,
+                                     size_t *file_count) {
     UNIX_LOCKED;
     if (!file_count) return -EINVAL;
     *file_count = 0;
@@ -858,13 +851,14 @@ int64_t unix_socket_recv_with_rights(struct unix_socket *socket, size_t size,
     return result;
 }
 
-void unix_socket_last_sender(struct unix_socket *socket,
-                             struct unix_credentials *out) {
+void unix_socket_last_sender(struct unix_socket *socket, struct unix_credentials *out) {
     UNIX_LOCKED;
     if (!out) return;
-    if (socket && socket->last_sender.pid) { *out = socket->last_sender; return; }
-    if (!socket || unix_socket_get_peer_credentials(socket, out) != 0)
-        memset(out, 0, sizeof(*out));
+    if (socket && socket->last_sender.pid) {
+        *out = socket->last_sender;
+        return;
+    }
+    if (!socket || unix_socket_get_peer_credentials(socket, out) != 0) memset(out, 0, sizeof(*out));
 }
 
 int unix_socket_read_ready(struct unix_socket *socket) {
@@ -884,8 +878,7 @@ int unix_socket_read_ready(struct unix_socket *socket) {
 size_t unix_socket_read_available(struct unix_socket *socket) {
     UNIX_LOCKED;
     if (socket && socket->dgram) return socket->rx_head ? socket->rx_head->length : 0;
-    if (!socket || socket->listening || !socket->connected || !socket->channel)
-        return 0;
+    if (!socket || socket->listening || !socket->connected || !socket->channel) return 0;
     if (socket->seqpacket) {
         struct unix_record_queue *records = incoming_records(socket);
         if (!records || records->count <= 0) return 0;
@@ -900,8 +893,8 @@ int unix_socket_write_ready(struct unix_socket *socket) {
     if (socket && socket->dgram) {
         struct unix_socket *peer = socket->dgram_peer;
         if (!peer) return 1;
-        return peer->refs <= 0 || (peer->rx_count < UNIX_DGRAM_COUNT_MAX &&
-                                   peer->rx_bytes < UNIX_DGRAM_BYTES_MAX);
+        return peer->refs <= 0 ||
+            (peer->rx_count < UNIX_DGRAM_COUNT_MAX && peer->rx_bytes < UNIX_DGRAM_BYTES_MAX);
     }
     if (!socket || !socket->connected || !socket->channel || !peer_open(socket)) return 0;
     if (own_write_shutdown(socket) || peer_read_shutdown(socket)) return 0;

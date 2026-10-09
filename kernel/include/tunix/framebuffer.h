@@ -49,12 +49,10 @@ uint32_t framebuffer_font_height(void);
 
 int64_t framebuffer_file_read(struct file *file, size_t size, void *buffer);
 int64_t framebuffer_file_write(struct file *file, size_t size, const void *buffer);
-int64_t framebuffer_file_ioctl(struct file *file, unsigned long request,
-                               uint64_t user_argument);
+int64_t framebuffer_file_ioctl(struct file *file, unsigned long request, uint64_t user_argument);
 void framebuffer_file_close(struct file *file);
-int64_t framebuffer_device_mmap(struct vfs_node *node, struct file *file,
-                                uint64_t cr3, uint64_t virtual_address,
-                                uint64_t length, uint64_t offset,
+int64_t framebuffer_device_mmap(struct vfs_node *node, struct file *file, uint64_t cr3,
+                                uint64_t virtual_address, uint64_t length, uint64_t offset,
                                 uint64_t page_flags);
 
 #endif

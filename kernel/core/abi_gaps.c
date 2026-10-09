@@ -46,9 +46,7 @@ int abi_gaps_snapshot(unsigned index, struct abi_gap *out) {
     return found ? 0 : -1;
 }
 
-uint64_t abi_gaps_overflow(void) {
-    return overflow;
-}
+uint64_t abi_gaps_overflow(void) { return overflow; }
 
 void abi_gaps_clear(void) {
     lock_acquire(&gaps_lock);

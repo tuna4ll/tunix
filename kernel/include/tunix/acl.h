@@ -7,7 +7,7 @@
 struct vfs_node;
 struct credentials;
 
-#define ACL_XATTR_ACCESS "system.posix_acl_access"
+#define ACL_XATTR_ACCESS  "system.posix_acl_access"
 #define ACL_XATTR_DEFAULT "system.posix_acl_default"
 
 int64_t acl_xattr_get(struct vfs_node *node, const char *name, void *out, size_t size);

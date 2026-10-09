@@ -19,11 +19,11 @@ int tty_poll_lock(void) {
     return 1;
 }
 
-#define EINTR 4
-#define EAGAIN 11
-#define TTY_INPUT_CAPACITY 1024
+#define EINTR                  4
+#define EAGAIN                 11
+#define TTY_INPUT_CAPACITY     1024
 #define TTY_CANONICAL_CAPACITY 1024
-#define ANSI_PARAM_MAX 16
+#define ANSI_PARAM_MAX         16
 
 extern void serial_write_char(char c);
 
@@ -64,20 +64,25 @@ static int altgr_down;
 static int caps_lock;
 
 static const char default_keymap[128] = {
-    [0x02]='1',[0x03]='2',[0x04]='3',[0x05]='4',[0x06]='5',[0x07]='6',[0x08]='7',[0x09]='8',[0x0A]='9',[0x0B]='0',
-    [0x0C]='-',[0x0D]='=',[0x0E]='\b',[0x0F]='\t',[0x10]='q',[0x11]='w',[0x12]='e',[0x13]='r',[0x14]='t',[0x15]='y',
-    [0x16]='u',[0x17]='i',[0x18]='o',[0x19]='p',[0x1A]='[',[0x1B]=']',[0x1C]='\r',[0x1E]='a',[0x1F]='s',[0x20]='d',
-    [0x21]='f',[0x22]='g',[0x23]='h',[0x24]='j',[0x25]='k',[0x26]='l',[0x27]=';',[0x28]='\'',[0x29]='`',[0x2B]='\\',
-    [0x2C]='z',[0x2D]='x',[0x2E]='c',[0x2F]='v',[0x30]='b',[0x31]='n',[0x32]='m',[0x33]=',',[0x34]='.',[0x35]='/',[0x39]=' '
-};
+    [0x02] = '1',  [0x03] = '2',  [0x04] = '3',  [0x05] = '4',  [0x06] = '5', [0x07] = '6',
+    [0x08] = '7',  [0x09] = '8',  [0x0A] = '9',  [0x0B] = '0',  [0x0C] = '-', [0x0D] = '=',
+    [0x0E] = '\b', [0x0F] = '\t', [0x10] = 'q',  [0x11] = 'w',  [0x12] = 'e', [0x13] = 'r',
+    [0x14] = 't',  [0x15] = 'y',  [0x16] = 'u',  [0x17] = 'i',  [0x18] = 'o', [0x19] = 'p',
+    [0x1A] = '[',  [0x1B] = ']',  [0x1C] = '\r', [0x1E] = 'a',  [0x1F] = 's', [0x20] = 'd',
+    [0x21] = 'f',  [0x22] = 'g',  [0x23] = 'h',  [0x24] = 'j',  [0x25] = 'k', [0x26] = 'l',
+    [0x27] = ';',  [0x28] = '\'', [0x29] = '`',  [0x2B] = '\\', [0x2C] = 'z', [0x2D] = 'x',
+    [0x2E] = 'c',  [0x2F] = 'v',  [0x30] = 'b',  [0x31] = 'n',  [0x32] = 'm', [0x33] = ',',
+    [0x34] = '.',  [0x35] = '/',  [0x39] = ' '};
 
 static const char default_shift_keymap[128] = {
-    [0x02]='!',[0x03]='@',[0x04]='#',[0x05]='$',[0x06]='%',[0x07]='^',[0x08]='&',[0x09]='*',[0x0A]='(',[0x0B]=')',
-    [0x0C]='_',[0x0D]='+',[0x10]='Q',[0x11]='W',[0x12]='E',[0x13]='R',[0x14]='T',[0x15]='Y',[0x16]='U',[0x17]='I',
-    [0x18]='O',[0x19]='P',[0x1A]='{',[0x1B]='}',[0x1E]='A',[0x1F]='S',[0x20]='D',[0x21]='F',[0x22]='G',[0x23]='H',
-    [0x24]='J',[0x25]='K',[0x26]='L',[0x27]=':',[0x28]='"',[0x29]='~',[0x2B]='|',[0x2C]='Z',[0x2D]='X',[0x2E]='C',
-    [0x2F]='V',[0x30]='B',[0x31]='N',[0x32]='M',[0x33]='<',[0x34]='>',[0x35]='?',[0x39]=' '
-};
+    [0x02] = '!', [0x03] = '@', [0x04] = '#', [0x05] = '$', [0x06] = '%', [0x07] = '^',
+    [0x08] = '&', [0x09] = '*', [0x0A] = '(', [0x0B] = ')', [0x0C] = '_', [0x0D] = '+',
+    [0x10] = 'Q', [0x11] = 'W', [0x12] = 'E', [0x13] = 'R', [0x14] = 'T', [0x15] = 'Y',
+    [0x16] = 'U', [0x17] = 'I', [0x18] = 'O', [0x19] = 'P', [0x1A] = '{', [0x1B] = '}',
+    [0x1E] = 'A', [0x1F] = 'S', [0x20] = 'D', [0x21] = 'F', [0x22] = 'G', [0x23] = 'H',
+    [0x24] = 'J', [0x25] = 'K', [0x26] = 'L', [0x27] = ':', [0x28] = '"', [0x29] = '~',
+    [0x2B] = '|', [0x2C] = 'Z', [0x2D] = 'X', [0x2E] = 'C', [0x2F] = 'V', [0x30] = 'B',
+    [0x31] = 'N', [0x32] = 'M', [0x33] = '<', [0x34] = '>', [0x35] = '?', [0x39] = ' '};
 
 static struct tunix_keymap active_keymap;
 static int keymap_loaded;
@@ -85,13 +90,11 @@ static int keymap_loaded;
 static int input_push(struct tty *tty, uint8_t value);
 
 static int keymap_is_letter(unsigned keycode) {
-    return (active_keymap.letter_bitmap[keycode >> 3] &
-            (uint8_t)(1U << (keycode & 7U))) != 0;
+    return (active_keymap.letter_bitmap[keycode >> 3] & (uint8_t)(1U << (keycode & 7U))) != 0;
 }
 
 static void keymap_mark_letter(unsigned keycode) {
-    active_keymap.letter_bitmap[keycode >> 3] |=
-        (uint8_t)(1U << (keycode & 7U));
+    active_keymap.letter_bitmap[keycode >> 3] |= (uint8_t)(1U << (keycode & 7U));
 }
 
 static void keymap_set_name(const char *name) {
@@ -178,31 +181,24 @@ static uint32_t keymap_lookup(unsigned keycode, unsigned level, int *direct_ctrl
     for (;;) {
         uint32_t value = active_keymap.symbols[candidate][keycode];
         if (value != TUNIX_KEYSYM_NONE) {
-            *direct_ctrl = candidate == level &&
-                           (candidate & TUNIX_KEYMAP_LEVEL_CTRL) != 0;
+            *direct_ctrl = candidate == level && (candidate & TUNIX_KEYMAP_LEVEL_CTRL) != 0;
             return value;
         }
-        if (candidate & TUNIX_KEYMAP_LEVEL_CTRL)
-            candidate &= ~TUNIX_KEYMAP_LEVEL_CTRL;
-        else if (candidate & TUNIX_KEYMAP_LEVEL_ALTGR)
-            candidate &= ~TUNIX_KEYMAP_LEVEL_ALTGR;
-        else if (candidate & TUNIX_KEYMAP_LEVEL_SHIFT)
-            candidate &= ~TUNIX_KEYMAP_LEVEL_SHIFT;
-        else
-            return TUNIX_KEYSYM_NONE;
+        if (candidate & TUNIX_KEYMAP_LEVEL_CTRL) candidate &= ~TUNIX_KEYMAP_LEVEL_CTRL;
+        else if (candidate & TUNIX_KEYMAP_LEVEL_ALTGR) candidate &= ~TUNIX_KEYMAP_LEVEL_ALTGR;
+        else if (candidate & TUNIX_KEYMAP_LEVEL_SHIFT) candidate &= ~TUNIX_KEYMAP_LEVEL_SHIFT;
+        else return TUNIX_KEYSYM_NONE;
     }
 }
 
 static unsigned ansi_param(struct tty *tty, unsigned index, unsigned default_value) {
-    if (index >= tty->ansi_param_count || tty->ansi_params[index] == 0)
-        return default_value;
+    if (index >= tty->ansi_param_count || tty->ansi_params[index] == 0) return default_value;
     return tty->ansi_params[index];
 }
 
 static void ansi_finish_param(struct tty *tty) {
     if (tty->ansi_param_count < ANSI_PARAM_MAX) {
-        tty->ansi_params[tty->ansi_param_count++] =
-            tty->ansi_have_current ? tty->ansi_current : 0;
+        tty->ansi_params[tty->ansi_param_count++] = tty->ansi_have_current ? tty->ansi_current : 0;
     }
     tty->ansi_current = 0;
     tty->ansi_have_current = 0;
@@ -212,49 +208,72 @@ static void terminal_ansi_final(struct tty *tty, char command) {
     struct terminal_screen *screen = tty->screen;
     if (tty->ansi_have_current || tty->ansi_param_count == 0) ansi_finish_param(tty);
     switch (command) {
-        case 'm':
-            terminal_set_sgr_sequence(screen, tty->ansi_params, tty->ansi_param_count);
-            break;
-        case 'A': terminal_cursor_move(screen, -(int)ansi_param(tty, 0, 1), 0); break;
-        case 'B': terminal_cursor_move(screen, (int)ansi_param(tty, 0, 1), 0); break;
-        case 'C': terminal_cursor_move(screen, 0, (int)ansi_param(tty, 0, 1)); break;
-        case 'D': terminal_cursor_move(screen, 0, -(int)ansi_param(tty, 0, 1)); break;
-        case 'E': { int row, col; terminal_cursor_get(screen, &row, &col); (void)col; terminal_cursor_set(screen, row + (int)ansi_param(tty, 0, 1), 0); break; }
-        case 'F': { int row, col; terminal_cursor_get(screen, &row, &col); (void)col; terminal_cursor_set(screen, row - (int)ansi_param(tty, 0, 1), 0); break; }
-        case 'G': { int row, col; terminal_cursor_get(screen, &row, &col); (void)col; terminal_cursor_set(screen, row, (int)ansi_param(tty, 0, 1) - 1); break; }
-        case 'H':
-        case 'f': terminal_cursor_set(screen, (int)ansi_param(tty, 0, 1) - 1,
-                                      (int)ansi_param(tty, 1, 1) - 1); break;
-        case 'J': terminal_erase_display(screen, ansi_param(tty, 0, 0)); break;
-        case 'K': terminal_erase_line(screen, ansi_param(tty, 0, 0)); break;
-        case 'L': terminal_insert_lines(screen, ansi_param(tty, 0, 1)); break;
-        case 'M': terminal_delete_lines(screen, ansi_param(tty, 0, 1)); break;
-        case '@': terminal_insert_chars(screen, ansi_param(tty, 0, 1)); break;
-        case 'P': terminal_delete_chars(screen, ansi_param(tty, 0, 1)); break;
-        case 'X': terminal_erase_chars(screen, ansi_param(tty, 0, 1)); break;
-        case 'S': terminal_scroll_up(screen, ansi_param(tty, 0, 1)); break;
-        case 'T': terminal_scroll_down(screen, ansi_param(tty, 0, 1)); break;
-        case 'r': terminal_set_scroll_region(screen, (int)ansi_param(tty, 0, 1),
-                                             (int)ansi_param(tty, 1, 0)); break;
-        case 's': terminal_cursor_get(screen, &tty->saved_row, &tty->saved_col); break;
-        case 'u': terminal_cursor_set(screen, tty->saved_row, tty->saved_col); break;
-        case 'a': terminal_cursor_move(screen, 0, (int)ansi_param(tty, 0, 1)); break;
-        case 'd': { int row, col; terminal_cursor_get(screen, &row, &col); (void)row; terminal_cursor_set(screen, (int)ansi_param(tty, 0, 1) - 1, col); break; }
-        case 'e': terminal_cursor_move(screen, (int)ansi_param(tty, 0, 1), 0); break;
-        case 'h':
-        case 'l':
-            if (tty->ansi_private) {
-                int enabled = command == 'h';
-                for (unsigned i = 0; i < tty->ansi_param_count; i++) {
-                    if (tty->ansi_params[i] == 25U)
-                        terminal_set_cursor_visible(screen, enabled);
-                    else if (tty->ansi_params[i] == 47U || tty->ansi_params[i] == 1047U ||
-                             tty->ansi_params[i] == 1049U)
-                        terminal_set_alternate_screen(screen, enabled);
-                }
+    case 'm': terminal_set_sgr_sequence(screen, tty->ansi_params, tty->ansi_param_count); break;
+    case 'A': terminal_cursor_move(screen, -(int)ansi_param(tty, 0, 1), 0); break;
+    case 'B': terminal_cursor_move(screen, (int)ansi_param(tty, 0, 1), 0); break;
+    case 'C': terminal_cursor_move(screen, 0, (int)ansi_param(tty, 0, 1)); break;
+    case 'D': terminal_cursor_move(screen, 0, -(int)ansi_param(tty, 0, 1)); break;
+    case 'E': {
+        int row, col;
+        terminal_cursor_get(screen, &row, &col);
+        (void)col;
+        terminal_cursor_set(screen, row + (int)ansi_param(tty, 0, 1), 0);
+        break;
+    }
+    case 'F': {
+        int row, col;
+        terminal_cursor_get(screen, &row, &col);
+        (void)col;
+        terminal_cursor_set(screen, row - (int)ansi_param(tty, 0, 1), 0);
+        break;
+    }
+    case 'G': {
+        int row, col;
+        terminal_cursor_get(screen, &row, &col);
+        (void)col;
+        terminal_cursor_set(screen, row, (int)ansi_param(tty, 0, 1) - 1);
+        break;
+    }
+    case 'H':
+    case 'f':
+        terminal_cursor_set(screen, (int)ansi_param(tty, 0, 1) - 1, (int)ansi_param(tty, 1, 1) - 1);
+        break;
+    case 'J': terminal_erase_display(screen, ansi_param(tty, 0, 0)); break;
+    case 'K': terminal_erase_line(screen, ansi_param(tty, 0, 0)); break;
+    case 'L': terminal_insert_lines(screen, ansi_param(tty, 0, 1)); break;
+    case 'M': terminal_delete_lines(screen, ansi_param(tty, 0, 1)); break;
+    case '@': terminal_insert_chars(screen, ansi_param(tty, 0, 1)); break;
+    case 'P': terminal_delete_chars(screen, ansi_param(tty, 0, 1)); break;
+    case 'X': terminal_erase_chars(screen, ansi_param(tty, 0, 1)); break;
+    case 'S': terminal_scroll_up(screen, ansi_param(tty, 0, 1)); break;
+    case 'T': terminal_scroll_down(screen, ansi_param(tty, 0, 1)); break;
+    case 'r':
+        terminal_set_scroll_region(screen, (int)ansi_param(tty, 0, 1), (int)ansi_param(tty, 1, 0));
+        break;
+    case 's': terminal_cursor_get(screen, &tty->saved_row, &tty->saved_col); break;
+    case 'u': terminal_cursor_set(screen, tty->saved_row, tty->saved_col); break;
+    case 'a': terminal_cursor_move(screen, 0, (int)ansi_param(tty, 0, 1)); break;
+    case 'd': {
+        int row, col;
+        terminal_cursor_get(screen, &row, &col);
+        (void)row;
+        terminal_cursor_set(screen, (int)ansi_param(tty, 0, 1) - 1, col);
+        break;
+    }
+    case 'e': terminal_cursor_move(screen, (int)ansi_param(tty, 0, 1), 0); break;
+    case 'h':
+    case 'l':
+        if (tty->ansi_private) {
+            int enabled = command == 'h';
+            for (unsigned i = 0; i < tty->ansi_param_count; i++) {
+                if (tty->ansi_params[i] == 25U) terminal_set_cursor_visible(screen, enabled);
+                else if (tty->ansi_params[i] == 47U || tty->ansi_params[i] == 1047U ||
+                         tty->ansi_params[i] == 1049U)
+                    terminal_set_alternate_screen(screen, enabled);
             }
-            break;
-        default: break;
+        }
+        break;
+    default: break;
     }
     tty->ansi_state = 0;
     tty->ansi_param_count = 0;
@@ -298,8 +317,7 @@ static void terminal_feed_text_byte(struct tty *tty, uint8_t byte) {
             if (codepoint < minimum || codepoint > UINT32_C(0x10FFFF) ||
                 (codepoint >= UINT32_C(0xD800) && codepoint <= UINT32_C(0xDFFF)))
                 terminal_put_codepoint(tty->screen, UINT32_C(0xFFFD));
-            else
-                terminal_put_codepoint(tty->screen, codepoint);
+            else terminal_put_codepoint(tty->screen, codepoint);
         }
         return;
     }
@@ -382,8 +400,8 @@ static void terminal_feed(struct tty *tty, char c) {
             tty->ansi_state = 0;
             return;
         }
-        if (c == '(' || c == ')' || c == '*' || c == '+' || c == '-' ||
-            c == '.' || c == '/' || c == '#' || c == '%') {
+        if (c == '(' || c == ')' || c == '*' || c == '+' || c == '-' || c == '.' || c == '/' ||
+            c == '#' || c == '%') {
             tty->ansi_state = 5;
             return;
         }
@@ -437,8 +455,7 @@ int64_t tty_write(struct tty *tty, size_t size, const void *buffer) {
 }
 
 static int signal_input_character(struct tty *tty, uint8_t value) {
-    if (!(tty->termios.lflag & TTY_ISIG) || tty->foreground_pgid <= 0)
-        return 0;
+    if (!(tty->termios.lflag & TTY_ISIG) || tty->foreground_pgid <= 0) return 0;
 
     int signal_number = 0;
     const char *echo = NULL;
@@ -462,8 +479,7 @@ static int signal_input_character(struct tty *tty, uint8_t value) {
     tty->canonical_length = tty->canonical_offset = 0;
     tty->input_head = tty->input_tail = tty->input_count = 0;
     tty->input_interrupted = 1;
-    if ((tty->termios.lflag & TTY_ECHO) && echo)
-        (void)tty_write(tty, echo_length, echo);
+    if ((tty->termios.lflag & TTY_ECHO) && echo) (void)tty_write(tty, echo_length, echo);
     (void)process_send_signal(-(int64_t)tty->foreground_pgid, signal_number);
     return 1;
 }
@@ -523,29 +539,29 @@ static void apply_keyboard_reset(void) {
 
 static const char *key_sequence(uint16_t keycode) {
     switch (keycode) {
-        case TUNIX_KEY_UP: return "\x1b[A";
-        case TUNIX_KEY_DOWN: return "\x1b[B";
-        case TUNIX_KEY_RIGHT: return "\x1b[C";
-        case TUNIX_KEY_LEFT: return "\x1b[D";
-        case TUNIX_KEY_HOME: return "\x1b[H";
-        case TUNIX_KEY_END: return "\x1b[F";
-        case TUNIX_KEY_INSERT: return "\x1b[2~";
-        case TUNIX_KEY_DELETE: return "\x1b[3~";
-        case TUNIX_KEY_PAGEUP: return "\x1b[5~";
-        case TUNIX_KEY_PAGEDOWN: return "\x1b[6~";
-        case TUNIX_KEY_F1: return "\x1bOP";
-        case TUNIX_KEY_F2: return "\x1bOQ";
-        case TUNIX_KEY_F3: return "\x1bOR";
-        case TUNIX_KEY_F4: return "\x1bOS";
-        case TUNIX_KEY_F5: return "\x1b[15~";
-        case TUNIX_KEY_F6: return "\x1b[17~";
-        case TUNIX_KEY_F7: return "\x1b[18~";
-        case TUNIX_KEY_F8: return "\x1b[19~";
-        case TUNIX_KEY_F9: return "\x1b[20~";
-        case TUNIX_KEY_F10: return "\x1b[21~";
-        case TUNIX_KEY_F11: return "\x1b[23~";
-        case TUNIX_KEY_F12: return "\x1b[24~";
-        default: return NULL;
+    case TUNIX_KEY_UP:       return "\x1b[A";
+    case TUNIX_KEY_DOWN:     return "\x1b[B";
+    case TUNIX_KEY_RIGHT:    return "\x1b[C";
+    case TUNIX_KEY_LEFT:     return "\x1b[D";
+    case TUNIX_KEY_HOME:     return "\x1b[H";
+    case TUNIX_KEY_END:      return "\x1b[F";
+    case TUNIX_KEY_INSERT:   return "\x1b[2~";
+    case TUNIX_KEY_DELETE:   return "\x1b[3~";
+    case TUNIX_KEY_PAGEUP:   return "\x1b[5~";
+    case TUNIX_KEY_PAGEDOWN: return "\x1b[6~";
+    case TUNIX_KEY_F1:       return "\x1bOP";
+    case TUNIX_KEY_F2:       return "\x1bOQ";
+    case TUNIX_KEY_F3:       return "\x1bOR";
+    case TUNIX_KEY_F4:       return "\x1bOS";
+    case TUNIX_KEY_F5:       return "\x1b[15~";
+    case TUNIX_KEY_F6:       return "\x1b[17~";
+    case TUNIX_KEY_F7:       return "\x1b[18~";
+    case TUNIX_KEY_F8:       return "\x1b[19~";
+    case TUNIX_KEY_F9:       return "\x1b[20~";
+    case TUNIX_KEY_F10:      return "\x1b[21~";
+    case TUNIX_KEY_F11:      return "\x1b[23~";
+    case TUNIX_KEY_F12:      return "\x1b[24~";
+    default:                 return NULL;
     }
 }
 
@@ -554,29 +570,41 @@ void tty_handle_key(struct tty *tty, uint16_t keycode, int pressed) {
     apply_keyboard_reset();
     if (!tty) return;
     switch (keycode) {
-        case TUNIX_KEY_LEFTSHIFT:
-        case TUNIX_KEY_RIGHTSHIFT: shift_down = pressed; return;
-        case TUNIX_KEY_LEFTCTRL:
-        case TUNIX_KEY_RIGHTCTRL: ctrl_down = pressed; return;
-        case TUNIX_KEY_LEFTALT: alt_down = pressed; return;
-        case TUNIX_KEY_RIGHTALT: altgr_down = pressed; return;
+    case TUNIX_KEY_LEFTSHIFT:
+    case TUNIX_KEY_RIGHTSHIFT: shift_down = pressed; return;
+    case TUNIX_KEY_LEFTCTRL:
+    case TUNIX_KEY_RIGHTCTRL:  ctrl_down = pressed; return;
+    case TUNIX_KEY_LEFTALT:    alt_down = pressed; return;
+    case TUNIX_KEY_RIGHTALT:   altgr_down = pressed; return;
 
-        case TUNIX_KEY_CAPSLOCK:
-            if (pressed) caps_lock = !caps_lock;
-            return;
-        default: break;
+    case TUNIX_KEY_CAPSLOCK:
+        if (pressed) caps_lock = !caps_lock;
+        return;
+    default: break;
     }
 
     if (!pressed) return;
 
-    if (keycode == TUNIX_KEY_ESC) { (void)input_push(tty, 0x1BU); return; }
-    if (keycode == TUNIX_KEY_BACKSPACE) { (void)input_push(tty, 127U); return; }
+    if (keycode == TUNIX_KEY_ESC) {
+        (void)input_push(tty, 0x1BU);
+        return;
+    }
+    if (keycode == TUNIX_KEY_BACKSPACE) {
+        (void)input_push(tty, 127U);
+        return;
+    }
     if (keycode == TUNIX_KEY_TAB && shift_down) {
         input_push_text(tty, "\x1b[Z");
         return;
     }
-    if (keycode == TUNIX_KEY_KPENTER) { (void)input_push(tty, '\r'); return; }
-    if (keycode == TUNIX_KEY_KPSLASH) { (void)input_push(tty, '/'); return; }
+    if (keycode == TUNIX_KEY_KPENTER) {
+        (void)input_push(tty, '\r');
+        return;
+    }
+    if (keycode == TUNIX_KEY_KPSLASH) {
+        (void)input_push(tty, '/');
+        return;
+    }
     const char *sequence = key_sequence(keycode);
     if (sequence) {
         input_push_text(tty, sequence);
@@ -585,8 +613,7 @@ void tty_handle_key(struct tty *tty, uint16_t keycode, int pressed) {
     if (keycode >= TUNIX_KEYMAP_KEYCODES) return;
 
     unsigned level = (shift_down ? TUNIX_KEYMAP_LEVEL_SHIFT : 0U) |
-                     (altgr_down ? TUNIX_KEYMAP_LEVEL_ALTGR : 0U) |
-                     (ctrl_down ? TUNIX_KEYMAP_LEVEL_CTRL : 0U);
+        (altgr_down ? TUNIX_KEYMAP_LEVEL_ALTGR : 0U) | (ctrl_down ? TUNIX_KEYMAP_LEVEL_CTRL : 0U);
     if (caps_lock && keymap_is_letter(keycode)) level ^= TUNIX_KEYMAP_LEVEL_SHIFT;
     int direct_ctrl = 0;
     uint32_t value = keymap_lookup(keycode, level, &direct_ctrl);
@@ -616,8 +643,7 @@ static int canonical_input_complete(struct tty *tty) {
     if (tty->canonical_offset < tty->canonical_length) return 1;
     for (size_t i = 0, at = tty->input_head; i < tty->input_count; i++) {
         uint8_t value = tty->input_buffer[at];
-        if (value == '\n' || value == '\r' ||
-            value == tty->termios.cc[TTY_VEOF]) return 1;
+        if (value == '\n' || value == '\r' || value == tty->termios.cc[TTY_VEOF]) return 1;
         at = (at + 1U) % TTY_INPUT_CAPACITY;
     }
 
@@ -676,8 +702,7 @@ int64_t tty_read(struct tty *tty, size_t size, void *buffer) {
     TTY_LOCKED;
     if (!tty || !buffer || size == 0) return 0;
     struct process *reader = process_current();
-    if (reader && tty->session > 0 && reader->sid == tty->session &&
-        tty->foreground_pgid > 0 &&
+    if (reader && tty->session > 0 && reader->sid == tty->session && tty->foreground_pgid > 0 &&
         reader->pgid != (uint64_t)tty->foreground_pgid) {
         (void)process_send_signal(-(int64_t)reader->pgid, SIGTTIN);
         return -EINTR;
@@ -717,8 +742,7 @@ struct tty *tty_create(struct terminal_screen *screen) {
     tty->termios.iflag = 0x00000500U;
     tty->termios.oflag = 0x00000005U;
     tty->termios.cflag = 0x000000BFU;
-    tty->termios.lflag = TTY_ECHO | TTY_ECHOE | TTY_ECHOK |
-                         TTY_ICANON | TTY_ISIG | TTY_IEXTEN;
+    tty->termios.lflag = TTY_ECHO | TTY_ECHOE | TTY_ECHOK | TTY_ICANON | TTY_ISIG | TTY_IEXTEN;
     tty->termios.cc[TTY_VINTR] = 3;
     tty->termios.cc[TTY_VQUIT] = 28;
     tty->termios.cc[TTY_VERASE] = 127;
@@ -742,48 +766,34 @@ void tty_destroy(struct tty *tty) {
     kfree(tty);
 }
 
-struct terminal_screen *tty_screen(const struct tty *tty) {
-    return tty ? tty->screen : NULL;
-}
+struct terminal_screen *tty_screen(const struct tty *tty) { return tty ? tty->screen : NULL; }
 
 int tty_ioctl(struct tty *tty, unsigned long request, void *argument) {
     TTY_LOCKED;
     if (!tty || !argument) return -1;
     switch (request) {
-        case TCGETS:
-            memcpy(argument, &tty->termios, sizeof(tty->termios));
-            return 0;
-        case TCSETS:
-        case TCSETSW:
-        case TCSETSF:
-            memcpy(&tty->termios, argument, sizeof(tty->termios));
-            if (request == TCSETSF) tty_flush_input(tty);
-            return 0;
-        case TIOCGPGRP:
-            *(int *)argument = tty->foreground_pgid;
-            return 0;
-        case TIOCSPGRP:
-            tty->foreground_pgid = *(const int *)argument;
-            tty->input_interrupted = 0;
-            return 0;
-        case TIOCGETD:
-            *(int *)argument = 0;
-            return 0;
-        case TIOCSETD:
-            return *(const int *)argument == 0 ? 0 : -1;
-        case TUNIX_KDGKBMAP:
-            memcpy(argument, &active_keymap, sizeof(active_keymap));
-            return 0;
-        case TUNIX_KDSKBMAP:
-            if (keymap_validate((const struct tunix_keymap *)argument) != 0) return -1;
-            memcpy(&active_keymap, argument, sizeof(active_keymap));
-            tty_reset_keyboard_state();
-            return 0;
-        case KDGKBTYPE:
-            *(uint8_t *)argument = TUNIX_KB_101;
-            return 0;
-        default:
-            return -1;
+    case TCGETS:  memcpy(argument, &tty->termios, sizeof(tty->termios)); return 0;
+    case TCSETS:
+    case TCSETSW:
+    case TCSETSF:
+        memcpy(&tty->termios, argument, sizeof(tty->termios));
+        if (request == TCSETSF) tty_flush_input(tty);
+        return 0;
+    case TIOCGPGRP: *(int *)argument = tty->foreground_pgid; return 0;
+    case TIOCSPGRP:
+        tty->foreground_pgid = *(const int *)argument;
+        tty->input_interrupted = 0;
+        return 0;
+    case TIOCGETD:       *(int *)argument = 0; return 0;
+    case TIOCSETD:       return *(const int *)argument == 0 ? 0 : -1;
+    case TUNIX_KDGKBMAP: memcpy(argument, &active_keymap, sizeof(active_keymap)); return 0;
+    case TUNIX_KDSKBMAP:
+        if (keymap_validate((const struct tunix_keymap *)argument) != 0) return -1;
+        memcpy(&active_keymap, argument, sizeof(active_keymap));
+        tty_reset_keyboard_state();
+        return 0;
+    case KDGKBTYPE: *(uint8_t *)argument = TUNIX_KB_101; return 0;
+    default:        return -1;
     }
 }
 

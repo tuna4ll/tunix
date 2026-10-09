@@ -3,7 +3,7 @@
 #include <tunix/pmm.h>
 #include <tunix/lock.h>
 
-#define HEAP_START HEAP_VIRTUAL_BASE
+#define HEAP_START        HEAP_VIRTUAL_BASE
 #define HEAP_INITIAL_SIZE (1024 * 1024)
 static uint64_t heap_extent_limit(void) {
     static uint64_t limit;
@@ -19,13 +19,13 @@ static uint64_t heap_pressure_size(void) {
     return pmm_usable_page_count() * (uint64_t)PMM_PAGE_SIZE / 4ULL * 3ULL;
 }
 #define HEAP_FREE_PAGES_FLOOR (16384ULL)
-#define HEAP_PAGE_SIZE 4096ULL
-#define HEAP_RELEASE_MIN (1024ULL * 1024ULL)
-#define HEAP_PAGE_ALIGN_MIN (64ULL * 1024)
-#define HEAP_MAGIC 0x1234ABCD
+#define HEAP_PAGE_SIZE        4096ULL
+#define HEAP_RELEASE_MIN      (1024ULL * 1024ULL)
+#define HEAP_PAGE_ALIGN_MIN   (64ULL * 1024)
+#define HEAP_MAGIC            0x1234ABCD
 
 #define HEAP_ALIGN 16ULL
-#define HEAP_BINS 64
+#define HEAP_BINS  64
 
 typedef struct heap_block {
     uint32_t magic;
@@ -33,18 +33,18 @@ typedef struct heap_block {
     uint8_t pages_released;
     uint16_t bin;
     uint64_t size;
-    struct heap_block* next;
-    struct heap_block* prev;
-    struct heap_block* free_prev;
-    struct heap_block* free_next;
+    struct heap_block *next;
+    struct heap_block *prev;
+    struct heap_block *free_prev;
+    struct heap_block *free_next;
 } heap_block_t;
 
 _Static_assert(sizeof(heap_block_t) % HEAP_ALIGN == 0,
                "the heap header must not disturb the alignment of what follows it");
 
-static heap_block_t* head = NULL;
-static heap_block_t* tail = NULL;
-static heap_block_t* bins[HEAP_BINS];
+static heap_block_t *head = NULL;
+static heap_block_t *tail = NULL;
+static heap_block_t *bins[HEAP_BINS];
 static uint64_t bin_mask;
 static uint64_t heap_size = 0;
 static uint64_t heap_allocated = 0;
@@ -53,9 +53,7 @@ static struct lock heap_lock = LOCK_INITIALIZER("heap", LOCK_RANK_HEAP);
 extern void kprintf(const char *fmt, ...);
 extern void panic(const char *msg);
 
-static unsigned bin_of(uint64_t size) {
-    return size ? 63U - (unsigned)__builtin_clzll(size) : 0U;
-}
+static unsigned bin_of(uint64_t size) { return size ? 63U - (unsigned)__builtin_clzll(size) : 0U; }
 
 static void free_insert(heap_block_t *block) {
     unsigned bin = bin_of(block->size);
@@ -79,13 +77,13 @@ static void free_remove(heap_block_t *block) {
 
 void heap_init(void) {
     for (uint64_t i = 0; i < HEAP_INITIAL_SIZE; i += HEAP_PAGE_SIZE) {
-        void* phys = pmm_alloc_page();
+        void *phys = pmm_alloc_page();
         if (!phys) panic("HEAP: PMM out of memory!");
         vmm_map_page(HEAP_START + i, (uint64_t)phys, PAGE_PRESENT | PAGE_WRITE);
     }
 
     heap_size = HEAP_INITIAL_SIZE;
-    head = (heap_block_t*)HEAP_START;
+    head = (heap_block_t *)HEAP_START;
     head->magic = HEAP_MAGIC;
     head->size = HEAP_INITIAL_SIZE - sizeof(heap_block_t);
     head->is_free = 1;
@@ -103,8 +101,7 @@ static int heap_grow(size_t min_size) {
     uint64_t growth = (needed + HEAP_PAGE_SIZE - 1) & ~(HEAP_PAGE_SIZE - 1);
 
     uint64_t ceiling = heap_extent_limit();
-    if (heap_size >= ceiling || growth > ceiling - heap_size)
-        return -1;
+    if (heap_size >= ceiling || growth > ceiling - heap_size) return -1;
 
     uint64_t base = HEAP_START + heap_size;
     uint64_t cr3 = vmm_kernel_cr3();
@@ -113,8 +110,7 @@ static int heap_grow(size_t min_size) {
     for (; mapped < growth; mapped += HEAP_PAGE_SIZE) {
         void *phys = pmm_alloc_page();
         if (!phys) break;
-        if (vmm_map_page_in(cr3, base + mapped, (uint64_t)phys,
-                            PAGE_PRESENT | PAGE_WRITE) != 0) {
+        if (vmm_map_page_in(cr3, base + mapped, (uint64_t)phys, PAGE_PRESENT | PAGE_WRITE) != 0) {
             pmm_free_page(phys);
             break;
         }
@@ -139,8 +135,7 @@ static int heap_grow(size_t min_size) {
     new_block->next = NULL;
     new_block->prev = tail;
 
-    if (tail->is_free &&
-        (uint64_t)tail + sizeof(heap_block_t) + tail->size == base) {
+    if (tail->is_free && (uint64_t)tail + sizeof(heap_block_t) + tail->size == base) {
         free_remove(tail);
         tail->size += growth;
         free_insert(tail);
@@ -191,8 +186,7 @@ static int heap_reacquire_pages(heap_block_t *block, uint64_t size) {
         if (vmm_translate(cr3, page, NULL, NULL) == 0) continue;
         void *physical = pmm_alloc_page();
         if (!physical) return -1;
-        if (vmm_map_page_in(cr3, page, (uint64_t)physical,
-                            PAGE_PRESENT | PAGE_WRITE) != 0) {
+        if (vmm_map_page_in(cr3, page, (uint64_t)physical, PAGE_PRESENT | PAGE_WRITE) != 0) {
             pmm_free_page(physical);
             return -1;
         }
@@ -204,8 +198,7 @@ static heap_block_t *split_for_page_alignment(heap_block_t *block, uint64_t size
     uint64_t payload = (uint64_t)block + sizeof(heap_block_t);
     if ((payload & (HEAP_PAGE_SIZE - 1)) == 0) return block;
     uint64_t aligned = (payload + HEAP_PAGE_SIZE - 1) & ~(HEAP_PAGE_SIZE - 1);
-    while (aligned - payload < sizeof(heap_block_t) + HEAP_ALIGN)
-        aligned += HEAP_PAGE_SIZE;
+    while (aligned - payload < sizeof(heap_block_t) + HEAP_ALIGN) aligned += HEAP_PAGE_SIZE;
     uint64_t lead = aligned - payload;
     if (block->size < lead + size) return NULL;
 
@@ -227,8 +220,8 @@ static heap_block_t *split_for_page_alignment(heap_block_t *block, uint64_t size
 }
 
 static heap_block_t *find_fit(uint64_t size, int page_aligned) {
-    uint64_t wanted = page_aligned ? size + HEAP_PAGE_SIZE + sizeof(heap_block_t) + HEAP_ALIGN
-                                   : size;
+    uint64_t wanted =
+        page_aligned ? size + HEAP_PAGE_SIZE + sizeof(heap_block_t) + HEAP_ALIGN : size;
     unsigned first = bin_of(wanted);
     for (heap_block_t *curr = bins[first]; curr; curr = curr->free_next)
         if (curr->size >= wanted) return curr;
@@ -236,7 +229,7 @@ static heap_block_t *find_fit(uint64_t size, int page_aligned) {
     return larger ? bins[__builtin_ctzll(larger)] : NULL;
 }
 
-void* kmalloc(size_t size) {
+void *kmalloc(size_t size) {
     if (size == 0) return NULL;
     size = (size + (HEAP_ALIGN - 1)) & ~(HEAP_ALIGN - 1);
     int page_aligned = size >= HEAP_PAGE_ALIGN_MIN;
@@ -246,7 +239,8 @@ void* kmalloc(size_t size) {
     for (;;) {
         heap_block_t *curr = find_fit(size, page_aligned);
         if (!curr) {
-            if (heap_grow(page_aligned ? size + HEAP_PAGE_SIZE + sizeof(heap_block_t) : size) != 0) {
+            if (heap_grow(page_aligned ? size + HEAP_PAGE_SIZE + sizeof(heap_block_t) : size) !=
+                0) {
                 lock_release(&heap_lock);
                 return NULL;
             }
@@ -269,7 +263,8 @@ void* kmalloc(size_t size) {
         }
         free_remove(chosen);
         if (chosen->size > size + sizeof(heap_block_t) + 16) {
-            heap_block_t *new_block = (heap_block_t *)((uint8_t *)chosen + sizeof(heap_block_t) + size);
+            heap_block_t *new_block =
+                (heap_block_t *)((uint8_t *)chosen + sizeof(heap_block_t) + size);
             new_block->magic = HEAP_MAGIC;
             new_block->size = chosen->size - size - sizeof(heap_block_t);
             new_block->is_free = 1;
@@ -291,12 +286,12 @@ void* kmalloc(size_t size) {
     }
 }
 
-void kfree(void* ptr) {
+void kfree(void *ptr) {
     if (!ptr) return;
 
     lock_acquire(&heap_lock);
 
-    heap_block_t* block = (heap_block_t*)((uint8_t*)ptr - sizeof(heap_block_t));
+    heap_block_t *block = (heap_block_t *)((uint8_t *)ptr - sizeof(heap_block_t));
     if (block->magic != HEAP_MAGIC) {
         lock_release(&heap_lock);
         panic("HEAP: Invalid kfree magic!");

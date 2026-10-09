@@ -14,21 +14,21 @@
 extern void kprintf(const char *fmt, ...);
 extern void panic(const char *message) __attribute__((noreturn));
 
-#define EC_UNKNOWN 0x00U
-#define EC_SVC64 0x15U
-#define EC_SYS64 0x18U
-#define EC_IABT_LOW 0x20U
-#define EC_PC_ALIGN 0x22U
-#define EC_DABT_LOW 0x24U
-#define EC_SP_ALIGN 0x26U
+#define EC_UNKNOWN      0x00U
+#define EC_SVC64        0x15U
+#define EC_SYS64        0x18U
+#define EC_IABT_LOW     0x20U
+#define EC_PC_ALIGN     0x22U
+#define EC_DABT_LOW     0x24U
+#define EC_SP_ALIGN     0x26U
 #define EC_FP_EXCEPTION 0x2CU
-#define EC_BRK64 0x3CU
+#define EC_BRK64        0x3CU
 
-#define FSC_TYPE_MASK 0x3CU
+#define FSC_TYPE_MASK   0x3CU
 #define FSC_TRANSLATION 0x04U
-#define FSC_ACCESS 0x08U
-#define FSC_PERMISSION 0x0CU
-#define ESR_WNR (1U << 6)
+#define FSC_ACCESS      0x08U
+#define FSC_PERMISSION  0x0CU
+#define ESR_WNR         (1U << 6)
 
 #define SIGTRAP 5
 
@@ -55,12 +55,12 @@ static uint64_t read_far(void) {
 static int user_fault_signal(uint32_t class) {
     switch (class) {
     case EC_PC_ALIGN:
-    case EC_SP_ALIGN: return SIGBUS;
+    case EC_SP_ALIGN:     return SIGBUS;
     case EC_FP_EXCEPTION: return SIGFPE;
-    case EC_BRK64: return SIGTRAP;
+    case EC_BRK64:        return SIGTRAP;
     case EC_UNKNOWN:
-    case EC_SYS64: return SIGILL;
-    default: return SIGSEGV;
+    case EC_SYS64:        return SIGILL;
+    default:              return SIGSEGV;
     }
 }
 
@@ -69,16 +69,17 @@ static void user_fault(struct interrupt_frame *frame, uint64_t esr, uint64_t far
     if (class == EC_DABT_LOW || class == EC_IABT_LOW) {
         uint32_t status = (uint32_t)esr & FSC_TYPE_MASK;
         if ((status == FSC_TRANSLATION || status == FSC_ACCESS) &&
-            (process_grow_user_stack(far) || process_commit_area(far))) return;
+            (process_grow_user_stack(far) || process_commit_area(far)))
+            return;
         if (status == FSC_PERMISSION && class == EC_DABT_LOW && (esr & ESR_WNR) &&
-            process_handle_cow_fault(far)) return;
+            process_handle_cow_fault(far))
+            return;
     }
 
     int signal_number = user_fault_signal(class);
     struct process *faulted = process_current();
-    kprintf("fault: %s[%d] class %x at %p addr %p (esr %p)\n",
-            faulted ? faulted->name : "?", (int)process_current_pid(), class,
-            (void *)frame->elr, (void *)far, (void *)esr);
+    kprintf("fault: %s[%d] class %x at %p addr %p (esr %p)\n", faulted ? faulted->name : "?",
+            (int)process_current_pid(), class, (void *)frame->elr, (void *)far, (void *)esr);
     if (process_fault_from_interrupt(frame, signal_number)) return;
     panic("unhandled user exception");
 }
@@ -102,8 +103,8 @@ int aarch64_el0_sync(struct syscall_frame *frame) {
 
 void aarch64_el1_sync(struct syscall_frame *frame) {
     uint64_t esr = read_esr();
-    kprintf("\nKERNEL EXCEPTION: class %x esr %p elr %p far %p sp %p\n",
-            (unsigned)(esr >> 26), (void *)esr, (void *)frame->elr, (void *)read_far(),
+    kprintf("\nKERNEL EXCEPTION: class %x esr %p elr %p far %p sp %p\n", (unsigned)(esr >> 26),
+            (void *)esr, (void *)frame->elr, (void *)read_far(),
             (void *)((uint64_t)frame + sizeof(*frame)));
     const char *module = NULL;
     uint64_t offset = 0;
@@ -115,7 +116,7 @@ void aarch64_el1_sync(struct syscall_frame *frame) {
 }
 
 void aarch64_unexpected(struct syscall_frame *frame, uint64_t kind) {
-    static const char *const names[] = { "EL1t", "FIQ", "SError", "AArch32" };
+    static const char *const names[] = {"EL1t", "FIQ", "SError", "AArch32"};
     kprintf("\nUNEXPECTED %s exception: esr %p elr %p far %p\n", names[kind & 3U],
             (void *)read_esr(), (void *)frame->elr, (void *)read_far());
     panic("unexpected exception");
@@ -143,8 +144,7 @@ int aarch64_irq(struct interrupt_frame *frame) {
     unsigned due = timer ? timer_local_expired() : 0;
     gic_end_of_interrupt(intid);
     if (timer && !(due & TIMER_LOCAL_DEADLINE) && !cpu_current()->current &&
-        !process_ready_pending() &&
-        !(cpu_current()->index == 0 && (due & TIMER_LOCAL_TICK))) {
+        !process_ready_pending() && !(cpu_current()->index == 0 && (due & TIMER_LOCAL_TICK))) {
         smp_service_flush();
         return 0;
     }

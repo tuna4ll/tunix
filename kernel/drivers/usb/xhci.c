@@ -23,232 +23,232 @@
 extern void kprintf(const char *fmt, ...);
 
 #define PCI_CLASS_SERIAL_BUS 0x0CU
-#define PCI_SUBCLASS_USB 0x03U
-#define PCI_PROG_IF_XHCI 0x30U
+#define PCI_SUBCLASS_USB     0x03U
+#define PCI_PROG_IF_XHCI     0x30U
 
-#define XHCI_CAPLENGTH 0x00U
-#define XHCI_VERSION_SHIFT 16U
-#define XHCI_HCSPARAMS1 0x04U
-#define XHCI_HCSPARAMS2 0x08U
-#define XHCI_HCCPARAMS1 0x10U
-#define XHCI_DBOFF 0x14U
-#define XHCI_RTSOFF 0x18U
+#define XHCI_CAPLENGTH      0x00U
+#define XHCI_VERSION_SHIFT  16U
+#define XHCI_HCSPARAMS1     0x04U
+#define XHCI_HCSPARAMS2     0x08U
+#define XHCI_HCCPARAMS1     0x10U
+#define XHCI_DBOFF          0x14U
+#define XHCI_RTSOFF         0x18U
 #define XHCI_REGISTER_BYTES 0x10000ULL
 
-#define HCCPARAMS1_AC64 (1U << 0)
+#define HCCPARAMS1_AC64       (1U << 0)
 #define HCCPARAMS1_CONTEXT_64 (1U << 2)
-#define HCCPARAMS1_PPC (1U << 3)
+#define HCCPARAMS1_PPC        (1U << 3)
 #define HCCPARAMS1_XECP_SHIFT 16U
 
-#define XHCI_USBCMD 0x00U
-#define XHCI_USBSTS 0x04U
-#define XHCI_CRCR 0x18U
-#define XHCI_DCBAAP 0x30U
-#define XHCI_CONFIG 0x38U
+#define XHCI_USBCMD      0x00U
+#define XHCI_USBSTS      0x04U
+#define XHCI_CRCR        0x18U
+#define XHCI_DCBAAP      0x30U
+#define XHCI_CONFIG      0x38U
 #define XHCI_PORTSC_BASE 0x400U
 #define XHCI_PORT_STRIDE 0x10U
 
 #define XHCI_INTERRUPTER0 0x20U
-#define XHCI_IMAN 0x00U
-#define XHCI_IMOD 0x04U
-#define XHCI_ERSTSZ 0x08U
-#define XHCI_ERSTBA 0x10U
-#define XHCI_ERDP 0x18U
+#define XHCI_IMAN         0x00U
+#define XHCI_IMOD         0x04U
+#define XHCI_ERSTSZ       0x08U
+#define XHCI_ERSTBA       0x10U
+#define XHCI_ERDP         0x18U
 
-#define USBCMD_RUN (1U << 0)
-#define USBCMD_RESET (1U << 1)
-#define USBCMD_INTERRUPTS (1U << 2)
-#define USBSTS_HALTED (1U << 0)
-#define USBSTS_HOST_ERROR (1U << 2)
-#define USBSTS_EVENT_INTERRUPT (1U << 3)
-#define USBSTS_NOT_READY (1U << 11)
-#define IMAN_PENDING (1U << 0)
-#define IMAN_ENABLE (1U << 1)
-#define CRCR_RING_CYCLE_STATE (1ULL << 0)
+#define USBCMD_RUN              (1U << 0)
+#define USBCMD_RESET            (1U << 1)
+#define USBCMD_INTERRUPTS       (1U << 2)
+#define USBSTS_HALTED           (1U << 0)
+#define USBSTS_HOST_ERROR       (1U << 2)
+#define USBSTS_EVENT_INTERRUPT  (1U << 3)
+#define USBSTS_NOT_READY        (1U << 11)
+#define IMAN_PENDING            (1U << 0)
+#define IMAN_ENABLE             (1U << 1)
+#define CRCR_RING_CYCLE_STATE   (1ULL << 0)
 #define ERDP_EVENT_HANDLER_BUSY (1ULL << 3)
 
-#define XECP_LEGACY 1U
-#define LEGACY_BIOS_OWNED (1U << 16)
-#define LEGACY_OS_OWNED (1U << 24)
+#define XECP_LEGACY        1U
+#define LEGACY_BIOS_OWNED  (1U << 16)
+#define LEGACY_OS_OWNED    (1U << 24)
 #define LEGACY_SMI_ENABLES ((1U << 0) | (1U << 4) | (0x7U << 13))
-#define LEGACY_SMI_EVENTS (0x7U << 29)
+#define LEGACY_SMI_EVENTS  (0x7U << 29)
 
-#define PORTSC_CONNECTED (1U << 0)
-#define PORTSC_ENABLED (1U << 1)
-#define PORTSC_RESET (1U << 4)
-#define PORTSC_POWER (1U << 9)
-#define PORTSC_SPEED_SHIFT 10U
-#define PORTSC_SPEED_MASK 0xFU
+#define PORTSC_CONNECTED      (1U << 0)
+#define PORTSC_ENABLED        (1U << 1)
+#define PORTSC_RESET          (1U << 4)
+#define PORTSC_POWER          (1U << 9)
+#define PORTSC_SPEED_SHIFT    10U
+#define PORTSC_SPEED_MASK     0xFU
 #define PORTSC_CONNECT_CHANGE (1U << 17)
-#define PORTSC_RESET_CHANGE (1U << 21)
-#define PORTSC_CHANGES 0x00FE0000U
-#define PORTSC_NEUTRAL 0x4E00FDE9U
+#define PORTSC_RESET_CHANGE   (1U << 21)
+#define PORTSC_CHANGES        0x00FE0000U
+#define PORTSC_NEUTRAL        0x4E00FDE9U
 
-#define TRB_BYTES 16U
-#define TRB_TYPE_SHIFT 10U
-#define TRB_TYPE_MASK 0x3FU
-#define TRB_CYCLE (1U << 0)
-#define TRB_TOGGLE_CYCLE (1U << 1)
-#define TRB_INTERRUPT_ON_SHORT (1U << 2)
+#define TRB_BYTES                   16U
+#define TRB_TYPE_SHIFT              10U
+#define TRB_TYPE_MASK               0x3FU
+#define TRB_CYCLE                   (1U << 0)
+#define TRB_TOGGLE_CYCLE            (1U << 1)
+#define TRB_INTERRUPT_ON_SHORT      (1U << 2)
 #define TRB_INTERRUPT_ON_COMPLETION (1U << 5)
-#define TRB_IMMEDIATE_DATA (1U << 6)
-#define TRB_DIRECTION_IN (1U << 16)
-#define TRB_TRANSFER_TYPE_SHIFT 16U
-#define TRB_TRANSFER_TYPE_NO_DATA 0U
-#define TRB_TRANSFER_TYPE_OUT 2U
-#define TRB_TRANSFER_TYPE_IN 3U
+#define TRB_IMMEDIATE_DATA          (1U << 6)
+#define TRB_DIRECTION_IN            (1U << 16)
+#define TRB_TRANSFER_TYPE_SHIFT     16U
+#define TRB_TRANSFER_TYPE_NO_DATA   0U
+#define TRB_TRANSFER_TYPE_OUT       2U
+#define TRB_TRANSFER_TYPE_IN        3U
 
-#define TRB_TYPE_NORMAL 1U
-#define TRB_TYPE_SETUP_STAGE 2U
-#define TRB_TYPE_DATA_STAGE 3U
-#define TRB_TYPE_STATUS_STAGE 4U
-#define TRB_TYPE_LINK 6U
-#define TRB_TYPE_ENABLE_SLOT 9U
-#define TRB_TYPE_DISABLE_SLOT 10U
-#define TRB_TYPE_ADDRESS_DEVICE 11U
-#define TRB_TYPE_CONFIGURE_ENDPOINT 12U
-#define TRB_TYPE_EVALUATE_CONTEXT 13U
-#define TRB_TYPE_RESET_ENDPOINT 14U
-#define TRB_TYPE_STOP_ENDPOINT 15U
-#define TRB_TYPE_SET_DEQUEUE 16U
-#define TRB_TYPE_NO_OP_COMMAND 23U
-#define TRB_TYPE_TRANSFER_EVENT 32U
-#define TRB_TYPE_COMMAND_COMPLETION 33U
-#define TRB_TYPE_PORT_STATUS_CHANGE 34U
+#define TRB_TYPE_NORMAL                1U
+#define TRB_TYPE_SETUP_STAGE           2U
+#define TRB_TYPE_DATA_STAGE            3U
+#define TRB_TYPE_STATUS_STAGE          4U
+#define TRB_TYPE_LINK                  6U
+#define TRB_TYPE_ENABLE_SLOT           9U
+#define TRB_TYPE_DISABLE_SLOT          10U
+#define TRB_TYPE_ADDRESS_DEVICE        11U
+#define TRB_TYPE_CONFIGURE_ENDPOINT    12U
+#define TRB_TYPE_EVALUATE_CONTEXT      13U
+#define TRB_TYPE_RESET_ENDPOINT        14U
+#define TRB_TYPE_STOP_ENDPOINT         15U
+#define TRB_TYPE_SET_DEQUEUE           16U
+#define TRB_TYPE_NO_OP_COMMAND         23U
+#define TRB_TYPE_TRANSFER_EVENT        32U
+#define TRB_TYPE_COMMAND_COMPLETION    33U
+#define TRB_TYPE_PORT_STATUS_CHANGE    34U
 #define TRB_TYPE_HOST_CONTROLLER_EVENT 37U
 
-#define TRB_COMPLETION_SHIFT 24U
-#define TRB_COMPLETION_MASK 0xFFU
-#define CODE_SUCCESS 1U
-#define CODE_BABBLE 3U
-#define CODE_TRANSACTION 4U
-#define CODE_STALL 6U
-#define CODE_SHORT_PACKET 13U
-#define CODE_STOPPED 26U
-#define CODE_STOPPED_LENGTH 27U
-#define CODE_TIMEOUT 0x100U
+#define TRB_COMPLETION_SHIFT   24U
+#define TRB_COMPLETION_MASK    0xFFU
+#define CODE_SUCCESS           1U
+#define CODE_BABBLE            3U
+#define CODE_TRANSACTION       4U
+#define CODE_STALL             6U
+#define CODE_SHORT_PACKET      13U
+#define CODE_STOPPED           26U
+#define CODE_STOPPED_LENGTH    27U
+#define CODE_TIMEOUT           0x100U
 #define TRANSFER_RESIDUAL_MASK 0x00FFFFFFU
-#define EVENT_SLOT_SHIFT 24U
-#define EVENT_ENDPOINT_SHIFT 16U
-#define EVENT_ENDPOINT_MASK 0x1FU
-#define EVENT_PORT_SHIFT 24U
+#define EVENT_SLOT_SHIFT       24U
+#define EVENT_ENDPOINT_SHIFT   16U
+#define EVENT_ENDPOINT_MASK    0x1FU
+#define EVENT_PORT_SHIFT       24U
 
-#define RING_BYTES 4096U
+#define RING_BYTES     4096U
 #define RING_TRB_COUNT (RING_BYTES / TRB_BYTES)
 
-#define INPUT_CONTROL_INDEX 0U
-#define SLOT_CONTEXT_INDEX 1U
-#define ADD_SLOT (1U << 0)
-#define ADD_EP0 (1U << 1)
-#define SLOT_ROUTE_MASK 0xFFFFFU
-#define SLOT_SPEED_SHIFT 20U
-#define SLOT_HUB (1U << 26)
-#define SLOT_ENTRIES_SHIFT 27U
-#define SLOT_ROOT_PORT_SHIFT 16U
+#define INPUT_CONTROL_INDEX   0U
+#define SLOT_CONTEXT_INDEX    1U
+#define ADD_SLOT              (1U << 0)
+#define ADD_EP0               (1U << 1)
+#define SLOT_ROUTE_MASK       0xFFFFFU
+#define SLOT_SPEED_SHIFT      20U
+#define SLOT_HUB              (1U << 26)
+#define SLOT_ENTRIES_SHIFT    27U
+#define SLOT_ROOT_PORT_SHIFT  16U
 #define SLOT_PORT_COUNT_SHIFT 24U
-#define SLOT_TT_PORT_SHIFT 8U
-#define SLOT_TT_THINK_SHIFT 16U
+#define SLOT_TT_PORT_SHIFT    8U
+#define SLOT_TT_THINK_SHIFT   16U
 
-#define EP_STATE_MASK 0x7U
-#define EP_STATE_HALTED 2U
-#define EP_STATE_STOPPED 3U
-#define EP_INTERVAL_SHIFT 16U
-#define EP_TYPE_SHIFT 3U
+#define EP_STATE_MASK        0x7U
+#define EP_STATE_HALTED      2U
+#define EP_STATE_STOPPED     3U
+#define EP_INTERVAL_SHIFT    16U
+#define EP_TYPE_SHIFT        3U
 #define EP_ERROR_COUNT_SHIFT 1U
-#define EP_ERROR_COUNT 3U
-#define EP_MAX_PACKET_SHIFT 16U
-#define EP_MAX_ESIT_SHIFT 16U
-#define EP_DEQUEUE_CYCLE 1U
-#define EP_TYPE_CONTROL 4U
-#define EP_TYPE_BULK_OUT 2U
-#define EP_TYPE_BULK_IN 6U
+#define EP_ERROR_COUNT       3U
+#define EP_MAX_PACKET_SHIFT  16U
+#define EP_MAX_ESIT_SHIFT    16U
+#define EP_DEQUEUE_CYCLE     1U
+#define EP_TYPE_CONTROL      4U
+#define EP_TYPE_BULK_OUT     2U
+#define EP_TYPE_BULK_IN      6U
 #define EP_TYPE_INTERRUPT_IN 7U
-#define BULK_AVERAGE_TRB 3072U
+#define BULK_AVERAGE_TRB     3072U
 
-#define USB_SPEED_FULL 1U
-#define USB_SPEED_LOW 2U
-#define USB_SPEED_HIGH 3U
+#define USB_SPEED_FULL  1U
+#define USB_SPEED_LOW   2U
+#define USB_SPEED_HIGH  3U
 #define USB_SPEED_SUPER 4U
 
-#define USB_DIRECTION_IN 0x80U
-#define REQUEST_TYPE_CLASS_INTERFACE 0x21U
-#define REQUEST_TYPE_CLASS_DEVICE_IN 0xA0U
-#define REQUEST_TYPE_CLASS_OTHER_OUT 0x23U
-#define REQUEST_TYPE_CLASS_OTHER_IN 0xA3U
+#define USB_DIRECTION_IN               0x80U
+#define REQUEST_TYPE_CLASS_INTERFACE   0x21U
+#define REQUEST_TYPE_CLASS_DEVICE_IN   0xA0U
+#define REQUEST_TYPE_CLASS_OTHER_OUT   0x23U
+#define REQUEST_TYPE_CLASS_OTHER_IN    0xA3U
 #define REQUEST_TYPE_STANDARD_ENDPOINT 0x02U
-#define REQUEST_GET_STATUS 0U
-#define REQUEST_CLEAR_FEATURE 1U
-#define REQUEST_SET_FEATURE 3U
-#define REQUEST_GET_DESCRIPTOR 6U
-#define REQUEST_SET_CONFIGURATION 9U
-#define REQUEST_HID_SET_IDLE 0x0AU
-#define REQUEST_HID_SET_PROTOCOL 0x0BU
-#define REQUEST_STORAGE_RESET 0xFFU
-#define FEATURE_ENDPOINT_HALT 0U
+#define REQUEST_GET_STATUS             0U
+#define REQUEST_CLEAR_FEATURE          1U
+#define REQUEST_SET_FEATURE            3U
+#define REQUEST_GET_DESCRIPTOR         6U
+#define REQUEST_SET_CONFIGURATION      9U
+#define REQUEST_HID_SET_IDLE           0x0AU
+#define REQUEST_HID_SET_PROTOCOL       0x0BU
+#define REQUEST_STORAGE_RESET          0xFFU
+#define FEATURE_ENDPOINT_HALT          0U
 
-#define DESCRIPTOR_DEVICE 1U
-#define DESCRIPTOR_CONFIGURATION 2U
-#define DESCRIPTOR_INTERFACE 4U
-#define DESCRIPTOR_ENDPOINT 5U
-#define DESCRIPTOR_HUB 0x29U
-#define DESCRIPTOR_HID 0x21U
-#define DESCRIPTOR_HID_REPORT 0x22U
+#define DESCRIPTOR_DEVICE                  1U
+#define DESCRIPTOR_CONFIGURATION           2U
+#define DESCRIPTOR_INTERFACE               4U
+#define DESCRIPTOR_ENDPOINT                5U
+#define DESCRIPTOR_HUB                     0x29U
+#define DESCRIPTOR_HID                     0x21U
+#define DESCRIPTOR_HID_REPORT              0x22U
 #define REQUEST_TYPE_STANDARD_INTERFACE_IN 0x81U
-#define HID_PROTOCOL_REPORT 1U
+#define HID_PROTOCOL_REPORT                1U
 
-#define CLASS_HID 3U
-#define CLASS_STORAGE 8U
-#define CLASS_HUB 9U
-#define HID_SUBCLASS_BOOT 1U
-#define HID_KEYBOARD 1U
-#define HID_MOUSE 2U
+#define CLASS_HID             3U
+#define CLASS_STORAGE         8U
+#define CLASS_HUB             9U
+#define HID_SUBCLASS_BOOT     1U
+#define HID_KEYBOARD          1U
+#define HID_MOUSE             2U
 #define STORAGE_SUBCLASS_SCSI 6U
-#define STORAGE_BULK_ONLY 0x50U
+#define STORAGE_BULK_ONLY     0x50U
 
-#define ENDPOINT_DIRECTION_IN 0x80U
-#define ENDPOINT_NUMBER_MASK 0x0FU
-#define ENDPOINT_TYPE_MASK 0x03U
-#define ENDPOINT_TYPE_BULK 2U
+#define ENDPOINT_DIRECTION_IN   0x80U
+#define ENDPOINT_NUMBER_MASK    0x0FU
+#define ENDPOINT_TYPE_MASK      0x03U
+#define ENDPOINT_TYPE_BULK      2U
 #define ENDPOINT_TYPE_INTERRUPT 3U
 
-#define HUB_FEATURE_PORT_RESET 4U
-#define HUB_FEATURE_PORT_POWER 8U
-#define HUB_FEATURE_C_CONNECTION 16U
-#define HUB_FEATURE_C_ENABLE 17U
-#define HUB_FEATURE_C_SUSPEND 18U
+#define HUB_FEATURE_PORT_RESET     4U
+#define HUB_FEATURE_PORT_POWER     8U
+#define HUB_FEATURE_C_CONNECTION   16U
+#define HUB_FEATURE_C_ENABLE       17U
+#define HUB_FEATURE_C_SUSPEND      18U
 #define HUB_FEATURE_C_OVER_CURRENT 19U
-#define HUB_FEATURE_C_RESET 20U
-#define HUB_STATUS_CONNECTION 0x0001U
-#define HUB_STATUS_ENABLE 0x0002U
-#define HUB_STATUS_LOW_SPEED 0x0200U
-#define HUB_STATUS_HIGH_SPEED 0x0400U
-#define HUB_CHANGE_CONNECTION 0x0001U
-#define HUB_CHANGE_ENABLE 0x0002U
-#define HUB_CHANGE_SUSPEND 0x0004U
-#define HUB_CHANGE_OVER_CURRENT 0x0008U
-#define HUB_CHANGE_RESET 0x0010U
-#define HUB_MAX_PORTS 15U
-#define HUB_MAX_DEPTH 5U
+#define HUB_FEATURE_C_RESET        20U
+#define HUB_STATUS_CONNECTION      0x0001U
+#define HUB_STATUS_ENABLE          0x0002U
+#define HUB_STATUS_LOW_SPEED       0x0200U
+#define HUB_STATUS_HIGH_SPEED      0x0400U
+#define HUB_CHANGE_CONNECTION      0x0001U
+#define HUB_CHANGE_ENABLE          0x0002U
+#define HUB_CHANGE_SUSPEND         0x0004U
+#define HUB_CHANGE_OVER_CURRENT    0x0008U
+#define HUB_CHANGE_RESET           0x0010U
+#define HUB_MAX_PORTS              15U
+#define HUB_MAX_DEPTH              5U
 
-#define MAX_DEVICES 255U
-#define MAX_HID 16U
-#define MAX_PORTS 256U
+#define MAX_DEVICES    255U
+#define MAX_HID        16U
+#define MAX_PORTS      256U
 #define RECOVERY_LIMIT 8U
 
-#define NS_PER_MS 1000000ULL
-#define RESET_TIMEOUT_NS (1000ULL * NS_PER_MS)
-#define HALT_TIMEOUT_NS (100ULL * NS_PER_MS)
-#define HANDOFF_TIMEOUT_NS (1000ULL * NS_PER_MS)
-#define COMMAND_TIMEOUT_NS (1000ULL * NS_PER_MS)
-#define CONTROL_TIMEOUT_NS (1000ULL * NS_PER_MS)
-#define BULK_TIMEOUT_NS (5000ULL * NS_PER_MS)
+#define NS_PER_MS             1000000ULL
+#define RESET_TIMEOUT_NS      (1000ULL * NS_PER_MS)
+#define HALT_TIMEOUT_NS       (100ULL * NS_PER_MS)
+#define HANDOFF_TIMEOUT_NS    (1000ULL * NS_PER_MS)
+#define COMMAND_TIMEOUT_NS    (1000ULL * NS_PER_MS)
+#define CONTROL_TIMEOUT_NS    (1000ULL * NS_PER_MS)
+#define BULK_TIMEOUT_NS       (5000ULL * NS_PER_MS)
 #define PORT_RESET_TIMEOUT_NS (500ULL * NS_PER_MS)
-#define PORT_POWER_NS (20ULL * NS_PER_MS)
-#define DEBOUNCE_NS (100ULL * NS_PER_MS)
-#define RESET_RECOVERY_NS (10ULL * NS_PER_MS)
-#define FIRST_SCAN_NS (200ULL * NS_PER_MS)
-#define DMA_LIMIT_32 0x100000000ULL
-#define DMA_ATTEMPTS 64U
+#define PORT_POWER_NS         (20ULL * NS_PER_MS)
+#define DEBOUNCE_NS           (100ULL * NS_PER_MS)
+#define RESET_RECOVERY_NS     (10ULL * NS_PER_MS)
+#define FIRST_SCAN_NS         (200ULL * NS_PER_MS)
+#define DMA_LIMIT_32          0x100000000ULL
+#define DMA_ATTEMPTS          64U
 
 struct trb {
     uint32_t parameter_low;
@@ -402,9 +402,7 @@ static struct mutex xhci_ops = MUTEX_INITIALIZER("xhci operations", LOCK_RANK_BU
 
 static const struct usb_host xhci_usb_host;
 
-static inline uint32_t read32(uint64_t address) {
-    return *(volatile uint32_t *)address;
-}
+static inline uint32_t read32(uint64_t address) { return *(volatile uint32_t *)address; }
 
 static inline void write32(uint64_t address, uint32_t value) {
     *(volatile uint32_t *)address = value;
@@ -489,8 +487,8 @@ static uint64_t ring_position(const struct ring *ring) {
     return ring->physical + (uint64_t)ring->index * TRB_BYTES;
 }
 
-static void enqueue(struct ring *ring, uint64_t parameter, uint32_t status,
-                    uint32_t type, uint32_t control) {
+static void enqueue(struct ring *ring, uint64_t parameter, uint32_t status, uint32_t type,
+                    uint32_t control) {
     struct trb *entry = &ring->entries[ring->index];
     entry->parameter_low = (uint32_t)parameter;
     entry->parameter_high = (uint32_t)(parameter >> 32);
@@ -539,23 +537,22 @@ static void hub_arm(struct usb_device *device) {
     ring_doorbell(device->host, device->slot, device->hub_dci);
 }
 
-static int completed(uint32_t code) {
-    return code == CODE_SUCCESS || code == CODE_SHORT_PACKET;
-}
+static int completed(uint32_t code) { return code == CODE_SUCCESS || code == CODE_SHORT_PACKET; }
 
 static void mark_subtree(struct xhci_host *host, struct usb_device *device) {
     device->disconnected = 1;
     for (unsigned index = 0; index < host->max_slots; index++) {
         struct usb_device *child = &host->devices[index];
-        if (child->used && child->parent == device && !child->disconnected) mark_subtree(host, child);
+        if (child->used && child->parent == device && !child->disconnected)
+            mark_subtree(host, child);
     }
 }
 
 static void mark_hub_ports(struct xhci_host *host, struct usb_device *hub, uint32_t changed) {
     for (unsigned index = 0; index < host->max_slots; index++) {
         struct usb_device *child = &host->devices[index];
-        if (child->used && child->started && child->parent == hub &&
-            child->parent_port < 32U && (changed & (1U << child->parent_port)))
+        if (child->used && child->started && child->parent == hub && child->parent_port < 32U &&
+            (changed & (1U << child->parent_port)))
             mark_subtree(host, child);
     }
 }
@@ -586,7 +583,8 @@ static void transfer_event(struct xhci_host *host, const struct trb *event) {
         if (function->protocol == HID_KEYBOARD)
             hid_keyboard_report(function->previous, function->report, length);
         else
-            hid_mouse_report(function->report_mode ? &function->layout : NULL, function->report, length);
+            hid_mouse_report(function->report_mode ? &function->layout : NULL, function->report,
+                             length);
         hid_arm(device, function);
         return;
     }
@@ -670,8 +668,8 @@ static int command_answered(void *context) {
     return host->command_done || host->failed;
 }
 
-static int command(struct xhci_host *host, uint32_t type, uint64_t parameter,
-                   uint32_t control, uint32_t *slot_out) {
+static int command(struct xhci_host *host, uint32_t type, uint64_t parameter, uint32_t control,
+                   uint32_t *slot_out) {
     if (host->failed) return -1;
     host->command_done = 0;
     enqueue(&host->commands, parameter, 0, type, control);
@@ -695,7 +693,7 @@ static int result_posted(void *context) {
     struct result_wait *wait = (struct result_wait *)context;
     pump(wait->device->host);
     return wait->device->results[wait->dci].done || wait->device->disconnected ||
-           wait->device->host->failed;
+        wait->device->host->failed;
 }
 
 static uint32_t wait_result(struct usb_device *device, uint32_t dci, uint64_t timeout,
@@ -732,17 +730,16 @@ static int realign_endpoint(struct usb_device *device, uint32_t dci, struct ring
                    (device->slot << EVENT_SLOT_SHIFT) | (dci << EVENT_ENDPOINT_SHIFT), NULL);
 }
 
-static int control(struct usb_device *device, uint8_t request_type, uint8_t request,
-                   uint16_t value, uint16_t index, uint16_t length) {
+static int control(struct usb_device *device, uint8_t request_type, uint8_t request, uint16_t value,
+                   uint16_t index, uint16_t length) {
     if (!device->used || device->disconnected || device->host->failed) return -1;
     if (length > RING_BYTES) return -1;
-    uint64_t setup = (uint64_t)request_type | ((uint64_t)request << 8) |
-                     ((uint64_t)value << 16) | ((uint64_t)index << 32) |
-                     ((uint64_t)length << 48);
+    uint64_t setup = (uint64_t)request_type | ((uint64_t)request << 8) | ((uint64_t)value << 16) |
+        ((uint64_t)index << 32) | ((uint64_t)length << 48);
     uint32_t transfer_type = TRB_TRANSFER_TYPE_NO_DATA;
     if (length)
-        transfer_type = (request_type & USB_DIRECTION_IN) ? TRB_TRANSFER_TYPE_IN
-                                                          : TRB_TRANSFER_TYPE_OUT;
+        transfer_type =
+            (request_type & USB_DIRECTION_IN) ? TRB_TRANSFER_TYPE_IN : TRB_TRANSFER_TYPE_OUT;
 
     device->results[1].done = 0;
     enqueue(&device->ep0, setup, 8U, TRB_TYPE_SETUP_STAGE,
@@ -750,7 +747,8 @@ static int control(struct usb_device *device, uint8_t request_type, uint8_t requ
     if (length)
         enqueue(&device->ep0, device->buffer_physical, length, TRB_TYPE_DATA_STAGE,
                 (request_type & USB_DIRECTION_IN) ? TRB_DIRECTION_IN : 0);
-    uint32_t status_direction = (length && (request_type & USB_DIRECTION_IN)) ? 0 : TRB_DIRECTION_IN;
+    uint32_t status_direction =
+        (length && (request_type & USB_DIRECTION_IN)) ? 0 : TRB_DIRECTION_IN;
     enqueue(&device->ep0, 0, 0, TRB_TYPE_STATUS_STAGE,
             status_direction | TRB_INTERRUPT_ON_COMPLETION);
     ring_doorbell(device->host, device->slot, 1);
@@ -783,18 +781,16 @@ static int bulk(struct usb_device *device, int in, uint64_t physical, uint32_t l
 static void write_slot_context(struct usb_device *device, uint32_t entries) {
     uint32_t *slot = context_at(device->host, device->input_context, SLOT_CONTEXT_INDEX);
     slot[0] = (device->route & SLOT_ROUTE_MASK) | (device->speed << SLOT_SPEED_SHIFT) |
-              (entries << SLOT_ENTRIES_SHIFT) | (device->hub ? SLOT_HUB : 0);
+        (entries << SLOT_ENTRIES_SHIFT) | (device->hub ? SLOT_HUB : 0);
     slot[1] = (device->root_port << SLOT_ROOT_PORT_SHIFT) |
-              (device->hub ? device->hub_ports << SLOT_PORT_COUNT_SHIFT : 0);
+        (device->hub ? device->hub_ports << SLOT_PORT_COUNT_SHIFT : 0);
     slot[2] = device->tt_slot | (device->tt_port << SLOT_TT_PORT_SHIFT) |
-              (device->hub && device->speed == USB_SPEED_HIGH
-                   ? device->hub_think << SLOT_TT_THINK_SHIFT : 0);
+        (device->hub && device->speed == USB_SPEED_HIGH ? device->hub_think << SLOT_TT_THINK_SHIFT
+                                                        : 0);
     slot[3] = 0;
 }
 
-static void clear_input(struct usb_device *device) {
-    memset(device->input_context, 0, RING_BYTES);
-}
+static void clear_input(struct usb_device *device) { memset(device->input_context, 0, RING_BYTES); }
 
 static uint32_t interval_for(struct usb_device *device, uint8_t interval) {
     uint32_t exponent;
@@ -816,8 +812,7 @@ static void write_interrupt_endpoint(struct usb_device *device, uint32_t dci, st
     uint32_t *endpoint = context_at(device->host, device->input_context, dci + 1U);
     endpoint[0] = interval_for(device, interval) << EP_INTERVAL_SHIFT;
     endpoint[1] = (EP_TYPE_INTERRUPT_IN << EP_TYPE_SHIFT) |
-                  (EP_ERROR_COUNT << EP_ERROR_COUNT_SHIFT) |
-                  ((uint32_t)packet << EP_MAX_PACKET_SHIFT);
+        (EP_ERROR_COUNT << EP_ERROR_COUNT_SHIFT) | ((uint32_t)packet << EP_MAX_PACKET_SHIFT);
     endpoint[2] = (uint32_t)(ring->physical | EP_DEQUEUE_CYCLE);
     endpoint[3] = (uint32_t)(ring->physical >> 32);
     endpoint[4] = (uint32_t)packet | ((uint32_t)packet << EP_MAX_ESIT_SHIFT);
@@ -827,14 +822,15 @@ static void write_bulk_endpoint(struct usb_device *device, uint32_t dci, struct 
                                 uint32_t type, uint16_t packet) {
     uint32_t *endpoint = context_at(device->host, device->input_context, dci + 1U);
     endpoint[1] = (type << EP_TYPE_SHIFT) | (EP_ERROR_COUNT << EP_ERROR_COUNT_SHIFT) |
-                  ((uint32_t)packet << EP_MAX_PACKET_SHIFT);
+        ((uint32_t)packet << EP_MAX_PACKET_SHIFT);
     endpoint[2] = (uint32_t)(ring->physical | EP_DEQUEUE_CYCLE);
     endpoint[3] = (uint32_t)(ring->physical >> 32);
     endpoint[4] = BULK_AVERAGE_TRB;
 }
 
 static int configure(struct usb_device *device, uint32_t added, uint32_t entries) {
-    uint32_t *control_context = context_at(device->host, device->input_context, INPUT_CONTROL_INDEX);
+    uint32_t *control_context =
+        context_at(device->host, device->input_context, INPUT_CONTROL_INDEX);
     control_context[1] = ADD_SLOT | added;
     write_slot_context(device, entries);
     return command(device->host, TRB_TYPE_CONFIGURE_ENDPOINT, device->input_physical,
@@ -900,7 +896,8 @@ static void remove_device(struct usb_device *device) {
         hid_keyboard_release(function->previous);
     }
     if (device->storage >= 0) storage_table[device->storage].device = NULL;
-    if (device->started) kprintf("XHCI: %s slot %u removed\n", device->name, (unsigned)device->slot);
+    if (device->started)
+        kprintf("XHCI: %s slot %u removed\n", device->name, (unsigned)device->slot);
     if (device->slot) {
         host->by_slot[device->slot] = NULL;
         (void)command(host, TRB_TYPE_DISABLE_SLOT, 0, device->slot << EVENT_SLOT_SHIFT, NULL);
@@ -911,18 +908,20 @@ static void remove_device(struct usb_device *device) {
 }
 
 static int setup_ep0_packet(struct usb_device *device) {
-    if (control(device, USB_DIRECTION_IN, REQUEST_GET_DESCRIPTOR,
-                DESCRIPTOR_DEVICE << 8, 0, 8) != 0) return -1;
+    if (control(device, USB_DIRECTION_IN, REQUEST_GET_DESCRIPTOR, DESCRIPTOR_DEVICE << 8, 0, 8) !=
+        0)
+        return -1;
     uint32_t reported = device->buffer[7];
     if (device->speed >= USB_SPEED_SUPER) reported = reported < 16U ? 1U << reported : 512U;
     if (!reported || reported == device->ep0_packet) return 0;
     device->ep0_packet = reported;
     clear_input(device);
-    uint32_t *control_context = context_at(device->host, device->input_context, INPUT_CONTROL_INDEX);
+    uint32_t *control_context =
+        context_at(device->host, device->input_context, INPUT_CONTROL_INDEX);
     control_context[1] = ADD_EP0;
     uint32_t *endpoint = context_at(device->host, device->input_context, 2);
     endpoint[1] = (EP_TYPE_CONTROL << EP_TYPE_SHIFT) | (EP_ERROR_COUNT << EP_ERROR_COUNT_SHIFT) |
-                  (reported << EP_MAX_PACKET_SHIFT);
+        (reported << EP_MAX_PACKET_SHIFT);
     return command(device->host, TRB_TYPE_EVALUATE_CONTEXT, device->input_physical,
                    device->slot << EVENT_SLOT_SHIFT, NULL);
 }
@@ -952,7 +951,8 @@ static void parse_configuration(struct usb_device *device, uint16_t total) {
                 function = &device->hid[device->hid_count];
                 memset(function, 0, sizeof(*function));
                 function->protocol = subclass == HID_SUBCLASS_BOOT && protocol == HID_KEYBOARD
-                                         ? HID_KEYBOARD : HID_MOUSE;
+                    ? HID_KEYBOARD
+                    : HID_MOUSE;
                 function->subclass = subclass;
                 function->interface_protocol = protocol;
                 function->interface = interface;
@@ -963,11 +963,13 @@ static void parse_configuration(struct usb_device *device, uint16_t total) {
                 !device->bulk_in_address)
                 device->storage_interface = (uint8_t)(interface | 0x80U);
         } else if (type == DESCRIPTOR_HID && length >= 9U && function) {
-            function->descriptor_length = (uint16_t)(buffer[offset + 7U] | (buffer[offset + 8U] << 8));
+            function->descriptor_length =
+                (uint16_t)(buffer[offset + 7U] | (buffer[offset + 8U] << 8));
         } else if (type == DESCRIPTOR_ENDPOINT && length >= 7U) {
             uint8_t address = buffer[offset + 2U];
             uint8_t attributes = buffer[offset + 3U];
-            uint16_t packet = (uint16_t)((buffer[offset + 4U] | (buffer[offset + 5U] << 8)) & 0x7FFU);
+            uint16_t packet =
+                (uint16_t)((buffer[offset + 4U] | (buffer[offset + 5U] << 8)) & 0x7FFU);
             uint8_t interval = buffer[offset + 6U];
             uint8_t kind = attributes & ENDPOINT_TYPE_MASK;
             if (function && !function->address && kind == ENDPOINT_TYPE_INTERRUPT &&
@@ -1013,7 +1015,8 @@ static int classify_hid(struct usb_device *device, struct hid_function *function
         function->report_mode = 1;
         return 0;
     }
-    if (function->subclass == HID_SUBCLASS_BOOT && function->interface_protocol == HID_MOUSE) return 0;
+    if (function->subclass == HID_SUBCLASS_BOOT && function->interface_protocol == HID_MOUSE)
+        return 0;
     kprintf("XHCI: %s interface %u is HID but not a keyboard or a relative mouse\n", device->name,
             (unsigned)function->interface);
     return -1;
@@ -1066,14 +1069,15 @@ static int start_storage(struct usb_device *device) {
     device->bulk_in_dci = (uint32_t)(device->bulk_in_address & ENDPOINT_NUMBER_MASK) * 2U + 1U;
     device->bulk_out_dci = (uint32_t)(device->bulk_out_address & ENDPOINT_NUMBER_MASK) * 2U;
     if (ring_create(device->host, &device->bulk_in) != 0 ||
-        ring_create(device->host, &device->bulk_out) != 0) return -1;
+        ring_create(device->host, &device->bulk_out) != 0)
+        return -1;
     clear_input(device);
     write_bulk_endpoint(device, device->bulk_in_dci, &device->bulk_in, EP_TYPE_BULK_IN,
                         device->bulk_in_packet);
     write_bulk_endpoint(device, device->bulk_out_dci, &device->bulk_out, EP_TYPE_BULK_OUT,
                         device->bulk_out_packet);
-    uint32_t entries = device->bulk_in_dci > device->bulk_out_dci ? device->bulk_in_dci
-                                                                  : device->bulk_out_dci;
+    uint32_t entries =
+        device->bulk_in_dci > device->bulk_out_dci ? device->bulk_in_dci : device->bulk_out_dci;
     if (configure(device, (1U << device->bulk_in_dci) | (1U << device->bulk_out_dci), entries) != 0)
         return -1;
     device->storage = storage_entries;
@@ -1093,8 +1097,9 @@ static int start_hub(struct usb_device *device) {
         return -1;
     }
     if (device->depth >= HUB_MAX_DEPTH || !device->hub_address) return -1;
-    if (control(device, REQUEST_TYPE_CLASS_DEVICE_IN, REQUEST_GET_DESCRIPTOR,
-                DESCRIPTOR_HUB << 8, 0, 9) != 0) return -1;
+    if (control(device, REQUEST_TYPE_CLASS_DEVICE_IN, REQUEST_GET_DESCRIPTOR, DESCRIPTOR_HUB << 8,
+                0, 9) != 0)
+        return -1;
     device->hub_ports = device->buffer[2];
     if (device->hub_ports > HUB_MAX_PORTS) device->hub_ports = HUB_MAX_PORTS;
     uint16_t characteristics = (uint16_t)(device->buffer[3] | (device->buffer[4] << 8));
@@ -1113,16 +1118,16 @@ static int start_hub(struct usb_device *device) {
 
     for (uint32_t port = 1; port <= device->hub_ports; port++)
         (void)hub_request(device, REQUEST_SET_FEATURE, HUB_FEATURE_PORT_POWER, (uint16_t)port);
-    uint64_t power = (uint64_t)(device->hub_power_ms < 100U ? 100U : device->hub_power_ms) * NS_PER_MS;
+    uint64_t power =
+        (uint64_t)(device->hub_power_ms < 100U ? 100U : device->hub_power_ms) * NS_PER_MS;
     pause_ns(power);
-    for (uint32_t port = 1; port <= device->hub_ports; port++)
-        device->hub_changed |= 1U << port;
+    for (uint32_t port = 1; port <= device->hub_ports; port++) device->hub_changed |= 1U << port;
     hub_arm(device);
     return 0;
 }
 
-static struct usb_device *attach(struct xhci_host *host, struct usb_device *parent,
-                                 uint32_t port, uint32_t speed) {
+static struct usb_device *attach(struct xhci_host *host, struct usb_device *parent, uint32_t port,
+                                 uint32_t speed) {
     struct usb_device *device = allocate_device(host);
     if (!device) {
         kprintf("XHCI%u: no room for another device\n", host->index);
@@ -1169,30 +1174,33 @@ static struct usb_device *attach(struct xhci_host *host, struct usb_device *pare
     write_slot_context(device, 1);
     uint32_t *endpoint = context_at(host, device->input_context, 2);
     endpoint[1] = (EP_TYPE_CONTROL << EP_TYPE_SHIFT) | (EP_ERROR_COUNT << EP_ERROR_COUNT_SHIFT) |
-                  (device->ep0_packet << EP_MAX_PACKET_SHIFT);
+        (device->ep0_packet << EP_MAX_PACKET_SHIFT);
     endpoint[2] = (uint32_t)(device->ep0.physical | EP_DEQUEUE_CYCLE);
     endpoint[3] = (uint32_t)(device->ep0.physical >> 32);
     endpoint[4] = 8U;
     host->dcbaa[slot] = device->output_physical;
     host->by_slot[slot] = device;
-    if (command(host, TRB_TYPE_ADDRESS_DEVICE, device->input_physical,
-                slot << EVENT_SLOT_SHIFT, NULL) != 0) {
+    if (command(host, TRB_TYPE_ADDRESS_DEVICE, device->input_physical, slot << EVENT_SLOT_SHIFT,
+                NULL) != 0) {
         kprintf("XHCI: %s would not take an address\n", device->name);
         goto fail;
     }
     if (setup_ep0_packet(device) != 0 ||
-        control(device, USB_DIRECTION_IN, REQUEST_GET_DESCRIPTOR, DESCRIPTOR_DEVICE << 8, 0, 18) != 0) {
+        control(device, USB_DIRECTION_IN, REQUEST_GET_DESCRIPTOR, DESCRIPTOR_DEVICE << 8, 0, 18) !=
+            0) {
         kprintf("XHCI: %s would not describe itself\n", device->name);
         goto fail;
     }
     device->device_class = device->buffer[4];
-    if (control(device, USB_DIRECTION_IN, REQUEST_GET_DESCRIPTOR,
-                DESCRIPTOR_CONFIGURATION << 8, 0, 9) != 0) goto fail;
+    if (control(device, USB_DIRECTION_IN, REQUEST_GET_DESCRIPTOR, DESCRIPTOR_CONFIGURATION << 8, 0,
+                9) != 0)
+        goto fail;
     uint16_t total = (uint16_t)(device->buffer[2] | (device->buffer[3] << 8));
     if (total < 9U) goto fail;
     if (total > RING_BYTES) total = RING_BYTES;
-    if (control(device, USB_DIRECTION_IN, REQUEST_GET_DESCRIPTOR,
-                DESCRIPTOR_CONFIGURATION << 8, 0, total) != 0) goto fail;
+    if (control(device, USB_DIRECTION_IN, REQUEST_GET_DESCRIPTOR, DESCRIPTOR_CONFIGURATION << 8, 0,
+                total) != 0)
+        goto fail;
     parse_configuration(device, total);
     if (control(device, 0, REQUEST_SET_CONFIGURATION, device->configuration, 0, 0) != 0) {
         kprintf("XHCI: %s would not take its configuration\n", device->name);
@@ -1213,10 +1221,11 @@ static struct usb_device *attach(struct xhci_host *host, struct usb_device *pare
         for (unsigned index = 0; index < device->hid_count; index++) {
             struct hid_function *function = &device->hid[index];
             if (function->report_mode)
-                kprintf("XHCI: mouse at %s slot %u, endpoint %x, report %u, %u buttons, %u-bit motion\n",
-                        device->name, (unsigned)slot, (unsigned)function->address,
-                        (unsigned)function->layout.report_id, (unsigned)function->layout.buttons,
-                        (unsigned)function->layout.x.size);
+                kprintf(
+                    "XHCI: mouse at %s slot %u, endpoint %x, report %u, %u buttons, %u-bit motion\n",
+                    device->name, (unsigned)slot, (unsigned)function->address,
+                    (unsigned)function->layout.report_id, (unsigned)function->layout.buttons,
+                    (unsigned)function->layout.x.size);
             else
                 kprintf("XHCI: %s at %s slot %u, endpoint %x reporting\n",
                         function->protocol == HID_KEYBOARD ? "keyboard" : "boot mouse",
@@ -1289,7 +1298,8 @@ static int root_reset(struct xhci_host *host, uint32_t port, uint32_t *portsc) {
 static void service_root_port(struct xhci_host *host, uint32_t port) {
     uint64_t address = port_register(host, port);
     uint32_t status = read32(address);
-    if (status & PORTSC_CHANGES) write32(address, (status & PORTSC_NEUTRAL) | (status & PORTSC_CHANGES));
+    if (status & PORTSC_CHANGES)
+        write32(address, (status & PORTSC_NEUTRAL) | (status & PORTSC_CHANGES));
     struct usb_device *child = child_on(host, NULL, port);
     int connected = (status & PORTSC_CONNECTED) != 0;
     if (child && (!connected || (status & PORTSC_CONNECT_CHANGE))) {
@@ -1315,7 +1325,8 @@ static void service_root_port(struct xhci_host *host, uint32_t port) {
     (void)attach(host, NULL, port, root_speed(portsc));
 }
 
-static int hub_port_status(struct usb_device *hub, uint32_t port, uint16_t *status, uint16_t *change) {
+static int hub_port_status(struct usb_device *hub, uint32_t port, uint16_t *status,
+                           uint16_t *change) {
     if (control(hub, REQUEST_TYPE_CLASS_OTHER_IN, REQUEST_GET_STATUS, 0, (uint16_t)port, 4) != 0)
         return -1;
     *status = (uint16_t)(hub->buffer[0] | (hub->buffer[1] << 8));
@@ -1372,9 +1383,9 @@ static void service_hub_port(struct usb_device *hub, uint32_t port) {
     clear_hub_changes(hub, port, change);
     pause_ns(RESET_RECOVERY_NS);
     if (!(status & HUB_STATUS_ENABLE)) return;
-    uint32_t speed = (status & HUB_STATUS_LOW_SPEED)    ? USB_SPEED_LOW
-                     : (status & HUB_STATUS_HIGH_SPEED) ? USB_SPEED_HIGH
-                                                        : USB_SPEED_FULL;
+    uint32_t speed = (status & HUB_STATUS_LOW_SPEED) ? USB_SPEED_LOW
+        : (status & HUB_STATUS_HIGH_SPEED)           ? USB_SPEED_HIGH
+                                                     : USB_SPEED_FULL;
     (void)attach(host, hub, port, speed);
 }
 
@@ -1501,9 +1512,7 @@ static int hid_present(uint8_t protocol) {
 int xhci_keyboard_present(void) { return hid_present(HID_KEYBOARD); }
 int xhci_pointer_present(void) { return hid_present(HID_MOUSE); }
 
-static int storage_count_unlocked(void) {
-    return storage_entries;
-}
+static int storage_count_unlocked(void) { return storage_entries; }
 
 static int storage_count(void) {
     lock_acquire(&xhci_lock);
@@ -1552,7 +1561,7 @@ static int storage_reset(int index) {
 
 static int storage_present_unlocked(int index) {
     return index >= 0 && index < storage_entries && storage_table[index].device != NULL &&
-           !storage_table[index].device->disconnected;
+        !storage_table[index].device->disconnected;
 }
 
 static int storage_present(int index) {
@@ -1582,7 +1591,8 @@ static void take_from_firmware(struct xhci_host *host) {
                 write32(capability, header | LEGACY_OS_OWNED);
                 if (wait_bits(capability, LEGACY_BIOS_OWNED | LEGACY_OS_OWNED, LEGACY_OS_OWNED,
                               HANDOFF_TIMEOUT_NS) != 0)
-                    kprintf("XHCI%u: firmware kept the controller; taking it anyway\n", host->index);
+                    kprintf("XHCI%u: firmware kept the controller; taking it anyway\n",
+                            host->index);
             }
             uint32_t legacy = read32(capability + 4U);
             write32(capability + 4U, (legacy & ~LEGACY_SMI_ENABLES) | LEGACY_SMI_EVENTS);
@@ -1600,7 +1610,8 @@ static int reset_host(struct xhci_host *host) {
     uint32_t value = read32(operational + XHCI_USBCMD);
     if (value & USBCMD_RUN) {
         write32(operational + XHCI_USBCMD, value & ~USBCMD_RUN);
-        if (wait_bits(operational + XHCI_USBSTS, USBSTS_HALTED, USBSTS_HALTED, HALT_TIMEOUT_NS) != 0) {
+        if (wait_bits(operational + XHCI_USBSTS, USBSTS_HALTED, USBSTS_HALTED, HALT_TIMEOUT_NS) !=
+            0) {
             kprintf("XHCI%u: controller will not halt\n", host->index);
             return -1;
         }
@@ -1685,7 +1696,8 @@ static int start_host(struct xhci_host *host) {
         for (uint32_t port = 1; port <= host->max_ports; port++) {
             uint64_t address = port_register(host, port);
             uint32_t status = read32(address);
-            if (!(status & PORTSC_POWER)) write32(address, (status & PORTSC_NEUTRAL) | PORTSC_POWER);
+            if (!(status & PORTSC_POWER))
+                write32(address, (status & PORTSC_NEUTRAL) | PORTSC_POWER);
         }
         pause_ns(PORT_POWER_NS);
     }
@@ -1706,7 +1718,8 @@ static int bring_up(struct xhci_host *host) {
 
     uint32_t length_and_version = read32(host->base + XHCI_CAPLENGTH);
     uint8_t capability_length = (uint8_t)length_and_version;
-    if (length_and_version == 0xFFFFFFFFU || capability_length < 0x20U || (capability_length & 3U)) {
+    if (length_and_version == 0xFFFFFFFFU || capability_length < 0x20U ||
+        (capability_length & 3U)) {
         kprintf("XHCI%u: registers at %p do not answer\n", host->index, (void *)physical);
         return -1;
     }

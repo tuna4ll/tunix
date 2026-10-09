@@ -8,7 +8,7 @@
 #include <tunix/process.h>
 #include <tunix/vfs.h>
 
-#define EAGAIN 11
+#define EAGAIN   11
 #define EMSGSIZE 90
 
 struct eventfs_subscriber {
@@ -45,7 +45,8 @@ static void eventfs_guard_release(int *unused) {
 }
 
 #define EVENTFS_LOCKED \
-    __attribute__((cleanup(eventfs_guard_release))) int eventfs_guard = (lock_acquire(&eventfs_lock), 0)
+    __attribute__((cleanup(eventfs_guard_release))) int eventfs_guard = \
+        (lock_acquire(&eventfs_lock), 0)
 
 static void builder_char(struct event_builder *builder, char value) {
     if (builder->length >= builder->capacity) {
@@ -101,8 +102,7 @@ static void builder_field(struct event_builder *builder, const char *value) {
     }
 }
 
-static uint8_t ring_get(const struct eventfs_subscriber *subscriber,
-                        uint32_t offset) {
+static uint8_t ring_get(const struct eventfs_subscriber *subscriber, uint32_t offset) {
     return subscriber->queue[(subscriber->head + offset) % EVENTFS_QUEUE_BYTES];
 }
 
@@ -118,16 +118,14 @@ static void ring_drop(struct eventfs_subscriber *subscriber, uint32_t count) {
 }
 
 static uint16_t next_length(const struct eventfs_subscriber *subscriber) {
-    return (uint16_t)ring_get(subscriber, 0) |
-           (uint16_t)((uint16_t)ring_get(subscriber, 1) << 8);
+    return (uint16_t)ring_get(subscriber, 0) | (uint16_t)((uint16_t)ring_get(subscriber, 1) << 8);
 }
 
 static void lose_event(struct eventfs_subscriber *subscriber) {
     if (subscriber->lost != UINT64_MAX) subscriber->lost++;
 }
 
-static int queue_event(struct eventfs_subscriber *subscriber, const char *event,
-                       size_t length) {
+static int queue_event(struct eventfs_subscriber *subscriber, const char *event, size_t length) {
     if (subscriber->lost || length > UINT16_MAX ||
         length + 2U > EVENTFS_QUEUE_BYTES - subscriber->used) {
         lose_event(subscriber);
@@ -135,22 +133,19 @@ static int queue_event(struct eventfs_subscriber *subscriber, const char *event,
     }
     ring_put(subscriber, (uint8_t)length);
     ring_put(subscriber, (uint8_t)(length >> 8));
-    for (size_t index = 0; index < length; index++)
-        ring_put(subscriber, (uint8_t)event[index]);
+    for (size_t index = 0; index < length; index++) ring_put(subscriber, (uint8_t)event[index]);
     return 0;
 }
 
-static int may_receive(const struct eventfs_subscriber *subscriber,
-                       uint32_t uid, int system_event) {
+static int may_receive(const struct eventfs_subscriber *subscriber, uint32_t uid,
+                       int system_event) {
     if (subscriber->uid == 0) return 1;
     return !system_event && subscriber->uid == uid;
 }
 
-static void publish(enum eventfs_channel channel, uint32_t uid,
-                    int system_event, size_t length) {
+static void publish(enum eventfs_channel channel, uint32_t uid, int system_event, size_t length) {
     if (!initialized || channel <= 0 || channel >= EVENTFS_CHANNEL_COUNT) return;
-    for (struct eventfs_subscriber *item = subscribers[channel]; item;
-         item = item->next) {
+    for (struct eventfs_subscriber *item = subscribers[channel]; item; item = item->next) {
         if (!may_receive(item, uid, system_event)) continue;
         int was_ready = item->used || item->lost;
         if (!length || length > EVENTFS_MAX_EVENT) lose_event(item);
@@ -165,15 +160,14 @@ static size_t finish(struct event_builder *builder) {
 }
 
 static struct event_builder begin(const char *action) {
-    struct event_builder builder = { format_buffer, 0, sizeof(format_buffer), 0 };
+    struct event_builder builder = {format_buffer, 0, sizeof(format_buffer), 0};
     builder_text(&builder, action);
     return builder;
 }
 
 struct eventfs_subscriber *eventfs_subscribe(enum eventfs_channel channel) {
     EVENTFS_LOCKED;
-    if (!initialized || channel <= 0 || channel >= EVENTFS_CHANNEL_COUNT)
-        return NULL;
+    if (!initialized || channel <= 0 || channel >= EVENTFS_CHANNEL_COUNT) return NULL;
     struct eventfs_subscriber *subscriber = kmalloc(sizeof(*subscriber));
     if (!subscriber) return NULL;
     memset(subscriber, 0, sizeof(*subscriber));
@@ -188,8 +182,8 @@ struct eventfs_subscriber *eventfs_subscribe(enum eventfs_channel channel) {
 
 void eventfs_unsubscribe(struct eventfs_subscriber *subscriber) {
     EVENTFS_LOCKED;
-    if (!subscriber || subscriber->channel <= 0 ||
-        subscriber->channel >= EVENTFS_CHANNEL_COUNT) return;
+    if (!subscriber || subscriber->channel <= 0 || subscriber->channel >= EVENTFS_CHANNEL_COUNT)
+        return;
     struct eventfs_subscriber **at = &subscribers[subscriber->channel];
     while (*at && *at != subscriber) at = &(*at)->next;
     if (*at != subscriber) return;
@@ -200,15 +194,14 @@ void eventfs_unsubscribe(struct eventfs_subscriber *subscriber) {
 }
 
 static size_t lost_record(char output[32], uint64_t lost) {
-    struct event_builder builder = { output, 0, 32, 0 };
+    struct event_builder builder = {output, 0, 32, 0};
     builder_text(&builder, "lost ");
     builder_uint(&builder, lost);
     builder_char(&builder, '\n');
     return builder.length;
 }
 
-int64_t eventfs_read(struct eventfs_subscriber *subscriber, size_t size,
-                     void *buffer) {
+int64_t eventfs_read(struct eventfs_subscriber *subscriber, size_t size, void *buffer) {
     EVENTFS_LOCKED;
     if (!subscriber || !buffer) return -EAGAIN;
     if (!size) return 0;
@@ -254,13 +247,10 @@ const void *eventfs_wait_channel(const struct eventfs_subscriber *subscriber) {
     return subscriber ? &wait_token : NULL;
 }
 
-int eventfs_interested(enum eventfs_channel channel, uint32_t uid,
-                       int system_event) {
+int eventfs_interested(enum eventfs_channel channel, uint32_t uid, int system_event) {
     EVENTFS_LOCKED;
-    if (!initialized || channel <= 0 || channel >= EVENTFS_CHANNEL_COUNT)
-        return 0;
-    for (struct eventfs_subscriber *item = subscribers[channel]; item;
-         item = item->next)
+    if (!initialized || channel <= 0 || channel >= EVENTFS_CHANNEL_COUNT) return 0;
+    for (struct eventfs_subscriber *item = subscribers[channel]; item; item = item->next)
         if (may_receive(item, uid, system_event)) return 1;
     return 0;
 }
@@ -304,8 +294,7 @@ void eventfs_emit_process_signal(uint32_t uid, uint64_t pid, int signal_number) 
     publish(EVENTFS_PROCESS, uid, 0, finish(&builder));
 }
 
-void eventfs_emit_process_fault(uint32_t uid, uint64_t pid, const char *type,
-                                const char *name) {
+void eventfs_emit_process_fault(uint32_t uid, uint64_t pid, const char *type, const char *name) {
     EVENTFS_LOCKED;
     if (!eventfs_interested(EVENTFS_PROCESS, uid, 0)) return;
     struct event_builder builder = begin("fault ");
@@ -315,8 +304,7 @@ void eventfs_emit_process_fault(uint32_t uid, uint64_t pid, const char *type,
     publish(EVENTFS_PROCESS, uid, 0, finish(&builder));
 }
 
-static void emit_file_one(const char *action, uint32_t uid, uint64_t pid,
-                          const char *path) {
+static void emit_file_one(const char *action, uint32_t uid, uint64_t pid, const char *path) {
     if (!eventfs_interested(EVENTFS_FILES, uid, 0)) return;
     struct event_builder builder = begin(action);
     builder_char(&builder, ' ');
@@ -369,9 +357,8 @@ void eventfs_emit_device_remove(const char *type, const char *name) {
     emit_device("remove", type, name);
 }
 
-static void emit_network(const char *action, uint32_t uid, uint64_t pid,
-                         const char *proto, uint32_t local_address,
-                         uint16_t local_port, uint32_t remote_address,
+static void emit_network(const char *action, uint32_t uid, uint64_t pid, const char *proto,
+                         uint32_t local_address, uint16_t local_port, uint32_t remote_address,
                          uint16_t remote_port) {
     if (!eventfs_interested(EVENTFS_NETWORK, uid, 0)) return;
     struct event_builder builder = begin(action);
@@ -399,30 +386,27 @@ void eventfs_emit_network_connect(uint32_t uid, uint64_t pid, const char *proto,
                                   uint32_t local_address, uint16_t local_port,
                                   uint32_t remote_address, uint16_t remote_port) {
     EVENTFS_LOCKED;
-    emit_network("connect", uid, pid, proto, local_address, local_port,
-                 remote_address, remote_port);
+    emit_network("connect", uid, pid, proto, local_address, local_port, remote_address,
+                 remote_port);
 }
 
 void eventfs_emit_network_accept(uint32_t uid, uint64_t pid, const char *proto,
                                  uint32_t local_address, uint16_t local_port,
                                  uint32_t remote_address, uint16_t remote_port) {
     EVENTFS_LOCKED;
-    emit_network("accept", uid, pid, proto, local_address, local_port,
-                 remote_address, remote_port);
+    emit_network("accept", uid, pid, proto, local_address, local_port, remote_address, remote_port);
 }
 
 void eventfs_emit_network_close(uint32_t uid, uint64_t pid, const char *proto,
                                 uint32_t local_address, uint16_t local_port,
                                 uint32_t remote_address, uint16_t remote_port) {
     EVENTFS_LOCKED;
-    emit_network("close", uid, pid, proto, local_address, local_port,
-                 remote_address, remote_port);
+    emit_network("close", uid, pid, proto, local_address, local_port, remote_address, remote_port);
 }
 
-static int attach_stream(struct vfs_node *root, const char *name,
-                         enum eventfs_channel channel) {
-    struct vfs_node *node = vfs_alloc_node(name, VFS_FILE | VFS_READONLY |
-                                                  VFS_VOLATILE | VFS_EVENTSTREAM);
+static int attach_stream(struct vfs_node *root, const char *name, enum eventfs_channel channel) {
+    struct vfs_node *node =
+        vfs_alloc_node(name, VFS_FILE | VFS_READONLY | VFS_VOLATILE | VFS_EVENTSTREAM);
     if (!node) return -1;
     node->mode = 0444;
     node->data = (void *)(uintptr_t)channel;
@@ -439,7 +423,8 @@ void eventfs_init(void) {
     if (attach_stream(root, "process", EVENTFS_PROCESS) != 0 ||
         attach_stream(root, "files", EVENTFS_FILES) != 0 ||
         attach_stream(root, "devices", EVENTFS_DEVICES) != 0 ||
-        attach_stream(root, "network", EVENTFS_NETWORK) != 0) return;
+        attach_stream(root, "network", EVENTFS_NETWORK) != 0)
+        return;
     vfs_mount_builtin("eventfs", "/events", "eventfs", root);
     initialized = 1;
 }

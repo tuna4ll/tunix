@@ -9,37 +9,37 @@
 
 extern void kprintf(const char *fmt, ...);
 
-#define DESC_SH_INNER (3ULL << 8)
-#define DESC_AF (1ULL << 10)
-#define DESC_PXN (1ULL << 53)
-#define DESC_UXN (1ULL << 54)
-#define BLOCK_2M 0x200000ULL
+#define DESC_SH_INNER  (3ULL << 8)
+#define DESC_AF        (1ULL << 10)
+#define DESC_PXN       (1ULL << 53)
+#define DESC_UXN       (1ULL << 54)
+#define BLOCK_2M       0x200000ULL
 #define EFI_PAGE_BYTES 4096ULL
 
-#define EFI_RESERVED 0U
-#define EFI_LOADER_CODE 1U
-#define EFI_LOADER_DATA 2U
-#define EFI_BOOT_SERVICES_CODE 3U
-#define EFI_BOOT_SERVICES_DATA 4U
+#define EFI_RESERVED              0U
+#define EFI_LOADER_CODE           1U
+#define EFI_LOADER_DATA           2U
+#define EFI_BOOT_SERVICES_CODE    3U
+#define EFI_BOOT_SERVICES_DATA    4U
 #define EFI_RUNTIME_SERVICES_CODE 5U
 #define EFI_RUNTIME_SERVICES_DATA 6U
-#define EFI_CONVENTIONAL 7U
-#define EFI_ACPI_RECLAIM 9U
-#define EFI_ACPI_NVS 10U
-#define EFI_PERSISTENT 14U
+#define EFI_CONVENTIONAL          7U
+#define EFI_ACPI_RECLAIM          9U
+#define EFI_ACPI_NVS              10U
+#define EFI_PERSISTENT            14U
 
-#define EFI_MMIO 11U
-#define EFI_MMIO_PORT 12U
-#define EFI_MEMORY_RUNTIME (1ULL << 63)
-#define DESC_ATTR_DEVICE (1ULL << 2)
-#define SYSTEM_TABLE_RUNTIME 88U
-#define RUNTIME_GET_TIME 24U
-#define EFI_UNSPECIFIED_TIMEZONE 0x07FF
-#define SYSTEM_TABLE_ENTRY_COUNT 104U
-#define SYSTEM_TABLE_ENTRIES 112U
-#define CONFIG_ENTRY_BYTES 24U
-#define SCREEN_INFO_BYTES 64U
-#define VIDEO_TYPE_EFI 0x70U
+#define EFI_MMIO                    11U
+#define EFI_MMIO_PORT               12U
+#define EFI_MEMORY_RUNTIME          (1ULL << 63)
+#define DESC_ATTR_DEVICE            (1ULL << 2)
+#define SYSTEM_TABLE_RUNTIME        88U
+#define RUNTIME_GET_TIME            24U
+#define EFI_UNSPECIFIED_TIMEZONE    0x07FF
+#define SYSTEM_TABLE_ENTRY_COUNT    104U
+#define SYSTEM_TABLE_ENTRIES        112U
+#define CONFIG_ENTRY_BYTES          24U
+#define SCREEN_INFO_BYTES           64U
+#define VIDEO_TYPE_EFI              0x70U
 #define VIDEO_CAPABILITY_64BIT_BASE 2U
 
 struct efi_guid_bytes {
@@ -47,16 +47,58 @@ struct efi_guid_bytes {
 };
 
 static const struct efi_guid_bytes acpi20_guid = {{
-    0x71, 0xe8, 0x68, 0x88, 0xf1, 0xe4, 0xd3, 0x11,
-    0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81,
+    0x71,
+    0xe8,
+    0x68,
+    0x88,
+    0xf1,
+    0xe4,
+    0xd3,
+    0x11,
+    0xbc,
+    0x22,
+    0x00,
+    0x80,
+    0xc7,
+    0x3c,
+    0x88,
+    0x81,
 }};
 static const struct efi_guid_bytes acpi10_guid = {{
-    0x30, 0x2d, 0x9d, 0xeb, 0x88, 0x2d, 0xd3, 0x11,
-    0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d,
+    0x30,
+    0x2d,
+    0x9d,
+    0xeb,
+    0x88,
+    0x2d,
+    0xd3,
+    0x11,
+    0x9a,
+    0x16,
+    0x00,
+    0x90,
+    0x27,
+    0x3f,
+    0xc1,
+    0x4d,
 }};
 static const struct efi_guid_bytes screen_info_guid = {{
-    0x0a, 0xc2, 0x3f, 0xe0, 0xdc, 0x85, 0x6e, 0x40,
-    0xb9, 0x0e, 0x4a, 0xb5, 0x02, 0x37, 0x1d, 0x95,
+    0x0a,
+    0xc2,
+    0x3f,
+    0xe0,
+    0xdc,
+    0x85,
+    0x6e,
+    0x40,
+    0xb9,
+    0x0e,
+    0x4a,
+    0xb5,
+    0x02,
+    0x37,
+    0x1d,
+    0x95,
 }};
 
 static struct boot_framebuffer_info framebuffer;
@@ -118,14 +160,13 @@ static int descriptor_at(uint64_t index, uint32_t *type, uint64_t *base, uint64_
 }
 
 static int type_is_ram(uint32_t type) {
-    return (type >= EFI_LOADER_CODE && type <= EFI_CONVENTIONAL) ||
-           type == EFI_ACPI_RECLAIM || type == EFI_ACPI_NVS || type == EFI_PERSISTENT;
+    return (type >= EFI_LOADER_CODE && type <= EFI_CONVENTIONAL) || type == EFI_ACPI_RECLAIM ||
+        type == EFI_ACPI_NVS || type == EFI_PERSISTENT;
 }
 
 static int type_is_usable(uint32_t type) {
-    return type == EFI_LOADER_CODE || type == EFI_LOADER_DATA ||
-           type == EFI_BOOT_SERVICES_CODE || type == EFI_BOOT_SERVICES_DATA ||
-           type == EFI_CONVENTIONAL;
+    return type == EFI_LOADER_CODE || type == EFI_LOADER_DATA || type == EFI_BOOT_SERVICES_CODE ||
+        type == EFI_BOOT_SERVICES_DATA || type == EFI_CONVENTIONAL;
 }
 
 void uefi_collect_ram(void) {
@@ -134,8 +175,8 @@ void uefi_collect_ram(void) {
     for (uint64_t index = 0; descriptor_at(index, &type, &base, &bytes, NULL) == 0; index++) {
         if (!bytes || !type_is_ram(type)) continue;
         struct aarch64_range *last = aarch64_platform.ram_count
-                                         ? &aarch64_platform.ram[aarch64_platform.ram_count - 1U]
-                                         : NULL;
+            ? &aarch64_platform.ram[aarch64_platform.ram_count - 1U]
+            : NULL;
         if (last && last->base + last->size == base) {
             last->size += bytes;
             continue;
@@ -170,7 +211,8 @@ void uefi_each_region(void (*visit)(uint64_t base, uint64_t end, int usable)) {
 static uint64_t firmware_physical(uint64_t address) {
     uint32_t type;
     uint64_t base, bytes, virtual_base;
-    for (uint64_t index = 0; descriptor_at(index, &type, &base, &bytes, &virtual_base) == 0; index++) {
+    for (uint64_t index = 0; descriptor_at(index, &type, &base, &bytes, &virtual_base) == 0;
+         index++) {
         if (!virtual_base || virtual_base == base) continue;
         if (address >= virtual_base && address - virtual_base < bytes)
             return base + (address - virtual_base);
@@ -188,7 +230,7 @@ const uint8_t *aarch64_physical_bytes(uint64_t physical, uint64_t bytes) {
         for (unsigned index = 0; index < aarch64_platform.ram_count && !mapped; index++) {
             const struct aarch64_range *range = &aarch64_platform.ram[index];
             mapped = (range->base >> 30) <= gigabyte &&
-                     ((range->base + range->size - 1U) >> 30) >= gigabyte;
+                ((range->base + range->size - 1U) >> 30) >= gigabyte;
         }
         if (!mapped) return NULL;
     }
@@ -206,13 +248,14 @@ static void use_screen_info(const uint8_t *info) {
     uint16_t width = (uint16_t)(info[18] | (info[19] << 8));
     uint16_t height = (uint16_t)(info[20] | (info[21] << 8));
     uint16_t depth = (uint16_t)(info[22] | (info[23] << 8));
-    uint64_t base = (uint64_t)info[24] | ((uint64_t)info[25] << 8) |
-                    ((uint64_t)info[26] << 16) | ((uint64_t)info[27] << 24);
+    uint64_t base = (uint64_t)info[24] | ((uint64_t)info[25] << 8) | ((uint64_t)info[26] << 16) |
+        ((uint64_t)info[27] << 24);
     uint32_t capabilities = (uint32_t)info[54] | ((uint32_t)info[55] << 8) |
-                            ((uint32_t)info[56] << 16) | ((uint32_t)info[57] << 24);
+        ((uint32_t)info[56] << 16) | ((uint32_t)info[57] << 24);
     if (capabilities & VIDEO_CAPABILITY_64BIT_BASE)
-        base |= ((uint64_t)info[58] | ((uint64_t)info[59] << 8) |
-                 ((uint64_t)info[60] << 16) | ((uint64_t)info[61] << 24)) << 32;
+        base |= ((uint64_t)info[58] | ((uint64_t)info[59] << 8) | ((uint64_t)info[60] << 16) |
+                 ((uint64_t)info[61] << 24))
+            << 32;
     uint16_t line = (uint16_t)(info[36] | (info[37] << 8));
     if (!base || !width || !height || depth != 32U || line < width * 4U) return;
 
@@ -248,8 +291,8 @@ static int guid_equal(const uint8_t *entry, const struct efi_guid_bytes *guid) {
 }
 
 void uefi_scan_tables(void) {
-    const uint8_t *system = aarch64_physical_bytes(aarch64_platform.uefi_system_table,
-                                           SYSTEM_TABLE_ENTRIES + 8U);
+    const uint8_t *system =
+        aarch64_physical_bytes(aarch64_platform.uefi_system_table, SYSTEM_TABLE_ENTRIES + 8U);
     if (!system) {
         kprintf("UEFI: system table at %p is not in memory\n",
                 (void *)aarch64_platform.uefi_system_table);
@@ -300,7 +343,8 @@ typedef uint64_t (*efi_get_time_fn)(struct efi_time *time, void *capabilities);
 static int map_runtime(void) {
     uint32_t type;
     uint64_t base, bytes, virtual_base;
-    for (uint64_t index = 0; descriptor_at(index, &type, &base, &bytes, &virtual_base) == 0; index++) {
+    for (uint64_t index = 0; descriptor_at(index, &type, &base, &bytes, &virtual_base) == 0;
+         index++) {
         if (!(descriptor_attributes(index) & EFI_MEMORY_RUNTIME)) continue;
         uint64_t target = virtual_base ? virtual_base : base;
         uint64_t attributes = DESC_AF | DESC_UXN;
@@ -309,7 +353,7 @@ static int map_runtime(void) {
         else attributes |= DESC_SH_INNER | DESC_PXN;
         for (uint64_t offset = 0; offset < bytes;) {
             int block = !((target + offset) & (BLOCK_2M - 1U)) &&
-                        !((base + offset) & (BLOCK_2M - 1U)) && bytes - offset >= BLOCK_2M;
+                !((base + offset) & (BLOCK_2M - 1U)) && bytes - offset >= BLOCK_2M;
             if (aarch64_early_map(target + offset, base + offset, attributes, block ? 2 : 3) != 0)
                 return -1;
             offset += block ? BLOCK_2M : EFI_PAGE_BYTES;
@@ -322,12 +366,12 @@ void uefi_read_time(void) {
     kprintf("UEFI: system table at %p, ACPI at %p, framebuffer %ux%u at %p\n",
             (void *)aarch64_platform.uefi_system_table, (void *)aarch64_platform.rsdp,
             framebuffer.width, framebuffer.height, (void *)framebuffer.physical_address);
-    const uint8_t *system = aarch64_physical_bytes(aarch64_platform.uefi_system_table,
-                                                   SYSTEM_TABLE_ENTRIES + 8U);
+    const uint8_t *system =
+        aarch64_physical_bytes(aarch64_platform.uefi_system_table, SYSTEM_TABLE_ENTRIES + 8U);
     if (!system) return;
     uint64_t runtime_virtual = read_u64(system + SYSTEM_TABLE_RUNTIME);
-    const uint8_t *runtime = aarch64_physical_bytes(firmware_physical(runtime_virtual),
-                                                    RUNTIME_GET_TIME + 8U);
+    const uint8_t *runtime =
+        aarch64_physical_bytes(firmware_physical(runtime_virtual), RUNTIME_GET_TIME + 8U);
     if (!runtime) return;
     uint64_t get_time = read_u64(runtime + RUNTIME_GET_TIME);
     if (!get_time || map_runtime() != 0) {
@@ -345,13 +389,17 @@ void uefi_read_time(void) {
         return;
     }
     struct tunix_rtc_time calendar = {
-        .year = now.year, .month = now.month, .day = now.day,
-        .hour = now.hour, .minute = now.minute, .second = now.second,
+        .year = now.year,
+        .month = now.month,
+        .day = now.day,
+        .hour = now.hour,
+        .minute = now.minute,
+        .second = now.second,
     };
     int64_t seconds = (int64_t)time_calendar_to_epoch(&calendar);
     if (now.timezone != EFI_UNSPECIFIED_TIMEZONE) seconds += (int64_t)now.timezone * 60;
     aarch64_platform.firmware_epoch = (uint64_t)seconds;
     aarch64_platform.firmware_epoch_counter = counter;
-    kprintf("UEFI: time %u-%u-%u %u:%u:%u\n", now.year, now.month, now.day, now.hour,
-            now.minute, now.second);
+    kprintf("UEFI: time %u-%u-%u %u:%u:%u\n", now.year, now.month, now.day, now.hour, now.minute,
+            now.second);
 }

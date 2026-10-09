@@ -79,9 +79,7 @@ void usb_host_storage_added(const struct usb_host *host, int local_index) {
     (void)add_slot(host, local_index);
 }
 
-int usb_storage_count(void) {
-    return __atomic_load_n(&slot_count, __ATOMIC_ACQUIRE);
-}
+int usb_storage_count(void) { return __atomic_load_n(&slot_count, __ATOMIC_ACQUIRE); }
 
 static int slot_at(int index, struct storage_slot *out) {
     USB_LOCKED;

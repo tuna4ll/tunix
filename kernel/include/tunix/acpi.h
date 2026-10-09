@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#define ACPI_MAX_IO_APICS 128U
+#define ACPI_MAX_IO_APICS  128U
 #define ACPI_MAX_OVERRIDES 256U
 
 #define ACPI_MAX_CPUS 256U

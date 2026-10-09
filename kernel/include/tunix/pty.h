@@ -18,7 +18,6 @@ int64_t pty_read(struct pty_pair *pty, int master, size_t size, void *buffer);
 int64_t pty_write(struct pty_pair *pty, int master, size_t size, const void *buffer);
 int pty_read_ready(struct pty_pair *pty, int master);
 int pty_write_ready(struct pty_pair *pty, int master);
-int64_t pty_ioctl(struct pty_pair *pty, int master, unsigned long request,
-                  uint64_t user_argument);
+int64_t pty_ioctl(struct pty_pair *pty, int master, unsigned long request, uint64_t user_argument);
 
 #endif

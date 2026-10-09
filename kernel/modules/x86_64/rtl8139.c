@@ -13,37 +13,37 @@
 #include <tunix/vmm.h>
 #include <tunix/net/net.h>
 
-#define RTL_VENDOR 0x10ECU
-#define RTL_DEVICE 0x8139U
-#define RX_RING_BYTES 32768U
+#define RTL_VENDOR      0x10ECU
+#define RTL_DEVICE      0x8139U
+#define RX_RING_BYTES   32768U
 #define RX_BUFFER_BYTES (RX_RING_BYTES + 16U + 1536U)
 #define TX_BUFFER_BYTES 2048U
 
 #define RCR_CONFIG 0x0000F78FU
 
-#define REG_IDR0 0x00U
-#define REG_TSD0 0x10U
-#define REG_TSAD0 0x20U
+#define REG_IDR0    0x00U
+#define REG_TSD0    0x10U
+#define REG_TSAD0   0x20U
 #define REG_RBSTART 0x30U
-#define REG_CMD 0x37U
-#define REG_CAPR 0x38U
-#define REG_IMR 0x3CU
-#define REG_ISR 0x3EU
-#define REG_TCR 0x40U
-#define REG_RCR 0x44U
+#define REG_CMD     0x37U
+#define REG_CAPR    0x38U
+#define REG_IMR     0x3CU
+#define REG_ISR     0x3EU
+#define REG_TCR     0x40U
+#define REG_RCR     0x44U
 #define REG_CONFIG1 0x52U
 
-#define CMD_RESET 0x10U
+#define CMD_RESET     0x10U
 #define CMD_RX_ENABLE 0x08U
 #define CMD_TX_ENABLE 0x04U
-#define CMD_RX_EMPTY 0x01U
+#define CMD_RX_EMPTY  0x01U
 
-#define ISR_RX_OK 0x0001U
-#define ISR_RX_ERROR 0x0002U
+#define ISR_RX_OK       0x0001U
+#define ISR_RX_ERROR    0x0002U
 #define ISR_RX_OVERFLOW 0x0010U
 
 #define RX_QUEUE_FRAMES 128U
-#define RX_FRAME_BYTES 1536U
+#define RX_FRAME_BYTES  1536U
 
 struct rx_frame {
     uint16_t length;
@@ -94,8 +94,7 @@ static int rtl8139_start(const struct pci_device *found) {
     if (!rx_buffer)
         rx_buffer = dma_alloc_below(RX_BUFFER_BYTES, 4096, DMA_LIMIT_32BIT, &rx_physical);
     if (!tx_buffer)
-        tx_buffer = dma_alloc_below(4U * TX_BUFFER_BYTES, 256, DMA_LIMIT_32BIT,
-                                    &tx_physical);
+        tx_buffer = dma_alloc_below(4U * TX_BUFFER_BYTES, 256, DMA_LIMIT_32BIT, &tx_physical);
     if (!rx_buffer || !tx_buffer) return -1;
 
     outb((uint16_t)(io_base + REG_CONFIG1), 0x00U);
@@ -257,7 +256,7 @@ static void rtl8139_stop(const struct pci_device *device) {
 }
 
 static const struct pci_device_id rtl8139_ids[] = {
-    { RTL_VENDOR, RTL_DEVICE, PCI_ANY_ID, PCI_ANY_ID },
+    {RTL_VENDOR, RTL_DEVICE, PCI_ANY_ID, PCI_ANY_ID},
 };
 
 static struct pci_driver rtl8139_driver = {
@@ -268,13 +267,9 @@ static struct pci_driver rtl8139_driver = {
     .remove = rtl8139_stop,
 };
 
-static int rtl8139_load(void) {
-    return pci_register_driver(&rtl8139_driver);
-}
+static int rtl8139_load(void) { return pci_register_driver(&rtl8139_driver); }
 
-static void rtl8139_unload(void) {
-    pci_unregister_driver(&rtl8139_driver);
-}
+static void rtl8139_unload(void) { pci_unregister_driver(&rtl8139_driver); }
 
 MODULE_MAIN(rtl8139_load, rtl8139_unload);
 MODULE_PCI_ALIAS("10EC", "8139");

@@ -30,11 +30,11 @@ extern int process_pidfd_exited(uint64_t pid, uint64_t start_ns);
 #include <tunix/net/netlink.h>
 
 #define EAGAIN 11
-#define EBADF 9
+#define EBADF  9
 #define EINVAL 22
 
 #define EWOULDBLOCK EAGAIN
-#define EPIPE 32
+#define EPIPE       32
 
 struct file *file_open_node(struct vfs_node *node, uint32_t flags) {
     if (!node) return NULL;
@@ -214,8 +214,8 @@ struct file *file_create_pidfd(uint64_t pid, uint64_t start_ns, uint32_t flags) 
     return file;
 }
 
-struct file *file_create_pty_endpoint(struct pty_pair *pty, int master,
-                                      struct vfs_node *node, uint32_t flags) {
+struct file *file_create_pty_endpoint(struct pty_pair *pty, int master, struct vfs_node *node,
+                                      uint32_t flags) {
     if (!pty || !node) return NULL;
     struct file *file = (struct file *)kmalloc(sizeof(*file));
     if (!file) return NULL;
@@ -231,20 +231,16 @@ struct file *file_create_pty_endpoint(struct pty_pair *pty, int master,
 }
 
 const void *file_read_wait_channel(struct file *file) {
-    if (file && file->kind == FILE_KIND_EVENTFS)
-        return eventfs_wait_channel(file->eventfs);
-    if (file && file->kind == FILE_KIND_PIPE_READ && file->pipe)
-        return &file->pipe->data_wait;
+    if (file && file->kind == FILE_KIND_EVENTFS) return eventfs_wait_channel(file->eventfs);
+    if (file && file->kind == FILE_KIND_PIPE_READ && file->pipe) return &file->pipe->data_wait;
 
-    if (file && file->kind == FILE_KIND_VFS && file->node &&
-        file->node->read == vt_node_read)
+    if (file && file->kind == FILE_KIND_VFS && file->node && file->node->read == vt_node_read)
         return vt_input_wait_channel();
     return NULL;
 }
 
 const void *file_write_wait_channel(struct file *file) {
-    if (file && file->kind == FILE_KIND_PIPE_WRITE && file->pipe)
-        return &file->pipe->space_wait;
+    if (file && file->kind == FILE_KIND_PIPE_WRITE && file->pipe) return &file->pipe->space_wait;
     return NULL;
 }
 
@@ -312,35 +308,22 @@ void file_unref(struct file *file) {
     if ((file->kind == FILE_KIND_PIPE_READ || file->kind == FILE_KIND_PIPE_WRITE) && file->pipe)
         pipe_release(file->pipe, file->kind == FILE_KIND_PIPE_WRITE);
 
-    if (file->kind == FILE_KIND_VFS && file->node &&
-        file->node->file_ioctl == drm_file_ioctl)
+    if (file->kind == FILE_KIND_VFS && file->node && file->node->file_ioctl == drm_file_ioctl)
         drm_file_close(file);
     if (file->kind == FILE_KIND_VFS && file->node && file->node->close)
         file->node->close(file->node);
-    if (file->kind == FILE_KIND_INPUT && file->input_reader)
-        input_reader_close(file->input_reader);
-    if (file->kind == FILE_KIND_FRAMEBUFFER)
-        framebuffer_file_close(file);
-    if (file->kind == FILE_KIND_EVENTFD && file->eventfd)
-        eventfd_destroy(file->eventfd);
-    if (file->kind == FILE_KIND_TIMERFD && file->timerfd)
-        timerfd_destroy(file->timerfd);
-    if (file->kind == FILE_KIND_EPOLL && file->epoll)
-        epoll_destroy(file->epoll);
-    if (file->kind == FILE_KIND_INOTIFY && file->inotify)
-        inotify_destroy(file->inotify);
-    if (file->kind == FILE_KIND_MEMFD && file->memfd)
-        memfd_destroy(file->memfd);
-    if (file->kind == FILE_KIND_SIGNALFD && file->signalfd)
-        signalfd_destroy(file->signalfd);
-    if (file->kind == FILE_KIND_EVENTFS && file->eventfs)
-        eventfs_unsubscribe(file->eventfs);
-    if (file->kind == FILE_KIND_IO_URING && file->io_uring)
-        io_uring_destroy(file->io_uring);
-    if (file->kind == FILE_KIND_DMABUF)
-        drm_buffer_put(file->dmabuf_handle);
-    if (file->kind == FILE_KIND_SOCKET && file->socket)
-        unix_socket_unref(file->socket);
+    if (file->kind == FILE_KIND_INPUT && file->input_reader) input_reader_close(file->input_reader);
+    if (file->kind == FILE_KIND_FRAMEBUFFER) framebuffer_file_close(file);
+    if (file->kind == FILE_KIND_EVENTFD && file->eventfd) eventfd_destroy(file->eventfd);
+    if (file->kind == FILE_KIND_TIMERFD && file->timerfd) timerfd_destroy(file->timerfd);
+    if (file->kind == FILE_KIND_EPOLL && file->epoll) epoll_destroy(file->epoll);
+    if (file->kind == FILE_KIND_INOTIFY && file->inotify) inotify_destroy(file->inotify);
+    if (file->kind == FILE_KIND_MEMFD && file->memfd) memfd_destroy(file->memfd);
+    if (file->kind == FILE_KIND_SIGNALFD && file->signalfd) signalfd_destroy(file->signalfd);
+    if (file->kind == FILE_KIND_EVENTFS && file->eventfs) eventfs_unsubscribe(file->eventfs);
+    if (file->kind == FILE_KIND_IO_URING && file->io_uring) io_uring_destroy(file->io_uring);
+    if (file->kind == FILE_KIND_DMABUF) drm_buffer_put(file->dmabuf_handle);
+    if (file->kind == FILE_KIND_SOCKET && file->socket) unix_socket_unref(file->socket);
     if (file->kind == FILE_KIND_INET_SOCKET && file->inet_socket)
         inet_socket_unref(file->inet_socket);
     if (file->kind == FILE_KIND_NETLINK_SOCKET && file->netlink_socket)
@@ -357,7 +340,7 @@ static int file_positioned(const struct file *file) {
     if (file->kind != FILE_KIND_VFS || !file->node) return 0;
     uint32_t type = file->node->flags & 0xFFU;
     return type == VFS_FILE || type == VFS_DIRECTORY || type == VFS_SYMLINK ||
-           type == VFS_BLOCKDEVICE;
+        type == VFS_BLOCKDEVICE;
 }
 
 static void file_enter(struct file *file) {
@@ -394,24 +377,19 @@ static int64_t file_read_locked(struct file *file, size_t size, void *buffer) {
     if (!file || !buffer) return -EBADF;
     if (file->kind == FILE_KIND_PIPE_READ) return pipe_read(file->pipe, size, buffer);
     if (file->kind == FILE_KIND_SOCKET) return unix_socket_read(file->socket, size, buffer);
-    if (file->kind == FILE_KIND_INET_SOCKET) return inet_socket_read(file->inet_socket, size, buffer);
-    if (file->kind == FILE_KIND_NETLINK_SOCKET) return netlink_socket_read(file->netlink_socket, size, buffer);
+    if (file->kind == FILE_KIND_INET_SOCKET)
+        return inet_socket_read(file->inet_socket, size, buffer);
+    if (file->kind == FILE_KIND_NETLINK_SOCKET)
+        return netlink_socket_read(file->netlink_socket, size, buffer);
     if (file->kind == FILE_KIND_PTY_MASTER || file->kind == FILE_KIND_PTY_SLAVE)
         return pty_read(file->pty, file->kind == FILE_KIND_PTY_MASTER, size, buffer);
-    if (file->kind == FILE_KIND_INPUT)
-        return input_reader_read(file->input_reader, size, buffer);
-    if (file->kind == FILE_KIND_FRAMEBUFFER)
-        return framebuffer_file_read(file, size, buffer);
-    if (file->kind == FILE_KIND_EVENTFD)
-        return eventfd_read(file->eventfd, size, buffer);
-    if (file->kind == FILE_KIND_TIMERFD)
-        return timerfd_read(file->timerfd, size, buffer);
-    if (file->kind == FILE_KIND_INOTIFY)
-        return inotify_read(file->inotify, size, buffer);
-    if (file->kind == FILE_KIND_SIGNALFD)
-        return signalfd_read(file->signalfd, size, buffer);
-    if (file->kind == FILE_KIND_EVENTFS)
-        return eventfs_read(file->eventfs, size, buffer);
+    if (file->kind == FILE_KIND_INPUT) return input_reader_read(file->input_reader, size, buffer);
+    if (file->kind == FILE_KIND_FRAMEBUFFER) return framebuffer_file_read(file, size, buffer);
+    if (file->kind == FILE_KIND_EVENTFD) return eventfd_read(file->eventfd, size, buffer);
+    if (file->kind == FILE_KIND_TIMERFD) return timerfd_read(file->timerfd, size, buffer);
+    if (file->kind == FILE_KIND_INOTIFY) return inotify_read(file->inotify, size, buffer);
+    if (file->kind == FILE_KIND_SIGNALFD) return signalfd_read(file->signalfd, size, buffer);
+    if (file->kind == FILE_KIND_EVENTFS) return eventfs_read(file->eventfs, size, buffer);
     if (file->kind == FILE_KIND_VFS && file->node && file->node->file_ioctl == drm_file_ioctl)
         return drm_file_read(file, size, buffer);
 
@@ -438,18 +416,18 @@ int64_t file_write(struct file *file, size_t size, const void *buffer) {
 static int64_t file_write_locked(struct file *file, size_t size, const void *buffer) {
     if (!file || !buffer) return -EBADF;
     if (file->kind == FILE_KIND_SOCKET) return unix_socket_write(file->socket, size, buffer);
-    if (file->kind == FILE_KIND_INET_SOCKET) return inet_socket_write(file->inet_socket, size, buffer);
-    if (file->kind == FILE_KIND_NETLINK_SOCKET) return netlink_socket_write(file->netlink_socket, size, buffer);
+    if (file->kind == FILE_KIND_INET_SOCKET)
+        return inet_socket_write(file->inet_socket, size, buffer);
+    if (file->kind == FILE_KIND_NETLINK_SOCKET)
+        return netlink_socket_write(file->netlink_socket, size, buffer);
     if (file->kind == FILE_KIND_PTY_MASTER || file->kind == FILE_KIND_PTY_SLAVE)
         return pty_write(file->pty, file->kind == FILE_KIND_PTY_MASTER, size, buffer);
     if (file->kind == FILE_KIND_PIPE_WRITE) {
         if (file->pipe && file->pipe->readers == 0) return -EPIPE;
         return pipe_write(file->pipe, size, buffer);
     }
-    if (file->kind == FILE_KIND_FRAMEBUFFER)
-        return framebuffer_file_write(file, size, buffer);
-    if (file->kind == FILE_KIND_EVENTFD)
-        return eventfd_write(file->eventfd, size, buffer);
+    if (file->kind == FILE_KIND_FRAMEBUFFER) return framebuffer_file_write(file, size, buffer);
+    if (file->kind == FILE_KIND_EVENTFD) return eventfd_write(file->eventfd, size, buffer);
     if (file->kind == FILE_KIND_MEMFD) {
         int64_t moved = memfd_write(file->memfd, file->offset, size, buffer);
         if (moved > 0) file->offset += (uint64_t)moved;
@@ -465,8 +443,7 @@ uint32_t file_poll_events(struct file *file, uint32_t requested) {
     return file_poll_events_nested(file, requested, 0);
 }
 
-uint32_t file_poll_events_nested(struct file *file, uint32_t requested,
-                                 unsigned depth) {
+uint32_t file_poll_events_nested(struct file *file, uint32_t requested, unsigned depth) {
     const uint32_t pollin = 0x001U;
     const uint32_t pollout = 0x004U;
     const uint32_t pollerr = 0x008U;
@@ -521,10 +498,10 @@ uint32_t file_poll_events_nested(struct file *file, uint32_t requested,
             events |= pollerr | 0x002U;
         if (file->node->file_ioctl == drm_file_ioctl) {
             if (drm_file_read_ready(file)) events |= pollin;
-        } else if (file->node->read_ready ? file->node->read_ready(file->node) :
-            ((file->node->flags & 0xFFU) != VFS_CHARDEVICE)) events |= pollin;
-        if (!file->node->write_ready || file->node->write_ready(file->node))
-            events |= pollout;
+        } else if (file->node->read_ready ? file->node->read_ready(file->node)
+                                          : ((file->node->flags & 0xFFU) != VFS_CHARDEVICE))
+            events |= pollin;
+        if (!file->node->write_ready || file->node->write_ready(file->node)) events |= pollout;
     } else {
         events |= pollerr;
     }

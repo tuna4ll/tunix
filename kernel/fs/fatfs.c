@@ -20,19 +20,19 @@ extern void kprintf(const char *fmt, ...);
 #define EINVAL 22
 #define ENODEV 19
 #define ENOMEM 12
-#define EIO 5
+#define EIO    5
 #define ENOSPC 28
 
 #define FAT_ATTR_READ_ONLY 0x01U
-#define FAT_ATTR_HIDDEN 0x02U
-#define FAT_ATTR_SYSTEM 0x04U
+#define FAT_ATTR_HIDDEN    0x02U
+#define FAT_ATTR_SYSTEM    0x04U
 #define FAT_ATTR_VOLUME_ID 0x08U
 #define FAT_ATTR_DIRECTORY 0x10U
 #define FAT_ATTR_LONG_NAME 0x0FU
 
 #define FAT_ENTRY_FREE 0xE5U
-#define FAT_ENTRY_END 0x00U
-#define FAT_MAX_NAME 255
+#define FAT_ENTRY_END  0x00U
+#define FAT_MAX_NAME   255
 
 struct fat_volume {
     int used;
@@ -63,20 +63,18 @@ struct fat_file {
 static struct fat_volume **volumes;
 static int volume_capacity;
 
-static int read_sectors(struct fat_volume *volume, uint64_t sector,
-                        uint32_t count, void *out) {
+static int read_sectors(struct fat_volume *volume, uint64_t sector, uint32_t count, void *out) {
     return volume->device->read(volume->device->context, sector, count, out);
 }
 
-static int write_sectors(struct fat_volume *volume, uint64_t sector,
-                         uint32_t count, const void *in) {
+static int write_sectors(struct fat_volume *volume, uint64_t sector, uint32_t count,
+                         const void *in) {
     if (!volume->device->write) return -1;
     return volume->device->write(volume->device->context, sector, count, in);
 }
 
 static uint64_t cluster_sector(struct fat_volume *volume, uint32_t cluster) {
-    return (uint64_t)volume->data_start +
-           (uint64_t)(cluster - 2U) * volume->sectors_per_cluster;
+    return (uint64_t)volume->data_start + (uint64_t)(cluster - 2U) * volume->sectors_per_cluster;
 }
 
 static int cluster_is_end(struct fat_volume *volume, uint32_t value) {
@@ -104,17 +102,14 @@ static int fat_entry_read(struct fat_volume *volume, uint32_t cluster, uint32_t 
     uint64_t sector_index = offset / volume->bytes_per_sector;
     uint32_t within = (uint32_t)(offset % volume->bytes_per_sector);
 
-    if (read_sectors(volume, volume->fat_start + sector_index, 2, sector) != 0)
-        return -1;
+    if (read_sectors(volume, volume->fat_start + sector_index, 2, sector) != 0) return -1;
 
     uint32_t value = 0;
     for (uint32_t index = 0; index < width; index++)
         value |= (uint32_t)sector[within + index] << (index * 8U);
 
-    if (volume->bits == 12)
-        value = (cluster & 1U) ? (value >> 4) : (value & 0x0FFFU);
-    else if (volume->bits == 32)
-        value &= 0x0FFFFFFFU;
+    if (volume->bits == 12) value = (cluster & 1U) ? (value >> 4) : (value & 0x0FFFU);
+    else if (volume->bits == 32) value &= 0x0FFFFFFFU;
 
     *out = value;
     return 0;
@@ -164,16 +159,14 @@ static uint32_t fat_allocate_cluster(struct fat_volume *volume) {
         uint32_t value = 0;
         if (fat_entry_read(volume, cluster, &value) != 0) return 0;
         if (value) continue;
-        uint32_t end = volume->bits == 32 ? 0x0FFFFFFFU :
-                       (volume->bits == 16 ? 0xFFFFU : 0x0FFFU);
+        uint32_t end = volume->bits == 32 ? 0x0FFFFFFFU : (volume->bits == 16 ? 0xFFFFU : 0x0FFFU);
         if (fat_entry_write(volume, cluster, end) != 0) return 0;
         return cluster;
     }
     return 0;
 }
 
-static uint32_t cluster_at(struct fat_volume *volume, uint32_t first,
-                           uint64_t offset, int grow) {
+static uint32_t cluster_at(struct fat_volume *volume, uint32_t first, uint64_t offset, int grow) {
     if (first < 2U) return 0;
     uint32_t cluster = first;
     uint64_t steps = offset / volume->cluster_bytes;
@@ -191,8 +184,7 @@ static uint32_t cluster_at(struct fat_volume *volume, uint32_t first,
     return cluster;
 }
 
-static int64_t fat_node_read(struct vfs_node *node, uint64_t offset,
-                             size_t size, void *buffer) {
+static int64_t fat_node_read(struct vfs_node *node, uint64_t offset, size_t size, void *buffer) {
     VFS_GUARD;
     struct fat_file *file = (struct fat_file *)node->fs_private;
     if (!file) return -1;
@@ -221,8 +213,7 @@ static int64_t fat_node_read(struct vfs_node *node, uint64_t offset,
     return (int64_t)moved;
 }
 
-static int fat_write_directory_entry(struct fat_file *file, uint32_t size,
-                                     uint32_t first_cluster);
+static int fat_write_directory_entry(struct fat_file *file, uint32_t size, uint32_t first_cluster);
 
 static int release_chain(struct fat_volume *volume, uint32_t cluster) {
     while (cluster >= 2U && !cluster_is_end(volume, cluster)) {
@@ -257,15 +248,14 @@ static int fat_node_truncate(struct vfs_node *node, uint64_t length) {
     if (!last) return -1;
     uint32_t next = 0;
     if (fat_entry_read(volume, last, &next) != 0) return -1;
-    uint32_t end = volume->bits == 32 ? 0x0FFFFFFFU :
-                   (volume->bits == 16 ? 0xFFFFU : 0x0FFFU);
+    uint32_t end = volume->bits == 32 ? 0x0FFFFFFFU : (volume->bits == 16 ? 0xFFFFU : 0x0FFFU);
     if (fat_entry_write(volume, last, end) != 0) return -1;
     if (!cluster_is_end(volume, next) && release_chain(volume, next) != 0) return -1;
     return fat_write_directory_entry(file, (uint32_t)length, first);
 }
 
-static int64_t fat_node_write(struct vfs_node *node, uint64_t offset,
-                              size_t size, const void *buffer) {
+static int64_t fat_node_write(struct vfs_node *node, uint64_t offset, size_t size,
+                              const void *buffer) {
     VFS_GUARD;
     struct fat_file *file = (struct fat_file *)node->fs_private;
     if (!file) return -1;
@@ -303,13 +293,13 @@ static int64_t fat_node_write(struct vfs_node *node, uint64_t offset,
     }
 
     if (offset > node->length) node->length = offset;
-    if (fat_write_directory_entry(file, (uint32_t)node->length,
-                                  file->first_cluster) != 0) return -1;
+    if (fat_write_directory_entry(file, (uint32_t)node->length, file->first_cluster) != 0)
+        return -1;
     return (int64_t)moved;
 }
 
-static int directory_read(struct fat_volume *volume, uint32_t cluster,
-                          uint64_t offset, uint32_t count, void *out) {
+static int directory_read(struct fat_volume *volume, uint32_t cluster, uint64_t offset,
+                          uint32_t count, void *out) {
     if (!cluster) {
         uint64_t sector = volume->root_start + offset / volume->bytes_per_sector;
         if (offset / volume->bytes_per_sector >= volume->root_sectors) return -1;
@@ -322,8 +312,8 @@ static int directory_read(struct fat_volume *volume, uint32_t cluster,
                         count, out);
 }
 
-static int directory_write(struct fat_volume *volume, uint32_t cluster,
-                           uint64_t offset, uint32_t count, const void *in) {
+static int directory_write(struct fat_volume *volume, uint32_t cluster, uint64_t offset,
+                           uint32_t count, const void *in) {
     if (!cluster) {
         uint64_t sector = volume->root_start + offset / volume->bytes_per_sector;
         if (offset / volume->bytes_per_sector >= volume->root_sectors) return -1;
@@ -336,16 +326,13 @@ static int directory_write(struct fat_volume *volume, uint32_t cluster,
                          count, in);
 }
 
-static int fat_write_directory_entry(struct fat_file *file, uint32_t size,
-                                     uint32_t first_cluster) {
+static int fat_write_directory_entry(struct fat_file *file, uint32_t size, uint32_t first_cluster) {
     struct fat_volume *volume = file->volume;
-    uint64_t sector_offset = file->entry_offset -
-                             (file->entry_offset % volume->bytes_per_sector);
+    uint64_t sector_offset = file->entry_offset - (file->entry_offset % volume->bytes_per_sector);
     uint32_t within = file->entry_offset % volume->bytes_per_sector;
     uint8_t sector[BLOCK_SECTOR_SIZE];
 
-    if (directory_read(volume, file->entry_cluster, sector_offset, 1, sector) != 0)
-        return -1;
+    if (directory_read(volume, file->entry_cluster, sector_offset, 1, sector) != 0) return -1;
     uint8_t *entry = sector + within;
     entry[26] = (uint8_t)first_cluster;
     entry[27] = (uint8_t)(first_cluster >> 8);
@@ -382,24 +369,25 @@ static void short_name(const uint8_t *entry, char *out) {
 static void long_name_piece(const uint8_t *entry, char *out) {
     static const int offsets[13] = {1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30};
     for (int index = 0; index < 13; index++) {
-        uint16_t unit = (uint16_t)(entry[offsets[index]] |
-                                   (entry[offsets[index] + 1] << 8));
-        if (unit == 0 || unit == 0xFFFFU) { out[index] = '\0'; return; }
+        uint16_t unit = (uint16_t)(entry[offsets[index]] | (entry[offsets[index] + 1] << 8));
+        if (unit == 0 || unit == 0xFFFFU) {
+            out[index] = '\0';
+            return;
+        }
         out[index] = unit < 0x100U ? (char)unit : '_';
     }
     out[13] = '\0';
 }
 
-static struct vfs_node *build_directory(struct fat_volume *volume,
-                                        uint32_t cluster, const char *name,
-                                        struct vfs_node *parent, int depth);
+static struct vfs_node *build_directory(struct fat_volume *volume, uint32_t cluster,
+                                        const char *name, struct vfs_node *parent, int depth);
 static int fat_adopt_child(struct vfs_node *directory, struct vfs_node *child);
 
-static int attach_entry(struct fat_volume *volume, struct vfs_node *directory,
-                        const uint8_t *entry, const char *name,
-                        uint32_t entry_cluster, uint32_t entry_offset, int depth) {
-    uint32_t first = (uint32_t)(entry[26] | (entry[27] << 8)) |
-                     ((uint32_t)(entry[20] | (entry[21] << 8)) << 16);
+static int attach_entry(struct fat_volume *volume, struct vfs_node *directory, const uint8_t *entry,
+                        const char *name, uint32_t entry_cluster, uint32_t entry_offset,
+                        int depth) {
+    uint32_t first =
+        (uint32_t)(entry[26] | (entry[27] << 8)) | ((uint32_t)(entry[20] | (entry[21] << 8)) << 16);
     uint32_t size = 0;
     for (uint32_t index = 0; index < 4U; index++)
         size |= (uint32_t)entry[28 + index] << (index * 8U);
@@ -429,8 +417,7 @@ static int attach_entry(struct fat_volume *volume, struct vfs_node *directory,
 }
 
 static struct vfs_node *build_directory(struct fat_volume *volume, uint32_t cluster,
-                                        const char *name, struct vfs_node *parent,
-                                        int depth) {
+                                        const char *name, struct vfs_node *parent, int depth) {
     if (depth > 24) return NULL;
 
     struct vfs_node *directory = vfs_alloc_node(name, VFS_DIRECTORY);
@@ -461,7 +448,10 @@ static struct vfs_node *build_directory(struct fat_volume *volume, uint32_t clus
         for (uint32_t at = 0; at + 32U <= volume->bytes_per_sector; at += 32U) {
             const uint8_t *entry = sector + at;
             if (entry[0] == FAT_ENTRY_END) return directory;
-            if (entry[0] == FAT_ENTRY_FREE) { have_long = 0; continue; }
+            if (entry[0] == FAT_ENTRY_FREE) {
+                have_long = 0;
+                continue;
+            }
 
             if ((entry[11] & FAT_ATTR_LONG_NAME) == FAT_ATTR_LONG_NAME) {
                 char piece[16];
@@ -477,14 +467,23 @@ static struct vfs_node *build_directory(struct fat_volume *volume, uint32_t clus
                 }
                 continue;
             }
-            if (entry[11] & FAT_ATTR_VOLUME_ID) { have_long = 0; assembled[0] = '\0'; continue; }
+            if (entry[11] & FAT_ATTR_VOLUME_ID) {
+                have_long = 0;
+                assembled[0] = '\0';
+                continue;
+            }
 
             char name_buffer[16];
             short_name(entry, name_buffer);
-            if (name_buffer[0] == '.') { have_long = 0; assembled[0] = '\0'; continue; }
+            if (name_buffer[0] == '.') {
+                have_long = 0;
+                assembled[0] = '\0';
+                continue;
+            }
 
             const char *use = have_long && assembled[0] ? assembled : name_buffer;
-            (void)attach_entry(volume, directory, entry, use, cluster, (uint32_t)(offset + at), depth);
+            (void)attach_entry(volume, directory, entry, use, cluster, (uint32_t)(offset + at),
+                               depth);
             have_long = 0;
             assembled[0] = '\0';
         }
@@ -496,7 +495,8 @@ static struct vfs_node *build_directory(struct fat_volume *volume, uint32_t clus
 static void make_short_name(const char *name, uint8_t *out) {
     memset(out, ' ', 11);
     const char *dot = NULL;
-    for (const char *at = name; *at; at++) if (*at == '.') dot = at;
+    for (const char *at = name; *at; at++)
+        if (*at == '.') dot = at;
 
     size_t index = 0;
     for (const char *at = name; *at && index < 8U; at++) {
@@ -525,14 +525,13 @@ static void entry_timestamp(uint16_t *date_out, uint16_t *time_out) {
         *time_out = 0;
         return;
     }
-    *date_out = (uint16_t)((((uint32_t)now.year - 1980U) << 9) |
-                           ((uint32_t)now.month << 5) | (uint32_t)now.day);
-    *time_out = (uint16_t)(((uint32_t)now.hour << 11) |
-                           ((uint32_t)now.minute << 5) | ((uint32_t)now.second / 2U));
+    *date_out = (uint16_t)((((uint32_t)now.year - 1980U) << 9) | ((uint32_t)now.month << 5) |
+                           (uint32_t)now.day);
+    *time_out = (uint16_t)(((uint32_t)now.hour << 11) | ((uint32_t)now.minute << 5) |
+                           ((uint32_t)now.second / 2U));
 }
 
-static int find_free_entry(struct fat_volume *volume, uint32_t cluster,
-                           uint64_t *offset_out) {
+static int find_free_entry(struct fat_volume *volume, uint32_t cluster, uint64_t *offset_out) {
     uint8_t sector[BLOCK_SECTOR_SIZE];
     uint64_t offset = 0;
     uint64_t limit = cluster ? (uint64_t)volume->cluster_count * volume->cluster_bytes
@@ -565,8 +564,7 @@ static int fat_adopt_child(struct vfs_node *directory, struct vfs_node *child) {
     uint64_t sector_offset = offset - (offset % volume->bytes_per_sector);
     uint32_t within = (uint32_t)(offset % volume->bytes_per_sector);
     uint8_t sector[BLOCK_SECTOR_SIZE];
-    if (directory_read(volume, parent->first_cluster, sector_offset, 1, sector) != 0)
-        return -1;
+    if (directory_read(volume, parent->first_cluster, sector_offset, 1, sector) != 0) return -1;
 
     uint8_t *entry = sector + within;
     int was_last = entry[0] == FAT_ENTRY_END;
@@ -585,8 +583,7 @@ static int fat_adopt_child(struct vfs_node *directory, struct vfs_node *child) {
     entry[23] = (uint8_t)(stamp >> 8);
     entry[24] = (uint8_t)date;
     entry[25] = (uint8_t)(date >> 8);
-    if (directory_write(volume, parent->first_cluster, sector_offset, 1, sector) != 0)
-        return -1;
+    if (directory_write(volume, parent->first_cluster, sector_offset, 1, sector) != 0) return -1;
 
     if (was_last && within + 64U <= volume->bytes_per_sector) {
         sector[within + 32U] = FAT_ENTRY_END;
@@ -653,10 +650,10 @@ int fatfs_mount(const char *source, const char *mount_name, struct vfs_node **ro
     uint32_t root_entries = (uint32_t)(boot[17] | (boot[18] << 8));
     uint32_t total_short = (uint32_t)(boot[19] | (boot[20] << 8));
     uint32_t fat_short = (uint32_t)(boot[22] | (boot[23] << 8));
-    uint32_t total_long = (uint32_t)(boot[32] | (boot[33] << 8) |
-                                     (boot[34] << 16) | (boot[35] << 24));
-    uint32_t fat_long = (uint32_t)(boot[36] | (boot[37] << 8) |
-                                   (boot[38] << 16) | (boot[39] << 24));
+    uint32_t total_long =
+        (uint32_t)(boot[32] | (boot[33] << 8) | (boot[34] << 16) | (boot[35] << 24));
+    uint32_t fat_long =
+        (uint32_t)(boot[36] | (boot[37] << 8) | (boot[38] << 16) | (boot[39] << 24));
 
     if (volume->bytes_per_sector != BLOCK_SECTOR_SIZE) return -EINVAL;
     if (!volume->sectors_per_cluster || !volume->fat_count || !reserved) return -EINVAL;
@@ -668,8 +665,8 @@ int fatfs_mount(const char *source, const char *mount_name, struct vfs_node **ro
     volume->cluster_bytes = volume->bytes_per_sector * volume->sectors_per_cluster;
     volume->fat_start = reserved;
     volume->root_start = reserved + volume->fat_count * volume->fat_sectors;
-    volume->root_sectors = (root_entries * 32U + volume->bytes_per_sector - 1U) /
-                           volume->bytes_per_sector;
+    volume->root_sectors =
+        (root_entries * 32U + volume->bytes_per_sector - 1U) / volume->bytes_per_sector;
     volume->data_start = volume->root_start + volume->root_sectors;
     if (total <= volume->data_start) return -EINVAL;
     volume->cluster_count = (total - volume->data_start) / volume->sectors_per_cluster;
@@ -679,8 +676,8 @@ int fatfs_mount(const char *source, const char *mount_name, struct vfs_node **ro
     else volume->bits = 32;
 
     if (volume->bits == 32) {
-        volume->root_cluster = (uint32_t)(boot[44] | (boot[45] << 8) |
-                                          (boot[46] << 16) | (boot[47] << 24));
+        volume->root_cluster =
+            (uint32_t)(boot[44] | (boot[45] << 8) | (boot[46] << 16) | (boot[47] << 24));
         volume->root_sectors = 0;
         volume->root_start = 0;
         volume->data_start = reserved + volume->fat_count * volume->fat_sectors;
@@ -689,8 +686,7 @@ int fatfs_mount(const char *source, const char *mount_name, struct vfs_node **ro
     }
 
     volume->used = 1;
-    struct vfs_node *root = build_directory(volume,
-                                            volume->bits == 32 ? volume->root_cluster : 0U,
+    struct vfs_node *root = build_directory(volume, volume->bits == 32 ? volume->root_cluster : 0U,
                                             mount_name, NULL, 0);
     if (!root) {
         volume->used = 0;

@@ -11,29 +11,29 @@
 #include <tunix/lock.h>
 #include <tunix/mutex.h>
 
-#define ATA_DATA       0x1F0
-#define ATA_SECCOUNT0  0x1F2
-#define ATA_LBA0       0x1F3
-#define ATA_LBA1       0x1F4
-#define ATA_LBA2       0x1F5
-#define ATA_HDDEVSEL   0x1F6
-#define ATA_COMMAND    0x1F7
-#define ATA_STATUS     0x1F7
-#define ATA_CONTROL    0x3F6
+#define ATA_DATA      0x1F0
+#define ATA_SECCOUNT0 0x1F2
+#define ATA_LBA0      0x1F3
+#define ATA_LBA1      0x1F4
+#define ATA_LBA2      0x1F5
+#define ATA_HDDEVSEL  0x1F6
+#define ATA_COMMAND   0x1F7
+#define ATA_STATUS    0x1F7
+#define ATA_CONTROL   0x3F6
 
-#define ATA_CMD_READ_PIO 0x20
-#define ATA_CMD_READ_DMA 0xC8
-#define ATA_CMD_WRITE_PIO 0x30
-#define ATA_CMD_WRITE_DMA 0xCA
+#define ATA_CMD_READ_PIO    0x20
+#define ATA_CMD_READ_DMA    0xC8
+#define ATA_CMD_WRITE_PIO   0x30
+#define ATA_CMD_WRITE_DMA   0xCA
 #define ATA_CMD_FLUSH_CACHE 0xE7
-#define ATA_CMD_IDENTIFY 0xEC
-#define ATA_SR_BSY       0x80
-#define ATA_SR_DRQ       0x08
-#define ATA_SR_DF        0x20
-#define ATA_SR_ERR       0x01
-#define ATA_SECTOR_SIZE  512U
+#define ATA_CMD_IDENTIFY    0xEC
+#define ATA_SR_BSY          0x80
+#define ATA_SR_DRQ          0x08
+#define ATA_SR_DF           0x20
+#define ATA_SR_ERR          0x01
+#define ATA_SECTOR_SIZE     512U
 #define ATA_DMA_MAX_SECTORS 256U
-#define ATA_DMA_MAX_PRDS 4U
+#define ATA_DMA_MAX_PRDS    4U
 
 #define BM_COMMAND_START 0x01
 #define BM_COMMAND_READ  0x08
@@ -88,8 +88,7 @@ static int ata_wait_not_busy(void) {
 static int ata_data_or_error(void *unused) {
     (void)unused;
     uint8_t status = inb(ATA_STATUS);
-    return (status & (ATA_SR_ERR | ATA_SR_DF)) ||
-           (!(status & ATA_SR_BSY) && (status & ATA_SR_DRQ));
+    return (status & (ATA_SR_ERR | ATA_SR_DF)) || (!(status & ATA_SR_BSY) && (status & ATA_SR_DRQ));
 }
 
 static int ata_wait_drq(void) {
@@ -157,8 +156,8 @@ static int ata_dma_settled(void *context) {
     return !(bus_status & BM_STATUS_ACTIVE) && !(ata_status & ATA_SR_BSY);
 }
 
-static int ata_dma_transfer_chunk(uint32_t lba, uint32_t sectors,
-                                  uint64_t buffer_physical, int to_device) {
+static int ata_dma_transfer_chunk(uint32_t lba, uint32_t sectors, uint64_t buffer_physical,
+                                  int to_device) {
     uint32_t bytes = sectors * ATA_SECTOR_SIZE;
     if (ata_build_prdt(buffer_physical, bytes) != 0) return -1;
 
@@ -192,8 +191,7 @@ static int ata_dma_transfer_chunk(uint32_t lba, uint32_t sectors,
     if (io_poll(ata_dma_settled, &status_port, IO_TIMEOUT_NS) == 0) {
         uint8_t bus_status = inb(status_port);
         uint8_t ata_status = inb(ATA_STATUS);
-        if (!(bus_status & BM_STATUS_ERROR) && !(ata_status & (ATA_SR_ERR | ATA_SR_DF)))
-            result = 0;
+        if (!(bus_status & BM_STATUS_ERROR) && !(ata_status & (ATA_SR_ERR | ATA_SR_DF))) result = 0;
     }
 
     outb(command_port, direction);
@@ -243,10 +241,8 @@ uint32_t ata_disk_sectors(void) {
     return cached_sectors;
 }
 
-static int ata_dma_transfer28(uint32_t lba, uint32_t sectors,
-                              const void *buffer, int to_device) {
-    if (!buffer || sectors == 0 || lba > 0x0FFFFFFFU ||
-        sectors > 0x10000000U - lba) return -1;
+static int ata_dma_transfer28(uint32_t lba, uint32_t sectors, const void *buffer, int to_device) {
+    if (!buffer || sectors == 0 || lba > 0x0FFFFFFFU || sectors > 0x10000000U - lba) return -1;
     if (ata_dma_probe() != 0) return -1;
 
     uint32_t disk_sectors = ata_disk_sectors();
@@ -254,8 +250,7 @@ static int ata_dma_transfer28(uint32_t lba, uint32_t sectors,
 
     uint64_t total_bytes = (uint64_t)sectors * ATA_SECTOR_SIZE;
     uint64_t physical = ata_pointer_physical(buffer, total_bytes);
-    if (!physical || physical > 0xFFFFFFFFULL ||
-        total_bytes > 0x100000000ULL - physical) return -1;
+    if (!physical || physical > 0xFFFFFFFFULL || total_bytes > 0x100000000ULL - physical) return -1;
 
     uint32_t remaining = sectors;
     uint32_t current_lba = lba;
@@ -278,8 +273,7 @@ int ata_dma_write28(uint32_t lba, uint32_t sectors, const void *source) {
 }
 
 int ata_pio_read28(uint32_t lba, uint32_t sectors, void *destination) {
-    if (!destination || sectors == 0 || lba > 0x0FFFFFFFU ||
-        sectors > 0x10000000U - lba) return -1;
+    if (!destination || sectors == 0 || lba > 0x0FFFFFFFU || sectors > 0x10000000U - lba) return -1;
 
     uint32_t disk_sectors = ata_disk_sectors();
     if (disk_sectors && (lba >= disk_sectors || sectors > disk_sectors - lba)) return -1;
@@ -329,8 +323,7 @@ int ata_flush_cache(void) {
 }
 
 int ata_pio_write28(uint32_t lba, uint32_t sectors, const void *source) {
-    if (!source || sectors == 0 || lba > 0x0FFFFFFFU ||
-        sectors > 0x10000000U - lba) return -1;
+    if (!source || sectors == 0 || lba > 0x0FFFFFFFU || sectors > 0x10000000U - lba) return -1;
 
     uint32_t disk_sectors = ata_disk_sectors();
     if (disk_sectors && (lba >= disk_sectors || sectors > disk_sectors - lba)) return -1;
@@ -404,7 +397,8 @@ static int ata_block_read(void *context, uint64_t lba, uint32_t count, void *des
     return status;
 }
 
-static int ata_block_write_unlocked(void *context, uint64_t lba, uint32_t count, const void *source) {
+static int ata_block_write_unlocked(void *context, uint64_t lba, uint32_t count,
+                                    const void *source) {
     (void)context;
     if (lba > 0x0FFFFFFFULL) return -1;
     if (ata_dma_write28((uint32_t)lba, count, source) == 0) return 0;
@@ -428,7 +422,9 @@ void ata_register_block_device(void) {
     if (!sectors) return;
     struct block_device device;
     memset(&device, 0, sizeof(device));
-    device.name[0] = 'i'; device.name[1] = 'd'; device.name[2] = 'e';
+    device.name[0] = 'i';
+    device.name[1] = 'd';
+    device.name[2] = 'e';
     device.name[3] = '0';
     device.sectors = sectors;
     device.read = ata_block_read;

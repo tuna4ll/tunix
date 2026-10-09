@@ -9,26 +9,18 @@
 
 extern void kprintf(const char *fmt, ...);
 
-#define PSCI_SYSTEM_OFF 0x84000008ULL
+#define PSCI_SYSTEM_OFF   0x84000008ULL
 #define PSCI_SYSTEM_RESET 0x84000009ULL
 
-void arch_early_init(void) {
-    serial_init();
-}
+void arch_early_init(void) { serial_init(); }
 
-void arch_cpu_init(void) {
-}
+void arch_cpu_init(void) {}
 
-void arch_route_legacy_interrupts(void) {
-}
+void arch_route_legacy_interrupts(void) {}
 
-void arch_route_timer(void) {
-    gic_enable_interrupt(aarch64_platform.timer_interrupt);
-}
+void arch_route_timer(void) { gic_enable_interrupt(aarch64_platform.timer_interrupt); }
 
-void set_kernel_stack(uint64_t stack_top) {
-    (void)stack_top;
-}
+void set_kernel_stack(uint64_t stack_top) { (void)stack_top; }
 
 void aarch64_pci_init(void) {
     if (!aarch64_platform.ecam_physical) return;
@@ -75,17 +67,11 @@ uint64_t psci_call(uint64_t function, uint64_t first, uint64_t second, uint64_t 
     return (uint64_t)-1;
 }
 
-void psci_system_off(void) {
-    psci_call(PSCI_SYSTEM_OFF, 0, 0, 0);
-}
+void psci_system_off(void) { psci_call(PSCI_SYSTEM_OFF, 0, 0, 0); }
 
-void psci_system_reset(void) {
-    psci_call(PSCI_SYSTEM_RESET, 0, 0, 0);
-}
+void psci_system_reset(void) { psci_call(PSCI_SYSTEM_RESET, 0, 0, 0); }
 
-void arch_power_off(void) {
-    psci_system_off();
-}
+void arch_power_off(void) { psci_system_off(); }
 
 void arch_restart(void) {
     psci_system_reset();

@@ -40,7 +40,7 @@ struct lock {
     const char *name;
 };
 
-#define LOCK_INITIALIZER(label, order) { 0, 0, 0, 0, (order), (label) }
+#define LOCK_INITIALIZER(label, order) {0, 0, 0, 0, (order), (label)}
 
 void lock_init(struct lock *lock, const char *name, unsigned rank);
 void lock_acquire(struct lock *lock);

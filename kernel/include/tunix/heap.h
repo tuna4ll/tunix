@@ -5,8 +5,8 @@
 #include <stddef.h>
 
 void heap_init(void);
-void* kmalloc(size_t size);
-void kfree(void* ptr);
+void *kmalloc(size_t size);
+void kfree(void *ptr);
 
 int heap_under_pressure(void);
 

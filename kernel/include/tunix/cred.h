@@ -52,7 +52,6 @@ int64_t cred_set_fsuid(uint32_t fsuid);
 int64_t cred_set_fsgid(uint32_t fsgid);
 int64_t cred_set_groups(uint32_t count, const uint32_t *groups);
 
-void cred_apply_exec(struct credentials *cred, const struct vfs_node *node,
-                     int no_new_privs);
+void cred_apply_exec(struct credentials *cred, const struct vfs_node *node, int no_new_privs);
 
 #endif

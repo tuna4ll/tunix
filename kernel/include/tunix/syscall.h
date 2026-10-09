@@ -33,9 +33,12 @@ _Static_assert(__builtin_offsetof(struct syscall_frame, r15) == 0, "entry writes
 _Static_assert(__builtin_offsetof(struct syscall_frame, rax) == 96, "entry writes rax at 96");
 _Static_assert(__builtin_offsetof(struct syscall_frame, rcx) == 104, "entry writes rcx at 104");
 _Static_assert(__builtin_offsetof(struct syscall_frame, r11) == 112, "entry writes r11 at 112");
-_Static_assert(__builtin_offsetof(struct syscall_frame, user_rip) == 120, "entry writes rip at 120");
-_Static_assert(__builtin_offsetof(struct syscall_frame, user_rflags) == 128, "entry writes rflags at 128");
-_Static_assert(__builtin_offsetof(struct syscall_frame, user_rsp) == 136, "entry writes rsp at 136");
+_Static_assert(__builtin_offsetof(struct syscall_frame, user_rip) == 120,
+               "entry writes rip at 120");
+_Static_assert(__builtin_offsetof(struct syscall_frame, user_rflags) == 128,
+               "entry writes rflags at 128");
+_Static_assert(__builtin_offsetof(struct syscall_frame, user_rsp) == 136,
+               "entry writes rsp at 136");
 
 #elif defined(__aarch64__)
 
@@ -50,7 +53,8 @@ struct syscall_frame {
 _Static_assert(sizeof(struct syscall_frame) == 288, "exceptions.S subtracts 288");
 _Static_assert(__builtin_offsetof(struct syscall_frame, elr) == 248, "entry writes elr at 248");
 _Static_assert(__builtin_offsetof(struct syscall_frame, spsr) == 256, "entry writes spsr at 256");
-_Static_assert(__builtin_offsetof(struct syscall_frame, sp_el0) == 264, "entry writes sp_el0 at 264");
+_Static_assert(__builtin_offsetof(struct syscall_frame, sp_el0) == 264,
+               "entry writes sp_el0 at 264");
 
 #endif
 

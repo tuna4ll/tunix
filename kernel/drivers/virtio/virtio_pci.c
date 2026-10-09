@@ -8,41 +8,41 @@
 #include <tunix/vmm.h>
 
 #define PCI_STATUS_CAPABILITIES (1U << 4)
-#define PCI_CAPABILITY_POINTER 0x34U
-#define PCI_CAP_ID_VENDOR 0x09U
+#define PCI_CAPABILITY_POINTER  0x34U
+#define PCI_CAP_ID_VENDOR       0x09U
 
 #define VIRTIO_PCI_CAP_COMMON_CFG 1U
 #define VIRTIO_PCI_CAP_NOTIFY_CFG 2U
-#define VIRTIO_PCI_CAP_ISR_CFG 3U
+#define VIRTIO_PCI_CAP_ISR_CFG    3U
 #define VIRTIO_PCI_CAP_DEVICE_CFG 4U
 
 #define COMMON_DEVICE_FEATURE_SELECT 0x00U
-#define COMMON_DEVICE_FEATURE 0x04U
+#define COMMON_DEVICE_FEATURE        0x04U
 #define COMMON_DRIVER_FEATURE_SELECT 0x08U
-#define COMMON_DRIVER_FEATURE 0x0CU
-#define COMMON_CONFIG_MSIX_VECTOR 0x10U
-#define COMMON_NUM_QUEUES 0x12U
-#define COMMON_DEVICE_STATUS 0x14U
-#define COMMON_QUEUE_SELECT 0x16U
-#define COMMON_QUEUE_SIZE 0x18U
-#define COMMON_QUEUE_MSIX_VECTOR 0x1AU
-#define COMMON_QUEUE_ENABLE 0x1CU
-#define COMMON_QUEUE_NOTIFY_OFF 0x1EU
-#define COMMON_QUEUE_DESC 0x20U
-#define COMMON_QUEUE_DRIVER 0x28U
-#define COMMON_QUEUE_DEVICE 0x30U
+#define COMMON_DRIVER_FEATURE        0x0CU
+#define COMMON_CONFIG_MSIX_VECTOR    0x10U
+#define COMMON_NUM_QUEUES            0x12U
+#define COMMON_DEVICE_STATUS         0x14U
+#define COMMON_QUEUE_SELECT          0x16U
+#define COMMON_QUEUE_SIZE            0x18U
+#define COMMON_QUEUE_MSIX_VECTOR     0x1AU
+#define COMMON_QUEUE_ENABLE          0x1CU
+#define COMMON_QUEUE_NOTIFY_OFF      0x1EU
+#define COMMON_QUEUE_DESC            0x20U
+#define COMMON_QUEUE_DRIVER          0x28U
+#define COMMON_QUEUE_DEVICE          0x30U
 
 #define VIRTIO_MMIO_BAR_BYTES 0x10000ULL
 #define VIRTIO_MMIO_BAR_COUNT 6U
 
 #define MSIX_NO_VECTOR 0xFFFFU
 
-#define QUEUE_SIZE_MAX 256U
+#define QUEUE_SIZE_MAX   256U
 #define RESET_TIMEOUT_NS (500ULL * 1000ULL * 1000ULL)
 
 static uint8_t config_read8(const struct pci_device *pci, uint8_t offset) {
-    uint32_t value = pci_config_read32(pci->bus, pci->slot, pci->function,
-                                       (uint8_t)(offset & 0xFCU));
+    uint32_t value =
+        pci_config_read32(pci->bus, pci->slot, pci->function, (uint8_t)(offset & 0xFCU));
     return (uint8_t)(value >> ((offset & 3U) * 8U));
 }
 
@@ -70,9 +70,7 @@ static void write8(volatile uint8_t *base, uint32_t offset, uint8_t value) {
     *(base + offset) = value;
 }
 
-static uint8_t read8(volatile uint8_t *base, uint32_t offset) {
-    return *(base + offset);
-}
+static uint8_t read8(volatile uint8_t *base, uint32_t offset) { return *(base + offset); }
 
 static void write64(volatile uint8_t *base, uint32_t offset, uint64_t value) {
     write32(base, offset, (uint32_t)value);
@@ -84,8 +82,7 @@ static volatile uint8_t *map_bar(struct virtio_device *device, unsigned index) {
     if (device->bars[index]) return device->bars[index];
     uint64_t physical = pci_bar_address(&device->pci, index);
     if (!physical) return NULL;
-    device->bars[index] =
-        (volatile uint8_t *)vmm_map_device(physical, VIRTIO_MMIO_BAR_BYTES);
+    device->bars[index] = (volatile uint8_t *)vmm_map_device(physical, VIRTIO_MMIO_BAR_BYTES);
     return device->bars[index];
 }
 
@@ -114,9 +111,9 @@ static int walk_capabilities(struct virtio_device *device) {
                     device->notify = base + within;
                     device->notify_multiplier = config_read32_at(pci, (uint8_t)(offset + 16U));
                     break;
-                case VIRTIO_PCI_CAP_ISR_CFG: device->isr = base + within; break;
+                case VIRTIO_PCI_CAP_ISR_CFG:    device->isr = base + within; break;
                 case VIRTIO_PCI_CAP_DEVICE_CFG: device->config = base + within; break;
-                default: break;
+                default:                        break;
                 }
             }
         }
@@ -144,8 +141,8 @@ static int negotiate(struct virtio_device *device, uint64_t wanted, uint64_t *ag
     return 0;
 }
 
-int virtio_pci_attach(struct virtio_device *device, uint16_t device_id,
-                      uint64_t features, uint64_t *features_out) {
+int virtio_pci_attach(struct virtio_device *device, uint16_t device_id, uint64_t features,
+                      uint64_t *features_out) {
     if (!device) return -1;
     memset(device, 0, sizeof(*device));
     if (pci_find_device(VIRTIO_VENDOR_ID, device_id, &device->pci) != 0) return -1;
@@ -182,24 +179,22 @@ int virtio_pci_setup_queue(struct virtio_device *device, struct virtio_queue *qu
     write16(device->common, COMMON_QUEUE_SIZE, size);
     if (device->vector) {
         write16(device->common, COMMON_QUEUE_MSIX_VECTOR, 0);
-        if (read16(device->common, COMMON_QUEUE_MSIX_VECTOR) == MSIX_NO_VECTOR)
-            device->vector = 0;
-        else
-            queue->interrupt_driven = 1;
+        if (read16(device->common, COMMON_QUEUE_MSIX_VECTOR) == MSIX_NO_VECTOR) device->vector = 0;
+        else queue->interrupt_driven = 1;
     }
     write64(device->common, COMMON_QUEUE_DESC, vmm_virt_to_phys_direct(queue->descriptors));
     write64(device->common, COMMON_QUEUE_DRIVER, vmm_virt_to_phys_direct(queue->available));
     write64(device->common, COMMON_QUEUE_DEVICE, vmm_virt_to_phys_direct(queue->used));
 
     uint32_t notify_offset = read16(device->common, COMMON_QUEUE_NOTIFY_OFF);
-    queue->doorbell = (volatile uint16_t *)(device->notify +
-                                            notify_offset * device->notify_multiplier);
+    queue->doorbell =
+        (volatile uint16_t *)(device->notify + notify_offset * device->notify_multiplier);
     write16(device->common, COMMON_QUEUE_ENABLE, 1);
     return 0;
 }
 
-int virtio_pci_request_irq(struct virtio_device *device, const char *name,
-                           irq_handler_fn handler, void *context) {
+int virtio_pci_request_irq(struct virtio_device *device, const char *name, irq_handler_fn handler,
+                           void *context) {
     if (!device || !device->common || !handler) return -1;
     if (pci_msix_enable(&device->pci) != 0) return -1;
 
@@ -208,8 +203,7 @@ int virtio_pci_request_irq(struct virtio_device *device, const char *name,
     if (pci_msix_bind(&device->pci, 0, vector) != 0) return -1;
 
     write16(device->common, COMMON_CONFIG_MSIX_VECTOR, 0);
-    if (read16(device->common, COMMON_CONFIG_MSIX_VECTOR) == MSIX_NO_VECTOR)
-        return -1;
+    if (read16(device->common, COMMON_CONFIG_MSIX_VECTOR) == MSIX_NO_VECTOR) return -1;
 
     device->vector = vector;
     return 0;

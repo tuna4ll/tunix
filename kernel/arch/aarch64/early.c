@@ -2,18 +2,18 @@
 
 #include "aarch64.h"
 
-#define EARLY_TABLES 40U
+#define EARLY_TABLES  40U
 #define TABLE_ENTRIES 512U
-#define ADDRESS_MASK 0x0000FFFFFFFFF000ULL
+#define ADDRESS_MASK  0x0000FFFFFFFFF000ULL
 
-#define DESC_VALID (1ULL << 0)
-#define DESC_TABLE (3ULL << 0)
-#define DESC_PAGE (3ULL << 0)
+#define DESC_VALID       (1ULL << 0)
+#define DESC_TABLE       (3ULL << 0)
+#define DESC_PAGE        (3ULL << 0)
 #define DESC_ATTR_DEVICE (1ULL << 2)
-#define DESC_SH_INNER (3ULL << 8)
-#define DESC_AF (1ULL << 10)
-#define DESC_PXN (1ULL << 53)
-#define DESC_UXN (1ULL << 54)
+#define DESC_SH_INNER    (3ULL << 8)
+#define DESC_AF          (1ULL << 10)
+#define DESC_PXN         (1ULL << 53)
+#define DESC_UXN         (1ULL << 54)
 
 #define BLOCK_2M 0x200000ULL
 
@@ -42,9 +42,7 @@ static uint64_t *descend(uint64_t *table, unsigned index) {
     return (uint64_t *)((table[index] & ADDRESS_MASK) - table_offset);
 }
 
-static int is_block(uint64_t entry) {
-    return (entry & DESC_TABLE) == DESC_VALID;
-}
+static int is_block(uint64_t entry) { return (entry & DESC_TABLE) == DESC_VALID; }
 
 static int map_into(uint64_t *root, uint64_t virtual_address, uint64_t physical,
                     uint64_t attributes, int level) {
@@ -79,15 +77,15 @@ void aarch64_build_early_tables(uint64_t load_physical, uint64_t dtb_physical) {
 
     if (load_physical & (BLOCK_2M - 1U)) {
         for (uint64_t offset = 0; offset < image_bytes; offset += 4096U) {
-            map_into(boot_root, load_physical + offset, load_physical + offset,
-                     kernel_attributes, 3);
+            map_into(boot_root, load_physical + offset, load_physical + offset, kernel_attributes,
+                     3);
             map_into(boot_root, AARCH64_KERNEL_VIRTUAL_BASE + offset, load_physical + offset,
                      kernel_attributes, 3);
         }
     } else {
         for (uint64_t offset = 0; offset < image_bytes; offset += BLOCK_2M) {
-            map_into(boot_root, load_physical + offset, load_physical + offset,
-                     kernel_attributes, 2);
+            map_into(boot_root, load_physical + offset, load_physical + offset, kernel_attributes,
+                     2);
             map_into(boot_root, AARCH64_KERNEL_VIRTUAL_BASE + offset, load_physical + offset,
                      kernel_attributes, 2);
         }
@@ -97,7 +95,7 @@ void aarch64_build_early_tables(uint64_t load_physical, uint64_t dtb_physical) {
         uint64_t bytes = 4096U;
         if (header[0] == 0xD0 && header[1] == 0x0D && header[2] == 0xFE && header[3] == 0xED)
             bytes = ((uint64_t)header[4] << 24) | ((uint64_t)header[5] << 16) |
-                    ((uint64_t)header[6] << 8) | header[7];
+                ((uint64_t)header[6] << 8) | header[7];
         uint64_t first = dtb_physical & ~0xFFFULL;
         uint64_t last = dtb_physical + bytes;
         for (uint64_t page = first; page < last; page += 4096U)
@@ -105,8 +103,7 @@ void aarch64_build_early_tables(uint64_t load_physical, uint64_t dtb_physical) {
     }
 }
 
-int aarch64_early_map(uint64_t virtual_address, uint64_t physical, uint64_t attributes,
-                      int level) {
+int aarch64_early_map(uint64_t virtual_address, uint64_t physical, uint64_t attributes, int level) {
     table_offset = aarch64_platform.load_offset;
     int status = map_into(boot_root, virtual_address, physical, attributes, level);
     __asm__ volatile("tlbi vmalle1; dsb sy; isb" ::: "memory");
@@ -122,8 +119,8 @@ uint64_t aarch64_early_map_device(uint64_t physical, uint64_t bytes) {
     uint64_t base = AARCH64_EARLY_DEVICE_BASE + (uint64_t)used * 4096ULL;
     uint64_t attributes = DESC_AF | DESC_ATTR_DEVICE | DESC_PXN | DESC_UXN;
     for (uint64_t page = 0; page < pages; page++) {
-        if (aarch64_early_map(base + page * 4096ULL, first + page * 4096ULL,
-                              attributes, 3) != 0) return 0;
+        if (aarch64_early_map(base + page * 4096ULL, first + page * 4096ULL, attributes, 3) != 0)
+            return 0;
     }
     used += (unsigned)pages;
     return base + (physical & 0xFFFULL);

@@ -19,11 +19,11 @@
 #include <tunix/vt.h>
 #include <uapi/input_event.h>
 
-#define EFAULT 14
-#define EINVAL 22
-#define ENOSPC 28
-#define EIO 5
-#define EAGAIN 11
+#define EFAULT      14
+#define EINVAL      22
+#define ENOSPC      28
+#define EIO         5
+#define EAGAIN      11
 #define RTC_RD_TIME 0x80247009UL
 
 struct linux_rtc_time {
@@ -43,8 +43,7 @@ static int always_ready(struct vfs_node *node) {
     return 1;
 }
 
-static int64_t null_read(struct vfs_node *node, uint64_t offset,
-                         size_t size, void *buffer) {
+static int64_t null_read(struct vfs_node *node, uint64_t offset, size_t size, void *buffer) {
     (void)node;
     (void)offset;
     (void)size;
@@ -52,16 +51,15 @@ static int64_t null_read(struct vfs_node *node, uint64_t offset,
     return 0;
 }
 
-static int64_t discard_write(struct vfs_node *node, uint64_t offset,
-                             size_t size, const void *buffer) {
+static int64_t discard_write(struct vfs_node *node, uint64_t offset, size_t size,
+                             const void *buffer) {
     (void)node;
     (void)offset;
     (void)buffer;
     return (int64_t)size;
 }
 
-static int64_t zero_read(struct vfs_node *node, uint64_t offset,
-                         size_t size, void *buffer) {
+static int64_t zero_read(struct vfs_node *node, uint64_t offset, size_t size, void *buffer) {
     (void)node;
     (void)offset;
     if (!buffer) return -1;
@@ -69,8 +67,7 @@ static int64_t zero_read(struct vfs_node *node, uint64_t offset,
     return (int64_t)size;
 }
 
-static int64_t full_write(struct vfs_node *node, uint64_t offset,
-                          size_t size, const void *buffer) {
+static int64_t full_write(struct vfs_node *node, uint64_t offset, size_t size, const void *buffer) {
     (void)node;
     (void)offset;
     (void)size;
@@ -78,8 +75,7 @@ static int64_t full_write(struct vfs_node *node, uint64_t offset,
     return -ENOSPC;
 }
 
-static int64_t random_read(struct vfs_node *node, uint64_t offset,
-                           size_t size, void *buffer) {
+static int64_t random_read(struct vfs_node *node, uint64_t offset, size_t size, void *buffer) {
     (void)node;
     (void)offset;
     if (!buffer) return -1;
@@ -87,8 +83,8 @@ static int64_t random_read(struct vfs_node *node, uint64_t offset,
     return (int64_t)size;
 }
 
-static int64_t random_write(struct vfs_node *node, uint64_t offset,
-                            size_t size, const void *buffer) {
+static int64_t random_write(struct vfs_node *node, uint64_t offset, size_t size,
+                            const void *buffer) {
     (void)node;
     (void)offset;
     if (!buffer) return -1;
@@ -101,14 +97,12 @@ static int random_ready(struct vfs_node *node) {
     return random_is_seeded();
 }
 
-static int64_t kmsg_read(struct vfs_node *node, uint64_t offset,
-                         size_t size, void *buffer) {
+static int64_t kmsg_read(struct vfs_node *node, uint64_t offset, size_t size, void *buffer) {
     (void)node;
     return klog_read(offset, size, buffer);
 }
 
-static int64_t kmsg_write(struct vfs_node *node, uint64_t offset,
-                          size_t size, const void *buffer) {
+static int64_t kmsg_write(struct vfs_node *node, uint64_t offset, size_t size, const void *buffer) {
     (void)node;
     (void)offset;
     return klog_write(size, buffer);
@@ -119,8 +113,7 @@ static int kmsg_ready(struct vfs_node *node) {
     return klog_size() != 0;
 }
 
-static int64_t rtc_read(struct vfs_node *node, uint64_t offset,
-                        size_t size, void *buffer) {
+static int64_t rtc_read(struct vfs_node *node, uint64_t offset, size_t size, void *buffer) {
     (void)node;
     uint64_t epoch = time_epoch_seconds();
     if (!buffer || offset >= sizeof(epoch)) return 0;
@@ -130,24 +123,21 @@ static int64_t rtc_read(struct vfs_node *node, uint64_t offset,
     return (int64_t)size;
 }
 
-static int64_t rtc_ioctl(struct vfs_node *node, unsigned long request,
-                         uint64_t user_argument) {
+static int64_t rtc_ioctl(struct vfs_node *node, unsigned long request, uint64_t user_argument) {
     (void)node;
     if (request != RTC_RD_TIME) return -EINVAL;
     if (!user_argument) return -EFAULT;
     struct tunix_rtc_time now;
     if (time_get_rtc(&now) != 0) return -EIO;
-    struct linux_rtc_time value = {
-        .tm_sec = now.second,
-        .tm_min = now.minute,
-        .tm_hour = now.hour,
-        .tm_mday = now.day,
-        .tm_mon = now.month - 1,
-        .tm_year = now.year - 1900,
-        .tm_wday = now.weekday,
-        .tm_yday = now.yearday,
-        .tm_isdst = 0
-    };
+    struct linux_rtc_time value = {.tm_sec = now.second,
+                                   .tm_min = now.minute,
+                                   .tm_hour = now.hour,
+                                   .tm_mday = now.day,
+                                   .tm_mon = now.month - 1,
+                                   .tm_year = now.year - 1900,
+                                   .tm_wday = now.weekday,
+                                   .tm_yday = now.yearday,
+                                   .tm_isdst = 0};
     return copy_to_user(user_argument, &value, sizeof(value)) == 0 ? 0 : -EFAULT;
 }
 
@@ -155,20 +145,15 @@ static const struct block_device *disk_of(const struct vfs_node *node) {
     return block_device_at(block_device_index_by_name(node->name));
 }
 
-static int64_t disk_read(struct vfs_node *node, uint64_t offset,
-                         size_t size, void *buffer) {
-    return block_device_read_bytes(disk_of(node), offset, size, buffer) == 0
-        ? (int64_t)size : -1;
+static int64_t disk_read(struct vfs_node *node, uint64_t offset, size_t size, void *buffer) {
+    return block_device_read_bytes(disk_of(node), offset, size, buffer) == 0 ? (int64_t)size : -1;
 }
 
-static int64_t disk_write(struct vfs_node *node, uint64_t offset,
-                          size_t size, const void *buffer) {
-    return block_device_write_bytes(disk_of(node), offset, size, buffer) == 0
-        ? (int64_t)size : -1;
+static int64_t disk_write(struct vfs_node *node, uint64_t offset, size_t size, const void *buffer) {
+    return block_device_write_bytes(disk_of(node), offset, size, buffer) == 0 ? (int64_t)size : -1;
 }
 
-static int64_t keyboard_read(struct vfs_node *node, uint64_t offset,
-                             size_t size, void *buffer) {
+static int64_t keyboard_read(struct vfs_node *node, uint64_t offset, size_t size, void *buffer) {
     (void)node;
     (void)offset;
     return input_read_scancodes(size, buffer);
@@ -200,9 +185,8 @@ static int64_t input_event_ioctl(struct vfs_node *node, unsigned long request,
     return copy_to_user(user_argument, &info, sizeof(info)) == 0 ? 0 : -EFAULT;
 }
 
-static struct vfs_node *attach_terminal(struct vfs_node *dev, const char *name,
-                                        unsigned index, uint32_t major,
-                                        uint32_t minor) {
+static struct vfs_node *attach_terminal(struct vfs_node *dev, const char *name, unsigned index,
+                                        uint32_t major, uint32_t minor) {
     struct vfs_node *node = vfs_alloc_node(name, VFS_CHARDEVICE);
     if (!node) return NULL;
     node->mode = 0666;
@@ -218,9 +202,8 @@ static struct vfs_node *attach_terminal(struct vfs_node *dev, const char *name,
     return node;
 }
 
-static struct vfs_node *attach_device(struct vfs_node *dev, const char *name,
-                                      uint32_t flags, uint32_t mode,
-                                      vfs_read_fn read, vfs_write_fn write,
+static struct vfs_node *attach_device(struct vfs_node *dev, const char *name, uint32_t flags,
+                                      uint32_t mode, vfs_read_fn read, vfs_write_fn write,
                                       vfs_ready_fn ready) {
     struct vfs_node *node = vfs_alloc_node(name, flags);
     if (!node) return NULL;
@@ -236,8 +219,8 @@ void devfs_add_block(int index) {
     const struct block_device *device = block_device_at(index);
     struct vfs_node *dev = vfs_lookup("/dev");
     if (!device || !dev || vfs_find_entry(dev, device->dev_name)) return;
-    struct vfs_node *disk = attach_device(dev, device->dev_name, VFS_BLOCKDEVICE, 0660,
-                                          disk_read, device->write ? disk_write : NULL, NULL);
+    struct vfs_node *disk = attach_device(dev, device->dev_name, VFS_BLOCKDEVICE, 0660, disk_read,
+                                          device->write ? disk_write : NULL, NULL);
     if (!disk) return;
     disk->length = device->sectors * BLOCK_SECTOR_SIZE;
     disk->gid = DEV_GROUP_DISK;
@@ -247,8 +230,8 @@ void devfs_publish_sound(void) {
     struct vfs_node *snd = vfs_mkdir_p("/dev/snd");
     if (!snd) return;
 
-    struct vfs_node *control = attach_device(snd, "controlC0",
-        VFS_CHARDEVICE, 0660, NULL, NULL, NULL);
+    struct vfs_node *control =
+        attach_device(snd, "controlC0", VFS_CHARDEVICE, 0660, NULL, NULL, NULL);
     if (control) {
         control->dev_major = DEV_MAJOR_SOUND;
         control->dev_minor = DEV_MINOR_SOUND_CONTROL;
@@ -256,8 +239,8 @@ void devfs_publish_sound(void) {
         control->gid = DEV_GROUP_AUDIO;
     }
 
-    struct vfs_node *playback = attach_device(snd, "pcmC0D0p",
-        VFS_CHARDEVICE, 0660, NULL, sound_pcm_write, NULL);
+    struct vfs_node *playback =
+        attach_device(snd, "pcmC0D0p", VFS_CHARDEVICE, 0660, NULL, sound_pcm_write, NULL);
     if (playback) {
         playback->dev_major = DEV_MAJOR_SOUND;
         playback->dev_minor = DEV_MINOR_SOUND_PCM_PLAYBACK;
@@ -286,11 +269,12 @@ void devfs_init(void) {
     (void)attach_terminal(dev, "console", VT_NODE_ACTIVE, DEV_MAJOR_TTYAUX,
                           DEV_MINOR_TTYAUX_CONSOLE);
     (void)attach_terminal(dev, "tty0", VT_NODE_ACTIVE, DEV_MAJOR_TTY, 0);
-    (void)attach_terminal(dev, "tty", VT_NODE_CURRENT, DEV_MAJOR_TTYAUX,
-                          DEV_MINOR_TTYAUX_CURRENT);
+    (void)attach_terminal(dev, "tty", VT_NODE_CURRENT, DEV_MAJOR_TTYAUX, DEV_MINOR_TTYAUX_CURRENT);
     for (unsigned index = 1U; index <= VT_COUNT; index++) {
         char name[8];
-        name[0] = 't'; name[1] = 't'; name[2] = 'y';
+        name[0] = 't';
+        name[1] = 't';
+        name[2] = 'y';
         if (index < 10U) {
             name[3] = (char)('0' + index);
             name[4] = 0;
@@ -303,30 +287,29 @@ void devfs_init(void) {
     }
 
     struct vfs_node *stateless[3];
-    stateless[0] = attach_device(dev, "null", VFS_CHARDEVICE, 0666,
-                                 null_read, discard_write, always_ready);
-    stateless[1] = attach_device(dev, "zero", VFS_CHARDEVICE, 0666,
-                                 zero_read, discard_write, always_ready);
-    stateless[2] = attach_device(dev, "full", VFS_CHARDEVICE, 0666,
-                                 zero_read, full_write, always_ready);
+    stateless[0] =
+        attach_device(dev, "null", VFS_CHARDEVICE, 0666, null_read, discard_write, always_ready);
+    stateless[1] =
+        attach_device(dev, "zero", VFS_CHARDEVICE, 0666, zero_read, discard_write, always_ready);
+    stateless[2] =
+        attach_device(dev, "full", VFS_CHARDEVICE, 0666, zero_read, full_write, always_ready);
     for (unsigned index = 0; index < 3U; index++)
         if (stateless[index]) stateless[index]->stateless = 1U;
-    (void)attach_device(dev, "random", VFS_CHARDEVICE, 0666,
-                        random_read, random_write, random_ready);
-    (void)attach_device(dev, "urandom", VFS_CHARDEVICE, 0666,
-                        random_read, random_write, random_ready);
-    (void)attach_device(dev, "kmsg", VFS_CHARDEVICE, 0600,
-                        kmsg_read, kmsg_write, kmsg_ready);
+    (void)attach_device(dev, "random", VFS_CHARDEVICE, 0666, random_read, random_write,
+                        random_ready);
+    (void)attach_device(dev, "urandom", VFS_CHARDEVICE, 0666, random_read, random_write,
+                        random_ready);
+    (void)attach_device(dev, "kmsg", VFS_CHARDEVICE, 0600, kmsg_read, kmsg_write, kmsg_ready);
 
-    struct vfs_node *rtc = attach_device(dev, "rtc", VFS_CHARDEVICE, 0660,
-                                         rtc_read, NULL, always_ready);
+    struct vfs_node *rtc =
+        attach_device(dev, "rtc", VFS_CHARDEVICE, 0660, rtc_read, NULL, always_ready);
     if (rtc) rtc->ioctl = rtc_ioctl;
 
     for (int index = 0; index < block_device_count(); index++) devfs_add_block(index);
 
     if (framebuffer_available()) {
-        struct vfs_node *fb = attach_device(dev, "fb0",
-            VFS_CHARDEVICE | VFS_FRAMEBUFFER, 0660, NULL, NULL, always_ready);
+        struct vfs_node *fb = attach_device(dev, "fb0", VFS_CHARDEVICE | VFS_FRAMEBUFFER, 0660,
+                                            NULL, NULL, always_ready);
         if (fb) {
             fb->length = framebuffer_byte_length();
             fb->mmap = framebuffer_device_mmap;
@@ -338,9 +321,8 @@ void devfs_init(void) {
     if (drm_available()) {
         struct vfs_node *dri = vfs_mkdir_p("/dev/dri");
         if (dri) {
-            struct vfs_node *card = attach_device(dri, "card0", VFS_CHARDEVICE,
-                                                  0660, drm_device_read, NULL,
-                                                  drm_device_read_ready);
+            struct vfs_node *card = attach_device(dri, "card0", VFS_CHARDEVICE, 0660,
+                                                  drm_device_read, NULL, drm_device_read_ready);
             if (card) {
                 card->dev_major = DEV_MAJOR_DRM;
                 card->dev_minor = DEV_MINOR_DRM_CARD0;
@@ -352,10 +334,9 @@ void devfs_init(void) {
             }
 
             if (virtgpu_virgl_available()) {
-                struct vfs_node *render = attach_device(dri, "renderD128",
-                                                        VFS_CHARDEVICE, 0666,
-                                                        drm_device_read, NULL,
-                                                        drm_device_read_ready);
+                struct vfs_node *render =
+                    attach_device(dri, "renderD128", VFS_CHARDEVICE, 0666, drm_device_read, NULL,
+                                  drm_device_read_ready);
                 if (render) {
                     render->dev_major = DEV_MAJOR_DRM;
                     render->dev_minor = DEV_MINOR_DRM_RENDER0;
@@ -378,8 +359,8 @@ void devfs_init(void) {
             keyboard->close = keyboard_close;
         }
 
-        struct vfs_node *event0 = attach_device(input, "event0",
-            VFS_CHARDEVICE | VFS_INPUTDEVICE, 0660, NULL, NULL, NULL);
+        struct vfs_node *event0 = attach_device(input, "event0", VFS_CHARDEVICE | VFS_INPUTDEVICE,
+                                                0660, NULL, NULL, NULL);
         if (event0) {
             event0->data = (void *)(uintptr_t)TUNIX_INPUT_DEVICE_KEYBOARD;
             event0->ioctl = input_event_ioctl;
@@ -388,8 +369,8 @@ void devfs_init(void) {
             event0->gid = DEV_GROUP_INPUT;
         }
 
-        struct vfs_node *event1 = attach_device(input, "event1",
-            VFS_CHARDEVICE | VFS_INPUTDEVICE, 0660, NULL, NULL, NULL);
+        struct vfs_node *event1 = attach_device(input, "event1", VFS_CHARDEVICE | VFS_INPUTDEVICE,
+                                                0660, NULL, NULL, NULL);
         if (event1) {
             event1->data = (void *)(uintptr_t)TUNIX_INPUT_DEVICE_MOUSE;
             event1->ioctl = input_event_ioctl;
@@ -397,8 +378,8 @@ void devfs_init(void) {
             event1->dev_minor = DEV_MINOR_INPUT_EVENT_BASE + 1U;
             event1->gid = DEV_GROUP_INPUT;
         }
-        struct vfs_node *event2 = attach_device(input, "event2",
-            VFS_CHARDEVICE | VFS_INPUTDEVICE, 0660, NULL, NULL, NULL);
+        struct vfs_node *event2 = attach_device(input, "event2", VFS_CHARDEVICE | VFS_INPUTDEVICE,
+                                                0660, NULL, NULL, NULL);
         if (event2) {
             event2->data = (void *)(uintptr_t)TUNIX_INPUT_DEVICE_TABLET;
             event2->ioctl = input_event_ioctl;

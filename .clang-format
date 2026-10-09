@@ -1,0 +1,22 @@
+BasedOnStyle: LLVM
+IndentWidth: 4
+ColumnLimit: 100
+PointerAlignment: Right
+IndentCaseLabels: false
+AllowShortIfStatementsOnASingleLine: AllIfsAndElse
+AllowShortLoopsOnASingleLine: true
+AllowShortFunctionsOnASingleLine: All
+AllowShortBlocksOnASingleLine: Always
+AllowShortCaseLabelsOnASingleLine: true
+AlignConsecutiveShortCaseStatements:
+  Enabled: true
+AlignConsecutiveMacros: Consecutive
+AlignEscapedNewlines: DontAlign
+AlignTrailingComments: false
+AlignOperands: DontAlign
+AlignArrayOfStructures: None
+BreakStringLiterals: false
+ReflowComments: false
+SortIncludes: Never
+IncludeBlocks: Preserve
+SpaceBeforeParens: ControlStatements

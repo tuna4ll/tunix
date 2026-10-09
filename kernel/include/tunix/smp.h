@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#define SMP_TIMER_VECTOR 0xF0U
+#define SMP_TIMER_VECTOR      0xF0U
 #define SMP_INVALIDATE_VECTOR 0xF1U
 #define SMP_RESCHEDULE_VECTOR 0xF2U
 

@@ -25,14 +25,14 @@
 #define VFS_MOUNTPOINT  0x20000U
 #define VFS_EVENTSTREAM 0x40000U
 
-#define VFS_MS_RDONLY   0x0001U
-#define VFS_MS_NOSUID   0x0002U
-#define VFS_MS_NODEV    0x0004U
-#define VFS_MS_NOEXEC   0x0008U
-#define VFS_MS_REMOUNT  0x0020U
-#define VFS_MS_BIND     0x1000U
-#define VFS_MS_SUPPORTED (VFS_MS_RDONLY | VFS_MS_NOSUID | VFS_MS_NODEV | \
-                          VFS_MS_NOEXEC | VFS_MS_REMOUNT | VFS_MS_BIND)
+#define VFS_MS_RDONLY  0x0001U
+#define VFS_MS_NOSUID  0x0002U
+#define VFS_MS_NODEV   0x0004U
+#define VFS_MS_NOEXEC  0x0008U
+#define VFS_MS_REMOUNT 0x0020U
+#define VFS_MS_BIND    0x1000U
+#define VFS_MS_SUPPORTED \
+    (VFS_MS_RDONLY | VFS_MS_NOSUID | VFS_MS_NODEV | VFS_MS_NOEXEC | VFS_MS_REMOUNT | VFS_MS_BIND)
 #define VFS_MS_SYNCHRONOUS 0x00000010U
 #define VFS_MS_MANDLOCK    0x00000040U
 #define VFS_MS_DIRSYNC     0x00000080U
@@ -44,10 +44,10 @@
 #define VFS_MS_RELATIME    0x00200000U
 #define VFS_MS_STRICTATIME 0x01000000U
 #define VFS_MS_LAZYTIME    0x02000000U
-#define VFS_MS_IGNORED (VFS_MS_SYNCHRONOUS | VFS_MS_MANDLOCK | VFS_MS_DIRSYNC | \
-                        VFS_MS_NOSYMFOLLOW | VFS_MS_NOATIME | VFS_MS_NODIRATIME | \
-                        VFS_MS_SILENT | VFS_MS_POSIXACL | VFS_MS_RELATIME | \
-                        VFS_MS_STRICTATIME | VFS_MS_LAZYTIME)
+#define VFS_MS_IGNORED \
+    (VFS_MS_SYNCHRONOUS | VFS_MS_MANDLOCK | VFS_MS_DIRSYNC | VFS_MS_NOSYMFOLLOW | VFS_MS_NOATIME | \
+     VFS_MS_NODIRATIME | VFS_MS_SILENT | VFS_MS_POSIXACL | VFS_MS_RELATIME | VFS_MS_STRICTATIME | \
+     VFS_MS_LAZYTIME)
 
 struct vfs_node;
 struct vfs_acl;
@@ -61,8 +61,8 @@ typedef int64_t (*vfs_file_ioctl_fn)(struct file *, unsigned long, uint64_t);
 typedef int (*vfs_ready_fn)(struct vfs_node *);
 typedef void (*vfs_open_fn)(struct vfs_node *);
 typedef void (*vfs_close_fn)(struct vfs_node *);
-typedef int64_t (*vfs_mmap_fn)(struct vfs_node *, struct file *, uint64_t,
-                               uint64_t, uint64_t, uint64_t, uint64_t);
+typedef int64_t (*vfs_mmap_fn)(struct vfs_node *, struct file *, uint64_t, uint64_t, uint64_t,
+                               uint64_t, uint64_t);
 
 struct vfs_page_map {
     uint64_t count;
@@ -165,8 +165,8 @@ struct vfs_mount {
     struct vfs_mount *next;
 };
 
-int vfs_mount(const char *source, const char *target, const char *type,
-              uint32_t flags, const char *options);
+int vfs_mount(const char *source, const char *target, const char *type, uint32_t flags,
+              const char *options);
 void vfs_notify(struct vfs_node *node);
 int vfs_umount(const char *target, int detach);
 void vfs_mount_builtin(const char *source, const char *target, const char *type,
@@ -176,8 +176,7 @@ const struct vfs_mount *vfs_mounts(void);
 struct vfs_persist_ops {
     void (*created)(struct vfs_node *node);
     void (*removed)(struct vfs_node *node);
-    void (*moved)(struct vfs_node *node, struct vfs_node *old_parent,
-                  const char *old_name);
+    void (*moved)(struct vfs_node *node, struct vfs_node *old_parent, const char *old_name);
     void (*truncated)(struct vfs_node *node);
     void (*meta_changed)(struct vfs_node *node);
     void (*linked)(struct vfs_node *link);
@@ -254,16 +253,14 @@ struct vfs_node *vfs_attach_link(struct vfs_node *parent, const char *name,
 struct vfs_node *vfs_lookup(const char *path);
 struct vfs_node *vfs_lookup_nofollow(const char *path);
 struct vfs_node *vfs_mkdir_p(const char *path);
-struct vfs_node *vfs_create_file(const char *path, const void *data,
-                                 uint64_t length, uint32_t flags, int copy_data);
+struct vfs_node *vfs_create_file(const char *path, const void *data, uint64_t length,
+                                 uint32_t flags, int copy_data);
 struct vfs_node *vfs_create_file_node(const char *path, uint32_t mode);
 struct vfs_node *vfs_create_directory(const char *path, uint32_t mode);
 struct vfs_node *vfs_create_fifo(const char *path, uint32_t mode);
 struct vfs_node *vfs_create_socket_node(const char *path, uint32_t mode);
-struct vfs_node *vfs_create_symlink(const char *path, const char *target,
-                                    uint32_t flags);
-struct vfs_node *vfs_attach_symlink(struct vfs_node *parent, const char *name,
-                                    const char *target);
+struct vfs_node *vfs_create_symlink(const char *path, const char *target, uint32_t flags);
+struct vfs_node *vfs_attach_symlink(struct vfs_node *parent, const char *name, const char *target);
 int vfs_detach_child(struct vfs_node *parent, struct vfs_node *node);
 int64_t vfs_readlink(struct vfs_node *node, void *buffer, size_t size);
 int vfs_remove(const char *path, int remove_directory);

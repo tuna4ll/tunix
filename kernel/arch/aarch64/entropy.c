@@ -37,20 +37,24 @@ size_t arch_entropy_collect(uint64_t *values, size_t room) {
     for (unsigned i = 0; i < 8 && count < room; i++) {
         uint64_t value;
         for (unsigned retry = 0; retry < 32U; retry++) {
-            if (get_rndrrs(&value)) { values[count++] = value; break; }
+            if (get_rndrrs(&value)) {
+                values[count++] = value;
+                break;
+            }
             cpu_relax();
         }
     }
     for (unsigned i = 0; i < 8 && count < room; i++) {
         uint64_t value;
         for (unsigned retry = 0; retry < 16U; retry++) {
-            if (get_rndr(&value)) { values[count++] = value; break; }
+            if (get_rndr(&value)) {
+                values[count++] = value;
+                break;
+            }
             cpu_relax();
         }
     }
     return count;
 }
 
-uint64_t arch_entropy_noise(void) {
-    return cpu_counter();
-}
+uint64_t arch_entropy_noise(void) { return cpu_counter(); }

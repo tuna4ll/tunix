@@ -17,14 +17,14 @@ static void epoll_guard_release(int *unused) {
 #define EPOLL_LOCKED \
     __attribute__((cleanup(epoll_guard_release))) int epoll_guard = (lock_acquire(&epoll_lock), 0)
 
-#define EEXIST 17
-#define EINVAL 22
-#define ENOENT 2
-#define ENOSPC 28
-#define EPOLLONESHOT (1U << 30)
-#define EPOLLET (1U << 31)
-#define EPOLLERR 0x008U
-#define EPOLLHUP 0x010U
+#define EEXIST        17
+#define EINVAL        22
+#define ENOENT        2
+#define ENOSPC        28
+#define EPOLLONESHOT  (1U << 30)
+#define EPOLLET       (1U << 31)
+#define EPOLLERR      0x008U
+#define EPOLLHUP      0x010U
 #define EPOLL_BUCKETS 64U
 
 struct epoll_entry {
@@ -48,12 +48,9 @@ struct epoll_context {
     int buckets[EPOLL_BUCKETS];
 };
 
-static unsigned fd_bucket(int fd) {
-    return (unsigned)fd % EPOLL_BUCKETS;
-}
+static unsigned fd_bucket(int fd) { return (unsigned)fd % EPOLL_BUCKETS; }
 
-static struct epoll_entry *find_entry(struct epoll_context *context, int fd,
-                                      struct file *file) {
+static struct epoll_entry *find_entry(struct epoll_context *context, int fd, struct file *file) {
     if (!context || !file) return NULL;
     for (int index = context->buckets[fd_bucket(fd)]; index >= 0;
          index = context->entries[index].hash_next) {
@@ -80,7 +77,7 @@ static int entry_fresh(const struct epoll_entry *entry, uint32_t occurred) {
     if (!occurred) return 0;
     if (!(entry->events & EPOLLET)) return 1;
     return (occurred & ~entry->edge_seen) != 0 ||
-           entry->file->edge_generation != entry->edge_generation;
+        entry->file->edge_generation != entry->edge_generation;
 }
 
 struct epoll_context *epoll_create(void) {
@@ -174,8 +171,8 @@ int epoll_ctl_del(struct epoll_context *context, int fd, struct file *file) {
     return 0;
 }
 
-int epoll_collect(struct epoll_context *context,
-                  struct tunix_epoll_event *events, int maximum, unsigned depth) {
+int epoll_collect(struct epoll_context *context, struct tunix_epoll_event *events, int maximum,
+                  unsigned depth) {
     EPOLL_LOCKED;
     if (!context || !events || maximum <= 0) return -EINVAL;
     if (depth >= EPOLL_MAX_NESTING) return 0;

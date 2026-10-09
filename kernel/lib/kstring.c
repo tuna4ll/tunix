@@ -6,20 +6,14 @@
 
 void *memset(void *dst, int value, size_t count) {
     void *out = dst;
-    __asm__ volatile("rep stosb"
-                     : "+D"(out), "+c"(count)
-                     : "a"((uint8_t)value)
-                     : "memory");
+    __asm__ volatile("rep stosb" : "+D"(out), "+c"(count) : "a"((uint8_t)value) : "memory");
     return dst;
 }
 
 void *memcpy(void *dst, const void *src, size_t count) {
     void *out = dst;
     const void *in = src;
-    __asm__ volatile("rep movsb"
-                     : "+D"(out), "+S"(in), "+c"(count)
-                     :
-                     : "memory");
+    __asm__ volatile("rep movsb" : "+D"(out), "+S"(in), "+c"(count) : : "memory");
     return dst;
 }
 
@@ -70,7 +64,10 @@ size_t strlen(const char *str) {
 }
 
 int strcmp(const char *a, const char *b) {
-    while (*a && *a == *b) { a++; b++; }
+    while (*a && *a == *b) {
+        a++;
+        b++;
+    }
     return (unsigned char)*a - (unsigned char)*b;
 }
 
@@ -83,7 +80,11 @@ int memcmp(const void *a, const void *b, size_t count) {
 }
 
 int strncmp(const char *a, const char *b, size_t count) {
-    while (count && *a && *a == *b) { a++; b++; count--; }
+    while (count && *a && *a == *b) {
+        a++;
+        b++;
+        count--;
+    }
     if (!count) return 0;
     return (unsigned char)*a - (unsigned char)*b;
 }

@@ -33,8 +33,7 @@ struct signalfd_siginfo {
     uint8_t __pad[28];
 };
 
-typedef char signalfd_siginfo_size_check[
-    (sizeof(struct signalfd_siginfo) == 128) ? 1 : -1];
+typedef char signalfd_siginfo_size_check[(sizeof(struct signalfd_siginfo) == 128) ? 1 : -1];
 
 struct signalfd_context {
     uint64_t mask;
@@ -46,16 +45,13 @@ static uint64_t signal_bit(int signal_number) {
 }
 
 struct signalfd_context *signalfd_create(uint64_t mask) {
-    struct signalfd_context *context =
-        (struct signalfd_context *)kmalloc(sizeof(*context));
+    struct signalfd_context *context = (struct signalfd_context *)kmalloc(sizeof(*context));
     if (!context) return NULL;
     context->mask = mask;
     return context;
 }
 
-void signalfd_destroy(struct signalfd_context *context) {
-    kfree(context);
-}
+void signalfd_destroy(struct signalfd_context *context) { kfree(context); }
 
 void signalfd_set_mask(struct signalfd_context *context, uint64_t mask) {
     if (context) context->mask = mask;
@@ -66,7 +62,7 @@ static uint64_t available_signals(struct signalfd_context *context) {
     if (!context || !process) return 0;
     uint64_t undeliverable = signal_bit(9) | signal_bit(19);
     return __atomic_load_n(&process->signal_pending, __ATOMIC_ACQUIRE) & context->mask &
-           ~undeliverable;
+        ~undeliverable;
 }
 
 int signalfd_read_ready(struct signalfd_context *context) {

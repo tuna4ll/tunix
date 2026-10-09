@@ -8,15 +8,14 @@
 
 typedef void (*irq_handler_fn)(void *context);
 
-unsigned irq_request(const char *name, const char *kind, irq_handler_fn handler,
-                     void *context);
+unsigned irq_request(const char *name, const char *kind, irq_handler_fn handler, void *context);
 
 int irq_dispatch(unsigned vector);
 
 void irq_release(unsigned vector);
 
-int irq_describe(unsigned slot, unsigned *vector, uint64_t *count,
-                 const char **name, const char **kind);
+int irq_describe(unsigned slot, unsigned *vector, uint64_t *count, const char **name,
+                 const char **kind);
 
 uint64_t irq_total(void);
 

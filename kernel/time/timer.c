@@ -12,7 +12,7 @@
 #include <tunix/vt.h>
 
 #define TIMER_PERIOD_NS (1000000000ULL / TIMER_FREQUENCY_HZ)
-#define TIMER_IDLE_NS 1000000000ULL
+#define TIMER_IDLE_NS   1000000000ULL
 
 static volatile uint64_t ticks;
 
@@ -25,8 +25,7 @@ void timer_irq(struct interrupt_frame *frame) {
     ticks++;
     vt_poll_from_tick();
     net_tick();
-    if ((ticks % (TIMER_FREQUENCY_HZ / 30U)) == 0U && vt_console_in_front())
-        drm_console_present();
+    if ((ticks % (TIMER_FREQUENCY_HZ / 30U)) == 0U && vt_console_in_front()) drm_console_present();
     sound_tick();
     io_poll_tick();
     process_wake_io();
@@ -34,13 +33,11 @@ void timer_irq(struct interrupt_frame *frame) {
     process_timer_interrupt(frame);
 }
 
-uint64_t timer_ticks(void) {
-    return ticks;
-}
+uint64_t timer_ticks(void) { return ticks; }
 
 static void program(struct cpu *cpu, uint64_t now) {
-    uint64_t when = cpu->timer_deadline_ns < cpu->timer_next_tick_ns
-                        ? cpu->timer_deadline_ns : cpu->timer_next_tick_ns;
+    uint64_t when = cpu->timer_deadline_ns < cpu->timer_next_tick_ns ? cpu->timer_deadline_ns
+                                                                     : cpu->timer_next_tick_ns;
     if (when == UINT64_MAX) when = now + TIMER_IDLE_NS;
     cpu->timer_programmed_ns = when;
     arch_local_timer_program(when > now ? when - now : 0);

@@ -85,8 +85,8 @@ static void text_signed(struct text_buffer *buffer, int64_t value) {
     }
 }
 
-static int64_t text_read(const struct text_buffer *text, uint64_t offset,
-                         size_t size, void *output) {
+static int64_t text_read(const struct text_buffer *text, uint64_t offset, size_t size,
+                         void *output) {
     if (!output || offset >= text->length) return 0;
     size_t available = text->length - (size_t)offset;
     if (size > available) size = available;
@@ -94,8 +94,8 @@ static int64_t text_read(const struct text_buffer *text, uint64_t offset,
     return (int64_t)size;
 }
 
-static int64_t proc_cpuinfo_read(struct vfs_node *node, uint64_t offset,
-                                 size_t size, void *output) {
+static int64_t proc_cpuinfo_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
     (void)node;
     TEXT_BUFFER text = {0};
     struct cpu_identity identity;
@@ -106,9 +106,15 @@ static int64_t proc_cpuinfo_read(struct vfs_node *node, uint64_t offset,
 
     unsigned cpus = smp_cpu_count();
     for (unsigned index = 0; index < cpus; index++) {
-        text_string(&text, "processor\t: "); text_unsigned(&text, index); text_char(&text, '\n');
-        text_string(&text, "vendor_id\t: "); text_string(&text, vendor); text_char(&text, '\n');
-        text_string(&text, "model name\t: "); text_string(&text, model); text_char(&text, '\n');
+        text_string(&text, "processor\t: ");
+        text_unsigned(&text, index);
+        text_char(&text, '\n');
+        text_string(&text, "vendor_id\t: ");
+        text_string(&text, vendor);
+        text_char(&text, '\n');
+        text_string(&text, "model name\t: ");
+        text_string(&text, model);
+        text_char(&text, '\n');
         text_string(&text, "cpu MHz\t\t: ");
         text_unsigned(&text, frequency / 1000000ULL);
         text_char(&text, '.');
@@ -117,50 +123,71 @@ static int64_t proc_cpuinfo_read(struct vfs_node *node, uint64_t offset,
         if (fraction < 10) text_char(&text, '0');
         text_unsigned(&text, fraction);
         text_char(&text, '\n');
-        text_string(&text, "cpu cores\t: "); text_unsigned(&text, cpus); text_char(&text, '\n');
+        text_string(&text, "cpu cores\t: ");
+        text_unsigned(&text, cpus);
+        text_char(&text, '\n');
         text_string(&text, "address sizes\t: 48 bits virtual\n");
 #if defined(__x86_64__)
-        text_string(&text, "flags\t\t: fpu tsc msr pae apic mtrr cmov pat mmx fxsr sse sse2 syscall nx lm\n");
+        text_string(
+            &text,
+            "flags\t\t: fpu tsc msr pae apic mtrr cmov pat mmx fxsr sse sse2 syscall nx lm\n");
 #elif defined(__aarch64__)
         char features[256];
         (void)arch_hwcap_names(features, sizeof(features));
-        text_string(&text, "Features\t: "); text_string(&text, features); text_char(&text, '\n');
+        text_string(&text, "Features\t: ");
+        text_string(&text, features);
+        text_char(&text, '\n');
 #endif
         text_char(&text, '\n');
     }
     return text_read(&text, offset, size, output);
 }
 
-static int64_t proc_meminfo_read(struct vfs_node *node, uint64_t offset,
-                                 size_t size, void *output) {
+static int64_t proc_meminfo_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
     (void)node;
     TEXT_BUFFER text = {0};
     uint64_t total = pmm_usable_page_count() * 4ULL;
     uint64_t free = pmm_free_page_count() * 4ULL;
     uint64_t used = total >= free ? total - free : 0;
 
-    text_string(&text, "MemTotal:       "); text_unsigned(&text, total); text_string(&text, " kB\n");
-    text_string(&text, "MemFree:        "); text_unsigned(&text, free); text_string(&text, " kB\n");
-    text_string(&text, "MemAvailable:   "); text_unsigned(&text, free); text_string(&text, " kB\n");
-    text_string(&text, "MemUsed:        "); text_unsigned(&text, used); text_string(&text, " kB\n");
+    text_string(&text, "MemTotal:       ");
+    text_unsigned(&text, total);
+    text_string(&text, " kB\n");
+    text_string(&text, "MemFree:        ");
+    text_unsigned(&text, free);
+    text_string(&text, " kB\n");
+    text_string(&text, "MemAvailable:   ");
+    text_unsigned(&text, free);
+    text_string(&text, " kB\n");
+    text_string(&text, "MemUsed:        ");
+    text_unsigned(&text, used);
+    text_string(&text, " kB\n");
     text_string(&text, "Buffers:        0 kB\nCached:         0 kB\n");
     text_string(&text, "SwapTotal:      0 kB\nSwapFree:       0 kB\n");
     text_string(&text, "Shmem:          0 kB\nSReclaimable:   0 kB\n");
-    text_string(&text, "Dirty:          "); text_unsigned(&text, vfs_dirty_pages() * 4U);
+    text_string(&text, "Dirty:          ");
+    text_unsigned(&text, vfs_dirty_pages() * 4U);
     text_string(&text, " kB\n");
 
     uint64_t heap_reserved = 0;
     uint64_t heap_allocated = 0;
     uint64_t heap_limit = 0;
     heap_stats(&heap_reserved, &heap_allocated, &heap_limit);
-    text_string(&text, "Slab:           "); text_unsigned(&text, heap_allocated / 1024ULL); text_string(&text, " kB\n");
-    text_string(&text, "SUnreclaim:     "); text_unsigned(&text, heap_reserved / 1024ULL); text_string(&text, " kB\n");
-    text_string(&text, "KernelHeapMax:  "); text_unsigned(&text, heap_limit / 1024ULL); text_string(&text, " kB\n");
+    text_string(&text, "Slab:           ");
+    text_unsigned(&text, heap_allocated / 1024ULL);
+    text_string(&text, " kB\n");
+    text_string(&text, "SUnreclaim:     ");
+    text_unsigned(&text, heap_reserved / 1024ULL);
+    text_string(&text, " kB\n");
+    text_string(&text, "KernelHeapMax:  ");
+    text_unsigned(&text, heap_limit / 1024ULL);
+    text_string(&text, " kB\n");
     return text_read(&text, offset, size, output);
 }
 
-static int64_t proc_blockstat_read(struct vfs_node *node, uint64_t offset,
-                                   size_t size, void *output) {
+static int64_t proc_blockstat_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                   void *output) {
     (void)node;
     TEXT_BUFFER text = {0};
     uint64_t reads = 0, sectors = 0, nanoseconds = 0, write_failures = 0;
@@ -187,8 +214,8 @@ static int64_t proc_blockstat_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
-static int64_t proc_inputlog_read(struct vfs_node *node, uint64_t offset,
-                                  size_t size, void *output) {
+static int64_t proc_inputlog_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                  void *output) {
     (void)node;
     TEXT_BUFFER text = {0};
     text_string(&text, "ms code value readers\n");
@@ -212,8 +239,8 @@ static int64_t proc_inputlog_read(struct vfs_node *node, uint64_t offset,
 static void text_hex32(struct text_buffer *text, uint32_t value);
 static void text_hex64_lower(struct text_buffer *text, uint64_t value);
 
-static int64_t proc_overlap_read(struct vfs_node *node, uint64_t offset,
-                                 size_t size, void *output) {
+static int64_t proc_overlap_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
     (void)node;
     TEXT_BUFFER text = {0};
     text_string(&text, "peak ");
@@ -222,17 +249,18 @@ static int64_t proc_overlap_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
-static int64_t proc_overlap_write(struct vfs_node *node, uint64_t offset,
-                                  size_t size, const void *input) {
-    (void)node; (void)offset;
+static int64_t proc_overlap_write(struct vfs_node *node, uint64_t offset, size_t size,
+                                  const void *input) {
+    (void)node;
+    (void)offset;
     const char *text = (const char *)input;
     if (size && text && text[0] == '0') kernel_overlap_stop();
     else kernel_overlap_start();
     return (int64_t)size;
 }
 
-static int64_t proc_abi_gaps_read(struct vfs_node *node, uint64_t offset,
-                                  size_t size, void *output) {
+static int64_t proc_abi_gaps_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                  void *output) {
     (void)node;
     TEXT_BUFFER text = {0};
     int found = 0;
@@ -261,16 +289,16 @@ static int64_t proc_abi_gaps_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
-static int64_t proc_abi_gaps_write(struct vfs_node *node, uint64_t offset,
-                                   size_t size, const void *input) {
-    (void)node; (void)offset;
+static int64_t proc_abi_gaps_write(struct vfs_node *node, uint64_t offset, size_t size,
+                                   const void *input) {
+    (void)node;
+    (void)offset;
     const char *text = (const char *)input;
     if (size && text && text[0] == '0') abi_gaps_clear();
     return (int64_t)size;
 }
 
-static int64_t proc_uptime_read(struct vfs_node *node, uint64_t offset,
-                                size_t size, void *output) {
+static int64_t proc_uptime_read(struct vfs_node *node, uint64_t offset, size_t size, void *output) {
     (void)node;
     TEXT_BUFFER text = {0};
     uint64_t centiseconds = time_uptime_ns() / 10000000ULL;
@@ -283,8 +311,8 @@ static int64_t proc_uptime_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
-static int64_t proc_interrupts_read(struct vfs_node *node, uint64_t offset,
-                                    size_t size, void *output) {
+static int64_t proc_interrupts_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                    void *output) {
     (void)node;
     TEXT_BUFFER text = {0};
     text_string(&text, "           CPU0\n");
@@ -308,8 +336,8 @@ static int64_t proc_interrupts_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
-static int64_t proc_cmdline_line_read(struct vfs_node *node, uint64_t offset,
-                                      size_t size, void *output) {
+static int64_t proc_cmdline_line_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                      void *output) {
     (void)node;
     TEXT_BUFFER text = {0};
     text_string(&text, boot_info()->command_line);
@@ -317,8 +345,8 @@ static int64_t proc_cmdline_line_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
-static int64_t proc_hostname_read(struct vfs_node *node, uint64_t offset,
-                                  size_t size, void *output) {
+static int64_t proc_hostname_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                  void *output) {
     (void)node;
     TEXT_BUFFER text = {0};
     text_string(&text, uts_hostname());
@@ -326,36 +354,34 @@ static int64_t proc_hostname_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
-static int64_t proc_hostname_write(struct vfs_node *node, uint64_t offset,
-                                   size_t size, const void *input) {
+static int64_t proc_hostname_write(struct vfs_node *node, uint64_t offset, size_t size,
+                                   const void *input) {
     (void)node;
     (void)offset;
     uts_set_hostname((const char *)input, size);
     return (int64_t)size;
 }
 
-static int64_t proc_knob_read(struct vfs_node *node, uint64_t offset,
-                              size_t size, void *output) {
+static int64_t proc_knob_read(struct vfs_node *node, uint64_t offset, size_t size, void *output) {
     TEXT_BUFFER text = {0};
     text_unsigned(&text, (uint64_t)(uintptr_t)node->data);
     text_char(&text, '\n');
     return text_read(&text, offset, size, output);
 }
 
-static int64_t proc_knob_write(struct vfs_node *node, uint64_t offset,
-                               size_t size, const void *input) {
+static int64_t proc_knob_write(struct vfs_node *node, uint64_t offset, size_t size,
+                               const void *input) {
     (void)offset;
     const char *at = (const char *)input;
     uint64_t value = 0;
-    for (size_t index = 0; index < size && at[index] >= '0' && at[index] <= '9';
-         index++)
+    for (size_t index = 0; index < size && at[index] >= '0' && at[index] <= '9'; index++)
         value = value * 10U + (uint64_t)(at[index] - '0');
     node->data = (void *)(uintptr_t)value;
     return (int64_t)size;
 }
 
-static struct vfs_node *virtual_file(struct vfs_node *parent, const char *name,
-                                     vfs_read_fn reader, uint64_t pid);
+static struct vfs_node *virtual_file(struct vfs_node *parent, const char *name, vfs_read_fn reader,
+                                     uint64_t pid);
 
 static void knob(struct vfs_node *parent, const char *name, uint64_t value) {
     struct vfs_node *node = virtual_file(parent, name, proc_knob_read, value);
@@ -364,16 +390,15 @@ static void knob(struct vfs_node *parent, const char *name, uint64_t value) {
     node->write = proc_knob_write;
 }
 
-static int64_t proc_ostype_read(struct vfs_node *node, uint64_t offset,
-                                size_t size, void *output) {
+static int64_t proc_ostype_read(struct vfs_node *node, uint64_t offset, size_t size, void *output) {
     (void)node;
     TEXT_BUFFER text = {0};
     text_string(&text, UTS_SYSNAME "\n");
     return text_read(&text, offset, size, output);
 }
 
-static int64_t proc_osrelease_read(struct vfs_node *node, uint64_t offset,
-                                   size_t size, void *output) {
+static int64_t proc_osrelease_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                   void *output) {
     (void)node;
     TEXT_BUFFER text = {0};
     text_string(&text, UTS_RELEASE "\n");
@@ -391,8 +416,7 @@ static void create_boot_id(void) {
 
     size_t at = 0;
     for (size_t index = 0; index < sizeof(bytes); index++) {
-        if (index == 4 || index == 6 || index == 8 || index == 10)
-            boot_id[at++] = '-';
+        if (index == 4 || index == 6 || index == 8 || index == 10) boot_id[at++] = '-';
         boot_id[at++] = hex[bytes[index] >> 4];
         boot_id[at++] = hex[bytes[index] & 0x0FU];
     }
@@ -400,8 +424,8 @@ static void create_boot_id(void) {
     memset(bytes, 0, sizeof(bytes));
 }
 
-static int64_t proc_boot_id_read(struct vfs_node *node, uint64_t offset,
-                                 size_t size, void *output) {
+static int64_t proc_boot_id_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
     (void)node;
     TEXT_BUFFER text = {0};
     text_string(&text, boot_id);
@@ -409,8 +433,8 @@ static int64_t proc_boot_id_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
-static int64_t proc_version_read(struct vfs_node *node, uint64_t offset,
-                                 size_t size, void *output) {
+static int64_t proc_version_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
     (void)node;
     TEXT_BUFFER text = {0};
     text_string(&text, UTS_SYSNAME " version " UTS_RELEASE " #1 " SYSCALL_UTS_MACHINE "\n");
@@ -423,8 +447,8 @@ static void text_hex64(struct text_buffer *text, uint64_t value) {
         text_char(text, alphabet[(value >> (shift - 4)) & 0xFULL]);
 }
 
-static int64_t proc_modules_read(struct vfs_node *node, uint64_t offset,
-                                 size_t size, void *output) {
+static int64_t proc_modules_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
     (void)node;
     TEXT_BUFFER text = {0};
     module_lock_acquire();
@@ -454,8 +478,7 @@ static int64_t proc_modules_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
-static int64_t proc_mounts_read(struct vfs_node *node, uint64_t offset,
-                                size_t size, void *output) {
+static int64_t proc_mounts_read(struct vfs_node *node, uint64_t offset, size_t size, void *output) {
     (void)node;
     TEXT_BUFFER text = {0};
     for (const struct vfs_mount *mount = vfs_mounts(); mount; mount = mount->next) {
@@ -494,8 +517,8 @@ static int mount_contains(const char *outer, const char *inner) {
     return strncmp(outer, inner, length) == 0 && inner[length] == '/';
 }
 
-static int64_t proc_mountinfo_read(struct vfs_node *node, uint64_t offset,
-                                   size_t size, void *output) {
+static int64_t proc_mountinfo_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                   void *output) {
     (void)node;
     TEXT_BUFFER text = {0};
     unsigned index = 0;
@@ -503,7 +526,8 @@ static int64_t proc_mountinfo_read(struct vfs_node *node, uint64_t offset,
         unsigned parent = 20U + index;
         size_t best = 0;
         unsigned candidate = 0;
-        for (const struct vfs_mount *outer = vfs_mounts(); outer; outer = outer->next, candidate++) {
+        for (const struct vfs_mount *outer = vfs_mounts(); outer;
+             outer = outer->next, candidate++) {
             if (outer == mount || !mount_contains(outer->target, mount->target)) continue;
             size_t length = strlen(outer->target);
             if (length >= best) {
@@ -531,21 +555,25 @@ static int64_t proc_mountinfo_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
-static int64_t proc_stat_read(struct vfs_node *node, uint64_t offset,
-                              size_t size, void *output) {
+static int64_t proc_stat_read(struct vfs_node *node, uint64_t offset, size_t size, void *output) {
     (void)node;
     TEXT_BUFFER text = {0};
     uint64_t uptime_ticks = time_uptime_ns() / 10000000ULL;
     uint64_t runtime_ticks = process_total_runtime_ns() / 10000000ULL;
     uint64_t idle_ticks = uptime_ticks > runtime_ticks ? uptime_ticks - runtime_ticks : 0;
-    text_string(&text, "cpu  "); text_unsigned(&text, runtime_ticks);
-    text_string(&text, " 0 0 "); text_unsigned(&text, idle_ticks);
+    text_string(&text, "cpu  ");
+    text_unsigned(&text, runtime_ticks);
+    text_string(&text, " 0 0 ");
+    text_unsigned(&text, idle_ticks);
     text_string(&text, " 0 0 0 0 0 0\n");
     unsigned cpus = smp_cpu_count();
     for (unsigned index = 0; index < cpus; index++) {
-        text_string(&text, "cpu"); text_unsigned(&text, index); text_char(&text, ' ');
+        text_string(&text, "cpu");
+        text_unsigned(&text, index);
+        text_char(&text, ' ');
         text_unsigned(&text, runtime_ticks / cpus);
-        text_string(&text, " 0 0 "); text_unsigned(&text, idle_ticks / cpus);
+        text_string(&text, " 0 0 ");
+        text_unsigned(&text, idle_ticks / cpus);
         text_string(&text, " 0 0 0 0 0 0\n");
     }
     uint64_t now = time_epoch_seconds();
@@ -554,45 +582,65 @@ static int64_t proc_stat_read(struct vfs_node *node, uint64_t offset,
     text_unsigned(&text, now > uptime_seconds ? now - uptime_seconds : 0);
     text_char(&text, '\n');
     text_string(&text, "ctxt 0\n");
-    text_string(&text, "processes "); text_unsigned(&text, process_created_count()); text_char(&text, '\n');
-    text_string(&text, "procs_running "); text_unsigned(&text, process_runnable_count()); text_char(&text, '\n');
-    text_string(&text, "procs_blocked "); text_unsigned(&text, process_blocked_count()); text_char(&text, '\n');
+    text_string(&text, "processes ");
+    text_unsigned(&text, process_created_count());
+    text_char(&text, '\n');
+    text_string(&text, "procs_running ");
+    text_unsigned(&text, process_runnable_count());
+    text_char(&text, '\n');
+    text_string(&text, "procs_blocked ");
+    text_unsigned(&text, process_blocked_count());
+    text_char(&text, '\n');
     return text_read(&text, offset, size, output);
 }
 
-static int64_t proc_loadavg_read(struct vfs_node *node, uint64_t offset,
-                                 size_t size, void *output) {
+static int64_t proc_loadavg_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
     (void)node;
     TEXT_BUFFER text = {0};
     uint64_t runnable = process_runnable_count();
     uint64_t total = process_count();
-    text_unsigned(&text, runnable); text_string(&text, ".00 ");
-    text_unsigned(&text, runnable); text_string(&text, ".00 ");
-    text_unsigned(&text, runnable); text_string(&text, ".00 ");
-    text_unsigned(&text, runnable); text_char(&text, '/'); text_unsigned(&text, total);
-    text_char(&text, ' '); text_unsigned(&text, process_created_count()); text_char(&text, '\n');
+    text_unsigned(&text, runnable);
+    text_string(&text, ".00 ");
+    text_unsigned(&text, runnable);
+    text_string(&text, ".00 ");
+    text_unsigned(&text, runnable);
+    text_string(&text, ".00 ");
+    text_unsigned(&text, runnable);
+    text_char(&text, '/');
+    text_unsigned(&text, total);
+    text_char(&text, ' ');
+    text_unsigned(&text, process_created_count());
+    text_char(&text, '\n');
     return text_read(&text, offset, size, output);
 }
 
-static int64_t proc_net_dev_read(struct vfs_node *node, uint64_t offset,
-                                  size_t size, void *output) {
+static int64_t proc_net_dev_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
     (void)node;
     TEXT_BUFFER text = {0};
-    text_string(&text, "Inter-|   Receive                                                |  Transmit\n");
-    text_string(&text, " face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n");
-    text_string(&text, "  eth0: "); text_unsigned(&text, net_rx_bytes());
-    text_string(&text, " "); text_unsigned(&text, net_rx_packets());
-    text_string(&text, " 0 "); text_unsigned(&text, net_rx_dropped());
-    text_string(&text, " 0 0 0 0 "); text_unsigned(&text, net_tx_bytes());
-    text_string(&text, " "); text_unsigned(&text, net_tx_packets());
+    text_string(&text,
+                "Inter-|   Receive                                                |  Transmit\n");
+    text_string(
+        &text,
+        " face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n");
+    text_string(&text, "  eth0: ");
+    text_unsigned(&text, net_rx_bytes());
+    text_string(&text, " ");
+    text_unsigned(&text, net_rx_packets());
+    text_string(&text, " 0 ");
+    text_unsigned(&text, net_rx_dropped());
+    text_string(&text, " 0 0 0 0 ");
+    text_unsigned(&text, net_tx_bytes());
+    text_string(&text, " ");
+    text_unsigned(&text, net_tx_packets());
     text_string(&text, " 0 0 0 0 0 0\n");
     return text_read(&text, offset, size, output);
 }
 
 static void text_hex32(struct text_buffer *text, uint32_t value) {
     static const char digits[] = "0123456789ABCDEF";
-    for (int shift = 28; shift >= 0; shift -= 4)
-        text_char(text, digits[(value >> shift) & 15U]);
+    for (int shift = 28; shift >= 0; shift -= 4) text_char(text, digits[(value >> shift) & 15U]);
 }
 
 static void text_hex8_lower(struct text_buffer *text, uint8_t value) {
@@ -609,25 +657,31 @@ static void text_ipv4(struct text_buffer *text, uint32_t address) {
     }
 }
 
-static int64_t proc_net_route_read(struct vfs_node *node, uint64_t offset,
-                                    size_t size, void *output) {
+static int64_t proc_net_route_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                   void *output) {
     (void)node;
     const struct net_config *cfg = net_get_config();
     TEXT_BUFFER text = {0};
-    text_string(&text, "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n");
-    text_string(&text, "eth0\t00000000\t"); text_hex32(&text, cfg->gateway);
+    text_string(
+        &text,
+        "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n");
+    text_string(&text, "eth0\t00000000\t");
+    text_hex32(&text, cfg->gateway);
     text_string(&text, "\t0003\t0\t0\t0\t00000000\t0\t0\t0\n");
-    text_string(&text, "eth0\t"); text_hex32(&text, cfg->address & cfg->netmask);
-    text_string(&text, "\t00000000\t0001\t0\t0\t0\t"); text_hex32(&text, cfg->netmask);
+    text_string(&text, "eth0\t");
+    text_hex32(&text, cfg->address & cfg->netmask);
+    text_string(&text, "\t00000000\t0001\t0\t0\t0\t");
+    text_hex32(&text, cfg->netmask);
     text_string(&text, "\t0\t0\t0\n");
     return text_read(&text, offset, size, output);
 }
 
-static int64_t proc_net_arp_read(struct vfs_node *node, uint64_t offset,
-                                  size_t size, void *output) {
+static int64_t proc_net_arp_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
     (void)node;
     TEXT_BUFFER text = {0};
-    text_string(&text, "IP address       HW type     Flags       HW address            Mask     Device\n");
+    text_string(&text,
+                "IP address       HW type     Flags       HW address            Mask     Device\n");
     struct net_arp_record records[16];
     size_t count = net_arp_snapshot(records, sizeof(records) / sizeof(records[0]));
     if (count > sizeof(records) / sizeof(records[0])) count = sizeof(records) / sizeof(records[0]);
@@ -643,8 +697,8 @@ static int64_t proc_net_arp_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
-static int64_t proc_net_udp_read(struct vfs_node *node, uint64_t offset,
-                                  size_t size, void *output) {
+static int64_t proc_net_udp_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
     (void)node;
     TEXT_BUFFER text = {0};
     if (text_reserve(&text, inet_socket_count() * 160U + 128U) == 0)
@@ -652,8 +706,8 @@ static int64_t proc_net_udp_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
-static int64_t proc_net_raw_read(struct vfs_node *node, uint64_t offset,
-                                  size_t size, void *output) {
+static int64_t proc_net_raw_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
     (void)node;
     TEXT_BUFFER text = {0};
     if (text_reserve(&text, inet_socket_count() * 160U + 128U) == 0)
@@ -661,8 +715,8 @@ static int64_t proc_net_raw_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
-static int64_t proc_net_tcp_read(struct vfs_node *node, uint64_t offset,
-                                  size_t size, void *output) {
+static int64_t proc_net_tcp_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
     (void)node;
     TEXT_BUFFER text = {0};
     if (text_reserve(&text, inet_socket_count() * 160U + 128U) == 0)
@@ -670,29 +724,23 @@ static int64_t proc_net_tcp_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
-static uint64_t node_pid(struct vfs_node *node) {
-    return (uint64_t)(uintptr_t)node->data;
-}
+static uint64_t node_pid(struct vfs_node *node) { return (uint64_t)(uintptr_t)node->data; }
 
 static const char *state_name(const struct process *process) {
     switch (process->state) {
-        case PROCESS_READY: return "R (runnable)";
-        case PROCESS_RUNNING: return "R (running)";
-        case PROCESS_BLOCKED: return "S (sleeping)";
-        case PROCESS_ZOMBIE: return "Z (zombie)";
-        default: return "X (dead)";
+    case PROCESS_READY:   return "R (runnable)";
+    case PROCESS_RUNNING: return "R (running)";
+    case PROCESS_BLOCKED: return "S (sleeping)";
+    case PROCESS_ZOMBIE:  return "Z (zombie)";
+    default:              return "X (dead)";
     }
 }
 
-static void put_process(struct process **process) {
-    process_put(*process);
-}
+static void put_process(struct process **process) { process_put(*process); }
 
 #define PROCESS_REF __attribute__((cleanup(put_process))) struct process *
 
-static void put_memory(struct process_memory **memory) {
-    process_memory_put(*memory);
-}
+static void put_memory(struct process_memory **memory) { process_memory_put(*memory); }
 
 #define MEMORY_REF __attribute__((cleanup(put_memory))) struct process_memory *
 
@@ -703,48 +751,79 @@ static char state_code(const struct process *process) {
     return 'R';
 }
 
-static int64_t proc_status_read(struct vfs_node *node, uint64_t offset,
-                                size_t size, void *output) {
+static int64_t proc_status_read(struct vfs_node *node, uint64_t offset, size_t size, void *output) {
     PROCESS_REF process = process_get(node_pid(node));
     if (!process) return 0;
     TEXT_BUFFER text = {0};
     uint64_t pages = vmm_count_user_pages(process->cr3);
     uint64_t memory_kb = pages * 4ULL;
 
-    text_string(&text, "Name:\t"); text_string(&text, process->name); text_char(&text, '\n');
-    text_string(&text, "State:\t"); text_string(&text, state_name(process)); text_char(&text, '\n');
-    text_string(&text, "Tgid:\t"); text_unsigned(&text, process->tgid); text_char(&text, '\n');
-    text_string(&text, "Pid:\t"); text_unsigned(&text, process->pid); text_char(&text, '\n');
-    text_string(&text, "PPid:\t"); text_unsigned(&text, process->ppid); text_char(&text, '\n');
+    text_string(&text, "Name:\t");
+    text_string(&text, process->name);
+    text_char(&text, '\n');
+    text_string(&text, "State:\t");
+    text_string(&text, state_name(process));
+    text_char(&text, '\n');
+    text_string(&text, "Tgid:\t");
+    text_unsigned(&text, process->tgid);
+    text_char(&text, '\n');
+    text_string(&text, "Pid:\t");
+    text_unsigned(&text, process->pid);
+    text_char(&text, '\n');
+    text_string(&text, "PPid:\t");
+    text_unsigned(&text, process->ppid);
+    text_char(&text, '\n');
     text_string(&text, "Uid:\t");
-    text_unsigned(&text, process->cred.uid); text_char(&text, '\t');
-    text_unsigned(&text, process->cred.euid); text_char(&text, '\t');
-    text_unsigned(&text, process->cred.suid); text_char(&text, '\t');
-    text_unsigned(&text, process->cred.fsuid); text_char(&text, '\n');
+    text_unsigned(&text, process->cred.uid);
+    text_char(&text, '\t');
+    text_unsigned(&text, process->cred.euid);
+    text_char(&text, '\t');
+    text_unsigned(&text, process->cred.suid);
+    text_char(&text, '\t');
+    text_unsigned(&text, process->cred.fsuid);
+    text_char(&text, '\n');
     text_string(&text, "Gid:\t");
-    text_unsigned(&text, process->cred.gid); text_char(&text, '\t');
-    text_unsigned(&text, process->cred.egid); text_char(&text, '\t');
-    text_unsigned(&text, process->cred.sgid); text_char(&text, '\t');
-    text_unsigned(&text, process->cred.fsgid); text_char(&text, '\n');
+    text_unsigned(&text, process->cred.gid);
+    text_char(&text, '\t');
+    text_unsigned(&text, process->cred.egid);
+    text_char(&text, '\t');
+    text_unsigned(&text, process->cred.sgid);
+    text_char(&text, '\t');
+    text_unsigned(&text, process->cred.fsgid);
+    text_char(&text, '\n');
     text_string(&text, "Groups:\t");
     for (uint32_t index = 0; index < process->cred.group_count; index++) {
         text_unsigned(&text, process->cred.groups[index]);
         text_char(&text, ' ');
     }
     text_char(&text, '\n');
-    text_string(&text, "Pgid:\t"); text_unsigned(&text, process->pgid); text_char(&text, '\n');
-    text_string(&text, "Sid:\t"); text_unsigned(&text, process->sid); text_char(&text, '\n');
-    text_string(&text, "VmSize:\t"); text_unsigned(&text, memory_kb); text_string(&text, " kB\n");
-    text_string(&text, "VmRSS:\t"); text_unsigned(&text, memory_kb); text_string(&text, " kB\n");
+    text_string(&text, "Pgid:\t");
+    text_unsigned(&text, process->pgid);
+    text_char(&text, '\n');
+    text_string(&text, "Sid:\t");
+    text_unsigned(&text, process->sid);
+    text_char(&text, '\n');
+    text_string(&text, "VmSize:\t");
+    text_unsigned(&text, memory_kb);
+    text_string(&text, " kB\n");
+    text_string(&text, "VmRSS:\t");
+    text_unsigned(&text, memory_kb);
+    text_string(&text, " kB\n");
     text_string(&text, "Threads:\t1\n");
-    text_string(&text, "StartTicks:\t"); text_unsigned(&text, process->start_time_ns / 10000000ULL); text_char(&text, '\n');
-    text_string(&text, "CpuTicks:\t"); text_unsigned(&text, process_runtime_ns(process) / 10000000ULL); text_char(&text, '\n');
-    text_string(&text, "Command:\t"); text_string(&text, process->exe_path ? process->exe_path : ""); text_char(&text, '\n');
+    text_string(&text, "StartTicks:\t");
+    text_unsigned(&text, process->start_time_ns / 10000000ULL);
+    text_char(&text, '\n');
+    text_string(&text, "CpuTicks:\t");
+    text_unsigned(&text, process_runtime_ns(process) / 10000000ULL);
+    text_char(&text, '\n');
+    text_string(&text, "Command:\t");
+    text_string(&text, process->exe_path ? process->exe_path : "");
+    text_char(&text, '\n');
     return text_read(&text, offset, size, output);
 }
 
-static int64_t proc_pid_stat_read(struct vfs_node *node, uint64_t offset,
-                                  size_t size, void *output) {
+static int64_t proc_pid_stat_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                  void *output) {
     PROCESS_REF process = process_get(node_pid(node));
     if (!process) return 0;
     TEXT_BUFFER text = {0};
@@ -753,26 +832,36 @@ static int64_t proc_pid_stat_read(struct vfs_node *node, uint64_t offset,
     uint64_t start = process->start_time_ns / 10000000ULL;
 
     text_unsigned(&text, process->pid);
-    text_string(&text, " ("); text_string(&text, process->name);
+    text_string(&text, " (");
+    text_string(&text, process->name);
     text_string(&text, ") ");
-    text_char(&text, state_code(process)); text_char(&text, ' ');
-    text_unsigned(&text, process->ppid); text_char(&text, ' ');
-    text_unsigned(&text, process->pgid); text_char(&text, ' ');
-    text_unsigned(&text, process->sid); text_char(&text, ' ');
+    text_char(&text, state_code(process));
+    text_char(&text, ' ');
+    text_unsigned(&text, process->ppid);
+    text_char(&text, ' ');
+    text_unsigned(&text, process->pgid);
+    text_char(&text, ' ');
+    text_unsigned(&text, process->sid);
+    text_char(&text, ' ');
     text_string(&text, "0 ");
-    text_signed(&text, -1); text_char(&text, ' ');
+    text_signed(&text, -1);
+    text_char(&text, ' ');
     text_string(&text, "0 ");
     text_string(&text, "0 0 0 0 ");
-    text_unsigned(&text, ticks); text_char(&text, ' ');
+    text_unsigned(&text, ticks);
+    text_char(&text, ' ');
     text_string(&text, "0 ");
     text_string(&text, "0 0 ");
     text_string(&text, "20 ");
     text_string(&text, "0 ");
     text_string(&text, "1 ");
     text_string(&text, "0 ");
-    text_unsigned(&text, start); text_char(&text, ' ');
-    text_unsigned(&text, rss_pages * 4096ULL); text_char(&text, ' ');
-    text_unsigned(&text, rss_pages); text_char(&text, ' ');
+    text_unsigned(&text, start);
+    text_char(&text, ' ');
+    text_unsigned(&text, rss_pages * 4096ULL);
+    text_char(&text, ' ');
+    text_unsigned(&text, rss_pages);
+    text_char(&text, ' ');
     text_string(&text, "0 0 0 0 0 0 0 0 0 0 0 0 0 0 ");
     text_string(&text, "0 ");
     text_string(&text, "0 0 ");
@@ -783,19 +872,22 @@ static int64_t proc_pid_stat_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
-static int64_t proc_pid_statm_read(struct vfs_node *node, uint64_t offset,
-                                   size_t size, void *output) {
+static int64_t proc_pid_statm_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                   void *output) {
     PROCESS_REF process = process_get(node_pid(node));
     if (!process) return 0;
     TEXT_BUFFER text = {0};
     uint64_t pages = vmm_count_user_pages(process->cr3);
 
-    text_unsigned(&text, pages); text_char(&text, ' ');
-    text_unsigned(&text, pages); text_char(&text, ' ');
+    text_unsigned(&text, pages);
+    text_char(&text, ' ');
+    text_unsigned(&text, pages);
+    text_char(&text, ' ');
     text_string(&text, "0 ");
     text_string(&text, "0 ");
     text_string(&text, "0 ");
-    text_unsigned(&text, pages); text_char(&text, ' ');
+    text_unsigned(&text, pages);
+    text_char(&text, ' ');
     text_string(&text, "0\n");
     return text_read(&text, offset, size, output);
 }
@@ -807,8 +899,8 @@ static void text_hex64_lower(struct text_buffer *text, uint64_t value) {
     for (; shift >= 0; shift -= 4) text_char(text, digits[(value >> shift) & 15ULL]);
 }
 
-static void maps_line(struct text_buffer *text, uint64_t start, uint64_t end,
-                      uint64_t page_flags, uint64_t offset, const char *name) {
+static void maps_line(struct text_buffer *text, uint64_t start, uint64_t end, uint64_t page_flags,
+                      uint64_t offset, const char *name) {
     text_hex64_lower(text, start);
     text_char(text, '-');
     text_hex64_lower(text, end);
@@ -827,8 +919,8 @@ static void maps_line(struct text_buffer *text, uint64_t start, uint64_t end,
     text_char(text, '\n');
 }
 
-static int64_t proc_pid_maps_read(struct vfs_node *node, uint64_t offset,
-                                  size_t size, void *output) {
+static int64_t proc_pid_maps_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                  void *output) {
     PROCESS_REF process = process_get(node_pid(node));
     MEMORY_REF memory = process_memory_get(process);
     if (!memory) return 0;
@@ -838,24 +930,28 @@ static int64_t proc_pid_maps_read(struct vfs_node *node, uint64_t offset,
     size_t produced = 0;
     uint64_t position = 0;
 
-    struct vm_area heap = {memory->brk_start, memory->brk_end,
-                           PAGE_WRITE | PAGE_NX, VM_ANONYMOUS, NULL, 0, NULL};
-    struct vm_area stack = {process_stack_floor(process), USER_STACK_TOP,
-                            PAGE_WRITE | PAGE_NX, VM_ANONYMOUS, NULL, 0, NULL};
+    struct vm_area heap = {
+        memory->brk_start, memory->brk_end, PAGE_WRITE | PAGE_NX, VM_ANONYMOUS, NULL, 0, NULL};
+    struct vm_area stack = {process_stack_floor(process),
+                            USER_STACK_TOP,
+                            PAGE_WRITE | PAGE_NX,
+                            VM_ANONYMOUS,
+                            NULL,
+                            0,
+                            NULL};
 
     VFS_PATH_SCOPED path = vfs_path_buffer();
     for (int step = 0; step < 3 && produced < size; step++) {
         struct vm_area *area = step == 0 ? (heap.end > heap.start ? &heap : NULL)
-                             : step == 1 ? memory->areas
-                             : &stack;
+            : step == 1                  ? memory->areas
+                                         : &stack;
         for (; area && produced < size; area = step == 1 ? area->next : NULL) {
             TEXT_BUFFER line = {0};
             const char *name = step == 0 ? "[heap]" : step == 2 ? "[stack]" : NULL;
             if (step == 1 && path && area->file && area->file->node &&
                 vfs_node_path(area->file->node, path, VFS_PATH_MAX) == 0)
                 name = path;
-            maps_line(&line, area->start, area->end, area->page_flags,
-                      area->offset, name);
+            maps_line(&line, area->start, area->end, area->page_flags, area->offset, name);
 
             if (position + line.length <= offset) {
                 position += line.length;
@@ -873,8 +969,8 @@ static int64_t proc_pid_maps_read(struct vfs_node *node, uint64_t offset,
     return (int64_t)produced;
 }
 
-static int64_t proc_pid_comm_read(struct vfs_node *node, uint64_t offset,
-                                  size_t size, void *output) {
+static int64_t proc_pid_comm_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                  void *output) {
     PROCESS_REF process = process_get(node_pid(node));
     if (!process) return 0;
     TEXT_BUFFER text = {0};
@@ -883,8 +979,8 @@ static int64_t proc_pid_comm_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
-static int64_t proc_pid_mem_read(struct vfs_node *node, uint64_t offset,
-                                 size_t size, void *output) {
+static int64_t proc_pid_mem_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
     PROCESS_REF process = process_get(node_pid(node));
     if (!process) return -3;
     const struct credentials *reader = cred_current();
@@ -900,8 +996,8 @@ static int64_t proc_pid_mem_read(struct vfs_node *node, uint64_t offset,
     return status == 0 ? (int64_t)size : -5;
 }
 
-static int64_t proc_pid_syscall_read(struct vfs_node *node, uint64_t offset,
-                                     size_t size, void *output) {
+static int64_t proc_pid_syscall_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                     void *output) {
     PROCESS_REF process = process_get(node_pid(node));
     if (!process) return 0;
     TEXT_BUFFER text = {0};
@@ -918,8 +1014,8 @@ static int64_t proc_pid_syscall_read(struct vfs_node *node, uint64_t offset,
     return text_read(&text, offset, size, output);
 }
 
-static int64_t proc_pid_cgroup_read(struct vfs_node *node, uint64_t offset,
-                                    size_t size, void *output) {
+static int64_t proc_pid_cgroup_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                    void *output) {
     PROCESS_REF process = process_get(node_pid(node));
     if (!process) return 0;
     char description[512];
@@ -930,12 +1026,13 @@ static int64_t proc_pid_cgroup_read(struct vfs_node *node, uint64_t offset,
     return (int64_t)size;
 }
 
-static int64_t proc_cmdline_read(struct vfs_node *node, uint64_t offset,
-                                 size_t size, void *output) {
+static int64_t proc_cmdline_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
     PROCESS_REF process = process_get(node_pid(node));
     MEMORY_REF memory = process_memory_get(process);
     if (!memory || process->arg_end <= process->arg_start ||
-        offset >= process->arg_end - process->arg_start) return 0;
+        offset >= process->arg_end - process->arg_start)
+        return 0;
     uint64_t available = process->arg_end - process->arg_start - offset;
     if (size > available) size = (size_t)available;
     mutex_lock(&memory->lock);
@@ -944,15 +1041,16 @@ static int64_t proc_cmdline_read(struct vfs_node *node, uint64_t offset,
     return status == 0 ? (int64_t)size : 0;
 }
 
-static int64_t proc_environ_read(struct vfs_node *node, uint64_t offset,
-                                 size_t size, void *output) {
+static int64_t proc_environ_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
     PROCESS_REF process = process_get(node_pid(node));
     if (!process) return -3;
     const struct credentials *reader = cred_current();
     if (reader && reader->euid != 0 && reader->euid != process->cred.uid) return -13;
     MEMORY_REF memory = process_memory_get(process);
     if (!memory || process->env_end <= process->arg_end ||
-        offset >= process->env_end - process->arg_end) return 0;
+        offset >= process->env_end - process->arg_end)
+        return 0;
     uint64_t available = process->env_end - process->arg_end - offset;
     if (size > available) size = (size_t)available;
     mutex_lock(&memory->lock);
@@ -961,8 +1059,8 @@ static int64_t proc_environ_read(struct vfs_node *node, uint64_t offset,
     return status == 0 ? (int64_t)size : 0;
 }
 
-static struct vfs_node *virtual_file(struct vfs_node *parent, const char *name,
-                                     vfs_read_fn reader, uint64_t pid) {
+static struct vfs_node *virtual_file(struct vfs_node *parent, const char *name, vfs_read_fn reader,
+                                     uint64_t pid) {
     struct vfs_node *node = vfs_alloc_node(name, VFS_FILE);
     if (!node) return NULL;
     node->mode = 0444;
@@ -1016,24 +1114,27 @@ static void describe_file(const struct file *file, char *output, size_t capacity
     }
     const char *kind = "anon_inode:[unknown]";
     switch (file->kind) {
-        case FILE_KIND_PIPE_READ:
-        case FILE_KIND_PIPE_WRITE: kind = "pipe:[0]"; break;
-        case FILE_KIND_SOCKET:
-        case FILE_KIND_INET_SOCKET:
-        case FILE_KIND_NETLINK_SOCKET: kind = "socket:[0]"; break;
-        case FILE_KIND_PTY_MASTER: kind = "/dev/ptmx"; break;
-        case FILE_KIND_EVENTFD: kind = "anon_inode:[eventfd]"; break;
-        case FILE_KIND_TIMERFD: kind = "anon_inode:[timerfd]"; break;
-        case FILE_KIND_EPOLL: kind = "anon_inode:[eventpoll]"; break;
-        case FILE_KIND_INOTIFY: kind = "anon_inode:inotify"; break;
-        case FILE_KIND_SIGNALFD: kind = "anon_inode:[signalfd]"; break;
-        case FILE_KIND_IO_URING: kind = "anon_inode:[io_uring]"; break;
-        case FILE_KIND_PIDFD: kind = "anon_inode:[pidfd]"; break;
-        case FILE_KIND_MEMFD: kind = "/memfd:tunix"; break;
-        default: break;
+    case FILE_KIND_PIPE_READ:
+    case FILE_KIND_PIPE_WRITE:     kind = "pipe:[0]"; break;
+    case FILE_KIND_SOCKET:
+    case FILE_KIND_INET_SOCKET:
+    case FILE_KIND_NETLINK_SOCKET: kind = "socket:[0]"; break;
+    case FILE_KIND_PTY_MASTER:     kind = "/dev/ptmx"; break;
+    case FILE_KIND_EVENTFD:        kind = "anon_inode:[eventfd]"; break;
+    case FILE_KIND_TIMERFD:        kind = "anon_inode:[timerfd]"; break;
+    case FILE_KIND_EPOLL:          kind = "anon_inode:[eventpoll]"; break;
+    case FILE_KIND_INOTIFY:        kind = "anon_inode:inotify"; break;
+    case FILE_KIND_SIGNALFD:       kind = "anon_inode:[signalfd]"; break;
+    case FILE_KIND_IO_URING:       kind = "anon_inode:[io_uring]"; break;
+    case FILE_KIND_PIDFD:          kind = "anon_inode:[pidfd]"; break;
+    case FILE_KIND_MEMFD:          kind = "/memfd:tunix"; break;
+    default:                       break;
     }
     size_t at = 0;
-    while (kind[at] && at + 1 < capacity) { output[at] = kind[at]; at++; }
+    while (kind[at] && at + 1 < capacity) {
+        output[at] = kind[at];
+        at++;
+    }
     output[at] = '\0';
 }
 
@@ -1042,8 +1143,7 @@ static void proc_fd_refresh(struct vfs_node *directory) {
     if (busy) return;
     busy = 1;
 
-    while (directory->children)
-        (void)vfs_detach_child(directory, directory->children);
+    while (directory->children) (void)vfs_detach_child(directory, directory->children);
 
     PROCESS_REF process = process_get(node_pid(directory));
     struct file_table *table = process_files_get(process);
@@ -1090,7 +1190,8 @@ static void proc_process_refresh(struct vfs_node *directory) {
     PROCESS_REF process = process_get(node_pid(directory));
     if (!process) return;
 
-    (void)set_link_target(direct_child(directory, "exe"), process->exe_path ? process->exe_path : "/");
+    (void)set_link_target(direct_child(directory, "exe"),
+                          process->exe_path ? process->exe_path : "/");
 
     VFS_PATH_SCOPED path = vfs_path_buffer();
     if (path && vfs_node_path(process->cwd, path, VFS_PATH_MAX) == 0)
@@ -1204,16 +1305,26 @@ void procfs_init(void) {
 }
 
 static void populate_process_files(struct vfs_node *directory, uint64_t pid) {
-    if (!vfs_find_child(directory, "status")) virtual_file(directory, "status", proc_status_read, pid);
-    if (!vfs_find_child(directory, "stat")) virtual_file(directory, "stat", proc_pid_stat_read, pid);
-    if (!vfs_find_child(directory, "cmdline")) virtual_file(directory, "cmdline", proc_cmdline_read, pid);
-    if (!vfs_find_child(directory, "statm")) virtual_file(directory, "statm", proc_pid_statm_read, pid);
-    if (!vfs_find_child(directory, "comm")) virtual_file(directory, "comm", proc_pid_comm_read, pid);
-    if (!vfs_find_child(directory, "maps")) virtual_file(directory, "maps", proc_pid_maps_read, pid);
-    if (!vfs_find_child(directory, "cgroup")) virtual_file(directory, "cgroup", proc_pid_cgroup_read, pid);
-    if (!vfs_find_child(directory, "syscall")) virtual_file(directory, "syscall", proc_pid_syscall_read, pid);
-    if (!vfs_find_child(directory, "mountinfo")) virtual_file(directory, "mountinfo", proc_mountinfo_read, pid);
-    if (!vfs_find_child(directory, "mounts")) virtual_file(directory, "mounts", proc_mounts_read, pid);
+    if (!vfs_find_child(directory, "status"))
+        virtual_file(directory, "status", proc_status_read, pid);
+    if (!vfs_find_child(directory, "stat"))
+        virtual_file(directory, "stat", proc_pid_stat_read, pid);
+    if (!vfs_find_child(directory, "cmdline"))
+        virtual_file(directory, "cmdline", proc_cmdline_read, pid);
+    if (!vfs_find_child(directory, "statm"))
+        virtual_file(directory, "statm", proc_pid_statm_read, pid);
+    if (!vfs_find_child(directory, "comm"))
+        virtual_file(directory, "comm", proc_pid_comm_read, pid);
+    if (!vfs_find_child(directory, "maps"))
+        virtual_file(directory, "maps", proc_pid_maps_read, pid);
+    if (!vfs_find_child(directory, "cgroup"))
+        virtual_file(directory, "cgroup", proc_pid_cgroup_read, pid);
+    if (!vfs_find_child(directory, "syscall"))
+        virtual_file(directory, "syscall", proc_pid_syscall_read, pid);
+    if (!vfs_find_child(directory, "mountinfo"))
+        virtual_file(directory, "mountinfo", proc_mountinfo_read, pid);
+    if (!vfs_find_child(directory, "mounts"))
+        virtual_file(directory, "mounts", proc_mounts_read, pid);
     if (!vfs_find_child(directory, "environ")) {
         struct vfs_node *environ = virtual_file(directory, "environ", proc_environ_read, pid);
         if (environ) {
@@ -1279,42 +1390,71 @@ void procfs_unregister_process(uint64_t pid) {
     decimal_path(pid, NULL, path);
     struct vfs_node *directory = vfs_lookup(path);
     if (directory) directory->refresh = NULL;
-    task_path(pid, "/status", path); (void)vfs_remove(path, 0);
-    task_path(pid, "/stat", path); (void)vfs_remove(path, 0);
-    task_path(pid, "/cmdline", path); (void)vfs_remove(path, 0);
-    task_path(pid, "/statm", path); (void)vfs_remove(path, 0);
-    task_path(pid, "/maps", path); (void)vfs_remove(path, 0);
-    task_path(pid, "/comm", path); (void)vfs_remove(path, 0);
-    task_path(pid, "/cgroup", path); (void)vfs_remove(path, 0);
-    task_path(pid, "/syscall", path); (void)vfs_remove(path, 0);
-    task_path(pid, "/mountinfo", path); (void)vfs_remove(path, 0);
-    task_path(pid, "/mounts", path); (void)vfs_remove(path, 0);
-    task_path(pid, "/mem", path); (void)vfs_remove(path, 0);
-    task_path(pid, "/environ", path); (void)vfs_remove(path, 0);
-    task_path(pid, NULL, path); (void)vfs_remove(path, 1);
-    decimal_path(pid, "/task", path); (void)vfs_remove(path, 1);
-    decimal_path(pid, "/status", path); (void)vfs_remove(path, 0);
-    decimal_path(pid, "/stat", path); (void)vfs_remove(path, 0);
-    decimal_path(pid, "/cmdline", path); (void)vfs_remove(path, 0);
-    decimal_path(pid, "/statm", path); (void)vfs_remove(path, 0);
-    decimal_path(pid, "/maps", path); (void)vfs_remove(path, 0);
-    decimal_path(pid, "/comm", path); (void)vfs_remove(path, 0);
-    decimal_path(pid, "/cgroup", path); (void)vfs_remove(path, 0);
-    decimal_path(pid, "/syscall", path); (void)vfs_remove(path, 0);
-    decimal_path(pid, "/mountinfo", path); (void)vfs_remove(path, 0);
-    decimal_path(pid, "/mounts", path); (void)vfs_remove(path, 0);
-    decimal_path(pid, "/mem", path); (void)vfs_remove(path, 0);
-    decimal_path(pid, "/environ", path); (void)vfs_remove(path, 0);
-    decimal_path(pid, "/exe", path); (void)vfs_remove(path, 0);
-    decimal_path(pid, "/cwd", path); (void)vfs_remove(path, 0);
-    decimal_path(pid, "/root", path); (void)vfs_remove(path, 0);
+    task_path(pid, "/status", path);
+    (void)vfs_remove(path, 0);
+    task_path(pid, "/stat", path);
+    (void)vfs_remove(path, 0);
+    task_path(pid, "/cmdline", path);
+    (void)vfs_remove(path, 0);
+    task_path(pid, "/statm", path);
+    (void)vfs_remove(path, 0);
+    task_path(pid, "/maps", path);
+    (void)vfs_remove(path, 0);
+    task_path(pid, "/comm", path);
+    (void)vfs_remove(path, 0);
+    task_path(pid, "/cgroup", path);
+    (void)vfs_remove(path, 0);
+    task_path(pid, "/syscall", path);
+    (void)vfs_remove(path, 0);
+    task_path(pid, "/mountinfo", path);
+    (void)vfs_remove(path, 0);
+    task_path(pid, "/mounts", path);
+    (void)vfs_remove(path, 0);
+    task_path(pid, "/mem", path);
+    (void)vfs_remove(path, 0);
+    task_path(pid, "/environ", path);
+    (void)vfs_remove(path, 0);
+    task_path(pid, NULL, path);
+    (void)vfs_remove(path, 1);
+    decimal_path(pid, "/task", path);
+    (void)vfs_remove(path, 1);
+    decimal_path(pid, "/status", path);
+    (void)vfs_remove(path, 0);
+    decimal_path(pid, "/stat", path);
+    (void)vfs_remove(path, 0);
+    decimal_path(pid, "/cmdline", path);
+    (void)vfs_remove(path, 0);
+    decimal_path(pid, "/statm", path);
+    (void)vfs_remove(path, 0);
+    decimal_path(pid, "/maps", path);
+    (void)vfs_remove(path, 0);
+    decimal_path(pid, "/comm", path);
+    (void)vfs_remove(path, 0);
+    decimal_path(pid, "/cgroup", path);
+    (void)vfs_remove(path, 0);
+    decimal_path(pid, "/syscall", path);
+    (void)vfs_remove(path, 0);
+    decimal_path(pid, "/mountinfo", path);
+    (void)vfs_remove(path, 0);
+    decimal_path(pid, "/mounts", path);
+    (void)vfs_remove(path, 0);
+    decimal_path(pid, "/mem", path);
+    (void)vfs_remove(path, 0);
+    decimal_path(pid, "/environ", path);
+    (void)vfs_remove(path, 0);
+    decimal_path(pid, "/exe", path);
+    (void)vfs_remove(path, 0);
+    decimal_path(pid, "/cwd", path);
+    (void)vfs_remove(path, 0);
+    decimal_path(pid, "/root", path);
+    (void)vfs_remove(path, 0);
     decimal_path(pid, "/fd", path);
     struct vfs_node *descriptors = vfs_lookup(path);
     if (descriptors) {
         descriptors->refresh = NULL;
-        while (descriptors->children)
-            (void)vfs_detach_child(descriptors, descriptors->children);
+        while (descriptors->children) (void)vfs_detach_child(descriptors, descriptors->children);
         (void)vfs_remove(path, 1);
     }
-    decimal_path(pid, NULL, path); (void)vfs_remove(path, 1);
+    decimal_path(pid, NULL, path);
+    (void)vfs_remove(path, 1);
 }

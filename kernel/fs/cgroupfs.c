@@ -8,14 +8,14 @@
 #include <tunix/process.h>
 #include <tunix/vfs.h>
 
-#define EPERM 1
-#define ENOENT 2
-#define ESRCH 3
-#define ENOMEM 12
-#define EBUSY 16
-#define EINVAL 22
+#define EPERM     1
+#define ENOENT    2
+#define ESRCH     3
+#define ENOMEM    12
+#define EBUSY     16
+#define EINVAL    22
 #define ENOTEMPTY 39
-#define SIGKILL 9
+#define SIGKILL   9
 
 enum {
     FILE_PROCS,
@@ -79,7 +79,8 @@ static void cgroup_guard_release(int *unused) {
 }
 
 #define CGROUP_LOCKED \
-    __attribute__((cleanup(cgroup_guard_release))) int cgroup_guard = (lock_acquire(&cgroup_lock), 0)
+    __attribute__((cleanup(cgroup_guard_release))) int cgroup_guard = \
+        (lock_acquire(&cgroup_lock), 0)
 
 struct text {
     char *data;
@@ -87,9 +88,7 @@ struct text {
     size_t capacity;
 };
 
-static void text_free(struct text *text) {
-    kfree(text->data);
-}
+static void text_free(struct text *text) { kfree(text->data); }
 
 static void text_put(struct text *text, const char *value, size_t length) {
     if (text->length + length + 1 > text->capacity) {
@@ -379,8 +378,7 @@ static int move_member(struct process *process, void *context) {
     if (move->changed_count < NOTIFY_DEPTH)
         move->changed_count += leave(process, move->index, move->changed + move->changed_count,
                                      NOTIFY_DEPTH - move->changed_count);
-    else
-        (void)leave(process, move->index, move->changed, 0);
+    else (void)leave(process, move->index, move->changed, 0);
     if (move->to != move->to->hierarchy->root) {
         int was[NOTIFY_DEPTH];
         remember_populated(move->to, was, NOTIFY_DEPTH);
@@ -388,8 +386,8 @@ static int move_member(struct process *process, void *context) {
         move->to->tasks++;
         move->to->refs++;
         unsigned room = NOTIFY_DEPTH * 2 - move->changed_count;
-        move->changed_count += collect_populated(move->to, was,
-                                                 move->changed + move->changed_count, room);
+        move->changed_count +=
+            collect_populated(move->to, was, move->changed + move->changed_count, room);
     }
     return 0;
 }
@@ -465,13 +463,13 @@ static int64_t control_read(struct vfs_node *node, uint64_t offset, size_t size,
     struct cgroup *cgroup = file->cgroup;
     struct text text = {0};
     switch (file->kind) {
-    case FILE_PROCS: return read_members(cgroup, 0, offset, size, output);
+    case FILE_PROCS:       return read_members(cgroup, 0, offset, size, output);
     case FILE_THREADS:
-    case FILE_TASKS: return read_members(cgroup, 1, offset, size, output);
+    case FILE_TASKS:       return read_members(cgroup, 1, offset, size, output);
     case FILE_CONTROLLERS:
-    case FILE_SUBTREE: text_string(&text, "\n"); break;
-    case FILE_TYPE: text_string(&text, "domain\n"); break;
-    case FILE_EVENTS: {
+    case FILE_SUBTREE:     text_string(&text, "\n"); break;
+    case FILE_TYPE:        text_string(&text, "domain\n"); break;
+    case FILE_EVENTS:      {
         int populated, frozen;
         {
             CGROUP_LOCKED;
@@ -493,17 +491,17 @@ static int64_t control_read(struct vfs_node *node, uint64_t offset, size_t size,
         text_string(&text, "\nnr_dying_descendants 0\n");
         break;
     }
-    case FILE_FREEZE: text_string(&text, cgroup->frozen ? "1\n" : "0\n"); break;
+    case FILE_FREEZE:          text_string(&text, cgroup->frozen ? "1\n" : "0\n"); break;
     case FILE_MAX_DEPTH:
     case FILE_MAX_DESCENDANTS: text_string(&text, "max\n"); break;
-    case FILE_NOTIFY: text_string(&text, cgroup->notify_on_release ? "1\n" : "0\n"); break;
-    case FILE_CLONE_CHILDREN: text_string(&text, cgroup->clone_children ? "1\n" : "0\n"); break;
+    case FILE_NOTIFY:          text_string(&text, cgroup->notify_on_release ? "1\n" : "0\n"); break;
+    case FILE_CLONE_CHILDREN:  text_string(&text, cgroup->clone_children ? "1\n" : "0\n"); break;
     case FILE_RELEASE_AGENT:
         text_string(&text, cgroup->hierarchy->release_agent);
         text_string(&text, "\n");
         break;
     case FILE_SANE: text_string(&text, "0\n"); break;
-    default: break;
+    default:        break;
     }
     return text_reply(&text, offset, size, output);
 }
@@ -517,7 +515,7 @@ static int written_flag(const void *buffer, size_t size, int *value) {
 }
 
 static int64_t control_write(struct vfs_node *node, uint64_t offset, size_t size,
-                          const void *buffer) {
+                             const void *buffer) {
     (void)offset;
     struct cgroup_file *file = (struct cgroup_file *)node->fs_private;
     if (!file || !buffer) return -EINVAL;
@@ -525,15 +523,14 @@ static int64_t control_write(struct vfs_node *node, uint64_t offset, size_t size
     const char *text = (const char *)buffer;
     int flag;
     switch (file->kind) {
-    case FILE_PROCS: return write_members(cgroup, 1, size, buffer);
+    case FILE_PROCS:   return write_members(cgroup, 1, size, buffer);
     case FILE_THREADS:
-    case FILE_TASKS: return write_members(cgroup, 0, size, buffer);
+    case FILE_TASKS:   return write_members(cgroup, 0, size, buffer);
     case FILE_SUBTREE:
         for (size_t index = 0; index < size; index++)
             if (text[index] == '+') return -ENOENT;
         return (int64_t)size;
-    case FILE_TYPE:
-        return size >= 6 && memcmp(text, "domain", 6) == 0 ? (int64_t)size : -EINVAL;
+    case FILE_TYPE: return size >= 6 && memcmp(text, "domain", 6) == 0 ? (int64_t)size : -EINVAL;
     case FILE_FREEZE:
         if (written_flag(buffer, size, &flag) != 0) return -EINVAL;
         cgroup->frozen = (uint8_t)flag;
@@ -565,43 +562,61 @@ static int64_t control_write(struct vfs_node *node, uint64_t offset, size_t size
 }
 
 static const char *const file_names[FILE_COUNT] = {
-    "cgroup.procs", "cgroup.threads", "tasks", "cgroup.controllers",
-    "cgroup.subtree_control", "cgroup.type", "cgroup.events", "cgroup.stat",
-    "cgroup.freeze", "cgroup.kill", "cgroup.max.depth", "cgroup.max.descendants",
-    "notify_on_release", "cgroup.clone_children", "release_agent", "cgroup.sane_behavior",
+    "cgroup.procs",
+    "cgroup.threads",
+    "tasks",
+    "cgroup.controllers",
+    "cgroup.subtree_control",
+    "cgroup.type",
+    "cgroup.events",
+    "cgroup.stat",
+    "cgroup.freeze",
+    "cgroup.kill",
+    "cgroup.max.depth",
+    "cgroup.max.descendants",
+    "notify_on_release",
+    "cgroup.clone_children",
+    "release_agent",
+    "cgroup.sane_behavior",
 };
 
 static int file_present(const struct cgroup *cgroup, unsigned kind) {
     int root = cgroup == cgroup->hierarchy->root;
     if (cgroup->hierarchy->v2) {
         switch (kind) {
-        case FILE_PROCS: case FILE_THREADS: case FILE_CONTROLLERS: case FILE_SUBTREE:
-        case FILE_STAT: case FILE_MAX_DEPTH: case FILE_MAX_DESCENDANTS:
-            return 1;
-        case FILE_TYPE: case FILE_EVENTS: case FILE_FREEZE: case FILE_KILL:
-            return !root;
-        default:
-            return 0;
+        case FILE_PROCS:
+        case FILE_THREADS:
+        case FILE_CONTROLLERS:
+        case FILE_SUBTREE:
+        case FILE_STAT:
+        case FILE_MAX_DEPTH:
+        case FILE_MAX_DESCENDANTS: return 1;
+        case FILE_TYPE:
+        case FILE_EVENTS:
+        case FILE_FREEZE:
+        case FILE_KILL:            return !root;
+        default:                   return 0;
         }
     }
     switch (kind) {
-    case FILE_PROCS: case FILE_TASKS: case FILE_NOTIFY: case FILE_CLONE_CHILDREN:
-        return 1;
-    case FILE_RELEASE_AGENT: case FILE_SANE:
-        return root;
-    default:
-        return 0;
+    case FILE_PROCS:
+    case FILE_TASKS:
+    case FILE_NOTIFY:
+    case FILE_CLONE_CHILDREN: return 1;
+    case FILE_RELEASE_AGENT:
+    case FILE_SANE:           return root;
+    default:                  return 0;
     }
 }
 
 static uint32_t file_mode(unsigned kind) {
     switch (kind) {
-    case FILE_CONTROLLERS: case FILE_EVENTS: case FILE_STAT: case FILE_SANE:
-        return 0444;
-    case FILE_KILL:
-        return 0200;
-    default:
-        return 0644;
+    case FILE_CONTROLLERS:
+    case FILE_EVENTS:
+    case FILE_STAT:
+    case FILE_SANE:        return 0444;
+    case FILE_KILL:        return 0200;
+    default:               return 0644;
     }
 }
 
@@ -633,7 +648,7 @@ static void populate(struct cgroup *cgroup) {
 
 static int is_cgroup_directory(const struct vfs_node *node) {
     return node && (node->flags & 0xFFU) == VFS_DIRECTORY && node->adopt == adopt &&
-           node->fs_private;
+        node->fs_private;
 }
 
 static int adopt(struct vfs_node *directory, struct vfs_node *child) {
@@ -719,8 +734,7 @@ static int parse_options(const char *options, char *name, size_t capacity) {
                    !(length == 5 && memcmp(at, "xattr", 5) == 0) &&
                    !(length == 2 && memcmp(at, "rw", 2) == 0) &&
                    !(length == 10 && memcmp(at, "nsdelegate", 10) == 0) &&
-                   !(length == 20 && memcmp(at, "memory_recursiveprot", 20) == 0) &&
-                   length) {
+                   !(length == 20 && memcmp(at, "memory_recursiveprot", 20) == 0) && length) {
             return -ENOENT;
         }
         at = *end ? end + 1 : end;

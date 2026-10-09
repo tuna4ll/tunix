@@ -350,3 +350,14 @@ test: $(KERNEL) $(LIMINE_EXE)
 
 test-aarch64: $(AARCH64_CORE_IMAGE)
 	ARCH=aarch64 KERNEL=$(AARCH64_CORE_IMAGE) LIMINE=$(LIMINE_DIR) tools/tests/run.sh $(TESTS)
+
+CLANG_FORMAT ?= clang-format
+
+FORMAT_SOURCES := $(shell find kernel tools/tests -name '*.[ch]')
+
+.PHONY: format format-check
+format:
+	@$(CLANG_FORMAT) -i $(FORMAT_SOURCES)
+
+format-check:
+	@$(CLANG_FORMAT) --dry-run --Werror $(FORMAT_SOURCES)

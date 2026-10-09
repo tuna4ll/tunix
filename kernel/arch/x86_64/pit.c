@@ -3,9 +3,9 @@
 #include <tunix/io.h>
 #include <tunix/timer.h>
 
-#define PIT_INPUT_HZ 1193182U
-#define PIT_COMMAND 0x43U
-#define PIT_CHANNEL0 0x40U
+#define PIT_INPUT_HZ            1193182U
+#define PIT_COMMAND             0x43U
+#define PIT_CHANNEL0            0x40U
 #define PIT_MODE_RATE_GENERATOR 0x34U
 
 void arch_timer_start(unsigned hz) {

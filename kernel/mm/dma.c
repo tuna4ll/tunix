@@ -6,12 +6,9 @@
 #include <tunix/pmm.h>
 #include <tunix/vmm.h>
 
-static uint64_t pages_for(uint64_t bytes) {
-    return (bytes + PMM_PAGE_SIZE - 1ULL) / PMM_PAGE_SIZE;
-}
+static uint64_t pages_for(uint64_t bytes) { return (bytes + PMM_PAGE_SIZE - 1ULL) / PMM_PAGE_SIZE; }
 
-void *dma_alloc_below(uint64_t bytes, uint64_t alignment, uint64_t limit,
-                      uint64_t *physical) {
+void *dma_alloc_below(uint64_t bytes, uint64_t alignment, uint64_t limit, uint64_t *physical) {
     if (!bytes || !physical) return NULL;
     if (alignment < PMM_PAGE_SIZE) alignment = PMM_PAGE_SIZE;
 

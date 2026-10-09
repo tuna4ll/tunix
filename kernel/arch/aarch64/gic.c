@@ -7,30 +7,30 @@
 extern void kprintf(const char *fmt, ...);
 extern void panic(const char *message) __attribute__((noreturn));
 
-#define GICD_CTLR 0x0000U
-#define GICD_TYPER 0x0004U
-#define GICD_IGROUPR 0x0080U
-#define GICD_ISENABLER 0x0100U
-#define GICD_ICENABLER 0x0180U
-#define GICD_ICPENDR 0x0280U
+#define GICD_CTLR       0x0000U
+#define GICD_TYPER      0x0004U
+#define GICD_IGROUPR    0x0080U
+#define GICD_ISENABLER  0x0100U
+#define GICD_ICENABLER  0x0180U
+#define GICD_ICPENDR    0x0280U
 #define GICD_IPRIORITYR 0x0400U
-#define GICD_ITARGETSR 0x0800U
-#define GICD_ICFGR 0x0C00U
-#define GICD_SGIR 0x0F00U
-#define GICD_IROUTER 0x6000U
+#define GICD_ITARGETSR  0x0800U
+#define GICD_ICFGR      0x0C00U
+#define GICD_SGIR       0x0F00U
+#define GICD_IROUTER    0x6000U
 
-#define GICR_TYPER 0x0008U
-#define GICR_WAKER 0x0014U
-#define GICR_SGI_BASE 0x10000U
+#define GICR_TYPER       0x0008U
+#define GICR_WAKER       0x0014U
+#define GICR_SGI_BASE    0x10000U
 #define GICR_FRAME_BYTES 0x20000ULL
 
 #define GICC_CTLR 0x00U
-#define GICC_PMR 0x04U
-#define GICC_BPR 0x08U
-#define GICC_IAR 0x0CU
+#define GICC_PMR  0x04U
+#define GICC_BPR  0x08U
+#define GICC_IAR  0x0CU
 #define GICC_EOIR 0x10U
 
-#define PRIORITY_DEFAULT 0xA0U
+#define PRIORITY_DEFAULT    0xA0U
 #define MPIDR_AFFINITY_MASK 0xFF00FFFFFFULL
 
 static uint64_t distributor;
@@ -98,14 +98,13 @@ static void cpu_local_v3(unsigned index) {
     }
     if (index < SMP_MAX_CPUS) {
         redistributors[index] = found;
-        redistributor_physical[index] = aarch64_platform.gic_redistributor +
-                                        found_frame * GICR_FRAME_BYTES;
+        redistributor_physical[index] =
+            aarch64_platform.gic_redistributor + found_frame * GICR_FRAME_BYTES;
     }
 
     uint32_t waker = read32(found, GICR_WAKER);
     write32(found, GICR_WAKER, waker & ~(1U << 1));
-    for (unsigned spin = 0; spin < 1000000U && (read32(found, GICR_WAKER) & (1U << 2)); spin++) {
-    }
+    for (unsigned spin = 0; spin < 1000000U && (read32(found, GICR_WAKER) & (1U << 2)); spin++) {}
 
     uint64_t sgi = found + GICR_SGI_BASE;
     banked_defaults(sgi);
@@ -178,7 +177,7 @@ void gic_enable_interrupt(uint32_t intid) {
     if (intid < 32U && aarch64_platform.gic_version == 3) {
         unsigned index = cpu_current()->index;
         uint64_t base = index < SMP_MAX_CPUS && redistributors[index] ? redistributors[index]
-                                                                     : redistributor_base;
+                                                                      : redistributor_base;
         write32(base + GICR_SGI_BASE, GICD_ISENABLER, bit);
         return;
     }
@@ -202,13 +201,9 @@ void gic_end_of_interrupt(uint32_t intid) {
     write32(cpu_interface, GICC_EOIR, intid);
 }
 
-uint64_t gic_boot_redistributor(void) {
-    return redistributors[0];
-}
+uint64_t gic_boot_redistributor(void) { return redistributors[0]; }
 
-uint64_t gic_boot_redistributor_physical(void) {
-    return redistributor_physical[0];
-}
+uint64_t gic_boot_redistributor_physical(void) { return redistributor_physical[0]; }
 
 static void send_to_others(uint32_t intid) {
     if (aarch64_platform.gic_version == 3) {
@@ -219,13 +214,9 @@ static void send_to_others(uint32_t intid) {
     write32(distributor, GICD_SGIR, (1U << 24) | intid);
 }
 
-void gic_send_flush_ipi(void) {
-    send_to_others(AARCH64_SGI_FLUSH);
-}
+void gic_send_flush_ipi(void) { send_to_others(AARCH64_SGI_FLUSH); }
 
-void gic_send_reschedule_ipi(void) {
-    send_to_others(AARCH64_SGI_RESCHEDULE);
-}
+void gic_send_reschedule_ipi(void) { send_to_others(AARCH64_SGI_RESCHEDULE); }
 
 void gic_send_reschedule_to(uint64_t mpidr) {
     if (aarch64_platform.gic_version != 3 || (mpidr & 0xFFU) >= 16U) {
@@ -233,7 +224,7 @@ void gic_send_reschedule_to(uint64_t mpidr) {
         return;
     }
     uint64_t value = (((mpidr >> 32) & 0xFFULL) << 48) | (((mpidr >> 16) & 0xFFULL) << 32) |
-                     ((uint64_t)AARCH64_SGI_RESCHEDULE << 24) | (((mpidr >> 8) & 0xFFULL) << 16) |
-                     (1ULL << (mpidr & 0xFU));
+        ((uint64_t)AARCH64_SGI_RESCHEDULE << 24) | (((mpidr >> 8) & 0xFFULL) << 16) |
+        (1ULL << (mpidr & 0xFU));
     __asm__ volatile("msr ICC_SGI1R_EL1, %0; isb" : : "r"(value) : "memory");
 }

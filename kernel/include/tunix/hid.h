@@ -24,7 +24,7 @@ struct hid_mouse_layout {
 };
 
 int hid_parse_mouse(const uint8_t *descriptor, uint32_t length, struct hid_mouse_layout *out);
-int hid_decode_mouse(const struct hid_mouse_layout *layout, const uint8_t *report,
-                     uint32_t length, int *dx, int *dy, int *wheel, uint32_t *buttons);
+int hid_decode_mouse(const struct hid_mouse_layout *layout, const uint8_t *report, uint32_t length,
+                     int *dx, int *dy, int *wheel, uint32_t *buttons);
 
 #endif

@@ -11,12 +11,12 @@
 #include <tunix/hwcap.h>
 #include "aarch64.h"
 
-#define DESC_SH_INNER (3ULL << 8)
-#define DESC_AF (1ULL << 10)
-#define DESC_PXN (1ULL << 53)
-#define DESC_UXN (1ULL << 54)
-#define RESERVED_RANGES 32U
-#define BLOCK_2M 0x200000ULL
+#define DESC_SH_INNER      (3ULL << 8)
+#define DESC_AF            (1ULL << 10)
+#define DESC_PXN           (1ULL << 53)
+#define DESC_UXN           (1ULL << 54)
+#define RESERVED_RANGES    32U
+#define BLOCK_2M           0x200000ULL
 #define COMMAND_LINE_BYTES 1024U
 
 extern char kernel_image_start[];
@@ -36,7 +36,8 @@ const struct boot_info *boot_info(void) { return &info; }
 
 int aarch64_direct_map_wanted(uint64_t physical) {
     uint64_t frame = physical & ~(BLOCK_2M - 1U);
-    if (aarch64_platform.display_hole_size && frame + BLOCK_2M > aarch64_platform.display_hole_base &&
+    if (aarch64_platform.display_hole_size &&
+        frame + BLOCK_2M > aarch64_platform.display_hole_base &&
         frame < aarch64_platform.display_hole_base + aarch64_platform.display_hole_size)
         return 0;
     for (unsigned index = 0; index < aarch64_platform.ram_count; index++) {
@@ -135,10 +136,12 @@ static void collect_memory(uint64_t dtb_physical, uint64_t load_physical) {
         const void *start = fdt_property(&chosen, "linux,initrd-start", &length);
         const void *end = fdt_property(&chosen, "linux,initrd-end", NULL);
         if (start && end) {
-            uint64_t first = length == 8U ? ((uint64_t)fdt_read32(start) << 32) | fdt_read32((const uint8_t *)start + 4)
-                                          : fdt_read32(start);
-            uint64_t last = length == 8U ? ((uint64_t)fdt_read32(end) << 32) | fdt_read32((const uint8_t *)end + 4)
-                                         : fdt_read32(end);
+            uint64_t first = length == 8U
+                ? ((uint64_t)fdt_read32(start) << 32) | fdt_read32((const uint8_t *)start + 4)
+                : fdt_read32(start);
+            uint64_t last = length == 8U
+                ? ((uint64_t)fdt_read32(end) << 32) | fdt_read32((const uint8_t *)end + 4)
+                : fdt_read32(end);
             if (last > first) reserve(first, last - first);
         }
     }
@@ -202,8 +205,7 @@ static uint32_t property_u32(const struct fdt_node *node, const char *name, uint
 
 static void attach_console(void) {
     struct fdt_node node;
-    if (stdout_node(&node) != 0 &&
-        fdt_find_compatible("arm,pl011", 0, &node) != 0) return;
+    if (stdout_node(&node) != 0 && fdt_find_compatible("arm,pl011", 0, &node) != 0) return;
     uint64_t base, size;
     if (fdt_reg_cpu(&node, 0, &base, &size) != 0) return;
     uint64_t mapped = aarch64_early_map_device(base, size < 0x1000ULL ? 0x1000ULL : size);
@@ -247,7 +249,8 @@ static void discover_devices(void) {
     if (fdt_find_compatible("arm,armv8-timer", 0, &node) == 0) {
         uint32_t length = 0;
         const uint8_t *interrupts = fdt_property(&node, "interrupts", &length);
-        if (interrupts && length >= 36U) aarch64_platform.timer_interrupt = fdt_read32(interrupts + 28) + 16U;
+        if (interrupts && length >= 36U)
+            aarch64_platform.timer_interrupt = fdt_read32(interrupts + 28) + 16U;
         aarch64_platform.timer_frequency = property_u32(&node, "clock-frequency", 0);
     }
 
@@ -275,8 +278,9 @@ static void discover_devices(void) {
             uint64_t cpu = 0;
             for (uint32_t cell = 0; cell < parent_cells; cell++)
                 cpu = (cpu << 32) | fdt_read32(ranges + offset + 12U + cell * 4U);
-            uint64_t bytes = ((uint64_t)fdt_read32(ranges + offset + 12U + parent_cells * 4U) << 32) |
-                             fdt_read32(ranges + offset + 16U + parent_cells * 4U);
+            uint64_t bytes =
+                ((uint64_t)fdt_read32(ranges + offset + 12U + parent_cells * 4U) << 32) |
+                fdt_read32(ranges + offset + 16U + parent_cells * 4U);
             if (space == 2U && !aarch64_platform.pci_mmio32_size) {
                 aarch64_platform.pci_mmio32_base = cpu;
                 aarch64_platform.pci_mmio32_size = bytes;
@@ -295,11 +299,13 @@ static void discover_devices(void) {
     }
 
     static const char *const sd_compatibles[] = {
-        "brcm,bcm2711-emmc2", "brcm,bcm2835-sdhci", "arasan,sdhci-5.1", "arasan,sdhci-8.9a",
-        "snps,dwcmshc-sdhci", "rockchip,rk3588-dwcmshc", "rockchip,rk3568-dwcmshc",
+        "brcm,bcm2711-emmc2",      "brcm,bcm2835-sdhci", "arasan,sdhci-5.1",
+        "arasan,sdhci-8.9a",       "snps,dwcmshc-sdhci", "rockchip,rk3588-dwcmshc",
+        "rockchip,rk3568-dwcmshc",
     };
     for (unsigned kind = 0; kind < sizeof(sd_compatibles) / sizeof(sd_compatibles[0]); kind++) {
-        for (unsigned index = 0; fdt_find_compatible(sd_compatibles[kind], index, &node) == 0; index++) {
+        for (unsigned index = 0; fdt_find_compatible(sd_compatibles[kind], index, &node) == 0;
+             index++) {
             const char *status = fdt_property(&node, "status", NULL);
             if (status && !text_equal(status, "okay") && !text_equal(status, "ok")) continue;
             if (aarch64_platform.sd_count >= AARCH64_MAX_SD) break;
@@ -311,7 +317,8 @@ static void discover_devices(void) {
             struct aarch64_sd *sd = &aarch64_platform.sd[aarch64_platform.sd_count++];
             sd->physical = base;
             sd->clock_hz = property_u32(&node, "clock-frequency", 0);
-            sd->quirks = fdt_is_compatible(&node, "brcm,bcm2835-sdhci") ? SDHCI_QUIRK_WRITE_DELAY : 0;
+            sd->quirks =
+                fdt_is_compatible(&node, "brcm,bcm2835-sdhci") ? SDHCI_QUIRK_WRITE_DELAY : 0;
         }
     }
 

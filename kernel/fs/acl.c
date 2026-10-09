@@ -6,24 +6,24 @@
 #include <tunix/kstring.h>
 #include <tunix/vfs.h>
 
-#define EPERM 1
-#define EEXIST 17
-#define EINVAL 22
-#define EROFS 30
-#define ERANGE 34
-#define ENODATA 61
+#define EPERM      1
+#define EEXIST     17
+#define EINVAL     22
+#define EROFS      30
+#define ERANGE     34
+#define ENODATA    61
 #define EOPNOTSUPP 95
 
-#define ACL_VERSION 2U
-#define ACL_USER_OBJ 0x01U
-#define ACL_USER 0x02U
-#define ACL_GROUP_OBJ 0x04U
-#define ACL_GROUP 0x08U
-#define ACL_MASK 0x10U
-#define ACL_OTHER 0x20U
+#define ACL_VERSION     2U
+#define ACL_USER_OBJ    0x01U
+#define ACL_USER        0x02U
+#define ACL_GROUP_OBJ   0x04U
+#define ACL_GROUP       0x08U
+#define ACL_MASK        0x10U
+#define ACL_OTHER       0x20U
 #define ACL_MAX_ENTRIES 64U
-#define XATTR_CREATE 1
-#define XATTR_REPLACE 2
+#define XATTR_CREATE    1
+#define XATTR_REPLACE   2
 
 struct acl_entry {
     uint16_t tag;
@@ -45,7 +45,8 @@ static struct vfs_acl *acl_of(const struct vfs_node *node) {
 }
 
 static void acl_swap(struct vfs_node *node, struct vfs_acl *next) {
-    struct vfs_acl *old = __atomic_exchange_n((struct vfs_acl **)&node->acl, next, __ATOMIC_ACQ_REL);
+    struct vfs_acl *old =
+        __atomic_exchange_n((struct vfs_acl **)&node->acl, next, __ATOMIC_ACQ_REL);
     if (old) defer_free(old);
 }
 
@@ -58,7 +59,7 @@ static int may_change(const struct vfs_node *node) {
 }
 
 static void put_entry(uint8_t *out, size_t *at, uint16_t tag, uint16_t perm, uint32_t id) {
-    struct acl_entry entry = { tag, perm, id };
+    struct acl_entry entry = {tag, perm, id};
     memcpy(out + *at, &entry, sizeof(entry));
     *at += sizeof(entry);
 }
@@ -117,12 +118,25 @@ int64_t acl_xattr_set(struct vfs_node *node, const char *name, const void *value
         struct acl_entry *entry = &entries[index];
         if (entry->perm > 7U) return -EINVAL;
         switch (entry->tag) {
-        case ACL_USER_OBJ: if (user_obj >= 0) return -EINVAL; user_obj = entry->perm; break;
-        case ACL_GROUP_OBJ: if (group_obj >= 0) return -EINVAL; group_obj = entry->perm; break;
-        case ACL_MASK: if (mask >= 0) return -EINVAL; mask = entry->perm; break;
-        case ACL_OTHER: if (other >= 0) return -EINVAL; other = entry->perm; break;
-        case ACL_USER: case ACL_GROUP: entries[named++] = *entry; break;
-        default: return -EINVAL;
+        case ACL_USER_OBJ:
+            if (user_obj >= 0) return -EINVAL;
+            user_obj = entry->perm;
+            break;
+        case ACL_GROUP_OBJ:
+            if (group_obj >= 0) return -EINVAL;
+            group_obj = entry->perm;
+            break;
+        case ACL_MASK:
+            if (mask >= 0) return -EINVAL;
+            mask = entry->perm;
+            break;
+        case ACL_OTHER:
+            if (other >= 0) return -EINVAL;
+            other = entry->perm;
+            break;
+        case ACL_USER:
+        case ACL_GROUP: entries[named++] = *entry; break;
+        default:        return -EINVAL;
         }
     }
     if (user_obj < 0 || group_obj < 0 || other < 0) return -EINVAL;
@@ -137,7 +151,8 @@ int64_t acl_xattr_set(struct vfs_node *node, const char *name, const void *value
         entries[at] = key;
     }
     for (uint32_t index = 1; index < named; index++)
-        if (entries[index].tag == entries[index - 1].tag && entries[index].id == entries[index - 1].id)
+        if (entries[index].tag == entries[index - 1].tag &&
+            entries[index].id == entries[index - 1].id)
             return -EINVAL;
 
     struct vfs_acl *next = NULL;
@@ -149,8 +164,8 @@ int64_t acl_xattr_set(struct vfs_node *node, const char *name, const void *value
         memcpy(next->entries, entries, named * sizeof(struct acl_entry));
     }
     uint32_t group_bits = (uint32_t)(named ? mask : group_obj);
-    node->mode = (node->mode & ~0777U) | ((uint32_t)user_obj << 6) | (group_bits << 3) |
-                 (uint32_t)other;
+    node->mode =
+        (node->mode & ~0777U) | ((uint32_t)user_obj << 6) | (group_bits << 3) | (uint32_t)other;
     acl_swap(node, next);
     vfs_stamp_times(node, VFS_TIME_CTIME);
     return 0;
@@ -210,6 +225,7 @@ int acl_permission(const struct vfs_node *node, const struct credentials *cred, 
 }
 
 void acl_release(struct vfs_node *node) {
-    struct vfs_acl *acl = __atomic_exchange_n((struct vfs_acl **)&node->acl, NULL, __ATOMIC_ACQ_REL);
+    struct vfs_acl *acl =
+        __atomic_exchange_n((struct vfs_acl **)&node->acl, NULL, __ATOMIC_ACQ_REL);
     if (acl) defer_free(acl);
 }

@@ -17,7 +17,7 @@ static void read_brand(char *model) {
     char raw[49];
     for (unsigned leaf = 0; leaf < 3; leaf++) {
         cpu_cpuid(0x80000002U + leaf, 0, &a, &b, &c, &d);
-        uint32_t words[4] = { a, b, c, d };
+        uint32_t words[4] = {a, b, c, d};
         copy_words(raw + leaf * 16U, words, 4);
     }
     raw[48] = '\0';
@@ -36,7 +36,7 @@ static void read_brand(char *model) {
 void cpu_identify(struct cpu_identity *out) {
     uint32_t a, b, c, d;
     cpu_cpuid(0, 0, &a, &b, &c, &d);
-    uint32_t words[3] = { b, d, c };
+    uint32_t words[3] = {b, d, c};
     copy_words(out->vendor, words, 3);
     out->vendor[12] = '\0';
 

@@ -14,32 +14,32 @@
 
 extern void kprintf(const char *fmt, ...);
 
-#define NVME_CLASS 0x01U
+#define NVME_CLASS    0x01U
 #define NVME_SUBCLASS 0x08U
 
-#define REG_CAP 0x00U
-#define REG_CC 0x14U
+#define REG_CAP  0x00U
+#define REG_CC   0x14U
 #define REG_CSTS 0x1CU
-#define REG_AQA 0x24U
-#define REG_ASQ 0x28U
-#define REG_ACQ 0x30U
+#define REG_AQA  0x24U
+#define REG_ASQ  0x28U
+#define REG_ACQ  0x30U
 
-#define CC_ENABLE 0x00000001U
+#define CC_ENABLE  0x00000001U
 #define CSTS_READY 0x00000001U
 #define CSTS_FATAL 0x00000002U
 
 #define ADMIN_DELETE_SQ 0x00U
 #define ADMIN_CREATE_SQ 0x01U
 #define ADMIN_CREATE_CQ 0x05U
-#define ADMIN_IDENTIFY 0x06U
+#define ADMIN_IDENTIFY  0x06U
 
 #define IO_FLUSH 0x00U
 #define IO_WRITE 0x01U
-#define IO_READ 0x02U
+#define IO_READ  0x02U
 
-#define QUEUE_ENTRIES 32U
+#define QUEUE_ENTRIES   32U
 #define NVME_WAIT_SPINS 40000000U
-#define NVME_MAX_PAGES 32U
+#define NVME_MAX_PAGES  32U
 
 struct nvme_command {
     uint32_t dword0;
@@ -111,9 +111,7 @@ static uint64_t buffer_physical(uint64_t address) {
 }
 
 static uint32_t read32(uint64_t address) { return *(volatile uint32_t *)address; }
-static void write32(uint64_t address, uint32_t value) {
-    *(volatile uint32_t *)address = value;
-}
+static void write32(uint64_t address, uint32_t value) { *(volatile uint32_t *)address = value; }
 
 static void write64(uint64_t address, uint64_t value) {
     write32(address, (uint32_t)value);
@@ -203,8 +201,8 @@ static int build_prp(struct nvme_controller *controller, struct nvme_command *co
     return 0;
 }
 
-static int transfer(struct nvme_namespace *space, uint64_t lba, uint32_t count,
-                    void *buffer, int write) {
+static int transfer(struct nvme_namespace *space, uint64_t lba, uint32_t count, void *buffer,
+                    int write) {
     if (count % space->sectors_per_block || lba % space->sectors_per_block) return -1;
     uint64_t block = lba / space->sectors_per_block;
     uint32_t blocks = count / space->sectors_per_block;
@@ -355,11 +353,17 @@ static void name_device(struct block_device *device, unsigned controller, uint32
     char digits[12];
     unsigned count = 0;
     unsigned value = controller;
-    do { digits[count++] = (char)('0' + value % 10U); value /= 10U; } while (value);
+    do {
+        digits[count++] = (char)('0' + value % 10U);
+        value /= 10U;
+    } while (value);
     while (count) text[at++] = digits[--count];
     text[at++] = 'n';
     value = nsid;
-    do { digits[count++] = (char)('0' + value % 10U); value /= 10U; } while (value);
+    do {
+        digits[count++] = (char)('0' + value % 10U);
+        value /= 10U;
+    } while (value);
     while (count) text[at++] = digits[--count];
     text[at] = '\0';
     size_t limit = sizeof(device->name) - 1;

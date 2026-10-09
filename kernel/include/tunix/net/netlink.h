@@ -4,13 +4,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define TUNIX_AF_NETLINK 16
-#define TUNIX_NETLINK_ROUTE 0
-#define TUNIX_NETLINK_SOCK_DIAG 4
+#define TUNIX_AF_NETLINK             16
+#define TUNIX_NETLINK_ROUTE          0
+#define TUNIX_NETLINK_SOCK_DIAG      4
 #define TUNIX_NETLINK_KOBJECT_UEVENT 15
 
 #define TUNIX_UEVENT_GROUP_KERNEL 1
-#define TUNIX_UEVENT_GROUP_UDEV 2
+#define TUNIX_UEVENT_GROUP_UDEV   2
 
 struct netlink_socket;
 
@@ -36,8 +36,8 @@ int netlink_socket_getsockname(struct netlink_socket *socket, void *address, siz
 
 int64_t netlink_socket_sendto(struct netlink_socket *socket, const void *data, size_t length,
                               int flags, const void *address, size_t address_length);
-int64_t netlink_socket_recvfrom(struct netlink_socket *socket, void *data, size_t length,
-                                int flags, void *address, size_t *address_length);
+int64_t netlink_socket_recvfrom(struct netlink_socket *socket, void *data, size_t length, int flags,
+                                void *address, size_t *address_length);
 int64_t netlink_socket_read(struct netlink_socket *socket, size_t length, void *data);
 int64_t netlink_socket_write(struct netlink_socket *socket, size_t length, const void *data);
 

@@ -76,8 +76,7 @@ void kmain(const struct boot_info *boot) {
     cpu_irq_disable();
     arch_early_init();
 #if TUNIX_DEBUG_LOGS
-    kprintf("TUNIX: boot regions=%u cmdline=\"%s\"\n", boot->memory_count,
-            boot->command_line);
+    kprintf("TUNIX: boot regions=%u cmdline=\"%s\"\n", boot->memory_count, boot->command_line);
 #endif
 
     arch_cpu_init();
@@ -95,8 +94,7 @@ void kmain(const struct boot_info *boot) {
     if (boot->framebuffer && framebuffer_init(boot->framebuffer) != 0)
         panic("framebuffer initialization failed");
     heap_init();
-    if (terminal_init() != 0)
-        panic("framebuffer terminal initialization failed");
+    if (terminal_init() != 0) panic("framebuffer terminal initialization failed");
     vt_init();
 #if TUNIX_BOOT_TIMINGS
     boot_log_stage("terminal initialization", &stage_started);
@@ -133,8 +131,8 @@ void kmain(const struct boot_info *boot) {
     const struct block_device *root = block_root();
     char source[5 + BLOCK_NAME_BYTES] = "/dev/";
     if (root) memcpy(source + 5, root->dev_name, sizeof root->dev_name);
-    vfs_mount_builtin(root ? source : "none", "/",
-                      ext2fs_journalled(vfs_root) ? "ext3" : "ext2", vfs_root);
+    vfs_mount_builtin(root ? source : "none", "/", ext2fs_journalled(vfs_root) ? "ext3" : "ext2",
+                      vfs_root);
 #if TUNIX_BOOT_TIMINGS
     boot_log_stage("root filesystem mount", &stage_started);
 #endif
@@ -155,8 +153,7 @@ void kmain(const struct boot_info *boot) {
     const char *requested = boot_command_line_value("init");
     if (requested) {
         size_t length = 0;
-        while (requested[length] && requested[length] != ' ' &&
-               length < sizeof init_path - 1) {
+        while (requested[length] && requested[length] != ' ' && length < sizeof init_path - 1) {
             init_path[length] = requested[length];
             length++;
         }

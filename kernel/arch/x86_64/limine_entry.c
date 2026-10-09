@@ -7,52 +7,67 @@
 #include <tunix/boot.h>
 #include <tunix/boot_framebuffer.h>
 
-__attribute__((used, section(".limine_requests")))
-static volatile LIMINE_BASE_REVISION(3);
+__attribute__((used, section(".limine_requests"))) static volatile LIMINE_BASE_REVISION(3);
 
-__attribute__((used, section(".limine_requests")))
-static volatile struct limine_paging_mode_request paging_mode_request = {
-    .id = LIMINE_PAGING_MODE_REQUEST, .revision = 0, .response = NULL,
-    .mode = LIMINE_PAGING_MODE_X86_64_4LVL,
-    .max_mode = LIMINE_PAGING_MODE_X86_64_4LVL,
-    .min_mode = LIMINE_PAGING_MODE_X86_64_4LVL,
+__attribute__((used, section(".limine_requests"))) static volatile struct limine_paging_mode_request
+    paging_mode_request = {
+        .id = LIMINE_PAGING_MODE_REQUEST,
+        .revision = 0,
+        .response = NULL,
+        .mode = LIMINE_PAGING_MODE_X86_64_4LVL,
+        .max_mode = LIMINE_PAGING_MODE_X86_64_4LVL,
+        .min_mode = LIMINE_PAGING_MODE_X86_64_4LVL,
 };
 
-__attribute__((used, section(".limine_requests")))
-static volatile struct limine_memmap_request memmap_request = {
-    .id = LIMINE_MEMMAP_REQUEST, .revision = 0, .response = NULL,
+__attribute__((
+    used,
+    section(".limine_requests"))) static volatile struct limine_memmap_request memmap_request = {
+    .id = LIMINE_MEMMAP_REQUEST,
+    .revision = 0,
+    .response = NULL,
 };
 
-__attribute__((used, section(".limine_requests")))
-static volatile struct limine_hhdm_request hhdm_request = {
-    .id = LIMINE_HHDM_REQUEST, .revision = 0, .response = NULL,
+__attribute__((
+    used, section(".limine_requests"))) static volatile struct limine_hhdm_request hhdm_request = {
+    .id = LIMINE_HHDM_REQUEST,
+    .revision = 0,
+    .response = NULL,
 };
 
-__attribute__((used, section(".limine_requests")))
-static volatile struct limine_framebuffer_request framebuffer_request = {
-    .id = LIMINE_FRAMEBUFFER_REQUEST, .revision = 0, .response = NULL,
+__attribute__((used, section(".limine_requests"))) static volatile struct limine_framebuffer_request
+    framebuffer_request = {
+        .id = LIMINE_FRAMEBUFFER_REQUEST,
+        .revision = 0,
+        .response = NULL,
 };
 
-__attribute__((used, section(".limine_requests")))
-static volatile struct limine_executable_address_request address_request = {
-    .id = LIMINE_EXECUTABLE_ADDRESS_REQUEST, .revision = 0, .response = NULL,
+__attribute__((
+    used, section(".limine_requests"))) static volatile struct limine_executable_address_request
+    address_request = {
+        .id = LIMINE_EXECUTABLE_ADDRESS_REQUEST,
+        .revision = 0,
+        .response = NULL,
 };
 
-__attribute__((used, section(".limine_requests")))
-static volatile struct limine_executable_cmdline_request cmdline_request = {
-    .id = LIMINE_EXECUTABLE_CMDLINE_REQUEST, .revision = 0, .response = NULL,
+__attribute__((
+    used, section(".limine_requests"))) static volatile struct limine_executable_cmdline_request
+    cmdline_request = {
+        .id = LIMINE_EXECUTABLE_CMDLINE_REQUEST,
+        .revision = 0,
+        .response = NULL,
 };
 
-__attribute__((used, section(".limine_requests")))
-static volatile struct limine_rsdp_request rsdp_request = {
-    .id = LIMINE_RSDP_REQUEST, .revision = 0, .response = NULL,
+__attribute__((
+    used, section(".limine_requests"))) static volatile struct limine_rsdp_request rsdp_request = {
+    .id = LIMINE_RSDP_REQUEST,
+    .revision = 0,
+    .response = NULL,
 };
 
-__attribute__((used, section(".limine_requests_start")))
-static volatile LIMINE_REQUESTS_START_MARKER;
+__attribute__((used,
+               section(".limine_requests_start"))) static volatile LIMINE_REQUESTS_START_MARKER;
 
-__attribute__((used, section(".limine_requests_end")))
-static volatile LIMINE_REQUESTS_END_MARKER;
+__attribute__((used, section(".limine_requests_end"))) static volatile LIMINE_REQUESTS_END_MARKER;
 
 extern uint8_t kernel_image_start[];
 extern uint8_t kernel_reserve_end[];
@@ -71,11 +86,12 @@ static uint32_t build_memory_map(void) {
     if (!response) return 0;
 
     uint32_t count = 0;
-    for (uint64_t index = 0;
-         index < response->entry_count && count < BOOT_MEMORY_REGIONS; index++) {
+    for (uint64_t index = 0; index < response->entry_count && count < BOOT_MEMORY_REGIONS;
+         index++) {
         const struct limine_memmap_entry *entry = response->entries[index];
         if (entry->type == LIMINE_MEMMAP_RESERVED || entry->type == LIMINE_MEMMAP_BAD_MEMORY ||
-            entry->type == LIMINE_MEMMAP_FRAMEBUFFER) continue;
+            entry->type == LIMINE_MEMMAP_FRAMEBUFFER)
+            continue;
         memory_regions[count].base = entry->base;
         memory_regions[count].length = entry->length;
         memory_regions[count].usable = entry->type == LIMINE_MEMMAP_USABLE;
@@ -130,8 +146,8 @@ void limine_start(void) {
     info.framebuffer = framebuffer_info.magic ? &framebuffer_info : NULL;
 
     info.command_line = cmdline_request.response && cmdline_request.response->cmdline
-                            ? cmdline_request.response->cmdline
-                            : "";
+        ? cmdline_request.response->cmdline
+        : "";
     info.rsdp = rsdp_request.response ? rsdp_request.response->address : 0;
 
     kmain(&info);

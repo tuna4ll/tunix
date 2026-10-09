@@ -20,12 +20,12 @@ extern void kprintf(const char *fmt, ...);
 #define FRAMEBUFFER_WINDOW_BYTES (DEVICE_MMIO_VIRTUAL_BASE - FRAMEBUFFER_VIRTUAL_BASE)
 
 #define EACCES 13
-#define EBUSY 16
+#define EBUSY  16
 #define EFAULT 14
 #define EINVAL 22
 #define ENODEV 19
 #define ENOTTY 25
-#define EPERM 1
+#define EPERM  1
 
 struct framebuffer_state {
     volatile uint8_t *base;
@@ -53,9 +53,7 @@ struct framebuffer_state {
 
 static struct framebuffer_state framebuffer;
 
-static uint64_t align_up_page(uint64_t value) {
-    return (value + 4095ULL) & ~4095ULL;
-}
+static uint64_t align_up_page(uint64_t value) { return (value + 4095ULL) & ~4095ULL; }
 
 static uint32_t scale_component(uint8_t value, uint8_t mask_size) {
     if (!mask_size) return 0;
@@ -63,9 +61,7 @@ static uint32_t scale_component(uint8_t value, uint8_t mask_size) {
     return ((uint32_t)value * maximum + 127U) / 255U;
 }
 
-static int file_is_writable(const struct file *file) {
-    return file && (file->flags & 3U) != 0U;
-}
+static int file_is_writable(const struct file *file) { return file && (file->flags & 3U) != 0U; }
 
 static int framebuffer_owner_is(const void *owner) {
     lock_acquire(&graphics_lock);
@@ -85,7 +81,7 @@ int framebuffer_claim_graphics(const void *owner) {
 
     lock_acquire(&graphics_lock);
     int takeover = framebuffer.graphics_owner && framebuffer.graphics_owner != owner &&
-                   vt_graphics_takeover_allowed(framebuffer.graphics_owner, owner);
+        vt_graphics_takeover_allowed(framebuffer.graphics_owner, owner);
     if (framebuffer.graphics_owner && framebuffer.graphics_owner != owner && !takeover) {
         int shared = shares_with_graphics_terminal(owner);
         lock_release(&graphics_lock);
@@ -132,8 +128,7 @@ void framebuffer_resume_graphics(void) {
 
 int framebuffer_graphics_foreground(const void *owner) {
     lock_acquire(&graphics_lock);
-    int mine = framebuffer.graphics_owner == owner ||
-               shares_with_graphics_terminal(owner);
+    int mine = framebuffer.graphics_owner == owner || shares_with_graphics_terminal(owner);
     int foreground = mine && !framebuffer.graphics_suspended;
     lock_release(&graphics_lock);
     return foreground;
@@ -151,13 +146,14 @@ static int framebuffer_release(struct file *file, int fail_if_not_owner) {
 
 int framebuffer_init(const struct boot_framebuffer_info *boot_info) {
     if (!boot_info || boot_info->magic != TUNIX_BOOT_FB_MAGIC ||
-        boot_info->version != TUNIX_BOOT_FB_VERSION ||
-        boot_info->size < sizeof(*boot_info)) return -1;
+        boot_info->version != TUNIX_BOOT_FB_VERSION || boot_info->size < sizeof(*boot_info))
+        return -1;
     if (boot_info->bits_per_pixel != 32U || !boot_info->physical_address ||
         boot_info->width < 640U || boot_info->height < 480U ||
-        boot_info->pitch < (uint32_t)boot_info->width * 4U) return -1;
-    if (!boot_info->red_mask_size || !boot_info->green_mask_size ||
-        !boot_info->blue_mask_size) return -1;
+        boot_info->pitch < (uint32_t)boot_info->width * 4U)
+        return -1;
+    if (!boot_info->red_mask_size || !boot_info->green_mask_size || !boot_info->blue_mask_size)
+        return -1;
 
     uint64_t physical_page = boot_info->physical_address & ~0xFFFULL;
     uint64_t page_offset = boot_info->physical_address & 0xFFFULL;
@@ -165,17 +161,15 @@ int framebuffer_init(const struct boot_framebuffer_info *boot_info) {
     if (framebuffer_bytes > UINT64_MAX - page_offset) return -1;
     uint64_t mapped_size = align_up_page(framebuffer_bytes + page_offset);
     if (mapped_size > FRAMEBUFFER_WINDOW_BYTES) return -1;
-    uint64_t cache_flags = vmm_write_combining_available() ? PAGE_WRITE_COMBINING
-                                                          : PAGE_UNCACHED;
+    uint64_t cache_flags = vmm_write_combining_available() ? PAGE_WRITE_COMBINING : PAGE_UNCACHED;
     for (uint64_t offset = 0; offset < mapped_size; offset += 4096ULL) {
-        int result = vmm_map_page_in(vmm_kernel_cr3(), FRAMEBUFFER_VIRTUAL_BASE + offset,
-                                     physical_page + offset,
-                                     PAGE_WRITE | PAGE_DEVICE | cache_flags);
+        int result =
+            vmm_map_page_in(vmm_kernel_cr3(), FRAMEBUFFER_VIRTUAL_BASE + offset,
+                            physical_page + offset, PAGE_WRITE | PAGE_DEVICE | cache_flags);
         if (result != 0 && result != -2) return -1;
     }
 
-    kprintf("FB: %ux%u mapped %s\n", (unsigned)boot_info->width,
-            (unsigned)boot_info->height,
+    kprintf("FB: %ux%u mapped %s\n", (unsigned)boot_info->width, (unsigned)boot_info->height,
             vmm_write_combining_available() ? "write-combining" : "uncached");
 
     framebuffer.base = (volatile uint8_t *)(FRAMEBUFFER_VIRTUAL_BASE + page_offset);
@@ -205,7 +199,7 @@ int framebuffer_init(const struct boot_framebuffer_info *boot_info) {
 int framebuffer_available(void) { return framebuffer.ready; }
 int framebuffer_console_active(void) {
     return framebuffer.ready &&
-           (framebuffer.graphics_owner == NULL || framebuffer.graphics_suspended);
+        (framebuffer.graphics_owner == NULL || framebuffer.graphics_suspended);
 }
 uint32_t framebuffer_width(void) { return framebuffer.width; }
 uint32_t framebuffer_height(void) { return framebuffer.height; }
@@ -229,22 +223,21 @@ uint32_t framebuffer_pack_rgb(uint32_t rgb) {
     uint8_t red = (uint8_t)(rgb >> 16);
     uint8_t green = (uint8_t)(rgb >> 8);
     uint8_t blue = (uint8_t)rgb;
-    if (framebuffer.red_size == 8U && framebuffer.green_size == 8U &&
-        framebuffer.blue_size == 8U) {
+    if (framebuffer.red_size == 8U && framebuffer.green_size == 8U && framebuffer.blue_size == 8U) {
         return ((uint32_t)red << framebuffer.red_position) |
-               ((uint32_t)green << framebuffer.green_position) |
-               ((uint32_t)blue << framebuffer.blue_position);
+            ((uint32_t)green << framebuffer.green_position) |
+            ((uint32_t)blue << framebuffer.blue_position);
     }
     return (scale_component(red, framebuffer.red_size) << framebuffer.red_position) |
-           (scale_component(green, framebuffer.green_size) << framebuffer.green_position) |
-           (scale_component(blue, framebuffer.blue_size) << framebuffer.blue_position);
+        (scale_component(green, framebuffer.green_size) << framebuffer.green_position) |
+        (scale_component(blue, framebuffer.blue_size) << framebuffer.blue_position);
 }
 
 void framebuffer_put_native(uint32_t x, uint32_t y, uint32_t native_pixel) {
-    if (!framebuffer_console_active() || x >= framebuffer.width || y >= framebuffer.height)
-        return;
-    volatile uint32_t *pixel = (volatile uint32_t *)(framebuffer.base +
-                               (uint64_t)y * framebuffer.pitch + (uint64_t)x * 4U);
+    if (!framebuffer_console_active() || x >= framebuffer.width || y >= framebuffer.height) return;
+    volatile uint32_t *pixel =
+        (volatile uint32_t *)(framebuffer.base + (uint64_t)y * framebuffer.pitch +
+                              (uint64_t)x * 4U);
     *pixel = native_pixel;
 }
 
@@ -267,15 +260,13 @@ void framebuffer_measure(unsigned rounds, uint64_t *read_rate, uint64_t *write_r
 
     uint64_t started = time_uptime_ns();
     for (unsigned round = 0; round < rounds; round++)
-        for (unsigned index = 0; index < words; index++)
-            measure_buffer[index] = window[index];
+        for (unsigned index = 0; index < words; index++) measure_buffer[index] = window[index];
     uint64_t elapsed = time_uptime_ns() - started;
     if (read_rate && elapsed) *read_rate = moved * 1000000000ULL / elapsed;
 
     started = time_uptime_ns();
     for (unsigned round = 0; round < rounds; round++)
-        for (unsigned index = 0; index < words; index++)
-            window[index] = measure_buffer[index];
+        for (unsigned index = 0; index < words; index++) window[index] = measure_buffer[index];
     elapsed = time_uptime_ns() - started;
     if (write_rate && elapsed) *write_rate = moved * 1000000000ULL / elapsed;
 }
@@ -289,8 +280,8 @@ void framebuffer_fill_rect_rgb(uint32_t x, uint32_t y, uint32_t width, uint32_t 
 
     uint32_t native = framebuffer_pack_rgb(rgb);
     for (uint32_t row = 0; row < height; row++) {
-        volatile uint32_t *line = (volatile uint32_t *)(framebuffer.base +
-                                  (uint64_t)(y + row) * framebuffer.pitch) + x;
+        volatile uint32_t *line =
+            (volatile uint32_t *)(framebuffer.base + (uint64_t)(y + row) * framebuffer.pitch) + x;
         for (uint32_t column = 0; column < width; column++) line[column] = native;
     }
 }
@@ -299,8 +290,8 @@ void framebuffer_fill_rgb(uint32_t rgb) {
     if (!framebuffer_console_active()) return;
     uint32_t native = framebuffer_pack_rgb(rgb);
     for (uint32_t y = 0; y < framebuffer.height; y++) {
-        volatile uint32_t *row = (volatile uint32_t *)(framebuffer.base +
-                                 (uint64_t)y * framebuffer.pitch);
+        volatile uint32_t *row =
+            (volatile uint32_t *)(framebuffer.base + (uint64_t)y * framebuffer.pitch);
         for (uint32_t x = 0; x < framebuffer.width; x++) row[x] = native;
     }
 }
@@ -346,16 +337,14 @@ static void framebuffer_fill_info(struct tunix_fb_info *info) {
     info->green_field_position = framebuffer.green_position;
     info->blue_mask_size = framebuffer.blue_size;
     info->blue_field_position = framebuffer.blue_position;
-    info->mode = framebuffer.graphics_owner ? TUNIX_FB_MODE_GRAPHICS :
-                                              TUNIX_FB_MODE_CONSOLE;
+    info->mode = framebuffer.graphics_owner ? TUNIX_FB_MODE_GRAPHICS : TUNIX_FB_MODE_CONSOLE;
     info->flags = TUNIX_FB_FLAG_LINEAR | TUNIX_FB_FLAG_DIRECT_MMAP;
     info->framebuffer_size = framebuffer.byte_length;
     info->mapping_size = framebuffer.mapping_size;
     info->memory_offset = framebuffer.memory_offset;
 }
 
-int64_t framebuffer_file_ioctl(struct file *file, unsigned long request,
-                               uint64_t user_argument) {
+int64_t framebuffer_file_ioctl(struct file *file, unsigned long request, uint64_t user_argument) {
     if (!framebuffer.ready || !file) return -ENODEV;
 
     if (request == TUNIX_FBIO_GET_INFO) {
@@ -367,8 +356,7 @@ int64_t framebuffer_file_ioctl(struct file *file, unsigned long request,
 
     if (request == TUNIX_FBIO_GET_MODE) {
         if (!user_argument) return -EFAULT;
-        uint32_t mode = framebuffer.graphics_owner ? TUNIX_FB_MODE_GRAPHICS :
-                                                     TUNIX_FB_MODE_CONSOLE;
+        uint32_t mode = framebuffer.graphics_owner ? TUNIX_FB_MODE_GRAPHICS : TUNIX_FB_MODE_CONSOLE;
         return copy_to_user(user_argument, &mode, sizeof(mode)) == 0 ? 0 : -EFAULT;
     }
 
@@ -385,10 +373,9 @@ int64_t framebuffer_file_ioctl(struct file *file, unsigned long request,
         if (!framebuffer_owner_is(file)) return -EPERM;
         if (user_argument) {
             struct tunix_fb_rect rectangle;
-            if (copy_from_user(&rectangle, user_argument, sizeof(rectangle)) != 0)
-                return -EFAULT;
-            if (!rectangle.width || !rectangle.height ||
-                rectangle.x >= framebuffer.width || rectangle.y >= framebuffer.height ||
+            if (copy_from_user(&rectangle, user_argument, sizeof(rectangle)) != 0) return -EFAULT;
+            if (!rectangle.width || !rectangle.height || rectangle.x >= framebuffer.width ||
+                rectangle.y >= framebuffer.height ||
                 rectangle.width > framebuffer.width - rectangle.x ||
                 rectangle.height > framebuffer.height - rectangle.y)
                 return -EINVAL;
@@ -409,29 +396,24 @@ uint8_t *framebuffer_scanout(void) {
     return (uint8_t *)framebuffer.base + framebuffer.memory_offset;
 }
 
-void framebuffer_present(void) {
-    __sync_synchronize();
-}
+void framebuffer_present(void) { __sync_synchronize(); }
 
-int64_t framebuffer_device_mmap(struct vfs_node *node, struct file *file,
-                                uint64_t cr3, uint64_t virtual_address,
-                                uint64_t length, uint64_t offset,
+int64_t framebuffer_device_mmap(struct vfs_node *node, struct file *file, uint64_t cr3,
+                                uint64_t virtual_address, uint64_t length, uint64_t offset,
                                 uint64_t page_flags) {
     (void)node;
     if (!framebuffer.ready || !file || !length) return -EINVAL;
     if (!framebuffer_owner_is(file)) return -EPERM;
     if ((offset & 0xFFFULL) || (length & 0xFFFULL)) return -EINVAL;
-    if (offset >= framebuffer.mapping_size ||
-        length > framebuffer.mapping_size - offset) return -EINVAL;
+    if (offset >= framebuffer.mapping_size || length > framebuffer.mapping_size - offset)
+        return -EINVAL;
 
     uint64_t mapped = 0;
     uint64_t flags = page_flags | PAGE_USER | PAGE_DEVICE | PAGE_PRESENT | PAGE_NX |
-                     (vmm_write_combining_available() ? PAGE_WRITE_COMBINING
-                                                      : PAGE_UNCACHED);
+        (vmm_write_combining_available() ? PAGE_WRITE_COMBINING : PAGE_UNCACHED);
     for (; mapped < length; mapped += 4096ULL) {
         int status = vmm_map_page_in(cr3, virtual_address + mapped,
-                                     framebuffer.physical_page + offset + mapped,
-                                     flags);
+                                     framebuffer.physical_page + offset + mapped, flags);
         if (status != 0) {
             while (mapped) {
                 mapped -= 4096ULL;

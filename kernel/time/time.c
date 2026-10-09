@@ -15,9 +15,7 @@ static uint64_t processor_skew[SMP_MAX_CPUS];
 
 int time_tsc_is_invariant(void) { return tsc_invariant; }
 
-static int leap_year(int year) {
-    return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-}
+static int leap_year(int year) { return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0; }
 
 int time_days_in_month(int year, int month) {
     static const uint8_t days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
@@ -28,10 +26,11 @@ int time_days_in_month(int year, int month) {
 uint64_t time_calendar_to_epoch(const struct tunix_rtc_time *value) {
     uint64_t days = 0;
     for (int year = 1970; year < value->year; year++) days += leap_year(year) ? 366U : 365U;
-    for (int month = 1; month < value->month; month++) days += (uint64_t)time_days_in_month(value->year, month);
+    for (int month = 1; month < value->month; month++)
+        days += (uint64_t)time_days_in_month(value->year, month);
     days += (uint64_t)(value->day - 1);
-    return days * 86400ULL + (uint64_t)value->hour * 3600ULL +
-           (uint64_t)value->minute * 60ULL + (uint64_t)value->second;
+    return days * 86400ULL + (uint64_t)value->hour * 3600ULL + (uint64_t)value->minute * 60ULL +
+        (uint64_t)value->second;
 }
 
 void time_epoch_to_calendar(uint64_t seconds, struct tunix_rtc_time *out) {
@@ -86,17 +85,11 @@ uint64_t time_uptime_ns(void) {
     return seconds * 1000000000ULL + (remainder * 1000000000ULL) / tsc_hz;
 }
 
-uint64_t time_realtime_ns(void) {
-    return boot_realtime_ns + time_uptime_ns();
-}
+uint64_t time_realtime_ns(void) { return boot_realtime_ns + time_uptime_ns(); }
 
-uint64_t time_epoch_seconds(void) {
-    return time_realtime_ns() / 1000000000ULL;
-}
+uint64_t time_epoch_seconds(void) { return time_realtime_ns() / 1000000000ULL; }
 
-uint64_t time_tsc_frequency(void) {
-    return tsc_hz;
-}
+uint64_t time_tsc_frequency(void) { return tsc_hz; }
 
 void time_mark_processor(unsigned index) {
     if (index < SMP_MAX_CPUS) processor_mark[index] = time_uptime_ns();
@@ -105,7 +98,10 @@ void time_mark_processor(unsigned index) {
 void time_check_processor(unsigned index, uint64_t before, uint64_t after) {
     if (index >= SMP_MAX_CPUS) return;
     uint64_t mark = processor_mark[index];
-    if (mark >= before && mark <= after) { processor_skew[index] = 0; return; }
+    if (mark >= before && mark <= after) {
+        processor_skew[index] = 0;
+        return;
+    }
     uint64_t skew = mark < before ? before - mark : mark - after;
     processor_skew[index] = skew;
     kprintf("TIME: cpu %u clock disagrees by at least %u ms\n", index,

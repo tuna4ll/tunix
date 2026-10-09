@@ -36,8 +36,7 @@ static void protection(void) {
     u8 *page = mmap(0, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS);
     page[0] = 0x5a;
     expect_eq(mprotect(page, PAGE_SIZE, PROT_READ), 0, "mprotect makes a page read-only");
-    expect_eq(killed_by(child_status(write_page, page)), SIGSEGV,
-              "writing to it raises SIGSEGV");
+    expect_eq(killed_by(child_status(write_page, page)), SIGSEGV, "writing to it raises SIGSEGV");
     expect_eq(page[0], 0x5a, "reading it still works");
     munmap(page, PAGE_SIZE);
 }

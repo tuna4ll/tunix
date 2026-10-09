@@ -9,17 +9,17 @@
 
 extern void kprintf(const char *fmt, ...);
 
-#define MSR_SMI_COUNT 0x34U
+#define MSR_SMI_COUNT     0x34U
 #define MSR_PLATFORM_INFO 0xCEU
-#define MSR_MPERF 0xE7U
-#define MSR_APERF 0xE8U
-#define MSR_PERF_STATUS 0x198U
-#define MSR_PERF_CTL 0x199U
-#define MSR_MISC_ENABLE 0x1A0U
+#define MSR_MPERF         0xE7U
+#define MSR_APERF         0xE8U
+#define MSR_PERF_STATUS   0x198U
+#define MSR_PERF_CTL      0x199U
+#define MSR_MISC_ENABLE   0x1A0U
 
-#define MISC_ENABLE_EIST (1ULL << 16)
+#define MISC_ENABLE_EIST          (1ULL << 16)
 #define MISC_ENABLE_TURBO_DISABLE (1ULL << 38)
-#define SAMPLE_NS 1000000000ULL
+#define SAMPLE_NS                 1000000000ULL
 
 struct core_state {
     struct cpufreq_reading reading;
@@ -35,17 +35,16 @@ static struct cpufreq_state state;
 static struct core_state cores[SMP_MAX_CPUS];
 
 static int atom_model(uint32_t model) {
-    static const uint8_t atoms[] = { 0x1C, 0x26, 0x27, 0x35, 0x36, 0x37, 0x4A, 0x4C, 0x4D,
-                                     0x5A, 0x5C, 0x5D, 0x5F, 0x7A, 0x86, 0x96, 0x9C, 0xAF,
-                                     0xB6, 0xBE };
+    static const uint8_t atoms[] = {0x1C, 0x26, 0x27, 0x35, 0x36, 0x37, 0x4A, 0x4C, 0x4D, 0x5A,
+                                    0x5C, 0x5D, 0x5F, 0x7A, 0x86, 0x96, 0x9C, 0xAF, 0xB6, 0xBE};
     for (unsigned index = 0; index < sizeof(atoms); index++)
         if (model == atoms[index]) return 1;
     return 0;
 }
 
 static int nehalem_model(uint32_t model) {
-    return model == 0x1AU || model == 0x1EU || model == 0x1FU || model == 0x25U ||
-           model == 0x2CU || model == 0x2EU || model == 0x2FU;
+    return model == 0x1AU || model == 0x1EU || model == 0x1FU || model == 0x25U || model == 0x2CU ||
+        model == 0x2EU || model == 0x2FU;
 }
 
 int cpufreq_supported(void) {
@@ -72,7 +71,8 @@ int cpufreq_supported(void) {
     state.max_ratio = (uint32_t)((info >> 8) & 0xFFU);
     state.min_ratio = (uint32_t)((info >> 40) & 0xFFU);
     if (state.max_ratio < 4U || state.max_ratio > 80U) return 0;
-    if (state.min_ratio < 1U || state.min_ratio > state.max_ratio) state.min_ratio = state.max_ratio;
+    if (state.min_ratio < 1U || state.min_ratio > state.max_ratio)
+        state.min_ratio = state.max_ratio;
     state.ratio_khz = time_tsc_frequency() / 1000ULL / state.max_ratio;
     state.smi_counted = 1;
     uint64_t misc = cpu_read_msr(MSR_MISC_ENABLE);
@@ -96,8 +96,8 @@ static void first_sample(struct core_state *core, unsigned index) {
     control |= (uint64_t)state.target_ratio << ratio_shift;
     cpu_write_msr(MSR_PERF_CTL, control);
     state.requested = 1;
-    kprintf("CPUFREQ: cpu %u was at ratio %u, asked for %u\n", index,
-            core->reading.boot_ratio, state.target_ratio);
+    kprintf("CPUFREQ: cpu %u was at ratio %u, asked for %u\n", index, core->reading.boot_ratio,
+            state.target_ratio);
 }
 
 void cpufreq_tick(void) {
@@ -130,6 +130,4 @@ int cpufreq_read(unsigned index, struct cpufreq_reading *out) {
     return out->valid ? 0 : -1;
 }
 
-const struct cpufreq_state *cpufreq_state(void) {
-    return &state;
-}
+const struct cpufreq_state *cpufreq_state(void) { return &state; }

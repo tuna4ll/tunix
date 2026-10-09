@@ -6,7 +6,7 @@
 #include <tunix/vmm_arch.h>
 
 #define INSTRUCTION_MOV_X8_RT_SIGRETURN 0xD2801168U
-#define INSTRUCTION_SVC_0 0xD4000001U
+#define INSTRUCTION_SVC_0               0xD4000001U
 
 static uint64_t trampoline_physical;
 
@@ -21,7 +21,7 @@ int arch_map_signal_trampoline(uint64_t cr3) {
         vmm_arch_sync_executable(physical);
         trampoline_physical = physical;
     }
-    int status = vmm_map_page_in(cr3, ARCH_SIGNAL_TRAMPOLINE, trampoline_physical,
-                                 PAGE_USER | PAGE_DEVICE);
+    int status =
+        vmm_map_page_in(cr3, ARCH_SIGNAL_TRAMPOLINE, trampoline_physical, PAGE_USER | PAGE_DEVICE);
     return status == -2 ? 0 : status;
 }

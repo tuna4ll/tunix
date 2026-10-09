@@ -7,21 +7,21 @@
 
 extern void kprintf(const char *fmt, ...);
 
-#define FW_CFG_DATA 0x00U
-#define FW_CFG_SELECTOR 0x08U
-#define FW_CFG_DMA 0x10U
-#define FW_CFG_SIGNATURE 0x0000U
-#define FW_CFG_ID 0x0001U
-#define FW_CFG_FILE_DIR 0x0019U
+#define FW_CFG_DATA        0x00U
+#define FW_CFG_SELECTOR    0x08U
+#define FW_CFG_DMA         0x10U
+#define FW_CFG_SIGNATURE   0x0000U
+#define FW_CFG_ID          0x0001U
+#define FW_CFG_FILE_DIR    0x0019U
 #define FW_CFG_FEATURE_DMA 2U
-#define FW_CFG_DMA_ERROR 0x01U
-#define FW_CFG_DMA_SELECT 0x08U
-#define FW_CFG_DMA_WRITE 0x10U
+#define FW_CFG_DMA_ERROR   0x01U
+#define FW_CFG_DMA_SELECT  0x08U
+#define FW_CFG_DMA_WRITE   0x10U
 
-#define RAMFB_WIDTH 1280U
-#define RAMFB_HEIGHT 720U
+#define RAMFB_WIDTH     1280U
+#define RAMFB_HEIGHT    720U
 #define FOURCC_XRGB8888 0x34325258U
-#define BLOCK_2M 0x200000ULL
+#define BLOCK_2M        0x200000ULL
 
 struct fw_cfg_access {
     uint32_t control;
@@ -81,7 +81,8 @@ static void fill_rgb(uint64_t physical, uint32_t width, uint32_t height, uint32_
 
 static int simple_framebuffer(void) {
     struct fdt_node node;
-    for (unsigned index = 0; fdt_find_compatible("simple-framebuffer", index, &node) == 0; index++) {
+    for (unsigned index = 0; fdt_find_compatible("simple-framebuffer", index, &node) == 0;
+         index++) {
         const char *status = fdt_property(&node, "status", NULL);
         if (status && !text_equal(status, "okay") && !text_equal(status, "ok")) continue;
         uint64_t base, size;
@@ -101,9 +102,7 @@ static int simple_framebuffer(void) {
     return 0;
 }
 
-static uint64_t fw_cfg_register(uint32_t offset) {
-    return aarch64_platform.fw_cfg_base + offset;
-}
+static uint64_t fw_cfg_register(uint32_t offset) { return aarch64_platform.fw_cfg_base + offset; }
 
 static void fw_cfg_select(uint16_t key) {
     *(volatile uint16_t *)fw_cfg_register(FW_CFG_SELECTOR) = (uint16_t)((key >> 8) | (key << 8));

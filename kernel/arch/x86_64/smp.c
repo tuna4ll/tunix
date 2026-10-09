@@ -24,17 +24,17 @@ extern uint8_t smp_trampoline_end[];
 extern uint8_t smp_trampoline_data[];
 
 #define TRAMPOLINE_PHYSICAL 0x8000ULL
-#define TRAMPOLINE_PAGE ((uint8_t)(TRAMPOLINE_PHYSICAL >> 12))
+#define TRAMPOLINE_PAGE     ((uint8_t)(TRAMPOLINE_PHYSICAL >> 12))
 
-#define DATA_CR3 0
+#define DATA_CR3   0
 #define DATA_STACK 8
 #define DATA_ENTRY 16
 #define DATA_INDEX 24
 
 #define STARTUP_TIMEOUT_MS 200ULL
-#define INIT_SETTLE_MS 10ULL
-#define STARTUP_SETTLE_US 200ULL
-#define FLUSH_TIMEOUT_NS (2ULL * 1000ULL * 1000ULL * 1000ULL)
+#define INIT_SETTLE_MS     10ULL
+#define STARTUP_SETTLE_US  200ULL
+#define FLUSH_TIMEOUT_NS   (2ULL * 1000ULL * 1000ULL * 1000ULL)
 
 static unsigned online_cpus = 1;
 
@@ -53,9 +53,7 @@ void smp_service_flush(void) {
     __atomic_store_n(&self->flush_pending, 0, __ATOMIC_RELEASE);
 }
 
-void smp_send_reschedule(void) {
-    apic_send_ipi_to_others(SMP_RESCHEDULE_VECTOR);
-}
+void smp_send_reschedule(void) { apic_send_ipi_to_others(SMP_RESCHEDULE_VECTOR); }
 
 void smp_send_reschedule_to(unsigned index) {
     struct cpu *cpu = percpu_slot(index);
@@ -76,8 +74,7 @@ static void flush_others(uint64_t cr3, int everywhere) {
     for (unsigned index = 0; index < SMP_MAX_CPUS; index++) {
         struct cpu *cpu = percpu_slot(index);
         if (index == self || !cpu->online) continue;
-        if (!everywhere && __atomic_load_n(&cpu->address_space, __ATOMIC_SEQ_CST) != cr3)
-            continue;
+        if (!everywhere && __atomic_load_n(&cpu->address_space, __ATOMIC_SEQ_CST) != cr3) continue;
         __atomic_store_n(&cpu->flush_pending, 1, __ATOMIC_RELEASE);
         asked = 1;
     }
@@ -104,13 +101,9 @@ static void flush_others(uint64_t cr3, int everywhere) {
     }
 }
 
-void smp_flush_address_space(uint64_t cr3) {
-    flush_others(cr3, 0);
-}
+void smp_flush_address_space(uint64_t cr3) { flush_others(cr3, 0); }
 
-void smp_flush_kernel_mappings(void) {
-    flush_others(0, 1);
-}
+void smp_flush_kernel_mappings(void) { flush_others(0, 1); }
 
 static void wait_ns(uint64_t nanoseconds) {
     uint64_t deadline = time_uptime_ns() + nanoseconds;
@@ -118,8 +111,8 @@ static void wait_ns(uint64_t nanoseconds) {
 }
 
 static void write_parameter(unsigned offset, uint64_t value) {
-    uint64_t address = TRAMPOLINE_PHYSICAL +
-                       (uint64_t)(smp_trampoline_data - smp_trampoline_start) + offset;
+    uint64_t address =
+        TRAMPOLINE_PHYSICAL + (uint64_t)(smp_trampoline_data - smp_trampoline_start) + offset;
     *(volatile uint64_t *)vmm_phys_to_virt(address) = value;
 }
 
@@ -132,8 +125,7 @@ static int map_trampoline_page(void) {
     if (vmm_translate(cr3, TRAMPOLINE_PHYSICAL, &physical, &flags) == 0 &&
         physical == TRAMPOLINE_PHYSICAL && (flags & PAGE_WRITE) && !(flags & PAGE_NX))
         return 0;
-    if (vmm_map_page_in(cr3, TRAMPOLINE_PHYSICAL, TRAMPOLINE_PHYSICAL, PAGE_WRITE) != 0)
-        return -1;
+    if (vmm_map_page_in(cr3, TRAMPOLINE_PHYSICAL, TRAMPOLINE_PHYSICAL, PAGE_WRITE) != 0) return -1;
     trampoline_page_added = 1;
     return 0;
 }
@@ -223,8 +215,7 @@ void smp_init(void) {
 
     if (!missing) unmap_trampoline_page();
     online_cpus = percpu_online_count();
-    kprintf("SMP: %u of %u processors running\n", online_cpus,
-            (unsigned)machine->cpu_count);
+    kprintf("SMP: %u of %u processors running\n", online_cpus, (unsigned)machine->cpu_count);
     if (online_cpus > 1 && !time_tsc_is_invariant())
         kprintf("SMP: the TSC is not invariant; timing may drift between processors\n");
 }

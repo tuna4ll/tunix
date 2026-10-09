@@ -32,90 +32,90 @@ static void drm_guard_release(int *unused) {
 
 extern void kprintf(const char *fmt, ...);
 
-#define EINVAL 22
-#define ENOENT 2
-#define ENOMEM 12
-#define ENOTTY 25
-#define EFAULT 14
-#define EPERM 1
-#define EAGAIN 11
-#define ENXIO 6
-#define EBADF 9
-#define EMFILE 24
-#define EIO 5
-#define EBUSY 16
-#define ENODEV 19
+#define EINVAL     22
+#define ENOENT     2
+#define ENOMEM     12
+#define ENOTTY     25
+#define EFAULT     14
+#define EPERM      1
+#define EAGAIN     11
+#define ENXIO      6
+#define EBADF      9
+#define EMFILE     24
+#define EIO        5
+#define EBUSY      16
+#define ENODEV     19
 #define EOPNOTSUPP 95
 
 #define DRM_CLOEXEC 02000000
 
-#define DRM_IOCTL_TYPE 'd'
+#define DRM_IOCTL_TYPE      'd'
 #define IOCTL_TYPE(request) (((request) >> 8) & 0xFFU)
-#define IOCTL_NR(request) ((request) & 0xFFU)
+#define IOCTL_NR(request)   ((request) & 0xFFU)
 
-#define DRM_NR_VERSION 0x00
-#define DRM_NR_GET_UNIQUE 0x01
-#define DRM_NR_GET_MAGIC 0x02
-#define DRM_NR_GEM_CLOSE 0x09
-#define DRM_NR_GET_CAP 0x0c
-#define DRM_NR_SET_CLIENT_CAP 0x0d
-#define DRM_NR_SET_VERSION 0x07
-#define DRM_NR_AUTH_MAGIC 0x11
-#define DRM_NR_SET_MASTER 0x1e
-#define DRM_NR_DROP_MASTER 0x1f
-#define DRM_NR_MODE_GETRESOURCES 0xa0
-#define DRM_NR_MODE_GETCRTC 0xa1
-#define DRM_NR_MODE_SETCRTC 0xa2
-#define DRM_NR_MODE_GETENCODER 0xa6
-#define DRM_NR_MODE_GETCONNECTOR 0xa7
-#define DRM_NR_MODE_GETFB 0xad
-#define DRM_NR_MODE_ADDFB 0xae
-#define DRM_NR_MODE_RMFB 0xaf
-#define DRM_NR_MODE_CLOSEFB 0xd0
-#define DRM_NR_MODE_PAGE_FLIP 0xb0
-#define DRM_NR_MODE_CURSOR 0xa3
-#define DRM_NR_MODE_CURSOR2 0xbb
-#define DRM_NR_MODE_ATOMIC 0xbc
-#define DRM_NR_MODE_CREATEPROPBLOB 0xbd
-#define DRM_NR_MODE_DESTROYPROPBLOB 0xbe
-#define DRM_NR_MODE_DIRTYFB 0xb1
-#define DRM_NR_MODE_CREATE_DUMB 0xb2
-#define DRM_NR_MODE_MAP_DUMB 0xb3
-#define DRM_NR_MODE_DESTROY_DUMB 0xb4
-#define DRM_NR_MODE_ADDFB2 0xb8
-#define DRM_NR_MODE_GETPROPERTY 0xaa
-#define DRM_NR_MODE_SETPROPERTY 0xab
+#define DRM_NR_VERSION                0x00
+#define DRM_NR_GET_UNIQUE             0x01
+#define DRM_NR_GET_MAGIC              0x02
+#define DRM_NR_GEM_CLOSE              0x09
+#define DRM_NR_GET_CAP                0x0c
+#define DRM_NR_SET_CLIENT_CAP         0x0d
+#define DRM_NR_SET_VERSION            0x07
+#define DRM_NR_AUTH_MAGIC             0x11
+#define DRM_NR_SET_MASTER             0x1e
+#define DRM_NR_DROP_MASTER            0x1f
+#define DRM_NR_MODE_GETRESOURCES      0xa0
+#define DRM_NR_MODE_GETCRTC           0xa1
+#define DRM_NR_MODE_SETCRTC           0xa2
+#define DRM_NR_MODE_GETENCODER        0xa6
+#define DRM_NR_MODE_GETCONNECTOR      0xa7
+#define DRM_NR_MODE_GETFB             0xad
+#define DRM_NR_MODE_ADDFB             0xae
+#define DRM_NR_MODE_RMFB              0xaf
+#define DRM_NR_MODE_CLOSEFB           0xd0
+#define DRM_NR_MODE_PAGE_FLIP         0xb0
+#define DRM_NR_MODE_CURSOR            0xa3
+#define DRM_NR_MODE_CURSOR2           0xbb
+#define DRM_NR_MODE_ATOMIC            0xbc
+#define DRM_NR_MODE_CREATEPROPBLOB    0xbd
+#define DRM_NR_MODE_DESTROYPROPBLOB   0xbe
+#define DRM_NR_MODE_DIRTYFB           0xb1
+#define DRM_NR_MODE_CREATE_DUMB       0xb2
+#define DRM_NR_MODE_MAP_DUMB          0xb3
+#define DRM_NR_MODE_DESTROY_DUMB      0xb4
+#define DRM_NR_MODE_ADDFB2            0xb8
+#define DRM_NR_MODE_GETPROPERTY       0xaa
+#define DRM_NR_MODE_SETPROPERTY       0xab
 #define DRM_NR_MODE_GETPLANERESOURCES 0xb5
-#define DRM_NR_MODE_GETPLANE 0xb6
-#define DRM_NR_MODE_SETPLANE 0xb7
+#define DRM_NR_MODE_GETPLANE          0xb6
+#define DRM_NR_MODE_SETPLANE          0xb7
 #define DRM_NR_MODE_OBJ_GETPROPERTIES 0xb9
-#define DRM_NR_MODE_OBJ_SETPROPERTY 0xba
-#define DRM_NR_PRIME_HANDLE_TO_FD 0x2d
-#define DRM_NR_PRIME_FD_TO_HANDLE 0x2e
-#define DRM_NR_MODE_CREATE_LEASE 0xc6
-#define DRM_NR_MODE_LIST_LESSEES 0xc7
-#define DRM_NR_MODE_GET_LEASE 0xc8
-#define DRM_NR_MODE_REVOKE_LEASE 0xc9
+#define DRM_NR_MODE_OBJ_SETPROPERTY   0xba
+#define DRM_NR_PRIME_HANDLE_TO_FD     0x2d
+#define DRM_NR_PRIME_FD_TO_HANDLE     0x2e
+#define DRM_NR_MODE_CREATE_LEASE      0xc6
+#define DRM_NR_MODE_LIST_LESSEES      0xc7
+#define DRM_NR_MODE_GET_LEASE         0xc8
+#define DRM_NR_MODE_REVOKE_LEASE      0xc9
 
-#define DRM_COMMAND_BASE 0x40
-#define DRM_NR_VIRTGPU_MAP (DRM_COMMAND_BASE + 0x01)
-#define DRM_NR_VIRTGPU_EXECBUFFER (DRM_COMMAND_BASE + 0x02)
-#define DRM_NR_VIRTGPU_GETPARAM (DRM_COMMAND_BASE + 0x03)
-#define DRM_NR_VIRTGPU_RESOURCE_CREATE (DRM_COMMAND_BASE + 0x04)
-#define DRM_NR_VIRTGPU_RESOURCE_INFO (DRM_COMMAND_BASE + 0x05)
-#define DRM_NR_VIRTGPU_TRANSFER_FROM_HOST (DRM_COMMAND_BASE + 0x06)
-#define DRM_NR_VIRTGPU_TRANSFER_TO_HOST (DRM_COMMAND_BASE + 0x07)
-#define DRM_NR_VIRTGPU_WAIT (DRM_COMMAND_BASE + 0x08)
-#define DRM_NR_VIRTGPU_GET_CAPS (DRM_COMMAND_BASE + 0x09)
+#define DRM_COMMAND_BASE                    0x40
+#define DRM_NR_VIRTGPU_MAP                  (DRM_COMMAND_BASE + 0x01)
+#define DRM_NR_VIRTGPU_EXECBUFFER           (DRM_COMMAND_BASE + 0x02)
+#define DRM_NR_VIRTGPU_GETPARAM             (DRM_COMMAND_BASE + 0x03)
+#define DRM_NR_VIRTGPU_RESOURCE_CREATE      (DRM_COMMAND_BASE + 0x04)
+#define DRM_NR_VIRTGPU_RESOURCE_INFO        (DRM_COMMAND_BASE + 0x05)
+#define DRM_NR_VIRTGPU_TRANSFER_FROM_HOST   (DRM_COMMAND_BASE + 0x06)
+#define DRM_NR_VIRTGPU_TRANSFER_TO_HOST     (DRM_COMMAND_BASE + 0x07)
+#define DRM_NR_VIRTGPU_WAIT                 (DRM_COMMAND_BASE + 0x08)
+#define DRM_NR_VIRTGPU_GET_CAPS             (DRM_COMMAND_BASE + 0x09)
 #define DRM_NR_VIRTGPU_RESOURCE_CREATE_BLOB (DRM_COMMAND_BASE + 0x0a)
-#define DRM_NR_VIRTGPU_CONTEXT_INIT (DRM_COMMAND_BASE + 0x0b)
+#define DRM_NR_VIRTGPU_CONTEXT_INIT         (DRM_COMMAND_BASE + 0x0b)
 
-#define VIRTGPU_PARAM_3D_FEATURES 1
-#define VIRTGPU_PARAM_CAPSET_QUERY_FIX 2
-#define VIRTGPU_PARAM_RESOURCE_BLOB 3
-#define VIRTGPU_PARAM_HOST_VISIBLE 4
-#define VIRTGPU_PARAM_CROSS_DEVICE 5
-#define VIRTGPU_PARAM_CONTEXT_INIT 6
+#define VIRTGPU_PARAM_3D_FEATURES          1
+#define VIRTGPU_PARAM_CAPSET_QUERY_FIX     2
+#define VIRTGPU_PARAM_RESOURCE_BLOB        3
+#define VIRTGPU_PARAM_HOST_VISIBLE         4
+#define VIRTGPU_PARAM_CROSS_DEVICE         5
+#define VIRTGPU_PARAM_CONTEXT_INIT         6
 #define VIRTGPU_PARAM_SUPPORTED_CAPSET_IDS 7
 
 struct drm_virtgpu_map {
@@ -195,78 +195,78 @@ struct drm_virtgpu_get_caps {
     uint32_t pad;
 };
 
-typedef char drm_virtgpu_execbuffer_size_check[
-    (sizeof(struct drm_virtgpu_execbuffer) == 64) ? 1 : -1];
-typedef char drm_virtgpu_resource_create_size_check[
-    (sizeof(struct drm_virtgpu_resource_create) == 56) ? 1 : -1];
-typedef char drm_virtgpu_transfer_size_check[
-    (sizeof(struct drm_virtgpu_3d_transfer) == 44) ? 1 : -1];
-typedef char drm_virtgpu_get_caps_size_check[
-    (sizeof(struct drm_virtgpu_get_caps) == 24) ? 1 : -1];
+typedef char
+    drm_virtgpu_execbuffer_size_check[(sizeof(struct drm_virtgpu_execbuffer) == 64) ? 1 : -1];
+typedef char
+    drm_virtgpu_resource_create_size_check[(sizeof(struct drm_virtgpu_resource_create) == 56) ? 1
+                                                                                              : -1];
+typedef char
+    drm_virtgpu_transfer_size_check[(sizeof(struct drm_virtgpu_3d_transfer) == 44) ? 1 : -1];
+typedef char drm_virtgpu_get_caps_size_check[(sizeof(struct drm_virtgpu_get_caps) == 24) ? 1 : -1];
 
-#define DRM_CAP_DUMB_BUFFER 0x1
-#define DRM_CAP_PRIME 0x5
-#define DRM_PRIME_CAP_IMPORT 0x1
-#define DRM_PRIME_CAP_EXPORT 0x2
-#define DRM_CAP_TIMESTAMP_MONOTONIC 0x6
-#define DRM_CAP_CURSOR_WIDTH 0x8
-#define DRM_CAP_CURSOR_HEIGHT 0x9
-#define DRM_CAP_ADDFB2_MODIFIERS 0x10
+#define DRM_CAP_DUMB_BUFFER          0x1
+#define DRM_CAP_PRIME                0x5
+#define DRM_PRIME_CAP_IMPORT         0x1
+#define DRM_PRIME_CAP_EXPORT         0x2
+#define DRM_CAP_TIMESTAMP_MONOTONIC  0x6
+#define DRM_CAP_CURSOR_WIDTH         0x8
+#define DRM_CAP_CURSOR_HEIGHT        0x9
+#define DRM_CAP_ADDFB2_MODIFIERS     0x10
 #define DRM_CAP_CRTC_IN_VBLANK_EVENT 0x12
 
-#define DRM_CRTC_ID 1
+#define DRM_CRTC_ID      1
 #define DRM_CONNECTOR_ID 2
-#define DRM_ENCODER_ID 3
-#define DRM_PLANE_ID 4
+#define DRM_ENCODER_ID   3
+#define DRM_PLANE_ID     4
 
-#define DRM_PROP_TYPE_ID 10
-#define DRM_PROP_CRTC_ACTIVE 11
-#define DRM_PROP_CRTC_MODE_ID 12
-#define DRM_PROP_PLANE_CRTC_ID 13
-#define DRM_PROP_PLANE_FB_ID 14
-#define DRM_PROP_CONNECTOR_CRTC_ID 15
-#define DRM_PROP_PLANE_SRC_X 16
-#define DRM_PROP_PLANE_SRC_Y 17
-#define DRM_PROP_PLANE_SRC_W 18
-#define DRM_PROP_PLANE_SRC_H 19
-#define DRM_PROP_PLANE_CRTC_X 20
-#define DRM_PROP_PLANE_CRTC_Y 21
-#define DRM_PROP_PLANE_CRTC_W 22
-#define DRM_PROP_PLANE_CRTC_H 23
+#define DRM_PROP_TYPE_ID               10
+#define DRM_PROP_CRTC_ACTIVE           11
+#define DRM_PROP_CRTC_MODE_ID          12
+#define DRM_PROP_PLANE_CRTC_ID         13
+#define DRM_PROP_PLANE_FB_ID           14
+#define DRM_PROP_CONNECTOR_CRTC_ID     15
+#define DRM_PROP_PLANE_SRC_X           16
+#define DRM_PROP_PLANE_SRC_Y           17
+#define DRM_PROP_PLANE_SRC_W           18
+#define DRM_PROP_PLANE_SRC_H           19
+#define DRM_PROP_PLANE_CRTC_X          20
+#define DRM_PROP_PLANE_CRTC_Y          21
+#define DRM_PROP_PLANE_CRTC_W          22
+#define DRM_PROP_PLANE_CRTC_H          23
 #define DRM_PROP_PLANE_FB_DAMAGE_CLIPS 24
-#define DRM_PROP_CONNECTOR_DPMS 25
-#define DRM_PROP_PLANE_FIRST_RECT DRM_PROP_PLANE_SRC_X
-#define DRM_PROP_PLANE_LAST_RECT DRM_PROP_PLANE_CRTC_H
+#define DRM_PROP_CONNECTOR_DPMS        25
+#define DRM_PROP_PLANE_FIRST_RECT      DRM_PROP_PLANE_SRC_X
+#define DRM_PROP_PLANE_LAST_RECT       DRM_PROP_PLANE_CRTC_H
 
-#define DRM_MODE_OBJECT_CRTC 0xcccccccc
+#define DRM_MODE_OBJECT_CRTC      0xcccccccc
 #define DRM_MODE_OBJECT_CONNECTOR 0xc0c0c0c0
-#define DRM_MODE_OBJECT_ENCODER 0xe0e0e0e0
-#define DRM_MODE_OBJECT_PLANE 0xeeeeeeee
+#define DRM_MODE_OBJECT_ENCODER   0xe0e0e0e0
+#define DRM_MODE_OBJECT_PLANE     0xeeeeeeee
 
-#define DRM_MODE_PROP_IMMUTABLE (1 << 2)
-#define DRM_MODE_PROP_RANGE (1 << 1)
-#define DRM_MODE_PROP_BLOB (1 << 4)
-#define DRM_MODE_PROP_ENUM (1 << 3)
-#define DRM_MODE_PROP_OBJECT (1 << 6)
+#define DRM_MODE_PROP_IMMUTABLE    (1 << 2)
+#define DRM_MODE_PROP_RANGE        (1 << 1)
+#define DRM_MODE_PROP_BLOB         (1 << 4)
+#define DRM_MODE_PROP_ENUM         (1 << 3)
+#define DRM_MODE_PROP_OBJECT       (1 << 6)
 #define DRM_MODE_PROP_SIGNED_RANGE (2 << 6)
-#define DRM_MODE_PROP_ATOMIC 0x80000000U
-#define DRM_MODE_OBJECT_ANY 0
-#define DRM_MODE_OBJECT_FB 0xfbfbfbfbULL
+#define DRM_MODE_PROP_ATOMIC       0x80000000U
+#define DRM_MODE_OBJECT_ANY        0
+#define DRM_MODE_OBJECT_FB         0xfbfbfbfbULL
 
 #define DRM_PLANE_TYPE_OVERLAY 0
 #define DRM_PLANE_TYPE_PRIMARY 1
-#define DRM_PLANE_TYPE_CURSOR 2
+#define DRM_PLANE_TYPE_CURSOR  2
 
 #define DRM_PROP_NAME_LEN 32
 
 #define DRM_FORMAT_XRGB8888 0x34325258
 
-#define DRM_MODE_CONNECTED 1
-#define DRM_MODE_SUBPIXEL_UNKNOWN 1
+#define DRM_MODE_CONNECTED         1
+#define DRM_MODE_SUBPIXEL_UNKNOWN  1
 #define DRM_MODE_CONNECTOR_VIRTUAL 15
-#define DRM_MODE_ENCODER_VIRTUAL 5
-#define DRM_MODE_TYPE_PREFERRED (1 << 3)
-#define DRM_MODE_TYPE_DRIVER (1 << 6)
+#define DRM_MODE_ENCODER_VIRTUAL   5
+#define DRM_MODE_TYPE_PREFERRED    (1 << 3)
+#define DRM_MODE_TYPE_DRIVER       (1 << 6)
 
 #define DRM_DISPLAY_MODE_LEN 32
 
@@ -477,13 +477,17 @@ struct drm_mode_atomic {
     uint64_t user_data;
 };
 
-struct drm_mode_create_blob { uint64_t data; uint32_t length; uint32_t blob_id; };
-struct drm_mode_destroy_blob { uint32_t blob_id; };
+struct drm_mode_create_blob {
+    uint64_t data;
+    uint32_t length;
+    uint32_t blob_id;
+};
+struct drm_mode_destroy_blob {
+    uint32_t blob_id;
+};
 
-typedef char drm_modeinfo_size_check[
-    (sizeof(struct drm_mode_modeinfo) == 68) ? 1 : -1];
-typedef char drm_create_dumb_size_check[
-    (sizeof(struct drm_mode_create_dumb) == 32) ? 1 : -1];
+typedef char drm_modeinfo_size_check[(sizeof(struct drm_mode_modeinfo) == 68) ? 1 : -1];
+typedef char drm_create_dumb_size_check[(sizeof(struct drm_mode_create_dumb) == 32) ? 1 : -1];
 
 #define DRM_MAX_DIMENSION 16384U
 
@@ -525,9 +529,9 @@ struct drm_framebuffer {
 };
 
 #define DRM_EVENT_FLIP_COMPLETE 0x02
-#define DRM_MAX_EVENTS 64
-#define DRM_VBLANK_NS 16666667ULL
-#define DRM_EVENT_QUEUES 32
+#define DRM_MAX_EVENTS          64
+#define DRM_VBLANK_NS           16666667ULL
+#define DRM_EVENT_QUEUES        32
 
 struct drm_event {
     uint32_t type;
@@ -564,10 +568,12 @@ static uint32_t buffer_capacity;
 static struct drm_framebuffer *framebuffers;
 static int framebuffer_capacity;
 #define DRM_MAX_DAMAGE_RECTS 16
-#define DRM_MAX_BLOB_BYTES 65536
+#define DRM_MAX_BLOB_BYTES   65536
 struct drm_property_blob {
-    uint32_t id; const struct file *owner;
-    uint32_t length; uint8_t *data;
+    uint32_t id;
+    const struct file *owner;
+    uint32_t length;
+    uint8_t *data;
 };
 static struct drm_property_blob *blobs;
 static unsigned blob_capacity;
@@ -675,7 +681,8 @@ static struct drm_property_blob *blob_find(uint32_t id) {
 
 static struct drm_import *import_find(const struct file *client, uint32_t handle) {
     for (int index = 0; index < import_capacity; index++)
-        if (imports[index].file == client && imports[index].handle == handle) return &imports[index];
+        if (imports[index].file == client && imports[index].handle == handle)
+            return &imports[index];
     return NULL;
 }
 
@@ -763,18 +770,23 @@ static int64_t ioctl_getfb(const struct file *client, uint64_t user_argument) {
     return copy_to_user(user_argument, &request, sizeof(request)) == 0 ? 0 : -EFAULT;
 }
 
-#define DRM_MODE_CURSOR_BO 0x01U
+#define DRM_MODE_CURSOR_BO   0x01U
 #define DRM_MODE_CURSOR_MOVE 0x02U
-#define DRM_CURSOR_SIZE 64U
+#define DRM_CURSOR_SIZE      64U
 
 static int32_t cursor_x;
 static int32_t cursor_y;
 
 static int64_t ioctl_cursor(const struct file *client, uint64_t user_argument, int cursor2) {
-    struct { struct drm_mode_cursor base; int32_t hot_x; int32_t hot_y; } request;
+    struct {
+        struct drm_mode_cursor base;
+        int32_t hot_x;
+        int32_t hot_y;
+    } request;
     memset(&request, 0, sizeof(request));
-    if (copy_from_user(&request, user_argument,
-                       cursor2 ? sizeof(request) : sizeof(request.base)) != 0) return -EFAULT;
+    if (copy_from_user(&request, user_argument, cursor2 ? sizeof(request) : sizeof(request.base)) !=
+        0)
+        return -EFAULT;
     if (request.base.crtc_id != DRM_CRTC_ID) return -ENOENT;
     if (!virtgpu_cursor_available()) return -ENXIO;
     if (request.base.flags & DRM_MODE_CURSOR_MOVE) {
@@ -797,24 +809,28 @@ static int64_t ioctl_cursor(const struct file *client, uint64_t user_argument, i
         uint32_t hot_x = request.hot_x > 0 ? (uint32_t)request.hot_x : 0;
         uint32_t hot_y = request.hot_y > 0 ? (uint32_t)request.hot_y : 0;
         return virtgpu_cursor_set(buffer->virtio_resource, buffer->pitch / 4U, !buffer->rendered,
-                                  cursor_x, cursor_y, hot_x, hot_y) == 0 ? 0 : -EIO;
+                                  cursor_x, cursor_y, hot_x, hot_y) == 0
+            ? 0
+            : -EIO;
     }
     if (request.base.flags & DRM_MODE_CURSOR_MOVE)
         return virtgpu_cursor_move(cursor_x, cursor_y) == 0 ? 0 : -EIO;
     return 0;
 }
 
-#define DRM_MODE_PAGE_FLIP_EVENT 0x01U
-#define DRM_MODE_ATOMIC_TEST_ONLY 0x100U
-#define DRM_MODE_ATOMIC_NONBLOCK 0x200U
+#define DRM_MODE_PAGE_FLIP_EVENT      0x01U
+#define DRM_MODE_ATOMIC_TEST_ONLY     0x100U
+#define DRM_MODE_ATOMIC_NONBLOCK      0x200U
 #define DRM_MODE_ATOMIC_ALLOW_MODESET 0x400U
-#define DRM_MODE_PAGE_FLIP_ASYNC 0x02U
-#define DRM_ATOMIC_MAX_OBJECTS 16U
-#define DRM_ATOMIC_MAX_PROPS 64U
+#define DRM_MODE_PAGE_FLIP_ASYNC      0x02U
+#define DRM_ATOMIC_MAX_OBJECTS        16U
+#define DRM_ATOMIC_MAX_PROPS          64U
 
 struct drm_damage {
     uint32_t count;
-    struct drm_mode_rect { int32_t x1, y1, x2, y2; } rects[DRM_MAX_DAMAGE_RECTS];
+    struct drm_mode_rect {
+        int32_t x1, y1, x2, y2;
+    } rects[DRM_MAX_DAMAGE_RECTS];
 };
 
 static int scanout_current;
@@ -829,17 +845,17 @@ static int plane_rectangle_ok(uint32_t property, uint64_t value) {
     case DRM_PROP_PLANE_SRC_Y:
     case DRM_PROP_PLANE_CRTC_X:
     case DRM_PROP_PLANE_CRTC_Y: return value == 0;
-    case DRM_PROP_PLANE_SRC_W: return value == ((uint64_t)framebuffer_width() << 16);
-    case DRM_PROP_PLANE_SRC_H: return value == ((uint64_t)framebuffer_height() << 16);
+    case DRM_PROP_PLANE_SRC_W:  return value == ((uint64_t)framebuffer_width() << 16);
+    case DRM_PROP_PLANE_SRC_H:  return value == ((uint64_t)framebuffer_height() << 16);
     case DRM_PROP_PLANE_CRTC_W: return value == framebuffer_width();
     case DRM_PROP_PLANE_CRTC_H: return value == framebuffer_height();
-    default: return 0;
+    default:                    return 0;
     }
 }
 
 static void damage_collect(struct drm_damage *damage, const uint8_t *data, uint32_t count) {
     damage->count = 0;
-    struct drm_mode_rect bounds = { INT32_MAX, INT32_MAX, INT32_MIN, INT32_MIN };
+    struct drm_mode_rect bounds = {INT32_MAX, INT32_MAX, INT32_MIN, INT32_MIN};
     for (uint32_t index = 0; index < count; index++) {
         struct drm_mode_rect rect;
         memcpy(&rect, data + (uint64_t)index * sizeof(rect), sizeof(rect));
@@ -860,8 +876,9 @@ static void damage_collect(struct drm_damage *damage, const uint8_t *data, uint3
 static int64_t ioctl_atomic(const struct file *client, uint64_t user_argument) {
     struct drm_mode_atomic request;
     if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
-    if (request.flags & ~(DRM_MODE_ATOMIC_TEST_ONLY | DRM_MODE_ATOMIC_NONBLOCK |
-                          DRM_MODE_ATOMIC_ALLOW_MODESET | DRM_MODE_PAGE_FLIP_EVENT))
+    if (request.flags &
+        ~(DRM_MODE_ATOMIC_TEST_ONLY | DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_ATOMIC_ALLOW_MODESET |
+          DRM_MODE_PAGE_FLIP_EVENT))
         return -EINVAL;
     if (!request.count_objs || request.count_objs > DRM_ATOMIC_MAX_OBJECTS) return -EINVAL;
 
@@ -869,12 +886,13 @@ static int64_t ioctl_atomic(const struct file *client, uint64_t user_argument) {
     uint32_t counts[DRM_ATOMIC_MAX_OBJECTS];
     uint64_t bytes = (uint64_t)request.count_objs * sizeof(objects[0]);
     if (copy_from_user(objects, request.objs_ptr, bytes) != 0 ||
-        copy_from_user(counts, request.count_props_ptr, bytes) != 0) return -EFAULT;
+        copy_from_user(counts, request.count_props_ptr, bytes) != 0)
+        return -EFAULT;
 
     uint32_t total = 0;
     for (uint32_t object = 0; object < request.count_objs; object++) {
-        if (counts[object] > DRM_ATOMIC_MAX_PROPS ||
-            total + counts[object] > DRM_ATOMIC_MAX_PROPS) return -EINVAL;
+        if (counts[object] > DRM_ATOMIC_MAX_PROPS || total + counts[object] > DRM_ATOMIC_MAX_PROPS)
+            return -EINVAL;
         total += counts[object];
     }
     if (!total) return -EINVAL;
@@ -882,8 +900,8 @@ static int64_t ioctl_atomic(const struct file *client, uint64_t user_argument) {
     uint32_t props[DRM_ATOMIC_MAX_PROPS];
     uint64_t values[DRM_ATOMIC_MAX_PROPS];
     if (copy_from_user(props, request.props_ptr, (uint64_t)total * sizeof(props[0])) != 0 ||
-        copy_from_user(values, request.prop_values_ptr,
-                       (uint64_t)total * sizeof(values[0])) != 0) return -EFAULT;
+        copy_from_user(values, request.prop_values_ptr, (uint64_t)total * sizeof(values[0])) != 0)
+        return -EFAULT;
 
     uint32_t new_fb = active_fb_id;
     const struct drm_property_blob *damage_blob = NULL;
@@ -898,31 +916,35 @@ static int64_t ioctl_atomic(const struct file *client, uint64_t user_argument) {
                 if (value > 1) return -EINVAL;
                 new_active = (int)value;
             } else if (objects[object] == DRM_CRTC_ID && id == DRM_PROP_CRTC_MODE_ID) {
-                if (!value) { mode_cleared = 1; continue; }
+                if (!value) {
+                    mode_cleared = 1;
+                    continue;
+                }
                 struct drm_property_blob *blob = blob_of(client, (uint32_t)value);
                 if (!blob || blob->length < sizeof(struct drm_mode_modeinfo)) return -EINVAL;
                 struct drm_mode_modeinfo mode;
                 memcpy(&mode, blob->data, sizeof(mode));
-                if (mode.hdisplay != framebuffer_width() ||
-                    mode.vdisplay != framebuffer_height()) return -EINVAL;
+                if (mode.hdisplay != framebuffer_width() || mode.vdisplay != framebuffer_height())
+                    return -EINVAL;
             } else if (objects[object] == DRM_PLANE_ID && id == DRM_PROP_PLANE_FB_ID) {
-                if (value > UINT32_MAX ||
-                    (value && !framebuffer_of(client, (uint32_t)value))) return -EINVAL;
+                if (value > UINT32_MAX || (value && !framebuffer_of(client, (uint32_t)value)))
+                    return -EINVAL;
                 new_fb = (uint32_t)value;
-            } else if (objects[object] == DRM_PLANE_ID &&
-                       id == DRM_PROP_PLANE_FB_DAMAGE_CLIPS) {
-                if (!value) { damage_blob = NULL; continue; }
+            } else if (objects[object] == DRM_PLANE_ID && id == DRM_PROP_PLANE_FB_DAMAGE_CLIPS) {
+                if (!value) {
+                    damage_blob = NULL;
+                    continue;
+                }
                 struct drm_property_blob *blob =
                     value > UINT32_MAX ? NULL : blob_of(client, (uint32_t)value);
                 if (!blob || blob->length % sizeof(struct drm_mode_rect)) return -EINVAL;
                 damage_blob = blob;
             } else if (objects[object] == DRM_PLANE_ID && id == DRM_PROP_PLANE_CRTC_ID) {
                 if (value != 0 && value != DRM_CRTC_ID) return -EINVAL;
-            } else if (objects[object] == DRM_PLANE_ID &&
-                       id >= DRM_PROP_PLANE_FIRST_RECT && id <= DRM_PROP_PLANE_LAST_RECT) {
+            } else if (objects[object] == DRM_PLANE_ID && id >= DRM_PROP_PLANE_FIRST_RECT &&
+                       id <= DRM_PROP_PLANE_LAST_RECT) {
                 if (!plane_rectangle_ok(id, value)) return -EINVAL;
-            } else if (objects[object] == DRM_CONNECTOR_ID &&
-                       id == DRM_PROP_CONNECTOR_CRTC_ID) {
+            } else if (objects[object] == DRM_CONNECTOR_ID && id == DRM_PROP_CONNECTOR_CRTC_ID) {
                 if (value != 0 && value != DRM_CRTC_ID) return -EINVAL;
             } else {
                 return -EINVAL;
@@ -992,8 +1014,12 @@ static void pages_retire(uint64_t *pages, uint64_t page_count, uint64_t sequence
 
 static void buffer_release(struct drm_dumb_buffer *buffer) {
     if (!buffer || !buffer->handle) return;
-    if (buffer->refs > 1) { buffer->refs--; return; }
-    uint64_t sequence = buffer->virtio_resource ? virtgpu_resource_release(buffer->virtio_resource) : 0;
+    if (buffer->refs > 1) {
+        buffer->refs--;
+        return;
+    }
+    uint64_t sequence =
+        buffer->virtio_resource ? virtgpu_resource_release(buffer->virtio_resource) : 0;
     pages_retire(buffer->pages, buffer->page_count, sequence);
     memset(buffer, 0, sizeof(*buffer));
 }
@@ -1018,7 +1044,7 @@ static void fill_mode(struct drm_mode_modeinfo *mode) {
     char *out = mode->name;
     size_t limit = sizeof(mode->name) - 1;
     size_t used = 0;
-    uint32_t parts[2] = { width, height };
+    uint32_t parts[2] = {width, height};
     for (int part = 0; part < 2; part++) {
         char digits[12];
         int count = 0;
@@ -1034,8 +1060,8 @@ static void fill_mode(struct drm_mode_modeinfo *mode) {
     out[used] = '\0';
 }
 
-static int copy_array_out(uint64_t user_pointer, uint32_t user_count,
-                          const void *source, size_t item_size, uint32_t count) {
+static int copy_array_out(uint64_t user_pointer, uint32_t user_count, const void *source,
+                          size_t item_size, uint32_t count) {
     if (!user_pointer || user_count == 0) return 0;
     if (user_count < count) count = user_count;
     if (!count) return 0;
@@ -1058,10 +1084,15 @@ static int64_t ioctl_version(uint64_t user_argument) {
     version.version_minor = 0;
     version.version_patchlevel = 0;
 
-    struct { uint64_t pointer; uint64_t *length; const char *text; size_t size; } fields[] = {
-        { version.name, &version.name_len, name, name_size },
-        { version.date, &version.date_len, date, sizeof(date) - 1 },
-        { version.desc, &version.desc_len, desc, sizeof(desc) - 1 },
+    struct {
+        uint64_t pointer;
+        uint64_t *length;
+        const char *text;
+        size_t size;
+    } fields[] = {
+        {version.name, &version.name_len, name, name_size},
+        {version.date, &version.date_len, date, sizeof(date) - 1},
+        {version.desc, &version.desc_len, desc, sizeof(desc) - 1},
     };
     for (int index = 0; index < 3; index++) {
         uint64_t room = *fields[index].length;
@@ -1075,28 +1106,32 @@ static int64_t ioctl_version(uint64_t user_argument) {
     return copy_to_user(user_argument, &version, sizeof(version)) == 0 ? 0 : -EFAULT;
 }
 
-#define DRM_CLIENT_CAP_STEREO_3D 1
-#define DRM_CLIENT_CAP_UNIVERSAL_PLANES 2
-#define DRM_CLIENT_CAP_ATOMIC 3
+#define DRM_CLIENT_CAP_STEREO_3D            1
+#define DRM_CLIENT_CAP_UNIVERSAL_PLANES     2
+#define DRM_CLIENT_CAP_ATOMIC               3
 #define DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT 6
 
 static int64_t ioctl_set_client_cap(uint64_t user_argument) {
-    struct drm_set_client_cap { uint64_t capability; uint64_t value; } request;
+    struct drm_set_client_cap {
+        uint64_t capability;
+        uint64_t value;
+    } request;
     if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
     if (request.capability != DRM_CLIENT_CAP_UNIVERSAL_PLANES &&
         request.capability != DRM_CLIENT_CAP_ATOMIC &&
-        request.capability != DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT) return -EOPNOTSUPP;
+        request.capability != DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT)
+        return -EOPNOTSUPP;
     return 0;
 }
 
 static uint32_t object_type_of(uint32_t type, uint32_t id) {
     if (type != DRM_MODE_OBJECT_ANY) return type;
     switch (id) {
-    case DRM_CRTC_ID: return DRM_MODE_OBJECT_CRTC;
+    case DRM_CRTC_ID:      return DRM_MODE_OBJECT_CRTC;
     case DRM_CONNECTOR_ID: return DRM_MODE_OBJECT_CONNECTOR;
-    case DRM_ENCODER_ID: return DRM_MODE_OBJECT_ENCODER;
-    case DRM_PLANE_ID: return DRM_MODE_OBJECT_PLANE;
-    default: return DRM_MODE_OBJECT_ANY;
+    case DRM_ENCODER_ID:   return DRM_MODE_OBJECT_ENCODER;
+    case DRM_PLANE_ID:     return DRM_MODE_OBJECT_PLANE;
+    default:               return DRM_MODE_OBJECT_ANY;
     }
 }
 
@@ -1110,15 +1145,25 @@ static int64_t set_connector_property(uint32_t connector_id, uint32_t prop_id, u
 }
 
 static int64_t ioctl_connector_set_property(uint64_t user_argument) {
-    struct { uint64_t value; uint32_t prop_id; uint32_t connector_id; } request;
+    struct {
+        uint64_t value;
+        uint32_t prop_id;
+        uint32_t connector_id;
+    } request;
     if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
     return set_connector_property(request.connector_id, request.prop_id, request.value);
 }
 
 static int64_t ioctl_obj_set_property(uint64_t user_argument) {
-    struct { uint64_t value; uint32_t prop_id; uint32_t obj_id; uint32_t obj_type; } request;
+    struct {
+        uint64_t value;
+        uint32_t prop_id;
+        uint32_t obj_id;
+        uint32_t obj_type;
+    } request;
     if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
-    if (object_type_of(request.obj_type, request.obj_id) != DRM_MODE_OBJECT_CONNECTOR) return -EINVAL;
+    if (object_type_of(request.obj_type, request.obj_id) != DRM_MODE_OBJECT_CONNECTOR)
+        return -EINVAL;
     return set_connector_property(request.obj_id, request.prop_id, request.value);
 }
 
@@ -1126,14 +1171,14 @@ static int64_t ioctl_get_cap(uint64_t user_argument) {
     struct drm_get_cap cap;
     if (copy_from_user(&cap, user_argument, sizeof(cap)) != 0) return -EFAULT;
     switch (cap.capability) {
-    case DRM_CAP_DUMB_BUFFER: cap.value = 1; break;
+    case DRM_CAP_DUMB_BUFFER:         cap.value = 1; break;
     case DRM_CAP_TIMESTAMP_MONOTONIC: cap.value = 1; break;
     case DRM_CAP_CURSOR_WIDTH:
-    case DRM_CAP_CURSOR_HEIGHT: cap.value = 64; break;
-    case DRM_CAP_PRIME: cap.value = DRM_PRIME_CAP_IMPORT | DRM_PRIME_CAP_EXPORT; break;
+    case DRM_CAP_CURSOR_HEIGHT:       cap.value = 64; break;
+    case DRM_CAP_PRIME:            cap.value = DRM_PRIME_CAP_IMPORT | DRM_PRIME_CAP_EXPORT; break;
     case DRM_CAP_ADDFB2_MODIFIERS: cap.value = 1; break;
     case DRM_CAP_CRTC_IN_VBLANK_EVENT: cap.value = 1; break;
-    default: cap.value = 0; break;
+    default:                           cap.value = 0; break;
     }
     return copy_to_user(user_argument, &cap, sizeof(cap)) == 0 ? 0 : -EFAULT;
 }
@@ -1147,10 +1192,9 @@ static int64_t ioctl_get_resources(uint64_t user_argument) {
     uint32_t encoder = DRM_ENCODER_ID;
 
     if (copy_array_out(res.crtc_id_ptr, res.count_crtcs, &crtc, sizeof(crtc), 1) != 0 ||
-        copy_array_out(res.connector_id_ptr, res.count_connectors, &connector,
-                       sizeof(connector), 1) != 0 ||
-        copy_array_out(res.encoder_id_ptr, res.count_encoders, &encoder,
-                       sizeof(encoder), 1) != 0)
+        copy_array_out(res.connector_id_ptr, res.count_connectors, &connector, sizeof(connector),
+                       1) != 0 ||
+        copy_array_out(res.encoder_id_ptr, res.count_encoders, &encoder, sizeof(encoder), 1) != 0)
         return -EFAULT;
 
     res.count_fbs = 0;
@@ -1172,15 +1216,13 @@ static int64_t ioctl_get_connector(uint64_t user_argument) {
     struct drm_mode_modeinfo mode;
     fill_mode(&mode);
     uint32_t encoder = DRM_ENCODER_ID;
-    uint32_t prop[2] = { DRM_PROP_CONNECTOR_CRTC_ID, DRM_PROP_CONNECTOR_DPMS };
-    uint64_t prop_value[2] = { active_fb_id ? DRM_CRTC_ID : 0, connector_dpms };
+    uint32_t prop[2] = {DRM_PROP_CONNECTOR_CRTC_ID, DRM_PROP_CONNECTOR_DPMS};
+    uint64_t prop_value[2] = {active_fb_id ? DRM_CRTC_ID : 0, connector_dpms};
 
-    if (copy_array_out(connector.modes_ptr, connector.count_modes, &mode,
-                       sizeof(mode), 1) != 0 ||
-        copy_array_out(connector.encoders_ptr, connector.count_encoders, &encoder,
-                       sizeof(encoder), 1) != 0 ||
-        copy_array_out(connector.props_ptr, connector.count_props, prop,
-                       sizeof(prop[0]), 2) != 0 ||
+    if (copy_array_out(connector.modes_ptr, connector.count_modes, &mode, sizeof(mode), 1) != 0 ||
+        copy_array_out(connector.encoders_ptr, connector.count_encoders, &encoder, sizeof(encoder),
+                       1) != 0 ||
+        copy_array_out(connector.props_ptr, connector.count_props, prop, sizeof(prop[0]), 2) != 0 ||
         copy_array_out(connector.prop_values_ptr, connector.count_props, prop_value,
                        sizeof(prop_value[0]), 2) != 0)
         return -EFAULT;
@@ -1244,7 +1286,7 @@ static int64_t ioctl_prime_handle_to_fd(const struct file *client, uint64_t user
         return -ENOMEM;
     }
     int fd = process_install_file_flags(process_current(), file, 0,
-                                       (request.flags & DRM_CLOEXEC) ? PROCESS_FD_CLOEXEC : 0);
+                                        (request.flags & DRM_CLOEXEC) ? PROCESS_FD_CLOEXEC : 0);
     if (fd < 0) {
         file_unref(file);
         return -EMFILE;
@@ -1284,8 +1326,7 @@ static int64_t ioctl_prime_fd_to_handle(const struct file *client, uint64_t user
 
     if (buffer->rendered && buffer->virtio_resource) {
         uint32_t context = render_context();
-        if (context)
-            (void)virtgpu_context_attach(context, buffer->virtio_resource, 1);
+        if (context) (void)virtgpu_context_attach(context, buffer->virtio_resource, 1);
     }
 
     request.handle = file->dmabuf_handle;
@@ -1298,8 +1339,8 @@ int64_t drm_dmabuf_size(const struct file *file) {
     return buffer ? (int64_t)buffer->size : -ENOENT;
 }
 
-int64_t drm_dmabuf_mmap(struct file *file, uint64_t cr3, uint64_t virtual_address,
-                        uint64_t length, uint64_t offset, uint64_t page_flags) {
+int64_t drm_dmabuf_mmap(struct file *file, uint64_t cr3, uint64_t virtual_address, uint64_t length,
+                        uint64_t offset, uint64_t page_flags) {
     DRM_LOCKED;
     if (!file || !length || (offset & 0xFFFULL)) return -EINVAL;
     struct drm_dumb_buffer *buffer = buffer_find(file->dmabuf_handle);
@@ -1328,8 +1369,8 @@ static int64_t ioctl_get_plane_resources(uint64_t user_argument) {
     if (copy_from_user(&res, user_argument, sizeof(res)) != 0) return -EFAULT;
 
     uint32_t plane = DRM_PLANE_ID;
-    if (copy_array_out(res.plane_id_ptr, res.count_planes, &plane,
-                       sizeof(plane), 1) != 0) return -EFAULT;
+    if (copy_array_out(res.plane_id_ptr, res.count_planes, &plane, sizeof(plane), 1) != 0)
+        return -EFAULT;
     res.count_planes = 1;
     return copy_to_user(user_argument, &res, sizeof(res)) == 0 ? 0 : -EFAULT;
 }
@@ -1340,8 +1381,9 @@ static int64_t ioctl_get_plane(uint64_t user_argument) {
     if (plane.plane_id != DRM_PLANE_ID) return -ENOENT;
 
     uint32_t format = DRM_FORMAT_XRGB8888;
-    if (copy_array_out(plane.format_type_ptr, plane.count_format_types,
-                       &format, sizeof(format), 1) != 0) return -EFAULT;
+    if (copy_array_out(plane.format_type_ptr, plane.count_format_types, &format, sizeof(format),
+                       1) != 0)
+        return -EFAULT;
 
     plane.crtc_id = active_fb_id ? DRM_CRTC_ID : 0;
     plane.fb_id = active_fb_id;
@@ -1351,7 +1393,7 @@ static int64_t ioctl_get_plane(uint64_t user_argument) {
     return copy_to_user(user_argument, &plane, sizeof(plane)) == 0 ? 0 : -EFAULT;
 }
 
-static const char *const plane_type_names[] = { "Overlay", "Primary", "Cursor" };
+static const char *const plane_type_names[] = {"Overlay", "Primary", "Cursor"};
 
 static int64_t ioctl_get_property(uint64_t user_argument) {
     struct drm_mode_get_property property;
@@ -1362,9 +1404,10 @@ static int64_t ioctl_get_property(uint64_t user_argument) {
         property.flags = DRM_MODE_PROP_RANGE;
         property.count_values = 2;
         property.count_enum_blobs = 0;
-        uint64_t range[2] = { 0, 1 };
-        if (copy_array_out(property.values_ptr, property.count_values, range,
-                           sizeof(range[0]), 2) != 0) return -EFAULT;
+        uint64_t range[2] = {0, 1};
+        if (copy_array_out(property.values_ptr, property.count_values, range, sizeof(range[0]),
+                           2) != 0)
+            return -EFAULT;
         return copy_to_user(user_argument, &property, sizeof(property)) == 0 ? 0 : -EFAULT;
     }
     if (property.prop_id == DRM_PROP_CRTC_MODE_ID ||
@@ -1386,47 +1429,46 @@ static int64_t ioctl_get_property(uint64_t user_argument) {
         property.flags = DRM_MODE_PROP_OBJECT | DRM_MODE_PROP_ATOMIC;
         property.count_values = 1;
         property.count_enum_blobs = 0;
-        uint64_t object_type[1] = {
-            property.prop_id == DRM_PROP_PLANE_FB_ID ? DRM_MODE_OBJECT_FB : DRM_MODE_OBJECT_CRTC
-        };
+        uint64_t object_type[1] = {property.prop_id == DRM_PROP_PLANE_FB_ID ? DRM_MODE_OBJECT_FB
+                                                                            : DRM_MODE_OBJECT_CRTC};
         if (copy_array_out(property.values_ptr, property.count_values, object_type,
-                           sizeof(object_type[0]), 1) != 0) return -EFAULT;
+                           sizeof(object_type[0]), 1) != 0)
+            return -EFAULT;
         return copy_to_user(user_argument, &property, sizeof(property)) == 0 ? 0 : -EFAULT;
     }
     if (property.prop_id >= DRM_PROP_PLANE_FIRST_RECT &&
         property.prop_id <= DRM_PROP_PLANE_LAST_RECT) {
         static const char *const rectangle_names[] = {
-            "SRC_X", "SRC_Y", "SRC_W", "SRC_H",
-            "CRTC_X", "CRTC_Y", "CRTC_W", "CRTC_H",
+            "SRC_X", "SRC_Y", "SRC_W", "SRC_H", "CRTC_X", "CRTC_Y", "CRTC_W", "CRTC_H",
         };
         memset(property.name, 0, sizeof(property.name));
         strncpy(property.name, rectangle_names[property.prop_id - DRM_PROP_PLANE_FIRST_RECT],
                 sizeof(property.name) - 1);
-        int signed_position = property.prop_id == DRM_PROP_PLANE_CRTC_X ||
-                              property.prop_id == DRM_PROP_PLANE_CRTC_Y;
-        int crtc_size = property.prop_id == DRM_PROP_PLANE_CRTC_W ||
-                        property.prop_id == DRM_PROP_PLANE_CRTC_H;
+        int signed_position =
+            property.prop_id == DRM_PROP_PLANE_CRTC_X || property.prop_id == DRM_PROP_PLANE_CRTC_Y;
+        int crtc_size =
+            property.prop_id == DRM_PROP_PLANE_CRTC_W || property.prop_id == DRM_PROP_PLANE_CRTC_H;
         property.flags = signed_position ? DRM_MODE_PROP_SIGNED_RANGE : DRM_MODE_PROP_RANGE;
         property.count_values = 2;
         property.count_enum_blobs = 0;
-        uint64_t range[2] = {
-            signed_position ? (uint64_t)(int64_t)INT32_MIN : 0,
-            signed_position || crtc_size ? (uint64_t)INT32_MAX : 0xFFFFFFFFULL
-        };
-        if (copy_array_out(property.values_ptr, property.count_values, range,
-                           sizeof(range[0]), 2) != 0) return -EFAULT;
+        uint64_t range[2] = {signed_position ? (uint64_t)(int64_t)INT32_MIN : 0,
+                             signed_position || crtc_size ? (uint64_t)INT32_MAX : 0xFFFFFFFFULL};
+        if (copy_array_out(property.values_ptr, property.count_values, range, sizeof(range[0]),
+                           2) != 0)
+            return -EFAULT;
         return copy_to_user(user_argument, &property, sizeof(property)) == 0 ? 0 : -EFAULT;
     }
     if (property.prop_id == DRM_PROP_CONNECTOR_DPMS) {
-        static const char *const dpms_names[] = { "On", "Standby", "Suspend", "Off" };
+        static const char *const dpms_names[] = {"On", "Standby", "Suspend", "Off"};
         struct drm_mode_property_enum levels[4];
         memset(levels, 0, sizeof(levels));
         for (unsigned index = 0; index < 4U; index++) {
             levels[index].value = index;
             strncpy(levels[index].name, dpms_names[index], DRM_PROP_NAME_LEN - 1);
         }
-        if (copy_array_out(property.enum_blob_ptr, property.count_enum_blobs,
-                           levels, sizeof(levels[0]), 4) != 0) return -EFAULT;
+        if (copy_array_out(property.enum_blob_ptr, property.count_enum_blobs, levels,
+                           sizeof(levels[0]), 4) != 0)
+            return -EFAULT;
         memset(property.name, 0, sizeof(property.name));
         strncpy(property.name, "DPMS", sizeof(property.name) - 1);
         property.flags = DRM_MODE_PROP_ENUM;
@@ -1442,8 +1484,9 @@ static int64_t ioctl_get_property(uint64_t user_argument) {
         choices[index].value = index;
         strncpy(choices[index].name, plane_type_names[index], DRM_PROP_NAME_LEN - 1);
     }
-    if (copy_array_out(property.enum_blob_ptr, property.count_enum_blobs,
-                       choices, sizeof(choices[0]), 3) != 0) return -EFAULT;
+    if (copy_array_out(property.enum_blob_ptr, property.count_enum_blobs, choices,
+                       sizeof(choices[0]), 3) != 0)
+        return -EFAULT;
 
     memset(property.name, 0, sizeof(property.name));
     strncpy(property.name, "type", sizeof(property.name) - 1);
@@ -1464,43 +1507,60 @@ static int64_t ioctl_obj_get_properties(uint64_t user_argument) {
     uint64_t values[16];
     if (type == DRM_MODE_OBJECT_PLANE) {
         if (request.obj_id != DRM_PLANE_ID) return -ENOENT;
-        ids[0] = DRM_PROP_TYPE_ID; values[0] = DRM_PLANE_TYPE_PRIMARY;
-        ids[1] = DRM_PROP_PLANE_CRTC_ID; values[1] = DRM_CRTC_ID;
-        ids[2] = DRM_PROP_PLANE_FB_ID; values[2] = active_fb_id;
-        ids[3] = DRM_PROP_PLANE_SRC_X; values[3] = 0;
-        ids[4] = DRM_PROP_PLANE_SRC_Y; values[4] = 0;
-        ids[5] = DRM_PROP_PLANE_SRC_W; values[5] = (uint64_t)framebuffer_width() << 16;
-        ids[6] = DRM_PROP_PLANE_SRC_H; values[6] = (uint64_t)framebuffer_height() << 16;
-        ids[7] = DRM_PROP_PLANE_CRTC_X; values[7] = 0;
-        ids[8] = DRM_PROP_PLANE_CRTC_Y; values[8] = 0;
-        ids[9] = DRM_PROP_PLANE_CRTC_W; values[9] = framebuffer_width();
-        ids[10] = DRM_PROP_PLANE_CRTC_H; values[10] = framebuffer_height();
-        ids[11] = DRM_PROP_PLANE_FB_DAMAGE_CLIPS; values[11] = 0;
+        ids[0] = DRM_PROP_TYPE_ID;
+        values[0] = DRM_PLANE_TYPE_PRIMARY;
+        ids[1] = DRM_PROP_PLANE_CRTC_ID;
+        values[1] = DRM_CRTC_ID;
+        ids[2] = DRM_PROP_PLANE_FB_ID;
+        values[2] = active_fb_id;
+        ids[3] = DRM_PROP_PLANE_SRC_X;
+        values[3] = 0;
+        ids[4] = DRM_PROP_PLANE_SRC_Y;
+        values[4] = 0;
+        ids[5] = DRM_PROP_PLANE_SRC_W;
+        values[5] = (uint64_t)framebuffer_width() << 16;
+        ids[6] = DRM_PROP_PLANE_SRC_H;
+        values[6] = (uint64_t)framebuffer_height() << 16;
+        ids[7] = DRM_PROP_PLANE_CRTC_X;
+        values[7] = 0;
+        ids[8] = DRM_PROP_PLANE_CRTC_Y;
+        values[8] = 0;
+        ids[9] = DRM_PROP_PLANE_CRTC_W;
+        values[9] = framebuffer_width();
+        ids[10] = DRM_PROP_PLANE_CRTC_H;
+        values[10] = framebuffer_height();
+        ids[11] = DRM_PROP_PLANE_FB_DAMAGE_CLIPS;
+        values[11] = 0;
         count = 12;
     } else if (type == DRM_MODE_OBJECT_CRTC) {
         if (request.obj_id != DRM_CRTC_ID) return -ENOENT;
-        ids[0] = DRM_PROP_CRTC_ACTIVE; values[0] = active_fb_id != 0;
-        ids[1] = DRM_PROP_CRTC_MODE_ID; values[1] = 0; count = 2;
+        ids[0] = DRM_PROP_CRTC_ACTIVE;
+        values[0] = active_fb_id != 0;
+        ids[1] = DRM_PROP_CRTC_MODE_ID;
+        values[1] = 0;
+        count = 2;
     } else if (type == DRM_MODE_OBJECT_CONNECTOR) {
         if (request.obj_id != DRM_CONNECTOR_ID) return -ENOENT;
-        ids[0] = DRM_PROP_CONNECTOR_CRTC_ID; values[0] = active_fb_id ? DRM_CRTC_ID : 0;
-        ids[1] = DRM_PROP_CONNECTOR_DPMS; values[1] = connector_dpms; count = 2;
+        ids[0] = DRM_PROP_CONNECTOR_CRTC_ID;
+        values[0] = active_fb_id ? DRM_CRTC_ID : 0;
+        ids[1] = DRM_PROP_CONNECTOR_DPMS;
+        values[1] = connector_dpms;
+        count = 2;
     } else if (type == DRM_MODE_OBJECT_ENCODER) {
         if (request.obj_id != DRM_ENCODER_ID) return -ENOENT;
     } else {
         return -EINVAL;
     }
 
-    if (copy_array_out(request.props_ptr, request.count_props, ids,
-                       sizeof(ids[0]), count) != 0 ||
-        copy_array_out(request.prop_values_ptr, request.count_props, values,
-                       sizeof(values[0]), count) != 0) return -EFAULT;
+    if (copy_array_out(request.props_ptr, request.count_props, ids, sizeof(ids[0]), count) != 0 ||
+        copy_array_out(request.prop_values_ptr, request.count_props, values, sizeof(values[0]),
+                       count) != 0)
+        return -EFAULT;
     request.count_props = count;
     return copy_to_user(user_argument, &request, sizeof(request)) == 0 ? 0 : -EFAULT;
 }
 
-static int present_via_virtgpu(const struct drm_framebuffer *fb,
-                               struct drm_dumb_buffer *buffer,
+static int present_via_virtgpu(const struct drm_framebuffer *fb, struct drm_dumb_buffer *buffer,
                                const struct drm_damage *damage) {
     uint32_t stride_pixels = buffer->pitch / 4U;
     if (!stride_pixels || !buffer->height) return -1;
@@ -1511,7 +1571,7 @@ static int present_via_virtgpu(const struct drm_framebuffer *fb,
     }
     uint32_t width = fb->width < stride_pixels ? fb->width : stride_pixels;
     uint32_t height = fb->height < buffer->height ? fb->height : buffer->height;
-    struct virtgpu_rect bounds = { 0, 0, 0, 0 };
+    struct virtgpu_rect bounds = {0, 0, 0, 0};
     if (damage && damage->count) {
         int32_t left = INT32_MAX, top = INT32_MAX, right = INT32_MIN, bottom = INT32_MIN;
         for (uint32_t index = 0; index < damage->count; index++) {
@@ -1534,16 +1594,11 @@ static int present_via_virtgpu(const struct drm_framebuffer *fb,
                            bounds.width ? &bounds : NULL, !buffer->rendered);
 }
 
-static int64_t drm_dispatch_ioctl(struct file *file, unsigned long request,
-                                  uint64_t user_argument);
+static int64_t drm_dispatch_ioctl(struct file *file, unsigned long request, uint64_t user_argument);
 
-static void drm_enter(void) {
-    mutex_lock(&drm_lock);
-}
+static void drm_enter(void) { mutex_lock(&drm_lock); }
 
-static void drm_leave(void) {
-    mutex_unlock(&drm_lock);
-}
+static void drm_leave(void) { mutex_unlock(&drm_lock); }
 
 static void copy_row_span(const struct drm_framebuffer *fb, const struct drm_dumb_buffer *buffer,
                           uint8_t *destination, uint32_t row, uint32_t first, uint32_t end) {
@@ -1554,8 +1609,7 @@ static void copy_row_span(const struct drm_framebuffer *fb, const struct drm_dum
     while (copied < end && page < buffer->page_count) {
         uint64_t chunk = 4096ULL - within;
         if (chunk > end - copied) chunk = end - copied;
-        memcpy(destination + copied,
-               (uint8_t *)vmm_phys_to_virt(buffer->pages[page]) + within,
+        memcpy(destination + copied, (uint8_t *)vmm_phys_to_virt(buffer->pages[page]) + within,
                (size_t)chunk);
         copied += (uint32_t)chunk;
         page++;
@@ -1585,7 +1639,8 @@ static int present_framebuffer(const struct file *client, uint32_t fb_id,
 
     if (virtgpu_available()) {
         static uint32_t last_virtgpu_fb;
-        const struct drm_damage *partial = scanout_current && last_virtgpu_fb == fb_id ? damage : NULL;
+        const struct drm_damage *partial =
+            scanout_current && last_virtgpu_fb == fb_id ? damage : NULL;
         if (present_via_virtgpu(fb, buffer, partial) == 0) {
             last_virtgpu_fb = fb_id;
             scanout_current = 1;
@@ -1601,7 +1656,7 @@ static int present_framebuffer(const struct file *client, uint32_t fb_id,
     uint32_t rows = fb->height < screen_height ? fb->height : screen_height;
     uint32_t row_bytes = fb->pitch < screen_pitch ? fb->pitch : screen_pitch;
     uint32_t columns = row_bytes / 4U;
-    struct drm_damage whole = { 1, { { 0, 0, (int32_t)columns, (int32_t)rows } } };
+    struct drm_damage whole = {1, {{0, 0, (int32_t)columns, (int32_t)rows}}};
     if (!damage || !scanout_current) damage = &whole;
 
     for (uint32_t index = 0; index < damage->count; index++) {
@@ -1727,13 +1782,11 @@ int64_t drm_file_read(struct file *file, size_t size, void *buffer) {
 
 int drm_file_read_ready(struct file *file) {
     for (unsigned index = 0; index < DRM_EVENT_QUEUES; index++)
-        if (event_queues[index].owner == file)
-            return flip_head_ready(&event_queues[index], 0);
+        if (event_queues[index].owner == file) return flip_head_ready(&event_queues[index], 0);
     return 0;
 }
 
-int64_t drm_device_read(struct vfs_node *node, uint64_t offset,
-                        size_t size, void *buffer) {
+int64_t drm_device_read(struct vfs_node *node, uint64_t offset, size_t size, void *buffer) {
     (void)node;
     (void)offset;
     (void)size;
@@ -1761,8 +1814,7 @@ static int64_t ioctl_create_dumb(const struct file *client, uint64_t user_argume
     struct drm_mode_create_dumb request;
     if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
     if (!request.width || !request.height || request.bpp != 32) return -EINVAL;
-    if (request.width > DRM_MAX_DIMENSION || request.height > DRM_MAX_DIMENSION)
-        return -EINVAL;
+    if (request.width > DRM_MAX_DIMENSION || request.height > DRM_MAX_DIMENSION) return -EINVAL;
 
     uint64_t pitch = (uint64_t)request.width * 4ULL;
     uint64_t size = pitch * request.height;
@@ -1835,18 +1887,21 @@ static int64_t ioctl_destroy_dumb(const struct file *client, uint64_t user_argum
     return handle_close(client, request.handle);
 }
 
-static int64_t ioctl_add_framebuffer(const struct file *client, uint32_t handle,
-                                     uint32_t width, uint32_t height,
-                                     uint32_t pitch, uint32_t *fb_id_out) {
+static int64_t ioctl_add_framebuffer(const struct file *client, uint32_t handle, uint32_t width,
+                                     uint32_t height, uint32_t pitch, uint32_t *fb_id_out) {
     struct drm_dumb_buffer *buffer = buffer_of(client, handle);
     if (!buffer) return -ENOENT;
     struct drm_framebuffer *slot = NULL;
     for (int index = 0; index < framebuffer_capacity; index++) {
-        if (!framebuffers[index].id) { slot = &framebuffers[index]; break; }
+        if (!framebuffers[index].id) {
+            slot = &framebuffers[index];
+            break;
+        }
     }
     if (!slot) {
         int first = framebuffer_capacity;
-        if (grow_int_table((void **)&framebuffers, sizeof(*framebuffers), &framebuffer_capacity) != 0)
+        if (grow_int_table((void **)&framebuffers, sizeof(*framebuffers), &framebuffer_capacity) !=
+            0)
             return -ENOMEM;
         slot = &framebuffers[first];
     }
@@ -1865,9 +1920,8 @@ static int64_t ioctl_add_framebuffer(const struct file *client, uint32_t handle,
 static int64_t ioctl_addfb(const struct file *client, uint64_t user_argument) {
     struct drm_mode_fb_cmd request;
     if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
-    int64_t status = ioctl_add_framebuffer(client, request.handle, request.width,
-                                           request.height, request.pitch,
-                                           &request.fb_id);
+    int64_t status = ioctl_add_framebuffer(client, request.handle, request.width, request.height,
+                                           request.pitch, &request.fb_id);
     if (status != 0) return status;
     return copy_to_user(user_argument, &request, sizeof(request)) == 0 ? 0 : -EFAULT;
 }
@@ -1877,8 +1931,7 @@ static int64_t ioctl_addfb2(const struct file *client, uint64_t user_argument) {
     if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
     if (request.handles[1] || request.handles[2] || request.handles[3]) return -EINVAL;
     int64_t status = ioctl_add_framebuffer(client, request.handles[0], request.width,
-                                           request.height, request.pitches[0],
-                                           &request.fb_id);
+                                           request.height, request.pitches[0], &request.fb_id);
     if (status != 0) return status;
     return copy_to_user(user_argument, &request, sizeof(request)) == 0 ? 0 : -EFAULT;
 }
@@ -1907,8 +1960,7 @@ static uint32_t render_context(void) {
     if (!process) return 0;
 
     for (int index = 0; index < context_capacity; index++) {
-        if (render_contexts[index].context &&
-            render_contexts[index].pid == process->pid)
+        if (render_contexts[index].context && render_contexts[index].pid == process->pid)
             return render_contexts[index].context;
     }
     for (int index = 0; index < context_capacity; index++) {
@@ -1986,7 +2038,7 @@ static int64_t ioctl_virtgpu_getparam(uint64_t user_argument) {
     case VIRTGPU_PARAM_RESOURCE_BLOB:
     case VIRTGPU_PARAM_HOST_VISIBLE:
     case VIRTGPU_PARAM_CROSS_DEVICE:
-    case VIRTGPU_PARAM_CONTEXT_INIT: answer = 0; break;
+    case VIRTGPU_PARAM_CONTEXT_INIT:     answer = 0; break;
     case VIRTGPU_PARAM_SUPPORTED_CAPSET_IDS:
         answer = virtgpu_capset_id() ? (1U << virtgpu_capset_id()) : 0;
         break;
@@ -2040,9 +2092,8 @@ static int64_t ioctl_virtgpu_resource_create(const struct file *client, uint64_t
     spec.nr_samples = query.nr_samples;
     spec.flags = query.flags;
 
-    uint32_t resource = virtgpu_resource_create_3d(&spec, buffer->pages,
-                                                   buffer->page_count,
-                                                   query.size);
+    uint32_t resource =
+        virtgpu_resource_create_3d(&spec, buffer->pages, buffer->page_count, query.size);
     if (!resource) {
         buffer_release(buffer);
         return -ENOMEM;
@@ -2085,7 +2136,8 @@ static int64_t ioctl_virtgpu_map(const struct file *client, uint64_t user_argume
     return copy_to_user(user_argument, &query, sizeof(query)) == 0 ? 0 : -EFAULT;
 }
 
-static int64_t ioctl_virtgpu_transfer(const struct file *client, uint64_t user_argument, int to_host) {
+static int64_t ioctl_virtgpu_transfer(const struct file *client, uint64_t user_argument,
+                                      int to_host) {
     struct drm_virtgpu_3d_transfer query;
     if (copy_from_user(&query, user_argument, sizeof(query)) != 0) return -EFAULT;
     struct drm_dumb_buffer *buffer = buffer_of(client, query.bo_handle);
@@ -2098,15 +2150,15 @@ static int64_t ioctl_virtgpu_transfer(const struct file *client, uint64_t user_a
     box.w = query.box.w;
     box.h = query.box.h;
     box.d = query.box.d;
-    if (virtgpu_transfer_3d(render_context(), buffer->virtio_resource, &box,
-                            query.offset, query.level, query.stride,
-                            query.layer_stride, to_host) != 0) return -EIO;
+    if (virtgpu_transfer_3d(render_context(), buffer->virtio_resource, &box, query.offset,
+                            query.level, query.stride, query.layer_stride, to_host) != 0)
+        return -EIO;
     buffer->busy_until = virtgpu_posted();
     return 0;
 }
 
 #define DRM_MAX_COMMAND_BYTES (1024U * 1024U)
-#define VIRTGPU_WAIT_NOWAIT 0x1U
+#define VIRTGPU_WAIT_NOWAIT   0x1U
 
 static void mark_busy(const struct file *client, uint64_t user_handles, uint32_t count,
                       uint64_t sequence) {
@@ -2159,8 +2211,8 @@ static int64_t ioctl_virtgpu_wait(const struct file *client, uint64_t user_argum
     if (copy_from_user(&query, user_argument, sizeof(query)) != 0) return -EFAULT;
     struct drm_dumb_buffer *buffer = buffer_of(client, query.handle);
     if (!buffer) return -ENOENT;
-    uint64_t target = buffer->busy_until > untracked_busy_until ? buffer->busy_until
-                                                                : untracked_busy_until;
+    uint64_t target =
+        buffer->busy_until > untracked_busy_until ? buffer->busy_until : untracked_busy_until;
     if (query.flags & VIRTGPU_WAIT_NOWAIT) return virtgpu_sequence_done(target) ? 0 : -EBUSY;
     if (virtgpu_sequence_done(target)) return 0;
     drm_leave();
@@ -2169,8 +2221,7 @@ static int64_t ioctl_virtgpu_wait(const struct file *client, uint64_t user_argum
     return status == 0 ? 0 : -EBUSY;
 }
 
-int64_t drm_file_ioctl(struct file *file, unsigned long request,
-                       uint64_t user_argument) {
+int64_t drm_file_ioctl(struct file *file, unsigned long request, uint64_t user_argument) {
     if (!drm_ready) return -ENOTTY;
     if (IOCTL_TYPE(request) != (unsigned)DRM_IOCTL_TYPE) return -ENOTTY;
     drm_enter();
@@ -2183,10 +2234,10 @@ static int64_t drm_dispatch_ioctl(struct file *file, unsigned long request,
                                   uint64_t user_argument) {
     retired_reap();
     switch (IOCTL_NR(request)) {
-    case DRM_NR_VERSION: return ioctl_version(user_argument);
-    case DRM_NR_GET_CAP: return ioctl_get_cap(user_argument);
+    case DRM_NR_VERSION:        return ioctl_version(user_argument);
+    case DRM_NR_GET_CAP:        return ioctl_get_cap(user_argument);
     case DRM_NR_SET_CLIENT_CAP: return ioctl_set_client_cap(user_argument);
-    case DRM_NR_SET_VERSION: return 0;
+    case DRM_NR_SET_VERSION:    return 0;
     case DRM_NR_DROP_MASTER:
         if (virtgpu_cursor_available()) (void)virtgpu_cursor_set(0, 0, 0, 0, 0, 0, 0);
         active_fb_id = 0;
@@ -2202,41 +2253,41 @@ static int64_t drm_dispatch_ioctl(struct file *file, unsigned long request,
         }
         return 0;
     case DRM_NR_GET_MAGIC:
-    case DRM_NR_AUTH_MAGIC: return 0;
-    case DRM_NR_PRIME_HANDLE_TO_FD: return ioctl_prime_handle_to_fd(file, user_argument);
-    case DRM_NR_PRIME_FD_TO_HANDLE: return ioctl_prime_fd_to_handle(file, user_argument);
+    case DRM_NR_AUTH_MAGIC:             return 0;
+    case DRM_NR_PRIME_HANDLE_TO_FD:     return ioctl_prime_handle_to_fd(file, user_argument);
+    case DRM_NR_PRIME_FD_TO_HANDLE:     return ioctl_prime_fd_to_handle(file, user_argument);
     case DRM_NR_MODE_GETPLANERESOURCES: return ioctl_get_plane_resources(user_argument);
-    case DRM_NR_MODE_GETPLANE: return ioctl_get_plane(user_argument);
-    case DRM_NR_MODE_GETPROPERTY: return ioctl_get_property(user_argument);
+    case DRM_NR_MODE_GETPLANE:          return ioctl_get_plane(user_argument);
+    case DRM_NR_MODE_GETPROPERTY:       return ioctl_get_property(user_argument);
     case DRM_NR_MODE_OBJ_GETPROPERTIES: return ioctl_obj_get_properties(user_argument);
-    case DRM_NR_MODE_SETPROPERTY: return ioctl_connector_set_property(user_argument);
-    case DRM_NR_MODE_OBJ_SETPROPERTY: return ioctl_obj_set_property(user_argument);
-    case DRM_NR_MODE_SETPLANE: return -EINVAL;
-    case DRM_NR_MODE_GETRESOURCES: return ioctl_get_resources(user_argument);
-    case DRM_NR_MODE_GETCONNECTOR: return ioctl_get_connector(user_argument);
-    case DRM_NR_MODE_GETENCODER: return ioctl_get_encoder(user_argument);
-    case DRM_NR_MODE_GETCRTC: return ioctl_get_crtc(user_argument);
-    case DRM_NR_MODE_GETFB: return ioctl_getfb(file, user_argument);
-    case DRM_NR_MODE_CURSOR: return ioctl_cursor(file, user_argument, 0);
-    case DRM_NR_MODE_CURSOR2: return ioctl_cursor(file, user_argument, 1);
-    case DRM_NR_MODE_ATOMIC: return ioctl_atomic(file, user_argument);
-    case DRM_NR_MODE_CREATEPROPBLOB: return ioctl_create_blob(file, user_argument);
-    case DRM_NR_MODE_DESTROYPROPBLOB: return ioctl_destroy_blob(file, user_argument);
-    case DRM_NR_MODE_SETCRTC: return ioctl_set_crtc(file, user_argument);
-    case DRM_NR_MODE_PAGE_FLIP: return ioctl_page_flip(file, user_argument);
-    case DRM_NR_MODE_DIRTYFB: return ioctl_dirty_fb(file, user_argument);
-    case DRM_NR_MODE_CREATE_DUMB: return ioctl_create_dumb(file, user_argument);
-    case DRM_NR_MODE_MAP_DUMB: return ioctl_map_dumb(file, user_argument);
-    case DRM_NR_MODE_DESTROY_DUMB: return ioctl_destroy_dumb(file, user_argument);
-    case DRM_NR_MODE_ADDFB: return ioctl_addfb(file, user_argument);
-    case DRM_NR_MODE_ADDFB2: return ioctl_addfb2(file, user_argument);
+    case DRM_NR_MODE_SETPROPERTY:       return ioctl_connector_set_property(user_argument);
+    case DRM_NR_MODE_OBJ_SETPROPERTY:   return ioctl_obj_set_property(user_argument);
+    case DRM_NR_MODE_SETPLANE:          return -EINVAL;
+    case DRM_NR_MODE_GETRESOURCES:      return ioctl_get_resources(user_argument);
+    case DRM_NR_MODE_GETCONNECTOR:      return ioctl_get_connector(user_argument);
+    case DRM_NR_MODE_GETENCODER:        return ioctl_get_encoder(user_argument);
+    case DRM_NR_MODE_GETCRTC:           return ioctl_get_crtc(user_argument);
+    case DRM_NR_MODE_GETFB:             return ioctl_getfb(file, user_argument);
+    case DRM_NR_MODE_CURSOR:            return ioctl_cursor(file, user_argument, 0);
+    case DRM_NR_MODE_CURSOR2:           return ioctl_cursor(file, user_argument, 1);
+    case DRM_NR_MODE_ATOMIC:            return ioctl_atomic(file, user_argument);
+    case DRM_NR_MODE_CREATEPROPBLOB:    return ioctl_create_blob(file, user_argument);
+    case DRM_NR_MODE_DESTROYPROPBLOB:   return ioctl_destroy_blob(file, user_argument);
+    case DRM_NR_MODE_SETCRTC:           return ioctl_set_crtc(file, user_argument);
+    case DRM_NR_MODE_PAGE_FLIP:         return ioctl_page_flip(file, user_argument);
+    case DRM_NR_MODE_DIRTYFB:           return ioctl_dirty_fb(file, user_argument);
+    case DRM_NR_MODE_CREATE_DUMB:       return ioctl_create_dumb(file, user_argument);
+    case DRM_NR_MODE_MAP_DUMB:          return ioctl_map_dumb(file, user_argument);
+    case DRM_NR_MODE_DESTROY_DUMB:      return ioctl_destroy_dumb(file, user_argument);
+    case DRM_NR_MODE_ADDFB:             return ioctl_addfb(file, user_argument);
+    case DRM_NR_MODE_ADDFB2:            return ioctl_addfb2(file, user_argument);
     case DRM_NR_MODE_RMFB:
-    case DRM_NR_MODE_CLOSEFB: return ioctl_rmfb(file, user_argument);
-    case DRM_NR_GEM_CLOSE: return ioctl_gem_close(file, user_argument);
+    case DRM_NR_MODE_CLOSEFB:           return ioctl_rmfb(file, user_argument);
+    case DRM_NR_GEM_CLOSE:              return ioctl_gem_close(file, user_argument);
     case DRM_NR_MODE_CREATE_LEASE:
     case DRM_NR_MODE_LIST_LESSEES:
     case DRM_NR_MODE_GET_LEASE:
-    case DRM_NR_MODE_REVOKE_LEASE: return -EOPNOTSUPP;
+    case DRM_NR_MODE_REVOKE_LEASE:      return -EOPNOTSUPP;
 
     case DRM_NR_VIRTGPU_GETPARAM:
     case DRM_NR_VIRTGPU_GET_CAPS:
@@ -2253,25 +2304,22 @@ static int64_t drm_dispatch_ioctl(struct file *file, unsigned long request,
         case DRM_NR_VIRTGPU_GET_CAPS: return ioctl_virtgpu_get_caps(user_argument);
         case DRM_NR_VIRTGPU_RESOURCE_CREATE:
             return ioctl_virtgpu_resource_create(file, user_argument);
-        case DRM_NR_VIRTGPU_RESOURCE_INFO:
-            return ioctl_virtgpu_resource_info(file, user_argument);
-        case DRM_NR_VIRTGPU_MAP: return ioctl_virtgpu_map(file, user_argument);
+        case DRM_NR_VIRTGPU_RESOURCE_INFO: return ioctl_virtgpu_resource_info(file, user_argument);
+        case DRM_NR_VIRTGPU_MAP:           return ioctl_virtgpu_map(file, user_argument);
         case DRM_NR_VIRTGPU_TRANSFER_FROM_HOST:
             return ioctl_virtgpu_transfer(file, user_argument, 0);
-        case DRM_NR_VIRTGPU_TRANSFER_TO_HOST:
-            return ioctl_virtgpu_transfer(file, user_argument, 1);
-        case DRM_NR_VIRTGPU_EXECBUFFER: return ioctl_virtgpu_execbuffer(file, user_argument);
-        default: return ioctl_virtgpu_wait(file, user_argument);
+        case DRM_NR_VIRTGPU_TRANSFER_TO_HOST: return ioctl_virtgpu_transfer(file, user_argument, 1);
+        case DRM_NR_VIRTGPU_EXECBUFFER:       return ioctl_virtgpu_execbuffer(file, user_argument);
+        default:                              return ioctl_virtgpu_wait(file, user_argument);
         }
     case DRM_NR_VIRTGPU_RESOURCE_CREATE_BLOB:
-    case DRM_NR_VIRTGPU_CONTEXT_INIT: return -EINVAL;
-    default: return -ENOTTY;
+    case DRM_NR_VIRTGPU_CONTEXT_INIT:         return -EINVAL;
+    default:                                  return -ENOTTY;
     }
 }
 
-int64_t drm_device_mmap(struct vfs_node *node, struct file *file,
-                        uint64_t cr3, uint64_t virtual_address,
-                        uint64_t length, uint64_t offset,
+int64_t drm_device_mmap(struct vfs_node *node, struct file *file, uint64_t cr3,
+                        uint64_t virtual_address, uint64_t length, uint64_t offset,
                         uint64_t page_flags) {
     DRM_LOCKED;
     (void)node;
@@ -2333,8 +2381,7 @@ void drm_file_close(struct file *file) {
         if (buffer) buffer_release(buffer);
     }
     for (unsigned index = 0; index < blob_capacity; index++)
-        if (blobs[index].id && blobs[index].owner == file)
-            blob_release(&blobs[index]);
+        if (blobs[index].id && blobs[index].owner == file) blob_release(&blobs[index]);
     struct drm_event_queue *queue = event_queue_of(file, 0);
     if (queue) memset(queue, 0, sizeof(*queue));
     retired_reap();
@@ -2363,10 +2410,8 @@ void drm_console_present(void) {
     if (!mutex_trylock(&drm_lock)) return;
     uint32_t pitch = framebuffer_pitch();
     if (pitch)
-        (void)virtgpu_console_present(framebuffer_physical_address() +
-                                          framebuffer_memory_offset(),
-                                      pitch / 4U, framebuffer_width(),
-                                      framebuffer_height());
+        (void)virtgpu_console_present(framebuffer_physical_address() + framebuffer_memory_offset(),
+                                      pitch / 4U, framebuffer_width(), framebuffer_height());
     mutex_unlock(&drm_lock);
 }
 

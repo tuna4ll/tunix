@@ -31,7 +31,7 @@ struct gdt_ptr {
 } __attribute__((packed));
 
 #define FAULT_STACK_BYTES 8192
-#define FAULT_STACK_IST 1
+#define FAULT_STACK_IST   1
 
 struct cpu_tables {
     struct gdt_entry gdt[7];
@@ -56,12 +56,10 @@ int gdt_prepare_cpu(unsigned index) {
 extern void gdt_flush(uint64_t);
 extern void tss_flush(void);
 
-void set_kernel_stack(uint64_t stack) {
-    tables[cpu_current()->index]->tss.rsp0 = stack;
-}
+void set_kernel_stack(uint64_t stack) { tables[cpu_current()->index]->tss.rsp0 = stack; }
 
-static void gdt_set_gate(struct gdt_entry *gdt, int num, uint64_t base,
-                         uint32_t limit, uint8_t access, uint8_t gran) {
+static void gdt_set_gate(struct gdt_entry *gdt, int num, uint64_t base, uint32_t limit,
+                         uint8_t access, uint8_t gran) {
     gdt[num].base_low = (base & 0xFFFF);
     gdt[num].base_middle = (base >> 16) & 0xFF;
     gdt[num].base_high = (base >> 24) & 0xFF;
@@ -98,8 +96,7 @@ void gdt_init_cpu(unsigned index) {
 
     __builtin_memset(&self->tss, 0, sizeof(self->tss));
     self->tss.iopb_offset = sizeof(self->tss);
-    self->tss.ist[FAULT_STACK_IST - 1] =
-        (uint64_t)(self->fault_stack + FAULT_STACK_BYTES);
+    self->tss.ist[FAULT_STACK_IST - 1] = (uint64_t)(self->fault_stack + FAULT_STACK_BYTES);
 
     gdt_set_tss(gdt, 5, (uint64_t)&self->tss, sizeof(self->tss) - 1);
 
@@ -109,6 +106,4 @@ void gdt_init_cpu(unsigned index) {
     percpu_activate(index);
 }
 
-void gdt_init(void) {
-    gdt_init_cpu(0);
-}
+void gdt_init(void) { gdt_init_cpu(0); }

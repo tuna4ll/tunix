@@ -13,49 +13,49 @@
 
 extern void kprintf(const char *fmt, ...);
 
-#define APIC_WINDOW_OFFSET 0x00400000ULL
+#define APIC_WINDOW_OFFSET    0x00400000ULL
 #define IO_APIC_WINDOW_OFFSET 0x00401000ULL
-#define APIC_PAGE_BYTES 4096ULL
+#define APIC_PAGE_BYTES       4096ULL
 
-#define LAPIC_ID 0x020U
-#define LAPIC_EOI 0x0B0U
-#define LAPIC_SPURIOUS 0x0F0U
-#define LAPIC_ICR_LOW 0x300U
-#define LAPIC_ICR_HIGH 0x310U
-#define LAPIC_LVT_TIMER 0x320U
+#define LAPIC_ID            0x020U
+#define LAPIC_EOI           0x0B0U
+#define LAPIC_SPURIOUS      0x0F0U
+#define LAPIC_ICR_LOW       0x300U
+#define LAPIC_ICR_HIGH      0x310U
+#define LAPIC_LVT_TIMER     0x320U
 #define LAPIC_TIMER_INITIAL 0x380U
 #define LAPIC_TIMER_CURRENT 0x390U
-#define LAPIC_TIMER_DIVIDE 0x3E0U
+#define LAPIC_TIMER_DIVIDE  0x3E0U
 
-#define ICR_DELIVERY_PENDING (1U << 12)
-#define ICR_LEVEL_ASSERT (1U << 14)
-#define ICR_MODE_INIT (5U << 8)
-#define ICR_MODE_STARTUP (6U << 8)
-#define ICR_SHORTHAND_OTHERS (3U << 18)
+#define ICR_DELIVERY_PENDING  (1U << 12)
+#define ICR_LEVEL_ASSERT      (1U << 14)
+#define ICR_MODE_INIT         (5U << 8)
+#define ICR_MODE_STARTUP      (6U << 8)
+#define ICR_SHORTHAND_OTHERS  (3U << 18)
 #define ICR_DESTINATION_SHIFT 24U
 
-#define LVT_MASKED (1U << 16)
-#define TIMER_DIVIDE_16 0x3U
-#define TIMER_DIVISOR 16U
-#define CALIBRATION_MS 20ULL
-#define TIMER_MAX_DELAY_NS 1000000000ULL
+#define LVT_MASKED            (1U << 16)
+#define TIMER_DIVIDE_16       0x3U
+#define TIMER_DIVISOR         16U
+#define CALIBRATION_MS        20ULL
+#define TIMER_MAX_DELAY_NS    1000000000ULL
 #define LAPIC_SPURIOUS_ENABLE (1U << 8)
 #define LAPIC_SPURIOUS_VECTOR 0xFFU
-#define LAPIC_ID_SHIFT 24U
+#define LAPIC_ID_SHIFT        24U
 
-#define IO_APIC_SELECT 0x00U
-#define IO_APIC_WINDOW 0x10U
+#define IO_APIC_SELECT           0x00U
+#define IO_APIC_WINDOW           0x10U
 #define IO_APIC_VERSION_REGISTER 0x01U
 #define IO_APIC_REDIRECTION_BASE 0x10U
-#define IO_APIC_MAX_ENTRY_SHIFT 16U
-#define IO_APIC_MAX_ENTRY_MASK 0xFFU
+#define IO_APIC_MAX_ENTRY_SHIFT  16U
+#define IO_APIC_MAX_ENTRY_MASK   0xFFU
 
-#define REDIRECTION_ACTIVE_LOW (1U << 13)
-#define REDIRECTION_LEVEL_TRIGGERED (1U << 15)
-#define REDIRECTION_MASKED (1U << 16)
+#define REDIRECTION_ACTIVE_LOW        (1U << 13)
+#define REDIRECTION_LEVEL_TRIGGERED   (1U << 15)
+#define REDIRECTION_MASKED            (1U << 16)
 #define REDIRECTION_DESTINATION_SHIFT 24U
 
-#define IRQ_VECTOR_BASE 32U
+#define IRQ_VECTOR_BASE  32U
 #define LEGACY_IRQ_COUNT 16U
 
 static volatile uint32_t *local_apic;
@@ -83,8 +83,8 @@ static void io_apic_write(uint32_t index, uint32_t value) {
     io_apic[IO_APIC_WINDOW / sizeof(uint32_t)] = value;
 }
 
-static uint32_t global_for_irq(const struct acpi_machine *machine, unsigned irq,
-                               int *active_low, int *level) {
+static uint32_t global_for_irq(const struct acpi_machine *machine, unsigned irq, int *active_low,
+                               int *level) {
     *active_low = 0;
     *level = 0;
     for (uint32_t i = 0; i < machine->override_count; i++) {
@@ -96,8 +96,7 @@ static uint32_t global_for_irq(const struct acpi_machine *machine, unsigned irq,
     return irq;
 }
 
-int apic_route_irq(unsigned global, unsigned vector, int active_low,
-                   int level_triggered) {
+int apic_route_irq(unsigned global, unsigned vector, int active_low, int level_triggered) {
     if (!active) return -1;
     if (global < io_apic_global_base) return -1;
     uint32_t entry = global - io_apic_global_base;
@@ -138,13 +137,9 @@ static void lapic_write(uint32_t offset, uint32_t value) {
     local_apic[offset / sizeof(uint32_t)] = value;
 }
 
-static uint32_t lapic_read(uint32_t offset) {
-    return local_apic[offset / sizeof(uint32_t)];
-}
+static uint32_t lapic_read(uint32_t offset) { return local_apic[offset / sizeof(uint32_t)]; }
 
-uint32_t apic_local_id(void) {
-    return active ? lapic_read(LAPIC_ID) >> LAPIC_ID_SHIFT : 0;
-}
+uint32_t apic_local_id(void) { return active ? lapic_read(LAPIC_ID) >> LAPIC_ID_SHIFT : 0; }
 
 void apic_enable_local(void) {
     if (!active) return;
@@ -224,8 +219,7 @@ void arch_local_timer_program(uint64_t delay_ns) {
     lapic_write(LAPIC_TIMER_INITIAL, (uint32_t)count);
 }
 
-void apic_timer_calibration(unsigned index, uint64_t *measured_hz,
-                            uint32_t *initial_count) {
+void apic_timer_calibration(unsigned index, uint64_t *measured_hz, uint32_t *initial_count) {
     if (index >= SMP_MAX_CPUS) return;
     if (measured_hz) *measured_hz = timer_measured_hz[index];
     if (initial_count) *initial_count = timer_initial_count[index];
@@ -244,12 +238,11 @@ int apic_init(void) {
     io_apic_global_base = machine->io_apics[0].global_base;
 
     local_apic_id = local_apic[LAPIC_ID / sizeof(uint32_t)] >> LAPIC_ID_SHIFT;
-    io_apic_entries =
-        ((io_apic_read(IO_APIC_VERSION_REGISTER) >> IO_APIC_MAX_ENTRY_SHIFT) &
-         IO_APIC_MAX_ENTRY_MASK) + 1U;
+    io_apic_entries = ((io_apic_read(IO_APIC_VERSION_REGISTER) >> IO_APIC_MAX_ENTRY_SHIFT) &
+                       IO_APIC_MAX_ENTRY_MASK) +
+        1U;
 
-    local_apic[LAPIC_SPURIOUS / sizeof(uint32_t)] =
-        LAPIC_SPURIOUS_ENABLE | LAPIC_SPURIOUS_VECTOR;
+    local_apic[LAPIC_SPURIOUS / sizeof(uint32_t)] = LAPIC_SPURIOUS_ENABLE | LAPIC_SPURIOUS_VECTOR;
 
     for (uint32_t entry = 0; entry < io_apic_entries; entry++)
         io_apic_write(IO_APIC_REDIRECTION_BASE + entry * 2U, REDIRECTION_MASKED);
@@ -258,9 +251,8 @@ int apic_init(void) {
 
     for (unsigned irq = 0; irq < LEGACY_IRQ_COUNT; irq++) pic_mask(irq);
 
-    kprintf("APIC: local apic %u, ioapic with %u inputs from global %u\n",
-            (unsigned)local_apic_id, (unsigned)io_apic_entries,
-            (unsigned)io_apic_global_base);
+    kprintf("APIC: local apic %u, ioapic with %u inputs from global %u\n", (unsigned)local_apic_id,
+            (unsigned)io_apic_entries, (unsigned)io_apic_global_base);
     return 0;
 }
 

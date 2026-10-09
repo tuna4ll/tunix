@@ -4,9 +4,9 @@
 #include <stddef.h>
 
 #define UTS_NAME_MAX 64
-#define UTS_SYSNAME "Tunix"
-#define UTS_RELEASE "0.1.0"
-#define UTS_VERSION "Tunix Kernel"
+#define UTS_SYSNAME  "Tunix"
+#define UTS_RELEASE  "0.1.0"
+#define UTS_VERSION  "Tunix Kernel"
 
 const char *uts_hostname(void);
 const char *uts_domainname(void);

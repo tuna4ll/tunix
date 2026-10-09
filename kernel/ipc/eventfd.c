@@ -12,7 +12,8 @@ static void eventfd_guard_release(int *unused) {
 }
 
 #define EVENTFD_LOCKED \
-    __attribute__((cleanup(eventfd_guard_release))) int eventfd_guard = (lock_acquire(&eventfd_lock), 0)
+    __attribute__((cleanup(eventfd_guard_release))) int eventfd_guard = \
+        (lock_acquire(&eventfd_lock), 0)
 
 #define EAGAIN 11
 #define EINVAL 22

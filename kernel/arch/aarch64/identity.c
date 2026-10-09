@@ -8,14 +8,12 @@ struct part_name {
 };
 
 static const struct part_name arm_parts[] = {
-    { 0xD03, "Cortex-A53" }, { 0xD04, "Cortex-A35" }, { 0xD05, "Cortex-A55" },
-    { 0xD07, "Cortex-A57" }, { 0xD08, "Cortex-A72" }, { 0xD09, "Cortex-A73" },
-    { 0xD0A, "Cortex-A75" }, { 0xD0B, "Cortex-A76" }, { 0xD0C, "Neoverse-N1" },
-    { 0xD0D, "Cortex-A77" }, { 0xD0E, "Cortex-A76AE" }, { 0xD40, "Neoverse-V1" },
-    { 0xD41, "Cortex-A78" }, { 0xD44, "Cortex-X1" }, { 0xD46, "Cortex-A510" },
-    { 0xD47, "Cortex-A710" }, { 0xD48, "Cortex-X2" }, { 0xD49, "Neoverse-N2" },
-    { 0xD4B, "Cortex-A78C" }, { 0xD4F, "Neoverse-V2" }, { 0xD80, "Cortex-A520" },
-    { 0xD81, "Cortex-A720" }, { 0xD82, "Cortex-X4" }, { 0xD87, "Cortex-A725" },
+    {0xD03, "Cortex-A53"},  {0xD04, "Cortex-A35"},  {0xD05, "Cortex-A55"},   {0xD07, "Cortex-A57"},
+    {0xD08, "Cortex-A72"},  {0xD09, "Cortex-A73"},  {0xD0A, "Cortex-A75"},   {0xD0B, "Cortex-A76"},
+    {0xD0C, "Neoverse-N1"}, {0xD0D, "Cortex-A77"},  {0xD0E, "Cortex-A76AE"}, {0xD40, "Neoverse-V1"},
+    {0xD41, "Cortex-A78"},  {0xD44, "Cortex-X1"},   {0xD46, "Cortex-A510"},  {0xD47, "Cortex-A710"},
+    {0xD48, "Cortex-X2"},   {0xD49, "Neoverse-N2"}, {0xD4B, "Cortex-A78C"},  {0xD4F, "Neoverse-V2"},
+    {0xD80, "Cortex-A520"}, {0xD81, "Cortex-A720"}, {0xD82, "Cortex-X4"},    {0xD87, "Cortex-A725"},
 };
 
 static const char *implementer_name(uint32_t implementer) {
@@ -28,7 +26,7 @@ static const char *implementer_name(uint32_t implementer) {
     case 0x51: return "Qualcomm";
     case 0x61: return "Apple";
     case 0xC0: return "Ampere";
-    default: return "unknown";
+    default:   return "unknown";
     }
 }
 

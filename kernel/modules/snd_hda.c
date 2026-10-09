@@ -13,144 +13,144 @@
 extern void kprintf(const char *fmt, ...);
 
 #define PCI_CLASS_MULTIMEDIA 0x04U
-#define PCI_SUBCLASS_HDA 0x03U
-#define PCI_VENDOR_INTEL 0x8086U
-#define PCI_TCSEL 0x44U
+#define PCI_SUBCLASS_HDA     0x03U
+#define PCI_VENDOR_INTEL     0x8086U
+#define PCI_TCSEL            0x44U
 
-#define BAR_IO 0x1U
-#define BAR_TYPE_MASK 0x6U
-#define BAR_TYPE_64BIT 0x4U
+#define BAR_IO           0x1U
+#define BAR_TYPE_MASK    0x6U
+#define BAR_TYPE_64BIT   0x4U
 #define BAR_ADDRESS_MASK 0xFFFFFFF0U
 
-#define HDA_GCAP 0x00U
-#define HDA_GCTL 0x08U
-#define HDA_WAKEEN 0x0CU
-#define HDA_STATESTS 0x0EU
-#define HDA_INTCTL 0x20U
-#define HDA_INTSTS 0x24U
+#define HDA_GCAP      0x00U
+#define HDA_GCTL      0x08U
+#define HDA_WAKEEN    0x0CU
+#define HDA_STATESTS  0x0EU
+#define HDA_INTCTL    0x20U
+#define HDA_INTSTS    0x24U
 #define HDA_CORBLBASE 0x40U
 #define HDA_CORBUBASE 0x44U
-#define HDA_CORBWP 0x48U
-#define HDA_CORBRP 0x4AU
-#define HDA_CORBCTL 0x4CU
-#define HDA_CORBSIZE 0x4EU
+#define HDA_CORBWP    0x48U
+#define HDA_CORBRP    0x4AU
+#define HDA_CORBCTL   0x4CU
+#define HDA_CORBSIZE  0x4EU
 #define HDA_RIRBLBASE 0x50U
 #define HDA_RIRBUBASE 0x54U
-#define HDA_RIRBWP 0x58U
-#define HDA_RINTCNT 0x5AU
-#define HDA_RIRBCTL 0x5CU
-#define HDA_RIRBSTS 0x5DU
-#define HDA_RIRBSIZE 0x5EU
-#define HDA_DPLBASE 0x70U
-#define HDA_DPUBASE 0x74U
+#define HDA_RIRBWP    0x58U
+#define HDA_RINTCNT   0x5AU
+#define HDA_RIRBCTL   0x5CU
+#define HDA_RIRBSTS   0x5DU
+#define HDA_RIRBSIZE  0x5EU
+#define HDA_DPLBASE   0x70U
+#define HDA_DPUBASE   0x74U
 
-#define GCTL_RESET 0x1U
-#define CORBCTL_RUN 0x2U
-#define CORBRP_RESET 0x8000U
-#define RIRBCTL_RUN 0x2U
-#define RIRBWP_RESET 0x8000U
-#define RIRBSTS_CLEAR 0x5U
+#define GCTL_RESET           0x1U
+#define CORBCTL_RUN          0x2U
+#define CORBRP_RESET         0x8000U
+#define RIRBCTL_RUN          0x2U
+#define RIRBWP_RESET         0x8000U
+#define RIRBSTS_CLEAR        0x5U
 #define RIRB_INTERRUPT_COUNT 0xFFU
-#define DPLBASE_ENABLE 0x1U
+#define DPLBASE_ENABLE       0x1U
 
 #define GCAP_ISS_SHIFT 8U
-#define GCAP_ISS_MASK 0xFU
+#define GCAP_ISS_MASK  0xFU
 #define GCAP_OSS_SHIFT 12U
-#define GCAP_OSS_MASK 0xFU
+#define GCAP_OSS_MASK  0xFU
 
-#define STREAM_BASE 0x80U
+#define STREAM_BASE   0x80U
 #define STREAM_STRIDE 0x20U
-#define SD_CTL 0x00U
-#define SD_STS 0x03U
-#define SD_LPIB 0x04U
-#define SD_CBL 0x08U
-#define SD_LVI 0x0CU
-#define SD_FIFOS 0x10U
-#define SD_FMT 0x12U
-#define SD_BDPL 0x18U
-#define SD_BDPU 0x1CU
+#define SD_CTL        0x00U
+#define SD_STS        0x03U
+#define SD_LPIB       0x04U
+#define SD_CBL        0x08U
+#define SD_LVI        0x0CU
+#define SD_FIFOS      0x10U
+#define SD_FMT        0x12U
+#define SD_BDPL       0x18U
+#define SD_BDPU       0x1CU
 
-#define SDCTL_RESET 0x1U
-#define SDCTL_RUN 0x2U
+#define SDCTL_RESET        0x1U
+#define SDCTL_RUN          0x2U
 #define SDCTL_STREAM_SHIFT 20U
-#define SDSTS_CLEAR 0x1CU
+#define SDSTS_CLEAR        0x1CU
 
-#define VERB_GET_PARAMETER 0xF00U
-#define VERB_GET_CONNECT_LIST 0xF02U
-#define VERB_SET_CONNECT_SEL 0x701U
-#define VERB_SET_POWER_STATE 0x705U
-#define VERB_SET_STREAM_CHANNEL 0x706U
-#define VERB_SET_PIN_CONTROL 0x707U
-#define VERB_SET_EAPD 0x70CU
-#define VERB_GET_CONFIG_DEFAULT 0xF1CU
+#define VERB_GET_PARAMETER        0xF00U
+#define VERB_GET_CONNECT_LIST     0xF02U
+#define VERB_SET_CONNECT_SEL      0x701U
+#define VERB_SET_POWER_STATE      0x705U
+#define VERB_SET_STREAM_CHANNEL   0x706U
+#define VERB_SET_PIN_CONTROL      0x707U
+#define VERB_SET_EAPD             0x70CU
+#define VERB_GET_CONFIG_DEFAULT   0xF1CU
 #define VERB_SET_CONVERTER_FORMAT 0x2U
-#define VERB_SET_AMP_GAIN_MUTE 0x3U
+#define VERB_SET_AMP_GAIN_MUTE    0x3U
 
-#define PARAM_NODE_COUNT 0x04U
-#define PARAM_FUNCTION_TYPE 0x05U
+#define PARAM_NODE_COUNT       0x04U
+#define PARAM_FUNCTION_TYPE    0x05U
 #define PARAM_AUDIO_WIDGET_CAP 0x09U
-#define PARAM_PIN_CAP 0x0CU
-#define PARAM_IN_AMP_CAP 0x0DU
-#define PARAM_CONNLIST_LEN 0x0EU
-#define PARAM_OUT_AMP_CAP 0x12U
+#define PARAM_PIN_CAP          0x0CU
+#define PARAM_IN_AMP_CAP       0x0DU
+#define PARAM_CONNLIST_LEN     0x0EU
+#define PARAM_OUT_AMP_CAP      0x12U
 
 #define FUNCTION_TYPE_AUDIO 0x01U
 
 #define WIDGET_TYPE_SHIFT 20U
-#define WIDGET_TYPE_MASK 0xFU
-#define WIDGET_OUTPUT 0x0U
-#define WIDGET_MIXER 0x2U
-#define WIDGET_SELECTOR 0x3U
-#define WIDGET_PIN 0x4U
+#define WIDGET_TYPE_MASK  0xFU
+#define WIDGET_OUTPUT     0x0U
+#define WIDGET_MIXER      0x2U
+#define WIDGET_SELECTOR   0x3U
+#define WIDGET_PIN        0x4U
 
-#define AWCAP_IN_AMP (1U << 1)
-#define AWCAP_OUT_AMP (1U << 2)
+#define AWCAP_IN_AMP       (1U << 1)
+#define AWCAP_OUT_AMP      (1U << 2)
 #define AWCAP_AMP_OVERRIDE (1U << 3)
-#define AWCAP_POWER (1U << 10)
+#define AWCAP_POWER        (1U << 10)
 
-#define PINCAP_OUTPUT (1U << 4)
+#define PINCAP_OUTPUT    (1U << 4)
 #define PINCAP_HEADPHONE (1U << 3)
-#define PINCAP_EAPD (1U << 16)
+#define PINCAP_EAPD      (1U << 16)
 
 #define PIN_CONTROL_OUT 0x40U
-#define PIN_CONTROL_HP 0x80U
-#define EAPD_ENABLE 0x2U
+#define PIN_CONTROL_HP  0x80U
+#define EAPD_ENABLE     0x2U
 
-#define AMP_SET_OUTPUT 0x8000U
-#define AMP_SET_INPUT 0x4000U
-#define AMP_SET_LEFT 0x2000U
-#define AMP_SET_RIGHT 0x1000U
-#define AMP_INDEX_SHIFT 8U
-#define AMP_MUTE 0x80U
-#define AMP_GAIN_MASK 0x7FU
+#define AMP_SET_OUTPUT     0x8000U
+#define AMP_SET_INPUT      0x4000U
+#define AMP_SET_LEFT       0x2000U
+#define AMP_SET_RIGHT      0x1000U
+#define AMP_INDEX_SHIFT    8U
+#define AMP_MUTE           0x80U
+#define AMP_GAIN_MASK      0x7FU
 #define AMPCAP_OFFSET_MASK 0x7FU
 #define AMPCAP_STEPS_SHIFT 8U
-#define AMPCAP_STEPS_MASK 0x7FU
+#define AMPCAP_STEPS_MASK  0x7FU
 
-#define CONFIG_DEVICE_SHIFT 20U
-#define CONFIG_DEVICE_MASK 0xFU
-#define CONFIG_DEVICE_LINE_OUT 0x0U
-#define CONFIG_DEVICE_SPEAKER 0x1U
-#define CONFIG_DEVICE_HEADPHONE 0x2U
+#define CONFIG_DEVICE_SHIFT       20U
+#define CONFIG_DEVICE_MASK        0xFU
+#define CONFIG_DEVICE_LINE_OUT    0x0U
+#define CONFIG_DEVICE_SPEAKER     0x1U
+#define CONFIG_DEVICE_HEADPHONE   0x2U
 #define CONFIG_CONNECTIVITY_SHIFT 30U
-#define CONFIG_CONNECTIVITY_NONE 0x1U
+#define CONFIG_CONNECTIVITY_NONE  0x1U
 
-#define CORB_ENTRIES 256U
-#define RIRB_ENTRIES 256U
+#define CORB_ENTRIES     256U
+#define RIRB_ENTRIES     256U
 #define SIZE_256_ENTRIES 0x2U
 
-#define MAX_WIDGETS 64U
+#define MAX_WIDGETS     64U
 #define MAX_CONNECTIONS 16U
-#define MAX_PATH 8U
+#define MAX_PATH        8U
 #define MAX_BDL_ENTRIES 256U
 
-#define MMIO_PAGE_BYTES 4096ULL
-#define HDA_REGISTER_BYTES 0x4000ULL
+#define MMIO_PAGE_BYTES     4096ULL
+#define HDA_REGISTER_BYTES  0x4000ULL
 #define HDA_MAX_CONTROLLERS 16U
 
 #define RESET_TIMEOUT_NS (500ULL * 1000ULL * 1000ULL)
-#define VERB_TIMEOUT_NS (100ULL * 1000ULL * 1000ULL)
-#define CODEC_SETTLE_NS (1000ULL * 1000ULL)
+#define VERB_TIMEOUT_NS  (100ULL * 1000ULL * 1000ULL)
+#define CODEC_SETTLE_NS  (1000ULL * 1000ULL)
 
 struct hda_widget {
     uint8_t nid;
@@ -199,25 +199,19 @@ struct hda_controller {
 
 static struct hda_controller hda;
 
-static inline uint8_t read8(uint32_t offset) {
-    return *(volatile uint8_t *)(hda.base + offset);
-}
+static inline uint8_t read8(uint32_t offset) { return *(volatile uint8_t *)(hda.base + offset); }
 
 static inline void write8(uint32_t offset, uint8_t value) {
     *(volatile uint8_t *)(hda.base + offset) = value;
 }
 
-static inline uint16_t read16(uint32_t offset) {
-    return *(volatile uint16_t *)(hda.base + offset);
-}
+static inline uint16_t read16(uint32_t offset) { return *(volatile uint16_t *)(hda.base + offset); }
 
 static inline void write16(uint32_t offset, uint16_t value) {
     *(volatile uint16_t *)(hda.base + offset) = value;
 }
 
-static inline uint32_t read32(uint32_t offset) {
-    return *(volatile uint32_t *)(hda.base + offset);
-}
+static inline uint32_t read32(uint32_t offset) { return *(volatile uint32_t *)(hda.base + offset); }
 
 static inline void write32(uint32_t offset, uint32_t value) {
     *(volatile uint32_t *)(hda.base + offset) = value;
@@ -469,8 +463,7 @@ static int find_path(uint8_t pin_nid) {
     if (length >= MAX_PATH || reverse[length - 1] != pin_nid) return -1;
 
     hda.path_length = (uint8_t)length;
-    for (unsigned index = 0; index < length; index++)
-        hda.path[index] = reverse[length - 1 - index];
+    for (unsigned index = 0; index < length; index++) hda.path[index] = reverse[length - 1 - index];
     hda.pin_nid = pin_nid;
     hda.dac_nid = found;
 
@@ -485,9 +478,7 @@ static int find_path(uint8_t pin_nid) {
     return 0;
 }
 
-static uint32_t amp_offset(uint32_t capability) {
-    return capability & AMPCAP_OFFSET_MASK;
-}
+static uint32_t amp_offset(uint32_t capability) { return capability & AMPCAP_OFFSET_MASK; }
 
 static uint32_t amp_steps(uint32_t capability) {
     return (capability >> AMPCAP_STEPS_SHIFT) & AMPCAP_STEPS_MASK;
@@ -495,16 +486,15 @@ static uint32_t amp_steps(uint32_t capability) {
 
 static void set_output_amp(struct hda_widget *widget, uint32_t gain, int muted) {
     if (!(widget->caps & AWCAP_OUT_AMP)) return;
-    uint32_t payload = AMP_SET_OUTPUT | AMP_SET_LEFT | AMP_SET_RIGHT |
-                       (gain & AMP_GAIN_MASK) | (muted ? AMP_MUTE : 0U);
+    uint32_t payload = AMP_SET_OUTPUT | AMP_SET_LEFT | AMP_SET_RIGHT | (gain & AMP_GAIN_MASK) |
+        (muted ? AMP_MUTE : 0U);
     (void)codec_command(widget->nid, VERB_SET_AMP_GAIN_MUTE, payload);
 }
 
 static void unmute_input_amp(struct hda_widget *widget, unsigned index) {
     if (!(widget->caps & AWCAP_IN_AMP)) return;
     uint32_t payload = AMP_SET_INPUT | AMP_SET_LEFT | AMP_SET_RIGHT |
-                       ((index & 0xFU) << AMP_INDEX_SHIFT) |
-                       (amp_offset(widget->in_amp_cap) & AMP_GAIN_MASK);
+        ((index & 0xFU) << AMP_INDEX_SHIFT) | (amp_offset(widget->in_amp_cap) & AMP_GAIN_MASK);
     (void)codec_command(widget->nid, VERB_SET_AMP_GAIN_MUTE, payload);
 }
 
@@ -512,8 +502,7 @@ static void enable_path(void) {
     for (unsigned index = 0; index < hda.path_length; index++) {
         struct hda_widget *widget = widget_for(hda.path[index]);
         if (!widget) continue;
-        if (widget->caps & AWCAP_POWER)
-            (void)codec_command(widget->nid, VERB_SET_POWER_STATE, 0);
+        if (widget->caps & AWCAP_POWER) (void)codec_command(widget->nid, VERB_SET_POWER_STATE, 0);
         set_output_amp(widget, amp_offset(widget->out_amp_cap), 0);
         unmute_input_amp(widget, 0);
     }
@@ -523,19 +512,18 @@ static void enable_path(void) {
     uint32_t control = PIN_CONTROL_OUT;
     if (pin->pin_caps & PINCAP_HEADPHONE) control |= PIN_CONTROL_HP;
     (void)codec_command(pin->nid, VERB_SET_PIN_CONTROL, control);
-    if (pin->pin_caps & PINCAP_EAPD)
-        (void)codec_command(pin->nid, VERB_SET_EAPD, EAPD_ENABLE);
+    if (pin->pin_caps & PINCAP_EAPD) (void)codec_command(pin->nid, VERB_SET_EAPD, EAPD_ENABLE);
 }
 
 static int pin_is_output(const struct hda_widget *widget, int strict) {
     if (widget->type != WIDGET_PIN) return 0;
     if (!(widget->pin_caps & PINCAP_OUTPUT)) return 0;
     if (!strict) return 1;
-    if (((widget->config >> CONFIG_CONNECTIVITY_SHIFT) & 0x3U) ==
-        CONFIG_CONNECTIVITY_NONE) return 0;
+    if (((widget->config >> CONFIG_CONNECTIVITY_SHIFT) & 0x3U) == CONFIG_CONNECTIVITY_NONE)
+        return 0;
     uint32_t device = (widget->config >> CONFIG_DEVICE_SHIFT) & CONFIG_DEVICE_MASK;
     return device == CONFIG_DEVICE_LINE_OUT || device == CONFIG_DEVICE_SPEAKER ||
-           device == CONFIG_DEVICE_HEADPHONE;
+        device == CONFIG_DEVICE_HEADPHONE;
 }
 
 static int build_output_path(void) {
@@ -579,25 +567,23 @@ struct rate_encoding {
 
 #define RATE_BASE_44100 (1U << 14)
 #define RATE_MULT_SHIFT 11U
-#define RATE_DIV_SHIFT 8U
+#define RATE_DIV_SHIFT  8U
 
 static const struct rate_encoding rate_table[] = {
-    { 8000, (5U << RATE_DIV_SHIFT) },
-    { 11025, RATE_BASE_44100 | (3U << RATE_DIV_SHIFT) },
-    { 16000, (2U << RATE_DIV_SHIFT) },
-    { 22050, RATE_BASE_44100 | (1U << RATE_DIV_SHIFT) },
-    { 32000, (1U << RATE_MULT_SHIFT) | (2U << RATE_DIV_SHIFT) },
-    { 44100, RATE_BASE_44100 },
-    { 48000, 0 },
-    { 88200, RATE_BASE_44100 | (1U << RATE_MULT_SHIFT) },
-    { 96000, (1U << RATE_MULT_SHIFT) },
-    { 176400, RATE_BASE_44100 | (3U << RATE_MULT_SHIFT) },
-    { 192000, (3U << RATE_MULT_SHIFT) }
-};
+    {8000, (5U << RATE_DIV_SHIFT)},
+    {11025, RATE_BASE_44100 | (3U << RATE_DIV_SHIFT)},
+    {16000, (2U << RATE_DIV_SHIFT)},
+    {22050, RATE_BASE_44100 | (1U << RATE_DIV_SHIFT)},
+    {32000, (1U << RATE_MULT_SHIFT) | (2U << RATE_DIV_SHIFT)},
+    {44100, RATE_BASE_44100},
+    {48000, 0},
+    {88200, RATE_BASE_44100 | (1U << RATE_MULT_SHIFT)},
+    {96000, (1U << RATE_MULT_SHIFT)},
+    {176400, RATE_BASE_44100 | (3U << RATE_MULT_SHIFT)},
+    {192000, (3U << RATE_MULT_SHIFT)}};
 
-static const uint32_t supported_rates[] = {
-    8000, 11025, 16000, 22050, 32000, 44100, 48000, 88200, 96000, 176400, 192000
-};
+static const uint32_t supported_rates[] = {8000,  11025, 16000, 22050,  32000, 44100,
+                                           48000, 88200, 96000, 176400, 192000};
 
 static int encode_format(const struct snd_stream_format *format, uint16_t *out) {
     uint16_t value = 0;
@@ -665,9 +651,8 @@ static int program_stream(void) {
     return 0;
 }
 
-static int hda_configure(const struct snd_stream_format *format,
-                         const uint64_t *pages, unsigned page_count,
-                         uint32_t buffer_bytes) {
+static int hda_configure(const struct snd_stream_format *format, const uint64_t *pages,
+                         unsigned page_count, uint32_t buffer_bytes) {
     if (!hda.present || !pages || !page_count || !buffer_bytes) return -1;
     if (buffer_bytes > page_count * (uint32_t)PMM_PAGE_SIZE) return -1;
     uint16_t encoded = 0;
@@ -680,8 +665,8 @@ static int hda_configure(const struct snd_stream_format *format,
     for (uint32_t offset = 0; offset < buffer_bytes; offset += chunk) {
         if (entries >= MAX_BDL_ENTRIES) return -1;
         uint32_t length = buffer_bytes - offset < chunk ? buffer_bytes - offset : chunk;
-        hda.bdl[entries * 2U] = pages[offset / (uint32_t)PMM_PAGE_SIZE] +
-                                (offset % (uint32_t)PMM_PAGE_SIZE);
+        hda.bdl[entries * 2U] =
+            pages[offset / (uint32_t)PMM_PAGE_SIZE] + (offset % (uint32_t)PMM_PAGE_SIZE);
         hda.bdl[entries * 2U + 1U] = length;
         entries++;
     }
@@ -720,11 +705,10 @@ static uint32_t hda_position(void) {
 static int hda_set_volume(uint32_t left, uint32_t right, int muted) {
     struct hda_widget *dac = widget_for(hda.dac_nid);
     if (!dac) return -1;
-    uint32_t payload = AMP_SET_OUTPUT | AMP_SET_LEFT | (left & AMP_GAIN_MASK) |
-                       (muted ? AMP_MUTE : 0U);
+    uint32_t payload =
+        AMP_SET_OUTPUT | AMP_SET_LEFT | (left & AMP_GAIN_MASK) | (muted ? AMP_MUTE : 0U);
     (void)codec_command(dac->nid, VERB_SET_AMP_GAIN_MUTE, payload);
-    payload = AMP_SET_OUTPUT | AMP_SET_RIGHT | (right & AMP_GAIN_MASK) |
-              (muted ? AMP_MUTE : 0U);
+    payload = AMP_SET_OUTPUT | AMP_SET_RIGHT | (right & AMP_GAIN_MASK) | (muted ? AMP_MUTE : 0U);
     (void)codec_command(dac->nid, VERB_SET_AMP_GAIN_MUTE, payload);
     return 0;
 }
@@ -734,28 +718,25 @@ static struct snd_backend hda_backend = {
     .name = "HDA Intel",
     .mixer_name = "Realtek HDA",
     .components = "HDA:hda-generic",
-    .hardware = {
-        .rate_min = 8000,
-        .rate_max = 192000,
-        .rates = supported_rates,
-        .rate_count = sizeof(supported_rates) / sizeof(supported_rates[0]),
-        .channels_min = 2,
-        .channels_max = 2,
-        .formats = (1U << SND_FORMAT_S16_LE) | (1U << SND_FORMAT_S32_LE),
-        .period_bytes_min = 128,
-        .period_bytes_max = 128 * 1024,
-        .periods_min = 2,
-        .periods_max = 32,
-        .buffer_bytes_max = MAX_BDL_ENTRIES * 4096U,
-        .fifo_size = 0
-    },
+    .hardware = {.rate_min = 8000,
+                 .rate_max = 192000,
+                 .rates = supported_rates,
+                 .rate_count = sizeof(supported_rates) / sizeof(supported_rates[0]),
+                 .channels_min = 2,
+                 .channels_max = 2,
+                 .formats = (1U << SND_FORMAT_S16_LE) | (1U << SND_FORMAT_S32_LE),
+                 .period_bytes_min = 128,
+                 .period_bytes_max = 128 * 1024,
+                 .periods_min = 2,
+                 .periods_max = 32,
+                 .buffer_bytes_max = MAX_BDL_ENTRIES * 4096U,
+                 .fifo_size = 0},
     .configure = hda_configure,
     .prepare = hda_prepare,
     .trigger = hda_trigger,
     .position = hda_position,
     .volume_max = 0,
-    .set_volume = hda_set_volume
-};
+    .set_volume = hda_set_volume};
 
 static int hda_probe(const struct pci_device *found) {
     struct pci_device device = *found;
@@ -773,10 +754,8 @@ static int hda_probe(const struct pci_device *found) {
 
     pci_enable_bus_mastering(&device);
     if (device.vendor_id == PCI_VENDOR_INTEL) {
-        uint32_t tcsel = pci_config_read32(device.bus, device.slot, device.function,
-                                           PCI_TCSEL);
-        pci_config_write32(device.bus, device.slot, device.function, PCI_TCSEL,
-                           tcsel & ~0x7U);
+        uint32_t tcsel = pci_config_read32(device.bus, device.slot, device.function, PCI_TCSEL);
+        pci_config_write32(device.bus, device.slot, device.function, PCI_TCSEL, tcsel & ~0x7U);
     }
 
     hda.base = map_registers(physical);
@@ -829,9 +808,8 @@ static int hda_probe(const struct pci_device *found) {
     if (!hda.volume_steps) hda_backend.set_volume = NULL;
 
     hda.present = 1;
-    kprintf("HDA: codec %u, dac nid %u, pin nid %u, stream %u\n",
-            (unsigned)hda.codec, (unsigned)hda.dac_nid, (unsigned)hda.pin_nid,
-            (unsigned)hda.output_stream);
+    kprintf("HDA: codec %u, dac nid %u, pin nid %u, stream %u\n", (unsigned)hda.codec,
+            (unsigned)hda.dac_nid, (unsigned)hda.pin_nid, (unsigned)hda.output_stream);
     return snd_register_card(&hda_backend);
 }
 
@@ -846,7 +824,7 @@ static void hda_remove(const struct pci_device *device) {
 }
 
 static const struct pci_device_id hda_ids[] = {
-    { PCI_ANY_ID, PCI_ANY_ID, PCI_CLASS_MULTIMEDIA, PCI_SUBCLASS_HDA },
+    {PCI_ANY_ID, PCI_ANY_ID, PCI_CLASS_MULTIMEDIA, PCI_SUBCLASS_HDA},
 };
 
 static struct pci_driver hda_driver = {
@@ -857,13 +835,9 @@ static struct pci_driver hda_driver = {
     .remove = hda_remove,
 };
 
-static int snd_hda_start(void) {
-    return pci_register_driver(&hda_driver);
-}
+static int snd_hda_start(void) { return pci_register_driver(&hda_driver); }
 
-static void snd_hda_stop(void) {
-    pci_unregister_driver(&hda_driver);
-}
+static void snd_hda_stop(void) { pci_unregister_driver(&hda_driver); }
 
 MODULE_MAIN(snd_hda_start, snd_hda_stop);
 MODULE_ALIAS("pci:v*d*sv*sd*bc04sc03i*");

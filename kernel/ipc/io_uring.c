@@ -9,93 +9,94 @@
 #include <tunix/usercopy.h>
 #include <tunix/vmm.h>
 
-#define ENOENT 2
-#define EBADF 9
-#define ENOMEM 12
-#define EFAULT 14
-#define EBUSY 16
-#define EINVAL 22
-#define ETIME 62
+#define ENOENT    2
+#define EBADF     9
+#define ENOMEM    12
+#define EFAULT    14
+#define EBUSY     16
+#define EINVAL    22
+#define ETIME     62
 #define ECANCELED 125
 
-#define RING_PAGE 4096ULL
-#define RING_MAX_ENTRIES 32768U
+#define RING_PAGE           4096ULL
+#define RING_MAX_ENTRIES    32768U
 #define RING_MAX_CQ_ENTRIES (2U * RING_MAX_ENTRIES)
 
-#define SETUP_IOPOLL (1U << 0)
-#define SETUP_SQPOLL (1U << 1)
-#define SETUP_SQ_AFF (1U << 2)
-#define SETUP_CQSIZE (1U << 3)
-#define SETUP_CLAMP (1U << 4)
-#define SETUP_ATTACH_WQ (1U << 5)
-#define SETUP_SUBMIT_ALL (1U << 7)
-#define SETUP_COOP_TASKRUN (1U << 8)
-#define SETUP_TASKRUN_FLAG (1U << 9)
+#define SETUP_IOPOLL        (1U << 0)
+#define SETUP_SQPOLL        (1U << 1)
+#define SETUP_SQ_AFF        (1U << 2)
+#define SETUP_CQSIZE        (1U << 3)
+#define SETUP_CLAMP         (1U << 4)
+#define SETUP_ATTACH_WQ     (1U << 5)
+#define SETUP_SUBMIT_ALL    (1U << 7)
+#define SETUP_COOP_TASKRUN  (1U << 8)
+#define SETUP_TASKRUN_FLAG  (1U << 9)
 #define SETUP_SINGLE_ISSUER (1U << 12)
 #define SETUP_DEFER_TASKRUN (1U << 13)
-#define SETUP_NO_SQARRAY (1U << 16)
-#define SETUP_SUPPORTED (SETUP_CQSIZE | SETUP_CLAMP | SETUP_ATTACH_WQ | \
-                         SETUP_SUBMIT_ALL | SETUP_COOP_TASKRUN | SETUP_TASKRUN_FLAG | \
-                         SETUP_SINGLE_ISSUER | SETUP_DEFER_TASKRUN | SETUP_NO_SQARRAY)
+#define SETUP_NO_SQARRAY    (1U << 16)
+#define SETUP_SUPPORTED \
+    (SETUP_CQSIZE | SETUP_CLAMP | SETUP_ATTACH_WQ | SETUP_SUBMIT_ALL | SETUP_COOP_TASKRUN | \
+     SETUP_TASKRUN_FLAG | SETUP_SINGLE_ISSUER | SETUP_DEFER_TASKRUN | SETUP_NO_SQARRAY)
 
-#define FEAT_SINGLE_MMAP (1U << 0)
-#define FEAT_NODROP (1U << 1)
-#define FEAT_SUBMIT_STABLE (1U << 2)
-#define FEAT_RW_CUR_POS (1U << 3)
+#define FEAT_SINGLE_MMAP     (1U << 0)
+#define FEAT_NODROP          (1U << 1)
+#define FEAT_SUBMIT_STABLE   (1U << 2)
+#define FEAT_RW_CUR_POS      (1U << 3)
 #define FEAT_CUR_PERSONALITY (1U << 4)
-#define FEAT_POLL_32BITS (1U << 6)
-#define FEAT_EXT_ARG (1U << 8)
+#define FEAT_POLL_32BITS     (1U << 6)
+#define FEAT_EXT_ARG         (1U << 8)
 
 #define SQ_NEED_WAKEUP (1U << 0)
 #define SQ_CQ_OVERFLOW (1U << 1)
 
-#define SQE_FIXED_FILE (1U << 0)
-#define SQE_IO_DRAIN (1U << 1)
-#define SQE_IO_LINK (1U << 2)
-#define SQE_IO_HARDLINK (1U << 3)
-#define SQE_ASYNC (1U << 4)
-#define SQE_BUFFER_SELECT (1U << 5)
+#define SQE_FIXED_FILE       (1U << 0)
+#define SQE_IO_DRAIN         (1U << 1)
+#define SQE_IO_LINK          (1U << 2)
+#define SQE_IO_HARDLINK      (1U << 3)
+#define SQE_ASYNC            (1U << 4)
+#define SQE_BUFFER_SELECT    (1U << 5)
 #define SQE_CQE_SKIP_SUCCESS (1U << 6)
-#define SQE_SUPPORTED (SQE_FIXED_FILE | SQE_IO_DRAIN | SQE_IO_LINK | SQE_IO_HARDLINK | \
-                       SQE_ASYNC | SQE_CQE_SKIP_SUCCESS)
+#define SQE_SUPPORTED \
+    (SQE_FIXED_FILE | SQE_IO_DRAIN | SQE_IO_LINK | SQE_IO_HARDLINK | SQE_ASYNC | \
+     SQE_CQE_SKIP_SUCCESS)
 
-#define TIMEOUT_ABS (1U << 0)
-#define TIMEOUT_UPDATE (1U << 1)
-#define TIMEOUT_BOOTTIME (1U << 2)
-#define TIMEOUT_REALTIME (1U << 3)
+#define TIMEOUT_ABS           (1U << 0)
+#define TIMEOUT_UPDATE        (1U << 1)
+#define TIMEOUT_BOOTTIME      (1U << 2)
+#define TIMEOUT_REALTIME      (1U << 3)
 #define TIMEOUT_ETIME_SUCCESS (1U << 5)
 
-#define CANCEL_ALL (1U << 0)
-#define CANCEL_FD (1U << 1)
-#define CANCEL_ANY (1U << 2)
+#define CANCEL_ALL      (1U << 0)
+#define CANCEL_FD       (1U << 1)
+#define CANCEL_ANY      (1U << 2)
 #define CANCEL_USERDATA (1U << 4)
-#define CANCEL_OP (1U << 5)
+#define CANCEL_OP       (1U << 5)
 
-#define POLL_ADD_MULTI (1U << 0)
-#define POLL_UPDATE_EVENTS (1U << 1)
+#define POLL_ADD_MULTI        (1U << 0)
+#define POLL_UPDATE_EVENTS    (1U << 1)
 #define POLL_UPDATE_USER_DATA (1U << 2)
 
 #define OFF_SQ_RING 0ULL
 #define OFF_CQ_RING 0x8000000ULL
-#define OFF_SQES 0x10000000ULL
+#define OFF_SQES    0x10000000ULL
 
-#define SQ_HEAD 0U
-#define SQ_TAIL 4U
-#define SQ_MASK 8U
-#define SQ_ENTRIES 12U
-#define SQ_FLAGS 16U
-#define SQ_DROPPED 20U
-#define CQ_HEAD 64U
-#define CQ_TAIL 68U
-#define CQ_MASK 72U
-#define CQ_ENTRIES 76U
+#define SQ_HEAD     0U
+#define SQ_TAIL     4U
+#define SQ_MASK     8U
+#define SQ_ENTRIES  12U
+#define SQ_FLAGS    16U
+#define SQ_DROPPED  20U
+#define CQ_HEAD     64U
+#define CQ_TAIL     68U
+#define CQ_MASK     72U
+#define CQ_ENTRIES  76U
 #define CQ_OVERFLOW 80U
-#define CQ_FLAGS 84U
-#define CQ_CQES 128U
+#define CQ_FLAGS    84U
+#define CQ_CQES     128U
 
 #define OP_WAITING 0
 #define OP_PENDING 1
-#define OP_DONE 2
+#define OP_DONE    2
 
 struct ring_sqe {
     uint8_t opcode;
@@ -244,9 +245,8 @@ int io_uring_create(uint32_t entries, struct tunix_io_uring_params *params,
 
     params->sq_entries = context->sq_entries;
     params->cq_entries = context->cq_entries;
-    params->features = FEAT_SINGLE_MMAP | FEAT_NODROP | FEAT_SUBMIT_STABLE |
-                       FEAT_RW_CUR_POS | FEAT_CUR_PERSONALITY | FEAT_POLL_32BITS |
-                       FEAT_EXT_ARG;
+    params->features = FEAT_SINGLE_MMAP | FEAT_NODROP | FEAT_SUBMIT_STABLE | FEAT_RW_CUR_POS |
+        FEAT_CUR_PERSONALITY | FEAT_POLL_32BITS | FEAT_EXT_ARG;
     memset(&params->sq_off, 0, sizeof(params->sq_off));
     memset(&params->cq_off, 0, sizeof(params->cq_off));
     params->sq_off.head = SQ_HEAD;
@@ -282,8 +282,8 @@ struct memfd_object *io_uring_memory(struct io_uring_context *context) {
     return context ? context->memory : NULL;
 }
 
-int io_uring_map_offset(struct io_uring_context *context, uint64_t offset,
-                        uint64_t length, uint64_t *object_offset) {
+int io_uring_map_offset(struct io_uring_context *context, uint64_t offset, uint64_t length,
+                        uint64_t *object_offset) {
     if (!context || !object_offset) return -EINVAL;
     if (offset == OFF_SQ_RING || offset == OFF_CQ_RING) {
         if (length > align_to(context->ring_bytes, RING_PAGE)) return -EINVAL;
@@ -298,30 +298,45 @@ int io_uring_map_offset(struct io_uring_context *context, uint64_t offset,
     return -EINVAL;
 }
 
-void io_uring_lock(struct io_uring_context *context) {
-    mutex_lock(&context->lock);
-}
+void io_uring_lock(struct io_uring_context *context) { mutex_lock(&context->lock); }
 
-void io_uring_unlock(struct io_uring_context *context) {
-    mutex_unlock(&context->lock);
-}
+void io_uring_unlock(struct io_uring_context *context) { mutex_unlock(&context->lock); }
 
 int io_uring_op_supported(uint32_t opcode) {
     switch (opcode) {
-    case IORING_OP_NOP: case IORING_OP_READV: case IORING_OP_WRITEV:
-    case IORING_OP_FSYNC: case IORING_OP_POLL_ADD: case IORING_OP_POLL_REMOVE:
-    case IORING_OP_SYNC_FILE_RANGE: case IORING_OP_SENDMSG: case IORING_OP_RECVMSG:
-    case IORING_OP_TIMEOUT: case IORING_OP_TIMEOUT_REMOVE: case IORING_OP_ACCEPT:
-    case IORING_OP_ASYNC_CANCEL: case IORING_OP_LINK_TIMEOUT: case IORING_OP_CONNECT:
-    case IORING_OP_FALLOCATE: case IORING_OP_OPENAT: case IORING_OP_CLOSE:
-    case IORING_OP_STATX: case IORING_OP_READ: case IORING_OP_WRITE:
-    case IORING_OP_FADVISE: case IORING_OP_MADVISE: case IORING_OP_SEND:
-    case IORING_OP_RECV: case IORING_OP_EPOLL_CTL: case IORING_OP_SHUTDOWN:
-    case IORING_OP_RENAMEAT: case IORING_OP_UNLINKAT: case IORING_OP_MKDIRAT:
-    case IORING_OP_SYMLINKAT: case IORING_OP_LINKAT:
-        return 1;
-    default:
-        return 0;
+    case IORING_OP_NOP:
+    case IORING_OP_READV:
+    case IORING_OP_WRITEV:
+    case IORING_OP_FSYNC:
+    case IORING_OP_POLL_ADD:
+    case IORING_OP_POLL_REMOVE:
+    case IORING_OP_SYNC_FILE_RANGE:
+    case IORING_OP_SENDMSG:
+    case IORING_OP_RECVMSG:
+    case IORING_OP_TIMEOUT:
+    case IORING_OP_TIMEOUT_REMOVE:
+    case IORING_OP_ACCEPT:
+    case IORING_OP_ASYNC_CANCEL:
+    case IORING_OP_LINK_TIMEOUT:
+    case IORING_OP_CONNECT:
+    case IORING_OP_FALLOCATE:
+    case IORING_OP_OPENAT:
+    case IORING_OP_CLOSE:
+    case IORING_OP_STATX:
+    case IORING_OP_READ:
+    case IORING_OP_WRITE:
+    case IORING_OP_FADVISE:
+    case IORING_OP_MADVISE:
+    case IORING_OP_SEND:
+    case IORING_OP_RECV:
+    case IORING_OP_EPOLL_CTL:
+    case IORING_OP_SHUTDOWN:
+    case IORING_OP_RENAMEAT:
+    case IORING_OP_UNLINKAT:
+    case IORING_OP_MKDIRAT:
+    case IORING_OP_SYMLINKAT:
+    case IORING_OP_LINKAT:          return 1;
+    default:                        return 0;
     }
 }
 
@@ -329,8 +344,9 @@ static int read_deadline(uint64_t user_time, uint32_t flags, uint64_t *deadline)
     struct ring_timespec value;
     if (!user_time || copy_from_user(&value, user_time, sizeof(value)) != 0) return -EFAULT;
     if (value.sec < 0 || value.nsec < 0) return -EINVAL;
-    uint64_t span = (uint64_t)value.sec > UINT64_MAX / 1000000000ULL ? UINT64_MAX :
-                    (uint64_t)value.sec * 1000000000ULL;
+    uint64_t span = (uint64_t)value.sec > UINT64_MAX / 1000000000ULL
+        ? UINT64_MAX
+        : (uint64_t)value.sec * 1000000000ULL;
     span = UINT64_MAX - span < (uint64_t)value.nsec ? UINT64_MAX : span + (uint64_t)value.nsec;
     uint64_t now = time_uptime_ns();
     if (!(flags & TIMEOUT_ABS)) {
@@ -339,8 +355,9 @@ static int read_deadline(uint64_t user_time, uint32_t flags, uint64_t *deadline)
     }
     if (flags & TIMEOUT_REALTIME) {
         uint64_t real = time_realtime_ns();
-        *deadline = span <= real ? now : (UINT64_MAX - now < span - real ? UINT64_MAX :
-                                          now + (span - real));
+        *deadline = span <= real
+            ? now
+            : (UINT64_MAX - now < span - real ? UINT64_MAX : now + (span - real));
         return 0;
     }
     *deadline = span;
@@ -397,8 +414,8 @@ static void prepare(struct io_uring_context *context, const struct ring_sqe *sqe
         return;
     }
     if (op->opcode == IORING_OP_TIMEOUT || op->opcode == IORING_OP_LINK_TIMEOUT) {
-        uint32_t allowed = TIMEOUT_ABS | TIMEOUT_BOOTTIME | TIMEOUT_REALTIME |
-                           TIMEOUT_ETIME_SUCCESS;
+        uint32_t allowed =
+            TIMEOUT_ABS | TIMEOUT_BOOTTIME | TIMEOUT_REALTIME | TIMEOUT_ETIME_SUCCESS;
         if (op->len != 1 || (op->op_flags & ~allowed) ||
             ((op->op_flags & TIMEOUT_BOOTTIME) && (op->op_flags & TIMEOUT_REALTIME))) {
             finish(op, -EINVAL);
@@ -409,8 +426,7 @@ static void prepare(struct io_uring_context *context, const struct ring_sqe *sqe
             finish(op, status);
             return;
         }
-        if (op->opcode == IORING_OP_TIMEOUT && op->off)
-            op->target = context->posted + op->off;
+        if (op->opcode == IORING_OP_TIMEOUT && op->off) op->target = context->posted + op->off;
     }
     if (op->opcode == IORING_OP_TIMEOUT_REMOVE) {
         if (op->op_flags & ~(TIMEOUT_UPDATE | TIMEOUT_ABS | TIMEOUT_BOOTTIME | TIMEOUT_REALTIME)) {
@@ -432,8 +448,7 @@ static void prepare(struct io_uring_context *context, const struct ring_sqe *sqe
     }
 }
 
-int64_t io_uring_submit(struct io_uring_context *context, uint32_t to_submit,
-                        uint64_t space) {
+int64_t io_uring_submit(struct io_uring_context *context, uint32_t to_submit, uint64_t space) {
     uint32_t head = *field(context, SQ_HEAD);
     uint32_t tail = __atomic_load_n(field(context, SQ_TAIL), __ATOMIC_ACQUIRE);
     uint32_t available = tail - head;
@@ -450,9 +465,10 @@ int64_t io_uring_submit(struct io_uring_context *context, uint32_t to_submit,
             blocked = 1;
             break;
         }
-        uint32_t index = (context->setup_flags & SETUP_NO_SQARRAY) ? (head & mask) :
-            __atomic_load_n((uint32_t *)at(context, array + (uint64_t)(head & mask) * 4ULL),
-                            __ATOMIC_RELAXED);
+        uint32_t index = (context->setup_flags & SETUP_NO_SQARRAY)
+            ? (head & mask)
+            : __atomic_load_n((uint32_t *)at(context, array + (uint64_t)(head & mask) * 4ULL),
+                              __ATOMIC_RELAXED);
         head++;
         if (index >= context->sq_entries) {
             __atomic_store_n(field(context, SQ_DROPPED), *field(context, SQ_DROPPED) + 1U,
@@ -554,8 +570,8 @@ static int32_t run_poll_remove(struct io_uring_context *context, struct io_uring
     return -ENOENT;
 }
 
-static int step(struct io_uring_context *context, struct io_uring_op *op,
-                io_uring_executor execute, uint64_t space, uint64_t *now) {
+static int step(struct io_uring_context *context, struct io_uring_op *op, io_uring_executor execute,
+                uint64_t space, uint64_t *now) {
     if (op->state == OP_DONE || op->after) return 0;
     if (op->cancelled) {
         finish(op, -ECANCELED);
@@ -563,9 +579,7 @@ static int step(struct io_uring_context *context, struct io_uring_op *op,
     }
     if ((op->sqe_flags & SQE_IO_DRAIN) && older_unfinished(context, op)) return 0;
     switch (op->opcode) {
-    case IORING_OP_NOP:
-        finish(op, 0);
-        return 1;
+    case IORING_OP_NOP: finish(op, 0); return 1;
     case IORING_OP_TIMEOUT:
         if (op->target && context->posted >= op->target) {
             finish(op, 0);
@@ -588,17 +602,10 @@ static int step(struct io_uring_context *context, struct io_uring_op *op,
         }
         op->state = OP_PENDING;
         return 0;
-    case IORING_OP_TIMEOUT_REMOVE:
-        finish(op, run_timeout_remove(context, op));
-        return 1;
-    case IORING_OP_ASYNC_CANCEL:
-        finish(op, run_cancel(context, op));
-        return 1;
-    case IORING_OP_POLL_REMOVE:
-        finish(op, run_poll_remove(context, op));
-        return 1;
-    default:
-        break;
+    case IORING_OP_TIMEOUT_REMOVE: finish(op, run_timeout_remove(context, op)); return 1;
+    case IORING_OP_ASYNC_CANCEL:   finish(op, run_cancel(context, op)); return 1;
+    case IORING_OP_POLL_REMOVE:    finish(op, run_poll_remove(context, op)); return 1;
+    default:                       break;
     }
     if (op->space != space) return 0;
     int64_t result = execute(op);
@@ -631,8 +638,8 @@ static void post(struct io_uring_context *context) {
                 overflow = 1;
                 break;
             }
-            struct ring_cqe *cqe = (struct ring_cqe *)at(context,
-                CQ_CQES + (uint64_t)(tail & mask) * sizeof(struct ring_cqe));
+            struct ring_cqe *cqe = (struct ring_cqe *)at(
+                context, CQ_CQES + (uint64_t)(tail & mask) * sizeof(struct ring_cqe));
             cqe->user_data = op->user_data;
             cqe->res = op->result;
             cqe->flags = 0;
@@ -650,8 +657,7 @@ static void post(struct io_uring_context *context) {
     __atomic_store_n(field(context, SQ_FLAGS), flags, __ATOMIC_RELEASE);
 }
 
-void io_uring_run(struct io_uring_context *context, io_uring_executor execute,
-                  uint64_t space) {
+void io_uring_run(struct io_uring_context *context, io_uring_executor execute, uint64_t space) {
     for (unsigned round = 0; round < 8; round++) {
         uint64_t now = 0;
         int progressed = 0;
@@ -676,8 +682,7 @@ uint32_t io_uring_completions_ready(struct io_uring_context *context) {
     return tail - head;
 }
 
-uint64_t io_uring_watch(struct io_uring_context *context, io_uring_watcher watch,
-                        uint64_t space) {
+uint64_t io_uring_watch(struct io_uring_context *context, io_uring_watcher watch, uint64_t space) {
     uint64_t deadline = UINT64_MAX;
     for (struct io_uring_op *op = context->head; op; op = op->next) {
         if (op->state != OP_PENDING) continue;
@@ -690,8 +695,8 @@ uint64_t io_uring_watch(struct io_uring_context *context, io_uring_watcher watch
     return deadline;
 }
 
-void io_uring_note_restart(struct io_uring_context *context, uint64_t tid,
-                           uint32_t submitted, uint64_t wait_deadline) {
+void io_uring_note_restart(struct io_uring_context *context, uint64_t tid, uint32_t submitted,
+                           uint64_t wait_deadline) {
     context->restart_tid = tid;
     context->restart_submitted = submitted;
     context->restart_deadline = wait_deadline;

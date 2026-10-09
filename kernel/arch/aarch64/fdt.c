@@ -3,13 +3,13 @@
 
 #include "aarch64.h"
 
-#define FDT_MAGIC 0xD00DFEEDU
+#define FDT_MAGIC      0xD00DFEEDU
 #define FDT_BEGIN_NODE 1U
-#define FDT_END_NODE 2U
-#define FDT_PROP 3U
-#define FDT_NOP 4U
-#define FDT_END 9U
-#define FDT_MAX_DEPTH 16U
+#define FDT_END_NODE   2U
+#define FDT_PROP       3U
+#define FDT_NOP        4U
+#define FDT_END        9U
+#define FDT_MAX_DEPTH  16U
 
 static const uint8_t *blob;
 static const uint8_t *structure;
@@ -86,9 +86,7 @@ struct walk_state {
 
 typedef int (*walk_visit)(const struct walk_state *state, void *context);
 
-static uint32_t align4(uint32_t value) {
-    return (value + 3U) & ~3U;
-}
+static uint32_t align4(uint32_t value) { return (value + 3U) & ~3U; }
 
 static int walk(walk_visit visit, void *context) {
     if (!structure) return -1;
@@ -237,7 +235,7 @@ static int visit_path(const struct walk_state *state, void *context) {
 }
 
 int fdt_find_path(const char *path, struct fdt_node *out) {
-    struct path_search search = { .path = path, .matched = 0, .out = out };
+    struct path_search search = {.path = path, .matched = 0, .out = out};
     out->offset = 0xFFFFFFFFU;
     walk(visit_path, &search);
     return out->offset == 0xFFFFFFFFU ? -1 : 0;
@@ -273,13 +271,13 @@ static int visit_match(const struct walk_state *state, void *context) {
 }
 
 int fdt_find_compatible(const char *compatible, unsigned index, struct fdt_node *out) {
-    struct match_search search = { compatible, NULL, index, out, 0 };
+    struct match_search search = {compatible, NULL, index, out, 0};
     walk(visit_match, &search);
     return search.found ? 0 : -1;
 }
 
 int fdt_find_device_type(const char *type, unsigned index, struct fdt_node *out) {
-    struct match_search search = { NULL, type, index, out, 0 };
+    struct match_search search = {NULL, type, index, out, 0};
     walk(visit_match, &search);
     return search.found ? 0 : -1;
 }
@@ -304,7 +302,7 @@ static int visit_child(const struct walk_state *state, void *context) {
 }
 
 int fdt_child(const struct fdt_node *parent, unsigned index, struct fdt_node *out) {
-    struct child_search search = { parent->offset, index, out, 0 };
+    struct child_search search = {parent->offset, index, out, 0};
     walk(visit_child, &search);
     return search.found ? 0 : -1;
 }
@@ -342,13 +340,13 @@ static int visit_ancestry(const struct walk_state *state, void *context) {
 }
 
 static int translate(const struct fdt_node *node, uint64_t *address) {
-    struct ancestry chain = { .target = node->offset };
+    struct ancestry chain = {.target = node->offset};
     walk(visit_ancestry, &chain);
     if (!chain.found) return -1;
 
     for (unsigned depth = chain.depth - 1U; depth >= 2U; depth--) {
-        struct fdt_node bus = { chain.offsets[depth], chain.address_cells[depth - 1U],
-                                chain.size_cells[depth - 1U] };
+        struct fdt_node bus = {chain.offsets[depth], chain.address_cells[depth - 1U],
+                               chain.size_cells[depth - 1U]};
         uint32_t length = 0;
         const uint8_t *ranges = fdt_property(&bus, "ranges", &length);
         if (!ranges) return -1;
@@ -364,8 +362,8 @@ static int translate(const struct fdt_node *node, uint64_t *address) {
         for (uint32_t offset = 0; offset + entry <= length; offset += entry) {
             uint64_t child = read_cells(ranges + offset, child_cells);
             uint64_t parent = read_cells(ranges + offset + child_cells * 4U, parent_cells);
-            uint64_t size = read_cells(ranges + offset + (child_cells + parent_cells) * 4U,
-                                       size_cells);
+            uint64_t size =
+                read_cells(ranges + offset + (child_cells + parent_cells) * 4U, size_cells);
             if (*address >= child && *address - child < size) {
                 *address = parent + (*address - child);
                 matched = 1;

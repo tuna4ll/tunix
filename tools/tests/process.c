@@ -37,8 +37,8 @@ static void many_children(void) {
 static void exec_program(void) {
     s64 child = fork();
     if (child == 0) {
-        char *argv[] = { "/sbin/init", "exec-child", 0 };
-        char *envp[] = { 0 };
+        char *argv[] = {"/sbin/init", "exec-child", 0};
+        char *envp[] = {0};
         execve(argv[0], argv, envp);
         exit(99);
     }
@@ -46,8 +46,8 @@ static void exec_program(void) {
     waitpid(child, &status, 0);
     expect_eq(exited_with(status), 42, "execve replaces the child and passes argv");
 
-    char *argv[] = { "/nonexistent", 0 };
-    char *envp[] = { 0 };
+    char *argv[] = {"/nonexistent", 0};
+    char *envp[] = {0};
     expect_eq(execve(argv[0], argv, envp), -ENOENT, "execve of a missing file fails");
 }
 

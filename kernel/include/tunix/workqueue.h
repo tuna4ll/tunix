@@ -10,7 +10,7 @@ struct work {
     volatile uint32_t queued;
 };
 
-#define WORK_INITIALIZER(function, data) { (function), (data), 0, 0 }
+#define WORK_INITIALIZER(function, data) {(function), (data), 0, 0}
 
 void workqueue_init(void);
 void work_queue(struct work *work);

@@ -14,7 +14,9 @@ extern void kprintf(const char *fmt, ...);
 #if TUNIX_DEBUG_LOGS
 #define KDEBUG(...) kprintf(__VA_ARGS__)
 #else
-#define KDEBUG(...) do { } while (0)
+#define KDEBUG(...) \
+    do { \
+    } while (0)
 #endif
 extern void panic(const char *msg);
 
@@ -25,13 +27,9 @@ static uint64_t usable_pages;
 static uint64_t free_pages;
 static uint64_t next_hint;
 
-static inline void bit_set(uint64_t page) {
-    bitmap[page >> 3] |= (uint8_t)(1U << (page & 7));
-}
+static inline void bit_set(uint64_t page) { bitmap[page >> 3] |= (uint8_t)(1U << (page & 7)); }
 
-static inline void bit_clear(uint64_t page) {
-    bitmap[page >> 3] &= (uint8_t)~(1U << (page & 7));
-}
+static inline void bit_clear(uint64_t page) { bitmap[page >> 3] &= (uint8_t)~(1U << (page & 7)); }
 
 static inline int bit_test(uint64_t page) {
     return (bitmap[page >> 3] & (uint8_t)(1U << (page & 7))) != 0;
@@ -79,7 +77,8 @@ void pmm_init(const struct boot_memory_region *regions, uint32_t count) {
         if (end < regions[i].base) continue;
         if (end > DIRECT_MAP_BYTES) {
             if (regions[i].usable)
-                ignored += end - (regions[i].base > DIRECT_MAP_BYTES ? regions[i].base : DIRECT_MAP_BYTES);
+                ignored +=
+                    end - (regions[i].base > DIRECT_MAP_BYTES ? regions[i].base : DIRECT_MAP_BYTES);
             end = DIRECT_MAP_BYTES;
         }
         if (end <= regions[i].base) continue;
@@ -92,7 +91,7 @@ void pmm_init(const struct boot_memory_region *regions, uint32_t count) {
     uint64_t bitmap_bytes = (total_pages + 7) / 8;
     refcount_offset = (bitmap_bytes + 63ULL) & ~63ULL;
     tracking_bytes = (refcount_offset + total_pages * sizeof(uint32_t) + PMM_PAGE_SIZE - 1) &
-                     ~(PMM_PAGE_SIZE - 1);
+        ~(PMM_PAGE_SIZE - 1);
     tracking_physical = place_tracking(regions, count);
     if (!tracking_physical) panic("PMM: no room for page tracking");
     point_tracking(boot_info()->hhdm_offset);
@@ -172,9 +171,7 @@ static void *pmm_alloc_page_locked(void) {
 
 void *pmm_alloc_pages_below(uint64_t count, uint64_t alignment_bytes, uint64_t limit) {
     if (!count) return NULL;
-    uint64_t stride = alignment_bytes > PMM_PAGE_SIZE
-                          ? alignment_bytes / PMM_PAGE_SIZE
-                          : 1ULL;
+    uint64_t stride = alignment_bytes > PMM_PAGE_SIZE ? alignment_bytes / PMM_PAGE_SIZE : 1ULL;
     if (alignment_bytes & (alignment_bytes - 1ULL)) return NULL;
     uint64_t last = limit ? limit / PMM_PAGE_SIZE : total_pages;
     if (last > total_pages) last = total_pages;
@@ -287,7 +284,6 @@ int pmm_physical_range_managed(uint64_t physical, uint64_t length) {
 }
 
 int pmm_page_is_allocated(uint64_t physical) {
-    if ((physical & (PMM_PAGE_SIZE - 1)) != 0 ||
-        physical >= pmm_managed_limit()) return 0;
+    if ((physical & (PMM_PAGE_SIZE - 1)) != 0 || physical >= pmm_managed_limit()) return 0;
     return bit_test(physical / PMM_PAGE_SIZE);
 }

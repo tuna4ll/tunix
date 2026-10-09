@@ -36,20 +36,22 @@ void process_enable_extended_fpu(void) {
 
 void arch_fpu_save(uint8_t *area) {
     if (fpu_xstate_mask)
-        __asm__ volatile("xsave64 (%0)" : : "r"(area),
-                         "a"((uint32_t)fpu_xstate_mask),
-                         "d"((uint32_t)(fpu_xstate_mask >> 32)) : "memory");
-    else
-        __asm__ volatile("fxsave64 (%0)" : : "r"(area) : "memory");
+        __asm__ volatile("xsave64 (%0)"
+                         :
+                         : "r"(area), "a"((uint32_t)fpu_xstate_mask),
+                           "d"((uint32_t)(fpu_xstate_mask >> 32))
+                         : "memory");
+    else __asm__ volatile("fxsave64 (%0)" : : "r"(area) : "memory");
 }
 
 void arch_fpu_restore(uint8_t *area) {
     if (fpu_xstate_mask)
-        __asm__ volatile("xrstor64 (%0)" : : "r"(area),
-                         "a"((uint32_t)fpu_xstate_mask),
-                         "d"((uint32_t)(fpu_xstate_mask >> 32)) : "memory");
-    else
-        __asm__ volatile("fxrstor64 (%0)" : : "r"(area) : "memory");
+        __asm__ volatile("xrstor64 (%0)"
+                         :
+                         : "r"(area), "a"((uint32_t)fpu_xstate_mask),
+                           "d"((uint32_t)(fpu_xstate_mask >> 32))
+                         : "memory");
+    else __asm__ volatile("fxrstor64 (%0)" : : "r"(area) : "memory");
 }
 
 void arch_fpu_init(uint8_t *area) {

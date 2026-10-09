@@ -18,7 +18,7 @@ struct mutex {
 };
 
 #define MUTEX_INITIALIZER(label, order) \
-    { LOCK_INITIALIZER(label, LOCK_RANK_MUTEX), NULL, 0, (order), (label), NULL, NULL }
+    {LOCK_INITIALIZER(label, LOCK_RANK_MUTEX), NULL, 0, (order), (label), NULL, NULL}
 
 void mutex_init(struct mutex *mutex, const char *name, unsigned rank);
 void mutex_lock(struct mutex *mutex);

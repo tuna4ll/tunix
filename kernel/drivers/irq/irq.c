@@ -16,8 +16,7 @@ static struct irq_slot slots[IRQ_VECTOR_COUNT];
 static uint64_t delivered;
 static struct lock slots_lock = LOCK_INITIALIZER("irq slots", LOCK_RANK_LEAF);
 
-unsigned irq_request(const char *name, const char *kind, irq_handler_fn handler,
-                     void *context) {
+unsigned irq_request(const char *name, const char *kind, irq_handler_fn handler, void *context) {
     if (!handler) return 0;
     lock_acquire(&slots_lock);
     for (unsigned index = 0; index < IRQ_VECTOR_COUNT; index++) {
@@ -60,8 +59,8 @@ int irq_dispatch(unsigned vector) {
     return 1;
 }
 
-int irq_describe(unsigned slot, unsigned *vector, uint64_t *count,
-                 const char **name, const char **kind) {
+int irq_describe(unsigned slot, unsigned *vector, uint64_t *count, const char **name,
+                 const char **kind) {
     if (slot >= IRQ_VECTOR_COUNT) return -1;
     if (vector) *vector = IRQ_VECTOR_FIRST + slot;
     if (count) *count = slots[slot].count;

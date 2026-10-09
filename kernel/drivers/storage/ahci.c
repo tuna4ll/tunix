@@ -14,36 +14,36 @@
 
 extern void kprintf(const char *fmt, ...);
 
-#define AHCI_CLASS 0x01U
+#define AHCI_CLASS    0x01U
 #define AHCI_SUBCLASS 0x06U
-#define AHCI_PROG_IF 0x01U
+#define AHCI_PROG_IF  0x01U
 
-#define HBA_CAP 0x00U
-#define HBA_GHC 0x04U
-#define HBA_PI 0x0CU
-#define HBA_GHC_AE 0x80000000U
-#define HBA_GHC_HR 0x00000001U
+#define HBA_CAP      0x00U
+#define HBA_GHC      0x04U
+#define HBA_PI       0x0CU
+#define HBA_GHC_AE   0x80000000U
+#define HBA_GHC_HR   0x00000001U
 #define HBA_CAP_S64A 0x80000000U
 
-#define PORT_BASE 0x100U
+#define PORT_BASE   0x100U
 #define PORT_STRIDE 0x80U
-#define PORT_CLB 0x00U
-#define PORT_CLBU 0x04U
-#define PORT_FB 0x08U
-#define PORT_FBU 0x0CU
-#define PORT_IS 0x10U
-#define PORT_IE 0x14U
-#define PORT_CMD 0x18U
-#define PORT_TFD 0x20U
-#define PORT_SIG 0x24U
-#define PORT_SSTS 0x28U
-#define PORT_SERR 0x30U
-#define PORT_CI 0x38U
+#define PORT_CLB    0x00U
+#define PORT_CLBU   0x04U
+#define PORT_FB     0x08U
+#define PORT_FBU    0x0CU
+#define PORT_IS     0x10U
+#define PORT_IE     0x14U
+#define PORT_CMD    0x18U
+#define PORT_TFD    0x20U
+#define PORT_SIG    0x24U
+#define PORT_SSTS   0x28U
+#define PORT_SERR   0x30U
+#define PORT_CI     0x38U
 
-#define PORT_CMD_ST 0x0001U
+#define PORT_CMD_ST  0x0001U
 #define PORT_CMD_FRE 0x0010U
-#define PORT_CMD_FR 0x4000U
-#define PORT_CMD_CR 0x8000U
+#define PORT_CMD_FR  0x4000U
+#define PORT_CMD_CR  0x8000U
 
 #define TFD_BSY 0x80U
 #define TFD_DRQ 0x08U
@@ -51,21 +51,21 @@ extern void kprintf(const char *fmt, ...);
 
 #define SIG_SATA 0x00000101U
 
-#define FIS_TYPE_H2D 0x27U
+#define FIS_TYPE_H2D    0x27U
 #define FIS_H2D_COMMAND 0x80U
 
-#define ATA_READ_DMA_EXT 0x25U
-#define ATA_WRITE_DMA_EXT 0x35U
+#define ATA_READ_DMA_EXT    0x25U
+#define ATA_WRITE_DMA_EXT   0x35U
 #define ATA_FLUSH_CACHE_EXT 0xEAU
-#define ATA_IDENTIFY 0xECU
+#define ATA_IDENTIFY        0xECU
 
 #define AHCI_PRDT_ENTRIES 32U
-#define AHCI_MAX_SECTORS ((AHCI_PRDT_ENTRIES - 1U) * 4096U / BLOCK_SECTOR_SIZE)
-#define AHCI_WAIT_SPINS 40000000U
+#define AHCI_MAX_SECTORS  ((AHCI_PRDT_ENTRIES - 1U) * 4096U / BLOCK_SECTOR_SIZE)
+#define AHCI_WAIT_SPINS   40000000U
 
-#define PORT_PAGE_CL 0x000U
+#define PORT_PAGE_CL  0x000U
 #define PORT_PAGE_FIS 0x400U
-#define PORT_PAGE_CT 0x500U
+#define PORT_PAGE_CT  0x500U
 
 struct ahci_command_header {
     uint16_t flags;
@@ -119,13 +119,9 @@ static uint64_t buffer_physical(uint64_t address) {
     return physical;
 }
 
-static uint32_t read32(uint64_t address) {
-    return *(volatile uint32_t *)address;
-}
+static uint32_t read32(uint64_t address) { return *(volatile uint32_t *)address; }
 
-static void write32(uint64_t address, uint32_t value) {
-    *(volatile uint32_t *)address = value;
-}
+static void write32(uint64_t address, uint32_t value) { *(volatile uint32_t *)address = value; }
 
 static void pause_cpu(void) { cpu_relax(); }
 
@@ -133,8 +129,7 @@ static int stop_port(struct ahci_port *port) {
     uint32_t command = read32(port->registers + PORT_CMD);
     write32(port->registers + PORT_CMD, command & ~(PORT_CMD_ST | PORT_CMD_FRE));
     for (uint32_t spin = 0; spin < AHCI_WAIT_SPINS; spin++) {
-        if (!(read32(port->registers + PORT_CMD) & (PORT_CMD_CR | PORT_CMD_FR)))
-            return 0;
+        if (!(read32(port->registers + PORT_CMD) & (PORT_CMD_CR | PORT_CMD_FR))) return 0;
         pause_cpu();
     }
     return -1;
@@ -149,8 +144,7 @@ static void start_port(struct ahci_port *port) {
     write32(port->registers + PORT_CMD, command | PORT_CMD_FRE | PORT_CMD_ST);
 }
 
-static int build_prdt(struct ahci_command_table *table, const void *buffer,
-                      uint32_t bytes) {
+static int build_prdt(struct ahci_command_table *table, const void *buffer, uint32_t bytes) {
     uint64_t address = (uint64_t)(uintptr_t)buffer;
     unsigned used = 0;
     while (bytes) {
@@ -173,7 +167,7 @@ static int build_prdt(struct ahci_command_table *table, const void *buffer,
 static int command_settled(void *context) {
     struct ahci_port *port = (struct ahci_port *)context;
     return !(read32(port->registers + PORT_CI) & 1U) ||
-           (read32(port->registers + PORT_IS) & 0x40000000U);
+        (read32(port->registers + PORT_IS) & 0x40000000U);
 }
 
 static int device_idle(void *context) {
@@ -190,12 +184,10 @@ static int wait_for_completion(struct ahci_port *port) {
     return 0;
 }
 
-static int issue(struct ahci_port *port, uint8_t command, uint64_t lba,
-                 uint32_t sectors, void *buffer, uint32_t bytes, int write) {
-    struct ahci_command_header *header =
-        (struct ahci_command_header *)(port->page + PORT_PAGE_CL);
-    struct ahci_command_table *table =
-        (struct ahci_command_table *)(port->page + PORT_PAGE_CT);
+static int issue(struct ahci_port *port, uint8_t command, uint64_t lba, uint32_t sectors,
+                 void *buffer, uint32_t bytes, int write) {
+    struct ahci_command_header *header = (struct ahci_command_header *)(port->page + PORT_PAGE_CL);
+    struct ahci_command_table *table = (struct ahci_command_table *)(port->page + PORT_PAGE_CT);
 
     memset(header, 0, sizeof(*header));
     memset(table, 0, sizeof(*table));
@@ -240,8 +232,8 @@ static int ahci_read_unlocked(void *context, uint64_t lba, uint32_t count, void 
     uint8_t *out = (uint8_t *)destination;
     while (count) {
         uint32_t chunk = count > AHCI_MAX_SECTORS ? AHCI_MAX_SECTORS : count;
-        if (issue(port, ATA_READ_DMA_EXT, lba, chunk, out,
-                  chunk * BLOCK_SECTOR_SIZE, 0) != 0) return -1;
+        if (issue(port, ATA_READ_DMA_EXT, lba, chunk, out, chunk * BLOCK_SECTOR_SIZE, 0) != 0)
+            return -1;
         out += chunk * BLOCK_SECTOR_SIZE;
         lba += chunk;
         count -= chunk;
@@ -263,7 +255,8 @@ static int ahci_write_unlocked(void *context, uint64_t lba, uint32_t count, cons
     while (count) {
         uint32_t chunk = count > AHCI_MAX_SECTORS ? AHCI_MAX_SECTORS : count;
         if (issue(port, ATA_WRITE_DMA_EXT, lba, chunk, (void *)(uintptr_t)in,
-                  chunk * BLOCK_SECTOR_SIZE, 1) != 0) return -1;
+                  chunk * BLOCK_SECTOR_SIZE, 1) != 0)
+            return -1;
         in += chunk * BLOCK_SECTOR_SIZE;
         lba += chunk;
         count -= chunk;
@@ -300,8 +293,7 @@ static uint64_t identify_sectors(struct ahci_port *port) {
     memcpy(words, identify, sizeof(words));
     if (words[83] & (1U << 10)) {
         uint64_t sectors = 0;
-        for (int index = 3; index >= 0; index--)
-            sectors = (sectors << 16) | words[100 + index];
+        for (int index = 3; index >= 0; index--) sectors = (sectors << 16) | words[100 + index];
         if (sectors) return sectors;
     }
     return ((uint64_t)words[61] << 16) | words[60];
@@ -353,7 +345,9 @@ static void bring_up_port(uint64_t hba, unsigned index) {
 
     struct block_device device;
     memset(&device, 0, sizeof(device));
-    device.name[0] = 'a'; device.name[1] = 'h'; device.name[2] = 'c';
+    device.name[0] = 'a';
+    device.name[1] = 'h';
+    device.name[2] = 'c';
     device.name[3] = 'i';
     unsigned at = 4;
     char digits[8];

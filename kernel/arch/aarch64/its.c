@@ -9,38 +9,38 @@
 
 extern void kprintf(const char *fmt, ...);
 
-#define GITS_CTLR 0x0000U
-#define GITS_TYPER 0x0008U
-#define GITS_CBASER 0x0080U
-#define GITS_CWRITER 0x0088U
-#define GITS_CREADR 0x0090U
-#define GITS_BASER 0x0100U
+#define GITS_CTLR       0x0000U
+#define GITS_TYPER      0x0008U
+#define GITS_CBASER     0x0080U
+#define GITS_CWRITER    0x0088U
+#define GITS_CREADR     0x0090U
+#define GITS_BASER      0x0100U
 #define GITS_TRANSLATER 0x10040ULL
-#define GITS_BYTES 0x20000ULL
+#define GITS_BYTES      0x20000ULL
 
-#define GICR_CTLR 0x0000U
-#define GICR_TYPER 0x0008U
+#define GICR_CTLR      0x0000U
+#define GICR_TYPER     0x0008U
 #define GICR_PROPBASER 0x0070U
 #define GICR_PENDBASER 0x0078U
 
-#define TABLE_VALID (1ULL << 63)
-#define TABLE_TYPE_DEVICE 1U
+#define TABLE_VALID           (1ULL << 63)
+#define TABLE_TYPE_DEVICE     1U
 #define TABLE_TYPE_COLLECTION 4U
-#define PENDING_ZEROED (1ULL << 62)
+#define PENDING_ZEROED        (1ULL << 62)
 
-#define COMMAND_BYTES 32U
+#define COMMAND_BYTES       32U
 #define COMMAND_QUEUE_BYTES 4096ULL
-#define COMMAND_MAPD 0x08ULL
-#define COMMAND_MAPC 0x09ULL
-#define COMMAND_MAPTI 0x0AULL
-#define COMMAND_INVALL 0x0DULL
+#define COMMAND_MAPD        0x08ULL
+#define COMMAND_MAPC        0x09ULL
+#define COMMAND_MAPTI       0x0AULL
+#define COMMAND_INVALL      0x0DULL
 
-#define LPI_FIRST 8192U
-#define LPI_ID_BITS 14U
-#define LPI_COUNT 8192U
+#define LPI_FIRST            8192U
+#define LPI_ID_BITS          14U
+#define LPI_COUNT            8192U
 #define LPI_ENABLED_PRIORITY 0xA1U
-#define EVENT_BITS_WANTED 7U
-#define MAX_DEVICE_BITS 16U
+#define EVENT_BITS_WANTED    7U
+#define MAX_DEVICE_BITS      16U
 
 static uint64_t its;
 static uint64_t command_queue;
@@ -103,8 +103,8 @@ static int allocate_tables(void) {
         uint64_t physical;
         if (!dma_alloc(pages * 4096ULL, 4096ULL, &physical)) return -1;
         write64(its, GITS_BASER + index * 8U,
-                TABLE_VALID | ((uint64_t)type << 56) | ((entry - 1ULL) << 48) |
-                physical | (pages - 1ULL));
+                TABLE_VALID | ((uint64_t)type << 56) | ((entry - 1ULL) << 48) | physical |
+                    (pages - 1ULL));
         if ((read64(its, GITS_BASER + index * 8U) >> 8) & 3ULL) {
             kprintf("ITS: table %u refuses 4 KiB pages\n", index);
             return -1;
@@ -155,9 +155,7 @@ void its_init(void) {
             (void *)aarch64_platform.gic_its, device_bits);
 }
 
-int its_ready(void) {
-    return ready;
-}
+int its_ready(void) { return ready; }
 
 int its_bind_msi(uint32_t device_id, uint32_t event, uint64_t *address) {
     if (!ready || event >= (1U << event_bits) || device_id >= (1U << device_bits)) return -1;

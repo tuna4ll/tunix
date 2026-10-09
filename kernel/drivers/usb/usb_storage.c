@@ -20,14 +20,14 @@ extern void kprintf(const char *fmt, ...);
 
 #define CBW_SIGNATURE 0x43425355U
 #define CSW_SIGNATURE 0x53425355U
-#define CBW_FLAG_IN 0x80U
+#define CBW_FLAG_IN   0x80U
 
-#define SCSI_TEST_UNIT_READY 0x00U
-#define SCSI_REQUEST_SENSE 0x03U
-#define SCSI_INQUIRY 0x12U
+#define SCSI_TEST_UNIT_READY  0x00U
+#define SCSI_REQUEST_SENSE    0x03U
+#define SCSI_INQUIRY          0x12U
 #define SCSI_READ_CAPACITY_10 0x25U
-#define SCSI_READ_10 0x28U
-#define SCSI_WRITE_10 0x2AU
+#define SCSI_READ_10          0x28U
+#define SCSI_WRITE_10         0x2AU
 
 #define STAGING_BYTES 65536U
 #define WRITE_SECTORS (16384U / BLOCK_SECTOR_SIZE)
@@ -69,10 +69,10 @@ static uint32_t next_tag = 1;
 static int initialized;
 
 #define TRANSPORT_FAILED (-1)
-#define REJECTED (-2)
+#define REJECTED         (-2)
 
-static int run_command_once(struct usb_disk *disk, const uint8_t *command,
-                            uint8_t command_length, int in, uint32_t length) {
+static int run_command_once(struct usb_disk *disk, const uint8_t *command, uint8_t command_length,
+                            int in, uint32_t length) {
     struct command_block_wrapper *cbw = (struct command_block_wrapper *)wrapper_page;
     memset(cbw, 0, sizeof(*cbw));
     cbw->signature = CBW_SIGNATURE;
@@ -84,18 +84,16 @@ static int run_command_once(struct usb_disk *disk, const uint8_t *command,
     memcpy(cbw->command, command, command_length);
     uint32_t tag = cbw->tag;
 
-    if (usb_bulk_transfer(disk->controller_index, 0, wrapper_physical,
-                           sizeof(*cbw)) != 0) return TRANSPORT_FAILED;
-
-    if (length &&
-        usb_bulk_transfer(disk->controller_index, in, staging_physical, length) != 0)
+    if (usb_bulk_transfer(disk->controller_index, 0, wrapper_physical, sizeof(*cbw)) != 0)
         return TRANSPORT_FAILED;
 
-    struct command_status_wrapper *csw =
-        (struct command_status_wrapper *)(wrapper_page + 64);
+    if (length && usb_bulk_transfer(disk->controller_index, in, staging_physical, length) != 0)
+        return TRANSPORT_FAILED;
+
+    struct command_status_wrapper *csw = (struct command_status_wrapper *)(wrapper_page + 64);
     memset(csw, 0, sizeof(*csw));
-    if (usb_bulk_transfer(disk->controller_index, 1, wrapper_physical + 64,
-                           sizeof(*csw)) != 0) return TRANSPORT_FAILED;
+    if (usb_bulk_transfer(disk->controller_index, 1, wrapper_physical + 64, sizeof(*csw)) != 0)
+        return TRANSPORT_FAILED;
 
     if (csw->signature != CSW_SIGNATURE || csw->tag != tag) return TRANSPORT_FAILED;
     if (csw->status == 0) return 0;
@@ -103,14 +101,14 @@ static int run_command_once(struct usb_disk *disk, const uint8_t *command,
 }
 
 #define COMMAND_ATTEMPTS 4
-#define COMMAND_REPORTS 8U
+#define COMMAND_REPORTS  8U
 
 #define FAILURES_BEFORE_BACKING_OFF 3U
 
 static unsigned consecutive_failures;
 
-static int run_command(struct usb_disk *disk, const uint8_t *command,
-                       uint8_t command_length, int in, uint32_t length) {
+static int run_command(struct usb_disk *disk, const uint8_t *command, uint8_t command_length,
+                       int in, uint32_t length) {
     static unsigned reported;
     if (!usb_storage_present(disk->controller_index)) return -1;
     int backed_off = consecutive_failures >= FAILURES_BEFORE_BACKING_OFF;
@@ -118,14 +116,13 @@ static int run_command(struct usb_disk *disk, const uint8_t *command,
 
     for (int attempt = 0; attempt < attempts; attempt++) {
         if (!usb_storage_present(disk->controller_index)) return -1;
-        if ((attempt || backed_off) &&
-            usb_reset_recovery(disk->controller_index) != 0) break;
+        if ((attempt || backed_off) && usb_reset_recovery(disk->controller_index) != 0) break;
         int status = run_command_once(disk, command, command_length, in, length);
         if (status == 0) {
             if (attempt && reported < COMMAND_REPORTS) {
                 reported++;
-                kprintf("USB-STORAGE: command %x needed %d attempts\n",
-                        (unsigned)command[0], attempt + 1);
+                kprintf("USB-STORAGE: command %x needed %d attempts\n", (unsigned)command[0],
+                        attempt + 1);
             }
             consecutive_failures = 0;
             return 0;
@@ -133,8 +130,7 @@ static int run_command(struct usb_disk *disk, const uint8_t *command,
         if (status == REJECTED) {
             if (reported < COMMAND_REPORTS) {
                 reported++;
-                kprintf("USB-STORAGE: the device refused command %x\n",
-                        (unsigned)command[0]);
+                kprintf("USB-STORAGE: the device refused command %x\n", (unsigned)command[0]);
             }
             consecutive_failures++;
             return -1;
@@ -143,10 +139,10 @@ static int run_command(struct usb_disk *disk, const uint8_t *command,
     consecutive_failures++;
     if (reported < COMMAND_REPORTS) {
         reported++;
-        kprintf("USB-STORAGE: command %x failed %d times%s\n",
-                (unsigned)command[0], attempts,
+        kprintf("USB-STORAGE: command %x failed %d times%s\n", (unsigned)command[0], attempts,
                 consecutive_failures >= FAILURES_BEFORE_BACKING_OFF
-                    ? ", retries given up until one works" : "");
+                    ? ", retries given up until one works"
+                    : "");
     }
     return -1;
 }
@@ -164,12 +160,11 @@ static void put_be32(uint8_t *out, uint32_t value) {
 }
 
 static uint32_t get_be32(const uint8_t *in) {
-    return ((uint32_t)in[0] << 24) | ((uint32_t)in[1] << 16) |
-           ((uint32_t)in[2] << 8) | in[3];
+    return ((uint32_t)in[0] << 24) | ((uint32_t)in[1] << 16) | ((uint32_t)in[2] << 8) | in[3];
 }
 
-static int transfer_sectors(struct usb_disk *disk, uint64_t lba, uint32_t count,
-                            void *buffer, int write) {
+static int transfer_sectors(struct usb_disk *disk, uint64_t lba, uint32_t count, void *buffer,
+                            int write) {
     if (lba % disk->sectors_per_block || count % disk->sectors_per_block) return -1;
     uint32_t block = (uint32_t)(lba / disk->sectors_per_block);
     uint32_t blocks = count / disk->sectors_per_block;
@@ -183,8 +178,7 @@ static int transfer_sectors(struct usb_disk *disk, uint64_t lba, uint32_t count,
 
     uint32_t bytes = count * BLOCK_SECTOR_SIZE;
     if (write) memcpy(staging_page, buffer, bytes);
-    if (run_command(disk, command, sizeof(command), write ? 0 : 1, bytes) != 0)
-        return -1;
+    if (run_command(disk, command, sizeof(command), write ? 0 : 1, bytes) != 0) return -1;
     if (!write) memcpy(buffer, staging_page, bytes);
     return 0;
 }
@@ -194,8 +188,7 @@ static int usb_read_unlocked(void *context, uint64_t lba, uint32_t count, void *
     uint8_t *out = (uint8_t *)destination;
     while (count) {
         uint32_t chunk = count > disk->read_sectors ? disk->read_sectors : count;
-        if (chunk % disk->sectors_per_block)
-            chunk -= chunk % disk->sectors_per_block;
+        if (chunk % disk->sectors_per_block) chunk -= chunk % disk->sectors_per_block;
         if (!chunk) return -1;
         if (transfer_sectors(disk, lba, chunk, out, 0) != 0) return -1;
         out += (size_t)chunk * BLOCK_SECTOR_SIZE;
@@ -218,11 +211,9 @@ static int usb_write_unlocked(void *context, uint64_t lba, uint32_t count, const
     struct usb_disk *disk = (struct usb_disk *)context;
     const uint8_t *in = (const uint8_t *)source;
     while (count) {
-        uint32_t limit = disk->read_sectors < WRITE_SECTORS ? disk->read_sectors
-                                                                     : WRITE_SECTORS;
+        uint32_t limit = disk->read_sectors < WRITE_SECTORS ? disk->read_sectors : WRITE_SECTORS;
         uint32_t chunk = count > limit ? limit : count;
-        if (chunk % disk->sectors_per_block)
-            chunk -= chunk % disk->sectors_per_block;
+        if (chunk % disk->sectors_per_block) chunk -= chunk % disk->sectors_per_block;
         if (!chunk) return -1;
         if (transfer_sectors(disk, lba, chunk, (void *)(uintptr_t)in, 1) != 0) return -1;
         in += (size_t)chunk * BLOCK_SECTOR_SIZE;
@@ -270,8 +261,7 @@ static int read_capacity(struct usb_disk *disk) {
 
     uint32_t last = get_be32(staging_page);
     uint32_t block_bytes = get_be32(staging_page + 4);
-    if (!block_bytes || block_bytes % BLOCK_SECTOR_SIZE || last == 0xFFFFFFFFU)
-        return -1;
+    if (!block_bytes || block_bytes % BLOCK_SECTOR_SIZE || last == 0xFFFFFFFFU) return -1;
 
     disk->block_bytes = block_bytes;
     disk->sectors_per_block = block_bytes / BLOCK_SECTOR_SIZE;
@@ -324,7 +314,9 @@ static int attach_disk(int index) {
     disk->used = 1;
     struct block_device device;
     memset(&device, 0, sizeof(device));
-    device.name[0] = 'u'; device.name[1] = 's'; device.name[2] = 'b';
+    device.name[0] = 'u';
+    device.name[1] = 's';
+    device.name[2] = 'b';
     unsigned at = 3;
     char digits[8];
     unsigned count = 0;

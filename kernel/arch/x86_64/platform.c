@@ -24,11 +24,13 @@ void arch_route_legacy_interrupts(void) {
     if (apic) apic_route_legacy_irq(1U);
     else pic_unmask(1U);
     if (input_mouse_available()) {
-        if (apic) apic_route_legacy_irq(12U); else pic_unmask(12U);
+        if (apic) apic_route_legacy_irq(12U);
+        else pic_unmask(12U);
     }
     if (apic) acpi_power_button_enable(ACPI_SCI_VECTOR);
 }
 
 void arch_route_timer(void) {
-    if (apic_is_active()) apic_route_legacy_irq(0U); else pic_unmask(0U);
+    if (apic_is_active()) apic_route_legacy_irq(0U);
+    else pic_unmask(0U);
 }

@@ -4,8 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define TUNIX_BOOT_FB_MAGIC 0x30424654U
-#define TUNIX_BOOT_FB_VERSION 1U
+#define TUNIX_BOOT_FB_MAGIC      0x30424654U
+#define TUNIX_BOOT_FB_VERSION    1U
 #define TUNIX_BIOS_FONT_PHYSICAL 0x00006000ULL
 
 struct boot_framebuffer_info {
@@ -31,8 +31,7 @@ struct boot_framebuffer_info {
     uint16_t font_height;
 } __attribute__((packed));
 
-_Static_assert(sizeof(struct boot_framebuffer_info) == 52U,
-               "boot framebuffer ABI size mismatch");
+_Static_assert(sizeof(struct boot_framebuffer_info) == 52U, "boot framebuffer ABI size mismatch");
 _Static_assert(offsetof(struct boot_framebuffer_info, font_physical_address) == 40U,
                "boot framebuffer ABI offset mismatch");
 

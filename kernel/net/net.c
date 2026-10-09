@@ -13,9 +13,9 @@
 extern void kprintf(const char *fmt, ...);
 
 #define ETHERTYPE_IPV4 0x0800U
-#define ETHERTYPE_ARP 0x0806U
-#define IPPROTO_ICMP 1U
-#define IPPROTO_UDP 17U
+#define ETHERTYPE_ARP  0x0806U
+#define IPPROTO_ICMP   1U
+#define IPPROTO_UDP    17U
 #define ARP_CACHE_SIZE 256
 
 struct ethernet_header {
@@ -81,13 +81,13 @@ struct arp_entry {
     uint64_t updated_ns;
 };
 
-#define LOOPBACK_BUDGET (16U << 20)
-#define LOOPBACK_BURST 128
-#define REASSEMBLY_LIMIT 64U
+#define LOOPBACK_BUDGET       (16U << 20)
+#define LOOPBACK_BURST        128
+#define REASSEMBLY_LIMIT      64U
 #define REASSEMBLY_TIMEOUT_NS 30000000000ULL
-#define IPV4_MORE_FRAGMENTS 0x2000U
-#define IPV4_DONT_FRAGMENT 0x4000U
-#define IPV4_OFFSET_MASK 0x1FFFU
+#define IPV4_MORE_FRAGMENTS   0x2000U
+#define IPV4_DONT_FRAGMENT    0x4000U
+#define IPV4_OFFSET_MASK      0x1FFFU
 
 struct loopback_packet {
     struct loopback_packet *next;
@@ -140,7 +140,7 @@ static int adapter_transmit(const void *frame, size_t length) {
 uint16_t net_htons(uint16_t value) { return (uint16_t)((value << 8) | (value >> 8)); }
 uint32_t net_htonl(uint32_t value) {
     return ((value & 0x000000FFU) << 24) | ((value & 0x0000FF00U) << 8) |
-           ((value & 0x00FF0000U) >> 8) | ((value & 0xFF000000U) >> 24);
+        ((value & 0x00FF0000U) >> 8) | ((value & 0xFF000000U) >> 24);
 }
 
 uint16_t net_checksum(const void *data, size_t length) {
@@ -175,8 +175,7 @@ static uint8_t *loopback_reserve(size_t length, struct loopback_packet **out) {
         loopback_dropped++;
         return NULL;
     }
-    struct loopback_packet *slot =
-        (struct loopback_packet *)kmalloc(sizeof(*slot) + length);
+    struct loopback_packet *slot = (struct loopback_packet *)kmalloc(sizeof(*slot) + length);
     if (!slot) {
         loopback_dropped++;
         return NULL;
@@ -211,7 +210,8 @@ size_t net_path_mtu(uint32_t destination) {
 }
 
 static int mac_equal(const uint8_t *left, const uint8_t *right) {
-    for (unsigned i = 0; i < 6; i++) if (left[i] != right[i]) return 0;
+    for (unsigned i = 0; i < 6; i++)
+        if (left[i] != right[i]) return 0;
     return 1;
 }
 
@@ -236,8 +236,8 @@ static const uint8_t *arp_lookup(uint32_t ip) {
     return NULL;
 }
 
-int net_send_ethernet(const uint8_t destination[6], uint16_t type,
-                         const void *payload, size_t length) {
+int net_send_ethernet(const uint8_t destination[6], uint16_t type, const void *payload,
+                      size_t length) {
     NET_LOCKED;
     if (!config.interface_up || length > NET_MTU) return -1;
     uint8_t frame[1514];
@@ -261,8 +261,8 @@ int net_send_raw_ethernet(const void *frame, size_t length) {
     return 0;
 }
 
-static void arp_send(uint16_t operation, const uint8_t destination_mac[6],
-                     uint32_t target_ip, const uint8_t target_mac[6]) {
+static void arp_send(uint16_t operation, const uint8_t destination_mac[6], uint32_t target_ip,
+                     const uint8_t target_mac[6]) {
     struct arp_packet packet;
     packet.hardware_type = net_htons(1);
     packet.protocol_type = net_htons(ETHERTYPE_IPV4);
@@ -277,12 +277,14 @@ static void arp_send(uint16_t operation, const uint8_t destination_mac[6],
 }
 
 static const uint8_t *resolve_mac(uint32_t destination) {
-    static const uint8_t broadcast[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+    static const uint8_t broadcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
     if (destination == 0xFFFFFFFFU ||
-        (config.netmask && (destination | config.netmask) == 0xFFFFFFFFU)) return broadcast;
+        (config.netmask && (destination | config.netmask) == 0xFFFFFFFFU))
+        return broadcast;
     uint32_t next_hop = destination;
     if (config.gateway && config.netmask &&
-        ((destination & config.netmask) != (config.address & config.netmask))) next_hop = config.gateway;
+        ((destination & config.netmask) != (config.address & config.netmask)))
+        next_hop = config.gateway;
     const uint8_t *found = arp_lookup(next_hop);
     if (found) return found;
     uint8_t zero[6] = {0};
@@ -297,9 +299,9 @@ static const uint8_t *resolve_mac(uint32_t destination) {
     return NULL;
 }
 
-static void fill_ipv4_header(struct ipv4_header *header, uint32_t destination,
-                             uint8_t protocol, size_t length, uint16_t identification,
-                             uint16_t fragment, uint8_t ttl) {
+static void fill_ipv4_header(struct ipv4_header *header, uint32_t destination, uint8_t protocol,
+                             size_t length, uint16_t identification, uint16_t fragment,
+                             uint8_t ttl) {
     memset(header, 0, sizeof(*header));
     header->version_ihl = 0x45U;
     header->total_length = net_htons((uint16_t)(sizeof(*header) + length));
@@ -324,8 +326,7 @@ static int send_fragments(const uint8_t *mac, uint32_t destination, uint8_t prot
         struct ipv4_header *header = (struct ipv4_header *)packet;
         fill_ipv4_header(header, destination, protocol, part, identification, fragment, ttl);
         memcpy(packet + sizeof(*header), payload + offset, part);
-        if (net_send_ethernet(mac, ETHERTYPE_IPV4, packet, sizeof(*header) + part) != 0)
-            return -1;
+        if (net_send_ethernet(mac, ETHERTYPE_IPV4, packet, sizeof(*header) + part) != 0) return -1;
     }
     return 0;
 }
@@ -337,8 +338,7 @@ int net_send_ipv4(uint32_t destination, uint8_t protocol, const void *payload, s
     if (header_included) {
         if (length < sizeof(struct ipv4_header) || length > NET_IPV4_MAX) return -1;
         const struct ipv4_header *provided = (const struct ipv4_header *)payload;
-        if (address_is_local(provided->destination))
-            return loopback_enqueue(payload, length);
+        if (address_is_local(provided->destination)) return loopback_enqueue(payload, length);
         if (!config.interface_up || length > NET_MTU) return -1;
         const uint8_t *mac = resolve_mac(provided->destination);
         return mac ? net_send_ethernet(mac, ETHERTYPE_IPV4, payload, length) : -1;
@@ -365,14 +365,14 @@ int net_send_ipv4(uint32_t destination, uint8_t protocol, const void *payload, s
                               identification, ttl);
     }
     uint8_t packet[NET_MTU];
-    fill_ipv4_header((struct ipv4_header *)packet, destination, protocol, length,
-                     identification, IPV4_DONT_FRAGMENT, ttl);
+    fill_ipv4_header((struct ipv4_header *)packet, destination, protocol, length, identification,
+                     IPV4_DONT_FRAGMENT, ttl);
     memcpy(packet + sizeof(struct ipv4_header), payload, length);
     return net_send_ethernet(mac, ETHERTYPE_IPV4, packet, total);
 }
 
-static uint16_t udp_checksum(uint32_t source, uint32_t destination,
-                             const void *udp, size_t length) {
+static uint16_t udp_checksum(uint32_t source, uint32_t destination, const void *udp,
+                             size_t length) {
     uint32_t sum = 0;
     const uint8_t *s = (const uint8_t *)&source;
     const uint8_t *d = (const uint8_t *)&destination;
@@ -385,7 +385,8 @@ static uint16_t udp_checksum(uint32_t source, uint32_t destination,
     const uint8_t *bytes = (const uint8_t *)udp;
     while (length >= 2) {
         sum += ((uint16_t)bytes[0] << 8) | bytes[1];
-        bytes += 2; length -= 2;
+        bytes += 2;
+        length -= 2;
     }
     if (length) sum += (uint16_t)bytes[0] << 8;
     while (sum >> 16) sum = (sum & 0xFFFFU) + (sum >> 16);
@@ -407,15 +408,15 @@ int net_send_udp(uint32_t source, uint16_t source_port, uint32_t destination,
     header->length = net_htons((uint16_t)total);
     header->checksum = 0;
     memcpy(packet + sizeof(*header), payload, length);
-    header->checksum = net_htons(udp_checksum(net_source_for(destination), destination,
-                                              packet, total));
+    header->checksum =
+        net_htons(udp_checksum(net_source_for(destination), destination, packet, total));
     int status = net_send_ipv4(destination, IPPROTO_UDP, packet, total, 64, 0);
     kfree(packet);
     return status;
 }
 
-static uint16_t tcp_checksum(uint32_t source, uint32_t destination,
-                             const void *segment, size_t length) {
+static uint16_t tcp_checksum(uint32_t source, uint32_t destination, const void *segment,
+                             size_t length) {
     uint32_t sum = 0;
     const uint8_t *s = (const uint8_t *)&source;
     const uint8_t *d = (const uint8_t *)&destination;
@@ -429,7 +430,8 @@ static uint16_t tcp_checksum(uint32_t source, uint32_t destination,
     size_t remaining = length;
     while (remaining >= 2) {
         sum += ((uint16_t)bytes[0] << 8) | bytes[1];
-        bytes += 2; remaining -= 2;
+        bytes += 2;
+        remaining -= 2;
     }
     if (remaining) sum += (uint16_t)bytes[0] << 8;
     while (sum >> 16) sum = (sum & 0xFFFFU) + (sum >> 16);
@@ -456,8 +458,8 @@ static size_t put_tcp_options(uint8_t *out, const struct net_tcp_options *option
 
 int net_send_tcp(uint32_t source, uint16_t source_port, uint32_t destination,
                  uint16_t destination_port, uint32_t seq, uint32_t ack, uint8_t flags,
-                 uint16_t window, const struct net_tcp_options *options,
-                 const void *payload, size_t length) {
+                 uint16_t window, const struct net_tcp_options *options, const void *payload,
+                 size_t length) {
     NET_LOCKED;
     (void)source;
     uint8_t option_bytes[8];
@@ -465,7 +467,8 @@ int net_send_tcp(uint32_t source, uint16_t source_port, uint32_t destination,
     size_t header_length = sizeof(struct tcp_header) + option_length;
     size_t total = header_length + length;
     if (total > net_path_mtu(destination) - sizeof(struct ipv4_header) ||
-        total > NET_IPV4_MAX - sizeof(struct ipv4_header)) return -1;
+        total > NET_IPV4_MAX - sizeof(struct ipv4_header))
+        return -1;
     uint8_t small[NET_MTU];
     uint8_t *packet = total <= sizeof(small) ? small : (uint8_t *)kmalloc(total);
     if (!packet) return -1;
@@ -480,15 +483,14 @@ int net_send_tcp(uint32_t source, uint16_t source_port, uint32_t destination,
     header->window = net_htons(window);
     memcpy(packet + sizeof(*header), option_bytes, option_length);
     if (length) memcpy(packet + header_length, payload, length);
-    header->checksum = net_htons(tcp_checksum(net_source_for(destination), destination,
-                                              packet, total));
+    header->checksum =
+        net_htons(tcp_checksum(net_source_for(destination), destination, packet, total));
     int status = net_send_ipv4(destination, IPPROTO_TCP, packet, total, 64, 0);
     if (packet != small) kfree(packet);
     return status;
 }
 
-static void parse_tcp_options(const uint8_t *at, size_t length,
-                              struct net_tcp_options *options) {
+static void parse_tcp_options(const uint8_t *at, size_t length, struct net_tcp_options *options) {
     memset(options, 0, sizeof(*options));
     size_t index = 0;
     while (index < length) {
@@ -515,8 +517,10 @@ static void parse_tcp_options(const uint8_t *at, size_t length,
 static void handle_arp(const uint8_t *data, size_t length) {
     if (length < sizeof(struct arp_packet)) return;
     const struct arp_packet *packet = (const struct arp_packet *)data;
-    if (net_htons(packet->hardware_type) != 1 || net_htons(packet->protocol_type) != ETHERTYPE_IPV4 ||
-        packet->hardware_length != 6 || packet->protocol_length != 4) return;
+    if (net_htons(packet->hardware_type) != 1 ||
+        net_htons(packet->protocol_type) != ETHERTYPE_IPV4 || packet->hardware_length != 6 ||
+        packet->protocol_length != 4)
+        return;
     arp_learn(packet->sender_ip, packet->sender_mac);
     uint16_t operation = net_htons(packet->operation);
     if (operation == 1 && config.address && packet->target_ip == config.address)
@@ -535,8 +539,8 @@ static void handle_icmp(const struct ipv4_header *ip, const uint8_t *data, size_
     if (length < sizeof(struct icmp_header)) return;
     const struct icmp_header *icmp = (const struct icmp_header *)data;
     if (net_checksum(data, length) != 0) return;
-    inet_socket_receive_ipv4((const uint8_t *)ip, (size_t)net_htons(ip->total_length),
-                             IPPROTO_ICMP, ip->source, ip->destination);
+    inet_socket_receive_ipv4((const uint8_t *)ip, (size_t)net_htons(ip->total_length), IPPROTO_ICMP,
+                             ip->source, ip->destination);
     if (icmp->type == 8 && icmp->code == 0 && address_is_local(ip->destination)) {
         uint8_t *reply = (uint8_t *)kmalloc(length);
         if (!reply) return;
@@ -599,13 +603,12 @@ static struct reassembly *reassembly_find(const struct ipv4_header *ip) {
     return entry;
 }
 
-static void reassemble(const struct ipv4_header *ip, size_t header_length,
-                       const uint8_t *payload, size_t length) {
+static void reassemble(const struct ipv4_header *ip, size_t header_length, const uint8_t *payload,
+                       size_t length) {
     uint16_t fragment = net_htons(ip->fragment);
     size_t offset = (size_t)(fragment & IPV4_OFFSET_MASK) * 8U;
     int last = !(fragment & IPV4_MORE_FRAGMENTS);
-    if ((!last && (length & 7U)) || !length ||
-        offset + length + header_length > NET_IPV4_MAX) {
+    if ((!last && (length & 7U)) || !length || offset + length + header_length > NET_IPV4_MAX) {
         stack_drop++;
         return;
     }
@@ -653,8 +656,10 @@ static void handle_ipv4(const uint8_t *data, size_t length) {
     size_t header_length = (size_t)(ip->version_ihl & 0x0FU) * 4U;
     size_t total_length = net_htons(ip->total_length);
     if ((ip->version_ihl >> 4) != 4U || header_length < 20U || header_length > length ||
-        total_length < header_length || total_length > length || net_checksum(data, header_length) != 0) {
-        stack_drop++; return;
+        total_length < header_length || total_length > length ||
+        net_checksum(data, header_length) != 0) {
+        stack_drop++;
+        return;
     }
     if (!address_accept(ip->destination)) return;
     if (net_htons(ip->fragment) & (IPV4_MORE_FRAGMENTS | IPV4_OFFSET_MASK)) {
@@ -676,28 +681,34 @@ static void handle_ipv4(const uint8_t *data, size_t length) {
         const struct tcp_header *tcp = (const struct tcp_header *)payload;
         size_t data_offset = (size_t)((tcp->data_offset >> 4) & 0x0FU) * 4U;
         if (data_offset < sizeof(struct tcp_header) || data_offset > payload_length) {
-            stack_drop++; return;
+            stack_drop++;
+            return;
         }
         if (tcp_checksum(ip->source, ip->destination, payload, payload_length) != 0) {
-            stack_drop++; return;
+            stack_drop++;
+            return;
         }
         struct net_tcp_options options;
         parse_tcp_options(payload + sizeof(struct tcp_header),
                           data_offset - sizeof(struct tcp_header), &options);
         inet_socket_receive_tcp(ip->source, net_htons(tcp->source_port), ip->destination,
                                 net_htons(tcp->destination_port), net_htonl(tcp->seq),
-                                net_htonl(tcp->ack), tcp->flags, net_htons(tcp->window),
-                                &options, payload + data_offset, payload_length - data_offset);
+                                net_htonl(tcp->ack), tcp->flags, net_htons(tcp->window), &options,
+                                payload + data_offset, payload_length - data_offset);
     } else {
         inet_socket_receive_ipv4(data, total_length, ip->protocol, ip->source, ip->destination);
     }
 }
 
 static void receive_frame(const uint8_t *frame, size_t length) {
-    if (length < sizeof(struct ethernet_header)) { stack_drop++; return; }
+    if (length < sizeof(struct ethernet_header)) {
+        stack_drop++;
+        return;
+    }
     const struct ethernet_header *header = (const struct ethernet_header *)frame;
-    static const uint8_t broadcast[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
-    if (!mac_equal(header->destination, config.mac) && !mac_equal(header->destination, broadcast)) return;
+    static const uint8_t broadcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    if (!mac_equal(header->destination, config.mac) && !mac_equal(header->destination, broadcast))
+        return;
     uint16_t type = net_htons(header->type);
     stack_rx++;
     stack_rx_bytes += length;
@@ -715,9 +726,8 @@ int net_register_adapter(const struct net_adapter *card) {
     memcpy(config.mac, card->mac, sizeof(config.mac));
     config.link_up = 1;
     config.interface_up = 1;
-    kprintf("NET: %s eth0 %x:%x:%x:%x:%x:%x ready\n", card->name,
-            config.mac[0], config.mac[1], config.mac[2], config.mac[3],
-            config.mac[4], config.mac[5]);
+    kprintf("NET: %s eth0 %x:%x:%x:%x:%x:%x ready\n", card->name, config.mac[0], config.mac[1],
+            config.mac[2], config.mac[3], config.mac[4], config.mac[5]);
     if (interrupts_wanted) net_enable_interrupts();
     return 0;
 }

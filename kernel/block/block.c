@@ -38,16 +38,14 @@ struct partition_context {
     uint64_t start;
 };
 
-static int partition_read(void *context, uint64_t lba, uint32_t count,
-                          void *destination) {
+static int partition_read(void *context, uint64_t lba, uint32_t count, void *destination) {
     const struct partition_context *part = context;
     const struct block_device *disk = block_device_at(part->parent);
     if (!disk) return -1;
     return disk->read(disk->context, part->start + lba, count, destination);
 }
 
-static int partition_write(void *context, uint64_t lba, uint32_t count,
-                           const void *source) {
+static int partition_write(void *context, uint64_t lba, uint32_t count, const void *source) {
     const struct partition_context *part = context;
     const struct block_device *disk = block_device_at(part->parent);
     if (!disk || !disk->write) return -1;
@@ -62,9 +60,8 @@ static int partition_flush(void *context) {
 }
 
 static void announce(int index) {
-    kprintf("BLOCK: %s (%s), %u sectors%s\n", devices[index]->dev_name,
-            devices[index]->name, (unsigned)devices[index]->sectors,
-            devices[index]->write ? "" : ", read only");
+    kprintf("BLOCK: %s (%s), %u sectors%s\n", devices[index]->dev_name, devices[index]->name,
+            (unsigned)devices[index]->sectors, devices[index]->write ? "" : ", read only");
 }
 
 static struct block_device *new_entry(void) {
@@ -118,12 +115,10 @@ int block_register(const struct block_device *device) {
     return index;
 }
 
-int block_register_partition(int parent, int number, uint64_t start,
-                             uint64_t sectors) {
+int block_register_partition(int parent, int number, uint64_t start, uint64_t sectors) {
     const struct block_device *disk = block_device_at(parent);
     if (!disk || disk->parent != -1 || number < 1 || number > 99999) return -1;
-    if (!sectors || start >= disk->sectors || sectors > disk->sectors - start)
-        return -1;
+    if (!sectors || start >= disk->sectors || sectors > disk->sectors - start) return -1;
 
     struct partition_context *context = kmalloc(sizeof(*context));
     if (!context) return -1;
@@ -217,8 +212,8 @@ void block_statistics(uint64_t *reads, uint64_t *sectors, uint64_t *nanoseconds,
     if (write_failures) *write_failures = __atomic_load_n(&block_write_failures, __ATOMIC_RELAXED);
 }
 
-static int device_read_counted(const struct block_device *device, uint64_t lba,
-                               uint32_t count, void *destination) {
+static int device_read_counted(const struct block_device *device, uint64_t lba, uint32_t count,
+                               void *destination) {
     uint64_t begun = time_uptime_ns();
     int status = device->read(device->context, lba, count, destination);
     uint64_t now = time_uptime_ns();
@@ -228,8 +223,8 @@ static int device_read_counted(const struct block_device *device, uint64_t lba,
     return status;
 }
 
-int block_device_read(const struct block_device *device, uint64_t lba,
-                      uint32_t count, void *destination) {
+int block_device_read(const struct block_device *device, uint64_t lba, uint32_t count,
+                      void *destination) {
     if (!device || !device->read || !count || !destination) return -1;
     if (lba + count > device->sectors) return -1;
     return device_read_counted(device, lba, count, destination);
@@ -237,8 +232,8 @@ int block_device_read(const struct block_device *device, uint64_t lba,
 
 #define WRITE_FAILURE_REPORT_LIMIT 8U
 
-int block_device_write(const struct block_device *device, uint64_t lba,
-                       uint32_t count, const void *source) {
+int block_device_write(const struct block_device *device, uint64_t lba, uint32_t count,
+                       const void *source) {
     if (!device || !device->write || !count || !source) return -1;
     if (lba + count > device->sectors) return -1;
     uint64_t begun = time_uptime_ns();
@@ -250,10 +245,11 @@ int block_device_write(const struct block_device *device, uint64_t lba,
     if (status != 0) {
         uint64_t failures = __atomic_add_fetch(&block_write_failures, 1, __ATOMIC_RELAXED);
         if (failures <= WRITE_FAILURE_REPORT_LIMIT)
-            kprintf("BLOCK: write of %u sectors at lba %u on %s failed (%d)%s\n",
-                    (unsigned)count, (unsigned)lba, device->dev_name, status,
+            kprintf("BLOCK: write of %u sectors at lba %u on %s failed (%d)%s\n", (unsigned)count,
+                    (unsigned)lba, device->dev_name, status,
                     failures == WRITE_FAILURE_REPORT_LIMIT
-                        ? ", further failures counted in /proc/blockstat" : "");
+                        ? ", further failures counted in /proc/blockstat"
+                        : "");
     }
     return status;
 }
@@ -263,8 +259,8 @@ int block_device_flush(const struct block_device *device) {
     return device->flush ? device->flush(device->context) : 0;
 }
 
-int block_device_write_bytes(const struct block_device *device, uint64_t offset,
-                             size_t size, const void *source) {
+int block_device_write_bytes(const struct block_device *device, uint64_t offset, size_t size,
+                             const void *source) {
     if (!device || !device->write || !source) return -1;
     const uint8_t *in = (const uint8_t *)source;
     uint8_t sector[BLOCK_SECTOR_SIZE];
@@ -298,8 +294,8 @@ int block_device_write_bytes(const struct block_device *device, uint64_t offset,
     return 0;
 }
 
-int block_device_read_bytes(const struct block_device *device, uint64_t offset,
-                            size_t size, void *destination) {
+int block_device_read_bytes(const struct block_device *device, uint64_t offset, size_t size,
+                            void *destination) {
     if (!device || !destination) return -1;
     uint8_t *out = (uint8_t *)destination;
     uint8_t sector[BLOCK_SECTOR_SIZE];

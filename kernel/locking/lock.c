@@ -8,8 +8,8 @@
 
 extern void kprintf(const char *fmt, ...);
 
-#define HELD_MAX 24U
-#define ORDER_REPORTS 16U
+#define HELD_MAX         24U
+#define ORDER_REPORTS    16U
 #define LOCK_WATCHDOG_NS (20ULL * 1000ULL * 1000ULL * 1000ULL)
 
 struct held_locks {
@@ -30,9 +30,7 @@ void lock_init(struct lock *lock, const char *name, unsigned rank) {
     lock->name = name;
 }
 
-static uint32_t self_id(void) {
-    return cpu_current()->index + 1U;
-}
+static uint32_t self_id(void) { return cpu_current()->index + 1U; }
 
 static void check_order(struct held_locks *mine, const struct lock *lock) {
     for (uint32_t index = 0; index < mine->count; index++) {
@@ -66,8 +64,7 @@ static void report_stuck(const struct lock *lock, uint32_t ticket) {
     uint32_t owner = __atomic_load_n(&lock->owner, __ATOMIC_RELAXED);
     kprintf("LOCK: cpu %u stuck on %s ticket %u, serving %u, held by cpu %d\n",
             cpu_current()->index, lock->name, (unsigned)ticket,
-            (unsigned)__atomic_load_n(&lock->serving, __ATOMIC_RELAXED),
-            (int)owner - 1);
+            (unsigned)__atomic_load_n(&lock->serving, __ATOMIC_RELAXED), (int)owner - 1);
     if (!owner || owner > SMP_MAX_CPUS) return;
     struct held_locks *theirs = &held[owner - 1U];
     uint32_t top = theirs->count < HELD_MAX ? theirs->count : HELD_MAX;
@@ -111,8 +108,8 @@ int lock_try_acquire(struct lock *lock) {
     }
     uint32_t serving = __atomic_load_n(&lock->serving, __ATOMIC_ACQUIRE);
     uint32_t expected = serving;
-    if (!__atomic_compare_exchange_n(&lock->next, &expected, serving + 1U, 0,
-                                     __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+    if (!__atomic_compare_exchange_n(&lock->next, &expected, serving + 1U, 0, __ATOMIC_ACQUIRE,
+                                     __ATOMIC_RELAXED))
         return 0;
     __atomic_store_n(&lock->owner, me, __ATOMIC_RELAXED);
     lock->depth = 1;
@@ -136,24 +133,20 @@ int lock_held(const struct lock *lock) {
     return __atomic_load_n(&lock->owner, __ATOMIC_RELAXED) == self_id();
 }
 
-unsigned lock_depth_here(void) {
-    return held[cpu_current()->index].count;
-}
+unsigned lock_depth_here(void) { return held[cpu_current()->index].count; }
 
 void lock_check_released(const char *where) {
     struct held_locks *mine = &held[cpu_current()->index];
     if (!mine->count) return;
-    if (!mine->reported && __atomic_fetch_add(&order_reports, 1, __ATOMIC_RELAXED) < ORDER_REPORTS) {
+    if (!mine->reported &&
+        __atomic_fetch_add(&order_reports, 1, __ATOMIC_RELAXED) < ORDER_REPORTS) {
         mine->reported = 1;
-        kprintf("LOCK: cpu %u leaves %s holding %u lock(s), first %s\n",
-                cpu_current()->index, where, (unsigned)mine->count,
-                mine->locks[0]->name);
+        kprintf("LOCK: cpu %u leaves %s holding %u lock(s), first %s\n", cpu_current()->index,
+                where, (unsigned)mine->count, mine->locks[0]->name);
     }
 }
 
-unsigned lock_depth(const struct lock *lock) {
-    return lock_held(lock) ? lock->depth : 0;
-}
+unsigned lock_depth(const struct lock *lock) { return lock_held(lock) ? lock->depth : 0; }
 
 void lock_set_depth(struct lock *lock, unsigned depth) {
     if (lock_held(lock) && depth) lock->depth = depth;
@@ -168,9 +161,8 @@ int lock_only_holds(const struct lock *lock) {
 void lock_report_sleep(const char *what) {
     struct held_locks *mine = &held[cpu_current()->index];
     if (__atomic_fetch_add(&order_reports, 1, __ATOMIC_RELAXED) >= ORDER_REPORTS) return;
-    kprintf("LOCK: cpu %u sleeps in %s holding %u lock(s), first %s\n",
-            cpu_current()->index, what, (unsigned)mine->count,
-            mine->count ? mine->locks[0]->name : "none");
+    kprintf("LOCK: cpu %u sleeps in %s holding %u lock(s), first %s\n", cpu_current()->index, what,
+            (unsigned)mine->count, mine->count ? mine->locks[0]->name : "none");
 }
 
 void lock_drop(struct lock *lock) {

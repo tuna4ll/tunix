@@ -17,11 +17,11 @@
 #include <tunix/vt.h>
 #include <uapi/input_event.h>
 
-#define EPERM 1
-#define ENXIO 6
+#define EPERM  1
+#define ENXIO  6
 #define EAGAIN 11
 #define EFAULT 14
-#define EBUSY 16
+#define EBUSY  16
 #define EINVAL 22
 #define ENOTTY 25
 #define ENOMEM 12
@@ -56,9 +56,7 @@ static char input_channel;
 
 extern void kprintf(const char *fmt, ...);
 
-static int index_valid(unsigned index) {
-    return index >= 1U && index <= VT_COUNT;
-}
+static int index_valid(unsigned index) { return index >= 1U && index <= VT_COUNT; }
 
 static struct vt *vt_ensure(unsigned index) {
     if (!index_valid(index)) return NULL;
@@ -94,8 +92,7 @@ unsigned vt_current_index(void) {
     struct process *process = process_current();
     if (process && process->sid) {
         for (unsigned index = 1U; index <= VT_COUNT; index++) {
-            if (terminals[index].allocated &&
-                tty_session(terminals[index].tty) == process->sid)
+            if (terminals[index].allocated && tty_session(terminals[index].tty) == process->sid)
                 return index;
         }
     }
@@ -157,8 +154,8 @@ int vt_switch(unsigned index) {
 
     struct vt *from = &terminals[active_index];
 
-    if (from->mode.mode == TUNIX_VT_PROCESS && from->mode.relsig &&
-        from->owner_pid && process_exists(from->owner_pid)) {
+    if (from->mode.mode == TUNIX_VT_PROCESS && from->mode.relsig && from->owner_pid &&
+        process_exists(from->owner_pid)) {
         pending_index = index;
         (void)process_send_signal((int64_t)from->owner_pid, from->mode.relsig);
         return 0;
@@ -203,7 +200,7 @@ void vt_process_exited(uint64_t pid, uint64_t sid) {
 
 int vt_console_in_front(void) {
     return !__atomic_load_n(&display_owner_index, __ATOMIC_ACQUIRE) ||
-           __atomic_load_n(&display_suspended, __ATOMIC_RELAXED);
+        __atomic_load_n(&display_suspended, __ATOMIC_RELAXED);
 }
 
 void vt_display_claimed(void) {
@@ -326,8 +323,7 @@ int64_t vt_node_read(struct vfs_node *node, uint64_t offset, size_t size, void *
     return tty_read(vt->tty, size, buffer);
 }
 
-int64_t vt_node_write(struct vfs_node *node, uint64_t offset, size_t size,
-                      const void *buffer) {
+int64_t vt_node_write(struct vfs_node *node, uint64_t offset, size_t size, const void *buffer) {
     TTY_LOCKED;
     (void)offset;
     struct vt *vt = vt_from_node(node);
@@ -367,146 +363,140 @@ static uint16_t vt_in_use_mask(void) {
     return mask;
 }
 
-int64_t vt_node_ioctl(struct vfs_node *node, unsigned long request,
-                      uint64_t user_argument) {
+int64_t vt_node_ioctl(struct vfs_node *node, unsigned long request, uint64_t user_argument) {
     TTY_LOCKED;
     struct vt *vt = vt_from_node(node);
     if (!vt) return -ENXIO;
 
     switch (request) {
-        case TCGETS: {
-            struct tunix_termios value;
-            if (tty_ioctl(vt->tty, request, &value) != 0) return -ENOTTY;
-            return copy_to_user(user_argument, &value, sizeof(value)) == 0 ? 0 : -EFAULT;
-        }
-        case TCSETS:
-        case TCSETSW:
-        case TCSETSF: {
-            struct tunix_termios value;
-            if (copy_from_user(&value, user_argument, sizeof(value)) != 0) return -EFAULT;
-            return tty_ioctl(vt->tty, request, &value) == 0 ? 0 : -ENOTTY;
-        }
-        case TIOCGPGRP: {
-            int pgid;
-            if (tty_ioctl(vt->tty, request, &pgid) != 0) return -ENOTTY;
-            return copy_to_user(user_argument, &pgid, sizeof(pgid)) == 0 ? 0 : -EFAULT;
-        }
-        case TIOCSPGRP: {
-            int pgid;
-            if (copy_from_user(&pgid, user_argument, sizeof(pgid)) != 0) return -EFAULT;
-            return tty_ioctl(vt->tty, request, &pgid) == 0 ? 0 : -ENOTTY;
-        }
-        case TIOCGETD:
-        case TIOCSETD: {
-            int discipline = 0;
-            if (request == TIOCSETD &&
-                copy_from_user(&discipline, user_argument, sizeof(discipline)) != 0)
-                return -EFAULT;
-            if (tty_ioctl(vt->tty, request, &discipline) != 0) return -ENOTTY;
-            if (request == TIOCGETD &&
-                copy_to_user(user_argument, &discipline, sizeof(discipline)) != 0)
-                return -EFAULT;
-            return 0;
-        }
+    case TCGETS: {
+        struct tunix_termios value;
+        if (tty_ioctl(vt->tty, request, &value) != 0) return -ENOTTY;
+        return copy_to_user(user_argument, &value, sizeof(value)) == 0 ? 0 : -EFAULT;
+    }
+    case TCSETS:
+    case TCSETSW:
+    case TCSETSF: {
+        struct tunix_termios value;
+        if (copy_from_user(&value, user_argument, sizeof(value)) != 0) return -EFAULT;
+        return tty_ioctl(vt->tty, request, &value) == 0 ? 0 : -ENOTTY;
+    }
+    case TIOCGPGRP: {
+        int pgid;
+        if (tty_ioctl(vt->tty, request, &pgid) != 0) return -ENOTTY;
+        return copy_to_user(user_argument, &pgid, sizeof(pgid)) == 0 ? 0 : -EFAULT;
+    }
+    case TIOCSPGRP: {
+        int pgid;
+        if (copy_from_user(&pgid, user_argument, sizeof(pgid)) != 0) return -EFAULT;
+        return tty_ioctl(vt->tty, request, &pgid) == 0 ? 0 : -ENOTTY;
+    }
+    case TIOCGETD:
+    case TIOCSETD: {
+        int discipline = 0;
+        if (request == TIOCSETD &&
+            copy_from_user(&discipline, user_argument, sizeof(discipline)) != 0)
+            return -EFAULT;
+        if (tty_ioctl(vt->tty, request, &discipline) != 0) return -ENOTTY;
+        if (request == TIOCGETD &&
+            copy_to_user(user_argument, &discipline, sizeof(discipline)) != 0)
+            return -EFAULT;
+        return 0;
+    }
 
-        case TIOCSCTTY: {
-            struct process *process = process_current();
-            if (!process) return -ENOTTY;
-            tty_set_controlling_session(vt->tty, process->sid, (int)process->pgid);
-            return 0;
-        }
-        case TIOCNOTTY: {
-            struct process *process = process_current();
-            if (!process) return -ENOTTY;
-            tty_release_controlling_session(vt->tty, process->sid);
-            return 0;
-        }
-        case TIOCGWINSZ: {
-            struct linux_winsize winsize;
-            memset(&winsize, 0, sizeof(winsize));
-            terminal_get_dimensions(&winsize.rows, &winsize.columns);
-            return copy_to_user(user_argument, &winsize, sizeof(winsize)) == 0 ? 0 : -EFAULT;
-        }
-        case TUNIX_KDGKBMAP: {
-            struct tunix_keymap map;
-            if (tty_ioctl(vt->tty, request, &map) != 0) return -ENOTTY;
-            return copy_to_user(user_argument, &map, sizeof(map)) == 0 ? 0 : -EFAULT;
-        }
-        case TUNIX_KDSKBMAP: {
-            struct tunix_keymap map;
-            if (copy_from_user(&map, user_argument, sizeof(map)) != 0) return -EFAULT;
-            return tty_ioctl(vt->tty, request, &map) == 0 ? 0 : -EINVAL;
-        }
-        case KDGKBTYPE: {
-            uint8_t type;
-            if (tty_ioctl(vt->tty, request, &type) != 0) return -ENOTTY;
-            return copy_to_user(user_argument, &type, sizeof(type)) == 0 ? 0 : -EFAULT;
-        }
+    case TIOCSCTTY: {
+        struct process *process = process_current();
+        if (!process) return -ENOTTY;
+        tty_set_controlling_session(vt->tty, process->sid, (int)process->pgid);
+        return 0;
+    }
+    case TIOCNOTTY: {
+        struct process *process = process_current();
+        if (!process) return -ENOTTY;
+        tty_release_controlling_session(vt->tty, process->sid);
+        return 0;
+    }
+    case TIOCGWINSZ: {
+        struct linux_winsize winsize;
+        memset(&winsize, 0, sizeof(winsize));
+        terminal_get_dimensions(&winsize.rows, &winsize.columns);
+        return copy_to_user(user_argument, &winsize, sizeof(winsize)) == 0 ? 0 : -EFAULT;
+    }
+    case TUNIX_KDGKBMAP: {
+        struct tunix_keymap map;
+        if (tty_ioctl(vt->tty, request, &map) != 0) return -ENOTTY;
+        return copy_to_user(user_argument, &map, sizeof(map)) == 0 ? 0 : -EFAULT;
+    }
+    case TUNIX_KDSKBMAP: {
+        struct tunix_keymap map;
+        if (copy_from_user(&map, user_argument, sizeof(map)) != 0) return -EFAULT;
+        return tty_ioctl(vt->tty, request, &map) == 0 ? 0 : -EINVAL;
+    }
+    case KDGKBTYPE: {
+        uint8_t type;
+        if (tty_ioctl(vt->tty, request, &type) != 0) return -ENOTTY;
+        return copy_to_user(user_argument, &type, sizeof(type)) == 0 ? 0 : -EFAULT;
+    }
 
-        case KDSETMODE:
-            return set_kd_mode(vt, (int)user_argument);
-        case KDSKBMODE: {
-            int mode = (int)user_argument;
-            if (mode < TUNIX_K_RAW || mode > TUNIX_K_OFF) return -EINVAL;
-            vt->kb_mode = mode;
-            return 0;
-        }
-        case KDGETMODE: {
-            int mode = vt->kd_mode;
-            return copy_to_user(user_argument, &mode, sizeof(mode)) == 0 ? 0 : -EFAULT;
-        }
-        case KDGKBMODE: {
-            int mode = vt->kb_mode;
-            return copy_to_user(user_argument, &mode, sizeof(mode)) == 0 ? 0 : -EFAULT;
-        }
-        case VT_OPENQRY: {
-            unsigned free_index = vt_first_free();
-            if (!free_index) return -ENXIO;
-            int value = (int)free_index;
-            return copy_to_user(user_argument, &value, sizeof(value)) == 0 ? 0 : -EFAULT;
-        }
-        case VT_GETSTATE: {
-            struct tunix_vt_stat state;
-            state.v_active = (uint16_t)active_index;
-            state.v_signal = 0;
-            state.v_state = vt_in_use_mask();
-            return copy_to_user(user_argument, &state, sizeof(state)) == 0 ? 0 : -EFAULT;
-        }
-        case VT_GETMODE:
-            return copy_to_user(user_argument, &vt->mode, sizeof(vt->mode)) == 0 ? 0 : -EFAULT;
-        case VT_SETMODE: {
-            struct tunix_vt_mode mode;
-            if (copy_from_user(&mode, user_argument, sizeof(mode)) != 0) return -EFAULT;
-            if (mode.mode != TUNIX_VT_AUTO && mode.mode != TUNIX_VT_PROCESS) return -EINVAL;
-            if (mode.mode == TUNIX_VT_PROCESS &&
-                (mode.relsig < 0 || mode.relsig > 64 ||
-                 mode.acqsig < 0 || mode.acqsig > 64)) return -EINVAL;
-            vt->mode = mode;
-            struct process *process = process_current();
-            vt->owner_pid = (mode.mode == TUNIX_VT_PROCESS && process) ? process->pid : 0;
-            return 0;
-        }
-        case VT_ACTIVATE:
-            return vt_switch((unsigned)user_argument);
-        case VT_WAITACTIVE:
-            return vt_wait_active((unsigned)user_argument);
-        case VT_RELDISP:
-            return vt_release_display((int)user_argument);
+    case KDSETMODE: return set_kd_mode(vt, (int)user_argument);
+    case KDSKBMODE: {
+        int mode = (int)user_argument;
+        if (mode < TUNIX_K_RAW || mode > TUNIX_K_OFF) return -EINVAL;
+        vt->kb_mode = mode;
+        return 0;
+    }
+    case KDGETMODE: {
+        int mode = vt->kd_mode;
+        return copy_to_user(user_argument, &mode, sizeof(mode)) == 0 ? 0 : -EFAULT;
+    }
+    case KDGKBMODE: {
+        int mode = vt->kb_mode;
+        return copy_to_user(user_argument, &mode, sizeof(mode)) == 0 ? 0 : -EFAULT;
+    }
+    case VT_OPENQRY: {
+        unsigned free_index = vt_first_free();
+        if (!free_index) return -ENXIO;
+        int value = (int)free_index;
+        return copy_to_user(user_argument, &value, sizeof(value)) == 0 ? 0 : -EFAULT;
+    }
+    case VT_GETSTATE: {
+        struct tunix_vt_stat state;
+        state.v_active = (uint16_t)active_index;
+        state.v_signal = 0;
+        state.v_state = vt_in_use_mask();
+        return copy_to_user(user_argument, &state, sizeof(state)) == 0 ? 0 : -EFAULT;
+    }
+    case VT_GETMODE:
+        return copy_to_user(user_argument, &vt->mode, sizeof(vt->mode)) == 0 ? 0 : -EFAULT;
+    case VT_SETMODE: {
+        struct tunix_vt_mode mode;
+        if (copy_from_user(&mode, user_argument, sizeof(mode)) != 0) return -EFAULT;
+        if (mode.mode != TUNIX_VT_AUTO && mode.mode != TUNIX_VT_PROCESS) return -EINVAL;
+        if (mode.mode == TUNIX_VT_PROCESS &&
+            (mode.relsig < 0 || mode.relsig > 64 || mode.acqsig < 0 || mode.acqsig > 64))
+            return -EINVAL;
+        vt->mode = mode;
+        struct process *process = process_current();
+        vt->owner_pid = (mode.mode == TUNIX_VT_PROCESS && process) ? process->pid : 0;
+        return 0;
+    }
+    case VT_ACTIVATE:   return vt_switch((unsigned)user_argument);
+    case VT_WAITACTIVE: return vt_wait_active((unsigned)user_argument);
+    case VT_RELDISP:    return vt_release_display((int)user_argument);
 
-        case VT_DISALLOCATE: {
-            unsigned index = (unsigned)user_argument;
-            if (!index) return 0;
-            if (!index_valid(index)) return -EINVAL;
-            if (index == active_index) return -EBUSY;
-            struct vt *target = &terminals[index];
-            if (!target->allocated) return 0;
-            if (display_owner_index == index) return -EBUSY;
-            tty_destroy(target->tty);
-            terminal_screen_destroy(target->screen);
-            memset(target, 0, sizeof(*target));
-            return 0;
-        }
-        default:
-            return -ENOTTY;
+    case VT_DISALLOCATE: {
+        unsigned index = (unsigned)user_argument;
+        if (!index) return 0;
+        if (!index_valid(index)) return -EINVAL;
+        if (index == active_index) return -EBUSY;
+        struct vt *target = &terminals[index];
+        if (!target->allocated) return 0;
+        if (display_owner_index == index) return -EBUSY;
+        tty_destroy(target->tty);
+        terminal_screen_destroy(target->screen);
+        memset(target, 0, sizeof(*target));
+        return 0;
+    }
+    default: return -ENOTTY;
     }
 }

@@ -1,0 +1,21 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{c,h,S}]
+indent_style = space
+indent_size = 4
+
+[{GNUmakefile,*.mk}]
+indent_style = tab
+
+[*.sh]
+indent_style = tab
+
+[*.{yml,yaml,toml}]
+indent_style = space
+indent_size = 2

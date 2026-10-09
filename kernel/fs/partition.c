@@ -6,21 +6,21 @@
 
 extern void kprintf(const char *fmt, ...);
 
-#define MBR_SIGNATURE_OFFSET 0x1FEU
-#define MBR_TABLE_OFFSET 0x1BEU
-#define MBR_ENTRY_BYTES 16U
-#define MBR_ENTRIES 4U
-#define MBR_TYPE_PROTECTIVE 0xEEU
+#define MBR_SIGNATURE_OFFSET  0x1FEU
+#define MBR_TABLE_OFFSET      0x1BEU
+#define MBR_ENTRY_BYTES       16U
+#define MBR_ENTRIES           4U
+#define MBR_TYPE_PROTECTIVE   0xEEU
 #define MBR_TYPE_EXTENDED_CHS 0x05U
 #define MBR_TYPE_EXTENDED_LBA 0x0FU
 
-#define GPT_HEADER_LBA 1U
-#define GPT_SIGNATURE "EFI PART"
+#define GPT_HEADER_LBA      1U
+#define GPT_SIGNATURE       "EFI PART"
 #define GPT_SIGNATURE_BYTES 8U
 
 static uint32_t read_le32(const uint8_t *at) {
-    return (uint32_t)at[0] | ((uint32_t)at[1] << 8) |
-           ((uint32_t)at[2] << 16) | ((uint32_t)at[3] << 24);
+    return (uint32_t)at[0] | ((uint32_t)at[1] << 8) | ((uint32_t)at[2] << 16) |
+        ((uint32_t)at[3] << 24);
 }
 
 static uint64_t read_le64(const uint8_t *at) {
@@ -48,8 +48,8 @@ static int scan_gpt(int disk, const struct block_device *device) {
     uint64_t table_lba = read_le64(header + 72);
     uint32_t entries = read_le32(header + 80);
     uint32_t entry_bytes = read_le32(header + 84);
-    if (!entry_bytes || entry_bytes > BLOCK_SECTOR_SIZE ||
-        BLOCK_SECTOR_SIZE % entry_bytes != 0) return -1;
+    if (!entry_bytes || entry_bytes > BLOCK_SECTOR_SIZE || BLOCK_SECTOR_SIZE % entry_bytes != 0)
+        return -1;
     if (entries > 65536U) entries = 65536U;
 
     uint32_t per_sector = BLOCK_SECTOR_SIZE / entry_bytes;
@@ -70,8 +70,7 @@ static int scan_gpt(int disk, const struct block_device *device) {
         uint64_t first = read_le64(entry + 32);
         uint64_t last = read_le64(entry + 40);
         if (last < first) continue;
-        if (block_register_partition(disk, number, first, last - first + 1U) >= 0)
-            registered++;
+        if (block_register_partition(disk, number, first, last - first + 1U) >= 0) registered++;
     }
     return registered;
 }
@@ -79,8 +78,7 @@ static int scan_gpt(int disk, const struct block_device *device) {
 static void scan_mbr(int disk, const struct block_device *device) {
     uint8_t sector[BLOCK_SECTOR_SIZE];
     if (device->read(device->context, 0, 1, sector) != 0) return;
-    if (sector[MBR_SIGNATURE_OFFSET] != 0x55U ||
-        sector[MBR_SIGNATURE_OFFSET + 1U] != 0xAAU) return;
+    if (sector[MBR_SIGNATURE_OFFSET] != 0x55U || sector[MBR_SIGNATURE_OFFSET + 1U] != 0xAAU) return;
 
     for (unsigned index = 0; index < MBR_ENTRIES; index++) {
         const uint8_t *entry = sector + MBR_TABLE_OFFSET + index * MBR_ENTRY_BYTES;

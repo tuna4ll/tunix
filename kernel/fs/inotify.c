@@ -13,16 +13,17 @@ static void inotify_guard_release(int *unused) {
 }
 
 #define INOTIFY_LOCKED \
-    __attribute__((cleanup(inotify_guard_release))) int inotify_guard = (lock_acquire(&inotify_lock), 0)
+    __attribute__((cleanup(inotify_guard_release))) int inotify_guard = \
+        (lock_acquire(&inotify_lock), 0)
 
-#define EAGAIN 11
-#define EINVAL 22
-#define ENOSPC 28
-#define IN_IGNORED 0x00008000U
-#define IN_Q_OVERFLOW 0x00004000U
+#define EAGAIN            11
+#define EINVAL            22
+#define ENOSPC            28
+#define IN_IGNORED        0x00008000U
+#define IN_Q_OVERFLOW     0x00004000U
 #define INOTIFY_QUEUE_MIN 8192U
 #define INOTIFY_QUEUE_MAX (1024U * 1024U)
-#define INOTIFY_BUCKETS 256U
+#define INOTIFY_BUCKETS   256U
 
 struct linux_inotify_event {
     int32_t wd;
@@ -65,8 +66,7 @@ static size_t aligned_name_length(const char *name) {
     return (length + 3U) & ~3U;
 }
 
-static void queue_bytes(struct inotify_context *context, const void *data,
-                        size_t size) {
+static void queue_bytes(struct inotify_context *context, const void *data, size_t size) {
     const uint8_t *bytes = data;
     for (size_t index = 0; index < size; index++) {
         context->queue[context->write_position] = bytes[index];
@@ -75,8 +75,8 @@ static void queue_bytes(struct inotify_context *context, const void *data,
     context->queued += size;
 }
 
-static void peek_bytes(const struct inotify_context *context, size_t offset,
-                       void *buffer, size_t size) {
+static void peek_bytes(const struct inotify_context *context, size_t offset, void *buffer,
+                       size_t size) {
     uint8_t *output = buffer;
     size_t position = (context->read_position + offset) % context->capacity;
     for (size_t index = 0; index < size; index++) {
@@ -100,8 +100,8 @@ static int grow_queue(struct inotify_context *context, size_t needed) {
     return 0;
 }
 
-static int queue_event(struct inotify_context *context, int wd, uint32_t mask,
-                       const char *name, uint32_t cookie) {
+static int queue_event(struct inotify_context *context, int wd, uint32_t mask, const char *name,
+                       uint32_t cookie) {
     size_t name_length = aligned_name_length(name);
     size_t total = sizeof(struct linux_inotify_event) + name_length;
     if (total > context->capacity - context->queued && grow_queue(context, total) != 0) {
@@ -152,8 +152,7 @@ static void unlink_from_node(struct inotify_watch *watch) {
 
 static void drop_watch(struct inotify_watch *watch) {
     struct inotify_context *context = watch->context;
-    for (struct inotify_watch **link = &context->watches; *link;
-         link = &(*link)->context_next) {
+    for (struct inotify_watch **link = &context->watches; *link; link = &(*link)->context_next) {
         if (*link == watch) {
             *link = watch->context_next;
             break;
@@ -171,8 +170,7 @@ void inotify_destroy(struct inotify_context *context) {
     kfree(context);
 }
 
-int inotify_add_watch(struct inotify_context *context, struct vfs_node *node,
-                      uint32_t mask) {
+int inotify_add_watch(struct inotify_context *context, struct vfs_node *node, uint32_t mask) {
     INOTIFY_LOCKED;
     if (!context || !node || !mask) return -EINVAL;
     for (struct inotify_watch *watch = *node_bucket(node); watch; watch = watch->node_next) {
@@ -242,14 +240,12 @@ int inotify_read_ready(struct inotify_context *context) {
     return context && context->queued != 0;
 }
 
-void inotify_notify(struct vfs_node *node, uint32_t mask, const char *name,
-                    uint32_t cookie) {
+void inotify_notify(struct vfs_node *node, uint32_t mask, const char *name, uint32_t cookie) {
     INOTIFY_LOCKED;
     if (!node || !mask) return;
     for (struct inotify_watch *watch = *node_bucket(node); watch; watch = watch->node_next)
         if (watch->node == node && (watch->mask & mask))
-            (void)queue_event(watch->context, watch->descriptor, mask & watch->mask,
-                              name, cookie);
+            (void)queue_event(watch->context, watch->descriptor, mask & watch->mask, name, cookie);
 }
 
 void inotify_invalidate(struct vfs_node *node) {

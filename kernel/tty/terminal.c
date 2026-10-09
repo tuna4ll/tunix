@@ -10,10 +10,10 @@
 #include <tunix/terminal.h>
 #include <tunix/terminal_font.h>
 
-#define CELL_BG_EXPLICIT 0x01U
+#define CELL_BG_EXPLICIT      0x01U
 #define CONSOLE_DEFAULT_COLOR 7
-#define CONSOLE_BACKGROUND 0x000000U
-#define CONSOLE_FOREGROUND 0xAAAAAAU
+#define CONSOLE_BACKGROUND    0x000000U
+#define CONSOLE_FOREGROUND    0xAAAAAAU
 
 struct console_cell {
     uint32_t codepoint;
@@ -60,11 +60,8 @@ static int terminal_is_ready;
 static struct terminal_screen *active_screen;
 
 static const uint32_t ansi_palette[16] = {
-    0x000000U, 0xAA0000U, 0x00AA00U, 0xAA5500U,
-    0x0000AAU, 0xAA00AAU, 0x00AAAAU, 0xAAAAAAU,
-    0x555555U, 0xFF5555U, 0x55FF55U, 0xFFFF55U,
-    0x5555FFU, 0xFF55FFU, 0x55FFFFU, 0xFFFFFFU
-};
+    0x000000U, 0xAA0000U, 0x00AA00U, 0xAA5500U, 0x0000AAU, 0xAA00AAU, 0x00AAAAU, 0xAAAAAAU,
+    0x555555U, 0xFF5555U, 0x55FF55U, 0xFFFF55U, 0x5555FFU, 0xFF55FFU, 0x55FFFFU, 0xFFFFFFU};
 
 static void fill_background_rect(uint32_t x, uint32_t y, uint32_t width, uint32_t height) {
     uint32_t end_x = x + width;
@@ -90,9 +87,7 @@ static void calculate_layout(void) {
     layout.rows = (uint16_t)rows;
 }
 
-static size_t cell_count(void) {
-    return (size_t)layout.columns * layout.rows;
-}
+static size_t cell_count(void) { return (size_t)layout.columns * layout.rows; }
 
 static struct console_cell *cell_at(struct terminal_screen *screen, int row, int col) {
     return &screen->cells[(size_t)row * layout.columns + (size_t)col];
@@ -115,8 +110,7 @@ static void clear_cell_model(struct terminal_screen *screen) {
     memset(screen->cells, 0, cell_count() * sizeof(screen->cells[0]));
 }
 
-static void clear_row_range(struct terminal_screen *screen, int row,
-                            int first_col, int last_col) {
+static void clear_row_range(struct terminal_screen *screen, int row, int first_col, int last_col) {
     if (row < 0 || row >= layout.rows) return;
     if (first_col < 0) first_col = 0;
     if (last_col >= layout.columns) last_col = layout.columns - 1;
@@ -125,8 +119,8 @@ static void clear_row_range(struct terminal_screen *screen, int row,
            (size_t)(last_col - first_col + 1) * sizeof(screen->cells[0]));
 }
 
-static unsigned scroll_region_up(struct terminal_screen *screen, int top,
-                                 int bottom, unsigned count) {
+static unsigned scroll_region_up(struct terminal_screen *screen, int top, int bottom,
+                                 unsigned count) {
     if (top < 0) top = 0;
     if (bottom >= layout.rows) bottom = layout.rows - 1;
     if (top > bottom) return 0;
@@ -143,8 +137,8 @@ static unsigned scroll_region_up(struct terminal_screen *screen, int top,
     return count;
 }
 
-static unsigned scroll_region_down(struct terminal_screen *screen, int top,
-                                   int bottom, unsigned count) {
+static unsigned scroll_region_down(struct terminal_screen *screen, int top, int bottom,
+                                   unsigned count) {
     if (top < 0) top = 0;
     if (bottom >= layout.rows) bottom = layout.rows - 1;
     if (top > bottom) return 0;
@@ -167,8 +161,7 @@ static void clear_cell_background(int row, int col) {
     fill_background_rect(x, y, layout.cell_width, layout.cell_height);
 }
 
-static void draw_glyph_to_framebuffer(uint32_t x, uint32_t y, uint32_t codepoint,
-                                      uint32_t color) {
+static void draw_glyph_to_framebuffer(uint32_t x, uint32_t y, uint32_t codepoint, uint32_t color) {
     const uint8_t *glyph = tunix_terminal_font_glyph(codepoint);
     if (!glyph) return;
     uint32_t solid = framebuffer_pack_rgb(color);
@@ -180,8 +173,7 @@ static void draw_glyph_to_framebuffer(uint32_t x, uint32_t y, uint32_t codepoint
     }
 }
 
-static void draw_cell_overlay(struct terminal_screen *screen, int row, int col,
-                              int cursor) {
+static void draw_cell_overlay(struct terminal_screen *screen, int row, int col, int cursor) {
     struct console_cell *cell = cell_at(screen, row, col);
     uint32_t x = layout.content_x + (uint32_t)col * layout.cell_width;
     uint32_t y = layout.content_y + (uint32_t)row * layout.cell_height;
@@ -238,15 +230,15 @@ static void render_rows(struct terminal_screen *screen, int top, int bottom) {
     }
 }
 
-static void render_region_scroll_up(struct terminal_screen *screen, int top,
-                                    int bottom, unsigned count) {
+static void render_region_scroll_up(struct terminal_screen *screen, int top, int bottom,
+                                    unsigned count) {
     if (!visible(screen)) return;
     if (!count || top < 0 || bottom >= layout.rows || top > bottom) return;
     render_rows(screen, top, bottom);
 }
 
-static void render_region_scroll_down(struct terminal_screen *screen, int top,
-                                      int bottom, unsigned count) {
+static void render_region_scroll_down(struct terminal_screen *screen, int top, int bottom,
+                                      unsigned count) {
     if (!visible(screen)) return;
     if (!count || top < 0 || bottom >= layout.rows || top > bottom) return;
     render_rows(screen, top, bottom);
@@ -269,8 +261,7 @@ static void clamp_terminal_cursor(struct terminal_screen *screen) {
 
 static void terminal_scroll_if_needed(struct terminal_screen *screen) {
     if (screen->row == screen->scroll_bottom + 1) {
-        unsigned count = scroll_region_up(screen, screen->scroll_top,
-                                          screen->scroll_bottom, 1);
+        unsigned count = scroll_region_up(screen, screen->scroll_top, screen->scroll_bottom, 1);
         screen->row = screen->scroll_bottom;
         render_region_scroll_up(screen, screen->scroll_top, screen->scroll_bottom, count);
     } else if (screen->row >= layout.rows) {
@@ -286,8 +277,7 @@ static uint32_t xterm_256_color(unsigned index) {
         unsigned green = (value / 6U) % 6U;
         unsigned blue = value % 6U;
         static const uint8_t levels[6] = {0, 95, 135, 175, 215, 255};
-        return ((uint32_t)levels[red] << 16) |
-               ((uint32_t)levels[green] << 8) | levels[blue];
+        return ((uint32_t)levels[red] << 16) | ((uint32_t)levels[green] << 8) | levels[blue];
     }
     unsigned gray = 8U + (index - 232U) * 10U;
     return (gray << 16) | (gray << 8) | gray;
@@ -476,8 +466,8 @@ void terminal_paint_lock_reset(void) {
     __atomic_clear(&paint_lock, __ATOMIC_RELEASE);
 }
 
-void terminal_set_sgr_sequence(struct terminal_screen *screen,
-                               const unsigned *codes, unsigned count) {
+void terminal_set_sgr_sequence(struct terminal_screen *screen, const unsigned *codes,
+                               unsigned count) {
     if (!terminal_is_ready || !screen) return;
     if (!codes || !count) {
         reset_attributes(screen);
@@ -500,8 +490,7 @@ void terminal_set_sgr_sequence(struct terminal_screen *screen,
         } else if (code == 39U) {
             screen->foreground_index = CONSOLE_DEFAULT_COLOR;
             screen->foreground = CONSOLE_FOREGROUND;
-        }
-        else if (code >= 40U && code <= 47U) {
+        } else if (code >= 40U && code <= 47U) {
             screen->background = ansi_palette[code - 40U];
             screen->background_explicit = 1;
         } else if (code >= 100U && code <= 107U) {
@@ -521,14 +510,12 @@ void terminal_set_sgr_sequence(struct terminal_screen *screen,
                 valid = 1;
             } else if (codes[i + 1U] == 2U && i + 4U < count) {
                 if (i + 5U < count && codes[i + 2U] == 0U) {
-                    color = ((codes[i + 3U] & 0xFFU) << 16) |
-                            ((codes[i + 4U] & 0xFFU) << 8) |
-                            (codes[i + 5U] & 0xFFU);
+                    color = ((codes[i + 3U] & 0xFFU) << 16) | ((codes[i + 4U] & 0xFFU) << 8) |
+                        (codes[i + 5U] & 0xFFU);
                     i += 5U;
                 } else {
-                    color = ((codes[i + 2U] & 0xFFU) << 16) |
-                            ((codes[i + 3U] & 0xFFU) << 8) |
-                            (codes[i + 4U] & 0xFFU);
+                    color = ((codes[i + 2U] & 0xFFU) << 16) | ((codes[i + 3U] & 0xFFU) << 8) |
+                        (codes[i + 4U] & 0xFFU);
                     i += 4U;
                 }
                 valid = 1;
@@ -536,8 +523,7 @@ void terminal_set_sgr_sequence(struct terminal_screen *screen,
             if (valid && code == 38U) {
                 screen->foreground = color;
                 screen->foreground_index = index < 16 ? index : -1;
-            }
-            else if (valid) {
+            } else if (valid) {
                 screen->background = color;
                 screen->background_explicit = 1;
             }
@@ -720,8 +706,7 @@ void terminal_erase_chars(struct terminal_screen *screen, unsigned count) {
 void terminal_scroll_up(struct terminal_screen *screen, unsigned count) {
     if (!terminal_is_ready || !screen) return;
     erase_visible_cursor(screen);
-    unsigned actual = scroll_region_up(screen, screen->scroll_top,
-                                       screen->scroll_bottom, count);
+    unsigned actual = scroll_region_up(screen, screen->scroll_top, screen->scroll_bottom, count);
     render_region_scroll_up(screen, screen->scroll_top, screen->scroll_bottom, actual);
     redraw_visible_cursor(screen);
 }
@@ -729,8 +714,7 @@ void terminal_scroll_up(struct terminal_screen *screen, unsigned count) {
 void terminal_scroll_down(struct terminal_screen *screen, unsigned count) {
     if (!terminal_is_ready || !screen) return;
     erase_visible_cursor(screen);
-    unsigned actual = scroll_region_down(screen, screen->scroll_top,
-                                         screen->scroll_bottom, count);
+    unsigned actual = scroll_region_down(screen, screen->scroll_top, screen->scroll_bottom, count);
     render_region_scroll_down(screen, screen->scroll_top, screen->scroll_bottom, actual);
     redraw_visible_cursor(screen);
 }

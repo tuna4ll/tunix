@@ -9,16 +9,11 @@ void arch_route_timer(void);
 #if defined(__x86_64__)
 #include <tunix/acpi.h>
 
-static inline void arch_probe_buses(void) {
-}
+static inline void arch_probe_buses(void) {}
 
-static inline void arch_power_off(void) {
-    acpi_power_off();
-}
+static inline void arch_power_off(void) { acpi_power_off(); }
 
-__attribute__((noreturn)) static inline void arch_restart(void) {
-    acpi_reset();
-}
+__attribute__((noreturn)) static inline void arch_restart(void) { acpi_reset(); }
 #else
 void arch_probe_buses(void);
 void arch_power_off(void);

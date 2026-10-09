@@ -12,30 +12,30 @@
 #include <tunix/usercopy.h>
 #include <tunix/vfs.h>
 
-#define EINTR 4
+#define EINTR  4
 #define EAGAIN 11
 #define EFAULT 14
 #define EINVAL 22
-#define EIO 5
+#define EIO    5
 #define ENOENT 2
 #define ENOTTY 25
-#define ENXIO 6
+#define ENXIO  6
 
-#define TIOCSCTTY   0x540EUL
-#define TIOCGPTN    0x80045430UL
-#define TIOCSPTLCK  0x40045431UL
-#define TIOCGPTLCK  0x80045439UL
-#define TIOCSWINSZ  0x5414UL
-#define TIOCPKT     0x5420UL
-#define FIONREAD    0x541BUL
+#define TIOCSCTTY  0x540EUL
+#define TIOCGPTN   0x80045430UL
+#define TIOCSPTLCK 0x40045431UL
+#define TIOCGPTLCK 0x80045439UL
+#define TIOCSWINSZ 0x5414UL
+#define TIOCPKT    0x5420UL
+#define FIONREAD   0x541BUL
 
 #define TIOCPKT_DATA 0x00
 
 #define PTY_QUEUE_CAPACITY 8192U
 #define PTY_CANON_CAPACITY 1024U
-#define TTY_ICRNL 0x00000100U
-#define TTY_OPOST 0x00000001U
-#define TTY_ONLCR 0x00000004U
+#define TTY_ICRNL          0x00000100U
+#define TTY_OPOST          0x00000001U
+#define TTY_ONLCR          0x00000004U
 
 struct pty_queue {
     uint8_t bytes[PTY_QUEUE_CAPACITY];
@@ -76,9 +76,7 @@ static struct vfs_node *pts_directory;
 static struct vfs_node *ptmx_node;
 static struct vfs_node *tty_node;
 
-static void queue_reset(struct pty_queue *queue) {
-    queue->head = queue->tail = queue->count = 0;
-}
+static void queue_reset(struct pty_queue *queue) { queue->head = queue->tail = queue->count = 0; }
 
 static int queue_push(struct pty_queue *queue, uint8_t value) {
     if (queue->count >= PTY_QUEUE_CAPACITY) return -1;
@@ -101,8 +99,7 @@ static void initialize_termios(struct tunix_termios *termios) {
     termios->iflag = 0x00000500U;
     termios->oflag = TTY_OPOST | TTY_ONLCR;
     termios->cflag = 0x000000BFU;
-    termios->lflag = TTY_ECHO | TTY_ECHOE | TTY_ECHOK |
-                     TTY_ICANON | TTY_ISIG | TTY_IEXTEN;
+    termios->lflag = TTY_ECHO | TTY_ECHOE | TTY_ECHOK | TTY_ICANON | TTY_ISIG | TTY_IEXTEN;
     termios->cc[TTY_VINTR] = 3;
     termios->cc[TTY_VQUIT] = 28;
     termios->cc[TTY_VERASE] = 127;
@@ -135,8 +132,7 @@ static void reset_pair(struct pty_pair *pty) {
 
 static void echo_byte(struct pty_pair *pty, uint8_t value) {
     if (!(pty->termios.lflag & TTY_ECHO)) return;
-    if (value == '\n' && (pty->termios.oflag & TTY_OPOST) &&
-        (pty->termios.oflag & TTY_ONLCR)) {
+    if (value == '\n' && (pty->termios.oflag & TTY_OPOST) && (pty->termios.oflag & TTY_ONLCR)) {
         (void)queue_push(&pty->to_master, '\r');
     }
     (void)queue_push(&pty->to_master, value);
@@ -161,21 +157,19 @@ static void signal_foreground(struct pty_pair *pty, int signal_number) {
         (void)process_send_signal(-(int64_t)pty->foreground_pgid, signal_number);
 }
 
-static size_t master_feed_input(struct pty_pair *pty, const uint8_t *bytes,
-                                size_t size) {
+static size_t master_feed_input(struct pty_pair *pty, const uint8_t *bytes, size_t size) {
     size_t completed = 0;
     for (; completed < size; completed++) {
         uint8_t value = bytes[completed];
         if ((pty->termios.iflag & TTY_ICRNL) && value == '\r') value = '\n';
 
         if ((pty->termios.lflag & TTY_ISIG) &&
-            (value == pty->termios.cc[TTY_VINTR] ||
-             value == pty->termios.cc[TTY_VQUIT] ||
+            (value == pty->termios.cc[TTY_VINTR] || value == pty->termios.cc[TTY_VQUIT] ||
              value == pty->termios.cc[TTY_VSUSP])) {
-            int signal_number = value == pty->termios.cc[TTY_VINTR] ? SIGINT :
-                                value == pty->termios.cc[TTY_VQUIT] ? SIGQUIT : SIGTSTP;
-            char echoed = signal_number == SIGINT ? 'C' :
-                          signal_number == SIGQUIT ? '\\' : 'Z';
+            int signal_number = value == pty->termios.cc[TTY_VINTR] ? SIGINT
+                : value == pty->termios.cc[TTY_VQUIT]               ? SIGQUIT
+                                                                    : SIGTSTP;
+            char echoed = signal_number == SIGINT ? 'C' : signal_number == SIGQUIT ? '\\' : 'Z';
             signal_foreground(pty, signal_number);
             pty->canonical_length = 0;
             pty->eof_pending = 0;
@@ -339,8 +333,7 @@ void pty_close_endpoint(struct pty_pair *pty, int master) {
     if (!pty) return;
     if (master) {
         if (pty->master_files > 0) pty->master_files--;
-        if (pty->master_files == 0 && pty->foreground_pgid > 0)
-            signal_foreground(pty, SIGHUP);
+        if (pty->master_files == 0 && pty->foreground_pgid > 0) signal_foreground(pty, SIGHUP);
     } else if (pty->slave_files > 0) {
         pty->slave_files--;
     }
@@ -376,8 +369,7 @@ int64_t pty_read(struct pty_pair *pty, int master, size_t size, void *buffer) {
     if (master && pty->packet_mode) {
         if (size < 2) return -EAGAIN;
         out[completed++] = TIOCPKT_DATA;
-        while (completed + 1 < size && queue->count)
-            out[completed++] = (uint8_t)queue_pop(queue);
+        while (completed + 1 < size && queue->count) out[completed++] = (uint8_t)queue_pop(queue);
         return (int64_t)completed;
     }
     while (completed < size && queue->count) out[completed++] = (uint8_t)queue_pop(queue);
@@ -388,7 +380,8 @@ int64_t pty_write(struct pty_pair *pty, int master, size_t size, const void *buf
     TTY_LOCKED;
     if (!pty || !buffer) return -EINVAL;
     if ((master && pty->slave_ever_opened && pty->slave_files == 0) ||
-        (!master && pty->master_files == 0)) return -EIO;
+        (!master && pty->master_files == 0))
+        return -EIO;
     const uint8_t *bytes = (const uint8_t *)buffer;
     if (master) {
         size_t completed = master_feed_input(pty, bytes, size);
@@ -397,8 +390,7 @@ int64_t pty_write(struct pty_pair *pty, int master, size_t size, const void *buf
     size_t completed = 0;
     for (; completed < size; completed++) {
         uint8_t value = bytes[completed];
-        if (value == '\n' && (pty->termios.oflag & TTY_OPOST) &&
-            (pty->termios.oflag & TTY_ONLCR)) {
+        if (value == '\n' && (pty->termios.oflag & TTY_OPOST) && (pty->termios.oflag & TTY_ONLCR)) {
             if (queue_push(&pty->to_master, '\r') != 0) break;
         }
         if (queue_push(&pty->to_master, value) != 0) break;
@@ -409,22 +401,21 @@ int64_t pty_write(struct pty_pair *pty, int master, size_t size, const void *buf
 int pty_read_ready(struct pty_pair *pty, int master) {
     TTY_POLL_LOCKED;
     if (!pty) return 0;
-    if (master) return pty->to_master.count > 0 ||
-                       (pty->slave_ever_opened && pty->slave_files == 0);
+    if (master)
+        return pty->to_master.count > 0 || (pty->slave_ever_opened && pty->slave_files == 0);
     return pty->to_slave.count > 0 || pty->eof_pending || pty->master_files == 0;
 }
 
 int pty_write_ready(struct pty_pair *pty, int master) {
     TTY_POLL_LOCKED;
     if (!pty) return 0;
-    if (master) return !(pty->slave_ever_opened && pty->slave_files == 0) &&
-                       pty->to_slave.count < PTY_QUEUE_CAPACITY &&
-                       pty->canonical_length < PTY_CANON_CAPACITY;
+    if (master)
+        return !(pty->slave_ever_opened && pty->slave_files == 0) &&
+            pty->to_slave.count < PTY_QUEUE_CAPACITY && pty->canonical_length < PTY_CANON_CAPACITY;
     return pty->to_master.count < PTY_QUEUE_CAPACITY && pty->master_files > 0;
 }
 
-int64_t pty_ioctl(struct pty_pair *pty, int master, unsigned long request,
-                  uint64_t user_argument) {
+int64_t pty_ioctl(struct pty_pair *pty, int master, unsigned long request, uint64_t user_argument) {
     TTY_LOCKED;
     if (!pty) return -ENXIO;
     if (request == TIOCGPTN && master) {
@@ -482,7 +473,8 @@ int64_t pty_ioctl(struct pty_pair *pty, int master, unsigned long request,
         return copy_to_user(user_argument, &pty->winsize, sizeof(pty->winsize)) == 0 ? 0 : -EFAULT;
     }
     if (request == TIOCSWINSZ) {
-        return copy_from_user(&pty->winsize, user_argument, sizeof(pty->winsize)) == 0 ? 0 : -EFAULT;
+        return copy_from_user(&pty->winsize, user_argument, sizeof(pty->winsize)) == 0 ? 0
+                                                                                       : -EFAULT;
     }
     if (request == TIOCGETD) {
         int discipline = 0;

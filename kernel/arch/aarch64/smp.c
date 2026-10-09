@@ -15,9 +15,9 @@
 extern void kprintf(const char *fmt, ...);
 extern char secondary_entry[];
 
-#define PSCI_CPU_ON 0xC4000003ULL
-#define STARTUP_TIMEOUT_NS 1000000000ULL
-#define FLUSH_TIMEOUT_NS 2000000000ULL
+#define PSCI_CPU_ON         0xC4000003ULL
+#define STARTUP_TIMEOUT_NS  1000000000ULL
+#define FLUSH_TIMEOUT_NS    2000000000ULL
 #define MPIDR_AFFINITY_MASK 0xFF00FFFFFFULL
 
 uint64_t secondary_root;
@@ -41,18 +41,14 @@ void smp_service_flush(void) {
     __atomic_store_n(&self->flush_pending, 0, __ATOMIC_RELEASE);
 }
 
-void smp_send_reschedule(void) {
-    gic_send_reschedule_ipi();
-}
+void smp_send_reschedule(void) { gic_send_reschedule_ipi(); }
 
 void smp_send_reschedule_to(unsigned index) {
     struct cpu *cpu = percpu_slot(index);
     if (cpu && cpu->online) gic_send_reschedule_to(cpu->apic_id);
 }
 
-void smp_flush_interrupt(void) {
-    smp_service_flush();
-}
+void smp_flush_interrupt(void) { smp_service_flush(); }
 
 static void flush_others(uint64_t cr3, int everywhere) {
     if (online_cpus < 2 || (!cr3 && !everywhere)) return;
@@ -63,8 +59,7 @@ static void flush_others(uint64_t cr3, int everywhere) {
     for (unsigned index = 0; index < SMP_MAX_CPUS; index++) {
         struct cpu *cpu = percpu_slot(index);
         if (index == self || !cpu->online) continue;
-        if (!everywhere && __atomic_load_n(&cpu->address_space, __ATOMIC_SEQ_CST) != cr3)
-            continue;
+        if (!everywhere && __atomic_load_n(&cpu->address_space, __ATOMIC_SEQ_CST) != cr3) continue;
         __atomic_store_n(&cpu->flush_pending, 1, __ATOMIC_RELEASE);
         asked = 1;
     }
@@ -91,13 +86,9 @@ static void flush_others(uint64_t cr3, int everywhere) {
     }
 }
 
-void smp_flush_address_space(uint64_t cr3) {
-    flush_others(cr3, 0);
-}
+void smp_flush_address_space(uint64_t cr3) { flush_others(cr3, 0); }
 
-void smp_flush_kernel_mappings(void) {
-    flush_others(0, 1);
-}
+void smp_flush_kernel_mappings(void) { flush_others(0, 1); }
 
 void aarch64_secondary_start(uint64_t index) {
     unsigned cpu = (unsigned)index;

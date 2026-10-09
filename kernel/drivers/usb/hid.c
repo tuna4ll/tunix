@@ -2,46 +2,46 @@
 
 #include <tunix/hid.h>
 
-#define ITEM_MAIN 0U
+#define ITEM_MAIN   0U
 #define ITEM_GLOBAL 1U
-#define ITEM_LOCAL 2U
+#define ITEM_LOCAL  2U
 
-#define MAIN_INPUT 0x8U
-#define MAIN_OUTPUT 0x9U
-#define MAIN_COLLECTION 0xAU
-#define MAIN_FEATURE 0xBU
+#define MAIN_INPUT          0x8U
+#define MAIN_OUTPUT         0x9U
+#define MAIN_COLLECTION     0xAU
+#define MAIN_FEATURE        0xBU
 #define MAIN_END_COLLECTION 0xCU
 
-#define GLOBAL_USAGE_PAGE 0x0U
+#define GLOBAL_USAGE_PAGE      0x0U
 #define GLOBAL_LOGICAL_MINIMUM 0x1U
 #define GLOBAL_LOGICAL_MAXIMUM 0x2U
-#define GLOBAL_REPORT_SIZE 0x7U
-#define GLOBAL_REPORT_ID 0x8U
-#define GLOBAL_REPORT_COUNT 0x9U
-#define GLOBAL_PUSH 0xAU
-#define GLOBAL_POP 0xBU
+#define GLOBAL_REPORT_SIZE     0x7U
+#define GLOBAL_REPORT_ID       0x8U
+#define GLOBAL_REPORT_COUNT    0x9U
+#define GLOBAL_PUSH            0xAU
+#define GLOBAL_POP             0xBU
 
-#define LOCAL_USAGE 0x0U
+#define LOCAL_USAGE         0x0U
 #define LOCAL_USAGE_MINIMUM 0x1U
 #define LOCAL_USAGE_MAXIMUM 0x2U
 
 #define INPUT_CONSTANT 0x1U
 #define INPUT_RELATIVE 0x4U
 
-#define PAGE_GENERIC_DESKTOP 0x01U
-#define PAGE_BUTTON 0x09U
-#define PAGE_CONSUMER 0x0CU
-#define USAGE_POINTER 0x01U
-#define USAGE_MOUSE 0x02U
-#define USAGE_X 0x30U
-#define USAGE_Y 0x31U
-#define USAGE_WHEEL 0x38U
-#define USAGE_AC_PAN 0x238U
+#define PAGE_GENERIC_DESKTOP   0x01U
+#define PAGE_BUTTON            0x09U
+#define PAGE_CONSUMER          0x0CU
+#define USAGE_POINTER          0x01U
+#define USAGE_MOUSE            0x02U
+#define USAGE_X                0x30U
+#define USAGE_Y                0x31U
+#define USAGE_WHEEL            0x38U
+#define USAGE_AC_PAN           0x238U
 #define COLLECTION_APPLICATION 1U
 
 #define MAX_USAGES 32U
-#define MAX_STACK 4U
-#define MAX_DEPTH 16U
+#define MAX_STACK  4U
+#define MAX_DEPTH  16U
 
 struct globals {
     uint32_t usage_page;
@@ -101,22 +101,22 @@ int hid_parse_mouse(const uint8_t *descriptor, uint32_t length, struct hid_mouse
 
         if (type == ITEM_GLOBAL) {
             switch (tag) {
-                case GLOBAL_USAGE_PAGE: global.usage_page = data; break;
-                case GLOBAL_LOGICAL_MINIMUM: global.logical_minimum = sign_extend(data, size); break;
-                case GLOBAL_LOGICAL_MAXIMUM:
-                    global.logical_maximum = global.logical_minimum < 0 ? sign_extend(data, size)
-                                                                        : (int32_t)data;
-                    break;
-                case GLOBAL_REPORT_SIZE: global.report_size = data; break;
-                case GLOBAL_REPORT_COUNT: global.report_count = data; break;
-                case GLOBAL_REPORT_ID: global.report_id = data & 0xFFU; break;
-                case GLOBAL_PUSH:
-                    if (stack_depth < MAX_STACK) stack[stack_depth++] = global;
-                    break;
-                case GLOBAL_POP:
-                    if (stack_depth) global = stack[--stack_depth];
-                    break;
-                default: break;
+            case GLOBAL_USAGE_PAGE:      global.usage_page = data; break;
+            case GLOBAL_LOGICAL_MINIMUM: global.logical_minimum = sign_extend(data, size); break;
+            case GLOBAL_LOGICAL_MAXIMUM:
+                global.logical_maximum =
+                    global.logical_minimum < 0 ? sign_extend(data, size) : (int32_t)data;
+                break;
+            case GLOBAL_REPORT_SIZE:  global.report_size = data; break;
+            case GLOBAL_REPORT_COUNT: global.report_count = data; break;
+            case GLOBAL_REPORT_ID:    global.report_id = data & 0xFFU; break;
+            case GLOBAL_PUSH:
+                if (stack_depth < MAX_STACK) stack[stack_depth++] = global;
+                break;
+            case GLOBAL_POP:
+                if (stack_depth) global = stack[--stack_depth];
+                break;
+            default: break;
             }
             continue;
         }
@@ -172,12 +172,15 @@ int hid_parse_mouse(const uint8_t *descriptor, uint32_t length, struct hid_mouse
                         }
                         if (code > found.buttons) found.buttons = (uint8_t)code;
                     } else if (page == PAGE_GENERIC_DESKTOP && (data & INPUT_RELATIVE)) {
-                        if (code == USAGE_X) set_field(&found.x, field, global.report_size, is_signed);
-                        if (code == USAGE_Y) set_field(&found.y, field, global.report_size, is_signed);
+                        if (code == USAGE_X)
+                            set_field(&found.x, field, global.report_size, is_signed);
+                        if (code == USAGE_Y)
+                            set_field(&found.y, field, global.report_size, is_signed);
                         if (code == USAGE_WHEEL)
                             set_field(&found.wheel, field, global.report_size, is_signed);
                         if (code == USAGE_X || code == USAGE_Y) chosen = (int)id;
-                    } else if (page == PAGE_GENERIC_DESKTOP && (code == USAGE_X || code == USAGE_Y) &&
+                    } else if (page == PAGE_GENERIC_DESKTOP &&
+                               (code == USAGE_X || code == USAGE_Y) &&
                                (!found.x.size || found.absolute)) {
                         if (code == USAGE_X) {
                             set_field(&found.x, field, global.report_size, is_signed);
@@ -188,7 +191,8 @@ int hid_parse_mouse(const uint8_t *descriptor, uint32_t length, struct hid_mouse
                         }
                         found.absolute = 1;
                         chosen = (int)id;
-                    } else if (page == PAGE_CONSUMER && code == USAGE_AC_PAN && (data & INPUT_RELATIVE)) {
+                    } else if (page == PAGE_CONSUMER && code == USAGE_AC_PAN &&
+                               (data & INPUT_RELATIVE)) {
                         set_field(&found.pan, field, global.report_size, is_signed);
                     }
                 }
@@ -222,8 +226,8 @@ static int32_t extract(const uint8_t *report, uint32_t length, const struct hid_
     return (int32_t)(int64_t)value;
 }
 
-int hid_decode_mouse(const struct hid_mouse_layout *layout, const uint8_t *report,
-                     uint32_t length, int *dx, int *dy, int *wheel, uint32_t *buttons) {
+int hid_decode_mouse(const struct hid_mouse_layout *layout, const uint8_t *report, uint32_t length,
+                     int *dx, int *dy, int *wheel, uint32_t *buttons) {
     if (layout->report_id) {
         if (!length || report[0] != layout->report_id) return -1;
         report++;

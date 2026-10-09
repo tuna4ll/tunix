@@ -14,10 +14,6 @@ static void set(char *destination, const char *name, size_t length) {
     destination[length] = '\0';
 }
 
-void uts_set_hostname(const char *name, size_t length) {
-    set(hostname, name, length);
-}
+void uts_set_hostname(const char *name, size_t length) { set(hostname, name, length); }
 
-void uts_set_domainname(const char *name, size_t length) {
-    set(domainname, name, length);
-}
+void uts_set_domainname(const char *name, size_t length) { set(domainname, name, length); }

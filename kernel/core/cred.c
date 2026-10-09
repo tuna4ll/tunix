@@ -7,12 +7,12 @@
 #include <tunix/process.h>
 #include <tunix/vfs.h>
 
-#define EPERM 1
-#define ENOENT 2
-#define EACCES 13
-#define EINVAL 22
-#define EROFS 30
-#define ENOMEM 12
+#define EPERM        1
+#define ENOENT       2
+#define EACCES       13
+#define EINVAL       22
+#define EROFS        30
+#define ENOMEM       12
 #define ENAMETOOLONG 36
 
 #define MODE_SETUID 04000U
@@ -181,10 +181,8 @@ int64_t cred_set_reuid(uint32_t ruid, uint32_t euid) {
     struct credentials *cred = cred_current();
     if (!cred) return -EPERM;
     if (!privileged(cred)) {
-        if (ruid != CRED_UNCHANGED && ruid != cred->uid && ruid != cred->euid)
-            return -EPERM;
-        if (euid != CRED_UNCHANGED &&
-            !one_of(euid, cred->uid, cred->euid, cred->suid))
+        if (ruid != CRED_UNCHANGED && ruid != cred->uid && ruid != cred->euid) return -EPERM;
+        if (euid != CRED_UNCHANGED && !one_of(euid, cred->uid, cred->euid, cred->suid))
             return -EPERM;
     }
     uint32_t old_uid = cred->uid;
@@ -200,10 +198,8 @@ int64_t cred_set_regid(uint32_t rgid, uint32_t egid) {
     struct credentials *cred = cred_current();
     if (!cred) return -EPERM;
     if (!privileged(cred)) {
-        if (rgid != CRED_UNCHANGED && rgid != cred->gid && rgid != cred->egid)
-            return -EPERM;
-        if (egid != CRED_UNCHANGED &&
-            !one_of(egid, cred->gid, cred->egid, cred->sgid))
+        if (rgid != CRED_UNCHANGED && rgid != cred->gid && rgid != cred->egid) return -EPERM;
+        if (egid != CRED_UNCHANGED && !one_of(egid, cred->gid, cred->egid, cred->sgid))
             return -EPERM;
     }
     uint32_t old_gid = cred->gid;
@@ -222,8 +218,7 @@ int64_t cred_set_resuid(uint32_t ruid, uint32_t euid, uint32_t suid) {
         const uint32_t values[3] = {ruid, euid, suid};
         for (int index = 0; index < 3; index++) {
             if (values[index] == CRED_UNCHANGED) continue;
-            if (!one_of(values[index], cred->uid, cred->euid, cred->suid))
-                return -EPERM;
+            if (!one_of(values[index], cred->uid, cred->euid, cred->suid)) return -EPERM;
         }
     }
     if (ruid != CRED_UNCHANGED) cred->uid = ruid;
@@ -240,8 +235,7 @@ int64_t cred_set_resgid(uint32_t rgid, uint32_t egid, uint32_t sgid) {
         const uint32_t values[3] = {rgid, egid, sgid};
         for (int index = 0; index < 3; index++) {
             if (values[index] == CRED_UNCHANGED) continue;
-            if (!one_of(values[index], cred->gid, cred->egid, cred->sgid))
-                return -EPERM;
+            if (!one_of(values[index], cred->gid, cred->egid, cred->sgid)) return -EPERM;
         }
     }
     if (rgid != CRED_UNCHANGED) cred->gid = rgid;
@@ -255,8 +249,8 @@ int64_t cred_set_fsuid(uint32_t fsuid) {
     struct credentials *cred = cred_current();
     if (!cred) return 0;
     uint32_t previous = cred->fsuid;
-    if (privileged(cred) || fsuid == cred->uid || fsuid == cred->euid ||
-        fsuid == cred->suid || fsuid == cred->fsuid)
+    if (privileged(cred) || fsuid == cred->uid || fsuid == cred->euid || fsuid == cred->suid ||
+        fsuid == cred->fsuid)
         cred->fsuid = fsuid;
     return previous;
 }
@@ -265,15 +259,13 @@ int64_t cred_set_fsgid(uint32_t fsgid) {
     struct credentials *cred = cred_current();
     if (!cred) return 0;
     uint32_t previous = cred->fsgid;
-    if (privileged(cred) || fsgid == cred->gid || fsgid == cred->egid ||
-        fsgid == cred->sgid || fsgid == cred->fsgid)
+    if (privileged(cred) || fsgid == cred->gid || fsgid == cred->egid || fsgid == cred->sgid ||
+        fsgid == cred->fsgid)
         cred->fsgid = fsgid;
     return previous;
 }
 
-static uint32_t *groups_references(uint32_t *groups) {
-    return groups - 2;
-}
+static uint32_t *groups_references(uint32_t *groups) { return groups - 2; }
 
 void cred_groups_share(struct credentials *cred) {
     if (cred && cred->groups) groups_references(cred->groups)[0]++;
@@ -305,8 +297,7 @@ int64_t cred_set_groups(uint32_t count, const uint32_t *groups) {
     return 0;
 }
 
-void cred_apply_exec(struct credentials *cred, const struct vfs_node *node,
-                     int no_new_privs) {
+void cred_apply_exec(struct credentials *cred, const struct vfs_node *node, int no_new_privs) {
     if (!cred) return;
     if (node && !no_new_privs) {
         if (node->mode & MODE_SETUID) cred->euid = node->uid;

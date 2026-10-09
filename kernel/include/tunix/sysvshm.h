@@ -7,8 +7,8 @@ struct file;
 
 #define IPC_PRIVATE 0
 
-#define IPC_CREAT  01000
-#define IPC_EXCL   02000
+#define IPC_CREAT 01000
+#define IPC_EXCL  02000
 
 #define IPC_RMID 0
 #define IPC_SET  1
@@ -18,10 +18,10 @@ struct file;
 #define SHM_RDONLY 010000
 #define SHM_RND    020000
 
-#define SHM_DEST   01000
+#define SHM_DEST 01000
 
 struct shm_id_ds {
-    int32_t  key;
+    int32_t key;
     uint32_t uid;
     uint32_t gid;
     uint32_t cuid;
@@ -31,11 +31,11 @@ struct shm_id_ds {
     uint64_t pad1;
     uint64_t pad2;
     uint64_t segsz;
-    int64_t  atime;
-    int64_t  dtime;
-    int64_t  ctime;
-    int32_t  cpid;
-    int32_t  lpid;
+    int64_t atime;
+    int64_t dtime;
+    int64_t ctime;
+    int32_t cpid;
+    int32_t lpid;
     uint64_t nattch;
     uint64_t unused4;
     uint64_t unused5;

@@ -11,62 +11,62 @@
 
 extern void kprintf(const char *fmt, ...);
 
-#define REG_BLOCK 0x04U
-#define REG_ARGUMENT 0x08U
-#define REG_COMMAND 0x0CU
-#define REG_RESPONSE 0x10U
-#define REG_BUFFER 0x20U
-#define REG_PRESENT 0x24U
-#define REG_HOST 0x28U
-#define REG_CLOCK 0x2CU
-#define REG_STATUS 0x30U
+#define REG_BLOCK         0x04U
+#define REG_ARGUMENT      0x08U
+#define REG_COMMAND       0x0CU
+#define REG_RESPONSE      0x10U
+#define REG_BUFFER        0x20U
+#define REG_PRESENT       0x24U
+#define REG_HOST          0x28U
+#define REG_CLOCK         0x2CU
+#define REG_STATUS        0x30U
 #define REG_STATUS_ENABLE 0x34U
 #define REG_SIGNAL_ENABLE 0x38U
-#define REG_CAPABILITIES 0x40U
-#define REG_VERSION 0xFCU
+#define REG_CAPABILITIES  0x40U
+#define REG_VERSION       0xFCU
 
 #define PRESENT_COMMAND_INHIBIT (1U << 0)
-#define PRESENT_DATA_INHIBIT (1U << 1)
+#define PRESENT_DATA_INHIBIT    (1U << 1)
 
-#define STATUS_COMMAND_DONE (1U << 0)
-#define STATUS_TRANSFER_DONE (1U << 1)
-#define STATUS_WRITE_READY (1U << 4)
-#define STATUS_READ_READY (1U << 5)
+#define STATUS_COMMAND_DONE   (1U << 0)
+#define STATUS_TRANSFER_DONE  (1U << 1)
+#define STATUS_WRITE_READY    (1U << 4)
+#define STATUS_READ_READY     (1U << 5)
 #define STATUS_CARD_INTERRUPT (1U << 8)
-#define STATUS_ERROR (1U << 15)
+#define STATUS_ERROR          (1U << 15)
 
 #define CLOCK_INTERNAL_ENABLE (1U << 0)
 #define CLOCK_INTERNAL_STABLE (1U << 1)
-#define CLOCK_CARD_ENABLE (1U << 2)
+#define CLOCK_CARD_ENABLE     (1U << 2)
 
-#define RESET_ALL (1U << 24)
+#define RESET_ALL     (1U << 24)
 #define RESET_COMMAND (1U << 25)
-#define RESET_DATA (1U << 26)
+#define RESET_DATA    (1U << 26)
 
-#define RESPONSE_NONE 0U
-#define RESPONSE_136 1U
-#define RESPONSE_48 2U
+#define RESPONSE_NONE    0U
+#define RESPONSE_136     1U
+#define RESPONSE_48      2U
 #define RESPONSE_48_BUSY 3U
-#define CHECK_CRC 0x08U
-#define CHECK_INDEX 0x10U
-#define DATA_PRESENT 0x20U
+#define CHECK_CRC        0x08U
+#define CHECK_INDEX      0x10U
+#define DATA_PRESENT     0x20U
 
-#define R1 (RESPONSE_48 | CHECK_CRC | CHECK_INDEX)
+#define R1  (RESPONSE_48 | CHECK_CRC | CHECK_INDEX)
 #define R1B (RESPONSE_48_BUSY | CHECK_CRC | CHECK_INDEX)
-#define R2 (RESPONSE_136 | CHECK_CRC)
-#define R3 RESPONSE_48
+#define R2  (RESPONSE_136 | CHECK_CRC)
+#define R3  RESPONSE_48
 
 #define TRANSFER_BLOCK_COUNT 0x02U
-#define TRANSFER_AUTO_CMD12 0x04U
-#define TRANSFER_READ 0x10U
-#define TRANSFER_MULTIPLE 0x20U
+#define TRANSFER_AUTO_CMD12  0x04U
+#define TRANSFER_READ        0x10U
+#define TRANSFER_MULTIPLE    0x20U
 
-#define SECTOR 512U
+#define SECTOR       512U
 #define CHUNK_BLOCKS 64U
-#define MAX_HOSTS 4U
+#define MAX_HOSTS    4U
 
 #define COMMAND_TIMEOUT_NS 1000000000ULL
-#define DATA_TIMEOUT_NS 5000000000ULL
+#define DATA_TIMEOUT_NS    5000000000ULL
 
 struct sdhci_host {
     struct mutex lock;
@@ -107,8 +107,8 @@ static int bits_match(void *context) {
     return (read_register(wait->host, wait->offset) & wait->mask) == wait->wanted;
 }
 
-static int wait_bits(const struct sdhci_host *host, uint32_t offset, uint32_t mask,
-                     uint32_t wanted, uint64_t timeout_ns) {
+static int wait_bits(const struct sdhci_host *host, uint32_t offset, uint32_t mask, uint32_t wanted,
+                     uint64_t timeout_ns) {
     struct register_wait wait = {host, offset, mask, wanted};
     return io_poll(bits_match, &wait, timeout_ns);
 }
@@ -138,15 +138,15 @@ static int set_clock(struct sdhci_host *host, uint64_t target) {
     }
 
     write_register(host, REG_CLOCK, clock | divider | CLOCK_INTERNAL_ENABLE);
-    if (wait_bits(host, REG_CLOCK, CLOCK_INTERNAL_STABLE, CLOCK_INTERNAL_STABLE,
-                  50000000ULL) != 0) return -1;
+    if (wait_bits(host, REG_CLOCK, CLOCK_INTERNAL_STABLE, CLOCK_INTERNAL_STABLE, 50000000ULL) != 0)
+        return -1;
     write_register(host, REG_CLOCK, read_register(host, REG_CLOCK) | CLOCK_CARD_ENABLE);
     settle_ns(2000000ULL);
     return 0;
 }
 
-static int command(struct sdhci_host *host, uint32_t index, uint32_t argument,
-                   uint32_t flags, uint32_t transfer, uint32_t response[4]) {
+static int command(struct sdhci_host *host, uint32_t index, uint32_t argument, uint32_t flags,
+                   uint32_t transfer, uint32_t response[4]) {
     uint32_t inhibit = PRESENT_COMMAND_INHIBIT;
     if ((flags & DATA_PRESENT) || (flags & 3U) == RESPONSE_48_BUSY) inhibit |= PRESENT_DATA_INHIBIT;
     if (wait_bits(host, REG_PRESENT, inhibit, 0, COMMAND_TIMEOUT_NS) != 0) return -1;
@@ -189,7 +189,7 @@ static int command(struct sdhci_host *host, uint32_t index, uint32_t argument,
 }
 
 static int application_command(struct sdhci_host *host, uint32_t index, uint32_t argument,
-                                uint32_t flags, uint32_t response[4]) {
+                               uint32_t flags, uint32_t response[4]) {
     uint32_t ignored[4];
     if (command(host, 55, host->rca << 16, R1, 0, ignored) != 0) return -1;
     return command(host, index, argument, flags, 0, response);
@@ -216,12 +216,14 @@ static int card_init(struct sdhci_host *host) {
     settle_ns(10000000ULL);
     write_register(host, REG_STATUS_ENABLE, 0xFFFFFFFFU & ~STATUS_CARD_INTERRUPT);
     write_register(host, REG_SIGNAL_ENABLE, 0);
-    write_register(host, REG_CLOCK, (read_register(host, REG_CLOCK) & ~(0xFFU << 16)) | (0x0EU << 16));
+    write_register(host, REG_CLOCK,
+                   (read_register(host, REG_CLOCK) & ~(0xFFU << 16)) | (0x0EU << 16));
     if (set_clock(host, 400000ULL) != 0) return -2;
 
     uint32_t response[4];
     command(host, 0, 0, RESPONSE_NONE, 0, NULL);
-    int version2 = command(host, 8, 0x1AAU, R1, 0, response) == 0 && (response[0] & 0xFFFU) == 0x1AAU;
+    int version2 =
+        command(host, 8, 0x1AAU, R1, 0, response) == 0 && (response[0] & 0xFFFU) == 0x1AAU;
 
     uint64_t deadline = time_uptime_ns() + 2000000000ULL;
     host->rca = 0;
@@ -245,8 +247,8 @@ static int card_init(struct sdhci_host *host) {
     return 0;
 }
 
-static int transfer_chunk(struct sdhci_host *host, uint64_t lba, uint32_t count,
-                          uint8_t *buffer, int write) {
+static int transfer_chunk(struct sdhci_host *host, uint64_t lba, uint32_t count, uint8_t *buffer,
+                          int write) {
     uint32_t argument = host->high_capacity ? (uint32_t)lba : (uint32_t)(lba * SECTOR);
     uint32_t mode = TRANSFER_BLOCK_COUNT | (write ? 0 : TRANSFER_READ);
     uint32_t index = write ? 24U : 17U;
@@ -269,7 +271,7 @@ static int transfer_chunk(struct sdhci_host *host, uint64_t lba, uint32_t count,
         for (unsigned offset = 0; offset < SECTOR; offset += 4U) {
             if (write) {
                 uint32_t word = (uint32_t)sector[offset] | ((uint32_t)sector[offset + 1] << 8) |
-                                ((uint32_t)sector[offset + 2] << 16) | ((uint32_t)sector[offset + 3] << 24);
+                    ((uint32_t)sector[offset + 2] << 16) | ((uint32_t)sector[offset + 3] << 24);
                 *(volatile uint32_t *)(host->base + REG_BUFFER) = word;
             } else {
                 uint32_t word = *(volatile uint32_t *)(host->base + REG_BUFFER);
@@ -290,7 +292,8 @@ static int transfer_chunk(struct sdhci_host *host, uint64_t lba, uint32_t count,
     return 0;
 }
 
-static int sdhci_transfer_unlocked(void *context, uint64_t lba, uint32_t count, uint8_t *buffer, int write) {
+static int sdhci_transfer_unlocked(void *context, uint64_t lba, uint32_t count, uint8_t *buffer,
+                                   int write) {
     struct sdhci_host *host = context;
     if (lba >= host->sectors || count > host->sectors - lba) return -1;
     while (count) {

@@ -23,25 +23,47 @@ extern void panic(const char *msg);
 
 #define VERBOSE_FAULT_LIMIT 24U
 
-const char *exception_messages[] = {
-    "Division By Zero", "Debug", "Non Maskable Interrupt", "Breakpoint",
-    "Into Detected Overflow", "Out of Bounds", "Invalid Opcode", "No Coprocessor",
-    "Double Fault", "Coprocessor Segment Overrun", "Bad TSS", "Segment Not Present",
-    "Stack Fault", "General Protection Fault", "Page Fault", "Unknown Interrupt",
-    "Coprocessor Fault", "Alignment Check", "Machine Check", "SIMD Floating-Point",
-    "Virtualization", "Control Protection", "Reserved", "Reserved",
-    "Reserved", "Reserved", "Reserved", "Reserved",
-    "Hypervisor Injection", "VMM Communication", "Security", "Reserved"
-};
+const char *exception_messages[] = {"Division By Zero",
+                                    "Debug",
+                                    "Non Maskable Interrupt",
+                                    "Breakpoint",
+                                    "Into Detected Overflow",
+                                    "Out of Bounds",
+                                    "Invalid Opcode",
+                                    "No Coprocessor",
+                                    "Double Fault",
+                                    "Coprocessor Segment Overrun",
+                                    "Bad TSS",
+                                    "Segment Not Present",
+                                    "Stack Fault",
+                                    "General Protection Fault",
+                                    "Page Fault",
+                                    "Unknown Interrupt",
+                                    "Coprocessor Fault",
+                                    "Alignment Check",
+                                    "Machine Check",
+                                    "SIMD Floating-Point",
+                                    "Virtualization",
+                                    "Control Protection",
+                                    "Reserved",
+                                    "Reserved",
+                                    "Reserved",
+                                    "Reserved",
+                                    "Reserved",
+                                    "Reserved",
+                                    "Hypervisor Injection",
+                                    "VMM Communication",
+                                    "Security",
+                                    "Reserved"};
 
 static int fault_signal(uint64_t vector) {
     switch (vector) {
-        case 0:  return SIGFPE;
-        case 6:  return SIGILL;
-        case 16:
-        case 19: return SIGFPE;
-        case 17: return SIGBUS;
-        default: return SIGSEGV;
+    case 0:  return SIGFPE;
+    case 6:  return SIGILL;
+    case 16:
+    case 19: return SIGFPE;
+    case 17: return SIGBUS;
+    default: return SIGSEGV;
     }
 }
 
@@ -68,8 +90,7 @@ static void isr_dispatch(struct interrupt_frame *regs) {
         process_reschedule_interrupt(regs);
         return;
     }
-    if (regs->int_no == PIC_MASTER_VECTOR + 1U ||
-        regs->int_no == PIC_SLAVE_VECTOR + 4U) {
+    if (regs->int_no == PIC_MASTER_VECTOR + 1U || regs->int_no == PIC_SLAVE_VECTOR + 4U) {
         interrupt_acknowledge((unsigned)regs->int_no);
         input_irq();
         return;
@@ -79,8 +100,7 @@ static void isr_dispatch(struct interrupt_frame *regs) {
         if (acpi_sci_interrupt()) power_button_pressed();
         return;
     }
-    if (regs->int_no >= IRQ_VECTOR_FIRST &&
-        regs->int_no < IRQ_VECTOR_FIRST + IRQ_VECTOR_COUNT) {
+    if (regs->int_no >= IRQ_VECTOR_FIRST && regs->int_no < IRQ_VECTOR_FIRST + IRQ_VECTOR_COUNT) {
         apic_send_eoi();
         irq_dispatch((unsigned)regs->int_no);
         return;
@@ -90,32 +110,29 @@ static void isr_dispatch(struct interrupt_frame *regs) {
         uint64_t fault_error = regs->err_code;
         uint64_t fault_cs = regs->cs;
         uint64_t fault_address = 0;
-        if (regs->int_no == 14)
-            __asm__ volatile("mov %%cr2, %0" : "=r"(fault_address));
+        if (regs->int_no == 14) __asm__ volatile("mov %%cr2, %0" : "=r"(fault_address));
 
         if (boot_verbose() && (regs->cs & 3U) == 3U) {
             static unsigned traced;
             if (traced < VERBOSE_FAULT_LIMIT) {
                 traced++;
-                kprintf("fault: pid %d rip %p addr %p error %x\n",
-                        (int)process_current_pid(), (void *)fault_rip,
-                        (void *)fault_address, (unsigned)fault_error);
+                kprintf("fault: pid %d rip %p addr %p error %x\n", (int)process_current_pid(),
+                        (void *)fault_rip, (void *)fault_address, (unsigned)fault_error);
             }
         }
 
-        if (regs->int_no == 14 && (regs->cs & 3U) == 3U &&
-            !(regs->err_code & 1U) && process_grow_user_stack(fault_address)) {
+        if (regs->int_no == 14 && (regs->cs & 3U) == 3U && !(regs->err_code & 1U) &&
+            process_grow_user_stack(fault_address)) {
             return;
         }
 
-        if (regs->int_no == 14 && (regs->cs & 3U) == 3U &&
-            !(regs->err_code & 1U) && process_commit_area(fault_address)) {
+        if (regs->int_no == 14 && (regs->cs & 3U) == 3U && !(regs->err_code & 1U) &&
+            process_commit_area(fault_address)) {
             return;
         }
 
-        if (regs->int_no == 14 && (regs->cs & 3U) == 3U &&
-            (regs->err_code & 1U) && (regs->err_code & 2U) &&
-            process_handle_cow_fault(fault_address)) {
+        if (regs->int_no == 14 && (regs->cs & 3U) == 3U && (regs->err_code & 1U) &&
+            (regs->err_code & 2U) && process_handle_cow_fault(fault_address)) {
             return;
         }
 
@@ -150,23 +167,21 @@ static void isr_dispatch(struct interrupt_frame *regs) {
         uint64_t stack_words[12];
         int stack_ok = 1;
         for (unsigned i = 0; i < 12; i++) {
-            if (!faulted || vmm_copy_from_space(faulted->cr3, &stack_words[i],
-                                                saved_rsp + (uint64_t)i * 8U, 8) != 0) {
+            if (!faulted ||
+                vmm_copy_from_space(faulted->cr3, &stack_words[i], saved_rsp + (uint64_t)i * 8U,
+                                    8) != 0) {
                 stack_ok = 0;
                 break;
             }
         }
 
         kprintf("%s in %s[%d] at %s+%p (RIP %p) addr %p (error %x), signalling process\n",
-                exception_messages[regs->int_no],
-                faulted_name[0] ? faulted_name : "?", faulted_pid,
-                object, (void *)within, (void *)fault_rip,
-                (void *)fault_address, fault_error);
-        kprintf("fault: rdi=%p rsi=%p rdx=%p rax=%p rbx=%p rcx=%p\n",
-                (void *)saved_rdi, (void *)saved_rsi, (void *)saved_rdx,
-                (void *)saved_rax, (void *)saved_rbx, (void *)saved_rcx);
-        kprintf("fault: rbp=%p rsp=%p r8=%p r9=%p\n",
-                (void *)saved_rbp, (void *)saved_rsp,
+                exception_messages[regs->int_no], faulted_name[0] ? faulted_name : "?", faulted_pid,
+                object, (void *)within, (void *)fault_rip, (void *)fault_address, fault_error);
+        kprintf("fault: rdi=%p rsi=%p rdx=%p rax=%p rbx=%p rcx=%p\n", (void *)saved_rdi,
+                (void *)saved_rsi, (void *)saved_rdx, (void *)saved_rax, (void *)saved_rbx,
+                (void *)saved_rcx);
+        kprintf("fault: rbp=%p rsp=%p r8=%p r9=%p\n", (void *)saved_rbp, (void *)saved_rsp,
                 (void *)saved_r8, (void *)saved_r9);
         if (stack_ok)
             for (unsigned i = 0; i < 12; i++) {
@@ -175,30 +190,30 @@ static void isr_dispatch(struct interrupt_frame *regs) {
                 if (faulted && faulted->memory)
                     for (struct vm_area *a = faulted->memory->areas; a; a = a->next) {
                         if (value < a->start) break;
-                        if (value < a->end) { hit = a; break; }
+                        if (value < a->end) {
+                            hit = a;
+                            break;
+                        }
                     }
                 if (hit && hit->file && hit->file->node)
-                    kprintf("fault: stack[%d] %p = %s+%p\n", (int)i,
-                            (void *)value, hit->file->node->name,
-                            (void *)(value - hit->start + hit->offset));
-                else
-                    kprintf("fault: stack[%d] %p\n", (int)i, (void *)value);
+                    kprintf("fault: stack[%d] %p = %s+%p\n", (int)i, (void *)value,
+                            hit->file->node->name, (void *)(value - hit->start + hit->offset));
+                else kprintf("fault: stack[%d] %p\n", (int)i, (void *)value);
             }
         if (faulted) {
             uint64_t window = (saved_rdi & ~15ULL) - 64ULL;
             for (unsigned row = 0; row < 8; row++) {
                 unsigned char bytes[16];
-                if (vmm_copy_from_space(faulted->cr3, bytes,
-                                        window + (uint64_t)row * 16U, 16) != 0) break;
+                if (vmm_copy_from_space(faulted->cr3, bytes, window + (uint64_t)row * 16U, 16) != 0)
+                    break;
                 char text[17];
                 for (unsigned i = 0; i < 16; i++)
                     text[i] = (bytes[i] >= 32 && bytes[i] < 127) ? (char)bytes[i] : '.';
                 text[16] = 0;
                 kprintf("fault: %p %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x |%s|\n",
-                        (void *)(window + (uint64_t)row * 16U),
-                        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
-                        bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11],
-                        bytes[12], bytes[13], bytes[14], bytes[15], text);
+                        (void *)(window + (uint64_t)row * 16U), bytes[0], bytes[1], bytes[2],
+                        bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9],
+                        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15], text);
             }
         }
 
@@ -213,7 +228,7 @@ static void isr_dispatch(struct interrupt_frame *regs) {
 }
 
 #define VECTOR_DOUBLE_FAULT 8U
-#define IA32_GS_BASE 0xC0000101U
+#define IA32_GS_BASE        0xC0000101U
 #define IA32_KERNEL_GS_BASE 0xC0000102U
 
 static uint64_t read_msr(uint32_t msr) {
@@ -226,28 +241,26 @@ void isr_handler(struct interrupt_frame *regs) {
     if (regs->int_no == VECTOR_DOUBLE_FAULT) {
         uint64_t cr2;
         __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
-        kprintf("DOUBLE FAULT: rip %p cs %x rsp %p ss %x cr2 %p rflags %x\n",
-                (void *)regs->rip, (unsigned)regs->cs, (void *)regs->rsp,
-                (unsigned)regs->ss, (void *)cr2, (unsigned)regs->rflags);
+        kprintf("DOUBLE FAULT: rip %p cs %x rsp %p ss %x cr2 %p rflags %x\n", (void *)regs->rip,
+                (unsigned)regs->cs, (void *)regs->rsp, (unsigned)regs->ss, (void *)cr2,
+                (unsigned)regs->rflags);
         uint64_t gs = read_msr(IA32_GS_BASE);
         uint64_t kernel_gs = read_msr(IA32_KERNEL_GS_BASE);
         kprintf("  gs %p kernelgs %p\n", (void *)gs, (void *)kernel_gs);
         struct cpu *self = (struct cpu *)(gs ? gs : kernel_gs);
         if (self) {
-            kprintf("  cpu %u kernel_rsp %p current %p\n", self->index,
-                    (void *)self->kernel_rsp, (void *)self->current);
+            kprintf("  cpu %u kernel_rsp %p current %p\n", self->index, (void *)self->kernel_rsp,
+                    (void *)self->current);
             struct process *running = self->current;
             if (running)
                 kprintf("  pid %u stack %p..%p\n", (unsigned)running->pid,
-                        (void *)running->kernel_stack_base,
-                        (void *)running->kernel_stack_top);
+                        (void *)running->kernel_stack_base, (void *)running->kernel_stack_top);
         }
         const uint64_t *word = (const uint64_t *)regs->rsp;
         unsigned shown = 0;
         for (unsigned index = 0; index < 512 && shown < 24; index++) {
             uint64_t value = word[index];
-            if (value < 0xFFFFFFFF80100000ULL || value >= 0xFFFFFFFF80400000ULL)
-                continue;
+            if (value < 0xFFFFFFFF80100000ULL || value >= 0xFFFFFFFF80400000ULL) continue;
             kprintf("  [%u] %p\n", index, (void *)value);
             shown++;
         }
@@ -257,8 +270,7 @@ void isr_handler(struct interrupt_frame *regs) {
         apic_send_eoi();
         unsigned due = timer_local_expired();
         cpu_current()->timer_due = (uint8_t)due;
-        if (!(due & TIMER_LOCAL_DEADLINE) && !cpu_current()->current &&
-            !process_ready_pending()) {
+        if (!(due & TIMER_LOCAL_DEADLINE) && !cpu_current()->current && !process_ready_pending()) {
             smp_service_flush();
             return;
         }
@@ -271,8 +283,7 @@ void isr_handler(struct interrupt_frame *regs) {
     if ((regs->cs & 3U) == 3U) {
         uint64_t stack_top = cpu_current()->kernel_rsp;
         if (stack_top) {
-            struct interrupt_frame *resumed =
-                (struct interrupt_frame *)(stack_top - sizeof(*regs));
+            struct interrupt_frame *resumed = (struct interrupt_frame *)(stack_top - sizeof(*regs));
             if (resumed != regs) *resumed = *regs;
         }
     }

@@ -17,7 +17,7 @@ static void stream(void) {
         exit(0);
     }
     close(fds[1]);
-    char reply[16] = { 0 };
+    char reply[16] = {0};
     write(fds[0], "tunix", 5);
     expect_eq(read(fds[0], reply, sizeof(reply)), 5, "a child answers over the socket");
     expect(memeq(reply, "TUNIX", 5), "with what it was sent, upper-cased");
@@ -58,14 +58,14 @@ static void passing_descriptors(void) {
     *(int *)(control.bytes + sizeof(struct cmsghdr)) = pipe[1];
 
     char byte = 'x';
-    struct iovec vector = { &byte, 1 };
-    struct msghdr message = { 0, 0, &vector, 1, &control, sizeof(control), 0 };
+    struct iovec vector = {&byte, 1};
+    struct msghdr message = {0, 0, &vector, 1, &control, sizeof(control), 0};
     expect_eq(sendmsg(sockets[0], &message, 0), 1, "sendmsg carries an fd with SCM_RIGHTS");
     close(pipe[1]);
 
     memset(&control, 0, sizeof(control));
     byte = 0;
-    struct msghdr received = { 0, 0, &vector, 1, &control, sizeof(control), 0 };
+    struct msghdr received = {0, 0, &vector, 1, &control, sizeof(control), 0};
     expect_eq(recvmsg(sockets[1], &received, 0), 1, "recvmsg takes the message");
     expect(byte == 'x' && control.header.type == SCM_RIGHTS, "with the rights attached");
     int passed = *(int *)(control.bytes + sizeof(struct cmsghdr));

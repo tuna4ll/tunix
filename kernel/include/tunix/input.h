@@ -30,8 +30,8 @@ struct input_reader *input_reader_open(unsigned device_id);
 void input_reader_close(struct input_reader *reader);
 int input_reader_ready(struct input_reader *reader);
 
-int64_t input_reader_ioctl(struct input_reader *reader, unsigned device_id,
-                           unsigned long request, uint64_t user_argument);
+int64_t input_reader_ioctl(struct input_reader *reader, unsigned device_id, unsigned long request,
+                           uint64_t user_argument);
 int64_t input_reader_read(struct input_reader *reader, size_t size, void *buffer);
 
 #define INPUT_KEY_HISTORY 128U

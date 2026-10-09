@@ -33,9 +33,7 @@ unsigned defer_cpus_in_kernel(void) {
     return inside;
 }
 
-int defer_in_kernel(void) {
-    return cpus[cpu_current()->index].depth != 0;
-}
+int defer_in_kernel(void) { return cpus[cpu_current()->index].depth != 0; }
 
 void defer_park(struct defer_park *park) {
     struct quiescence *self = &cpus[cpu_current()->index];
@@ -96,9 +94,7 @@ void defer_release(struct defer_item *item, void (*release)(struct defer_item *i
     lock_release(&pending_lock);
 }
 
-static void release_block(struct defer_item *item) {
-    kfree(item);
-}
+static void release_block(struct defer_item *item) { kfree(item); }
 
 void *defer_alloc(uint64_t size) {
     struct defer_item *item = (struct defer_item *)kmalloc(sizeof(*item) + size);

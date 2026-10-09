@@ -25,8 +25,7 @@ struct block_device {
 
 int block_register(const struct block_device *device);
 
-int block_register_partition(int parent, int number, uint64_t start,
-                             uint64_t sectors);
+int block_register_partition(int parent, int number, uint64_t start, uint64_t sectors);
 int block_device_count(void);
 const struct block_device *block_device_at(int index);
 
@@ -35,14 +34,14 @@ int block_device_index_by_name(const char *name);
 void block_select_root(int index);
 const struct block_device *block_root(void);
 
-int block_device_read_bytes(const struct block_device *device, uint64_t offset,
-                            size_t size, void *destination);
-int block_device_write_bytes(const struct block_device *device, uint64_t offset,
-                             size_t size, const void *source);
-int block_device_read(const struct block_device *device, uint64_t lba,
-                      uint32_t count, void *destination);
-int block_device_write(const struct block_device *device, uint64_t lba,
-                       uint32_t count, const void *source);
+int block_device_read_bytes(const struct block_device *device, uint64_t offset, size_t size,
+                            void *destination);
+int block_device_write_bytes(const struct block_device *device, uint64_t offset, size_t size,
+                             const void *source);
+int block_device_read(const struct block_device *device, uint64_t lba, uint32_t count,
+                      void *destination);
+int block_device_write(const struct block_device *device, uint64_t lba, uint32_t count,
+                       const void *source);
 int block_device_flush(const struct block_device *device);
 
 void block_probe(void);

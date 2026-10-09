@@ -28,9 +28,7 @@ static void klog_store_char(char c) {
 static int klog_console_enabled = 1;
 static int klog_console_busy;
 
-void klog_console(int enabled) {
-    klog_console_enabled = enabled;
-}
+void klog_console(int enabled) { klog_console_enabled = enabled; }
 
 extern void terminal_print(const char *);
 extern int terminal_ready(void);
@@ -39,8 +37,8 @@ extern void terminal_paint_end(void);
 extern void terminal_paint_lock_reset(void);
 struct terminal_screen;
 extern struct terminal_screen *terminal_screen_active(void);
-extern void terminal_set_sgr_sequence(struct terminal_screen *screen,
-                                      const unsigned *codes, unsigned count);
+extern void terminal_set_sgr_sequence(struct terminal_screen *screen, const unsigned *codes,
+                                      unsigned count);
 
 static void panic_sgr(const unsigned *codes, unsigned count) {
     terminal_set_sgr_sequence(terminal_screen_active(), codes, count);
@@ -83,9 +81,7 @@ static void paint_end(int painting) {
     if (painting) terminal_paint_end();
 }
 
-size_t klog_size(void) {
-    return klog_count;
-}
+size_t klog_size(void) { return klog_count; }
 
 int64_t klog_read(uint64_t offset, size_t size, void *buffer) {
     if (!buffer) return -1;

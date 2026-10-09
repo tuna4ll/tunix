@@ -5,8 +5,8 @@
 #include <stdint.h>
 #include <tunix/spinlock.h>
 
-#define PIPE_CAPACITY 65536
-#define PIPE_MAX_CAPACITY (1024U * 1024U)
+#define PIPE_CAPACITY          65536
+#define PIPE_MAX_CAPACITY      (1024U * 1024U)
 #define PIPE_ROOT_MAX_CAPACITY (64U * 1024U * 1024U)
 
 struct file;

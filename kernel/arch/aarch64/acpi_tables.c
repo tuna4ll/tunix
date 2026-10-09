@@ -7,38 +7,36 @@
 extern void kprintf(const char *fmt, ...);
 
 #define HEADER_BYTES 36U
-#define MAX_TABLES 64U
+#define MAX_TABLES   64U
 
-#define MADT_GICC 0x0BU
-#define MADT_GICD 0x0CU
-#define MADT_GICR 0x0EU
-#define MADT_ITS 0x0FU
-#define GICC_ENABLED 1U
+#define MADT_GICC           0x0BU
+#define MADT_GICD           0x0CU
+#define MADT_GICR           0x0EU
+#define MADT_ITS            0x0FU
+#define GICC_ENABLED        1U
 #define GICC_ONLINE_CAPABLE 8U
-#define GICR_FRAME_BYTES 0x20000ULL
+#define GICR_FRAME_BYTES    0x20000ULL
 
-#define SPCR_16550 0x00U
+#define SPCR_16550        0x00U
 #define SPCR_16550_SUBSET 0x01U
-#define SPCR_PL011 0x03U
-#define SPCR_BCM2835 0x10U
-#define SPCR_16550_GAS 0x12U
+#define SPCR_PL011        0x03U
+#define SPCR_BCM2835      0x10U
+#define SPCR_16550_GAS    0x12U
 
-#define IORT_ITS_GROUP 0U
-#define IORT_SMMU 3U
-#define IORT_SMMU_V3 4U
+#define IORT_ITS_GROUP    0U
+#define IORT_SMMU         3U
+#define IORT_SMMU_V3      4U
 #define IORT_ROOT_COMPLEX 2U
 
 #define FADT_ARM_BOOT_FLAGS 129U
 #define FADT_PSCI_COMPLIANT 1U
-#define FADT_PSCI_USE_HVC 2U
+#define FADT_PSCI_USE_HVC   2U
 
-static uint16_t u16_at(const uint8_t *bytes) {
-    return (uint16_t)(bytes[0] | (bytes[1] << 8));
-}
+static uint16_t u16_at(const uint8_t *bytes) { return (uint16_t)(bytes[0] | (bytes[1] << 8)); }
 
 static uint32_t u32_at(const uint8_t *bytes) {
     return (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8) | ((uint32_t)bytes[2] << 16) |
-           ((uint32_t)bytes[3] << 24);
+        ((uint32_t)bytes[3] << 24);
 }
 
 static uint64_t u64_at(const uint8_t *bytes) {
@@ -65,8 +63,8 @@ static const uint8_t *find_table(const char *signature) {
     const uint8_t *rsdp = aarch64_physical_bytes(aarch64_platform.rsdp, 36U);
     if (!rsdp || rsdp[0] != 'R' || rsdp[1] != 'S' || rsdp[2] != 'D' || rsdp[3] != ' ') return NULL;
     int wide = rsdp[15] >= 2U && u64_at(rsdp + 24);
-    const uint8_t *root = wide ? table_at(u64_at(rsdp + 24), "XSDT")
-                               : table_at(u32_at(rsdp + 16), "RSDT");
+    const uint8_t *root =
+        wide ? table_at(u64_at(rsdp + 24), "XSDT") : table_at(u32_at(rsdp + 16), "RSDT");
     if (!root) return NULL;
     unsigned entry_bytes = wide ? 8U : 4U;
     uint32_t count = (u32_at(root + 4) - HEADER_BYTES) / entry_bytes;
@@ -97,7 +95,8 @@ static void parse_madt(const uint8_t *madt) {
                 cpu->mpidr = u64_at(entry + 68) & 0xFF00FFFFFFULL;
                 cpu->release_address = 0;
             }
-            if (!aarch64_platform.gic_cpu_interface) aarch64_platform.gic_cpu_interface = u64_at(entry + 32);
+            if (!aarch64_platform.gic_cpu_interface)
+                aarch64_platform.gic_cpu_interface = u64_at(entry + 32);
             if (gicr) {
                 if (!lowest_gicr || gicr < lowest_gicr) lowest_gicr = gicr;
                 if (gicr + GICR_FRAME_BYTES > highest_gicr) highest_gicr = gicr + GICR_FRAME_BYTES;
@@ -165,8 +164,8 @@ static void parse_mcfg(const uint8_t *mcfg) {
     }
 }
 
-static int iort_follow(const uint8_t *iort, uint32_t length, uint32_t node_offset,
-                       uint32_t input, uint32_t *output, unsigned depth) {
+static int iort_follow(const uint8_t *iort, uint32_t length, uint32_t node_offset, uint32_t input,
+                       uint32_t *output, unsigned depth) {
     if (depth > 3U || node_offset + 16U > length) return -1;
     const uint8_t *node = iort + node_offset;
     if (node[0] == IORT_ITS_GROUP) {
@@ -181,8 +180,8 @@ static int iort_follow(const uint8_t *iort, uint32_t length, uint32_t node_offse
         const uint8_t *map = iort + at;
         uint32_t base = u32_at(map), count = u32_at(map + 4);
         if (input < base || input - base > count) continue;
-        return iort_follow(iort, length, u32_at(map + 12), u32_at(map + 8) + (input - base),
-                           output, depth + 1U);
+        return iort_follow(iort, length, u32_at(map + 12), u32_at(map + 8) + (input - base), output,
+                           depth + 1U);
     }
     return -1;
 }
@@ -274,8 +273,8 @@ int aarch64_acpi_discover(void) {
             aarch64_platform.gic_version, (void *)aarch64_platform.gic_distributor,
             aarch64_platform.cpu_count, aarch64_platform.timer_interrupt,
             (void *)aarch64_platform.ecam_physical, (void *)aarch64_platform.gic_its,
-            aarch64_platform.psci_method == PSCI_HVC   ? "hvc"
-            : aarch64_platform.psci_method == PSCI_SMC ? "smc"
-                                                       : "none");
+            aarch64_platform.psci_method == PSCI_HVC       ? "hvc"
+                : aarch64_platform.psci_method == PSCI_SMC ? "smc"
+                                                           : "none");
     return 0;
 }

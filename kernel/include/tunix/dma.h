@@ -7,8 +7,7 @@
 
 void *dma_alloc(uint64_t bytes, uint64_t alignment, uint64_t *physical);
 
-void *dma_alloc_below(uint64_t bytes, uint64_t alignment, uint64_t limit,
-                      uint64_t *physical);
+void *dma_alloc_below(uint64_t bytes, uint64_t alignment, uint64_t limit, uint64_t *physical);
 
 void dma_free(void *pointer, uint64_t bytes);
 

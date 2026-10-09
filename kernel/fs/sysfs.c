@@ -91,8 +91,8 @@ static int64_t uevent_write(struct vfs_node *node, uint64_t offset, size_t size,
     char action[16];
     size_t length = 0;
     const char *text = (const char *)buffer;
-    while (length < size && length + 1 < sizeof(action) &&
-           text[length] != '\n' && text[length] != '\0')
+    while (length < size && length + 1 < sizeof(action) && text[length] != '\n' &&
+           text[length] != '\0')
         length++;
     memcpy(action, text, length);
     action[length] = '\0';
@@ -100,8 +100,7 @@ static int64_t uevent_write(struct vfs_node *node, uint64_t offset, size_t size,
     return (int64_t)size;
 }
 
-static void append_hex(char *out, size_t limit, size_t *used, uint32_t value,
-                       unsigned digits) {
+static void append_hex(char *out, size_t limit, size_t *used, uint32_t value, unsigned digits) {
     static const char alphabet[] = "0123456789abcdef";
     while (digits--) {
         if (*used + 1 >= limit) return;
@@ -109,8 +108,8 @@ static void append_hex(char *out, size_t limit, size_t *used, uint32_t value,
     }
 }
 
-static void publish_hex_attribute(const char *directory, const char *name,
-                                  uint32_t value, unsigned digits) {
+static void publish_hex_attribute(const char *directory, const char *name, uint32_t value,
+                                  unsigned digits) {
     char path[224];
     size_t used = 0;
     append_string(path, sizeof(path), &used, directory);
@@ -132,8 +131,7 @@ static void append_hex64(char *out, size_t limit, size_t *used, uint64_t value) 
     append_hex(out, limit, used, (uint32_t)value, 8);
 }
 
-static void pci_slot_name(char *out, size_t limit, size_t *used,
-                          const struct pci_device *device) {
+static void pci_slot_name(char *out, size_t limit, size_t *used, const struct pci_device *device) {
     append_string(out, limit, used, "0000:");
     append_hex(out, limit, used, device->bus, 2);
     append_string(out, limit, used, ":");
@@ -172,8 +170,7 @@ static struct sysfs_device *register_uevent(const char *devpath, const char *fil
     append_string(device->devpath, sizeof(device->devpath), &at, devpath);
     device->devpath[at] = '\0';
     size_t out = 0;
-    for (size_t index = 0; index < length && out + 1 < sizeof(device->properties);
-         index++)
+    for (size_t index = 0; index < length && out + 1 < sizeof(device->properties); index++)
         device->properties[out++] = properties[index] == '\n' ? 0 : properties[index];
     device->properties_length = out;
     node->fs_private = device;
@@ -190,8 +187,8 @@ static void publish_pci_device(const struct pci_device *device, void *context) {
 
     uint8_t config[256];
     for (unsigned offset = 0; offset < sizeof(config); offset += 4) {
-        uint32_t word = pci_config_read32(device->bus, device->slot,
-                                          device->function, (uint8_t)offset);
+        uint32_t word =
+            pci_config_read32(device->bus, device->slot, device->function, (uint8_t)offset);
         config[offset + 0] = (uint8_t)word;
         config[offset + 1] = (uint8_t)(word >> 8);
         config[offset + 2] = (uint8_t)(word >> 16);
@@ -208,13 +205,14 @@ static void publish_pci_device(const struct pci_device *device, void *context) {
     publish_hex_attribute(directory, "vendor", device->vendor_id, 4);
     publish_hex_attribute(directory, "device", device->device_id, 4);
     publish_hex_attribute(directory, "revision", config[8], 2);
-    publish_hex_attribute(directory, "subsystem_vendor",
-                          (uint32_t)(config[44] | (config[45] << 8)), 4);
-    publish_hex_attribute(directory, "subsystem_device",
-                          (uint32_t)(config[46] | (config[47] << 8)), 4);
+    publish_hex_attribute(directory, "subsystem_vendor", (uint32_t)(config[44] | (config[45] << 8)),
+                          4);
+    publish_hex_attribute(directory, "subsystem_device", (uint32_t)(config[46] | (config[47] << 8)),
+                          4);
     publish_hex_attribute(directory, "class",
-                          ((uint32_t)device->class_code << 16) |
-                          ((uint32_t)device->subclass << 8) | device->prog_if, 6);
+                          ((uint32_t)device->class_code << 16) | ((uint32_t)device->subclass << 8) |
+                              device->prog_if,
+                          6);
 
     char text[16];
     size_t length = 0;
@@ -270,8 +268,9 @@ static void publish_pci_device(const struct pci_device *device, void *context) {
     length = 0;
     append_string(properties, sizeof(properties), &length, "DRIVER=\nPCI_CLASS=");
     append_hex(properties, sizeof(properties), &length,
-               ((uint32_t)device->class_code << 16) |
-               ((uint32_t)device->subclass << 8) | device->prog_if, 6);
+               ((uint32_t)device->class_code << 16) | ((uint32_t)device->subclass << 8) |
+                   device->prog_if,
+               6);
     append_string(properties, sizeof(properties), &length, "\nPCI_ID=");
     append_hex(properties, sizeof(properties), &length, device->vendor_id, 4);
     append_string(properties, sizeof(properties), &length, ":");
@@ -307,8 +306,7 @@ static void publish_pci_device(const struct pci_device *device, void *context) {
     (void)vfs_create_symlink(link, target, 0);
 }
 
-static void driver_directory(char *out, size_t limit, const char *driver,
-                             const char *suffix) {
+static void driver_directory(char *out, size_t limit, const char *driver, const char *suffix) {
     size_t used = 0;
     append_string(out, limit, &used, "/sys/bus/pci/drivers/");
     append_string(out, limit, &used, driver);
@@ -357,8 +355,7 @@ void sysfs_pci_bound(const struct pci_device *device, const char *driver) {
     reverse[used] = '\0';
     used = 0;
     char device_target[96];
-    append_string(device_target, sizeof(device_target), &used,
-                  "../../../../devices/pci0000:00/");
+    append_string(device_target, sizeof(device_target), &used, "../../../../devices/pci0000:00/");
     append_string(device_target, sizeof(device_target), &used, slot);
     device_target[used] = '\0';
     (void)vfs_create_symlink(reverse, device_target, 0);
@@ -435,8 +432,7 @@ static void publish_pci_parent(const char *name) {
 
     uint8_t config[64];
     for (unsigned offset = 0; offset < sizeof(config); offset += 4) {
-        uint32_t word = pci_config_read32(id.bus, id.slot, id.function,
-                                          (uint8_t)offset);
+        uint32_t word = pci_config_read32(id.bus, id.slot, id.function, (uint8_t)offset);
         config[offset + 0] = (uint8_t)word;
         config[offset + 1] = (uint8_t)(word >> 8);
         config[offset + 2] = (uint8_t)(word >> 16);
@@ -448,15 +444,11 @@ static void publish_pci_parent(const char *name) {
     file[used] = '\0';
     (void)vfs_create_file(file, config, sizeof(config), 0, 1);
 
-    publish_hex_attribute(path, "vendor",
-                          (uint32_t)(config[0] | (config[1] << 8)), 4);
-    publish_hex_attribute(path, "device",
-                          (uint32_t)(config[2] | (config[3] << 8)), 4);
+    publish_hex_attribute(path, "vendor", (uint32_t)(config[0] | (config[1] << 8)), 4);
+    publish_hex_attribute(path, "device", (uint32_t)(config[2] | (config[3] << 8)), 4);
     publish_hex_attribute(path, "revision", config[8], 2);
-    publish_hex_attribute(path, "subsystem_vendor",
-                          (uint32_t)(config[44] | (config[45] << 8)), 4);
-    publish_hex_attribute(path, "subsystem_device",
-                          (uint32_t)(config[46] | (config[47] << 8)), 4);
+    publish_hex_attribute(path, "subsystem_vendor", (uint32_t)(config[44] | (config[45] << 8)), 4);
+    publish_hex_attribute(path, "subsystem_device", (uint32_t)(config[46] | (config[47] << 8)), 4);
 }
 
 static void publish_platform_parent(const char *name) {
@@ -486,7 +478,7 @@ static void publish_platform_parent(const char *name) {
 }
 
 static void publish_drm_nodes(const char *name, unsigned count) {
-    static const char *const nodes[] = { "card0", "renderD128" };
+    static const char *const nodes[] = {"card0", "renderD128"};
     for (unsigned index = 0; index < count; index++) {
         char path[192];
         size_t used = 0;
@@ -499,9 +491,8 @@ static void publish_drm_nodes(const char *name, unsigned count) {
     }
 }
 
-static void publish_device(const char *name, const char *devname,
-                           const char *subsystem, const char *extra,
-                           uint32_t major, uint32_t minor) {
+static void publish_device(const char *name, const char *devname, const char *subsystem,
+                           const char *extra, uint32_t major, uint32_t minor) {
     char path[128];
     size_t used = 0;
     append_string(path, sizeof(path), &used, "/sys/devices/");
@@ -578,8 +569,8 @@ static void publish_device(const char *name, const char *devname,
 static int64_t module_section_read(struct vfs_node *node, uint64_t offset, size_t size,
                                    void *output);
 
-static int64_t attribute_reply(const char *text, size_t length, uint64_t offset,
-                               size_t size, void *output) {
+static int64_t attribute_reply(const char *text, size_t length, uint64_t offset, size_t size,
+                               void *output) {
     if (offset >= length) return 0;
     size_t available = length - (size_t)offset;
     if (size > available) size = available;
@@ -617,19 +608,17 @@ static int64_t module_parameter_read(struct vfs_node *node, uint64_t offset, siz
     return attribute_reply(text, (size_t)length, offset, size, output);
 }
 
-static int64_t module_parameter_write(struct vfs_node *node, uint64_t offset,
-                                      size_t size, const void *buffer) {
+static int64_t module_parameter_write(struct vfs_node *node, uint64_t offset, size_t size,
+                                      const void *buffer) {
     (void)offset;
     struct module *module = (struct module *)node->fs_private;
     if (!module) return -1;
-    int status = module_param_set(module, (unsigned)node->inode,
-                                  (const char *)buffer, size);
+    int status = module_param_set(module, (unsigned)node->inode, (const char *)buffer, size);
     return status == 0 ? (int64_t)size : (int64_t)status;
 }
 
 static struct vfs_node *module_attribute(struct vfs_node *parent, const char *name,
-                                         vfs_read_fn reader, void *context,
-                                         uint64_t tag) {
+                                         vfs_read_fn reader, void *context, uint64_t tag) {
     struct vfs_node *node = vfs_alloc_node(name, VFS_FILE);
     if (!node) return NULL;
     node->mode = 0444;
@@ -642,7 +631,7 @@ static struct vfs_node *module_attribute(struct vfs_node *parent, const char *na
 }
 
 #define HWMON_INPUT 0
-#define HWMON_CRIT 1
+#define HWMON_CRIT  1
 #define HWMON_LABEL 2
 
 static int64_t hwmon_read(struct vfs_node *node, uint64_t offset, size_t size, void *output) {
@@ -679,7 +668,8 @@ static void publish_thermal(unsigned cpus) {
     if (thermal_supported() <= 0 || !cpus) return;
     struct vfs_node *directory = vfs_mkdir_p("/sys/devices/platform/coretemp.0/hwmon/hwmon0");
     if (!directory) return;
-    (void)vfs_create_file("/sys/devices/platform/coretemp.0/hwmon/hwmon0/name", "coretemp\n", 9, 0, 1);
+    (void)vfs_create_file("/sys/devices/platform/coretemp.0/hwmon/hwmon0/name", "coretemp\n", 9, 0,
+                          1);
     for (unsigned cpu = 0; cpu < cpus; cpu++) {
         hwmon_attribute(directory, cpu, HWMON_INPUT, "_input");
         hwmon_attribute(directory, cpu, HWMON_CRIT, "_crit");
@@ -691,9 +681,9 @@ static void publish_thermal(unsigned cpus) {
 }
 
 #define CPUFREQ_CURRENT 0
-#define CPUFREQ_MIN 1
-#define CPUFREQ_MAX 2
-#define CPUFREQ_DRIVER 3
+#define CPUFREQ_MIN     1
+#define CPUFREQ_MAX     2
+#define CPUFREQ_DRIVER  3
 
 static int64_t cpufreq_attribute_read(struct vfs_node *node, uint64_t offset, size_t size,
                                       void *output) {
@@ -710,8 +700,8 @@ static int64_t cpufreq_attribute_read(struct vfs_node *node, uint64_t offset, si
     } else {
         struct cpufreq_reading reading;
         if (cpufreq_read(cpu, &reading) != 0) return -5;
-        uint64_t khz = reading.effective_khz ? reading.effective_khz
-                                             : state->ratio_khz * reading.ratio;
+        uint64_t khz =
+            reading.effective_khz ? reading.effective_khz : state->ratio_khz * reading.ratio;
         append_number(text, sizeof(text), &length, (uint32_t)khz);
     }
     append_string(text, sizeof(text), &length, "\n");
@@ -736,9 +726,8 @@ static void publish_cpu_list(const char *name, unsigned cpus) {
 }
 
 static void publish_cpufreq(unsigned cpus) {
-    static const char *const names[] = {
-        "scaling_cur_freq", "cpuinfo_min_freq", "cpuinfo_max_freq", "scaling_driver"
-    };
+    static const char *const names[] = {"scaling_cur_freq", "cpuinfo_min_freq", "cpuinfo_max_freq",
+                                        "scaling_driver"};
     for (unsigned cpu = 0; cpu < cpus; cpu++) {
         char path[80];
         size_t used = 0;
@@ -782,8 +771,7 @@ static void holders_refresh(struct vfs_node *directory) {
     const struct module *owner = (const struct module *)directory->fs_private;
     if (!owner || busy) return;
     busy = 1;
-    while (directory->children)
-        (void)vfs_detach_child(directory, directory->children);
+    while (directory->children) (void)vfs_detach_child(directory, directory->children);
     for (struct module *user = module_list(); user; user = user->next) {
         for (unsigned index = 0; index < user->use_count; index++) {
             if (user->uses[index] != owner) continue;
@@ -841,8 +829,7 @@ void sysfs_module_added(struct module *module) {
     if (!parameters) return;
     parameters->mode = 0555;
     for (unsigned index = 0; index < module->param_count; index++) {
-        struct vfs_node *node = module_attribute(parameters,
-                                                 module->params[index].name,
+        struct vfs_node *node = module_attribute(parameters, module->params[index].name,
                                                  module_parameter_read, module, index);
         if (!node || module->params[index].type == MODULE_PARAM_STRING) continue;
         node->mode = module->params[index].mode;
@@ -855,7 +842,8 @@ static int64_t module_section_read(struct vfs_node *node, uint64_t offset, size_
     const struct module *module = (const struct module *)node->fs_private;
     if (!module) return 0;
     uint64_t address = node->inode == 1 ? module->rodata
-                     : node->inode == 2 ? module->data : module->text;
+        : node->inode == 2              ? module->data
+                                        : module->text;
     char text[32];
     size_t length = 0;
     append_hex64(text, sizeof(text), &length, address);
@@ -901,10 +889,10 @@ static void announce(const char *name) {
 
 void sysfs_publish_sound(void) {
     VFS_GUARD;
-    publish_device("controlC0", "snd/controlC0", "sound", NULL,
-                   DEV_MAJOR_SOUND, DEV_MINOR_SOUND_CONTROL);
-    publish_device("pcmC0D0p", "snd/pcmC0D0p", "sound", NULL,
-                   DEV_MAJOR_SOUND, DEV_MINOR_SOUND_PCM_PLAYBACK);
+    publish_device("controlC0", "snd/controlC0", "sound", NULL, DEV_MAJOR_SOUND,
+                   DEV_MINOR_SOUND_CONTROL);
+    publish_device("pcmC0D0p", "snd/pcmC0D0p", "sound", NULL, DEV_MAJOR_SOUND,
+                   DEV_MINOR_SOUND_PCM_PLAYBACK);
     announce("controlC0");
     announce("pcmC0D0p");
 }
@@ -975,8 +963,7 @@ static void publish_input_parent(const char *name, const char *label) {
 
 static struct vfs_node *tty0_active;
 
-static int64_t tty0_active_read(struct vfs_node *node, uint64_t offset, size_t size,
-                                void *output) {
+static int64_t tty0_active_read(struct vfs_node *node, uint64_t offset, size_t size, void *output) {
     (void)node;
     char text[16];
     size_t length = 0;
@@ -1002,9 +989,7 @@ static void publish_console(void) {
         (void)vfs_create_symlink("/sys/class/tty/tty0", "../../devices/virtual/tty/tty0", 0);
 }
 
-void sysfs_console_switched(void) {
-    vfs_notify(tty0_active);
-}
+void sysfs_console_switched(void) { vfs_notify(tty0_active); }
 
 void sysfs_init(void) {
     struct vfs_node *sys = vfs_mkdir_p("/sys");
@@ -1027,8 +1012,8 @@ void sysfs_init(void) {
                        DEV_MAJOR_DRM, DEV_MINOR_DRM_CARD0);
         if (rendering) {
             publish_device("renderD128", "dri/renderD128", "drm",
-                           "DRIVER=virtio_gpu\nDEVTYPE=drm_render_minor\n",
-                           DEV_MAJOR_DRM, DEV_MINOR_DRM_RENDER0);
+                           "DRIVER=virtio_gpu\nDEVTYPE=drm_render_minor\n", DEV_MAJOR_DRM,
+                           DEV_MINOR_DRM_RENDER0);
             publish_drm_nodes("card0", 2);
             publish_drm_nodes("renderD128", 2);
             publish_pci_parent("card0");
@@ -1039,7 +1024,7 @@ void sysfs_init(void) {
         }
     }
 
-    static const char *const input_names[] = { "Tunix keyboard", "Tunix mouse", "Tunix USB Tablet" };
+    static const char *const input_names[] = {"Tunix keyboard", "Tunix mouse", "Tunix USB Tablet"};
     for (unsigned device = 0; device < 3U; device++) {
         char parent[48];
         size_t parent_used = 0;
@@ -1060,9 +1045,8 @@ void sysfs_init(void) {
         append_number(devname, sizeof(devname), &devname_used, device);
         devname[devname_used] = '\0';
 
-        const char *tags = device == 0U
-            ? "ID_INPUT=1\nID_INPUT_KEYBOARD=1\n"
-            : "ID_INPUT=1\nID_INPUT_MOUSE=1\n";
+        const char *tags =
+            device == 0U ? "ID_INPUT=1\nID_INPUT_KEYBOARD=1\n" : "ID_INPUT=1\nID_INPUT_MOUSE=1\n";
 
         publish_device(name, devname, "input", tags, DEV_MAJOR_INPUT,
                        DEV_MINOR_INPUT_EVENT_BASE + device);

@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#define ABI_GAP_SLOTS 32U
+#define ABI_GAP_SLOTS     32U
 #define ABI_GAP_NAME_SIZE 32U
 
 struct abi_gap {

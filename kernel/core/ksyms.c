@@ -18,7 +18,7 @@
 extern void kprintf(const char *fmt, ...);
 extern void panic(const char *message);
 
-#define EXPORT(symbol) { #symbol, (uint64_t)(uintptr_t)&symbol }
+#define EXPORT(symbol) {#symbol, (uint64_t)(uintptr_t)&symbol}
 
 const struct module_export kernel_symbols[] = {
     EXPORT(kprintf),
@@ -77,5 +77,4 @@ const struct module_export kernel_symbols[] = {
 #endif
 };
 
-const unsigned kernel_symbol_count =
-    (unsigned)(sizeof(kernel_symbols) / sizeof(kernel_symbols[0]));
+const unsigned kernel_symbol_count = (unsigned)(sizeof(kernel_symbols) / sizeof(kernel_symbols[0]));

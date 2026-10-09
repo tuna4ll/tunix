@@ -9,9 +9,7 @@ void arch_note_cpu_features(void);
 uint64_t arch_elf_hwcap(void);
 size_t arch_hwcap_names(char *out, size_t room);
 #else
-static inline uint64_t arch_elf_hwcap(void) {
-    return 0;
-}
+static inline uint64_t arch_elf_hwcap(void) { return 0; }
 #endif
 
 #endif

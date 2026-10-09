@@ -23,9 +23,7 @@ static inline int arch_map_signal_trampoline(uint64_t cr3) {
     return 0;
 }
 
-static inline void arch_sanitize_sigaction(struct tunix_sigaction *action) {
-    (void)action;
-}
+static inline void arch_sanitize_sigaction(struct tunix_sigaction *action) { (void)action; }
 #define IA32_KERNEL_GS_BASE 0xC0000102U
 
 static inline void arch_wrmsr(uint32_t msr, uint64_t value) {
@@ -97,17 +95,11 @@ static inline void arch_load_thread_pointers(uint64_t fs_base, uint64_t gs_base)
     arch_wrmsr(IA32_KERNEL_GS_BASE, gs_base);
 }
 
-static inline void arch_save_thread_pointers(struct process *process) {
-    (void)process;
-}
+static inline void arch_save_thread_pointers(struct process *process) { (void)process; }
 
-static inline void arch_write_fs_base(uint64_t value) {
-    arch_wrmsr(IA32_FS_BASE, value);
-}
+static inline void arch_write_fs_base(uint64_t value) { arch_wrmsr(IA32_FS_BASE, value); }
 
-static inline void arch_write_gs_base(uint64_t value) {
-    arch_wrmsr(IA32_KERNEL_GS_BASE, value);
-}
+static inline void arch_write_gs_base(uint64_t value) { arch_wrmsr(IA32_KERNEL_GS_BASE, value); }
 
 static inline void arch_mcontext_put(uint8_t *context, unsigned slot, uint64_t value) {
     memcpy(context + UCONTEXT_MCONTEXT_OFFSET + slot * 8U, &value, sizeof(value));
@@ -164,17 +156,16 @@ static inline void arch_read_mcontext(struct syscall_frame *frame, const uint8_t
     frame->user_rflags = (flags & ~(uint64_t)0x200D5UL & 0x3F7FD5UL) | 0x202UL;
 }
 
-static inline int arch_signal_push_restorer(uint64_t cr3, uint64_t area,
-                                            const uint64_t *restorer, uint64_t *stack_out) {
+static inline int arch_signal_push_restorer(uint64_t cr3, uint64_t area, const uint64_t *restorer,
+                                            uint64_t *stack_out) {
     uint64_t new_rsp = area - 8;
     *stack_out = new_rsp;
     return vmm_copy_to_space(cr3, new_rsp, restorer, sizeof(*restorer));
 }
 
 static inline void arch_signal_enter_handler(struct syscall_frame *frame, uint64_t stack,
-                                             uint64_t handler, uint64_t restorer,
-                                             int signal_number, uint64_t info,
-                                             uint64_t context) {
+                                             uint64_t handler, uint64_t restorer, int signal_number,
+                                             uint64_t info, uint64_t context) {
     (void)restorer;
     frame->user_rsp = stack;
     frame->user_rip = handler;
@@ -186,7 +177,7 @@ static inline void arch_signal_enter_handler(struct syscall_frame *frame, uint64
 
 #elif defined(__aarch64__)
 
-#define ARCH_SPSR_MODE_MASK 0xFULL
+#define ARCH_SPSR_MODE_MASK    0xFULL
 #define ARCH_SIGNAL_TRAMPOLINE 0x00007FFFFFFFF000ULL
 
 int arch_map_signal_trampoline(uint64_t cr3);
@@ -194,11 +185,11 @@ int arch_map_signal_trampoline(uint64_t cr3);
 static inline void arch_sanitize_sigaction(struct tunix_sigaction *action) {
     if (!(action->flags & SA_RESTORER)) action->restorer = 0;
 }
-#define ARCH_SPSR_USER_FLAGS 0xF0000000ULL
+#define ARCH_SPSR_USER_FLAGS   0xF0000000ULL
 
-#define SIGCONTEXT_REGS_OFFSET 8U
-#define SIGCONTEXT_SP_OFFSET 256U
-#define SIGCONTEXT_PC_OFFSET 264U
+#define SIGCONTEXT_REGS_OFFSET   8U
+#define SIGCONTEXT_SP_OFFSET     256U
+#define SIGCONTEXT_PC_OFFSET     264U
 #define SIGCONTEXT_PSTATE_OFFSET 272U
 
 static inline void arch_frame_enter_user(struct syscall_frame *frame, uint64_t entry,
@@ -243,9 +234,7 @@ static inline void arch_write_fs_base(uint64_t value) {
     __asm__ volatile("msr tpidr_el0, %0" : : "r"(value));
 }
 
-static inline void arch_write_gs_base(uint64_t value) {
-    (void)value;
-}
+static inline void arch_write_gs_base(uint64_t value) { (void)value; }
 
 static inline void arch_fill_mcontext(uint8_t *context, const struct syscall_frame *frame) {
     uint8_t *sigcontext = context + UCONTEXT_MCONTEXT_OFFSET;
@@ -267,8 +256,8 @@ static inline void arch_read_mcontext(struct syscall_frame *frame, const uint8_t
     frame->spsr = pstate & ARCH_SPSR_USER_FLAGS;
 }
 
-static inline int arch_signal_push_restorer(uint64_t cr3, uint64_t area,
-                                            const uint64_t *restorer, uint64_t *stack_out) {
+static inline int arch_signal_push_restorer(uint64_t cr3, uint64_t area, const uint64_t *restorer,
+                                            uint64_t *stack_out) {
     (void)cr3;
     (void)restorer;
     *stack_out = area & ~15ULL;
@@ -276,9 +265,8 @@ static inline int arch_signal_push_restorer(uint64_t cr3, uint64_t area,
 }
 
 static inline void arch_signal_enter_handler(struct syscall_frame *frame, uint64_t stack,
-                                             uint64_t handler, uint64_t restorer,
-                                             int signal_number, uint64_t info,
-                                             uint64_t context) {
+                                             uint64_t handler, uint64_t restorer, int signal_number,
+                                             uint64_t info, uint64_t context) {
     frame->sp_el0 = stack;
     frame->elr = handler;
     frame->x[0] = (uint64_t)signal_number;

@@ -10,7 +10,7 @@
 #include <tunix/time.h>
 
 #define IO_SPIN_NS 500000ULL
-#define IO_NAP_NS 1000000ULL
+#define IO_NAP_NS  1000000ULL
 
 static const char tick_channel;
 static volatile uint32_t sleepers;
@@ -19,8 +19,8 @@ static int can_sleep_holding(struct lock *held) {
     return process_current() && !cpu_current()->in_interrupt && lock_only_holds(held);
 }
 
-int io_poll_dropping(io_ready_fn ready, void *context, uint64_t timeout_ns,
-                     struct lock *held, const void *channel) {
+int io_poll_dropping(io_ready_fn ready, void *context, uint64_t timeout_ns, struct lock *held,
+                     const void *channel) {
     uint64_t started = time_uptime_ns();
     uint64_t deadline = started + timeout_ns;
     if (ready(context)) return 0;

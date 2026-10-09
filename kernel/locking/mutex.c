@@ -10,8 +10,8 @@
 
 extern void kprintf(const char *fmt, ...);
 
-#define MUTEX_REPORTS 16U
-#define OWNER_SPIN_NS 50000ULL
+#define MUTEX_REPORTS         16U
+#define OWNER_SPIN_NS         50000ULL
 #define STEALS_BEFORE_HANDOFF 4U
 
 static volatile uint32_t reports;
@@ -34,20 +34,17 @@ static struct process *holder_token(void) {
     return (struct process *)((uintptr_t)cpu_current() | 1U);
 }
 
-static int may_sleep(void) {
-    return process_may_sleep();
-}
+static int may_sleep(void) { return process_may_sleep(); }
 
 static int owner_running(const struct mutex *mutex) {
     struct process *owner = mutex->owner;
     if (!owner || ((uintptr_t)owner & 1U)) return 0;
-    return __atomic_load_n(&owner->on_cpu, __ATOMIC_ACQUIRE) &&
-           owner->state == PROCESS_RUNNING;
+    return __atomic_load_n(&owner->on_cpu, __ATOMIC_ACQUIRE) && owner->state == PROCESS_RUNNING;
 }
 
 static void check_order(struct process *self, const struct mutex *mutex) {
-    uint32_t count = self->held_mutex_count < PROCESS_HELD_MUTEXES
-                         ? self->held_mutex_count : PROCESS_HELD_MUTEXES;
+    uint32_t count = self->held_mutex_count < PROCESS_HELD_MUTEXES ? self->held_mutex_count
+                                                                   : PROCESS_HELD_MUTEXES;
     for (uint32_t index = 0; index < count; index++) {
         const struct mutex *other = self->held_mutexes[index];
         if (other->rank <= mutex->rank) continue;
@@ -66,8 +63,8 @@ static void remember(struct process *self, struct mutex *mutex) {
 
 static void forget(struct process *self, struct mutex *mutex) {
     if (!self->held_mutex_count) return;
-    uint32_t top = self->held_mutex_count < PROCESS_HELD_MUTEXES
-                       ? self->held_mutex_count : PROCESS_HELD_MUTEXES;
+    uint32_t top = self->held_mutex_count < PROCESS_HELD_MUTEXES ? self->held_mutex_count
+                                                                 : PROCESS_HELD_MUTEXES;
     for (uint32_t index = top; index-- > 0;) {
         if (self->held_mutexes[index] != mutex) continue;
         for (uint32_t move = index; move + 1U < top; move++)
@@ -87,9 +84,7 @@ void mutex_init(struct mutex *mutex, const char *name, unsigned rank) {
     mutex->last = NULL;
 }
 
-int mutex_held(const struct mutex *mutex) {
-    return mutex->owner == holder_token();
-}
+int mutex_held(const struct mutex *mutex) { return mutex->owner == holder_token(); }
 
 int mutex_trylock(struct mutex *mutex) {
     struct process *token = holder_token();
@@ -188,8 +183,7 @@ void mutex_lock(struct mutex *mutex) {
 void mutex_unlock(struct mutex *mutex) {
     struct process *token = holder_token();
     if (mutex->owner != token) {
-        if (may_report())
-            kprintf("LOCK: releases %s it does not hold\n", mutex->name);
+        if (may_report()) kprintf("LOCK: releases %s it does not hold\n", mutex->name);
         return;
     }
     if (--mutex->depth) return;
@@ -232,7 +226,6 @@ void mutex_check_released(const char *where) {
     struct process *self = process_current();
     if (!self || !self->held_mutex_count) return;
     if (may_report())
-        kprintf("LOCK: pid %u leaves %s holding %u mutex(es), first %s\n",
-                (unsigned)self->pid, where, (unsigned)self->held_mutex_count,
-                self->held_mutexes[0]->name);
+        kprintf("LOCK: pid %u leaves %s holding %u mutex(es), first %s\n", (unsigned)self->pid,
+                where, (unsigned)self->held_mutex_count, self->held_mutexes[0]->name);
 }

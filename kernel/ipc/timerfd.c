@@ -14,15 +14,16 @@ static void timerfd_guard_release(int *unused) {
 }
 
 #define TIMERFD_LOCKED \
-    __attribute__((cleanup(timerfd_guard_release))) int timerfd_guard = (lock_acquire(&timerfd_lock), 0)
+    __attribute__((cleanup(timerfd_guard_release))) int timerfd_guard = \
+        (lock_acquire(&timerfd_lock), 0)
 
-#define EAGAIN 11
-#define EINVAL 22
-#define TFD_TIMER_ABSTIME 1
+#define EAGAIN                  11
+#define EINVAL                  22
+#define TFD_TIMER_ABSTIME       1
 #define TFD_TIMER_CANCEL_ON_SET 2
-#define CLOCK_REALTIME 0
-#define CLOCK_MONOTONIC 1
-#define CLOCK_BOOTTIME 7
+#define CLOCK_REALTIME          0
+#define CLOCK_MONOTONIC         1
+#define CLOCK_BOOTTIME          7
 
 struct timerfd_context {
     int clock_id;
@@ -67,27 +68,23 @@ static void refresh(struct timerfd_context *context) {
     if (context->interval_ns) {
         expirations += (now - context->next_expiration_ns) / context->interval_ns;
         uint64_t advance;
-        if (expirations > UINT64_MAX / context->interval_ns)
-            advance = UINT64_MAX;
-        else
-            advance = expirations * context->interval_ns;
+        if (expirations > UINT64_MAX / context->interval_ns) advance = UINT64_MAX;
+        else advance = expirations * context->interval_ns;
         if (UINT64_MAX - context->next_expiration_ns < advance)
             context->next_expiration_ns = UINT64_MAX;
-        else
-            context->next_expiration_ns += advance;
+        else context->next_expiration_ns += advance;
     } else {
         context->next_expiration_ns = 0;
     }
     if (UINT64_MAX - context->pending_expirations < expirations)
         context->pending_expirations = UINT64_MAX;
-    else
-        context->pending_expirations += expirations;
+    else context->pending_expirations += expirations;
 }
 
 struct timerfd_context *timerfd_create(int clock_id) {
     TIMERFD_LOCKED;
-    if (clock_id != CLOCK_REALTIME && clock_id != CLOCK_MONOTONIC &&
-        clock_id != CLOCK_BOOTTIME) return NULL;
+    if (clock_id != CLOCK_REALTIME && clock_id != CLOCK_MONOTONIC && clock_id != CLOCK_BOOTTIME)
+        return NULL;
     struct timerfd_context *context = kmalloc(sizeof(*context));
     if (!context) return NULL;
     context->clock_id = clock_id;
@@ -102,38 +99,34 @@ void timerfd_destroy(struct timerfd_context *context) {
     if (context) kfree(context);
 }
 
-int timerfd_gettime(struct timerfd_context *context,
-                    struct tunix_itimerspec *value) {
+int timerfd_gettime(struct timerfd_context *context, struct tunix_itimerspec *value) {
     TIMERFD_LOCKED;
     if (!context || !value) return -EINVAL;
     refresh(context);
     uint64_t remaining = 0;
     if (context->next_expiration_ns) {
         uint64_t now = clock_now(context->clock_id);
-        if (context->next_expiration_ns > now)
-            remaining = context->next_expiration_ns - now;
+        if (context->next_expiration_ns > now) remaining = context->next_expiration_ns - now;
     }
-    ns_to_timespec(context->interval_ns, &value->interval_sec,
-                   &value->interval_nsec);
+    ns_to_timespec(context->interval_ns, &value->interval_sec, &value->interval_nsec);
     ns_to_timespec(remaining, &value->value_sec, &value->value_nsec);
     return 0;
 }
 
 int timerfd_settime(struct timerfd_context *context, int flags,
-                    const struct tunix_itimerspec *new_value,
-                    struct tunix_itimerspec *old_value) {
+                    const struct tunix_itimerspec *new_value, struct tunix_itimerspec *old_value) {
     TIMERFD_LOCKED;
-    if (!context || !new_value ||
-        (flags & ~(TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET))) return -EINVAL;
+    if (!context || !new_value || (flags & ~(TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET)))
+        return -EINVAL;
     if ((flags & TFD_TIMER_CANCEL_ON_SET) &&
-        (context->clock_id != CLOCK_REALTIME || !(flags & TFD_TIMER_ABSTIME))) return -EINVAL;
+        (context->clock_id != CLOCK_REALTIME || !(flags & TFD_TIMER_ABSTIME)))
+        return -EINVAL;
     if (old_value && timerfd_gettime(context, old_value) != 0) return -EINVAL;
     uint64_t interval;
     uint64_t initial;
-    if (timespec_to_ns(new_value->interval_sec, new_value->interval_nsec,
-                       &interval) != 0 ||
-        timespec_to_ns(new_value->value_sec, new_value->value_nsec,
-                       &initial) != 0) return -EINVAL;
+    if (timespec_to_ns(new_value->interval_sec, new_value->interval_nsec, &interval) != 0 ||
+        timespec_to_ns(new_value->value_sec, new_value->value_nsec, &initial) != 0)
+        return -EINVAL;
     context->interval_ns = interval;
     context->pending_expirations = 0;
     if (!initial) {

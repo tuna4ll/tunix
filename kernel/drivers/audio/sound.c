@@ -18,21 +18,21 @@
 
 extern void kprintf(const char *fmt, ...);
 
-#define EIO 5
-#define ENXIO 6
+#define EIO    5
+#define ENXIO  6
 #define EAGAIN 11
 #define EFAULT 14
-#define EBUSY 16
+#define EBUSY  16
 #define EINVAL 22
 #define ENOTTY 25
-#define EPIPE 32
+#define EPIPE  32
 #define EBADFD 77
 
-#define RING_PAGES 64U
-#define RING_BYTES (RING_PAGES * 4096U)
+#define RING_PAGES         64U
+#define RING_BYTES         (RING_PAGES * 4096U)
 #define PERIOD_BYTES_ALIGN 128U
-#define REFINE_PASSES 16U
-#define DRAIN_MAX_NS (300ULL * 1000ULL * 1000ULL)
+#define REFINE_PASSES      16U
+#define DRAIN_MAX_NS       (300ULL * 1000ULL * 1000ULL)
 
 _Static_assert(sizeof(struct snd_pcm_hw_params) == 608, "hw_params layout");
 _Static_assert(sizeof(struct snd_pcm_sw_params) == 136, "sw_params layout");
@@ -122,9 +122,7 @@ static uint64_t divide_down(uint64_t value, uint64_t divisor) {
     return divisor ? value / divisor : 0;
 }
 
-static uint64_t clamp_u32(uint64_t value) {
-    return value > UINT32_MAX ? UINT32_MAX : value;
-}
+static uint64_t clamp_u32(uint64_t value) { return value > UINT32_MAX ? UINT32_MAX : value; }
 
 static void copy_field(unsigned char *destination, size_t size, const char *text) {
     memset(destination, 0, size);
@@ -152,8 +150,7 @@ static int ring_allocate(void) {
 }
 
 static void ring_clear(void) {
-    for (unsigned index = 0; index < ring_page_count; index++)
-        memset(ring_virtual[index], 0, 4096);
+    for (unsigned index = 0; index < ring_page_count; index++) memset(ring_virtual[index], 0, 4096);
 }
 
 static void ring_zero(uint32_t offset, uint32_t size) {
@@ -196,8 +193,7 @@ static uint64_t playback_avail(void) {
 
 static void pcm_refresh_pointer(void) {
     if (!card || !pcm.buffer_size || !pcm.frame_bytes) return;
-    if (pcm.state != SNDRV_PCM_STATE_RUNNING &&
-        pcm.state != SNDRV_PCM_STATE_DRAINING) return;
+    if (pcm.state != SNDRV_PCM_STATE_RUNNING && pcm.state != SNDRV_PCM_STATE_DRAINING) return;
 
     uint32_t position = card->position();
     uint64_t frames = position / pcm.frame_bytes;
@@ -230,8 +226,7 @@ static void pcm_silence_ahead(void) {
 static void pcm_update_pointer(void) {
     pcm_refresh_pointer();
     if (!card || !pcm.buffer_size || !pcm.frame_bytes) return;
-    if (pcm.state != SNDRV_PCM_STATE_RUNNING &&
-        pcm.state != SNDRV_PCM_STATE_DRAINING) return;
+    if (pcm.state != SNDRV_PCM_STATE_RUNNING && pcm.state != SNDRV_PCM_STATE_DRAINING) return;
 
     uint64_t avail = playback_avail();
     if (avail > pcm.avail_max) pcm.avail_max = avail;
@@ -243,8 +238,7 @@ static void pcm_update_pointer(void) {
         }
         return;
     }
-    if (playback_used() > pcm.buffer_size ||
-        (pcm.stop_threshold && avail >= pcm.stop_threshold)) {
+    if (playback_used() > pcm.buffer_size || (pcm.stop_threshold && avail >= pcm.stop_threshold)) {
         (void)card->trigger(0);
         pcm.state = SNDRV_PCM_STATE_XRUN;
     }
@@ -270,9 +264,9 @@ static int pcm_start(void) {
 }
 
 static void pcm_stop(int state) {
-    if (card && (pcm.state == SNDRV_PCM_STATE_RUNNING ||
-                 pcm.state == SNDRV_PCM_STATE_DRAINING ||
-                 pcm.state == SNDRV_PCM_STATE_PAUSED))
+    if (card &&
+        (pcm.state == SNDRV_PCM_STATE_RUNNING || pcm.state == SNDRV_PCM_STATE_DRAINING ||
+         pcm.state == SNDRV_PCM_STATE_PAUSED))
         (void)card->trigger(0);
     pcm.state = state;
 }
@@ -332,7 +326,7 @@ static int interval_refine(struct snd_interval *interval, uint64_t low, uint64_t
     if (high < max) max = high;
 
     int changed = interval->openmin || interval->openmax || !interval->integer ||
-                  min != interval->min || max != interval->max;
+        min != interval->min || max != interval->max;
     interval->min = (unsigned)clamp_u32(min);
     interval->max = (unsigned)clamp_u32(max);
     interval->openmin = 0;
@@ -342,8 +336,8 @@ static int interval_refine(struct snd_interval *interval, uint64_t low, uint64_t
     return changed;
 }
 
-static int relate_muldiv(struct snd_interval *c, struct snd_interval *a,
-                         struct snd_interval *b, uint64_t k) {
+static int relate_muldiv(struct snd_interval *c, struct snd_interval *a, struct snd_interval *b,
+                         uint64_t k) {
     int changed = 0;
     changed |= interval_refine(c, divide_down((uint64_t)a->min * b->min, k),
                                divide_up((uint64_t)a->max * b->max, k));
@@ -358,14 +352,13 @@ static uint32_t format_bits(unsigned format) {
     switch (format) {
     case SNDRV_PCM_FORMAT_S16_LE: return 16;
     case SNDRV_PCM_FORMAT_S32_LE: return 32;
-    default: return 0;
+    default:                      return 0;
     }
 }
 
 static void supported_access_mask(uint32_t *bits) {
     memset(bits, 0, SNDRV_MASK_WORDS * sizeof(bits[0]));
-    bits[0] = (1U << SNDRV_PCM_ACCESS_MMAP_INTERLEAVED) |
-              (1U << SNDRV_PCM_ACCESS_RW_INTERLEAVED);
+    bits[0] = (1U << SNDRV_PCM_ACCESS_MMAP_INTERLEAVED) | (1U << SNDRV_PCM_ACCESS_RW_INTERLEAVED);
 }
 
 static void supported_format_mask(uint32_t *bits) {
@@ -405,8 +398,7 @@ static int rate_supported(uint32_t rate) {
 
 static uint32_t ring_limit_bytes(void) {
     uint32_t limit = ring_page_count * 4096U;
-    if (card->hardware.buffer_bytes_max &&
-        card->hardware.buffer_bytes_max < limit)
+    if (card->hardware.buffer_bytes_max && card->hardware.buffer_bytes_max < limit)
         limit = card->hardware.buffer_bytes_max;
     return limit;
 }
@@ -456,16 +448,14 @@ static int hw_refine(struct snd_pcm_hw_params *params) {
     for (unsigned pass = 0; pass < REFINE_PASSES; pass++) {
         int changed = 0;
         changed |= interval_refine(sample_bits, bits_low, bits_high);
-        changed |= interval_refine(channels, hardware->channels_min,
-                                   hardware->channels_max);
+        changed |= interval_refine(channels, hardware->channels_min, hardware->channels_max);
         changed |= interval_refine(rate, hardware->rate_min, hardware->rate_max);
         changed |= refine_rate_list(rate);
-        changed |= interval_refine(periods, hardware->periods_min,
-                                   hardware->periods_max);
-        changed |= interval_refine(period_bytes, hardware->period_bytes_min,
-                                   hardware->period_bytes_max);
-        changed |= interval_refine(period_bytes,
-            divide_up(period_bytes->min, PERIOD_BYTES_ALIGN) * PERIOD_BYTES_ALIGN,
+        changed |= interval_refine(periods, hardware->periods_min, hardware->periods_max);
+        changed |=
+            interval_refine(period_bytes, hardware->period_bytes_min, hardware->period_bytes_max);
+        changed |= interval_refine(
+            period_bytes, divide_up(period_bytes->min, PERIOD_BYTES_ALIGN) * PERIOD_BYTES_ALIGN,
             divide_down(period_bytes->max, PERIOD_BYTES_ALIGN) * PERIOD_BYTES_ALIGN);
         changed |= interval_refine(buffer_bytes, PERIOD_BYTES_ALIGN, ring_bytes);
 
@@ -473,11 +463,9 @@ static int hw_refine(struct snd_pcm_hw_params *params) {
         changed |= relate_muldiv(period_bytes, period_size, frame_bits, 8);
         changed |= relate_muldiv(buffer_bytes, buffer_size, frame_bits, 8);
         changed |= relate_muldiv(buffer_size, period_size, periods, 1);
-        if (!period_size->empty && period_size->min == period_size->max &&
-            period_size->min) {
+        if (!period_size->empty && period_size->min == period_size->max && period_size->min) {
             uint64_t one = period_size->min;
-            changed |= interval_refine(buffer_size,
-                                       divide_up(buffer_size->min, one) * one,
+            changed |= interval_refine(buffer_size, divide_up(buffer_size->min, one) * one,
                                        divide_down(buffer_size->max, one) * one);
         }
         changed |= interval_refine(period_time,
@@ -498,8 +486,8 @@ static int hw_refine(struct snd_pcm_hw_params *params) {
         if (!changed) break;
     }
 
-    params->info = SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_MMAP_VALID |
-                   SNDRV_PCM_INFO_INTERLEAVED | SNDRV_PCM_INFO_BLOCK_TRANSFER;
+    params->info = SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_MMAP_VALID | SNDRV_PCM_INFO_INTERLEAVED |
+        SNDRV_PCM_INFO_BLOCK_TRANSFER;
     params->msbits = sample_bits->max;
     params->rate_num = rate->max;
     params->rate_den = 1;
@@ -516,9 +504,9 @@ static int hw_refine(struct snd_pcm_hw_params *params) {
     for (unsigned index = 0; index < SNDRV_PCM_HW_PARAM_INTERVAL_COUNT; index++) {
         const struct snd_interval *was = &before.intervals[index];
         const struct snd_interval *now = &params->intervals[index];
-        if (was->min != now->min || was->max != now->max ||
-            was->openmin != now->openmin || was->openmax != now->openmax ||
-            was->integer != now->integer || was->empty != now->empty)
+        if (was->min != now->min || was->max != now->max || was->openmin != now->openmin ||
+            was->openmax != now->openmax || was->integer != now->integer ||
+            was->empty != now->empty)
             changed_mask |= 1U << (SNDRV_PCM_HW_PARAM_FIRST_INTERVAL + index);
     }
     params->cmask = changed_mask;
@@ -570,14 +558,10 @@ static int hw_params(struct snd_pcm_hw_params *params) {
     pcm_stop(SNDRV_PCM_STATE_SETUP);
 
     struct snd_stream_format stream = {
-        .rate = (uint32_t)rate,
-        .channels = (uint32_t)channels,
-        .format = format
-    };
+        .rate = (uint32_t)rate, .channels = (uint32_t)channels, .format = format};
     unsigned pages = (unsigned)divide_up(buffer_bytes, 4096U);
     if (pages > ring_page_count) return -EINVAL;
-    if (card->configure(&stream, ring_physical, pages, (uint32_t)buffer_bytes) != 0)
-        return -EINVAL;
+    if (card->configure(&stream, ring_physical, pages, (uint32_t)buffer_bytes) != 0) return -EINVAL;
 
     pcm.rate = (uint32_t)rate;
     pcm.channels = (uint32_t)channels;
@@ -592,8 +576,7 @@ static int hw_params(struct snd_pcm_hw_params *params) {
     pcm.buffer_bytes = (uint32_t)buffer_bytes;
 
     pcm.boundary = buffer_size;
-    while (pcm.boundary * 2U <= (uint64_t)INT64_MAX - buffer_size)
-        pcm.boundary *= 2U;
+    while (pcm.boundary * 2U <= (uint64_t)INT64_MAX - buffer_size) pcm.boundary *= 2U;
 
     pcm.avail_min = period_size;
     pcm.start_threshold = 1;
@@ -644,8 +627,7 @@ static int64_t pcm_append(const uint8_t *source, uint64_t frames) {
     return (int64_t)frames;
 }
 
-int64_t sound_pcm_write(struct vfs_node *node, uint64_t offset, size_t size,
-                        const void *buffer) {
+int64_t sound_pcm_write(struct vfs_node *node, uint64_t offset, size_t size, const void *buffer) {
     SOUND_LOCKED;
     (void)node;
     (void)offset;
@@ -664,9 +646,9 @@ int sound_pcm_write_ready(struct vfs_node *node) {
     if (!card) return 1;
     if (!pcm.configured) return 1;
     pcm_update_pointer();
-    if (pcm.state == SNDRV_PCM_STATE_XRUN ||
-        pcm.state == SNDRV_PCM_STATE_SETUP ||
-        pcm.state == SNDRV_PCM_STATE_PREPARED) return 1;
+    if (pcm.state == SNDRV_PCM_STATE_XRUN || pcm.state == SNDRV_PCM_STATE_SETUP ||
+        pcm.state == SNDRV_PCM_STATE_PREPARED)
+        return 1;
     uint64_t minimum = pcm.avail_min ? pcm.avail_min : 1U;
     return playback_avail() >= minimum;
 }
@@ -692,8 +674,7 @@ static int64_t ioctl_sync_ptr(uint64_t user_argument) {
     struct snd_pcm_sync_ptr sync;
     if (sound_copy_from_user(&sync, user_argument, sizeof(sync)) != 0) return -EFAULT;
 
-    if (!(sync.flags & SNDRV_PCM_SYNC_PTR_AVAIL_MIN))
-        pcm.avail_min = sync.c.control.avail_min;
+    if (!(sync.flags & SNDRV_PCM_SYNC_PTR_AVAIL_MIN)) pcm.avail_min = sync.c.control.avail_min;
     if (pcm.boundary) {
         if (!(sync.flags & SNDRV_PCM_SYNC_PTR_APPL))
             pcm.appl_ptr = sync.c.control.appl_ptr % pcm.boundary;
@@ -751,8 +732,7 @@ static int64_t ioctl_xferi(uint64_t user_argument) {
 
 static int64_t ioctl_drain(void) {
     if (!pcm.configured) return -EBADFD;
-    if (pcm.state == SNDRV_PCM_STATE_PREPARED && playback_used())
-        (void)pcm_start();
+    if (pcm.state == SNDRV_PCM_STATE_PREPARED && playback_used()) (void)pcm_start();
     if (pcm.state != SNDRV_PCM_STATE_RUNNING) {
         pcm_stop(SNDRV_PCM_STATE_SETUP);
         return 0;
@@ -803,18 +783,15 @@ static int64_t sound_report_refusal(unsigned nr, int64_t answer, const char *whi
     static unsigned reported;
     if (answer < 0 && answer != -EAGAIN && reported < SOUND_REFUSALS_REPORTED) {
         reported++;
-        kprintf("SOUND: %s request %x refused (%d), state %d\n",
-                which, nr, (int)answer, pcm.state);
+        kprintf("SOUND: %s request %x refused (%d), state %d\n", which, nr, (int)answer, pcm.state);
     }
     return answer;
 }
 
-int64_t sound_pcm_ioctl(struct vfs_node *node, unsigned long request,
-                        uint64_t user_argument) {
+int64_t sound_pcm_ioctl(struct vfs_node *node, unsigned long request, uint64_t user_argument) {
     SOUND_LOCKED;
     return sound_report_refusal((unsigned)SND_IOC_NR(request),
-                                sound_pcm_ioctl_locked(node, request, user_argument),
-                                "pcm");
+                                sound_pcm_ioctl_locked(node, request, user_argument), "pcm");
 }
 
 static int64_t sound_pcm_ioctl_locked(struct vfs_node *node, unsigned long request,
@@ -835,14 +812,13 @@ static int64_t sound_pcm_ioctl_locked(struct vfs_node *node, unsigned long reque
     }
     case 0x02:
     case 0x03:
-    case 0x04:
-        return 0;
+    case 0x04:                         return 0;
     case SNDRV_PCM_IOCTL_NR_HW_REFINE:
     case SNDRV_PCM_IOCTL_NR_HW_PARAMS: {
         struct snd_pcm_hw_params params;
         if (sound_copy_from_user(&params, user_argument, sizeof(params)) != 0) return -EFAULT;
-        int64_t result = SND_IOC_NR(request) == SNDRV_PCM_IOCTL_NR_HW_REFINE
-                             ? hw_refine(&params) : hw_params(&params);
+        int64_t result = SND_IOC_NR(request) == SNDRV_PCM_IOCTL_NR_HW_REFINE ? hw_refine(&params)
+                                                                             : hw_params(&params);
         if (result != 0) return result;
         return sound_copy_to_user(user_argument, &params, sizeof(params)) == 0 ? 0 : -EFAULT;
     }
@@ -868,43 +844,26 @@ static int64_t sound_pcm_ioctl_locked(struct vfs_node *node, unsigned long reque
         long delay = (long)playback_used();
         return sound_copy_to_user(user_argument, &delay, sizeof(delay)) == 0 ? 0 : -EFAULT;
     }
-    case SNDRV_PCM_IOCTL_NR_HWSYNC:
-        pcm_update_pointer();
-        return 0;
-    case SNDRV_PCM_IOCTL_NR_SYNC_PTR:
-        return ioctl_sync_ptr(user_argument);
-    case SNDRV_PCM_IOCTL_NR_CHANNEL_INFO:
-        return ioctl_channel_info(user_argument);
-    case SNDRV_PCM_IOCTL_NR_PREPARE:
-        return pcm_prepare();
-    case SNDRV_PCM_IOCTL_NR_RESET:
-        pcm.appl_ptr = pcm.hw_ptr;
-        return 0;
-    case SNDRV_PCM_IOCTL_NR_START:
-        return pcm_start();
-    case SNDRV_PCM_IOCTL_NR_DROP:
-        pcm_stop(SNDRV_PCM_STATE_SETUP);
-        return 0;
-    case SNDRV_PCM_IOCTL_NR_DRAIN:
-        return ioctl_drain();
-    case SNDRV_PCM_IOCTL_NR_PAUSE:
-        return -EINVAL;
-    case SNDRV_PCM_IOCTL_NR_XRUN:
-        pcm_stop(SNDRV_PCM_STATE_XRUN);
-        return 0;
-    case SNDRV_PCM_IOCTL_NR_WRITEI_FRAMES:
-        return ioctl_xferi(user_argument);
+    case SNDRV_PCM_IOCTL_NR_HWSYNC:        pcm_update_pointer(); return 0;
+    case SNDRV_PCM_IOCTL_NR_SYNC_PTR:      return ioctl_sync_ptr(user_argument);
+    case SNDRV_PCM_IOCTL_NR_CHANNEL_INFO:  return ioctl_channel_info(user_argument);
+    case SNDRV_PCM_IOCTL_NR_PREPARE:       return pcm_prepare();
+    case SNDRV_PCM_IOCTL_NR_RESET:         pcm.appl_ptr = pcm.hw_ptr; return 0;
+    case SNDRV_PCM_IOCTL_NR_START:         return pcm_start();
+    case SNDRV_PCM_IOCTL_NR_DROP:          pcm_stop(SNDRV_PCM_STATE_SETUP); return 0;
+    case SNDRV_PCM_IOCTL_NR_DRAIN:         return ioctl_drain();
+    case SNDRV_PCM_IOCTL_NR_PAUSE:         return -EINVAL;
+    case SNDRV_PCM_IOCTL_NR_XRUN:          pcm_stop(SNDRV_PCM_STATE_XRUN); return 0;
+    case SNDRV_PCM_IOCTL_NR_WRITEI_FRAMES: return ioctl_xferi(user_argument);
     case SNDRV_PCM_IOCTL_NR_LINK:
-    case SNDRV_PCM_IOCTL_NR_UNLINK:
-        return -EINVAL;
-    default:
-        return -ENOTTY;
+    case SNDRV_PCM_IOCTL_NR_UNLINK:        return -EINVAL;
+    default:                               return -ENOTTY;
     }
 }
 
 int64_t sound_pcm_mmap(struct vfs_node *node, struct file *file, uint64_t cr3,
-                       uint64_t virtual_address, uint64_t length,
-                       uint64_t offset, uint64_t page_flags) {
+                       uint64_t virtual_address, uint64_t length, uint64_t offset,
+                       uint64_t page_flags) {
     SOUND_LOCKED;
     (void)node;
     (void)file;
@@ -950,22 +909,18 @@ void sound_pcm_close(struct vfs_node *node) {
 #define CTL_NUMID_VOLUME 1U
 #define CTL_NUMID_SWITCH 2U
 
-static unsigned control_element_count(void) {
-    return card && card->set_volume ? 2U : 0U;
-}
+static unsigned control_element_count(void) { return card && card->set_volume ? 2U : 0U; }
 
 static void fill_element_id(struct snd_ctl_elem_id *id, unsigned numid) {
     memset(id, 0, sizeof(*id));
     id->numid = numid;
     id->iface = SNDRV_CTL_ELEM_IFACE_MIXER;
     copy_field(id->name, sizeof(id->name),
-               numid == CTL_NUMID_VOLUME ? "Master Playback Volume"
-                                         : "Master Playback Switch");
+               numid == CTL_NUMID_VOLUME ? "Master Playback Volume" : "Master Playback Switch");
 }
 
 static unsigned element_lookup(const struct snd_ctl_elem_id *id) {
-    if (id->numid == CTL_NUMID_VOLUME || id->numid == CTL_NUMID_SWITCH)
-        return id->numid;
+    if (id->numid == CTL_NUMID_VOLUME || id->numid == CTL_NUMID_SWITCH) return id->numid;
     const char *name = (const char *)id->name;
     size_t limit = sizeof(id->name);
     if (!strncmp(name, "Master Playback Volume", limit)) return CTL_NUMID_VOLUME;
@@ -982,8 +937,8 @@ static int64_t ioctl_elem_list(uint64_t user_argument) {
     for (unsigned index = list.offset; index < total && list.used < list.space; index++) {
         struct snd_ctl_elem_id id;
         fill_element_id(&id, index + 1U);
-        if (sound_copy_to_user(list.pids + (uint64_t)list.used * sizeof(id), &id,
-                         sizeof(id)) != 0) return -EFAULT;
+        if (sound_copy_to_user(list.pids + (uint64_t)list.used * sizeof(id), &id, sizeof(id)) != 0)
+            return -EFAULT;
         list.used++;
     }
     return sound_copy_to_user(user_argument, &list, sizeof(list)) == 0 ? 0 : -EFAULT;
@@ -1040,7 +995,8 @@ static int64_t ioctl_elem_write(uint64_t user_argument) {
         long left = value.value.integer_value[0];
         long right = value.value.integer_value[1];
         if (left < 0 || right < 0 || left > (long)card->volume_max ||
-            right > (long)card->volume_max) return -EINVAL;
+            right > (long)card->volume_max)
+            return -EINVAL;
         mixer.left = (uint32_t)left;
         mixer.right = (uint32_t)right;
     } else {
@@ -1061,8 +1017,7 @@ static void fill_card_info(struct snd_ctl_card_info *info) {
     copy_field(info->components, sizeof(info->components), card->components);
 }
 
-int64_t sound_control_ioctl(struct vfs_node *node, unsigned long request,
-                            uint64_t user_argument) {
+int64_t sound_control_ioctl(struct vfs_node *node, unsigned long request, uint64_t user_argument) {
     SOUND_LOCKED;
     return sound_report_refusal((unsigned)SND_IOC_NR(request),
                                 sound_control_ioctl_locked(node, request, user_argument),
@@ -1070,7 +1025,7 @@ int64_t sound_control_ioctl(struct vfs_node *node, unsigned long request,
 }
 
 static int64_t sound_control_ioctl_locked(struct vfs_node *node, unsigned long request,
-                            uint64_t user_argument) {
+                                          uint64_t user_argument) {
     (void)node;
     if (!card) return -ENXIO;
     if (SND_IOC_TYPE(request) != 'U') return -ENOTTY;
@@ -1085,18 +1040,14 @@ static int64_t sound_control_ioctl_locked(struct vfs_node *node, unsigned long r
         fill_card_info(&info);
         return sound_copy_to_user(user_argument, &info, sizeof(info)) == 0 ? 0 : -EFAULT;
     }
-    case SNDRV_CTL_IOCTL_NR_ELEM_LIST:
-        return ioctl_elem_list(user_argument);
-    case SNDRV_CTL_IOCTL_NR_ELEM_INFO:
-        return ioctl_elem_info(user_argument);
-    case SNDRV_CTL_IOCTL_NR_ELEM_READ:
-        return ioctl_elem_read(user_argument);
-    case SNDRV_CTL_IOCTL_NR_ELEM_WRITE:
-        return ioctl_elem_write(user_argument);
+    case SNDRV_CTL_IOCTL_NR_ELEM_LIST:        return ioctl_elem_list(user_argument);
+    case SNDRV_CTL_IOCTL_NR_ELEM_INFO:        return ioctl_elem_info(user_argument);
+    case SNDRV_CTL_IOCTL_NR_ELEM_READ:        return ioctl_elem_read(user_argument);
+    case SNDRV_CTL_IOCTL_NR_ELEM_WRITE:       return ioctl_elem_write(user_argument);
     case SNDRV_CTL_IOCTL_NR_SUBSCRIBE_EVENTS: {
         int subscribed = 0;
-        return sound_copy_to_user(user_argument, &subscribed, sizeof(subscribed)) == 0
-                   ? 0 : -EFAULT;
+        return sound_copy_to_user(user_argument, &subscribed, sizeof(subscribed)) == 0 ? 0
+                                                                                       : -EFAULT;
     }
     case SNDRV_CTL_IOCTL_NR_PCM_NEXT_DEVICE: {
         int device = -1;
@@ -1107,25 +1058,21 @@ static int64_t sound_control_ioctl_locked(struct vfs_node *node, unsigned long r
     case SNDRV_CTL_IOCTL_NR_PCM_INFO: {
         struct snd_pcm_info info;
         if (sound_copy_from_user(&info, user_argument, sizeof(info)) != 0) return -EFAULT;
-        if (info.device != 0 || info.stream != SNDRV_PCM_STREAM_PLAYBACK)
-            return -ENXIO;
+        if (info.device != 0 || info.stream != SNDRV_PCM_STREAM_PLAYBACK) return -ENXIO;
         fill_pcm_info(&info);
         return sound_copy_to_user(user_argument, &info, sizeof(info)) == 0 ? 0 : -EFAULT;
     }
-    case SNDRV_CTL_IOCTL_NR_PCM_PREFER_SUBDEVICE:
-        return 0;
-    case SNDRV_CTL_IOCTL_NR_POWER_STATE: {
+    case SNDRV_CTL_IOCTL_NR_PCM_PREFER_SUBDEVICE: return 0;
+    case SNDRV_CTL_IOCTL_NR_POWER_STATE:          {
         int state = 0;
         return sound_copy_to_user(user_argument, &state, sizeof(state)) == 0 ? 0 : -EFAULT;
     }
-    default:
-        return -ENOTTY;
+    default: return -ENOTTY;
     }
 }
 
 int snd_register_card(const struct snd_backend *backend) {
-    if (!backend || !backend->configure || !backend->trigger || !backend->position)
-        return -1;
+    if (!backend || !backend->configure || !backend->trigger || !backend->position) return -1;
     lock_acquire(&sound_lock);
     if (card || ring_allocate() != 0) {
         lock_release(&sound_lock);

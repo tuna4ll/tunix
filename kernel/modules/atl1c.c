@@ -18,166 +18,166 @@ extern void kprintf(const char *fmt, ...);
 
 #define ATL1C_REGISTER_BYTES 0x2000ULL
 
-#define REG_PCIE_PHYMISC 0x1000U
+#define REG_PCIE_PHYMISC           0x1000U
 #define PCIE_PHYMISC_FORCE_RCV_DET (1U << 2)
 
-#define REG_PM_CTRL 0x12F8U
-#define PM_CTRL_MAC_ASPM_CHK (1U << 30)
-#define PM_CTRL_L1_ENTRY_TIMER_MASK 0xFU
+#define REG_PM_CTRL                  0x12F8U
+#define PM_CTRL_MAC_ASPM_CHK         (1U << 30)
+#define PM_CTRL_L1_ENTRY_TIMER_MASK  0xFU
 #define PM_CTRL_L1_ENTRY_TIMER_SHIFT 16
-#define PM_CTRL_CLK_SWH_L1 (1U << 13)
-#define PM_CTRL_ASPM_L0S_EN (1U << 12)
+#define PM_CTRL_CLK_SWH_L1           (1U << 13)
+#define PM_CTRL_ASPM_L0S_EN          (1U << 12)
 #define PM_CTRL_SERDES_BUFS_RX_L1_EN (1U << 7)
-#define PM_CTRL_SERDES_PD_EX_L1 (1U << 6)
-#define PM_CTRL_SERDES_PLL_L1_EN (1U << 5)
-#define PM_CTRL_SERDES_L1_EN (1U << 4)
-#define PM_CTRL_ASPM_L1_EN (1U << 3)
+#define PM_CTRL_SERDES_PD_EX_L1      (1U << 6)
+#define PM_CTRL_SERDES_PLL_L1_EN     (1U << 5)
+#define PM_CTRL_SERDES_L1_EN         (1U << 4)
+#define PM_CTRL_ASPM_L1_EN           (1U << 3)
 
 #define REG_LTSSM_ID_CTRL 0x12FCU
-#define LTSSM_ID_EN_WRO 0x1000U
+#define LTSSM_ID_EN_WRO   0x1000U
 
 #define REG_CLK_GATING_CTRL 0x1814U
 
-#define REG_TWSI_CTRL 0x218U
+#define REG_TWSI_CTRL        0x218U
 #define TWSI_CTRL_SW_LDSTART 0x800U
-#define REG_TWSI_DEBUG 0x1108U
+#define REG_TWSI_DEBUG       0x1108U
 #define TWSI_DEBUG_DEV_EXIST 0x20000000U
-#define REG_OTP_CTRL 0x12F0U
-#define OTP_CTRL_CLK_EN 0x0002U
+#define REG_OTP_CTRL         0x12F0U
+#define OTP_CTRL_CLK_EN      0x0002U
 
-#define REG_MASTER_CTRL 0x1400U
-#define MASTER_CTRL_SOFT_RST (1U << 0)
-#define MASTER_CTRL_OOB_DIS (1U << 6)
-#define MASTER_CTRL_SA_TIMER_EN (1U << 7)
+#define REG_MASTER_CTRL          0x1400U
+#define MASTER_CTRL_SOFT_RST     (1U << 0)
+#define MASTER_CTRL_OOB_DIS      (1U << 6)
+#define MASTER_CTRL_SA_TIMER_EN  (1U << 7)
 #define MASTER_CTRL_TX_ITIMER_EN (1U << 10)
 #define MASTER_CTRL_RX_ITIMER_EN (1U << 11)
-#define MASTER_CTRL_CLK_SEL_DIS (1U << 12)
-#define MASTER_CTRL_INT_RDCLR (1U << 14)
-#define MASTER_CTRL_OTP_SEL (1U << 31)
+#define MASTER_CTRL_CLK_SEL_DIS  (1U << 12)
+#define MASTER_CTRL_INT_RDCLR    (1U << 14)
+#define MASTER_CTRL_OTP_SEL      (1U << 31)
 
-#define REG_GPHY_CTRL 0x140CU
-#define GPHY_CTRL_EXT_RESET (1U << 0)
+#define REG_GPHY_CTRL         0x140CU
+#define GPHY_CTRL_EXT_RESET   (1U << 0)
 #define GPHY_CTRL_GATE_25M_EN (1U << 5)
-#define GPHY_CTRL_PHY_IDDQ (1U << 7)
-#define GPHY_CTRL_HIB_EN (1U << 10)
-#define GPHY_CTRL_HIB_PULSE (1U << 11)
+#define GPHY_CTRL_PHY_IDDQ    (1U << 7)
+#define GPHY_CTRL_HIB_EN      (1U << 10)
+#define GPHY_CTRL_HIB_PULSE   (1U << 11)
 #define GPHY_CTRL_SEL_ANA_RST (1U << 12)
-#define GPHY_CTRL_PWDOWN_HW (1U << 14)
+#define GPHY_CTRL_PWDOWN_HW   (1U << 14)
 
-#define REG_IDLE_STATUS 0x1410U
+#define REG_IDLE_STATUS  0x1410U
 #define IDLE_STATUS_MASK 0x0FU
 
-#define REG_MDIO_CTRL 0x1414U
-#define MDIO_CTRL_BUSY (1U << 27)
-#define MDIO_CTRL_START (1U << 23)
+#define REG_MDIO_CTRL         0x1414U
+#define MDIO_CTRL_BUSY        (1U << 27)
+#define MDIO_CTRL_START       (1U << 23)
 #define MDIO_CTRL_SPRES_PRMBL (1U << 22)
-#define MDIO_CTRL_OP_READ (1U << 21)
-#define MDIO_CTRL_REG_SHIFT 16
-#define MDIO_CTRL_DATA_MASK 0xFFFFU
+#define MDIO_CTRL_OP_READ     (1U << 21)
+#define MDIO_CTRL_REG_SHIFT   16
+#define MDIO_CTRL_DATA_MASK   0xFFFFU
 
-#define REG_MAC_CTRL 0x1480U
-#define MAC_CTRL_TX_EN (1U << 0)
-#define MAC_CTRL_RX_EN (1U << 1)
-#define MAC_CTRL_TX_FLOW (1U << 2)
-#define MAC_CTRL_RX_FLOW (1U << 3)
-#define MAC_CTRL_DUPLX (1U << 5)
-#define MAC_CTRL_ADD_CRC (1U << 6)
-#define MAC_CTRL_PAD (1U << 7)
-#define MAC_CTRL_PRMLEN_SHIFT 10
-#define MAC_CTRL_PROMIS_EN (1U << 15)
-#define MAC_CTRL_SPEED_SHIFT 20
-#define MAC_CTRL_BC_EN (1U << 26)
-#define MAC_CTRL_HASH_ALG_CRC32 (1U << 29)
-#define MAC_CTRL_SPEED_MODE_SW (1U << 30)
+#define REG_MAC_CTRL             0x1480U
+#define MAC_CTRL_TX_EN           (1U << 0)
+#define MAC_CTRL_RX_EN           (1U << 1)
+#define MAC_CTRL_TX_FLOW         (1U << 2)
+#define MAC_CTRL_RX_FLOW         (1U << 3)
+#define MAC_CTRL_DUPLX           (1U << 5)
+#define MAC_CTRL_ADD_CRC         (1U << 6)
+#define MAC_CTRL_PAD             (1U << 7)
+#define MAC_CTRL_PRMLEN_SHIFT    10
+#define MAC_CTRL_PROMIS_EN       (1U << 15)
+#define MAC_CTRL_SPEED_SHIFT     20
+#define MAC_CTRL_BC_EN           (1U << 26)
+#define MAC_CTRL_HASH_ALG_CRC32  (1U << 29)
+#define MAC_CTRL_SPEED_MODE_SW   (1U << 30)
 #define MAC_CTRL_SINGLE_PAUSE_EN (1U << 28)
-#define MAC_SPEED_10_100 1U
-#define MAC_SPEED_1000 2U
+#define MAC_SPEED_10_100         1U
+#define MAC_SPEED_1000           2U
 
-#define REG_MAC_STA_ADDR 0x1488U
+#define REG_MAC_STA_ADDR  0x1488U
 #define REG_RX_HASH_TABLE 0x1490U
-#define REG_MTU 0x149CU
-#define REG_WOL_CTRL 0x14A0U
+#define REG_MTU           0x149CU
+#define REG_WOL_CTRL      0x14A0U
 
-#define REG_LOAD_PTR 0x1534U
-#define REG_RX_BASE_ADDR_HI 0x1540U
-#define REG_TX_BASE_ADDR_HI 0x1544U
+#define REG_LOAD_PTR          0x1534U
+#define REG_RX_BASE_ADDR_HI   0x1540U
+#define REG_TX_BASE_ADDR_HI   0x1544U
 #define REG_RFD0_HEAD_ADDR_LO 0x1550U
-#define REG_RFD_RING_SIZE 0x1560U
-#define REG_RX_BUF_SIZE 0x1564U
+#define REG_RFD_RING_SIZE     0x1560U
+#define REG_RX_BUF_SIZE       0x1564U
 #define REG_RRD0_HEAD_ADDR_LO 0x1568U
-#define REG_RRD_RING_SIZE 0x1578U
-#define REG_TPD_PRI0_ADDR_LO 0x1580U
-#define REG_TPD_RING_SIZE 0x1584U
+#define REG_RRD_RING_SIZE     0x1578U
+#define REG_TPD_PRI0_ADDR_LO  0x1580U
+#define REG_TPD_RING_SIZE     0x1584U
 
-#define REG_TXQ_CTRL 0x1590U
+#define REG_TXQ_CTRL          0x1590U
 #define TXQ_NUM_TPD_BURST_DEF 5U
 #define TXQ_CTRL_IP_OPTION_EN (1U << 4)
-#define TXQ_CTRL_EN (1U << 5)
-#define TXQ_CTRL_ENH_MODE (1U << 6)
-#define TXQ_CTRL_LS_8023_EN (1U << 7)
-#define TXQ_TXF_BURST_SHIFT 16
-#define TXQ_TXF_BURST_L1C 0x200U
+#define TXQ_CTRL_EN           (1U << 5)
+#define TXQ_CTRL_ENH_MODE     (1U << 6)
+#define TXQ_CTRL_LS_8023_EN   (1U << 7)
+#define TXQ_TXF_BURST_SHIFT   16
+#define TXQ_TXF_BURST_L1C     0x200U
 
-#define REG_RXQ_CTRL 0x15A0U
-#define RXQ_RFD_BURST_SHIFT 20
-#define RXQ_RFD_BURST_DEF 8U
-#define RXQ_CTRL_EN (1U << 31)
+#define REG_RXQ_CTRL                0x15A0U
+#define RXQ_RFD_BURST_SHIFT         20
+#define RXQ_RFD_BURST_DEF           8U
+#define RXQ_CTRL_EN                 (1U << 31)
 #define RXQ_ASPM_THRUPUT_LIMIT_100M 3U
 
-#define REG_DMA_CTRL 0x15C0U
+#define REG_DMA_CTRL             0x15C0U
 #define DMA_CTRL_RORDER_MODE_OUT 4U
 #define DMA_CTRL_RREQ_BLEN_SHIFT 4
-#define DMA_CTRL_RREQ_PRI_DATA (1U << 10)
-#define DMA_CTRL_RDLY_CNT_SHIFT 11
-#define DMA_CTRL_RDLY_CNT_DEF 15U
-#define DMA_CTRL_WDLY_CNT_SHIFT 16
-#define DMA_CTRL_WDLY_CNT_DEF 4U
+#define DMA_CTRL_RREQ_PRI_DATA   (1U << 10)
+#define DMA_CTRL_RDLY_CNT_SHIFT  11
+#define DMA_CTRL_RDLY_CNT_DEF    15U
+#define DMA_CTRL_WDLY_CNT_SHIFT  16
+#define DMA_CTRL_WDLY_CNT_DEF    4U
 
 #define REG_MB_RFD0_PROD_IDX 0x15E0U
-#define REG_TPD_PRI0_PIDX 0x15F2U
-#define REG_TPD_PRI0_CIDX 0x15F6U
+#define REG_TPD_PRI0_PIDX    0x15F2U
+#define REG_TPD_PRI0_CIDX    0x15F6U
 
 #define REG_ISR 0x1600U
 #define REG_IMR 0x1604U
 
-#define MII_BMCR 0x00U
-#define MII_BMSR 0x01U
-#define MII_PHYSID1 0x02U
-#define MII_PHYSID2 0x03U
-#define MII_ADVERTISE 0x04U
-#define MII_CTRL1000 0x09U
-#define ADVERTISE_ALL 0x01E1U
-#define ADVERTISE_PAUSE 0x0C00U
-#define CTRL1000_FULL 0x0200U
-#define CTRL1000_HALF 0x0100U
-#define BMCR_RESTART_ANEG 0x0200U
-#define BMCR_POWER_DOWN 0x0800U
-#define BMCR_ANEG_EN 0x1000U
-#define BMCR_RESET 0x8000U
-#define BMSR_LINK_UP 0x0004U
-#define MII_GIGA_PSSR 0x11U
+#define MII_BMCR           0x00U
+#define MII_BMSR           0x01U
+#define MII_PHYSID1        0x02U
+#define MII_PHYSID2        0x03U
+#define MII_ADVERTISE      0x04U
+#define MII_CTRL1000       0x09U
+#define ADVERTISE_ALL      0x01E1U
+#define ADVERTISE_PAUSE    0x0C00U
+#define CTRL1000_FULL      0x0200U
+#define CTRL1000_HALF      0x0100U
+#define BMCR_RESTART_ANEG  0x0200U
+#define BMCR_POWER_DOWN    0x0800U
+#define BMCR_ANEG_EN       0x1000U
+#define BMCR_RESET         0x8000U
+#define BMSR_LINK_UP       0x0004U
+#define MII_GIGA_PSSR      0x11U
 #define GIGA_PSSR_RESOLVED 0x0800U
-#define GIGA_PSSR_DUPLEX 0x2000U
-#define GIGA_PSSR_SPEED 0xC000U
-#define GIGA_PSSR_100MBS 0x4000U
-#define GIGA_PSSR_1000MBS 0x8000U
+#define GIGA_PSSR_DUPLEX   0x2000U
+#define GIGA_PSSR_SPEED    0xC000U
+#define GIGA_PSSR_100MBS   0x4000U
+#define GIGA_PSSR_1000MBS  0x8000U
 
 #define RRS_RFD_INDEX_SHIFT 20
-#define RRS_RFD_INDEX_MASK 0x0FFFU
+#define RRS_RFD_INDEX_MASK  0x0FFFU
 #define RRS_RFD_COUNT_SHIFT 16
-#define RRS_RFD_COUNT_MASK 0x000FU
-#define RRS_PKT_SIZE_MASK 0x3FFFU
-#define RRS_ERR_SUM (1U << 20)
-#define RRS_LEN_ERR (1U << 30)
-#define RRS_UPDATED (1U << 31)
+#define RRS_RFD_COUNT_MASK  0x000FU
+#define RRS_PKT_SIZE_MASK   0x3FFFU
+#define RRS_ERR_SUM         (1U << 20)
+#define RRS_LEN_ERR         (1U << 30)
+#define RRS_UPDATED         (1U << 31)
 
 #define TPD_EOP (1U << 31)
 
-#define RX_SLOTS 64U
-#define TX_SLOTS 16U
-#define FRAME_BYTES 1536U
-#define FRAME_MIN 14U
-#define FRAME_MAX 1514U
+#define RX_SLOTS        64U
+#define TX_SLOTS        16U
+#define FRAME_BYTES     1536U
+#define FRAME_MIN       14U
+#define FRAME_MAX       1514U
 #define RX_BUFFER_BYTES 1536U
 
 struct atl1c_tpd {
@@ -238,25 +238,19 @@ MODULE_PARAMETER(link_changes, MODULE_PARAM_UINT);
 
 static const struct net_adapter atl1c_adapter;
 
-static uint32_t read32(uint32_t offset) {
-    return *(volatile uint32_t *)(registers + offset);
-}
+static uint32_t read32(uint32_t offset) { return *(volatile uint32_t *)(registers + offset); }
 
 static void write32(uint32_t offset, uint32_t value) {
     *(volatile uint32_t *)(registers + offset) = value;
 }
 
-static uint16_t read16(uint32_t offset) {
-    return *(volatile uint16_t *)(registers + offset);
-}
+static uint16_t read16(uint32_t offset) { return *(volatile uint16_t *)(registers + offset); }
 
 static void write16(uint32_t offset, uint16_t value) {
     *(volatile uint16_t *)(registers + offset) = value;
 }
 
-static void flush_writes(void) {
-    (void)read32(REG_MASTER_CTRL);
-}
+static void flush_writes(void) { (void)read32(REG_MASTER_CTRL); }
 
 static void delay_ns(uint64_t nanoseconds) {
     uint64_t deadline = time_uptime_ns() + nanoseconds;
@@ -281,8 +275,9 @@ static int mdio_wait(void) {
 }
 
 static int phy_read(unsigned reg, uint16_t *value) {
-    write32(REG_MDIO_CTRL, MDIO_CTRL_SPRES_PRMBL | MDIO_CTRL_START |
-            MDIO_CTRL_OP_READ | ((reg & 0x1FU) << MDIO_CTRL_REG_SHIFT));
+    write32(REG_MDIO_CTRL,
+            MDIO_CTRL_SPRES_PRMBL | MDIO_CTRL_START | MDIO_CTRL_OP_READ |
+                ((reg & 0x1FU) << MDIO_CTRL_REG_SHIFT));
     flush_writes();
     if (mdio_wait() != 0) return -1;
     *value = (uint16_t)(read32(REG_MDIO_CTRL) & MDIO_CTRL_DATA_MASK);
@@ -290,8 +285,9 @@ static int phy_read(unsigned reg, uint16_t *value) {
 }
 
 static int phy_write(unsigned reg, uint16_t value) {
-    write32(REG_MDIO_CTRL, MDIO_CTRL_SPRES_PRMBL | MDIO_CTRL_START |
-            ((reg & 0x1FU) << MDIO_CTRL_REG_SHIFT) | value);
+    write32(REG_MDIO_CTRL,
+            MDIO_CTRL_SPRES_PRMBL | MDIO_CTRL_START | ((reg & 0x1FU) << MDIO_CTRL_REG_SHIFT) |
+                value);
     flush_writes();
     return mdio_wait();
 }
@@ -315,10 +311,10 @@ static void read_station_address(uint8_t *out) {
 }
 
 static void write_station_address(const uint8_t *address) {
-    write32(REG_MAC_STA_ADDR, ((uint32_t)address[2] << 24) |
-            ((uint32_t)address[3] << 16) | ((uint32_t)address[4] << 8) | address[5]);
-    write32(REG_MAC_STA_ADDR + 4U,
-            ((uint32_t)address[0] << 8) | address[1]);
+    write32(REG_MAC_STA_ADDR,
+            ((uint32_t)address[2] << 24) | ((uint32_t)address[3] << 16) |
+                ((uint32_t)address[4] << 8) | address[5]);
+    write32(REG_MAC_STA_ADDR + 4U, ((uint32_t)address[0] << 8) | address[1]);
 }
 
 static int load_mac_address(void) {
@@ -327,7 +323,7 @@ static int load_mac_address(void) {
 
     uint32_t otp = read32(REG_OTP_CTRL);
     int eeprom = (read32(REG_TWSI_DEBUG) & TWSI_DEBUG_DEV_EXIST) ||
-                 (read32(REG_MASTER_CTRL) & MASTER_CTRL_OTP_SEL);
+        (read32(REG_MASTER_CTRL) & MASTER_CTRL_OTP_SEL);
     if (!eeprom) return -1;
 
     if (!(otp & OTP_CTRL_CLK_EN)) {
@@ -352,8 +348,7 @@ static int load_mac_address(void) {
 static void reset_pcie(void) {
     write32(REG_LTSSM_ID_CTRL, read32(REG_LTSSM_ID_CTRL) & ~LTSSM_ID_EN_WRO);
     write32(REG_MASTER_CTRL, read32(REG_MASTER_CTRL) & ~MASTER_CTRL_CLK_SEL_DIS);
-    write32(REG_PCIE_PHYMISC,
-            read32(REG_PCIE_PHYMISC) | PCIE_PHYMISC_FORCE_RCV_DET);
+    write32(REG_PCIE_PHYMISC, read32(REG_PCIE_PHYMISC) | PCIE_PHYMISC_FORCE_RCV_DET);
     flush_writes();
     delay_ns(5000000ULL);
 }
@@ -367,10 +362,9 @@ static void set_aspm(int speed, int allowed) {
         control |= PM_CTRL_ASPM_L1_EN | PM_CTRL_MAC_ASPM_CHK;
     }
     if (speed) {
-        control |= PM_CTRL_SERDES_L1_EN | PM_CTRL_SERDES_PLL_L1_EN |
-                   PM_CTRL_SERDES_BUFS_RX_L1_EN;
-        control &= ~(PM_CTRL_SERDES_PD_EX_L1 | PM_CTRL_CLK_SWH_L1 |
-                     PM_CTRL_ASPM_L0S_EN | PM_CTRL_ASPM_L1_EN);
+        control |= PM_CTRL_SERDES_L1_EN | PM_CTRL_SERDES_PLL_L1_EN | PM_CTRL_SERDES_BUFS_RX_L1_EN;
+        control &= ~(PM_CTRL_SERDES_PD_EX_L1 | PM_CTRL_CLK_SWH_L1 | PM_CTRL_ASPM_L0S_EN |
+                     PM_CTRL_ASPM_L1_EN);
     } else {
         control |= PM_CTRL_CLK_SWH_L1;
         control &= ~(PM_CTRL_SERDES_L1_EN | PM_CTRL_SERDES_PLL_L1_EN |
@@ -405,8 +399,8 @@ static int reset_mac(void) {
 
 static void reset_phy(void) {
     uint32_t control = read32(REG_GPHY_CTRL);
-    control &= ~(GPHY_CTRL_EXT_RESET | GPHY_CTRL_PHY_IDDQ | GPHY_CTRL_GATE_25M_EN |
-                 GPHY_CTRL_PWDOWN_HW);
+    control &=
+        ~(GPHY_CTRL_EXT_RESET | GPHY_CTRL_PHY_IDDQ | GPHY_CTRL_GATE_25M_EN | GPHY_CTRL_PWDOWN_HW);
     control |= GPHY_CTRL_SEL_ANA_RST;
     if (hibernate) control |= GPHY_CTRL_HIB_EN | GPHY_CTRL_HIB_PULSE;
     else control &= ~(GPHY_CTRL_HIB_EN | GPHY_CTRL_HIB_PULSE);
@@ -418,9 +412,9 @@ static void reset_phy(void) {
     delay_ns(1000000ULL);
 }
 
-#define LINK_UP 0
-#define LINK_NO_PHY (-1)
-#define LINK_NO_CABLE (-2)
+#define LINK_UP          0
+#define LINK_NO_PHY      (-1)
+#define LINK_NO_CABLE    (-2)
 #define LINK_NEGOTIATING (-3)
 
 static int read_link(int *speed, int *duplex) {
@@ -435,18 +429,18 @@ static int read_link(int *speed, int *duplex) {
     *duplex = (detail & GIGA_PSSR_DUPLEX) ? 1 : 0;
     switch (detail & GIGA_PSSR_SPEED) {
     case GIGA_PSSR_1000MBS: *speed = 1000; break;
-    case GIGA_PSSR_100MBS: *speed = 100; break;
-    default: *speed = 10; break;
+    case GIGA_PSSR_100MBS:  *speed = 100; break;
+    default:                *speed = 10; break;
     }
     return LINK_UP;
 }
 
 static const char *link_reason(int state) {
     switch (state) {
-    case LINK_NO_PHY: return "the phy stopped answering";
-    case LINK_NO_CABLE: return "no cable";
+    case LINK_NO_PHY:      return "the phy stopped answering";
+    case LINK_NO_CABLE:    return "no cable";
     case LINK_NEGOTIATING: return "negotiating";
-    default: return "down";
+    default:               return "down";
     }
 }
 
@@ -462,8 +456,8 @@ static void update_link(void) {
         uint16_t detail = 0;
         (void)phy_read(MII_BMSR, &status);
         (void)phy_read(MII_GIGA_PSSR, &detail);
-        kprintf("ATL1C: poll bmsr %x pssr %x state %d rx %u tx %u dropped %u\n",
-                status, detail, state, rx_frames, tx_frames, rx_errors);
+        kprintf("ATL1C: poll bmsr %x pssr %x state %d rx %u tx %u dropped %u\n", status, detail,
+                state, rx_frames, tx_frames, rx_errors);
     }
     if (up == link_up && (!up || (speed == link_speed && duplex == link_duplex))) {
         link_state = state;
@@ -481,8 +475,7 @@ static void update_link(void) {
                 link_duplex ? "full" : "half");
     } else {
         set_aspm(0, 1);
-        if (state != link_state)
-            kprintf("ATL1C: link down, %s\n", link_reason(state));
+        if (state != link_state) kprintf("ATL1C: link down, %s\n", link_reason(state));
     }
     link_state = state;
 }
@@ -490,8 +483,8 @@ static void update_link(void) {
 static unsigned read_request_block(void) {
     uint8_t capability = pci_find_capability(&card, 0x10U);
     if (!capability) return 3U;
-    uint32_t control = pci_config_read32(card.bus, card.slot, card.function,
-                                         (uint8_t)(capability + 8U));
+    uint32_t control =
+        pci_config_read32(card.bus, card.slot, card.function, (uint8_t)(capability + 8U));
     unsigned maximum = (control >> 12) & 7U;
     return maximum < 3U ? maximum : 3U;
 }
@@ -512,9 +505,8 @@ static void configure_rings(void) {
 
 static void configure_mac(void) {
     uint32_t master = read32(REG_MASTER_CTRL);
-    master &= ~(MASTER_CTRL_TX_ITIMER_EN | MASTER_CTRL_RX_ITIMER_EN |
-                MASTER_CTRL_INT_RDCLR | MASTER_CTRL_SA_TIMER_EN |
-                MASTER_CTRL_CLK_SEL_DIS);
+    master &= ~(MASTER_CTRL_TX_ITIMER_EN | MASTER_CTRL_RX_ITIMER_EN | MASTER_CTRL_INT_RDCLR |
+                MASTER_CTRL_SA_TIMER_EN | MASTER_CTRL_CLK_SEL_DIS);
     write32(REG_ISR, 0xFFFFFFFFU);
     write32(REG_WOL_CTRL, 0);
     write32(REG_CLK_GATING_CTRL, 0);
@@ -523,15 +515,17 @@ static void configure_mac(void) {
     configure_rings();
 
     write32(REG_MTU, FRAME_MAX + 8U);
-    write32(REG_TXQ_CTRL, TXQ_NUM_TPD_BURST_DEF | TXQ_CTRL_ENH_MODE |
-            TXQ_CTRL_LS_8023_EN | TXQ_CTRL_IP_OPTION_EN |
-            (TXQ_TXF_BURST_L1C << TXQ_TXF_BURST_SHIFT));
-    write32(REG_RXQ_CTRL, (RXQ_RFD_BURST_DEF << RXQ_RFD_BURST_SHIFT) |
-            (card.device_id & 1U ? RXQ_ASPM_THRUPUT_LIMIT_100M : 0U));
-    write32(REG_DMA_CTRL, DMA_CTRL_RORDER_MODE_OUT | DMA_CTRL_RREQ_PRI_DATA |
-            (read_request_block() << DMA_CTRL_RREQ_BLEN_SHIFT) |
-            (DMA_CTRL_RDLY_CNT_DEF << DMA_CTRL_RDLY_CNT_SHIFT) |
-            (DMA_CTRL_WDLY_CNT_DEF << DMA_CTRL_WDLY_CNT_SHIFT));
+    write32(REG_TXQ_CTRL,
+            TXQ_NUM_TPD_BURST_DEF | TXQ_CTRL_ENH_MODE | TXQ_CTRL_LS_8023_EN |
+                TXQ_CTRL_IP_OPTION_EN | (TXQ_TXF_BURST_L1C << TXQ_TXF_BURST_SHIFT));
+    write32(REG_RXQ_CTRL,
+            (RXQ_RFD_BURST_DEF << RXQ_RFD_BURST_SHIFT) |
+                (card.device_id & 1U ? RXQ_ASPM_THRUPUT_LIMIT_100M : 0U));
+    write32(REG_DMA_CTRL,
+            DMA_CTRL_RORDER_MODE_OUT | DMA_CTRL_RREQ_PRI_DATA |
+                (read_request_block() << DMA_CTRL_RREQ_BLEN_SHIFT) |
+                (DMA_CTRL_RDLY_CNT_DEF << DMA_CTRL_RDLY_CNT_SHIFT) |
+                (DMA_CTRL_WDLY_CNT_DEF << DMA_CTRL_WDLY_CNT_SHIFT));
     write32(REG_RX_HASH_TABLE, 0xFFFFFFFFU);
     write32(REG_RX_HASH_TABLE + 4U, 0xFFFFFFFFU);
     write32(REG_IMR, 0);
@@ -540,12 +534,10 @@ static void configure_mac(void) {
 static void start_mac(void) {
     uint32_t mac = read32(REG_MAC_CTRL);
     mac |= MAC_CTRL_TX_EN | MAC_CTRL_RX_EN | MAC_CTRL_TX_FLOW | MAC_CTRL_RX_FLOW |
-           MAC_CTRL_ADD_CRC | MAC_CTRL_PAD | MAC_CTRL_BC_EN |
-           MAC_CTRL_SINGLE_PAUSE_EN | MAC_CTRL_HASH_ALG_CRC32 |
-           MAC_CTRL_SPEED_MODE_SW;
+        MAC_CTRL_ADD_CRC | MAC_CTRL_PAD | MAC_CTRL_BC_EN | MAC_CTRL_SINGLE_PAUSE_EN |
+        MAC_CTRL_HASH_ALG_CRC32 | MAC_CTRL_SPEED_MODE_SW;
     mac &= ~(3U << MAC_CTRL_SPEED_SHIFT);
-    mac |= (link_speed == 1000 ? MAC_SPEED_1000 : MAC_SPEED_10_100)
-           << MAC_CTRL_SPEED_SHIFT;
+    mac |= (link_speed == 1000 ? MAC_SPEED_1000 : MAC_SPEED_10_100) << MAC_CTRL_SPEED_SHIFT;
     if (link_duplex) mac |= MAC_CTRL_DUPLX;
     else mac &= ~MAC_CTRL_DUPLX;
     mac &= ~(0xFU << MAC_CTRL_PRMLEN_SHIFT);
@@ -558,16 +550,15 @@ static void start_mac(void) {
 }
 
 static int allocate_rings(void) {
-    rfd_ring = dma_alloc_below(RX_SLOTS * sizeof(uint64_t), 4096, DMA_LIMIT_32BIT,
-                               &rfd_physical);
-    rrd_ring = dma_alloc_below(RX_SLOTS * sizeof(struct atl1c_rrd), 4096,
-                               DMA_LIMIT_32BIT, &rrd_physical);
-    tpd_ring = dma_alloc_below(TX_SLOTS * sizeof(struct atl1c_tpd), 4096,
-                               DMA_LIMIT_32BIT, &tpd_physical);
-    rx_buffers = dma_alloc_below(RX_SLOTS * FRAME_BYTES, 4096, DMA_LIMIT_32BIT,
-                                 &rx_buffers_physical);
-    tx_buffers = dma_alloc_below(TX_SLOTS * FRAME_BYTES, 4096, DMA_LIMIT_32BIT,
-                                 &tx_buffers_physical);
+    rfd_ring = dma_alloc_below(RX_SLOTS * sizeof(uint64_t), 4096, DMA_LIMIT_32BIT, &rfd_physical);
+    rrd_ring =
+        dma_alloc_below(RX_SLOTS * sizeof(struct atl1c_rrd), 4096, DMA_LIMIT_32BIT, &rrd_physical);
+    tpd_ring =
+        dma_alloc_below(TX_SLOTS * sizeof(struct atl1c_tpd), 4096, DMA_LIMIT_32BIT, &tpd_physical);
+    rx_buffers =
+        dma_alloc_below(RX_SLOTS * FRAME_BYTES, 4096, DMA_LIMIT_32BIT, &rx_buffers_physical);
+    tx_buffers =
+        dma_alloc_below(TX_SLOTS * FRAME_BYTES, 4096, DMA_LIMIT_32BIT, &tx_buffers_physical);
     if (!rfd_ring || !rrd_ring || !tpd_ring || !rx_buffers || !tx_buffers) return -1;
 
     for (unsigned index = 0; index < RX_SLOTS; index++)
@@ -666,9 +657,9 @@ static int atl1c_probe(const struct pci_device *found) {
     }
     pci_enable_bus_mastering(&card);
     if (debug)
-        kprintf("ATL1C: %x:%x at %x:%x.%x, registers at %x, irq %u\n",
-                card.vendor_id, card.device_id, card.bus, card.slot, card.function,
-                (unsigned)physical, card.irq_line);
+        kprintf("ATL1C: %x:%x at %x:%x.%x, registers at %x, irq %u\n", card.vendor_id,
+                card.device_id, card.bus, card.slot, card.function, (unsigned)physical,
+                card.irq_line);
 
     registers = vmm_map_device(physical, ATL1C_REGISTER_BYTES);
     if (!registers) {
@@ -683,8 +674,7 @@ static int atl1c_probe(const struct pci_device *found) {
         return -1;
     }
     if (reset_mac() != 0) {
-        kprintf("ATL1C: the controller will not go idle, status %x\n",
-                read32(REG_IDLE_STATUS));
+        kprintf("ATL1C: the controller will not go idle, status %x\n", read32(REG_IDLE_STATUS));
         return -1;
     }
     if (debug)
@@ -719,9 +709,8 @@ static int atl1c_probe(const struct pci_device *found) {
         return -1;
     }
     if (debug)
-        kprintf("ATL1C: rings rfd %x rrd %x tpd %x buffers %x\n",
-                (unsigned)rfd_physical, (unsigned)rrd_physical,
-                (unsigned)tpd_physical, (unsigned)rx_buffers_physical);
+        kprintf("ATL1C: rings rfd %x rrd %x tpd %x buffers %x\n", (unsigned)rfd_physical,
+                (unsigned)rrd_physical, (unsigned)tpd_physical, (unsigned)rx_buffers_physical);
 
     rfd_next = RX_SLOTS - 1U;
     rrd_next = 0;
@@ -744,10 +733,9 @@ static int atl1c_probe(const struct pci_device *found) {
     uint16_t detail = 0;
     (void)phy_read(MII_BMSR, &status);
     (void)phy_read(MII_GIGA_PSSR, &detail);
-    kprintf("ATL1C: %x:%x:%x:%x:%x:%x at %x:%x.%x, phy %x bmsr %x pssr %x\n",
-            mac_address[0], mac_address[1], mac_address[2], mac_address[3],
-            mac_address[4], mac_address[5], card.bus, card.slot, card.function,
-            identity, status, detail);
+    kprintf("ATL1C: %x:%x:%x:%x:%x:%x at %x:%x.%x, phy %x bmsr %x pssr %x\n", mac_address[0],
+            mac_address[1], mac_address[2], mac_address[3], mac_address[4], mac_address[5],
+            card.bus, card.slot, card.function, identity, status, detail);
     update_link();
     if (net_register_adapter(&atl1c_adapter) != 0) {
         kprintf("ATL1C: the stack already has an adapter\n");
@@ -780,8 +768,8 @@ static const struct net_adapter atl1c_adapter = {
 };
 
 static const struct pci_device_id atl1c_ids[] = {
-    { ATL1C_VENDOR, ATL1C_AR8131, PCI_ANY_ID, PCI_ANY_ID },
-    { ATL1C_VENDOR, ATL1C_AR8132, PCI_ANY_ID, PCI_ANY_ID },
+    {ATL1C_VENDOR, ATL1C_AR8131, PCI_ANY_ID, PCI_ANY_ID},
+    {ATL1C_VENDOR, ATL1C_AR8132, PCI_ANY_ID, PCI_ANY_ID},
 };
 
 static struct pci_driver atl1c_driver = {
@@ -792,13 +780,9 @@ static struct pci_driver atl1c_driver = {
     .remove = atl1c_remove,
 };
 
-static int atl1c_load(void) {
-    return pci_register_driver(&atl1c_driver);
-}
+static int atl1c_load(void) { return pci_register_driver(&atl1c_driver); }
 
-static void atl1c_unload(void) {
-    pci_unregister_driver(&atl1c_driver);
-}
+static void atl1c_unload(void) { pci_unregister_driver(&atl1c_driver); }
 
 MODULE_MAIN(atl1c_load, atl1c_unload);
 MODULE_PCI_ALIAS("1969", "1063");

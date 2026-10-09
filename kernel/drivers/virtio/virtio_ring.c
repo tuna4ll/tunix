@@ -83,9 +83,8 @@ int virtio_queue_post(struct virtio_queue *queue, const struct virtio_buffer *bu
         struct virtq_desc *descriptor = &queue->descriptors[index];
         descriptor->address = buffers[position].physical;
         descriptor->length = buffers[position].length;
-        descriptor->flags =
-            (uint16_t)((position + 1U < count ? VIRTQ_DESC_F_NEXT : 0U) |
-                       (position >= write_from ? VIRTQ_DESC_F_WRITE : 0U));
+        descriptor->flags = (uint16_t)((position + 1U < count ? VIRTQ_DESC_F_NEXT : 0U) |
+                                       (position >= write_from ? VIRTQ_DESC_F_WRITE : 0U));
         index = descriptor->next;
     }
 
@@ -114,8 +113,7 @@ unsigned virtio_queue_reclaim(struct virtio_queue *queue) {
     return taken;
 }
 
-int virtio_queue_take_used(struct virtio_queue *queue, uint64_t *address,
-                           uint32_t *length) {
+int virtio_queue_take_used(struct virtio_queue *queue, uint64_t *address, uint32_t *length) {
     if (!queue || !queue->size || queue->used->index == queue->last_used) return 0;
     __sync_synchronize();
     struct virtq_used_element used = queue->used->ring[queue->last_used % queue->size];

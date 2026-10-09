@@ -15,8 +15,8 @@ struct unix_credentials {
 
 #define UNIX_MAX_RIGHTS 253
 
-#define TUNIX_AF_UNIX 1
-#define TUNIX_SOCK_STREAM 1
+#define TUNIX_AF_UNIX        1
+#define TUNIX_SOCK_STREAM    1
 #define TUNIX_SOCK_SEQPACKET 5
 
 struct tunix_sockaddr_un {
@@ -24,9 +24,9 @@ struct tunix_sockaddr_un {
     char path[108];
 };
 
-#define UNIX_KIND_STREAM 0
+#define UNIX_KIND_STREAM    0
 #define UNIX_KIND_SEQPACKET 1
-#define UNIX_KIND_DGRAM 2
+#define UNIX_KIND_DGRAM     2
 
 struct unix_socket *unix_socket_create(int kind);
 int64_t unix_socket_sendto(struct unix_socket *socket, size_t size, const void *buffer,
@@ -34,14 +34,15 @@ int64_t unix_socket_sendto(struct unix_socket *socket, size_t size, const void *
                            const char *resolved);
 int unix_socket_is_dgram(struct unix_socket *socket);
 void unix_socket_last_source(struct unix_socket *socket, char path[108]);
-void unix_socket_set_credentials(struct unix_socket *socket, int32_t pid, uint32_t uid, uint32_t gid);
-int unix_socket_get_peer_credentials(struct unix_socket *socket, struct unix_credentials *credentials);
-int unix_socket_get_name(struct unix_socket *socket, int peer,
-                         struct tunix_sockaddr_un *address, size_t *length);
+void unix_socket_set_credentials(struct unix_socket *socket, int32_t pid, uint32_t uid,
+                                 uint32_t gid);
+int unix_socket_get_peer_credentials(struct unix_socket *socket,
+                                     struct unix_credentials *credentials);
+int unix_socket_get_name(struct unix_socket *socket, int peer, struct tunix_sockaddr_un *address,
+                         size_t *length);
 void unix_socket_set_passcred(struct unix_socket *socket, int enabled);
 int unix_socket_get_passcred(struct unix_socket *socket);
-int unix_socket_pair(struct unix_socket **first, struct unix_socket **second,
-                     int seqpacket);
+int unix_socket_pair(struct unix_socket **first, struct unix_socket **second, int seqpacket);
 void unix_socket_ref(struct unix_socket *socket);
 void unix_socket_unref(struct unix_socket *socket);
 int unix_socket_bind(struct unix_socket *socket, const struct tunix_sockaddr_un *address,
@@ -52,14 +53,11 @@ int unix_socket_connect(struct unix_socket *socket, const struct tunix_sockaddr_
 struct unix_socket *unix_socket_accept(struct unix_socket *socket);
 int64_t unix_socket_read(struct unix_socket *socket, size_t size, void *buffer);
 int64_t unix_socket_write(struct unix_socket *socket, size_t size, const void *buffer);
-int64_t unix_socket_send_with_rights(struct unix_socket *socket, size_t size,
-                                     const void *buffer, struct file **files,
-                                     size_t file_count);
-int64_t unix_socket_recv_with_rights(struct unix_socket *socket, size_t size,
-                                     void *buffer, struct file **files,
-                                     size_t maximum_files, size_t *file_count);
-void unix_socket_last_sender(struct unix_socket *socket,
-                             struct unix_credentials *out);
+int64_t unix_socket_send_with_rights(struct unix_socket *socket, size_t size, const void *buffer,
+                                     struct file **files, size_t file_count);
+int64_t unix_socket_recv_with_rights(struct unix_socket *socket, size_t size, void *buffer,
+                                     struct file **files, size_t maximum_files, size_t *file_count);
+void unix_socket_last_sender(struct unix_socket *socket, struct unix_credentials *out);
 
 int unix_socket_read_ready(struct unix_socket *socket);
 size_t unix_socket_read_available(struct unix_socket *socket);

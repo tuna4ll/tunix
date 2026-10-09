@@ -44,39 +44,39 @@ struct tunix_io_uring_params {
     struct tunix_io_cqring_offsets cq_off;
 };
 
-#define IORING_OP_NOP 0
-#define IORING_OP_READV 1
-#define IORING_OP_WRITEV 2
-#define IORING_OP_FSYNC 3
-#define IORING_OP_POLL_ADD 6
-#define IORING_OP_POLL_REMOVE 7
+#define IORING_OP_NOP             0
+#define IORING_OP_READV           1
+#define IORING_OP_WRITEV          2
+#define IORING_OP_FSYNC           3
+#define IORING_OP_POLL_ADD        6
+#define IORING_OP_POLL_REMOVE     7
 #define IORING_OP_SYNC_FILE_RANGE 8
-#define IORING_OP_SENDMSG 9
-#define IORING_OP_RECVMSG 10
-#define IORING_OP_TIMEOUT 11
-#define IORING_OP_TIMEOUT_REMOVE 12
-#define IORING_OP_ACCEPT 13
-#define IORING_OP_ASYNC_CANCEL 14
-#define IORING_OP_LINK_TIMEOUT 15
-#define IORING_OP_CONNECT 16
-#define IORING_OP_FALLOCATE 17
-#define IORING_OP_OPENAT 18
-#define IORING_OP_CLOSE 19
-#define IORING_OP_STATX 21
-#define IORING_OP_READ 22
-#define IORING_OP_WRITE 23
-#define IORING_OP_FADVISE 24
-#define IORING_OP_MADVISE 25
-#define IORING_OP_SEND 26
-#define IORING_OP_RECV 27
-#define IORING_OP_EPOLL_CTL 29
-#define IORING_OP_SHUTDOWN 34
-#define IORING_OP_RENAMEAT 35
-#define IORING_OP_UNLINKAT 36
-#define IORING_OP_MKDIRAT 37
-#define IORING_OP_SYMLINKAT 38
-#define IORING_OP_LINKAT 39
-#define IORING_OP_LAST 58
+#define IORING_OP_SENDMSG         9
+#define IORING_OP_RECVMSG         10
+#define IORING_OP_TIMEOUT         11
+#define IORING_OP_TIMEOUT_REMOVE  12
+#define IORING_OP_ACCEPT          13
+#define IORING_OP_ASYNC_CANCEL    14
+#define IORING_OP_LINK_TIMEOUT    15
+#define IORING_OP_CONNECT         16
+#define IORING_OP_FALLOCATE       17
+#define IORING_OP_OPENAT          18
+#define IORING_OP_CLOSE           19
+#define IORING_OP_STATX           21
+#define IORING_OP_READ            22
+#define IORING_OP_WRITE           23
+#define IORING_OP_FADVISE         24
+#define IORING_OP_MADVISE         25
+#define IORING_OP_SEND            26
+#define IORING_OP_RECV            27
+#define IORING_OP_EPOLL_CTL       29
+#define IORING_OP_SHUTDOWN        34
+#define IORING_OP_RENAMEAT        35
+#define IORING_OP_UNLINKAT        36
+#define IORING_OP_MKDIRAT         37
+#define IORING_OP_SYMLINKAT       38
+#define IORING_OP_LINKAT          39
+#define IORING_OP_LAST            58
 
 #define IO_URING_PENDING INT64_MIN
 
@@ -111,20 +111,17 @@ int io_uring_create(uint32_t entries, struct tunix_io_uring_params *params,
                     struct io_uring_context **out);
 void io_uring_destroy(struct io_uring_context *context);
 struct memfd_object *io_uring_memory(struct io_uring_context *context);
-int io_uring_map_offset(struct io_uring_context *context, uint64_t offset,
-                        uint64_t length, uint64_t *object_offset);
+int io_uring_map_offset(struct io_uring_context *context, uint64_t offset, uint64_t length,
+                        uint64_t *object_offset);
 
 void io_uring_lock(struct io_uring_context *context);
 void io_uring_unlock(struct io_uring_context *context);
-int64_t io_uring_submit(struct io_uring_context *context, uint32_t to_submit,
-                        uint64_t space);
-void io_uring_run(struct io_uring_context *context, io_uring_executor execute,
-                  uint64_t space);
+int64_t io_uring_submit(struct io_uring_context *context, uint32_t to_submit, uint64_t space);
+void io_uring_run(struct io_uring_context *context, io_uring_executor execute, uint64_t space);
 uint32_t io_uring_completions_ready(struct io_uring_context *context);
-uint64_t io_uring_watch(struct io_uring_context *context, io_uring_watcher watch,
-                        uint64_t space);
-void io_uring_note_restart(struct io_uring_context *context, uint64_t tid,
-                           uint32_t submitted, uint64_t wait_deadline);
+uint64_t io_uring_watch(struct io_uring_context *context, io_uring_watcher watch, uint64_t space);
+void io_uring_note_restart(struct io_uring_context *context, uint64_t tid, uint32_t submitted,
+                           uint64_t wait_deadline);
 uint32_t io_uring_take_restart(struct io_uring_context *context, uint64_t tid,
                                uint64_t *wait_deadline);
 uint32_t io_uring_cq_entries(struct io_uring_context *context);

@@ -24,7 +24,7 @@
 extern void kprintf(const char *fmt, ...);
 
 #define REPORT_PATH "/tunix-hwreport.txt"
-#define REPORT_MAX 32768
+#define REPORT_MAX  32768
 
 static char report[REPORT_MAX];
 static size_t used;
@@ -79,10 +79,14 @@ static void put_processor_name(void) {
 static void put_processor_identity(void) {
     struct cpu_identity identity;
     cpu_identify(&identity);
-    put("  vendor      "); put(identity.vendor);
-    put(" family "); put_number(identity.family);
-    put(" model "); put_number(identity.model_number);
-    put(" stepping "); put_number(identity.stepping);
+    put("  vendor      ");
+    put(identity.vendor);
+    put(" family ");
+    put_number(identity.family);
+    put(" model ");
+    put_number(identity.model_number);
+    put(" stepping ");
+    put_number(identity.stepping);
     put("\n");
 }
 
@@ -95,7 +99,9 @@ static void put_command_line(void) {
 
 static void put_clock(void) {
     put("clock\n");
-    put("  tsc_hz      "); put_number(time_tsc_frequency()); put("\n");
+    put("  tsc_hz      ");
+    put_number(time_tsc_frequency());
+    put("\n");
     put("  invariant   ");
     put(time_tsc_is_invariant() ? "yes" : "NO -- the counter may stop or change rate");
     put("\n");
@@ -172,8 +178,7 @@ static void put_framebuffer(void) {
     put_number(write_rate / (1024ULL * 1024ULL));
     put(" MiB/s\n");
     put("  a screenful ");
-    put_number((uint64_t)framebuffer_pitch() * framebuffer_height() /
-               (1024ULL * 1024ULL));
+    put_number((uint64_t)framebuffer_pitch() * framebuffer_height() / (1024ULL * 1024ULL));
     put(" MiB, which the console never reads back\n");
 }
 
@@ -189,7 +194,7 @@ static void put_memory(void) {
 }
 
 #define MODULE_DIRECTORY "/usr/lib/modules/" UTS_RELEASE "/kernel"
-#define ALIAS_MAX 64
+#define ALIAS_MAX        64
 
 struct alias_entry {
     char module[MODULE_NAME_MAX];
@@ -206,7 +211,7 @@ static int glob_match(const char *pattern, const char *text) {
         if (*pattern == '*') {
             pattern++;
             if (!*pattern) return 1;
-            for (const char *at = text; ; at++) {
+            for (const char *at = text;; at++) {
                 if (glob_match(pattern, at)) return 1;
                 if (!*at) return 0;
             }
@@ -267,16 +272,14 @@ static void put_module_files(struct alias_table *aliases) {
         put(" bytes");
 
         char value[96];
-        if (module_image_info(contents, (size_t)bytes, "vermagic", 0, value,
-                              sizeof(value)) == 0 &&
+        if (module_image_info(contents, (size_t)bytes, "vermagic", 0, value, sizeof(value)) == 0 &&
             strcmp(value, MODULE_VERMAGIC) != 0) {
             put("  BUILT FOR \"");
             put(value);
             put("\"");
         }
         char name[MODULE_NAME_MAX];
-        if (module_image_info(contents, (size_t)bytes, "name", 0, name,
-                              sizeof(name)) != 0)
+        if (module_image_info(contents, (size_t)bytes, "name", 0, name, sizeof(name)) != 0)
             name[0] = '\0';
         for (unsigned occurrence = 0; occurrence < 8U; occurrence++) {
             if (module_image_info(contents, (size_t)bytes, "alias", occurrence, value,
@@ -341,10 +344,16 @@ static void put_module_selftest(void) {
 
 static void put_modules(struct alias_table *aliases) {
     put("modules\n");
-    put("  vermagic    "); put(MODULE_VERMAGIC); put("\n");
-    put("  window      "); put_hex(MODULE_VIRTUAL_BASE);
-    put(" + "); put_number(MODULE_VIRTUAL_BYTES / (1024ULL * 1024ULL)); put(" MiB\n");
-    put("  symbols     "); put_number(module_kernel_symbol_count());
+    put("  vermagic    ");
+    put(MODULE_VERMAGIC);
+    put("\n");
+    put("  window      ");
+    put_hex(MODULE_VIRTUAL_BASE);
+    put(" + ");
+    put_number(MODULE_VIRTUAL_BYTES / (1024ULL * 1024ULL));
+    put(" MiB\n");
+    put("  symbols     ");
+    put_number(module_kernel_symbol_count());
     put(" exported to modules\n");
     put_module_files(aliases);
     put_module_selftest();
@@ -367,19 +376,30 @@ static void put_pci_device(const struct pci_device *device, void *context) {
     pci_modalias(device, alias, sizeof(alias));
 
     put("  0000:");
-    put_hex_fixed(device->bus, 2); put(":");
-    put_hex_fixed(device->slot, 2); put(".");
+    put_hex_fixed(device->bus, 2);
+    put(":");
+    put_hex_fixed(device->slot, 2);
+    put(".");
     put_hex_fixed(device->function, 1);
     put("  ");
-    put_hex_fixed(device->vendor_id, 4); put(":"); put_hex_fixed(device->device_id, 4);
-    put(" class "); put_hex_fixed(((uint32_t)device->class_code << 16) |
-                                  ((uint32_t)device->subclass << 8) | device->prog_if, 6);
-    put(" irq "); put_number(device->irq_line);
-    put("\n    modalias  "); put(alias); put("\n");
+    put_hex_fixed(device->vendor_id, 4);
+    put(":");
+    put_hex_fixed(device->device_id, 4);
+    put(" class ");
+    put_hex_fixed(((uint32_t)device->class_code << 16) | ((uint32_t)device->subclass << 8) |
+                      device->prog_if,
+                  6);
+    put(" irq ");
+    put_number(device->irq_line);
+    put("\n    modalias  ");
+    put(alias);
+    put("\n");
 
     const char *driver = pci_device_driver(device);
     if (driver) {
-        put("    driver    "); put(driver); put(" (bound)\n");
+        put("    driver    ");
+        put(driver);
+        put(" (bound)\n");
     }
     for (unsigned index = 0; index < aliases->count; index++) {
         if (!glob_match(aliases->entry[index].pattern, alias)) continue;
@@ -411,19 +431,40 @@ static void put_acpi(void) {
         return;
     }
     const struct acpi_events *events = acpi_event_state();
-    put("  sci         "); put_number(power->sci_interrupt);
-    put(", enabled at boot "); put(events->sci_enabled_at_boot ? "yes" : "no");
-    put(", handed over "); put(events->handed_over ? "yes" : "no"); put("\n");
-    put("  power key   "); put(events->decision ? events->decision : "not set up"); put("\n");
-    put("  firmware    embedded controller "); put(power->embedded_controller ? "yes" : "no");
-    put(", thermal zones "); put_number(power->thermal_zones); put("\n");
-    put("  gpe0        "); put_hex(power->gpe0_block); put(" length "); put_number(power->gpe0_length);
-    put(", enabled at boot "); put_hex(events->gpe_enabled_at_boot); put("\n");
-    put("  gpe1        "); put_hex(power->gpe1_block); put(" length "); put_number(power->gpe1_length);
+    put("  sci         ");
+    put_number(power->sci_interrupt);
+    put(", enabled at boot ");
+    put(events->sci_enabled_at_boot ? "yes" : "no");
+    put(", handed over ");
+    put(events->handed_over ? "yes" : "no");
     put("\n");
-    put("  events      sci "); put_number(events->sci_count);
-    put(", gpe "); put_number(events->gpe_events);
-    put(", button "); put_number(events->button_events); put("\n");
+    put("  power key   ");
+    put(events->decision ? events->decision : "not set up");
+    put("\n");
+    put("  firmware    embedded controller ");
+    put(power->embedded_controller ? "yes" : "no");
+    put(", thermal zones ");
+    put_number(power->thermal_zones);
+    put("\n");
+    put("  gpe0        ");
+    put_hex(power->gpe0_block);
+    put(" length ");
+    put_number(power->gpe0_length);
+    put(", enabled at boot ");
+    put_hex(events->gpe_enabled_at_boot);
+    put("\n");
+    put("  gpe1        ");
+    put_hex(power->gpe1_block);
+    put(" length ");
+    put_number(power->gpe1_length);
+    put("\n");
+    put("  events      sci ");
+    put_number(events->sci_count);
+    put(", gpe ");
+    put_number(events->gpe_events);
+    put(", button ");
+    put_number(events->button_events);
+    put("\n");
 }
 
 static void put_thermal(void) {
@@ -433,19 +474,28 @@ static void put_thermal(void) {
         return;
     }
     const struct thermal_state *state = thermal_state();
-    put("  limit       "); put_signed(state->tjmax); put(" C\n");
+    put("  limit       ");
+    put_signed(state->tjmax);
+    put(" C\n");
     put("  automatic   ");
     put(state->automatic_control < 0 ? "not read yet" : state->automatic_control ? "on" : "OFF");
-    put(", clock modulation "); put(state->clock_modulation ? "available" : "absent"); put("\n");
+    put(", clock modulation ");
+    put(state->clock_modulation ? "available" : "absent");
+    put("\n");
     unsigned cpus = percpu_online_count();
     for (unsigned cpu = 0; cpu < cpus; cpu++) {
         struct thermal_reading reading;
-        put("  cpu "); put_number(cpu); put("       ");
+        put("  cpu ");
+        put_number(cpu);
+        put("       ");
         if (thermal_read(cpu, &reading) != 0) {
             put("not sampled yet\n");
             continue;
         }
-        put_signed(reading.celsius); put(" C, peak "); put_signed(reading.peak); put(" C");
+        put_signed(reading.celsius);
+        put(" C, peak ");
+        put_signed(reading.peak);
+        put(" C");
         if (reading.throttled) put(", throttled");
         put("\n");
     }
@@ -458,30 +508,46 @@ static void put_frequency(void) {
         return;
     }
     const struct cpufreq_state *state = cpufreq_state();
-    put("  range       "); put_number(state->ratio_khz * state->min_ratio / 1000U);
-    put(" - "); put_number(state->ratio_khz * state->max_ratio / 1000U); put(" MHz, ratios ");
-    put_number(state->min_ratio); put(" - "); put_number(state->max_ratio); put("\n");
-    put("  speedstep   "); put(state->eist_enabled ? "enabled" : "DISABLED by the firmware");
-    put(", turbo "); put(state->turbo ? "available" : "absent");
-    put(", target ratio "); put_number(state->target_ratio);
+    put("  range       ");
+    put_number(state->ratio_khz * state->min_ratio / 1000U);
+    put(" - ");
+    put_number(state->ratio_khz * state->max_ratio / 1000U);
+    put(" MHz, ratios ");
+    put_number(state->min_ratio);
+    put(" - ");
+    put_number(state->max_ratio);
+    put("\n");
+    put("  speedstep   ");
+    put(state->eist_enabled ? "enabled" : "DISABLED by the firmware");
+    put(", turbo ");
+    put(state->turbo ? "available" : "absent");
+    put(", target ratio ");
+    put_number(state->target_ratio);
     put(state->requested ? ", raised from the firmware's" : ", kept the firmware's");
     put("\n");
     if (state->smi_counted) {
-        put("  smi         "); put_number(state->smi_count);
+        put("  smi         ");
+        put_number(state->smi_count);
         put(" system management interrupts since power-on\n");
     }
     unsigned cpus = percpu_online_count();
     for (unsigned cpu = 0; cpu < cpus; cpu++) {
         struct cpufreq_reading reading;
-        put("  cpu "); put_number(cpu); put("       ");
+        put("  cpu ");
+        put_number(cpu);
+        put("       ");
         if (cpufreq_read(cpu, &reading) != 0) {
             put("not sampled yet\n");
             continue;
         }
-        put("boot ratio "); put_number(reading.boot_ratio);
-        put(", now "); put_number(reading.ratio);
+        put("boot ratio ");
+        put_number(reading.boot_ratio);
+        put(", now ");
+        put_number(reading.ratio);
         if (reading.effective_khz) {
-            put(", running at "); put_number(reading.effective_khz / 1000U); put(" MHz");
+            put(", running at ");
+            put_number(reading.effective_khz / 1000U);
+            put(" MHz");
         }
         put("\n");
     }
@@ -496,8 +562,7 @@ static void write_to_disk(void) {
     (void)vfs_truncate(node, 0);
     if (vfs_write(node, 0, used, report) != (int64_t)used)
         kprintf("HWREPORT: could not write %s\n", REPORT_PATH);
-    else
-        kprintf("HWREPORT: written to %s\n", REPORT_PATH);
+    else kprintf("HWREPORT: written to %s\n", REPORT_PATH);
 }
 
 void hwreport_emit(void) {

@@ -4,10 +4,10 @@
 #include <tunix/hwcap.h>
 
 static const char *const names[] = {
-    "fp", "asimd", "evtstrm", "aes", "pmull", "sha1", "sha2", "crc32",
-    "atomics", "fphp", "asimdhp", "cpuid", "asimdrdm", "jscvt", "fcma", "lrcpi",
-    "dcpop", "sha3", "sm3", "sm4", "asimddp", "sha512", "sve", "asimdfhm",
-    "dit", "uscat", "ilrcpi", "flagm", "ssbs", "sb", "paca", "pacg",
+    "fp",      "asimd", "evtstrm", "aes",   "pmull",    "sha1",   "sha2", "crc32",
+    "atomics", "fphp",  "asimdhp", "cpuid", "asimdrdm", "jscvt",  "fcma", "lrcpi",
+    "dcpop",   "sha3",  "sm3",     "sm4",   "asimddp",  "sha512", "sve",  "asimdfhm",
+    "dit",     "uscat", "ilrcpi",  "flagm", "ssbs",     "sb",     "paca", "pacg",
 };
 
 static uint64_t shared_hwcap = ~0ULL;
@@ -16,9 +16,7 @@ static unsigned field(uint64_t value, unsigned shift) {
     return (unsigned)((value >> shift) & 0xFU);
 }
 
-static uint64_t bit(unsigned index) {
-    return 1ULL << index;
-}
+static uint64_t bit(unsigned index) { return 1ULL << index; }
 
 static uint64_t current_hwcap(void) {
     uint64_t pfr0, isar0, isar1;
@@ -61,9 +59,8 @@ static uint64_t current_hwcap(void) {
 void arch_note_cpu_features(void) {
     uint64_t hwcap = current_hwcap();
     uint64_t seen = __atomic_load_n(&shared_hwcap, __ATOMIC_RELAXED);
-    while (!__atomic_compare_exchange_n(&shared_hwcap, &seen, seen & hwcap, 0,
-                                        __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
-    }
+    while (!__atomic_compare_exchange_n(&shared_hwcap, &seen, seen & hwcap, 0, __ATOMIC_ACQUIRE,
+                                        __ATOMIC_RELAXED)) {}
 }
 
 uint64_t arch_elf_hwcap(void) {

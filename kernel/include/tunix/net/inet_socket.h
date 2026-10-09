@@ -4,11 +4,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define TUNIX_AF_INET 2
-#define TUNIX_AF_PACKET 17
+#define TUNIX_AF_INET     2
+#define TUNIX_AF_PACKET   17
 #define TUNIX_SOCK_STREAM 1
-#define TUNIX_SOCK_DGRAM 2
-#define TUNIX_SOCK_RAW 3
+#define TUNIX_SOCK_DGRAM  2
+#define TUNIX_SOCK_RAW    3
 #define TUNIX_SOCK_PACKET 10
 
 struct inet_socket;
@@ -45,8 +45,7 @@ int inet_socket_listen(struct inet_socket *socket, int backlog);
 int inet_socket_is_listener(struct inet_socket *socket);
 int inet_socket_is_stream(const struct inet_socket *socket);
 struct inet_socket *inet_socket_accept(struct inet_socket *listener);
-void inet_socket_report_accept(struct inet_socket *socket, uint64_t pid,
-                               uint32_t uid);
+void inet_socket_report_accept(struct inet_socket *socket, uint64_t pid, uint32_t uid);
 int64_t inet_socket_sendto(struct inet_socket *socket, const void *data, size_t length, int flags,
                            const void *address, size_t address_length);
 int64_t inet_socket_recvfrom(struct inet_socket *socket, void *data, size_t length, int flags,
@@ -55,10 +54,10 @@ int inet_socket_wants_ttl(struct inet_socket *socket);
 uint8_t inet_socket_last_ttl(struct inet_socket *socket);
 int inet_socket_getsockname(struct inet_socket *socket, void *address, size_t *length);
 int inet_socket_getpeername(struct inet_socket *socket, void *address, size_t *length);
-int inet_socket_setsockopt(struct inet_socket *socket, int level, int option,
-                           const void *value, size_t length);
-int inet_socket_getsockopt(struct inet_socket *socket, int level, int option,
-                           void *value, size_t *length);
+int inet_socket_setsockopt(struct inet_socket *socket, int level, int option, const void *value,
+                           size_t length);
+int inet_socket_getsockopt(struct inet_socket *socket, int level, int option, void *value,
+                           size_t *length);
 int inet_socket_ioctl(struct inet_socket *socket, unsigned long request, void *argument);
 int inet_socket_read_ready(struct inet_socket *socket);
 int inet_socket_write_ready(struct inet_socket *socket);

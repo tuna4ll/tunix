@@ -5,12 +5,9 @@
 
 static struct cpufreq_state state;
 
-int cpufreq_supported(void) {
-    return 0;
-}
+int cpufreq_supported(void) { return 0; }
 
-void cpufreq_tick(void) {
-}
+void cpufreq_tick(void) {}
 
 int cpufreq_read(unsigned index, struct cpufreq_reading *out) {
     (void)index;
@@ -18,6 +15,4 @@ int cpufreq_read(unsigned index, struct cpufreq_reading *out) {
     return -1;
 }
 
-const struct cpufreq_state *cpufreq_state(void) {
-    return &state;
-}
+const struct cpufreq_state *cpufreq_state(void) { return &state; }

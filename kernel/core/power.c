@@ -24,9 +24,7 @@ static void flush_disks(void) {
 }
 
 static void park(void) __attribute__((noreturn));
-static void park(void) {
-    cpu_halt_forever();
-}
+static void park(void) { cpu_halt_forever(); }
 
 void power_off(void) {
     kprintf("POWER: flushing and powering off\n");
@@ -49,9 +47,7 @@ void power_halt(void) {
     park();
 }
 
-void power_set_button_handled(int handled) {
-    button_handled = handled != 0;
-}
+void power_set_button_handled(int handled) { button_handled = handled != 0; }
 
 static void power_off_from_work(void *unused) {
     (void)unused;

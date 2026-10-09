@@ -140,8 +140,8 @@ int memfd_truncate(struct memfd_object *object, uint64_t size) {
     return 0;
 }
 
-static int64_t transfer(struct memfd_object *object, uint64_t offset,
-                        size_t length, void *out, const void *in) {
+static int64_t transfer(struct memfd_object *object, uint64_t offset, size_t length, void *out,
+                        const void *in) {
     if (!object || offset >= object->size) return 0;
     uint64_t remaining = object->size - offset;
     if (length > remaining) length = (size_t)remaining;
@@ -167,14 +167,12 @@ static int64_t transfer(struct memfd_object *object, uint64_t offset,
     return (int64_t)moved;
 }
 
-int64_t memfd_read(struct memfd_object *object, uint64_t offset,
-                   size_t length, void *out) {
+int64_t memfd_read(struct memfd_object *object, uint64_t offset, size_t length, void *out) {
     MEMFD_LOCKED;
     return transfer(object, offset, length, out, NULL);
 }
 
-int64_t memfd_write(struct memfd_object *object, uint64_t offset,
-                    size_t length, const void *in) {
+int64_t memfd_write(struct memfd_object *object, uint64_t offset, size_t length, const void *in) {
     MEMFD_LOCKED;
     return transfer(object, offset, length, NULL, in);
 }

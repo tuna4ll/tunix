@@ -5,8 +5,8 @@
 
 struct interrupt_frame;
 
-#define TIMER_FREQUENCY_HZ 250U
-#define TIMER_LOCAL_TICK 1U
+#define TIMER_FREQUENCY_HZ   250U
+#define TIMER_LOCAL_TICK     1U
 #define TIMER_LOCAL_DEADLINE 2U
 
 void timer_init(void);

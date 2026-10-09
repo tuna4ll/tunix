@@ -25,8 +25,8 @@ void terminal_clear(struct terminal_screen *screen);
 void terminal_put_char(struct terminal_screen *screen, char c);
 void terminal_put_codepoint(struct terminal_screen *screen, uint32_t codepoint);
 void terminal_set_sgr(struct terminal_screen *screen, unsigned code);
-void terminal_set_sgr_sequence(struct terminal_screen *screen,
-                               const unsigned *codes, unsigned count);
+void terminal_set_sgr_sequence(struct terminal_screen *screen, const unsigned *codes,
+                               unsigned count);
 void terminal_cursor_move(struct terminal_screen *screen, int row_delta, int col_delta);
 void terminal_cursor_set(struct terminal_screen *screen, int row, int col);
 void terminal_cursor_get(struct terminal_screen *screen, int *row, int *col);

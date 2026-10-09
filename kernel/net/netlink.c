@@ -7,73 +7,73 @@
 #include <tunix/net/net.h>
 #include <tunix/process.h>
 
-#define EAGAIN 11
-#define ENOENT 2
-#define EINVAL 22
+#define EAGAIN     11
+#define ENOENT     2
+#define EINVAL     22
 #define EOPNOTSUPP 95
-#define ENODEV 19
+#define ENODEV     19
 
-#define NL_MSG_PEEK 0x2
+#define NL_MSG_PEEK  0x2
 #define NL_MSG_TRUNC 0x20
 
 #define NETLINK_GENERIC 16
 
-#define NLMSG_NOOP 1
+#define NLMSG_NOOP  1
 #define NLMSG_ERROR 2
-#define NLMSG_DONE 3
+#define NLMSG_DONE  3
 
 #define NLM_F_REQUEST 0x001
-#define NLM_F_MULTI 0x002
-#define NLM_F_ACK 0x004
-#define NLM_F_DUMP 0x300
+#define NLM_F_MULTI   0x002
+#define NLM_F_ACK     0x004
+#define NLM_F_DUMP    0x300
 
-#define RTM_NEWLINK 16
-#define RTM_GETLINK 18
-#define RTM_NEWADDR 20
-#define RTM_DELADDR 21
-#define RTM_GETADDR 22
+#define RTM_NEWLINK  16
+#define RTM_GETLINK  18
+#define RTM_NEWADDR  20
+#define RTM_DELADDR  21
+#define RTM_GETADDR  22
 #define RTM_NEWROUTE 24
 #define RTM_DELROUTE 25
 #define RTM_GETROUTE 26
 
-#define IFLA_ADDRESS 1
+#define IFLA_ADDRESS   1
 #define IFLA_BROADCAST 2
-#define IFLA_IFNAME 3
-#define IFLA_MTU 4
-#define IFLA_TXQLEN 13
+#define IFLA_IFNAME    3
+#define IFLA_MTU       4
+#define IFLA_TXQLEN    13
 
-#define IFA_ADDRESS 1
-#define IFA_LOCAL 2
-#define IFA_LABEL 3
+#define IFA_ADDRESS   1
+#define IFA_LOCAL     2
+#define IFA_LABEL     3
 #define IFA_BROADCAST 4
 
-#define RTA_DST 1
-#define RTA_OIF 4
+#define RTA_DST     1
+#define RTA_OIF     4
 #define RTA_GATEWAY 5
 #define RTA_PREFSRC 7
-#define RTA_TABLE 15
+#define RTA_TABLE   15
 
-#define ARPHRD_ETHER 1
+#define ARPHRD_ETHER    1
 #define ARPHRD_LOOPBACK 772
 
-#define IFF_UP 0x1
+#define IFF_UP        0x1
 #define IFF_BROADCAST 0x2
-#define IFF_LOOPBACK 0x8
-#define IFF_RUNNING 0x40
+#define IFF_LOOPBACK  0x8
+#define IFF_RUNNING   0x40
 #define IFF_MULTICAST 0x1000
-#define IFF_LOWER_UP 0x10000
+#define IFF_LOWER_UP  0x10000
 
 #define NL_AF_UNSPEC 0
-#define NL_AF_INET 2
+#define NL_AF_INET   2
 
-#define RT_TABLE_MAIN 254
+#define RT_TABLE_MAIN     254
 #define RT_SCOPE_UNIVERSE 0
-#define RT_SCOPE_LINK 253
-#define RTPROT_BOOT 3
-#define RTPROT_KERNEL 2
-#define RTN_UNICAST 1
+#define RT_SCOPE_LINK     253
+#define RTPROT_BOOT       3
+#define RTPROT_KERNEL     2
+#define RTN_UNICAST       1
 
-#define NETLINK_INDEX_LO NET_IFINDEX_LO
+#define NETLINK_INDEX_LO   NET_IFINDEX_LO
 #define NETLINK_INDEX_ETH0 NET_IFINDEX_ETH0
 
 struct nlmsghdr {
@@ -156,7 +156,8 @@ static struct netlink_socket *netlink_registry = NULL;
 struct netlink_socket *netlink_socket_create(int protocol) {
     NET_LOCKED;
     if (protocol != TUNIX_NETLINK_ROUTE && protocol != TUNIX_NETLINK_SOCK_DIAG &&
-        protocol != TUNIX_NETLINK_KOBJECT_UEVENT && protocol != NETLINK_GENERIC) return NULL;
+        protocol != TUNIX_NETLINK_KOBJECT_UEVENT && protocol != NETLINK_GENERIC)
+        return NULL;
     struct netlink_socket *socket = (struct netlink_socket *)kmalloc(sizeof(*socket));
     if (!socket) return NULL;
     memset(socket, 0, sizeof(*socket));
@@ -177,7 +178,10 @@ void netlink_socket_unref(struct netlink_socket *socket) {
     if (!socket || socket->refs <= 0) return;
     if (--socket->refs != 0) return;
     for (struct netlink_socket **at = &netlink_registry; *at; at = &(*at)->registry_next) {
-        if (*at == socket) { *at = socket->registry_next; break; }
+        if (*at == socket) {
+            *at = socket->registry_next;
+            break;
+        }
     }
     while (socket->rx_head) {
         struct netlink_datagram *dead = socket->rx_head;
@@ -218,7 +222,10 @@ void netlink_socket_last_credentials(struct netlink_socket *socket,
                                      struct netlink_credentials *out) {
     NET_LOCKED;
     if (!out) return;
-    if (!socket) { memset(out, 0, sizeof(*out)); return; }
+    if (!socket) {
+        memset(out, 0, sizeof(*out));
+        return;
+    }
     *out = socket->last_credentials;
 }
 
@@ -249,10 +256,13 @@ static void nl_pad(struct nl_builder *b) {
 }
 
 static struct nlmsghdr *nl_msg_begin(struct nl_builder *b, uint16_t type, uint16_t flags,
-                                     uint32_t seq, uint32_t pid,
-                                     const void *family_header, size_t family_length) {
+                                     uint32_t seq, uint32_t pid, const void *family_header,
+                                     size_t family_length) {
     nl_pad(b);
-    if (b->len + sizeof(struct nlmsghdr) + family_length > b->cap) { b->overflow = 1; return NULL; }
+    if (b->len + sizeof(struct nlmsghdr) + family_length > b->cap) {
+        b->overflow = 1;
+        return NULL;
+    }
     b->msg_start = b->len;
     struct nlmsghdr *header = (struct nlmsghdr *)(b->buf + b->len);
     memset(header, 0, sizeof(*header));
@@ -273,7 +283,10 @@ static struct nlmsghdr *nl_msg_begin(struct nl_builder *b, uint16_t type, uint16
 static void nl_attr(struct nl_builder *b, uint16_t type, const void *data, size_t length) {
     nl_pad(b);
     size_t total = sizeof(struct rtattr) + length;
-    if (b->len + NLMSG_ALIGN(total) > b->cap) { b->overflow = 1; return; }
+    if (b->len + NLMSG_ALIGN(total) > b->cap) {
+        b->overflow = 1;
+        return;
+    }
     struct rtattr *attr = (struct rtattr *)(b->buf + b->len);
     attr->rta_len = (uint16_t)total;
     attr->rta_type = type;
@@ -299,8 +312,8 @@ static void nl_attr_u32(struct nl_builder *b, uint16_t type, uint32_t value) {
 
 static void nl_put_done(struct nl_builder *b, uint32_t seq, uint32_t pid) {
     int32_t code = 0;
-    struct nlmsghdr *header = nl_msg_begin(b, NLMSG_DONE, NLM_F_MULTI, seq, pid,
-                                           &code, sizeof(code));
+    struct nlmsghdr *header =
+        nl_msg_begin(b, NLMSG_DONE, NLM_F_MULTI, seq, pid, &code, sizeof(code));
     nl_msg_end(b, header);
 }
 
@@ -319,22 +332,25 @@ static uint8_t netmask_prefix(uint32_t netmask_network_order) {
     const uint8_t *bytes = (const uint8_t *)&netmask_network_order;
     for (int i = 0; i < 4; i++) {
         uint8_t byte = bytes[i];
-        while (byte & 0x80U) { prefix++; byte = (uint8_t)(byte << 1); }
+        while (byte & 0x80U) {
+            prefix++;
+            byte = (uint8_t)(byte << 1);
+        }
     }
     return prefix;
 }
 
 static void emit_link(struct nl_builder *b, uint32_t seq, uint32_t pid, uint16_t msg_flags,
-                      int index, const char *name, uint16_t arptype, uint32_t flags,
-                      uint32_t mtu, const uint8_t *mac, int mac_length) {
+                      int index, const char *name, uint16_t arptype, uint32_t flags, uint32_t mtu,
+                      const uint8_t *mac, int mac_length) {
     struct ifinfomsg info;
     memset(&info, 0, sizeof(info));
     info.ifi_family = NL_AF_UNSPEC;
     info.ifi_type = arptype;
     info.ifi_index = index;
     info.ifi_flags = flags;
-    struct nlmsghdr *header = nl_msg_begin(b, RTM_NEWLINK, msg_flags, seq, pid,
-                                           &info, sizeof(info));
+    struct nlmsghdr *header =
+        nl_msg_begin(b, RTM_NEWLINK, msg_flags, seq, pid, &info, sizeof(info));
     nl_attr(b, IFLA_IFNAME, name, strlen(name) + 1);
     nl_attr(b, IFLA_MTU, &mtu, sizeof(mtu));
     nl_attr_u32(b, IFLA_TXQLEN, 1000U);
@@ -356,8 +372,7 @@ struct link_description {
     int mac_length;
 };
 
-static unsigned collect_links(struct link_description *links,
-                              uint8_t loopback_mac[6]) {
+static unsigned collect_links(struct link_description *links, uint8_t loopback_mac[6]) {
     memset(loopback_mac, 0, 6);
     links[0].index = NETLINK_INDEX_LO;
     links[0].name = "lo";
@@ -387,10 +402,8 @@ static const char *request_link_name(const struct nlmsghdr *request) {
     size_t offset = sizeof(*request) + sizeof(struct ifinfomsg);
     while (offset + sizeof(struct rtattr) <= request->nlmsg_len) {
         const struct rtattr *attr = (const struct rtattr *)(base + offset);
-        if (attr->rta_len < sizeof(*attr) ||
-            offset + attr->rta_len > request->nlmsg_len) break;
-        if (attr->rta_type == IFLA_IFNAME)
-            return (const char *)(base + offset + sizeof(*attr));
+        if (attr->rta_len < sizeof(*attr) || offset + attr->rta_len > request->nlmsg_len) break;
+        if (attr->rta_type == IFLA_IFNAME) return (const char *)(base + offset + sizeof(*attr));
         offset += NLMSG_ALIGN(attr->rta_len);
     }
     return NULL;
@@ -405,23 +418,21 @@ static int dump_links(struct nl_builder *b, uint32_t seq, uint32_t pid,
     if (request->nlmsg_flags & NLM_F_DUMP) {
         for (unsigned index = 0; index < count; index++)
             emit_link(b, seq, pid, NLM_F_MULTI, links[index].index, links[index].name,
-                      links[index].arptype, links[index].flags, links[index].mtu,
-                      links[index].mac, links[index].mac_length);
+                      links[index].arptype, links[index].flags, links[index].mtu, links[index].mac,
+                      links[index].mac_length);
         return 1;
     }
 
-    const struct ifinfomsg *info = (const struct ifinfomsg *)((const uint8_t *)request +
-                                                             sizeof(*request));
-    int wanted_index = request->nlmsg_len >= sizeof(*request) + sizeof(*info) ?
-        info->ifi_index : 0;
+    const struct ifinfomsg *info =
+        (const struct ifinfomsg *)((const uint8_t *)request + sizeof(*request));
+    int wanted_index = request->nlmsg_len >= sizeof(*request) + sizeof(*info) ? info->ifi_index : 0;
     const char *wanted_name = request_link_name(request);
 
     for (unsigned index = 0; index < count; index++) {
         if (wanted_index && links[index].index != wanted_index) continue;
         if (wanted_name && strcmp(links[index].name, wanted_name) != 0) continue;
-        emit_link(b, seq, pid, 0, links[index].index, links[index].name,
-                  links[index].arptype, links[index].flags, links[index].mtu,
-                  links[index].mac, links[index].mac_length);
+        emit_link(b, seq, pid, 0, links[index].index, links[index].name, links[index].arptype,
+                  links[index].flags, links[index].mtu, links[index].mac, links[index].mac_length);
         return 0;
     }
     nl_put_error(b, seq, pid, request, -ENODEV);
@@ -437,8 +448,8 @@ static void emit_addr(struct nl_builder *b, uint32_t seq, uint32_t pid, int inde
     addr.ifa_prefixlen = prefix;
     addr.ifa_scope = scope;
     addr.ifa_index = (uint32_t)index;
-    struct nlmsghdr *header = nl_msg_begin(b, RTM_NEWADDR, NLM_F_MULTI, seq, pid,
-                                           &addr, sizeof(addr));
+    struct nlmsghdr *header =
+        nl_msg_begin(b, RTM_NEWADDR, NLM_F_MULTI, seq, pid, &addr, sizeof(addr));
     nl_attr(b, IFA_ADDRESS, &address_network_order, sizeof(address_network_order));
     nl_attr(b, IFA_LOCAL, &address_network_order, sizeof(address_network_order));
     nl_attr(b, IFA_LABEL, label, strlen(label) + 1);
@@ -451,8 +462,8 @@ static int dump_addrs(struct nl_builder *b, uint32_t seq, uint32_t pid) {
 
     const struct net_config *config = net_get_config();
     if (config->address) {
-        emit_addr(b, seq, pid, NETLINK_INDEX_ETH0, "eth0",
-                  netmask_prefix(config->netmask), RT_SCOPE_UNIVERSE, config->address);
+        emit_addr(b, seq, pid, NETLINK_INDEX_ETH0, "eth0", netmask_prefix(config->netmask),
+                  RT_SCOPE_UNIVERSE, config->address);
     }
     return 1;
 }
@@ -468,8 +479,8 @@ static void emit_route(struct nl_builder *b, uint32_t seq, uint32_t pid, uint8_t
     route.rtm_protocol = protocol;
     route.rtm_scope = scope;
     route.rtm_type = RTN_UNICAST;
-    struct nlmsghdr *header = nl_msg_begin(b, RTM_NEWROUTE, NLM_F_MULTI, seq, pid,
-                                           &route, sizeof(route));
+    struct nlmsghdr *header =
+        nl_msg_begin(b, RTM_NEWROUTE, NLM_F_MULTI, seq, pid, &route, sizeof(route));
     nl_attr_u32(b, RTA_TABLE, RT_TABLE_MAIN);
     if (dst) nl_attr(b, RTA_DST, dst, sizeof(*dst));
     if (prefsrc) nl_attr(b, RTA_PREFSRC, prefsrc, sizeof(*prefsrc));
@@ -482,12 +493,12 @@ static int dump_routes(struct nl_builder *b, uint32_t seq, uint32_t pid) {
     const struct net_config *config = net_get_config();
     if (config->address && config->netmask) {
         uint32_t network = config->address & config->netmask;
-        emit_route(b, seq, pid, netmask_prefix(config->netmask), &network, NULL,
-                   &config->address, NETLINK_INDEX_ETH0, RT_SCOPE_LINK, RTPROT_KERNEL);
+        emit_route(b, seq, pid, netmask_prefix(config->netmask), &network, NULL, &config->address,
+                   NETLINK_INDEX_ETH0, RT_SCOPE_LINK, RTPROT_KERNEL);
     }
     if (config->gateway) {
-        emit_route(b, seq, pid, 0, NULL, &config->gateway, NULL,
-                   NETLINK_INDEX_ETH0, RT_SCOPE_UNIVERSE, RTPROT_BOOT);
+        emit_route(b, seq, pid, 0, NULL, &config->gateway, NULL, NETLINK_INDEX_ETH0,
+                   RT_SCOPE_UNIVERSE, RTPROT_BOOT);
     }
     return 1;
 }
@@ -499,8 +510,7 @@ static const void *request_attr(const struct nlmsghdr *request, size_t header_le
     size_t offset = NLMSG_ALIGN(sizeof(*request) + header_length);
     while (offset + sizeof(struct rtattr) <= request->nlmsg_len) {
         const struct rtattr *attr = (const struct rtattr *)(base + offset);
-        if (attr->rta_len < sizeof(*attr) || offset + attr->rta_len > request->nlmsg_len)
-            break;
+        if (attr->rta_len < sizeof(*attr) || offset + attr->rta_len > request->nlmsg_len) break;
         if (attr->rta_type == wanted) {
             if (value_length) *value_length = attr->rta_len - sizeof(*attr);
             return base + offset + sizeof(*attr);
@@ -521,16 +531,13 @@ static int handle_addr_change(const struct nlmsghdr *request) {
     if (!value) value = request_attr(request, sizeof(*address), IFA_ADDRESS, &value_length);
     if (request->nlmsg_type == RTM_DELADDR) {
         const struct net_config *current = net_get_config();
-        if (value && value_length >= sizeof(*value) && *value != current->address)
-            return 0;
+        if (value && value_length >= sizeof(*value) && *value != current->address) return 0;
         net_set_address(0);
         net_set_netmask(0);
         return 0;
     }
-    if (!value || value_length < sizeof(*value) || address->ifa_prefixlen > 32U)
-        return -EINVAL;
-    uint32_t mask = address->ifa_prefixlen
-        ? 0xFFFFFFFFU << (32U - address->ifa_prefixlen) : 0U;
+    if (!value || value_length < sizeof(*value) || address->ifa_prefixlen > 32U) return -EINVAL;
+    uint32_t mask = address->ifa_prefixlen ? 0xFFFFFFFFU << (32U - address->ifa_prefixlen) : 0U;
     net_set_address(*value);
     net_set_netmask(net_htonl(mask));
     return 0;
@@ -538,12 +545,10 @@ static int handle_addr_change(const struct nlmsghdr *request) {
 
 static int handle_route_change(const struct nlmsghdr *request) {
     if (request->nlmsg_len < sizeof(*request) + sizeof(struct rtmsg)) return -EINVAL;
-    const struct rtmsg *route =
-        (const struct rtmsg *)((const uint8_t *)request + sizeof(*request));
+    const struct rtmsg *route = (const struct rtmsg *)((const uint8_t *)request + sizeof(*request));
     if (route->rtm_family != NL_AF_INET) return -EINVAL;
     size_t value_length = 0;
-    const uint32_t *gateway =
-        request_attr(request, sizeof(*route), RTA_GATEWAY, &value_length);
+    const uint32_t *gateway = request_attr(request, sizeof(*route), RTA_GATEWAY, &value_length);
     if (request->nlmsg_type == RTM_DELROUTE) {
         if (route->rtm_dst_len == 0U) net_set_gateway(0);
         return 0;
@@ -557,23 +562,17 @@ static int handle_route_request(struct nl_builder *b, const struct nlmsghdr *req
     uint32_t seq = request->nlmsg_seq;
     uint32_t pid = portid;
     switch (request->nlmsg_type) {
-        case RTM_GETLINK: return dump_links(b, seq, pid, request);
-        case RTM_GETADDR: return dump_addrs(b, seq, pid);
-        case RTM_GETROUTE: return dump_routes(b, seq, pid);
-        case RTM_NEWADDR:
-        case RTM_DELADDR:
-            nl_put_error(b, seq, pid, request, handle_addr_change(request));
-            return 0;
-        case RTM_NEWROUTE:
-        case RTM_DELROUTE:
-            nl_put_error(b, seq, pid, request, handle_route_change(request));
-            return 0;
-        default:
-            if (request->nlmsg_flags & NLM_F_ACK)
-                nl_put_error(b, seq, pid, request, 0);
-            else
-                nl_put_error(b, seq, pid, request, -EOPNOTSUPP);
-            return 0;
+    case RTM_GETLINK:  return dump_links(b, seq, pid, request);
+    case RTM_GETADDR:  return dump_addrs(b, seq, pid);
+    case RTM_GETROUTE: return dump_routes(b, seq, pid);
+    case RTM_NEWADDR:
+    case RTM_DELADDR:  nl_put_error(b, seq, pid, request, handle_addr_change(request)); return 0;
+    case RTM_NEWROUTE:
+    case RTM_DELROUTE: nl_put_error(b, seq, pid, request, handle_route_change(request)); return 0;
+    default:
+        if (request->nlmsg_flags & NLM_F_ACK) nl_put_error(b, seq, pid, request, 0);
+        else nl_put_error(b, seq, pid, request, -EOPNOTSUPP);
+        return 0;
     }
 }
 
@@ -591,9 +590,8 @@ static int handle_generic_request(struct nl_builder *b, const struct nlmsghdr *r
     return 0;
 }
 
-static int nl_rx_queue_from(struct netlink_socket *socket, const uint8_t *data,
-                            size_t length, uint32_t source_portid,
-                            uint32_t source_groups,
+static int nl_rx_queue_from(struct netlink_socket *socket, const uint8_t *data, size_t length,
+                            uint32_t source_portid, uint32_t source_groups,
                             const struct netlink_credentials *credentials) {
     if (!length) return 0;
     struct netlink_datagram *datagram =
@@ -621,13 +619,12 @@ static void netlink_uevent_multicast(uint32_t groups, const void *data, size_t l
                                      const struct netlink_credentials *credentials,
                                      const struct netlink_socket *sender) {
     if (!groups || !length) return;
-    for (struct netlink_socket *socket = netlink_registry; socket;
-         socket = socket->registry_next) {
+    for (struct netlink_socket *socket = netlink_registry; socket; socket = socket->registry_next) {
         if (socket == sender) continue;
         if (socket->protocol != TUNIX_NETLINK_KOBJECT_UEVENT) continue;
         if (!(socket->groups & groups)) continue;
-        (void)nl_rx_queue_from(socket, (const uint8_t *)data, length, source_portid,
-                               groups, credentials);
+        (void)nl_rx_queue_from(socket, (const uint8_t *)data, length, source_portid, groups,
+                               credentials);
     }
 }
 
@@ -636,13 +633,12 @@ static void netlink_uevent_unicast(uint32_t portid, const void *data, size_t len
                                    const struct netlink_credentials *credentials,
                                    const struct netlink_socket *sender) {
     if (!portid || !length) return;
-    for (struct netlink_socket *socket = netlink_registry; socket;
-         socket = socket->registry_next) {
+    for (struct netlink_socket *socket = netlink_registry; socket; socket = socket->registry_next) {
         if (socket == sender) continue;
         if (socket->protocol != TUNIX_NETLINK_KOBJECT_UEVENT) continue;
         if (socket->portid != portid) continue;
-        (void)nl_rx_queue_from(socket, (const uint8_t *)data, length, source_portid,
-                               0, credentials);
+        (void)nl_rx_queue_from(socket, (const uint8_t *)data, length, source_portid, 0,
+                               credentials);
         return;
     }
 }
@@ -651,8 +647,8 @@ void netlink_uevent_broadcast(const void *message, size_t length) {
     NET_LOCKED;
 
     struct netlink_credentials kernel = {0, 0, 0};
-    netlink_uevent_multicast(1U << (TUNIX_UEVENT_GROUP_KERNEL - 1), message, length,
-                             0, &kernel, NULL);
+    netlink_uevent_multicast(1U << (TUNIX_UEVENT_GROUP_KERNEL - 1), message, length, 0, &kernel,
+                             NULL);
 }
 
 int64_t netlink_socket_sendto(struct netlink_socket *socket, const void *data, size_t length,
@@ -665,8 +661,7 @@ int64_t netlink_socket_sendto(struct netlink_socket *socket, const void *data, s
     uint32_t portid = netlink_assign_portid(socket);
 
     if (socket->protocol == TUNIX_NETLINK_KOBJECT_UEVENT) {
-        const struct tunix_sockaddr_nl *destination =
-            (const struct tunix_sockaddr_nl *)address;
+        const struct tunix_sockaddr_nl *destination = (const struct tunix_sockaddr_nl *)address;
         if (destination && address_length >= sizeof(*destination)) {
             struct netlink_credentials sender;
             const struct credentials *self = cred_current();
@@ -674,11 +669,9 @@ int64_t netlink_socket_sendto(struct netlink_socket *socket, const void *data, s
             sender.uid = self ? self->euid : 0U;
             sender.gid = self ? self->egid : 0U;
             if (destination->groups)
-                netlink_uevent_multicast(destination->groups, data, length, portid,
-                                         &sender, socket);
-            else
-                netlink_uevent_unicast(destination->pid, data, length, portid,
-                                       &sender, socket);
+                netlink_uevent_multicast(destination->groups, data, length, portid, &sender,
+                                         socket);
+            else netlink_uevent_unicast(destination->pid, data, length, portid, &sender, socket);
         }
         return (int64_t)length;
     }
@@ -693,15 +686,14 @@ int64_t netlink_socket_sendto(struct netlink_socket *socket, const void *data, s
     size_t offset = 0;
     while (offset + sizeof(struct nlmsghdr) <= length) {
         const struct nlmsghdr *request = (const struct nlmsghdr *)(bytes + offset);
-        if (request->nlmsg_len < sizeof(struct nlmsghdr) ||
-            offset + request->nlmsg_len > length) break;
+        if (request->nlmsg_len < sizeof(struct nlmsghdr) || offset + request->nlmsg_len > length)
+            break;
         int dump;
         if (socket->protocol == TUNIX_NETLINK_ROUTE)
             dump = handle_route_request(&builder, request, portid);
         else if (socket->protocol == NETLINK_GENERIC)
             dump = handle_generic_request(&builder, request, portid);
-        else
-            dump = handle_diag_request(&builder, request, portid);
+        else dump = handle_diag_request(&builder, request, portid);
 
         nl_rx_queue(socket, builder.buf, builder.len);
         builder.len = 0;
@@ -719,8 +711,8 @@ int64_t netlink_socket_sendto(struct netlink_socket *socket, const void *data, s
     return (int64_t)length;
 }
 
-int64_t netlink_socket_recvfrom(struct netlink_socket *socket, void *data, size_t length,
-                                int flags, void *address, size_t *address_length) {
+int64_t netlink_socket_recvfrom(struct netlink_socket *socket, void *data, size_t length, int flags,
+                                void *address, size_t *address_length) {
     NET_LOCKED;
     if (!socket) return -EINVAL;
     struct netlink_datagram *datagram = socket->rx_head;

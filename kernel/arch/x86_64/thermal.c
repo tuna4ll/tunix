@@ -11,23 +11,23 @@
 
 extern void kprintf(const char *fmt, ...);
 
-#define MSR_CLOCK_MODULATION 0x19AU
-#define MSR_THERM_STATUS 0x19CU
-#define MSR_MISC_ENABLE 0x1A0U
+#define MSR_CLOCK_MODULATION   0x19AU
+#define MSR_THERM_STATUS       0x19CU
+#define MSR_MISC_ENABLE        0x1A0U
 #define MSR_TEMPERATURE_TARGET 0x1A2U
 
-#define THERM_STATUS_CRITICAL (1ULL << 4)
-#define THERM_STATUS_VALID (1ULL << 31)
-#define MISC_ENABLE_TM1 (1ULL << 3)
+#define THERM_STATUS_CRITICAL   (1ULL << 4)
+#define THERM_STATUS_VALID      (1ULL << 31)
+#define MISC_ENABLE_TM1         (1ULL << 3)
 #define CLOCK_MODULATION_ENABLE (1ULL << 4)
-#define CLOCK_MODULATION_HALF (4ULL << 1)
+#define CLOCK_MODULATION_HALF   (4ULL << 1)
 
-#define SAMPLE_NS 1000000000ULL
-#define THROTTLE_MARGIN 5
-#define RELEASE_MARGIN 15
-#define CRITICAL_MARGIN 1
+#define SAMPLE_NS        1000000000ULL
+#define THROTTLE_MARGIN  5
+#define RELEASE_MARGIN   15
+#define CRITICAL_MARGIN  1
 #define CRITICAL_SAMPLES 3U
-#define DEFAULT_TJMAX 100
+#define DEFAULT_TJMAX    100
 
 struct core_state {
     struct thermal_reading reading;
@@ -36,7 +36,7 @@ struct core_state {
 };
 
 static int support = -1;
-static struct thermal_state state = { DEFAULT_TJMAX, -1, 0, 0, 0 };
+static struct thermal_state state = {DEFAULT_TJMAX, -1, 0, 0, 0};
 static struct core_state cores[SMP_MAX_CPUS];
 
 int thermal_supported(void) {
@@ -56,7 +56,7 @@ int thermal_supported(void) {
     support = 1;
     uint32_t model = identity.model_number;
     int older = model == 0x1CU || model == 0x1DU || model == 0x26U || model == 0x27U ||
-                model == 0x35U || model == 0x36U;
+        model == 0x35U || model == 0x36U;
     if (identity.family == 6U && model >= 0x1AU && !older) {
         int target = (int)((cpu_read_msr(MSR_TEMPERATURE_TARGET) >> 16) & 0xFFU);
         if (target >= 60 && target <= 130) state.tjmax = target;
@@ -103,8 +103,8 @@ void thermal_tick(void) {
         cpu_write_msr(MSR_CLOCK_MODULATION, CLOCK_MODULATION_ENABLE | CLOCK_MODULATION_HALF);
         core->reading.throttled = 1;
         __atomic_add_fetch(&state.throttle_events, 1, __ATOMIC_RELAXED);
-        kprintf("THERMAL: cpu %u at %d C (limit %d C); running it at half speed\n",
-                index, celsius, state.tjmax);
+        kprintf("THERMAL: cpu %u at %d C (limit %d C); running it at half speed\n", index, celsius,
+                state.tjmax);
     } else if (core->reading.throttled && celsius <= state.tjmax - RELEASE_MARGIN) {
         cpu_write_msr(MSR_CLOCK_MODULATION, 0);
         core->reading.throttled = 0;
@@ -127,6 +127,4 @@ int thermal_read(unsigned index, struct thermal_reading *out) {
     return out->valid ? 0 : -1;
 }
 
-const struct thermal_state *thermal_state(void) {
-    return &state;
-}
+const struct thermal_state *thermal_state(void) { return &state; }

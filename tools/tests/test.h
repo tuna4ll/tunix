@@ -8,114 +8,114 @@ typedef unsigned short u16;
 typedef unsigned char u8;
 
 #if defined(__x86_64__)
-#define SYS_read 0
-#define SYS_write 1
-#define SYS_close 3
-#define SYS_fstat 5
-#define SYS_lseek 8
-#define SYS_mmap 9
-#define SYS_mprotect 10
-#define SYS_munmap 11
-#define SYS_brk 12
-#define SYS_rt_sigaction 13
-#define SYS_pread64 17
-#define SYS_nanosleep 35
-#define SYS_getpid 39
-#define SYS_sendmsg 46
-#define SYS_recvmsg 47
-#define SYS_socketpair 53
-#define SYS_clone 56
-#define SYS_execve 59
-#define SYS_wait4 61
-#define SYS_kill 62
-#define SYS_ftruncate 77
-#define SYS_getppid 110
-#define SYS_reboot 169
-#define SYS_getdents64 217
-#define SYS_clock_gettime 228
-#define SYS_exit_group 231
-#define SYS_epoll_ctl 233
-#define SYS_openat 257
-#define SYS_mkdirat 258
-#define SYS_unlinkat 263
-#define SYS_renameat 264
-#define SYS_epoll_pwait 281
-#define SYS_timerfd_create 283
+#define SYS_read            0
+#define SYS_write           1
+#define SYS_close           3
+#define SYS_fstat           5
+#define SYS_lseek           8
+#define SYS_mmap            9
+#define SYS_mprotect        10
+#define SYS_munmap          11
+#define SYS_brk             12
+#define SYS_rt_sigaction    13
+#define SYS_pread64         17
+#define SYS_nanosleep       35
+#define SYS_getpid          39
+#define SYS_sendmsg         46
+#define SYS_recvmsg         47
+#define SYS_socketpair      53
+#define SYS_clone           56
+#define SYS_execve          59
+#define SYS_wait4           61
+#define SYS_kill            62
+#define SYS_ftruncate       77
+#define SYS_getppid         110
+#define SYS_reboot          169
+#define SYS_getdents64      217
+#define SYS_clock_gettime   228
+#define SYS_exit_group      231
+#define SYS_epoll_ctl       233
+#define SYS_openat          257
+#define SYS_mkdirat         258
+#define SYS_unlinkat        263
+#define SYS_renameat        264
+#define SYS_epoll_pwait     281
+#define SYS_timerfd_create  283
 #define SYS_timerfd_settime 286
-#define SYS_eventfd2 290
-#define SYS_epoll_create1 291
-#define SYS_dup3 292
-#define SYS_pipe2 293
-#define SA_RESTORER 0x04000000UL
+#define SYS_eventfd2        290
+#define SYS_epoll_create1   291
+#define SYS_dup3            292
+#define SYS_pipe2           293
+#define SA_RESTORER         0x04000000UL
 #elif defined(__aarch64__)
-#define SYS_eventfd2 19
-#define SYS_epoll_create1 20
-#define SYS_epoll_ctl 21
-#define SYS_epoll_pwait 22
-#define SYS_dup3 24
-#define SYS_mkdirat 34
-#define SYS_unlinkat 35
-#define SYS_renameat 38
-#define SYS_ftruncate 46
-#define SYS_openat 56
-#define SYS_close 57
-#define SYS_pipe2 59
-#define SYS_getdents64 61
-#define SYS_lseek 62
-#define SYS_read 63
-#define SYS_write 64
-#define SYS_pread64 67
-#define SYS_fstat 80
-#define SYS_timerfd_create 85
+#define SYS_eventfd2        19
+#define SYS_epoll_create1   20
+#define SYS_epoll_ctl       21
+#define SYS_epoll_pwait     22
+#define SYS_dup3            24
+#define SYS_mkdirat         34
+#define SYS_unlinkat        35
+#define SYS_renameat        38
+#define SYS_ftruncate       46
+#define SYS_openat          56
+#define SYS_close           57
+#define SYS_pipe2           59
+#define SYS_getdents64      61
+#define SYS_lseek           62
+#define SYS_read            63
+#define SYS_write           64
+#define SYS_pread64         67
+#define SYS_fstat           80
+#define SYS_timerfd_create  85
 #define SYS_timerfd_settime 86
-#define SYS_exit_group 94
-#define SYS_nanosleep 101
-#define SYS_clock_gettime 113
-#define SYS_kill 129
-#define SYS_rt_sigaction 134
-#define SYS_reboot 142
-#define SYS_getpid 172
-#define SYS_getppid 173
-#define SYS_socketpair 199
-#define SYS_sendmsg 211
-#define SYS_recvmsg 212
-#define SYS_brk 214
-#define SYS_munmap 215
-#define SYS_clone 220
-#define SYS_execve 221
-#define SYS_mmap 222
-#define SYS_mprotect 226
-#define SYS_wait4 260
-#define SA_RESTORER 0UL
+#define SYS_exit_group      94
+#define SYS_nanosleep       101
+#define SYS_clock_gettime   113
+#define SYS_kill            129
+#define SYS_rt_sigaction    134
+#define SYS_reboot          142
+#define SYS_getpid          172
+#define SYS_getppid         173
+#define SYS_socketpair      199
+#define SYS_sendmsg         211
+#define SYS_recvmsg         212
+#define SYS_brk             214
+#define SYS_munmap          215
+#define SYS_clone           220
+#define SYS_execve          221
+#define SYS_mmap            222
+#define SYS_mprotect        226
+#define SYS_wait4           260
+#define SA_RESTORER         0UL
 #else
 #error "tests are written for x86_64 and aarch64"
 #endif
 
-#define AT_FDCWD (-100)
+#define AT_FDCWD     (-100)
 #define AT_REMOVEDIR 0x200
 
-#define O_RDONLY 0
-#define O_WRONLY 1
-#define O_RDWR 2
-#define O_CREAT 0100
-#define O_EXCL 0200
-#define O_TRUNC 01000
-#define O_APPEND 02000
+#define O_RDONLY   0
+#define O_WRONLY   1
+#define O_RDWR     2
+#define O_CREAT    0100
+#define O_EXCL     0200
+#define O_TRUNC    01000
+#define O_APPEND   02000
 #define O_NONBLOCK 04000
-#define O_CLOEXEC 02000000
+#define O_CLOEXEC  02000000
 
-#define ENOENT 2
-#define EBADF 9
-#define ECHILD 10
-#define EAGAIN 11
-#define EEXIST 17
-#define EPIPE 32
+#define ENOENT    2
+#define EBADF     9
+#define ECHILD    10
+#define EAGAIN    11
+#define EEXIST    17
+#define EPIPE     32
 #define ENOTEMPTY 39
 
-#define PROT_READ 1
-#define PROT_WRITE 2
-#define MAP_SHARED 0x01
-#define MAP_PRIVATE 0x02
+#define PROT_READ     1
+#define PROT_WRITE    2
+#define MAP_SHARED    0x01
+#define MAP_PRIVATE   0x02
 #define MAP_ANONYMOUS 0x20
 
 #define SIGKILL 9
@@ -126,18 +126,18 @@ typedef unsigned char u8;
 #define SIG_IGN 1UL
 #define WNOHANG 1
 
-#define AF_UNIX 1
+#define AF_UNIX     1
 #define SOCK_STREAM 1
-#define SOCK_DGRAM 2
-#define SOL_SOCKET 1
-#define SCM_RIGHTS 1
+#define SOCK_DGRAM  2
+#define SOL_SOCKET  1
+#define SCM_RIGHTS  1
 
-#define CLOCK_REALTIME 0
+#define CLOCK_REALTIME  0
 #define CLOCK_MONOTONIC 1
-#define EFD_SEMAPHORE 1
-#define EFD_NONBLOCK O_NONBLOCK
-#define EPOLL_CTL_ADD 1
-#define EPOLLIN 0x001U
+#define EFD_SEMAPHORE   1
+#define EFD_NONBLOCK    O_NONBLOCK
+#define EPOLL_CTL_ADD   1
+#define EPOLLIN         0x001U
 
 #define PAGE_SIZE 4096UL
 
@@ -313,9 +313,7 @@ static inline s64 waitpid(s64 pid, int *status, int options) {
     return SYSCALL(SYS_wait4, pid, status, options, 0, 0, 0);
 }
 
-static inline s64 kill(s64 pid, int signal) {
-    return SYSCALL(SYS_kill, pid, signal, 0, 0, 0, 0);
-}
+static inline s64 kill(s64 pid, int signal) { return SYSCALL(SYS_kill, pid, signal, 0, 0, 0, 0); }
 
 __attribute__((noreturn)) static inline void exit(int code) {
     for (;;) SYSCALL(SYS_exit_group, code, 0, 0, 0, 0, 0);
@@ -353,12 +351,10 @@ static inline s64 eventfd(u32 initial, int flags) {
     return SYSCALL(SYS_eventfd2, initial, flags, 0, 0, 0, 0);
 }
 
-static inline s64 epoll_create(void) {
-    return SYSCALL(SYS_epoll_create1, 0, 0, 0, 0, 0, 0);
-}
+static inline s64 epoll_create(void) { return SYSCALL(SYS_epoll_create1, 0, 0, 0, 0, 0, 0); }
 
 static inline s64 epoll_add(int epoll, int fd, u32 events, u64 data) {
-    struct epoll_event event = { events, data };
+    struct epoll_event event = {events, data};
     return SYSCALL(SYS_epoll_ctl, epoll, EPOLL_CTL_ADD, fd, &event, 0, 0);
 }
 
@@ -377,9 +373,7 @@ static inline s64 timerfd_settime(int fd, const struct itimerspec *value) {
 extern void test_signal_return(void);
 
 static inline s64 signal(int number, u64 handler) {
-    struct sigaction action = {
-        handler, SA_RESTORER, (u64)test_signal_return, 0
-    };
+    struct sigaction action = {handler, SA_RESTORER, (u64)test_signal_return, 0};
     return SYSCALL(SYS_rt_sigaction, number, &action, 0, 8, 0, 0);
 }
 
@@ -425,7 +419,7 @@ static inline s64 now_ms(void) {
 }
 
 static inline void sleep_ms(s64 milliseconds) {
-    struct timespec duration = { milliseconds / 1000, (milliseconds % 1000) * 1000000 };
+    struct timespec duration = {milliseconds / 1000, (milliseconds % 1000) * 1000000};
     nanosleep(&duration);
 }
 
@@ -487,8 +481,7 @@ __attribute__((used, noreturn)) static void test_start(u64 *stack) {
     print("/");
     print_number(checks_run);
     print("\n");
-    if (getpid() == 1)
-        SYSCALL(SYS_reboot, 0xfee1dead, 672274793, 0x4321fedc, 0, 0, 0);
+    if (getpid() == 1) SYSCALL(SYS_reboot, 0xfee1dead, 672274793, 0x4321fedc, 0, 0, 0);
     exit(checks_failed ? 1 : 0);
 }
 

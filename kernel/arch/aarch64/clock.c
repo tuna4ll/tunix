@@ -4,8 +4,8 @@
 #include <tunix/timer.h>
 #include "aarch64.h"
 
-#define PL031_DATA 0x000U
-#define DEFAULT_EPOCH 1767225600ULL
+#define PL031_DATA         0x000U
+#define DEFAULT_EPOCH      1767225600ULL
 #define TIMER_MAX_DELAY_NS 1000000000ULL
 
 uint64_t arch_clock_frequency(void) {
@@ -27,7 +27,7 @@ int arch_rtc_read(struct tunix_rtc_time *out) {
         __asm__ volatile("mrs %0, cntvct_el0" : "=r"(counter));
         uint64_t frequency = arch_clock_frequency();
         seconds = aarch64_platform.firmware_epoch +
-                  (frequency ? (counter - aarch64_platform.firmware_epoch_counter) / frequency : 0);
+            (frequency ? (counter - aarch64_platform.firmware_epoch_counter) / frequency : 0);
     }
     time_epoch_to_calendar(seconds, out);
     return 0;

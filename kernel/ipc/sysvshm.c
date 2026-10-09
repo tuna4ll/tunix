@@ -46,9 +46,7 @@ static struct shm_segment *segments;
 static int segment_capacity;
 static int next_id = 1;
 
-static int64_t now_seconds(void) {
-    return (int64_t)(time_realtime_ns() / 1000000000ULL);
-}
+static int64_t now_seconds(void) { return (int64_t)(time_realtime_ns() / 1000000000ULL); }
 
 static struct shm_segment *find_by_id(int id) {
     if (id <= 0) return NULL;
@@ -96,14 +94,16 @@ int sysvshm_get(int32_t key, uint64_t size, int flags, uint32_t pid) {
 
     struct shm_segment *slot = NULL;
     for (int i = 0; i < segment_capacity; i++)
-        if (!segments[i].used) { slot = &segments[i]; break; }
+        if (!segments[i].used) {
+            slot = &segments[i];
+            break;
+        }
     if (!slot) {
         int capacity = segment_capacity ? segment_capacity * 2 : 32;
         struct shm_segment *grown = kmalloc((size_t)capacity * sizeof(*grown));
         if (!grown) return -ENOSPC;
         memset(grown, 0, (size_t)capacity * sizeof(*grown));
-        if (segment_capacity)
-            memcpy(grown, segments, (size_t)segment_capacity * sizeof(*grown));
+        if (segment_capacity) memcpy(grown, segments, (size_t)segment_capacity * sizeof(*grown));
         kfree(segments);
         slot = &grown[segment_capacity];
         segments = grown;

@@ -33,37 +33,36 @@ static int signal_would_act(const struct process *process, int signal_number);
 #include <tunix/vfs.h>
 #include <tunix/vmm.h>
 
-#define KERNEL_STACK_SIZE (32 * 1024)
-#define ECHILD 10
-#define EINTR 4
-#define EINVAL 22
-#define ESRCH 3
-#define EDEADLK 35
-#define EPERM 1
-#define EACCES 13
-#define EAGAIN 11
-#define EFAULT 14
-#define ETIMEDOUT 110
-#define SIGSEGV 11
-#define FUTEX_OWNER_DIED 0x40000000U
-#define FUTEX_TID_MASK 0x3fffffffU
-#define FUTEX_WAITERS 0x80000000U
-#define ROBUST_LIST_LIMIT 2048U
-#define DEFAULT_TIMERSLACK_NS 50000ULL
+#define KERNEL_STACK_SIZE             (32 * 1024)
+#define ECHILD                        10
+#define EINTR                         4
+#define EINVAL                        22
+#define ESRCH                         3
+#define EDEADLK                       35
+#define EPERM                         1
+#define EACCES                        13
+#define EAGAIN                        11
+#define EFAULT                        14
+#define ETIMEDOUT                     110
+#define SIGSEGV                       11
+#define FUTEX_OWNER_DIED              0x40000000U
+#define FUTEX_TID_MASK                0x3fffffffU
+#define FUTEX_WAITERS                 0x80000000U
+#define ROBUST_LIST_LIMIT             2048U
+#define DEFAULT_TIMERSLACK_NS         50000ULL
 #define PROCESS_DEFAULT_QUANTUM_TICKS 5U
-#define SCHED_TARGET_LATENCY_TICKS 6U
-#define SCHED_MIN_GRANULARITY_TICKS 1U
-#define SCHED_WAKEUP_GRANULARITY_NS 4000000ULL
-#define NICE_0_WEIGHT 1024ULL
-#define TICK_NS (1000000000ULL / TIMER_FREQUENCY_HZ)
-#define SCHED_TARGET_LATENCY_NS (SCHED_TARGET_LATENCY_TICKS * TICK_NS)
-#define SCHED_MAX_SAMPLE_NS 1000000000ULL
+#define SCHED_TARGET_LATENCY_TICKS    6U
+#define SCHED_MIN_GRANULARITY_TICKS   1U
+#define SCHED_WAKEUP_GRANULARITY_NS   4000000ULL
+#define NICE_0_WEIGHT                 1024ULL
+#define TICK_NS                       (1000000000ULL / TIMER_FREQUENCY_HZ)
+#define SCHED_TARGET_LATENCY_NS       (SCHED_TARGET_LATENCY_TICKS * TICK_NS)
+#define SCHED_MAX_SAMPLE_NS           1000000000ULL
 
 static const uint32_t nice_weights[40] = {
-    88761, 71755, 56483, 46273, 36291, 29154, 23254, 18705, 14949, 11916,
-     9548,  7620,  6100,  4904,  3906,  3121,  2501,  1991,  1586,  1277,
-     1024,   820,   655,   526,   423,   335,   272,   215,   172,   137,
-      110,    87,    70,    56,    45,    36,    29,    23,    18,    15,
+    88761, 71755, 56483, 46273, 36291, 29154, 23254, 18705, 14949, 11916, 9548, 7620, 6100, 4904,
+    3906,  3121,  2501,  1991,  1586,  1277,  1024,  820,   655,   526,   423,  335,  272,  215,
+    172,   137,   110,   87,    70,    56,    45,    36,    29,    23,    18,   15,
 };
 
 static uint64_t process_weight(const struct process *process) {
@@ -73,7 +72,8 @@ static uint64_t process_weight(const struct process *process) {
     return nice_weights[nice + 20];
 }
 
-extern void process_enter_user(uint64_t entry, uint64_t user_stack, uint64_t cr3) __attribute__((noreturn));
+extern void process_enter_user(uint64_t entry, uint64_t user_stack, uint64_t cr3)
+    __attribute__((noreturn));
 extern void cpu_enter_idle(uint64_t idle_stack_top) __attribute__((noreturn));
 extern void cpu_idle_park(uint64_t idle_stack_top) __attribute__((noreturn));
 extern void kprintf(const char *fmt, ...);
@@ -82,7 +82,9 @@ extern void panic(const char *msg) __attribute__((noreturn));
 #if TUNIX_DEBUG_LOGS
 #define KDEBUG(...) kprintf(__VA_ARGS__)
 #else
-#define KDEBUG(...) do { } while (0)
+#define KDEBUG(...) \
+    do { \
+    } while (0)
 #endif
 
 static struct process *queue;
@@ -154,16 +156,15 @@ static void rq_insert(struct process *node) {
     }
     *link = node;
     node->rq_parent = parent;
-    while (node->rq_parent && node->rq_priority < node->rq_parent->rq_priority)
-        rq_rotate_up(node);
+    while (node->rq_parent && node->rq_priority < node->rq_parent->rq_priority) rq_rotate_up(node);
 }
 
 static void rq_remove(struct process *node) {
     while (node->rq_left || node->rq_right) {
-        struct process *child = !node->rq_left ? node->rq_right
-                              : !node->rq_right ? node->rq_left
-                              : node->rq_left->rq_priority < node->rq_right->rq_priority
-                                    ? node->rq_left : node->rq_right;
+        struct process *child = !node->rq_left                         ? node->rq_right
+            : !node->rq_right                                          ? node->rq_left
+            : node->rq_left->rq_priority < node->rq_right->rq_priority ? node->rq_left
+                                                                       : node->rq_right;
         rq_rotate_up(child);
     }
     struct process *parent = node->rq_parent;
@@ -347,32 +348,25 @@ static void sched_guard_release(int *unused) {
 static volatile uint64_t wake_sequence;
 static volatile int io_recheck_pending;
 
-static void wake_bump(void) {
-    __atomic_add_fetch(&wake_sequence, 1, __ATOMIC_SEQ_CST);
-}
+static void wake_bump(void) { __atomic_add_fetch(&wake_sequence, 1, __ATOMIC_SEQ_CST); }
 
 static int wake_missed(void) {
-    return current &&
-           __atomic_load_n(&wake_sequence, __ATOMIC_SEQ_CST) != current->wake_snapshot;
+    return current && __atomic_load_n(&wake_sequence, __ATOMIC_SEQ_CST) != current->wake_snapshot;
 }
 
 void process_note_syscall_entry(void) {
     if (current) current->wake_snapshot = __atomic_load_n(&wake_sequence, __ATOMIC_SEQ_CST);
 }
 
-void process_table_lock(void) {
-    lock_acquire(&sched_lock);
-}
+void process_table_lock(void) { lock_acquire(&sched_lock); }
 
-void process_table_unlock(void) {
-    lock_release(&sched_lock);
-}
+void process_table_unlock(void) { lock_release(&sched_lock); }
 
 static void signal_one_process(struct process *target, int signal_number);
 static int send_signal(int64_t pid, int signal_number, int checked);
 
-static struct process_memory *memory_create(uint64_t cr3, uint64_t brk_start,
-                                            uint64_t brk_end, uint64_t mmap_base) {
+static struct process_memory *memory_create(uint64_t cr3, uint64_t brk_start, uint64_t brk_end,
+                                            uint64_t mmap_base) {
     struct process_memory *memory = (struct process_memory *)kmalloc(sizeof(*memory));
     if (!memory) return NULL;
     memset(memory, 0, sizeof(*memory));
@@ -390,8 +384,7 @@ static void memory_ref(struct process_memory *memory) {
 }
 
 static void areas_free(struct process_memory *memory);
-static int areas_copy(struct process_memory *destination,
-                      const struct process_memory *source);
+static int areas_copy(struct process_memory *destination, const struct process_memory *source);
 
 static void memory_unref(struct process_memory *memory) {
     if (!memory || __atomic_load_n(&memory->refs, __ATOMIC_RELAXED) == 0) return;
@@ -419,9 +412,7 @@ struct process_memory *process_memory_get(struct process *process) {
     return memory;
 }
 
-void process_memory_put(struct process_memory *memory) {
-    memory_unref(memory);
-}
+void process_memory_put(struct process_memory *memory) { memory_unref(memory); }
 
 static void memory_guard_release(int *unused) {
     (void)unused;
@@ -549,12 +540,12 @@ static void dequeue(struct process *process) {
 
 static const char *state_name(int state) {
     switch (state) {
-        case PROCESS_READY:   return "ready";
-        case PROCESS_RUNNING: return "run";
-        case PROCESS_BLOCKED: return "block";
-        case PROCESS_ZOMBIE:  return "zombie";
-        case PROCESS_STOPPED: return "stop";
-        default:              return "dead";
+    case PROCESS_READY:   return "ready";
+    case PROCESS_RUNNING: return "run";
+    case PROCESS_BLOCKED: return "block";
+    case PROCESS_ZOMBIE:  return "zombie";
+    case PROCESS_STOPPED: return "stop";
+    default:              return "dead";
     }
 }
 
@@ -589,23 +580,24 @@ void process_dump_all(void) {
     if (!queue) return;
     struct process *item = queue;
     do {
-        if (item->state == PROCESS_DEAD) { item = item->next; continue; }
-        uint64_t rip = item == current ? SYSCALL_IP(&item->saved_frame)
-                                       : SYSCALL_IP(&item->saved_frame);
+        if (item->state == PROCESS_DEAD) {
+            item = item->next;
+            continue;
+        }
+        uint64_t rip =
+            item == current ? SYSCALL_IP(&item->saved_frame) : SYSCALL_IP(&item->saved_frame);
         uint64_t offset = 0;
         const char *object = object_at(item, rip, &offset);
-        kprintf("  %d/%d %s %s", (int)item->pid, (int)item->tgid,
-                item->name, state_name(item->state));
+        kprintf("  %d/%d %s %s", (int)item->pid, (int)item->tgid, item->name,
+                state_name(item->state));
         if (item->wait4_active) kprintf(" wait4(%d)", (int)item->wait_pid);
         if (item->io_wait_active) kprintf(" io-syscall=%d", (int)item->io_wait_syscall);
         if (item->futex_wait_active) {
             uint32_t now = 0;
-            int readable = vmm_copy_from_space(item->cr3, &now,
-                                               item->futex_wait_address,
-                                               sizeof(now)) == 0;
+            int readable =
+                vmm_copy_from_space(item->cr3, &now, item->futex_wait_address, sizeof(now)) == 0;
             kprintf(" futex=%p want=%x now=%s%x", (void *)item->futex_wait_address,
-                    (unsigned)item->futex_wait_expected, readable ? "" : "?",
-                    (unsigned)now);
+                    (unsigned)item->futex_wait_expected, readable ? "" : "?", (unsigned)now);
         }
         if (item->wait_channel) kprintf(" chan=%p", (const void *)item->wait_channel);
         if (item->kernel_waiting) kprintf(" in-kernel");
@@ -626,7 +618,9 @@ void process_dump_all(void) {
              index++)
             kprintf(" holds=%s", item->held_mutexes[index]->name);
         if (item->syscall_rewound) kprintf(" rewound");
-        kprintf(" at %s+%p" "\n", object, (void *)offset);
+        kprintf(" at %s+%p"
+                "\n",
+                object, (void *)offset);
         item = item->next;
     } while (item != queue);
 }
@@ -743,8 +737,8 @@ int process_reserve_fd(struct process *process, int fd) {
     return status;
 }
 
-int process_install_file_flags(struct process *process, struct file *file,
-                               int minimum_fd, uint8_t flags) {
+int process_install_file_flags(struct process *process, struct file *file, int minimum_fd,
+                               uint8_t flags) {
     if (!process || !process->files || !file) return -1;
     if (minimum_fd < 0) minimum_fd = 0;
     struct file_table *table = process->files;
@@ -752,8 +746,7 @@ int process_install_file_flags(struct process *process, struct file *file,
     int installed = -1;
     lock_acquire(&table->lock);
     for (uint64_t fd = (uint64_t)minimum_fd; fd < limit; fd++) {
-        if (fd >= (uint64_t)table->capacity && file_table_grow(table, (int)fd + 1) != 0)
-            break;
+        if (fd >= (uint64_t)table->capacity && file_table_grow(table, (int)fd + 1) != 0) break;
         if (!table->fds[fd]) {
             table->fds[fd] = file;
             table->fd_flags[fd] = flags & PROCESS_FD_CLOEXEC;
@@ -765,8 +758,8 @@ int process_install_file_flags(struct process *process, struct file *file,
     return installed;
 }
 
-int process_install_file_at(struct process *process, struct file *file, int fd,
-                            uint8_t flags, struct file **replaced) {
+int process_install_file_at(struct process *process, struct file *file, int fd, uint8_t flags,
+                            struct file **replaced) {
     if (replaced) *replaced = NULL;
     if (!process || !process->files || !file || fd < 0 || (uint64_t)fd >= fd_limit(process))
         return -1;
@@ -1036,8 +1029,7 @@ static struct process_memory *take_zombie_memory(void) {
     while (list) {
         struct process *item = list;
         list = item->zombie_next;
-        if ((item == current || __atomic_load_n(&item->on_cpu, __ATOMIC_ACQUIRE)) &&
-            item->memory) {
+        if ((item == current || __atomic_load_n(&item->on_cpu, __ATOMIC_ACQUIRE)) && item->memory) {
             item->zombie_next = kept;
             kept = item;
             continue;
@@ -1070,7 +1062,8 @@ static void zombie_forget(struct process *process) {
 
 void process_reap_deferred(void) {
     if (!__atomic_load_n(&zombie_memory_pending, __ATOMIC_RELAXED) &&
-        !__atomic_load_n(&reap_pending, __ATOMIC_RELAXED)) return;
+        !__atomic_load_n(&reap_pending, __ATOMIC_RELAXED))
+        return;
     struct process_memory *memories = NULL;
     struct process *victims = NULL;
     {
@@ -1131,8 +1124,7 @@ static char *copy_text(const char *text) {
     return copy;
 }
 
-static void set_exe_path(struct process *process, struct vfs_node *file,
-                         const char *path) {
+static void set_exe_path(struct process *process, struct vfs_node *file, const char *path) {
     VFS_PATH_SCOPED resolved = vfs_path_buffer();
     if (resolved && file && vfs_node_path(file, resolved, VFS_PATH_MAX) == 0) path = resolved;
     char *copy = copy_text(path);
@@ -1194,14 +1186,12 @@ struct process *process_create_from_path(const char *path) {
     process->start_time_ns = time_uptime_ns();
 
     const char *argv[] = {path, NULL};
-    const char *envp[] = {
-        "PATH=/usr/bin:/usr/sbin:/bin:/sbin",
-        "HOME=/",
-        "TERM=tunix",
-        "SHELL=/bin/bash",
-        "USER=root",
-        NULL
-    };
+    const char *envp[] = {"PATH=/usr/bin:/usr/sbin:/bin:/sbin",
+                          "HOME=/",
+                          "TERM=tunix",
+                          "SHELL=/bin/bash",
+                          "USER=root",
+                          NULL};
     if (elf_load_process(process, file, argv, envp) != 0) {
         kprintf("process: invalid ELF64: %s\n", path);
         vmm_destroy_address_space(process->cr3);
@@ -1209,8 +1199,8 @@ struct process *process_create_from_path(const char *path) {
         free_process_struct(process);
         return NULL;
     }
-    process->memory = memory_create(process->cr3, process->brk_start,
-                                    process->brk_end, process->mmap_base);
+    process->memory =
+        memory_create(process->cr3, process->brk_start, process->brk_end, process->mmap_base);
     if (!process->memory) {
         vmm_destroy_address_space(process->cr3);
         process_release_files(process);
@@ -1237,13 +1227,12 @@ struct process *process_create_from_path(const char *path) {
     procfs_register_process(process);
     eventfs_emit_process_exec(process->cred.euid, process->pid, process->name);
     if (process->pid == 1) tty_set_foreground_pgid(vt_tty(1U), (int)process->pgid);
-    KDEBUG("process: pid=%u path=%s entry=%p cr3=%p\n",
-            (unsigned)process->pid, path, (void *)process->entry, (void *)process->cr3);
+    KDEBUG("process: pid=%u path=%s entry=%p cr3=%p\n", (unsigned)process->pid, path,
+           (void *)process->entry, (void *)process->cr3);
     return process;
 }
 
-struct process *process_create_kthread(const char *name, void (*body)(void *),
-                                       void *argument) {
+struct process *process_create_kthread(const char *name, void (*body)(void *), void *argument) {
     struct process *process = (struct process *)kmalloc(sizeof(*process));
     if (!process) return NULL;
     memset(process, 0, sizeof(*process));
@@ -1285,9 +1274,7 @@ uint64_t process_current_pid(void) { return current ? current->tgid : 0; }
 uint64_t process_current_tid(void) { return current ? current->pid : 0; }
 uint64_t process_current_ppid(void) { return current ? current->ppid : 0; }
 
-uint32_t process_get_umask(void) {
-    return current ? current->umask : 022;
-}
+uint32_t process_get_umask(void) { return current ? current->umask : 022; }
 
 uint32_t process_set_umask(uint32_t mask) {
     if (!current) return 022;
@@ -1312,8 +1299,8 @@ static int allowed_on_this_cpu(const struct process *process) {
 
 static int runnable(const struct process *process) {
     return process && process->state == PROCESS_READY && allowed_on_this_cpu(process) &&
-           (!__atomic_load_n(&process->on_cpu, __ATOMIC_ACQUIRE) || process == current ||
-            process == cpu_current()->switch_owner);
+        (!__atomic_load_n(&process->on_cpu, __ATOMIC_ACQUIRE) || process == current ||
+         process == cpu_current()->switch_owner);
 }
 
 static uint64_t minimum_virtual_runtime;
@@ -1393,10 +1380,12 @@ static void wake_expired_timers(uint64_t now) {
             if (item->itimer_real_interval_ns) {
                 uint64_t elapsed = now - item->itimer_real_deadline_ns;
                 uint64_t periods = 1 + elapsed / item->itimer_real_interval_ns;
-                uint64_t advance = periods > UINT64_MAX / item->itimer_real_interval_ns ?
-                    UINT64_MAX : periods * item->itimer_real_interval_ns;
-                item->itimer_real_deadline_ns = UINT64_MAX - item->itimer_real_deadline_ns < advance ?
-                    UINT64_MAX : item->itimer_real_deadline_ns + advance;
+                uint64_t advance = periods > UINT64_MAX / item->itimer_real_interval_ns
+                    ? UINT64_MAX
+                    : periods * item->itimer_real_interval_ns;
+                item->itimer_real_deadline_ns = UINT64_MAX - item->itimer_real_deadline_ns < advance
+                    ? UINT64_MAX
+                    : item->itimer_real_deadline_ns + advance;
             } else {
                 item->itimer_real_deadline_ns = 0;
             }
@@ -1404,8 +1393,7 @@ static void wake_expired_timers(uint64_t now) {
         }
         if (item->state != PROCESS_DEAD) note_deadline(item->itimer_real_deadline_ns);
         if (item->state == PROCESS_BLOCKED && item->futex_wait_active &&
-            item->futex_wait_deadline_ns != UINT64_MAX &&
-            now >= item->futex_wait_deadline_ns) {
+            item->futex_wait_deadline_ns != UINT64_MAX && now >= item->futex_wait_deadline_ns) {
             item->futex_wait_active = 0;
             item->futex_wait_address = 0;
             item->futex_wait_key = 0;
@@ -1458,8 +1446,9 @@ static int higher_priority_waiting(const struct process *than) {
 static int ordinary_should_preempt(const struct process *running) {
     if (!running || running->rt_priority || !ready_processes) return 0;
     struct process *walk = first_allowed_ordinary(running);
-    return walk && (int64_t)(walk->virtual_runtime_ns + SCHED_WAKEUP_GRANULARITY_NS -
-                             running->virtual_runtime_ns) < 0;
+    return walk &&
+        (int64_t)(walk->virtual_runtime_ns + SCHED_WAKEUP_GRANULARITY_NS -
+                  running->virtual_runtime_ns) < 0;
 }
 
 static uint32_t ordinary_slice_ticks(const struct process *selected) {
@@ -1519,8 +1508,8 @@ int process_set_scheduler(uint64_t tid, int policy, int rt_priority) {
     if (!target) return -ESRCH;
 
     int real_time = policy == PROCESS_SCHED_FIFO || policy == PROCESS_SCHED_RR;
-    if (!real_time && policy != PROCESS_SCHED_OTHER &&
-        policy != PROCESS_SCHED_BATCH && policy != PROCESS_SCHED_IDLE)
+    if (!real_time && policy != PROCESS_SCHED_OTHER && policy != PROCESS_SCHED_BATCH &&
+        policy != PROCESS_SCHED_IDLE)
         return -EINVAL;
     if (real_time) {
         if (rt_priority < 1 || rt_priority > PROCESS_RT_PRIORITY_MAX) return -EINVAL;
@@ -1572,7 +1561,8 @@ int process_get_nice(uint64_t tid, int *nice) {
 static void online_cpu_mask(struct cpu_mask *mask) {
     memset(mask, 0, sizeof(*mask));
     unsigned cpus = smp_cpu_count();
-    for (unsigned index = 0; index < cpus && index < SMP_MAX_CPUS; index++) cpu_mask_set(mask, index);
+    for (unsigned index = 0; index < cpus && index < SMP_MAX_CPUS; index++)
+        cpu_mask_set(mask, index);
 }
 
 int process_set_affinity(uint64_t tid, const struct cpu_mask *mask) {
@@ -1641,8 +1631,7 @@ void process_finish_switch(void) {
     struct process *owner = cpu->switch_owner;
     cpu->switching = 0;
     cpu->switch_owner = NULL;
-    if (owner && owner != cpu_running(cpu))
-        __atomic_store_n(&owner->on_cpu, 0, __ATOMIC_RELEASE);
+    if (owner && owner != cpu_running(cpu)) __atomic_store_n(&owner->on_cpu, 0, __ATOMIC_RELEASE);
 }
 
 static void activate_process(struct process *process) {
@@ -1655,9 +1644,8 @@ static void activate_process(struct process *process) {
     __atomic_store_n(&process->on_cpu, 1, __ATOMIC_RELAXED);
     current = process;
     if (!process->time_slice_ticks)
-        process->time_slice_ticks = process->rt_priority
-                                      ? PROCESS_DEFAULT_QUANTUM_TICKS
-                                      : ordinary_slice_ticks(process);
+        process->time_slice_ticks =
+            process->rt_priority ? PROCESS_DEFAULT_QUANTUM_TICKS : ordinary_slice_ticks(process);
     process->last_scheduled_ns = time_uptime_ns();
     set_process_state(process, PROCESS_RUNNING);
     set_kernel_stack(process->kernel_stack_top);
@@ -1870,22 +1858,18 @@ void process_preempt_point(void) {
         SCHED_LOCKED;
         if ((due & TIMER_LOCAL_TICK) && self->time_slice_ticks) self->time_slice_ticks--;
         yield = !self->time_slice_ticks || higher_priority_waiting(self) ||
-                ordinary_should_preempt(self);
+            ordinary_should_preempt(self);
     }
     if (yield) process_kernel_yield();
     SCHED_LOCKED;
     if (!self->time_slice_ticks)
-        self->time_slice_ticks = self->rt_priority ? PROCESS_DEFAULT_QUANTUM_TICKS
-                                                   : ordinary_slice_ticks(self);
+        self->time_slice_ticks =
+            self->rt_priority ? PROCESS_DEFAULT_QUANTUM_TICKS : ordinary_slice_ticks(self);
 }
 
-void process_start_first(void) {
-    go_idle();
-}
+void process_start_first(void) { go_idle(); }
 
-void process_run_idle(void) {
-    cpu_idle_park(cpu_current()->idle_stack_top);
-}
+void process_run_idle(void) { cpu_idle_park(cpu_current()->idle_stack_top); }
 
 static struct vm_area **area_list(void) {
     return current && current->memory ? &current->memory->areas : NULL;
@@ -1895,8 +1879,7 @@ static int area_writes_file(const struct vm_area *area) {
     return (area->page_flags & PAGE_WRITE) && !(area->kind & VM_PRIVATE);
 }
 
-static struct vm_area *area_alloc(uint64_t start, uint64_t end,
-                                  uint64_t page_flags, uint32_t kind,
+static struct vm_area *area_alloc(uint64_t start, uint64_t end, uint64_t page_flags, uint32_t kind,
                                   struct file *file, uint64_t offset) {
     struct vm_area *area = (struct vm_area *)kmalloc(sizeof(*area));
     if (!area) return NULL;
@@ -1910,8 +1893,7 @@ static struct vm_area *area_alloc(uint64_t start, uint64_t end,
     if (file) file_ref(file);
     if ((kind & VM_FILE_PAGES) && file) {
         vfs_map_ref(file->node);
-        if (area_writes_file(area))
-            vfs_map_write_ref(file->node, offset, end - start);
+        if (area_writes_file(area)) vfs_map_write_ref(file->node, offset, end - start);
     }
     return area;
 }
@@ -1927,8 +1909,7 @@ static void area_free(struct vm_area *area) {
 }
 
 static struct vm_area *area_split_at(struct vm_area *area, uint64_t cut) {
-    struct vm_area *tail = area_alloc(cut, area->end, area->page_flags,
-                                      area->kind, area->file,
+    struct vm_area *tail = area_alloc(cut, area->end, area->page_flags, area->kind, area->file,
                                       area->offset + (cut - area->start));
     if (!tail) return NULL;
     area->end = cut;
@@ -1944,8 +1925,8 @@ static void area_insert(struct vm_area **list, struct vm_area *area) {
     *link = area;
 }
 
-int process_map_area(uint64_t start, uint64_t end, uint64_t page_flags,
-                     uint32_t kind, struct file *file, uint64_t offset) {
+int process_map_area(uint64_t start, uint64_t end, uint64_t page_flags, uint32_t kind,
+                     struct file *file, uint64_t offset) {
     MEMORY_LOCKED;
     struct vm_area **list = area_list();
     if (!list || start >= end) return -1;
@@ -2003,9 +1984,7 @@ void process_protect_area(uint64_t start, uint64_t end, uint64_t page_flags) {
         }
         if (area->start < start || area->end > end) {
             uint64_t cut = area->start < start ? start : end;
-            if (!area_split_at(area, cut)) {
-                link = &area->next;
-            }
+            if (!area_split_at(area, cut)) { link = &area->next; }
             continue;
         }
         area->page_flags = page_flags;
@@ -2074,18 +2053,19 @@ static int reclaim_or_kill(void) {
     uint64_t worst = 0;
     struct process *item = queue;
     if (item) do {
-        if (item->pid > 1 && !item->is_thread &&
-            item->state != PROCESS_ZOMBIE && item->state != PROCESS_DEAD &&
-            item->cr3 && !item->group_exit_pending) {
-            uint64_t pages = vmm_count_user_pages(item->cr3);
-            if (pages > worst) { worst = pages; victim = item; }
-        }
-        item = item->next;
-    } while (item != queue);
+            if (item->pid > 1 && !item->is_thread && item->state != PROCESS_ZOMBIE &&
+                item->state != PROCESS_DEAD && item->cr3 && !item->group_exit_pending) {
+                uint64_t pages = vmm_count_user_pages(item->cr3);
+                if (pages > worst) {
+                    worst = pages;
+                    victim = item;
+                }
+            }
+            item = item->next;
+        } while (item != queue);
 
     if (!victim) return 0;
-    kprintf("OOM: killing pid=%u (%s), %u MiB resident\n",
-            (unsigned)victim->pid, victim->name,
+    kprintf("OOM: killing pid=%u (%s), %u MiB resident\n", (unsigned)victim->pid, victim->name,
             (unsigned)(worst / 256U));
     wake_bump();
     (void)send_signal((int64_t)victim->pid, SIGKILL, 0);
@@ -2149,8 +2129,9 @@ static int commit_file(struct vm_area *area, uint64_t page) {
 }
 
 static int commit_memfd(struct vm_area *area, uint64_t page) {
-    if (!area->file || (area->file->kind != FILE_KIND_MEMFD &&
-                        area->file->kind != FILE_KIND_IO_URING)) return 0;
+    if (!area->file ||
+        (area->file->kind != FILE_KIND_MEMFD && area->file->kind != FILE_KIND_IO_URING))
+        return 0;
     if (vmm_translate(current->cr3, page, NULL, NULL) == 0) return 1;
     uint64_t index = (page - area->start + area->offset) / 4096ULL;
     if (index * 4096ULL >= memfd_size(area->file->memfd)) return 0;
@@ -2187,13 +2168,11 @@ static void areas_free(struct process_memory *memory) {
     memory->areas = NULL;
 }
 
-static int areas_copy(struct process_memory *destination,
-                      const struct process_memory *source) {
+static int areas_copy(struct process_memory *destination, const struct process_memory *source) {
     struct vm_area **link = &destination->areas;
     for (const struct vm_area *area = source->areas; area; area = area->next) {
-        struct vm_area *copy =
-            area_alloc(area->start, area->end, area->page_flags, area->kind,
-                       area->file, area->offset);
+        struct vm_area *copy = area_alloc(area->start, area->end, area->page_flags, area->kind,
+                                          area->file, area->offset);
         if (!copy) {
             areas_free(destination);
             return -1;
@@ -2212,14 +2191,12 @@ int process_grow_user_stack(uint64_t fault_address) {
     uint64_t page = fault_address & ~4095ULL;
     uint64_t existing_physical = 0;
     uint64_t existing_flags = 0;
-    if (vmm_translate(current->cr3, page, &existing_physical, &existing_flags) == 0)
-        return 1;
+    if (vmm_translate(current->cr3, page, &existing_physical, &existing_flags) == 0) return 1;
 
     uint64_t physical = alloc_user_page();
     if (!physical) return 0;
     memset(vmm_phys_to_virt(physical), 0, 4096);
-    if (vmm_map_page_in(current->cr3, page, physical,
-                        PAGE_PRESENT | PAGE_WRITE | PAGE_USER) != 0) {
+    if (vmm_map_page_in(current->cr3, page, physical, PAGE_PRESENT | PAGE_WRITE | PAGE_USER) != 0) {
         pmm_free_page((void *)physical);
         return 0;
     }
@@ -2239,19 +2216,19 @@ int process_signal_has_handler(int signal_number) {
 }
 
 int process_fault_from_interrupt(struct interrupt_frame *frame, int signal_number) {
-    if (!frame || !arch_interrupt_from_user(frame) || !current ||
-        current->state != PROCESS_RUNNING) return 0;
+    if (!frame || !arch_interrupt_from_user(frame) || !current || current->state != PROCESS_RUNNING)
+        return 0;
 
     process_account_runtime();
     arch_frame_from_interrupt(&current->saved_frame, frame);
     struct syscall_frame resume = current->saved_frame;
 
-    const char *type = signal_number == SIGSEGV ? "segv" :
-                       signal_number == SIGILL ? "ill" :
-                       signal_number == SIGBUS ? "bus" :
-                       signal_number == SIGFPE ? "fpe" : "signal";
-    eventfs_emit_process_fault(current->cred.euid, current->pid, type,
-                               current->name);
+    const char *type = signal_number == SIGSEGV ? "segv"
+        : signal_number == SIGILL               ? "ill"
+        : signal_number == SIGBUS               ? "bus"
+        : signal_number == SIGFPE               ? "fpe"
+                                                : "signal";
+    eventfs_emit_process_fault(current->cred.euid, current->pid, type, current->name);
 
     (void)process_send_signal((int64_t)current->pid, signal_number);
     process_prepare_user_return(&resume);
@@ -2265,7 +2242,7 @@ static int next_pending_signal(struct process *process);
 
 static int needs_user_work(struct process *process) {
     return process->group_exit_pending ||
-           (!process->in_signal && next_pending_signal(process) != 0);
+        (!process->in_signal && next_pending_signal(process) != 0);
 }
 
 static void resume_from_idle(struct interrupt_frame *frame) {
@@ -2308,9 +2285,8 @@ static void preempt_from_interrupt(struct interrupt_frame *frame, int tick) {
             activate_process(next);
         } else {
             if (!allowed_on_this_cpu(preempted)) go_idle();
-            preempted->time_slice_ticks = preempted->rt_priority
-                                           ? PROCESS_DEFAULT_QUANTUM_TICKS
-                                           : ordinary_slice_ticks(preempted);
+            preempted->time_slice_ticks = preempted->rt_priority ? PROCESS_DEFAULT_QUANTUM_TICKS
+                                                                 : ordinary_slice_ticks(preempted);
             set_process_state(preempted, PROCESS_RUNNING);
             current = preempted;
         }
@@ -2329,9 +2305,7 @@ void process_timer_interrupt(struct interrupt_frame *frame) {
     preempt_from_interrupt(frame, 1);
 }
 
-void process_deadline_interrupt(struct interrupt_frame *frame) {
-    preempt_from_interrupt(frame, 0);
-}
+void process_deadline_interrupt(struct interrupt_frame *frame) { preempt_from_interrupt(frame, 0); }
 
 void process_reschedule_interrupt(struct interrupt_frame *frame) {
     preempt_from_interrupt(frame, 0);
@@ -2359,8 +2333,8 @@ void process_run_child_first_from_syscall(struct syscall_frame *frame, uint64_t 
     struct process *parent = current;
     struct process *child = process_find(child_pid);
     if (!child || child->state != PROCESS_READY || child->on_cpu || child->kernel_suspended ||
-        (child->ppid != parent->tgid &&
-         !(child->is_thread && child->tgid == parent->tgid))) return;
+        (child->ppid != parent->tgid && !(child->is_thread && child->tgid == parent->tgid)))
+        return;
 
     parent->saved_frame = *frame;
     set_process_state(parent, PROCESS_READY);
@@ -2396,7 +2370,8 @@ static void wake_group_waiters(struct process *leader) {
     } while (item != queue);
 }
 
-static int child_matches(const struct process *child, const struct process *parent, int64_t requested) {
+static int child_matches(const struct process *child, const struct process *parent,
+                         int64_t requested) {
     if (!child || !parent || child->ppid != parent->pid) return 0;
     if (requested > 0) return child->pid == (uint64_t)requested;
     if (requested == -1) return 1;
@@ -2481,7 +2456,8 @@ static int robust_futex_address(uint64_t entry, int64_t offset, uint64_t *addres
 
 static void process_handle_robust_list(struct process *process) {
     if (!process || !process->robust_list_head ||
-        process->robust_list_length != sizeof(struct linux_robust_list_head_user)) return;
+        process->robust_list_length != sizeof(struct linux_robust_list_head_user))
+        return;
 
     uint64_t head_address = process->robust_list_head;
     struct linux_robust_list_head_user head;
@@ -2526,8 +2502,8 @@ static void terminate_sibling_threads(int status);
 
 static void process_exit_from_signal(struct syscall_frame *frame, int signal_number) {
     if (current && current->pid == 1)
-        kprintf("TUNIX: init killed by signal %d at rip %p rsp %p\n",
-                signal_number, (void *)(frame ? SYSCALL_IP(frame) : 0),
+        kprintf("TUNIX: init killed by signal %d at rip %p rsp %p\n", signal_number,
+                (void *)(frame ? SYSCALL_IP(frame) : 0),
                 (void *)(frame ? SYSCALL_USER_SP(frame) : 0));
     if (current) current->termination_signal = signal_number;
     terminate_sibling_threads(128 + signal_number);
@@ -2556,8 +2532,7 @@ void process_exit_from_syscall(struct syscall_frame *frame, int status) {
     process_release_files(exiting);
     cgroup_exit(exiting);
     if (!exiting->is_thread)
-        vt_process_exited(exiting->pid,
-                          exiting->sid == exiting->pid ? exiting->sid : 0);
+        vt_process_exited(exiting->pid, exiting->sid == exiting->pid ? exiting->sid : 0);
 
     SCHED_LOCKED;
     wake_bump();
@@ -2576,8 +2551,7 @@ void process_exit_from_syscall(struct syscall_frame *frame, int status) {
     if (switch_to_next(frame, exiting) != 0) go_idle();
 }
 
-int64_t process_fork_from_syscall(struct syscall_frame *frame,
-                                  const struct fork_request *request) {
+int64_t process_fork_from_syscall(struct syscall_frame *frame, const struct fork_request *request) {
     if (!current || !frame) return -EINVAL;
     struct process *parent = current;
     struct process *child = (struct process *)kmalloc(sizeof(*child));
@@ -2624,8 +2598,7 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame,
     uint64_t parent_brk_start = parent->memory ? parent->memory->brk_start : parent->brk_start;
     uint64_t parent_brk_end = parent->memory ? parent->memory->brk_end : parent->brk_end;
     uint64_t parent_mmap_base = parent->memory ? parent->memory->mmap_base : parent->mmap_base;
-    child->memory = memory_create(child->cr3, parent_brk_start, parent_brk_end,
-                                  parent_mmap_base);
+    child->memory = memory_create(child->cr3, parent_brk_start, parent_brk_end, parent_mmap_base);
     if (!child->memory) {
         process_memory_leave();
         vmm_destroy_address_space(child->cr3);
@@ -2675,11 +2648,13 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame,
             uint32_t tid = (uint32_t)child->pid;
             (void)vmm_copy_to_space(child->cr3, request->child_settid_user, &tid, sizeof(tid));
         }
-        if (request->child_cleartid_user) child->clear_child_tid_user = request->child_cleartid_user;
+        if (request->child_cleartid_user)
+            child->clear_child_tid_user = request->child_cleartid_user;
         if (request->clear_signal_handlers) {
             for (unsigned signal = 0; signal < TUNIX_NSIG; signal++)
                 if (child->signal_actions[signal].handler != SIG_IGN)
-                    memset(&child->signal_actions[signal], 0, sizeof(child->signal_actions[signal]));
+                    memset(&child->signal_actions[signal], 0,
+                           sizeof(child->signal_actions[signal]));
         }
     }
 
@@ -2695,13 +2670,10 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame,
     return (int64_t)child->pid;
 }
 
-int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
-                                          uint64_t child_stack, uint64_t tls,
-                                          uint64_t parent_tid_user,
-                                          uint64_t child_tid_user,
-                                          uint64_t flags) {
-    if (!current || !frame || !child_stack || child_stack >= USER_ADDRESS_LIMIT)
-        return -EINVAL;
+int64_t process_clone_thread_from_syscall(struct syscall_frame *frame, uint64_t child_stack,
+                                          uint64_t tls, uint64_t parent_tid_user,
+                                          uint64_t child_tid_user, uint64_t flags) {
+    if (!current || !frame || !child_stack || child_stack >= USER_ADDRESS_LIMIT) return -EINVAL;
     if (!current->memory) return -EINVAL;
 
     struct process *parent = current;
@@ -2777,8 +2749,7 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
         return -EFAULT;
     }
     if ((flags & (0x01000000ULL | 0x00200000ULL)) && child_tid_user) {
-        if ((flags & 0x01000000ULL) &&
-            copy_to_user(child_tid_user, &tid, sizeof(tid)) != 0) {
+        if ((flags & 0x01000000ULL) && copy_to_user(child_tid_user, &tid, sizeof(tid)) != 0) {
             process_release_files(child);
             memory_unref(child->memory);
             kfree((void *)child->kernel_stack_base);
@@ -2795,8 +2766,7 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
         ready_link(child);
     }
     procfs_register_process(child);
-    KDEBUG("process: clone thread tgid=%u tid=%u\n",
-           (unsigned)child->tgid, (unsigned)child->pid);
+    KDEBUG("process: clone thread tgid=%u tid=%u\n", (unsigned)child->tgid, (unsigned)child->pid);
     return (int64_t)child->pid;
 }
 
@@ -2808,15 +2778,15 @@ static uint64_t futex_shared_key(uint64_t address) {
     return physical;
 }
 
-int64_t process_futex_wait(struct syscall_frame *frame, uint64_t address,
-                           uint32_t expected, int64_t timeout_ns,
-                           uint32_t bitset, int shared) {
-    if (!current || !frame || (address & 3U) || address >= USER_ADDRESS_LIMIT)
-        return -EINVAL;
+int64_t process_futex_wait(struct syscall_frame *frame, uint64_t address, uint32_t expected,
+                           int64_t timeout_ns, uint32_t bitset, int shared) {
+    if (!current || !frame || (address & 3U) || address >= USER_ADDRESS_LIMIT) return -EINVAL;
     uint32_t value = 0;
-    if (copy_from_user(&value, address, sizeof(value)) != 0)
-        return -EFAULT;
-    if (value != expected) { futex_note('A', address, 0, 0, value); return -EAGAIN; }
+    if (copy_from_user(&value, address, sizeof(value)) != 0) return -EFAULT;
+    if (value != expected) {
+        futex_note('A', address, 0, 0, value);
+        return -EAGAIN;
+    }
     if (timeout_ns == 0) return -ETIMEDOUT;
     uint64_t key = shared ? futex_shared_key(address) : 0;
     SCHED_LOCKED;
@@ -2833,8 +2803,8 @@ int64_t process_futex_wait(struct syscall_frame *frame, uint64_t address,
     waiting->futex_wait_expected = expected;
     waiting->futex_wait_bitset = bitset;
     futex_note('W', address, 0, 0, expected);
-    waiting->futex_wait_deadline_ns = timeout_ns < 0 ? UINT64_MAX :
-        time_uptime_ns() + (uint64_t)timeout_ns;
+    waiting->futex_wait_deadline_ns =
+        timeout_ns < 0 ? UINT64_MAX : time_uptime_ns() + (uint64_t)timeout_ns;
     wait_link(waiting, address);
     key_link(waiting, waiting->futex_wait_key);
     if (timeout_ns >= 0) note_deadline(waiting->futex_wait_deadline_ns);
@@ -2874,8 +2844,8 @@ static int pi_sleep(struct syscall_frame *frame, uint64_t address, uint32_t expe
     waiting->futex_wait_key = key;
     waiting->futex_wait_expected = expected;
     waiting->futex_wait_bitset = FUTEX_BITSET_MATCH_ANY;
-    waiting->futex_wait_deadline_ns = timeout_ns < 0 ? UINT64_MAX :
-        time_uptime_ns() + (uint64_t)timeout_ns;
+    waiting->futex_wait_deadline_ns =
+        timeout_ns < 0 ? UINT64_MAX : time_uptime_ns() + (uint64_t)timeout_ns;
     wait_link(waiting, address);
     key_link(waiting, key);
     if (timeout_ns >= 0) note_deadline(waiting->futex_wait_deadline_ns);
@@ -2884,9 +2854,8 @@ static int pi_sleep(struct syscall_frame *frame, uint64_t address, uint32_t expe
     return 1;
 }
 
-int64_t process_futex_lock_pi(struct syscall_frame *frame, uint64_t address,
-                              int64_t deadline_ns, int trylock, int shared,
-                              uint64_t syscall_number) {
+int64_t process_futex_lock_pi(struct syscall_frame *frame, uint64_t address, int64_t deadline_ns,
+                              int trylock, int shared, uint64_t syscall_number) {
     volatile uint32_t *word = user_futex_word(address);
     if (!word) return -EFAULT;
     uint32_t tid = (uint32_t)current->pid;
@@ -2950,12 +2919,12 @@ int64_t process_futex_unlock_pi(uint64_t address, int shared) {
 
 static int wake_op_compare(int cmp, int32_t value, int32_t argument) {
     switch (cmp) {
-    case 0: return value == argument;
-    case 1: return value != argument;
-    case 2: return value < argument;
-    case 3: return value <= argument;
-    case 4: return value > argument;
-    case 5: return value >= argument;
+    case 0:  return value == argument;
+    case 1:  return value != argument;
+    case 2:  return value < argument;
+    case 3:  return value <= argument;
+    case 4:  return value > argument;
+    case 5:  return value >= argument;
     default: return 0;
     }
 }
@@ -2972,8 +2941,11 @@ int64_t process_futex_wake_op(uint64_t address, int wake, uint64_t second, int w
     if (!word) return -EFAULT;
     uint32_t old = __atomic_load_n(word, __ATOMIC_ACQUIRE);
     for (;;) {
-        uint32_t next = op == 0 ? oparg : op == 1 ? old + oparg : op == 2 ? (old | oparg)
-                      : op == 3 ? (old & ~oparg) : (old ^ oparg);
+        uint32_t next = op == 0 ? oparg
+            : op == 1           ? old + oparg
+            : op == 2           ? (old | oparg)
+            : op == 3           ? (old & ~oparg)
+                                : (old ^ oparg);
         if (__atomic_compare_exchange_n(word, &old, next, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
             break;
     }
@@ -2993,9 +2965,7 @@ int process_sleep_on(struct syscall_frame *frame, const void *channel) {
     waiting->wait_channel = channel;
     wait_link(waiting, (uint64_t)(uintptr_t)channel);
     waiting->voluntary_switches++;
-    if (switch_to_next(frame, waiting) != 0) {
-        go_idle();
-    }
+    if (switch_to_next(frame, waiting) != 0) { go_idle(); }
     return 0;
 }
 
@@ -3026,8 +2996,7 @@ int process_wake_one(const void *channel) {
 
 static int io_waiter_urgent(const struct process *item, uint64_t *now) {
     if (!item->io_watch_armed) return 1;
-    if (__atomic_load_n(&item->signal_pending, __ATOMIC_RELAXED) & ~item->signal_blocked)
-        return 1;
+    if (__atomic_load_n(&item->signal_pending, __ATOMIC_RELAXED) & ~item->signal_blocked) return 1;
     if (item->io_wait_active && item->io_wait_deadline_ns != UINT64_MAX) {
         if (!*now) *now = time_uptime_ns();
         if (*now >= item->io_wait_deadline_ns) return 1;
@@ -3092,7 +3061,8 @@ static int io_files_ready(struct process *item, struct file_table *table) {
 static uint64_t io_recheck_epoch = 1;
 static uint32_t io_recheck_running;
 
-static int io_recheck_listed(struct process **candidates, unsigned count, const struct process *item) {
+static int io_recheck_listed(struct process **candidates, unsigned count,
+                             const struct process *item) {
     for (unsigned index = 0; index < count; index++)
         if (candidates[index] == item) return 1;
     return 0;
@@ -3157,7 +3127,14 @@ void process_io_recheck(void) {
     __atomic_store_n(&io_recheck_running, 0, __ATOMIC_RELEASE);
 }
 
-struct wake_record { uint64_t address; int woken; int pid; int max; char kind; unsigned value; };
+struct wake_record {
+    uint64_t address;
+    int woken;
+    int pid;
+    int max;
+    char kind;
+    unsigned value;
+};
 #define WAKE_RING 160
 static struct wake_record wake_ring[WAKE_RING];
 static unsigned wake_ring_next;
@@ -3165,8 +3142,7 @@ static unsigned wake_ring_next;
 static void futex_note(char kind, uint64_t address, int woken, int maximum, unsigned value) {
     unsigned last = (wake_ring_next + WAKE_RING - 1U) % WAKE_RING;
     if (wake_ring[last].address == address && wake_ring[last].kind == kind &&
-        wake_ring[last].pid == (current ? (int)current->pid : 0) &&
-        wake_ring[last].value == value)
+        wake_ring[last].pid == (current ? (int)current->pid : 0) && wake_ring[last].value == value)
         return;
     wake_ring[wake_ring_next].kind = kind;
     wake_ring[wake_ring_next].address = address;
@@ -3183,8 +3159,8 @@ void process_dump_wakes(void) {
         unsigned slot = (wake_ring_next + i) % WAKE_RING;
         if (!wake_ring[slot].address) continue;
         kprintf("  %c %p pid=%d n=%d/%d val=%x\n", wake_ring[slot].kind,
-                (void *)wake_ring[slot].address, wake_ring[slot].pid,
-                wake_ring[slot].woken, wake_ring[slot].max, wake_ring[slot].value);
+                (void *)wake_ring[slot].address, wake_ring[slot].pid, wake_ring[slot].woken,
+                wake_ring[slot].max, wake_ring[slot].value);
     }
 }
 
@@ -3193,7 +3169,7 @@ static int futex_wake_list(struct process *item, int by_key, uint64_t address, u
     while (item && woken < maximum) {
         struct process *next = by_key ? item->key_next : item->wait_next;
         int named = (key && item->futex_wait_key == key) ||
-                    (item->memory == current->memory && item->futex_wait_address == address);
+            (item->memory == current->memory && item->futex_wait_address == address);
         if (item->state == PROCESS_BLOCKED && item->futex_wait_active && named &&
             (item->futex_wait_bitset & bitset)) {
             item->futex_wait_active = 0;
@@ -3215,11 +3191,11 @@ int process_futex_wake(uint64_t address, int maximum, uint32_t bitset, int share
     SCHED_LOCKED;
     wake_bump();
     if (!queue) return 0;
-    int woken = futex_wake_list(wait_buckets[wait_bucket_of(address)], 0, address, key,
-                                bitset, maximum, 0);
+    int woken =
+        futex_wake_list(wait_buckets[wait_bucket_of(address)], 0, address, key, bitset, maximum, 0);
     if (key && woken < maximum)
-        woken = futex_wake_list(key_buckets[wait_bucket_of(key)], 1, address, key,
-                                bitset, maximum, woken);
+        woken = futex_wake_list(key_buckets[wait_bucket_of(key)], 1, address, key, bitset, maximum,
+                                woken);
     futex_note('K', address, woken, maximum, 0);
     return woken;
 }
@@ -3241,8 +3217,7 @@ void process_note_deadline(uint64_t deadline_ns) {
     note_deadline(deadline_ns);
 }
 
-void process_set_sigaction(int signal_number,
-                           const struct tunix_sigaction *action) {
+void process_set_sigaction(int signal_number, const struct tunix_sigaction *action) {
     if (!current || signal_number < 1 || signal_number > TUNIX_NSIG) return;
     current->signal_actions[signal_number - 1] = *action;
     arch_sanitize_sigaction(&current->signal_actions[signal_number - 1]);
@@ -3307,8 +3282,8 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
         return -1;
     }
 
-    struct process_memory *new_memory = memory_create(new_cr3, image.brk_start,
-                                                       image.brk_end, image.mmap_base);
+    struct process_memory *new_memory =
+        memory_create(new_cr3, image.brk_start, image.brk_end, image.mmap_base);
     if (!new_memory) {
         vmm_destroy_address_space(new_cr3);
         return -EINVAL;
@@ -3341,12 +3316,13 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
     current->robust_list_head = 0;
     current->robust_list_length = 0;
     cred_apply_exec(&current->cred, credential_source, current->no_new_privs);
-    current->dumpable = (current->cred.euid == current->cred.uid &&
-                         current->cred.egid == current->cred.gid);
+    current->dumpable =
+        (current->cred.euid == current->cred.uid && current->cred.egid == current->cred.gid);
     strncpy(current->name, file->name, sizeof(current->name) - 1);
     set_exe_path(current, file, path);
     for (int sig = 0; sig < TUNIX_NSIG; sig++) {
-        if (current->signal_actions[sig].handler != SIG_IGN) memset(&current->signal_actions[sig], 0, sizeof(current->signal_actions[sig]));
+        if (current->signal_actions[sig].handler != SIG_IGN)
+            memset(&current->signal_actions[sig], 0, sizeof(current->signal_actions[sig]));
     }
     __atomic_store_n(&current->signal_pending, 0, __ATOMIC_RELEASE);
     current->in_signal = 0;
@@ -3364,9 +3340,8 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
     return 0;
 }
 
-int64_t process_waitpid_from_syscall(struct syscall_frame *frame, int64_t pid,
-                                     uint64_t status_user, int options,
-                                     uint64_t syscall_number) {
+int64_t process_waitpid_from_syscall(struct syscall_frame *frame, int64_t pid, uint64_t status_user,
+                                     int options, uint64_t syscall_number) {
     options &= ~(WNOTHREAD | WALLCHILDREN | WCLONE);
     if (!current || !frame || (options & ~(WNOHANG | WUNTRACED | WCONTINUED))) return -EINVAL;
     struct process *caller = current;
@@ -3377,8 +3352,7 @@ int64_t process_waitpid_from_syscall(struct syscall_frame *frame, int64_t pid,
         SCHED_LOCKED;
         parent = group_leader(caller);
         int has_child = 0;
-        for (struct process *item = parent->children; item && !found;
-             item = item->sibling_next) {
+        for (struct process *item = parent->children; item && !found; item = item->sibling_next) {
             if (!child_matches(item, parent, pid)) continue;
             has_child = 1;
             if (item->state == PROCESS_ZOMBIE) {
@@ -3423,8 +3397,7 @@ int64_t process_waitpid_from_syscall(struct syscall_frame *frame, int64_t pid,
             return PROCESS_RESTARTED;
         }
     }
-    if (status_user && copy_to_user(status_user, &status, sizeof(status)) != 0)
-        return -EFAULT;
+    if (status_user && copy_to_user(status_user, &status, sizeof(status)) != 0) return -EFAULT;
     return found;
 }
 
@@ -3439,13 +3412,12 @@ struct waitid_siginfo {
     uint8_t pad1[128 - 28];
 };
 
-#define CLD_EXITED 1
-#define CLD_KILLED 2
-#define CLD_STOPPED 5
+#define CLD_EXITED    1
+#define CLD_KILLED    2
+#define CLD_STOPPED   5
 #define CLD_CONTINUED 6
 
-int64_t process_waitid_from_syscall(int64_t pid_spec, uint64_t info_user,
-                                    int options) {
+int64_t process_waitid_from_syscall(int64_t pid_spec, uint64_t info_user, int options) {
     if (!current || !info_user) return -EINVAL;
     struct process *parent;
     struct waitid_siginfo info;
@@ -3455,8 +3427,7 @@ int64_t process_waitid_from_syscall(int64_t pid_spec, uint64_t info_user,
         SCHED_LOCKED;
         parent = group_leader(current);
         int has_child = 0;
-        for (struct process *item = parent->children; item && !found;
-             item = item->sibling_next) {
+        for (struct process *item = parent->children; item && !found; item = item->sibling_next) {
             if (!child_matches(item, parent, pid_spec)) continue;
             has_child = 1;
             if ((options & WEXITED) && item->state == PROCESS_ZOMBIE) {
@@ -3503,15 +3474,15 @@ int64_t process_waitid_from_syscall(int64_t pid_spec, uint64_t info_user,
 static void signal_one_process(struct process *target, int signal_number) {
     if (signal_number == 0) return;
     eventfs_emit_process_signal(target->cred.euid, target->pid, signal_number);
-    if (signal_number == SIGKILL && target->state == PROCESS_STOPPED)
-        wake_to_ready(target);
+    if (signal_number == SIGKILL && target->state == PROCESS_STOPPED) wake_to_ready(target);
     if (signal_number == SIGCONT && target->state == PROCESS_STOPPED) {
         wake_to_ready(target);
         target->continued_pending = 1;
         target->stop_reported = 0;
         __atomic_fetch_and(&target->signal_pending,
-                           ~(signal_bit(SIGSTOP) | signal_bit(SIGTSTP) |
-                             signal_bit(SIGTTIN) | signal_bit(SIGTTOU)), __ATOMIC_RELEASE);
+                           ~(signal_bit(SIGSTOP) | signal_bit(SIGTSTP) | signal_bit(SIGTTIN) |
+                             signal_bit(SIGTTOU)),
+                           __ATOMIC_RELEASE);
         notify_parent_of_job_change(target);
     }
     __atomic_fetch_or(&target->signal_pending, signal_bit(signal_number), __ATOMIC_RELEASE);
@@ -3529,8 +3500,7 @@ static void signal_one_process(struct process *target, int signal_number) {
         target->futex_wait_address = 0;
         target->futex_wait_key = 0;
         target->futex_wait_deadline_ns = 0;
-        if (!target->syscall_rewound)
-            SYSCALL_RET(&target->saved_frame) = (uint64_t)-(int64_t)EINTR;
+        if (!target->syscall_rewound) SYSCALL_RET(&target->saved_frame) = (uint64_t)-(int64_t)EINTR;
         target->wait4_active = 0;
         target->wait_channel = NULL;
         target->wait_pid = 0;
@@ -3544,7 +3514,7 @@ static int may_signal(const struct process *target) {
     const struct credentials *sender = &current->cred;
     if (sender->euid == 0) return 1;
     return sender->uid == target->cred.uid || sender->uid == target->cred.suid ||
-           sender->euid == target->cred.uid || sender->euid == target->cred.suid;
+        sender->euid == target->cred.uid || sender->euid == target->cred.suid;
 }
 
 static void record_sender_code(struct process *target, int signal_number, int code) {
@@ -3649,8 +3619,7 @@ int process_sigreturn(struct syscall_frame *frame) {
     *frame = current->signal_saved_frame;
     if (current->signal_context_address) {
         uint8_t context[SIGNAL_CONTEXT_SIZE];
-        if (copy_from_user(context, current->signal_context_address,
-                           SIGNAL_CONTEXT_SIZE) == 0)
+        if (copy_from_user(context, current->signal_context_address, SIGNAL_CONTEXT_SIZE) == 0)
             read_user_context(frame, context);
     }
     current->signal_context_address = 0;
@@ -3675,8 +3644,8 @@ static int signal_would_act(const struct process *process, int signal_number) {
     if (signal_number == SIGKILL || signal_number == SIGSTOP) return 1;
     const struct tunix_sigaction *action = &process->signal_actions[signal_number - 1];
     if (action->handler == SIG_IGN) return 0;
-    if (action->handler == SIG_DFL &&
-        (signal_number == SIGCHLD || signal_number == SIGCONT)) return 0;
+    if (action->handler == SIG_DFL && (signal_number == SIGCHLD || signal_number == SIGCONT))
+        return 0;
     return 1;
 }
 
@@ -3740,8 +3709,8 @@ int process_take_signal(uint64_t set, int32_t *info) {
 
 int process_signal_interrupts_wait(void) {
     if (!current || current->in_signal) return 0;
-    if (!current->group_exit_pending &&
-        !signal_would_act(current, next_pending_signal(current))) return 0;
+    if (!current->group_exit_pending && !signal_would_act(current, next_pending_signal(current)))
+        return 0;
     current->syscall_rewound = 0;
     return 1;
 }
@@ -3763,8 +3732,8 @@ static void read_user_context(struct syscall_frame *frame, const uint8_t *contex
 }
 
 static int on_signal_stack(const struct process *process, uint64_t user_rsp) {
-    if (!process || process->signal_stack_flags == SS_DISABLE ||
-        !process->signal_stack_size) return 0;
+    if (!process || process->signal_stack_flags == SS_DISABLE || !process->signal_stack_size)
+        return 0;
     uint64_t base = process->signal_stack_pointer;
     uint64_t limit = base + process->signal_stack_size;
     return user_rsp >= base && user_rsp < limit;
@@ -3790,8 +3759,7 @@ void process_prepare_user_return(struct syscall_frame *frame) {
     if (!signal_would_act(current, signal_number)) return;
     if (signal_number == SIGSTOP ||
         (action->handler == SIG_DFL &&
-         (signal_number == SIGTSTP || signal_number == SIGTTIN ||
-          signal_number == SIGTTOU))) {
+         (signal_number == SIGTSTP || signal_number == SIGTTIN || signal_number == SIGTTOU))) {
         SCHED_LOCKED;
         wake_bump();
         current->stop_signal = signal_number;
@@ -3828,8 +3796,7 @@ void process_prepare_user_return(struct syscall_frame *frame) {
     current->signal_waited = 0;
     uint64_t resume_mask = take_resume_mask();
     uint64_t stack_top = SYSCALL_USER_SP(frame);
-    if ((action->flags & SA_ONSTACK) &&
-        current->signal_stack_flags != SS_DISABLE &&
+    if ((action->flags & SA_ONSTACK) && current->signal_stack_flags != SS_DISABLE &&
         !on_signal_stack(current, SYSCALL_USER_SP(frame))) {
         stack_top = current->signal_stack_pointer + current->signal_stack_size;
     }
@@ -3880,8 +3847,8 @@ void process_prepare_user_return(struct syscall_frame *frame) {
     current->signal_saved_mask = resume_mask;
     current->signal_blocked |= action->mask | bit;
     current->in_signal = 1;
-    arch_signal_enter_handler(frame, new_rsp, action->handler, action->restorer,
-                              signal_number, siginfo_address, context_address);
+    arch_signal_enter_handler(frame, new_rsp, action->handler, action->restorer, signal_number,
+                              siginfo_address, context_address);
 }
 
 void process_set_fs_base(uint64_t value) {
@@ -3890,9 +3857,7 @@ void process_set_fs_base(uint64_t value) {
     arch_write_fs_base(value);
 }
 
-uint64_t process_get_fs_base(void) {
-    return current ? current->fs_base : 0;
-}
+uint64_t process_get_fs_base(void) { return current ? current->fs_base : 0; }
 
 void process_set_gs_base(uint64_t value) {
     if (!current) return;
@@ -3900,9 +3865,7 @@ void process_set_gs_base(uint64_t value) {
     arch_write_gs_base(value);
 }
 
-uint64_t process_get_gs_base(void) {
-    return current ? current->gs_base : 0;
-}
+uint64_t process_get_gs_base(void) { return current ? current->gs_base : 0; }
 
 void process_account_runtime(void) {
     if (!current || current->state != PROCESS_RUNNING || !current->last_scheduled_ns) return;
@@ -3942,9 +3905,7 @@ uint64_t process_count(void) {
     return count;
 }
 
-uint64_t process_created_count(void) {
-    return next_pid - 1;
-}
+uint64_t process_created_count(void) { return next_pid - 1; }
 
 uint64_t process_runnable_count(void) {
     SCHED_LOCKED;

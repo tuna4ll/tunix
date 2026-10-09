@@ -6,7 +6,7 @@
 
 #define VT_COUNT 63U
 
-#define VT_NODE_ACTIVE 0U
+#define VT_NODE_ACTIVE  0U
 #define VT_NODE_CURRENT 0xFFU
 
 struct tty;
@@ -52,10 +52,8 @@ int vt_graphics_takeover_allowed(const void *holder, const void *claimer);
 void vt_process_exited(uint64_t pid, uint64_t sid);
 
 int64_t vt_node_read(struct vfs_node *node, uint64_t offset, size_t size, void *buffer);
-int64_t vt_node_write(struct vfs_node *node, uint64_t offset, size_t size,
-                      const void *buffer);
+int64_t vt_node_write(struct vfs_node *node, uint64_t offset, size_t size, const void *buffer);
 int vt_node_ready(struct vfs_node *node);
-int64_t vt_node_ioctl(struct vfs_node *node, unsigned long request,
-                      uint64_t user_argument);
+int64_t vt_node_ioctl(struct vfs_node *node, unsigned long request, uint64_t user_argument);
 
 #endif

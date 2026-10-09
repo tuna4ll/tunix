@@ -8,15 +8,15 @@
 #include <tunix/syscall.h>
 
 #define AARCH64_KERNEL_VIRTUAL_BASE 0xFFFFFFFF80000000ULL
-#define AARCH64_EARLY_DEVICE_BASE 0xFFFFFFFFFE000000ULL
-#define AARCH64_EARLY_DEVICE_PAGES 32U
-#define AARCH64_ECAM_VIRTUAL_BASE 0xFFFFFFFFE0000000ULL
-#define AARCH64_ECAM_VIRTUAL_BYTES 0x10000000ULL
-#define AARCH64_RAM_RANGES 32U
-#define AARCH64_MAX_CPUS 256U
-#define AARCH64_SGI_FLUSH 1U
-#define AARCH64_SGI_RESCHEDULE 2U
-#define AARCH64_MAX_SD 4U
+#define AARCH64_EARLY_DEVICE_BASE   0xFFFFFFFFFE000000ULL
+#define AARCH64_EARLY_DEVICE_PAGES  32U
+#define AARCH64_ECAM_VIRTUAL_BASE   0xFFFFFFFFE0000000ULL
+#define AARCH64_ECAM_VIRTUAL_BYTES  0x10000000ULL
+#define AARCH64_RAM_RANGES          32U
+#define AARCH64_MAX_CPUS            256U
+#define AARCH64_SGI_FLUSH           1U
+#define AARCH64_SGI_RESCHEDULE      2U
+#define AARCH64_MAX_SD              4U
 
 struct fdt_node {
     uint32_t offset;
@@ -94,15 +94,14 @@ struct aarch64_platform {
 };
 
 #define PSCI_NONE 0
-#define PSCI_HVC 1
-#define PSCI_SMC 2
+#define PSCI_HVC  1
+#define PSCI_SMC  2
 
 extern struct aarch64_platform aarch64_platform;
 extern uint64_t boot_root[];
 
 void aarch64_build_early_tables(uint64_t load_physical, uint64_t dtb_physical);
-int aarch64_early_map(uint64_t virtual_address, uint64_t physical, uint64_t attributes,
-                      int level);
+int aarch64_early_map(uint64_t virtual_address, uint64_t physical, uint64_t attributes, int level);
 uint64_t aarch64_early_map_device(uint64_t physical, uint64_t bytes);
 int aarch64_direct_map_wanted(uint64_t physical);
 

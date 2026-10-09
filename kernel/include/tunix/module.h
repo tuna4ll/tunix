@@ -14,13 +14,13 @@
 
 #define MODULE_NAME_MAX 56
 
-#define MODULE_PARAM_INT 1
-#define MODULE_PARAM_UINT 2
-#define MODULE_PARAM_BOOL 3
+#define MODULE_PARAM_INT    1
+#define MODULE_PARAM_UINT   2
+#define MODULE_PARAM_BOOL   3
 #define MODULE_PARAM_STRING 4
 
-#define MODULE_STATE_LOADING 0
-#define MODULE_STATE_LIVE 1
+#define MODULE_STATE_LOADING   0
+#define MODULE_STATE_LIVE      1
 #define MODULE_STATE_UNLOADING 2
 
 struct module_export {
@@ -75,27 +75,24 @@ void module_lock_acquire(void);
 void module_lock_release(void);
 void module_put(struct module *module);
 const char *module_state_name(const struct module *module);
-int module_param_format(const struct module *module, unsigned index,
-                        char *out, size_t capacity);
-int module_param_set(struct module *module, unsigned index, const char *text,
-                     size_t length);
+int module_param_format(const struct module *module, unsigned index, char *out, size_t capacity);
+int module_param_set(struct module *module, unsigned index, const char *text, size_t length);
 int module_address_owner(uint64_t address, const char **name, uint64_t *offset);
-int module_image_info(const void *contents, size_t bytes, const char *key,
-                      unsigned occurrence, char *out, size_t capacity);
-int module_export_value(const struct module *module, const char *name,
-                        uint64_t *value);
+int module_image_info(const void *contents, size_t bytes, const char *key, unsigned occurrence,
+                      char *out, size_t capacity);
+int module_export_value(const struct module *module, const char *name, uint64_t *value);
 
 #define MODULE_JOIN_(a, b) a##b
-#define MODULE_JOIN(a, b) MODULE_JOIN_(a, b)
+#define MODULE_JOIN(a, b)  MODULE_JOIN_(a, b)
 
 #define MODULE_INFO(tag, value) \
     static const char MODULE_JOIN(__modinfo_, __COUNTER__)[] \
         __attribute__((section(".modinfo"), used, aligned(1))) = #tag "=" value
 
-#define MODULE_LICENSE(text) MODULE_INFO(license, text)
-#define MODULE_AUTHOR(text) MODULE_INFO(author, text)
+#define MODULE_LICENSE(text)     MODULE_INFO(license, text)
+#define MODULE_AUTHOR(text)      MODULE_INFO(author, text)
 #define MODULE_DESCRIPTION(text) MODULE_INFO(description, text)
-#define MODULE_ALIAS(text) MODULE_INFO(alias, text)
+#define MODULE_ALIAS(text)       MODULE_INFO(alias, text)
 
 #define MODULE_PCI_ALIAS(vendor, device) \
     MODULE_ALIAS("pci:v0000" vendor "d0000" device "sv*sd*bc*sc*i*")
@@ -104,19 +101,19 @@ int module_export_value(const struct module *module, const char *name,
     MODULE_INFO(name, TUNIX_MODULE_NAME); \
     MODULE_INFO(vermagic, MODULE_VERMAGIC); \
     const struct module_descriptor __this_module \
-        __attribute__((section(".tunix_module"), used, aligned(8))) = \
-        { TUNIX_MODULE_NAME, init_function, exit_function }
+        __attribute__((section(".tunix_module"), used, aligned(8))) = { \
+            TUNIX_MODULE_NAME, init_function, exit_function}
 
 #define MODULE_EXPORT(symbol) \
     static const char MODULE_JOIN(__ksymstr_, symbol)[] \
         __attribute__((section("__ksymtab_strings"), used, aligned(1))) = #symbol; \
     const struct module_export MODULE_JOIN(__ksymtab_, symbol) \
-        __attribute__((section(".tunix_ksym"), used, aligned(8))) = \
-        { MODULE_JOIN(__ksymstr_, symbol), (uint64_t)(uintptr_t)&symbol }
+        __attribute__((section(".tunix_ksym"), used, aligned(8))) = { \
+            MODULE_JOIN(__ksymstr_, symbol), (uint64_t)(uintptr_t)&symbol}
 
 #define MODULE_PARAMETER(variable, kind) \
     static const struct module_param MODULE_JOIN(__param_, variable) \
-        __attribute__((section(".tunix_param"), used, aligned(8))) = \
-        { #variable, &variable, kind, 0644 }
+        __attribute__((section(".tunix_param"), used, aligned(8))) = {#variable, &variable, kind, \
+                                                                      0644}
 
 #endif

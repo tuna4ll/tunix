@@ -85,13 +85,9 @@ void pipe_buffer_destroy(struct pipe_buffer *pipe) {
     kfree(pipe);
 }
 
-static void pipe_enter(struct pipe_buffer *pipe) {
-    lock_acquire(&pipe->lock);
-}
+static void pipe_enter(struct pipe_buffer *pipe) { lock_acquire(&pipe->lock); }
 
-static void pipe_leave(struct pipe_buffer *pipe) {
-    lock_release(&pipe->lock);
-}
+static void pipe_leave(struct pipe_buffer *pipe) { lock_release(&pipe->lock); }
 
 void pipe_attach_end(struct pipe_buffer *pipe, int write_end) {
     pipe_enter(pipe);

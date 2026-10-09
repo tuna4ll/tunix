@@ -14,39 +14,39 @@
 #include <tunix/signal.h>
 #include <tunix/syscall.h>
 
-#define PROCESS_NR_OPEN 1048576
-#define PROCESS_RLIMITS 16
-#define PROCESS_RLIM_INFINITY UINT64_MAX
-#define PROCESS_RLIMIT_STACK 3
-#define PROCESS_RLIMIT_NOFILE 7
+#define PROCESS_NR_OPEN        1048576
+#define PROCESS_RLIMITS        16
+#define PROCESS_RLIM_INFINITY  UINT64_MAX
+#define PROCESS_RLIMIT_STACK   3
+#define PROCESS_RLIMIT_NOFILE  7
 #define PROCESS_FD_CAPACITY(p) ((p)->files ? (p)->files->capacity : 0)
-#define PROCESS_FD_CLOEXEC 1U
-#define PROCESS_READY 0
-#define PROCESS_RUNNING 1
-#define PROCESS_BLOCKED 2
-#define PROCESS_ZOMBIE 3
-#define PROCESS_DEAD 4
-#define PROCESS_STOPPED 5
+#define PROCESS_FD_CLOEXEC     1U
+#define PROCESS_READY          0
+#define PROCESS_RUNNING        1
+#define PROCESS_BLOCKED        2
+#define PROCESS_ZOMBIE         3
+#define PROCESS_DEAD           4
+#define PROCESS_STOPPED        5
 
-#define WNOHANG 1
-#define WUNTRACED 2
-#define WCONTINUED 8
-#define WSTOPPED 2
-#define WEXITED 4
-#define WNOWAIT 0x01000000
-#define WNOTHREAD 0x20000000
+#define WNOHANG      1
+#define WUNTRACED    2
+#define WCONTINUED   8
+#define WSTOPPED     2
+#define WEXITED      4
+#define WNOWAIT      0x01000000
+#define WNOTHREAD    0x20000000
 #define WALLCHILDREN 0x40000000
-#define WCLONE 0x80000000
+#define WCLONE       0x80000000
 
 struct vfs_node;
 struct pty_pair;
 struct interrupt_frame;
 
-#define VM_ANONYMOUS 0x1U
+#define VM_ANONYMOUS  0x1U
 #define VM_FILE_PAGES 0x2U
-#define VM_MEMFD 0x4U
-#define VM_PRIVATE 0x8U
-#define VM_DEVICE 0x10U
+#define VM_MEMFD      0x4U
+#define VM_PRIVATE    0x8U
+#define VM_DEVICE     0x10U
 
 struct vm_area {
     uint64_t start;
@@ -273,12 +273,12 @@ int process_ready_pending(void);
 uint64_t process_stack_floor(const struct process *process);
 uint64_t process_arg_limit(const struct process *process);
 
-#define PROCESS_SCHED_OTHER 0
-#define PROCESS_SCHED_FIFO 1
-#define PROCESS_SCHED_RR 2
-#define PROCESS_SCHED_BATCH 3
-#define PROCESS_SCHED_IDLE 5
-#define PROCESS_RT_PRIORITY_MAX 99
+#define PROCESS_SCHED_OTHER                  0
+#define PROCESS_SCHED_FIFO                   1
+#define PROCESS_SCHED_RR                     2
+#define PROCESS_SCHED_BATCH                  3
+#define PROCESS_SCHED_IDLE                   5
+#define PROCESS_RT_PRIORITY_MAX              99
 #define PROCESS_RT_PRIORITY_UNPRIVILEGED_MAX 20
 
 int process_set_scheduler(uint64_t tid, int policy, int rt_priority);
@@ -295,8 +295,8 @@ void process_run_idle(void) __attribute__((noreturn));
 void process_yield_from_syscall(struct syscall_frame *frame);
 void process_timer_interrupt(struct interrupt_frame *frame);
 void process_deadline_interrupt(struct interrupt_frame *frame);
-int process_map_area(uint64_t start, uint64_t end, uint64_t page_flags,
-                     uint32_t kind, struct file *file, uint64_t offset);
+int process_map_area(uint64_t start, uint64_t end, uint64_t page_flags, uint32_t kind,
+                     struct file *file, uint64_t offset);
 void process_unmap_area(uint64_t start, uint64_t end);
 void process_protect_area(uint64_t start, uint64_t end, uint64_t page_flags);
 int process_area_range_free(uint64_t start, uint64_t end);
@@ -330,30 +330,26 @@ void process_finish_switch(void);
 void process_exit_from_syscall(struct syscall_frame *frame, int status);
 void process_exit_group_from_syscall(struct syscall_frame *frame, int status);
 int process_install_file(struct process *process, struct file *file, int minimum_fd);
-int process_install_file_flags(struct process *process, struct file *file, int minimum_fd, uint8_t flags);
-int process_install_file_at(struct process *process, struct file *file, int fd,
-                            uint8_t flags, struct file **replaced);
+int process_install_file_flags(struct process *process, struct file *file, int minimum_fd,
+                               uint8_t flags);
+int process_install_file_at(struct process *process, struct file *file, int fd, uint8_t flags,
+                            struct file **replaced);
 uint8_t process_get_fd_flags(const struct process *process, int fd);
 int process_set_fd_flags(struct process *process, int fd, uint8_t flags);
 int process_close_fd(struct process *process, int fd);
 int process_reserve_fd(struct process *process, int fd);
 int process_set_rlimit(struct process *process, unsigned resource,
                        const struct process_rlimit *value);
-int64_t process_fork_from_syscall(struct syscall_frame *frame,
-                                  const struct fork_request *request);
-int64_t process_clone_thread_from_syscall(struct syscall_frame *frame,
-                                          uint64_t child_stack, uint64_t tls,
-                                          uint64_t parent_tid_user,
-                                          uint64_t child_tid_user,
-                                          uint64_t flags);
+int64_t process_fork_from_syscall(struct syscall_frame *frame, const struct fork_request *request);
+int64_t process_clone_thread_from_syscall(struct syscall_frame *frame, uint64_t child_stack,
+                                          uint64_t tls, uint64_t parent_tid_user,
+                                          uint64_t child_tid_user, uint64_t flags);
 int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
                                   const char *const argv[], const char *const envp[],
                                   const struct vfs_node *credential_source);
-int64_t process_waitpid_from_syscall(struct syscall_frame *frame, int64_t pid,
-                                     uint64_t status_user, int options,
-                                     uint64_t syscall_number);
-int64_t process_waitid_from_syscall(int64_t pid_spec, uint64_t info_user,
-                                    int options);
+int64_t process_waitpid_from_syscall(struct syscall_frame *frame, int64_t pid, uint64_t status_user,
+                                     int options, uint64_t syscall_number);
+int64_t process_waitid_from_syscall(int64_t pid_spec, uint64_t info_user, int options);
 int process_send_signal(int64_t pid, int signal_number);
 int process_send_signal_checked(int64_t pid, int signal_number);
 void process_set_sigaction(int signal_number, const struct tunix_sigaction *action);
@@ -369,9 +365,8 @@ void process_restore_signal_mask(void);
 int process_sigreturn(struct syscall_frame *frame);
 #define FUTEX_BITSET_MATCH_ANY 0xFFFFFFFFU
 
-int64_t process_futex_wait(struct syscall_frame *frame, uint64_t address,
-                           uint32_t expected, int64_t timeout_ns,
-                           uint32_t bitset, int shared);
+int64_t process_futex_wait(struct syscall_frame *frame, uint64_t address, uint32_t expected,
+                           int64_t timeout_ns, uint32_t bitset, int shared);
 int process_futex_wake(uint64_t address, int maximum, uint32_t bitset, int shared);
 
 int process_sleep_on(struct syscall_frame *frame, const void *channel);
@@ -382,9 +377,8 @@ int process_may_sleep(void);
 void process_preempt_point(void);
 int process_take_signal(uint64_t set, int32_t *info);
 int64_t process_send_thread_signal(int64_t tgid, int64_t tid, int signal_number);
-int64_t process_futex_lock_pi(struct syscall_frame *frame, uint64_t address,
-                              int64_t deadline_ns, int trylock, int shared,
-                              uint64_t syscall_number);
+int64_t process_futex_lock_pi(struct syscall_frame *frame, uint64_t address, int64_t deadline_ns,
+                              int trylock, int shared, uint64_t syscall_number);
 int64_t process_futex_unlock_pi(uint64_t address, int shared);
 int64_t process_futex_wake_op(uint64_t address, int wake, uint64_t second, int wake_second,
                               uint32_t encoded, int shared);

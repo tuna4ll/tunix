@@ -14,19 +14,19 @@
 
 extern void kprintf(const char *fmt, ...);
 
-#define ENOENT 2
+#define ENOENT  2
 #define ENOEXEC 8
-#define EAGAIN 11
-#define ENOMEM 12
-#define EBUSY 16
-#define EEXIST 17
-#define EINVAL 22
-#define ENOSPC 28
+#define EAGAIN  11
+#define ENOMEM  12
+#define EBUSY   16
+#define EEXIST  17
+#define EINVAL  22
+#define ENOSPC  28
 
-#define ELFCLASS64 2
+#define ELFCLASS64  2
 #define ELFDATA2LSB 1
-#define EV_CURRENT 1
-#define ET_REL 1
+#define EV_CURRENT  1
+#define ET_REL      1
 
 #if defined(__x86_64__)
 #define ELF_MACHINE 62
@@ -35,17 +35,17 @@ extern void kprintf(const char *fmt, ...);
 #endif
 
 #define SHT_PROGBITS 1
-#define SHT_SYMTAB 2
-#define SHT_STRTAB 3
-#define SHT_RELA 4
-#define SHT_NOBITS 8
+#define SHT_SYMTAB   2
+#define SHT_STRTAB   3
+#define SHT_RELA     4
+#define SHT_NOBITS   8
 
-#define SHF_WRITE 0x1U
-#define SHF_ALLOC 0x2U
+#define SHF_WRITE     0x1U
+#define SHF_ALLOC     0x2U
 #define SHF_EXECINSTR 0x4U
 
-#define SHN_UNDEF 0U
-#define SHN_ABS 0xFFF1U
+#define SHN_UNDEF  0U
+#define SHN_ABS    0xFFF1U
 #define SHN_COMMON 0xFFF2U
 
 #define STT_FUNC 2
@@ -122,13 +122,9 @@ static void module_guard_release(int *unused) {
 #define MODULES_LOCKED \
     __attribute__((cleanup(module_guard_release))) int module_guard = (mutex_lock(&module_lock), 0)
 
-void module_lock_acquire(void) {
-    mutex_lock(&module_lock);
-}
+void module_lock_acquire(void) { mutex_lock(&module_lock); }
 
-void module_lock_release(void) {
-    mutex_unlock(&module_lock);
-}
+void module_lock_release(void) { mutex_unlock(&module_lock); }
 
 extern const struct module_export kernel_symbols[];
 extern const unsigned kernel_symbol_count;
@@ -149,8 +145,8 @@ int module_get(struct module *module) {
     uint32_t refs = __atomic_load_n(&module->refs, __ATOMIC_ACQUIRE);
     do {
         if (refs & MODULE_DYING) return -EBUSY;
-    } while (!__atomic_compare_exchange_n(&module->refs, &refs, refs + 1U, 0,
-                                          __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
+    } while (!__atomic_compare_exchange_n(&module->refs, &refs, refs + 1U, 0, __ATOMIC_ACQ_REL,
+                                          __ATOMIC_ACQUIRE));
     return 0;
 }
 
@@ -176,9 +172,7 @@ int module_address_owner(uint64_t address, const char **name, uint64_t *offset) 
     return -1;
 }
 
-static uint64_t page_align(uint64_t value) {
-    return (value + 0xFFFULL) & ~0xFFFULL;
-}
+static uint64_t page_align(uint64_t value) { return (value + 0xFFFULL) & ~0xFFFULL; }
 
 static int range_valid(const struct image *image, uint64_t offset, uint64_t size) {
     return size <= image->length && offset <= image->length - size;
@@ -190,8 +184,7 @@ static uint64_t reserve_window(uint64_t bytes) {
     while (moved) {
         moved = 0;
         for (struct module *module = modules; module; module = module->next) {
-            if (candidate + bytes > module->base &&
-                candidate < module->base + module->bytes) {
+            if (candidate + bytes > module->base && candidate < module->base + module->bytes) {
                 candidate = module->base + module->bytes;
                 moved = 1;
             }
@@ -226,8 +219,8 @@ static void protect_range(uint64_t base, uint64_t bytes, uint64_t flags) {
     vmm_flush_batch_end();
 }
 
-static const char *modinfo_entry(const struct image *image, const char *key,
-                                 unsigned occurrence, char *out, size_t capacity) {
+static const char *modinfo_entry(const struct image *image, const char *key, unsigned occurrence,
+                                 char *out, size_t capacity) {
     size_t key_length = strlen(key);
     unsigned seen = 0;
     for (unsigned index = 0; index < image->section_count; index++) {
@@ -257,8 +250,8 @@ static const char *modinfo_entry(const struct image *image, const char *key,
     return NULL;
 }
 
-static const char *modinfo_value(const struct image *image, const char *key,
-                                 char *out, size_t capacity) {
+static const char *modinfo_value(const struct image *image, const char *key, char *out,
+                                 size_t capacity) {
     return modinfo_entry(image, key, 0, out, capacity);
 }
 
@@ -296,8 +289,7 @@ static int note_use(struct module *module, struct module *provider) {
     return 0;
 }
 
-static int lookup_module_symbol(struct module *module, const char *name,
-                                uint64_t *value) {
+static int lookup_module_symbol(struct module *module, const char *name, uint64_t *value) {
     for (struct module *provider = modules; provider; provider = provider->next) {
         if (provider == module) continue;
         for (unsigned index = 0; index < provider->export_count; index++) {
@@ -310,8 +302,8 @@ static int lookup_module_symbol(struct module *module, const char *name,
     return -1;
 }
 
-static int symbol_address(struct module *module, const struct image *image,
-                          uint32_t symbol_index, uint64_t *value) {
+static int symbol_address(struct module *module, const struct image *image, uint32_t symbol_index,
+                          uint64_t *value) {
     if (symbol_index >= image->symbol_count) return -1;
     const struct elf64_symbol *symbol = &image->symbols[symbol_index];
     const char *name = image->strings + symbol->name;
@@ -346,16 +338,11 @@ static void write64(uint64_t place, uint64_t value) {
 static int relocate(uint64_t place, uint64_t symbol, int64_t addend, uint32_t type) {
     uint64_t value = symbol + (uint64_t)addend;
     switch (type) {
-    case 0:
-        return 0;
-    case 1:
-        write64(place, value);
-        return 0;
-    case 24:
-        write64(place, value - place);
-        return 0;
+    case 0:  return 0;
+    case 1:  write64(place, value); return 0;
+    case 24: write64(place, value - place); return 0;
     case 2:
-    case 4: {
+    case 4:  {
         int64_t relative = (int64_t)value - (int64_t)place;
         if (relative < -0x80000000LL || relative > 0x7FFFFFFFLL) return -2;
         write32(place, (uint32_t)(int32_t)relative);
@@ -371,8 +358,7 @@ static int relocate(uint64_t place, uint64_t symbol, int64_t addend, uint32_t ty
         write32(place, (uint32_t)(int32_t)signed_value);
         return 0;
     }
-    default:
-        return -1;
+    default: return -1;
     }
 }
 
@@ -407,37 +393,24 @@ static int relocate(uint64_t place, uint64_t symbol, int64_t addend, uint32_t ty
     uint64_t value = symbol + (uint64_t)addend;
     int64_t relative = (int64_t)value - (int64_t)place;
     switch (type) {
-    case 0:
-        return 0;
-    case 257:
-        write64(place, value);
-        return 0;
+    case 0:   return 0;
+    case 257: write64(place, value); return 0;
     case 258:
         if (value > 0xFFFFFFFFULL) return -2;
         write32(place, (uint32_t)value);
         return 0;
-    case 260:
-        write64(place, (uint64_t)relative);
-        return 0;
+    case 260: write64(place, (uint64_t)relative); return 0;
     case 261:
         if (!fits_signed(relative, 32)) return -2;
         write32(place, (uint32_t)(int32_t)relative);
         return 0;
     case 263:
-    case 264:
-        insert_bits(place, 5, 16, value & 0xFFFFULL);
-        return 0;
+    case 264: insert_bits(place, 5, 16, value & 0xFFFFULL); return 0;
     case 265:
-    case 266:
-        insert_bits(place, 5, 16, (value >> 16) & 0xFFFFULL);
-        return 0;
+    case 266: insert_bits(place, 5, 16, (value >> 16) & 0xFFFFULL); return 0;
     case 267:
-    case 268:
-        insert_bits(place, 5, 16, (value >> 32) & 0xFFFFULL);
-        return 0;
-    case 269:
-        insert_bits(place, 5, 16, (value >> 48) & 0xFFFFULL);
-        return 0;
+    case 268: insert_bits(place, 5, 16, (value >> 32) & 0xFFFFULL); return 0;
+    case 269: insert_bits(place, 5, 16, (value >> 48) & 0xFFFFULL); return 0;
     case 273:
     case 280: {
         if (!fits_signed(relative, 21) || (relative & 3)) return -2;
@@ -465,24 +438,18 @@ static int relocate(uint64_t place, uint64_t symbol, int64_t addend, uint32_t ty
         return 0;
     }
     case 277:
-    case 278:
-        return relocate_lo12(place, value, 0);
-    case 284:
-        return relocate_lo12(place, value, 1);
-    case 285:
-        return relocate_lo12(place, value, 2);
-    case 286:
-        return relocate_lo12(place, value, 3);
-    case 299:
-        return relocate_lo12(place, value, 4);
+    case 278: return relocate_lo12(place, value, 0);
+    case 284: return relocate_lo12(place, value, 1);
+    case 285: return relocate_lo12(place, value, 2);
+    case 286: return relocate_lo12(place, value, 3);
+    case 299: return relocate_lo12(place, value, 4);
     case 282:
     case 283: {
         if (!fits_signed(relative, 28) || (relative & 3)) return -2;
         insert_bits(place, 0, 26, (uint64_t)(relative >> 2));
         return 0;
     }
-    default:
-        return -1;
+    default: return -1;
     }
 }
 
@@ -509,8 +476,8 @@ static int apply_relocations(struct module *module, const struct image *image) {
             uint64_t symbol = 0;
             if (symbol_address(module, image, symbol_index, &symbol) != 0) return -ENOEXEC;
 
-            int result = relocate(target + entries[entry].offset, symbol,
-                                  entries[entry].addend, type);
+            int result =
+                relocate(target + entries[entry].offset, symbol, entries[entry].addend, type);
             if (result != 0) {
                 kprintf("MODULE: %s relocation %u %s\n", module->name, (unsigned)type,
                         result == -1 ? "is not supported" : "is out of range");
@@ -525,8 +492,14 @@ static int parse_number(const char *text, uint64_t *out, int *negative) {
     uint64_t value = 0;
     unsigned base = 10;
     *negative = 0;
-    if (*text == '-') { *negative = 1; text++; }
-    if (text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) { base = 16; text += 2; }
+    if (*text == '-') {
+        *negative = 1;
+        text++;
+    }
+    if (text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) {
+        base = 16;
+        text += 2;
+    }
     if (!*text) return -1;
     while (*text) {
         unsigned digit;
@@ -555,19 +528,16 @@ static int assign_value(const struct module_param *param, char *value) {
         *(unsigned *)param->value = (unsigned)number;
         return 0;
     case MODULE_PARAM_BOOL:
-        if (strcmp(value, "1") == 0 || strcmp(value, "y") == 0 ||
-            strcmp(value, "Y") == 0 || strcmp(value, "on") == 0)
+        if (strcmp(value, "1") == 0 || strcmp(value, "y") == 0 || strcmp(value, "Y") == 0 ||
+            strcmp(value, "on") == 0)
             *(int *)param->value = 1;
-        else if (strcmp(value, "0") == 0 || strcmp(value, "n") == 0 ||
-                 strcmp(value, "N") == 0 || strcmp(value, "off") == 0)
+        else if (strcmp(value, "0") == 0 || strcmp(value, "n") == 0 || strcmp(value, "N") == 0 ||
+                 strcmp(value, "off") == 0)
             *(int *)param->value = 0;
         else return -EINVAL;
         return 0;
-    case MODULE_PARAM_STRING:
-        *(char **)param->value = value;
-        return 0;
-    default:
-        return -EINVAL;
+    case MODULE_PARAM_STRING: *(char **)param->value = value; return 0;
+    default:                  return -EINVAL;
     }
 }
 
@@ -580,8 +550,7 @@ static int assign_parameter(struct module *module, const char *name, char *value
     return -EINVAL;
 }
 
-int module_param_set(struct module *module, unsigned index, const char *text,
-                     size_t length) {
+int module_param_set(struct module *module, unsigned index, const char *text, size_t length) {
     MODULES_LOCKED;
     if (!module || index >= module->param_count) return -EINVAL;
     const struct module_param *param = &module->params[index];
@@ -590,8 +559,7 @@ int module_param_set(struct module *module, unsigned index, const char *text,
 
     char value[32];
     size_t used = 0;
-    while (used < length && used + 1 < sizeof(value) && text[used] != '\n' &&
-           text[used] != '\0') {
+    while (used < length && used + 1 < sizeof(value) && text[used] != '\n' && text[used] != '\0') {
         value[used] = text[used];
         used++;
     }
@@ -619,8 +587,7 @@ static int apply_parameters(struct module *module) {
     return 0;
 }
 
-int module_param_format(const struct module *module, unsigned index, char *out,
-                        size_t capacity) {
+int module_param_format(const struct module *module, unsigned index, char *out, size_t capacity) {
     MODULES_LOCKED;
     if (!module || index >= module->param_count || capacity < 24) return -1;
     const struct module_param *param = &module->params[index];
@@ -628,14 +595,16 @@ int module_param_format(const struct module *module, unsigned index, char *out,
         const char *value = *(const char *const *)param->value;
         size_t used = 0;
         if (value)
-            while (value[used] && used + 2 < capacity) { out[used] = value[used]; used++; }
+            while (value[used] && used + 2 < capacity) {
+                out[used] = value[used];
+                used++;
+            }
         out[used++] = '\n';
         out[used] = '\0';
         return (int)used;
     }
-    int64_t value = param->type == MODULE_PARAM_UINT
-        ? (int64_t)*(const unsigned *)param->value
-        : (int64_t)*(const int *)param->value;
+    int64_t value = param->type == MODULE_PARAM_UINT ? (int64_t)*(const unsigned *)param->value
+                                                     : (int64_t)*(const int *)param->value;
     char digits[24];
     size_t count = 0;
     int negative = value < 0;
@@ -653,12 +622,10 @@ int module_param_format(const struct module *module, unsigned index, char *out,
 }
 
 static void release_module(struct module *module) {
-    for (unsigned index = 0; index < module->use_count; index++)
-        module_put(module->uses[index]);
+    for (unsigned index = 0; index < module->use_count; index++) module_put(module->uses[index]);
     kfree(module->uses);
     if (module->base) unmap_window(module->base, module->bytes);
-    if (module->physical)
-        pmm_free_pages((void *)module->physical, module->bytes / 4096ULL);
+    if (module->physical) pmm_free_pages((void *)module->physical, module->bytes / 4096ULL);
     kfree(module->arguments);
     kfree(module);
 }
@@ -677,17 +644,20 @@ static int place_sections(struct module *module, struct image *image) {
             else kind = 2;
             if (kind != pass) continue;
 
-            uint64_t *cursor = pass == 0 ? &text : pass == 1 ? &rodata
-                             : pass == 2 ? &data : &bss;
+            uint64_t *cursor = pass == 0 ? &text : pass == 1 ? &rodata : pass == 2 ? &data : &bss;
             uint64_t alignment = section->addralign ? section->addralign : 1ULL;
             if (alignment > 4096ULL) alignment = 4096ULL;
             *cursor = (*cursor + alignment - 1ULL) & ~(alignment - 1ULL);
             image->addresses[index] = *cursor;
             *cursor += section->size;
         }
-        if (pass == 0) { rodata = page_align(text); }
-        else if (pass == 1) { data = page_align(rodata); }
-        else if (pass == 2) { bss = data; }
+        if (pass == 0) {
+            rodata = page_align(text);
+        } else if (pass == 1) {
+            data = page_align(rodata);
+        } else if (pass == 2) {
+            bss = data;
+        }
     }
 
     uint64_t total = page_align(bss);
@@ -717,16 +687,14 @@ static int place_sections(struct module *module, struct image *image) {
         image->addresses[index] += base;
         if (section->type == SHT_NOBITS) continue;
         if (!range_valid(image, section->offset, section->size)) return -ENOEXEC;
-        memcpy((void *)image->addresses[index], image->bytes + section->offset,
-               section->size);
+        memcpy((void *)image->addresses[index], image->bytes + section->offset, section->size);
     }
     return 0;
 }
 
 static int protect_module(struct module *module) {
     protect_range(module->text, module->text_bytes, PAGE_PRESENT);
-    protect_range(module->rodata, module->data - module->rodata,
-                  PAGE_PRESENT | PAGE_NX);
+    protect_range(module->rodata, module->data - module->rodata, PAGE_PRESENT | PAGE_NX);
     protect_range(module->data, module->base + module->bytes - module->data,
                   PAGE_PRESENT | PAGE_WRITE | PAGE_NX);
     for (uint64_t offset = 0; offset < module->text_bytes; offset += 4096ULL)
@@ -736,8 +704,8 @@ static int protect_module(struct module *module) {
         uint64_t flags = 0;
         if (vmm_translate(vmm_kernel_cr3(), module->text + offset, NULL, &flags) != 0 ||
             (flags & PAGE_NX)) {
-            kprintf("MODULE: %s text at %p did not become executable\n",
-                    module->name, (void *)(module->text + offset));
+            kprintf("MODULE: %s text at %p did not become executable\n", module->name,
+                    (void *)(module->text + offset));
             return -ENOEXEC;
         }
     }
@@ -756,8 +724,7 @@ static int read_tables(struct module *module, const struct image *image) {
     if (index >= 0 && image->addresses[index]) {
         if (image->sections[index].size % sizeof(struct module_param)) return -ENOEXEC;
         module->params = (const struct module_param *)image->addresses[index];
-        module->param_count =
-            (unsigned)(image->sections[index].size / sizeof(struct module_param));
+        module->param_count = (unsigned)(image->sections[index].size / sizeof(struct module_param));
     }
     index = section_index_named(image, ".tunix_module");
     if (index < 0 || !image->addresses[index] ||
@@ -784,8 +751,7 @@ static int prepare_image(struct image *image, const void *contents, size_t bytes
 
     image->header = header;
     image->section_count = header->shnum;
-    if (!range_valid(image, header->shoff,
-                     (uint64_t)header->shnum * sizeof(struct elf64_section)))
+    if (!range_valid(image, header->shoff, (uint64_t)header->shnum * sizeof(struct elf64_section)))
         return -ENOEXEC;
     image->sections = (const struct elf64_section *)(image->bytes + header->shoff);
 
@@ -809,8 +775,8 @@ static int prepare_image(struct image *image, const void *contents, size_t bytes
     return image->symbols ? 0 : -ENOEXEC;
 }
 
-int module_image_info(const void *contents, size_t bytes, const char *key,
-                      unsigned occurrence, char *out, size_t capacity) {
+int module_image_info(const void *contents, size_t bytes, const char *key, unsigned occurrence,
+                      char *out, size_t capacity) {
     struct image image;
     if (!out || !capacity) return -EINVAL;
     out[0] = '\0';
@@ -819,8 +785,7 @@ int module_image_info(const void *contents, size_t bytes, const char *key,
     return modinfo_entry(&image, key, occurrence, out, capacity) ? 0 : -ENOENT;
 }
 
-int module_export_value(const struct module *module, const char *name,
-                        uint64_t *value) {
+int module_export_value(const struct module *module, const char *name, uint64_t *value) {
     if (!module || !name || !value) return -EINVAL;
     for (unsigned index = 0; index < module->export_count; index++) {
         if (strcmp(module->exports[index].name, name) != 0) continue;
@@ -837,12 +802,12 @@ int module_load(const void *contents, size_t bytes, const char *arguments) {
     if (status != 0) return status;
 
     char name[MODULE_NAME_MAX];
-    char vermagic[64] = { 0 };
+    char vermagic[64] = {0};
     if (!modinfo_value(&image, "name", name, sizeof(name))) return -ENOEXEC;
     if (!modinfo_value(&image, "vermagic", vermagic, sizeof(vermagic)) ||
         strcmp(vermagic, MODULE_VERMAGIC) != 0) {
-        kprintf("MODULE: %s was built for \"%s\", this kernel is \"%s\"\n", name,
-                vermagic, MODULE_VERMAGIC);
+        kprintf("MODULE: %s was built for \"%s\", this kernel is \"%s\"\n", name, vermagic,
+                MODULE_VERMAGIC);
         return -ENOEXEC;
     }
     if (module_find(name)) return -EEXIST;
@@ -908,8 +873,8 @@ int module_load(const void *contents, size_t bytes, const char *arguments) {
     module->state = MODULE_STATE_LIVE;
     kfree(image.addresses);
     sysfs_module_added(module);
-    kprintf("MODULE: %s loaded at %p, %u bytes\n", module->name,
-            (void *)module->base, (unsigned)module->bytes);
+    kprintf("MODULE: %s loaded at %p, %u bytes\n", module->name, (void *)module->base,
+            (unsigned)module->bytes);
     return 0;
 
 failed:
@@ -925,8 +890,9 @@ int module_unload(const char *name, unsigned flags) {
     if (!module) return -ENOENT;
     if (module->state != MODULE_STATE_LIVE) return -EBUSY;
     uint32_t idle = 0;
-    if (!__atomic_compare_exchange_n(&module->refs, &idle, MODULE_DYING, 0,
-                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return -EBUSY;
+    if (!__atomic_compare_exchange_n(&module->refs, &idle, MODULE_DYING, 0, __ATOMIC_ACQ_REL,
+                                     __ATOMIC_ACQUIRE))
+        return -EBUSY;
 
     module->state = MODULE_STATE_UNLOADING;
     if (module->exit) {

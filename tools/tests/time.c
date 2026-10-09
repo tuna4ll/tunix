@@ -61,7 +61,7 @@ static void epoll(void) {
     expect(ready[0].events & EPOLLIN && ready[0].data == 77, "with the data it was added with");
 
     int timer = (int)timerfd_create(CLOCK_MONOTONIC);
-    struct itimerspec period = { { 0, 30000000 }, { 0, 30000000 } };
+    struct itimerspec period = {{0, 30000000}, {0, 30000000}};
     expect_eq(timerfd_settime(timer, &period), 0, "a 30 ms periodic timerfd is armed");
     epoll_add(epoll, timer, EPOLLIN, 88);
     read(event, &one, 8);

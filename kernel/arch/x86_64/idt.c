@@ -80,9 +80,7 @@ void idt_init(void) {
     idtp.limit = (sizeof(struct idt_entry) * 256) - 1;
     idtp.base = (uint64_t)&idt;
 
-    for (int i = 0; i < 256; i++) {
-        idt_set_gate(i, 0, 0, 0, 0);
-    }
+    for (int i = 0; i < 256; i++) { idt_set_gate(i, 0, 0, 0, 0); }
 
     idt_set_gate(0, (uint64_t)isr0, 0x08, 0x8E, 0);
     idt_set_gate(1, (uint64_t)isr1, 0x08, 0x8E, 0);
@@ -126,15 +124,13 @@ void idt_init(void) {
     idt_set_gate(SMP_RESCHEDULE_VECTOR, (uint64_t)irq_reschedule, 0x08, 0x8E, 0);
 
     for (unsigned index = 0; index < IRQ_VECTOR_COUNT; index++)
-        idt_set_gate((uint8_t)(IRQ_VECTOR_FIRST + index),
-                     (uint64_t)irq_device_stubs[index], 0x08, 0x8E, 0);
+        idt_set_gate((uint8_t)(IRQ_VECTOR_FIRST + index), (uint64_t)irq_device_stubs[index], 0x08,
+                     0x8E, 0);
 
     idt_load((uint64_t)&idtp);
 }
 
-void idt_activate(void) {
-    idt_load((uint64_t)&idtp);
-}
+void idt_activate(void) { idt_load((uint64_t)&idtp); }
 
 void idt_set_handler(uint8_t vector, void (*handler)(void)) {
     idt_set_gate(vector, (uint64_t)handler, 0x08, 0x8E, 0);

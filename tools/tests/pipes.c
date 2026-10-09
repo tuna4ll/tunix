@@ -7,7 +7,7 @@ static void basic(void) {
     int fds[2];
     expect_eq(pipe2(fds, 0), 0, "pipe2 makes a pipe");
     expect_eq(write(fds[1], "hello", 5), 5, "five bytes go in");
-    char text[8] = { 0 };
+    char text[8] = {0};
     expect_eq(read(fds[0], text, sizeof(text)), 5, "five bytes come out");
     expect(memeq(text, "hello", 5), "in order");
     close(fds[1]);
@@ -37,7 +37,8 @@ static void between_processes(void) {
         received += (u64)count;
     int intact = 1;
     for (u64 i = 0; i < sizeof(buffer); i++) intact &= buffer[i] == (u8)(i * 7);
-    expect_eq((s64)received, sizeof(buffer), "256 KiB cross from a child, more than the pipe holds");
+    expect_eq((s64)received, sizeof(buffer),
+              "256 KiB cross from a child, more than the pipe holds");
     expect(intact, "without a byte out of place");
     int status;
     waitpid(child, &status, 0);

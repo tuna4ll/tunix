@@ -4,9 +4,9 @@
 #include <tunix/percpu.h>
 #include <tunix/syscall.h>
 
-#define IA32_GS_BASE 0xC0000101U
+#define IA32_GS_BASE        0xC0000101U
 #define IA32_KERNEL_GS_BASE 0xC0000102U
-#define IDLE_STACK_BYTES 16384
+#define IDLE_STACK_BYTES    16384
 
 static struct cpu cpus[SMP_MAX_CPUS];
 static uint8_t boot_idle_stack[IDLE_STACK_BYTES] __attribute__((aligned(16)));
@@ -19,8 +19,7 @@ static uint8_t *idle_stack(unsigned index) {
 
 #if defined(__x86_64__)
 static inline void write_msr(uint32_t msr, uint64_t value) {
-    __asm__ volatile("wrmsr" : : "c"(msr), "a"((uint32_t)value),
-                     "d"((uint32_t)(value >> 32)));
+    __asm__ volatile("wrmsr" : : "c"(msr), "a"((uint32_t)value), "d"((uint32_t)(value >> 32)));
 }
 #endif
 
@@ -58,6 +57,4 @@ unsigned percpu_online_count(void) {
     return count;
 }
 
-void syscall_set_kernel_stack(uint64_t stack_top) {
-    cpu_current()->kernel_rsp = stack_top;
-}
+void syscall_set_kernel_stack(uint64_t stack_top) { cpu_current()->kernel_rsp = stack_top; }

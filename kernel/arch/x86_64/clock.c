@@ -4,10 +4,10 @@
 #include <tunix/io.h>
 #include <tunix/time.h>
 
-#define PIT_FREQUENCY 1193182ULL
-#define PIT_SAMPLE_TICKS 23864U
-#define CMOS_ADDRESS 0x70U
-#define CMOS_DATA 0x71U
+#define PIT_FREQUENCY           1193182ULL
+#define PIT_SAMPLE_TICKS        23864U
+#define CMOS_ADDRESS            0x70U
+#define CMOS_DATA               0x71U
 #define CMOS_UPDATE_IN_PROGRESS 0x80U
 
 struct rtc_snapshot {
@@ -78,9 +78,7 @@ static uint8_t cmos_read(uint8_t reg) {
     return inb(CMOS_DATA);
 }
 
-static int rtc_updating(void) {
-    return (cmos_read(0x0AU) & CMOS_UPDATE_IN_PROGRESS) != 0;
-}
+static int rtc_updating(void) { return (cmos_read(0x0AU) & CMOS_UPDATE_IN_PROGRESS) != 0; }
 
 static void rtc_read_once(struct rtc_snapshot *value) {
     value->second = cmos_read(0x00U);
@@ -94,15 +92,12 @@ static void rtc_read_once(struct rtc_snapshot *value) {
 }
 
 static int rtc_equal(const struct rtc_snapshot *a, const struct rtc_snapshot *b) {
-    return a->second == b->second && a->minute == b->minute &&
-           a->hour == b->hour && a->day == b->day && a->month == b->month &&
-           a->year == b->year && a->century == b->century &&
-           a->status_b == b->status_b;
+    return a->second == b->second && a->minute == b->minute && a->hour == b->hour &&
+        a->day == b->day && a->month == b->month && a->year == b->year &&
+        a->century == b->century && a->status_b == b->status_b;
 }
 
-static uint8_t from_bcd(uint8_t value) {
-    return (uint8_t)((value & 0x0FU) + ((value >> 4) * 10U));
-}
+static uint8_t from_bcd(uint8_t value) { return (uint8_t)((value & 0x0FU) + ((value >> 4) * 10U)); }
 
 static int rtc_decode(struct rtc_snapshot raw, struct tunix_rtc_time *out) {
     int pm = (raw.hour & 0x80U) != 0;
@@ -125,7 +120,8 @@ static int rtc_decode(struct rtc_snapshot raw, struct tunix_rtc_time *out) {
     int year = century * 100 + raw.year;
     if (year < 1970 || raw.month < 1U || raw.month > 12U || raw.day < 1U ||
         raw.day > (uint8_t)time_days_in_month(year, raw.month) || raw.hour > 23U ||
-        raw.minute > 59U || raw.second > 59U) return -1;
+        raw.minute > 59U || raw.second > 59U)
+        return -1;
 
     out->year = year;
     out->month = raw.month;

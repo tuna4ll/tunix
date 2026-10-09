@@ -21,26 +21,26 @@ struct signalfd_context;
 struct eventfs_subscriber;
 struct io_uring_context;
 
-#define FILE_KIND_VFS        1
-#define FILE_KIND_PIPE_READ  2
-#define FILE_KIND_PIPE_WRITE 3
-#define FILE_KIND_SOCKET     4
-#define FILE_KIND_PTY_MASTER 5
-#define FILE_KIND_PTY_SLAVE  6
-#define FILE_KIND_INET_SOCKET 7
-#define FILE_KIND_INPUT       8
-#define FILE_KIND_FRAMEBUFFER 9
-#define FILE_KIND_EVENTFD     10
-#define FILE_KIND_TIMERFD     11
-#define FILE_KIND_EPOLL       12
-#define FILE_KIND_INOTIFY     13
+#define FILE_KIND_VFS            1
+#define FILE_KIND_PIPE_READ      2
+#define FILE_KIND_PIPE_WRITE     3
+#define FILE_KIND_SOCKET         4
+#define FILE_KIND_PTY_MASTER     5
+#define FILE_KIND_PTY_SLAVE      6
+#define FILE_KIND_INET_SOCKET    7
+#define FILE_KIND_INPUT          8
+#define FILE_KIND_FRAMEBUFFER    9
+#define FILE_KIND_EVENTFD        10
+#define FILE_KIND_TIMERFD        11
+#define FILE_KIND_EPOLL          12
+#define FILE_KIND_INOTIFY        13
 #define FILE_KIND_NETLINK_SOCKET 14
-#define FILE_KIND_MEMFD       15
-#define FILE_KIND_SIGNALFD    16
-#define FILE_KIND_DMABUF      17
-#define FILE_KIND_EVENTFS     18
-#define FILE_KIND_IO_URING    19
-#define FILE_KIND_PIDFD       20
+#define FILE_KIND_MEMFD          15
+#define FILE_KIND_SIGNALFD       16
+#define FILE_KIND_DMABUF         17
+#define FILE_KIND_EVENTFS        18
+#define FILE_KIND_IO_URING       19
+#define FILE_KIND_PIDFD          20
 
 struct file {
     struct mutex lock;
@@ -87,8 +87,8 @@ struct file *file_create_dmabuf(uint32_t handle, uint32_t flags);
 struct file *file_create_inotify(struct inotify_context *context, uint32_t flags);
 struct file *file_create_io_uring(struct io_uring_context *context);
 struct file *file_create_pidfd(uint64_t pid, uint64_t start_ns, uint32_t flags);
-struct file *file_create_pty_endpoint(struct pty_pair *pty, int master,
-                                      struct vfs_node *node, uint32_t flags);
+struct file *file_create_pty_endpoint(struct pty_pair *pty, int master, struct vfs_node *node,
+                                      uint32_t flags);
 void file_ref(struct file *file);
 void file_unref(struct file *file);
 
@@ -103,7 +103,6 @@ int64_t file_write(struct file *file, size_t size, const void *buffer);
 const void *file_read_wait_channel(struct file *file);
 const void *file_write_wait_channel(struct file *file);
 uint32_t file_poll_events(struct file *file, uint32_t requested);
-uint32_t file_poll_events_nested(struct file *file, uint32_t requested,
-                                 unsigned depth);
+uint32_t file_poll_events_nested(struct file *file, uint32_t requested, unsigned depth);
 
 #endif
