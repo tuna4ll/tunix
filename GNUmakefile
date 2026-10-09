@@ -136,10 +136,10 @@ $(shell mkdir -p $(BUILD); printf '%s\n' '$(VOID_MIRROR)' '$(VOID_ROOTFS_DATE)' 
 		&& rm -f $(SYSROOT_RECIPE).tmp \
 		|| mv $(SYSROOT_RECIPE).tmp $(SYSROOT_RECIPE))
 
-$(SYSROOT_STAMP): support/sysroot.sh $(BASE_FILES) $(SYSROOT_RECIPE) | $(BUILD)
+$(SYSROOT_STAMP): tools/sysroot.sh $(BASE_FILES) $(SYSROOT_RECIPE) | $(BUILD)
 	$(USERNS) env VOID_MIRROR='$(VOID_MIRROR)' VOID_ROOTFS_DATE='$(VOID_ROOTFS_DATE)' \
 	VOID_INSTALL='$(VOID_INSTALL)' VOID_REMOVE='$(VOID_REMOVE)' DESKTOP='$(DESKTOP_NAME)' \
-		support/sysroot.sh $(SYSROOT) $(CACHE)
+		tools/sysroot.sh $(SYSROOT) $(CACHE)
 	@touch $@
 
 $(BUILD):
@@ -154,10 +154,10 @@ IMAGE_TABLE ?= gpt
 
 IMAGE_SLACK_MIB ?= 4096
 
-$(IMAGE): $(KERNEL) $(MODULES) $(LIMINE_EXE) support/limine.conf support/image.sh $(SYSROOT_STAMP)
+$(IMAGE): $(KERNEL) $(MODULES) $(LIMINE_EXE) tools/limine.conf tools/image.sh $(SYSROOT_STAMP)
 	$(USERNS) env TABLE='$(IMAGE_TABLE)' ROOT_SLACK_MIB='$(IMAGE_SLACK_MIB)' \
 	MODULES='$(BUILD)/modules' RELEASE='$(KERNEL_RELEASE)' \
-		support/image.sh $@ $(KERNEL) $(LIMINE_DIR) support/limine.conf $(SYSROOT)
+		tools/image.sh $@ $(KERNEL) $(LIMINE_DIR) tools/limine.conf $(SYSROOT)
 
 QEMU_MEMORY ?= 4G
 QEMU_SMP    ?= 4
@@ -295,18 +295,18 @@ IMAGE_AARCH64 := $(BUILD)/tunix-aarch64.img
 .PHONY: sysroot-aarch64 image-aarch64 run-aarch64-image
 sysroot-aarch64: $(SYSROOT_AARCH64_STAMP)
 
-$(SYSROOT_AARCH64_STAMP): support/sysroot.sh $(BASE_FILES) $(SYSROOT_RECIPE) | $(BUILD)
+$(SYSROOT_AARCH64_STAMP): tools/sysroot.sh $(BASE_FILES) $(SYSROOT_RECIPE) | $(BUILD)
 	$(USERNS) env VOID_ARCH=aarch64 VOID_MIRROR='$(VOID_MIRROR)' \
 		VOID_ROOTFS_DATE='$(VOID_ROOTFS_DATE)' VOID_INSTALL='$(VOID_INSTALL)' \
-		VOID_REMOVE='$(VOID_REMOVE)' DESKTOP='$(DESKTOP_NAME)' support/sysroot.sh $(SYSROOT_AARCH64) $(CACHE)
+		VOID_REMOVE='$(VOID_REMOVE)' DESKTOP='$(DESKTOP_NAME)' tools/sysroot.sh $(SYSROOT_AARCH64) $(CACHE)
 	@touch $@
 
 image-aarch64: $(IMAGE_AARCH64)
 
-$(IMAGE_AARCH64): $(AARCH64_CORE_IMAGE) $(AARCH64_MODULES) $(LIMINE_EXE) support/limine-aarch64.conf support/image.sh $(SYSROOT_AARCH64_STAMP)
+$(IMAGE_AARCH64): $(AARCH64_CORE_IMAGE) $(AARCH64_MODULES) $(LIMINE_EXE) tools/limine-aarch64.conf tools/image.sh $(SYSROOT_AARCH64_STAMP)
 	$(USERNS) env ARCH=aarch64 TABLE='$(IMAGE_TABLE)' ROOT_SLACK_MIB='$(IMAGE_SLACK_MIB)' \
 	MODULES='$(AARCH64_CORE_BUILD)/modules' RELEASE='$(KERNEL_RELEASE)' \
-		support/image.sh $@ $(AARCH64_CORE_IMAGE) $(LIMINE_DIR) support/limine-aarch64.conf $(SYSROOT_AARCH64)
+		tools/image.sh $@ $(AARCH64_CORE_IMAGE) $(LIMINE_DIR) tools/limine-aarch64.conf $(SYSROOT_AARCH64)
 
 QEMU_AARCH64_DEVICES ?= -device ramfb -device qemu-xhci -device usb-kbd -device usb-mouse \
 	-netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
