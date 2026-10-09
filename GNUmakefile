@@ -50,7 +50,10 @@ $(BUILD)/%.S.o: %.S | $(LIMINE_HEADER)
 	$(CC) $(KERNEL_CFLAGS) -MMD -MP -c $< -o $@
 
 
-KERNEL_RELEASE := $(shell sed -n 's/^#define UTS_RELEASE "\(.*\)"/\1/p' kernel/include/tunix/uts.h)
+KERNEL_RELEASE := $(shell sed -n 's/^#define UTS_RELEASE[[:space:]]*"\(.*\)"/\1/p' kernel/include/tunix/uts.h)
+ifeq ($(KERNEL_RELEASE),)
+$(error cannot read UTS_RELEASE from kernel/include/tunix/uts.h)
+endif
 
 MODULE_SOURCES := $(wildcard kernel/modules/*.c) $(wildcard kernel/modules/x86_64/*.c)
 MODULES := $(patsubst kernel/modules/%.c,$(BUILD)/modules/%.ko,$(MODULE_SOURCES))
