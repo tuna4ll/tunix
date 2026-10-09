@@ -74,5 +74,8 @@ int nv50_disp_flip_idle(struct nv50_device *gpu, int may_service);
 void nv50_disp_vblank_start(struct nv50_device *gpu);
 void nv50_disp_vblank_stop(struct nv50_device *gpu);
 int nv50_disp_interrupt(struct nv50_device *gpu);
+int nv50_disp_backlight_present(const struct nv50_device *gpu);
+uint32_t nv50_disp_backlight_get(const struct nv50_device *gpu, uint32_t scale);
+int nv50_disp_backlight_set(const struct nv50_device *gpu, uint32_t level, uint32_t scale);
 
 #endif

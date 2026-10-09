@@ -29,6 +29,12 @@
 #define PMC_INTR_DISP    0x04000000U
 #define INTR_1_VBLANK_0  0x00000004U
 #define PCI_MSI_REARM    0x088068U
+#define SOR_PWM_DIVIDER  0x61C080U
+#define SOR_PWM_CONTROL  0x61C084U
+#define SOR_STRIDE       0x800U
+#define PWM_VALUE        0x00FFFFFFU
+#define PWM_NEW          0x80000000U
+#define PWM_GT215        0x40000000U
 
 #define RAMHT_BYTES     0x1000U
 #define RAMHT_BITS      9U
@@ -433,4 +439,28 @@ int nv50_disp_interrupt(struct nv50_device *gpu) {
     nv50_wr32(gpu, PDISP_INTR_1, INTR_1_VBLANK_0);
     *(volatile uint8_t *)(gpu->bar0 + PCI_MSI_REARM) = 0xFFU;
     return 1;
+}
+
+static uint32_t pwm_register(const struct nv50_device *gpu, uint32_t base) {
+    return base + (uint32_t)gpu->lvds.or_index * SOR_STRIDE;
+}
+
+int nv50_disp_backlight_present(const struct nv50_device *gpu) {
+    return nv50_rd32(gpu, pwm_register(gpu, SOR_PWM_DIVIDER)) != 0 &&
+        nv50_rd32(gpu, pwm_register(gpu, SOR_PWM_CONTROL)) != 0;
+}
+
+uint32_t nv50_disp_backlight_get(const struct nv50_device *gpu, uint32_t scale) {
+    uint64_t divider = nv50_rd32(gpu, pwm_register(gpu, SOR_PWM_DIVIDER));
+    uint64_t value = nv50_rd32(gpu, pwm_register(gpu, SOR_PWM_CONTROL)) & PWM_VALUE;
+    if (!divider || value >= divider) return scale;
+    return (uint32_t)((value * scale + divider / 2U) / divider);
+}
+
+int nv50_disp_backlight_set(const struct nv50_device *gpu, uint32_t level, uint32_t scale) {
+    uint64_t divider = nv50_rd32(gpu, pwm_register(gpu, SOR_PWM_DIVIDER));
+    if (!divider || !scale || level > scale) return -1;
+    uint32_t value = (uint32_t)((level * divider + scale / 2U) / scale);
+    nv50_wr32(gpu, pwm_register(gpu, SOR_PWM_CONTROL), value | PWM_NEW | PWM_GT215);
+    return 0;
 }

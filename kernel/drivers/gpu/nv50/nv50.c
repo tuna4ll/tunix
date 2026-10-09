@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <tunix/backlight.h>
 #include <tunix/boot.h>
 #include <tunix/boot_framebuffer.h>
 #include <tunix/display.h>
@@ -21,8 +22,9 @@
 
 extern void kprintf(const char *fmt, ...);
 
-#define BUFFER_ALIGN 0x100000U
-#define DRM_BUFFERS  2U
+#define BUFFER_ALIGN    0x100000U
+#define BACKLIGHT_SCALE 100U
+#define DRM_BUFFERS     2U
 
 static struct nv50_device gpu;
 static uint8_t vbios_image[VBIOS_IMAGE_BYTES];
@@ -207,6 +209,29 @@ static void start_vblank_interrupt(void) {
     kprintf("NV50: vblank interrupt on vector %u\n", vector);
 }
 
+static uint32_t backlight_get(void) { return nv50_disp_backlight_get(&gpu, BACKLIGHT_SCALE); }
+
+static int backlight_set(uint32_t level) {
+    return nv50_disp_backlight_set(&gpu, level, BACKLIGHT_SCALE);
+}
+
+static const struct backlight_device backlight = {
+    .name = "nv_backlight",
+    .type = "raw",
+    .max_brightness = BACKLIGHT_SCALE,
+    .get = backlight_get,
+    .set = backlight_set,
+};
+
+static void start_backlight(void) {
+    if (!nv50_disp_backlight_present(&gpu)) {
+        kprintf("NV50: the panel backlight is not on a gpu pwm\n");
+        return;
+    }
+    sysfs_publish_backlight(&backlight, pci_bound ? &pci_device : NULL);
+    kprintf("NV50: backlight at %u of %u\n", backlight_get(), BACKLIGHT_SCALE);
+}
+
 static void nv50_late(void) {
     (void)pci_register_driver(&pci_driver);
     uint32_t bytes = gpu.pitch * gpu.height;
@@ -221,6 +246,7 @@ static void nv50_late(void) {
         }
     }
     start_vblank_interrupt();
+    start_backlight();
     display_register_flipper(&flipper);
     kprintf("NV50: page flipping between two buffers\n");
 }
