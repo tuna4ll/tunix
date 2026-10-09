@@ -394,6 +394,7 @@ static void key_watch(void) {
     }
     print("\n>>> Press Fn + brightness DOWN three times, then Fn + brightness UP three times.\n"
           ">>> Watching the keyboard and the panel for 20 seconds.\n\n");
+    (void)write_text("/dev/kmsg", "HWREPORT: key watch begins\n");
     s64 smi_before = read_number(SMI_COUNT);
     s64 level = read_number(BACKLIGHT "actual_brightness");
     s64 start = now_ms();
@@ -411,6 +412,7 @@ static void key_watch(void) {
         sleep_ms(50);
     }
     close(keyboard);
+    (void)write_text("/dev/kmsg", "HWREPORT: key watch ends\n");
     note("\nkeys: ");
     note_number(bytes);
     note(" bytes, panel level changed ");
@@ -449,6 +451,7 @@ static void run(int argc, char **argv) {
           "  /tunix-kmsg.txt           the kernel log\n"
           "  /tunix-display.txt        the page flip check\n"
           "  /tunix-vbios-*.rom        video bios images that were found\n"
+          "  /tunix-acpi-*.aml         acpi tables\n"
           "  /tunix-gpu-regs.bin       nvidia register dump\n\n"
           "They are on the stick's tunix-root partition and already on disk.\n"
           "Switch the machine off with the power button.\n");
