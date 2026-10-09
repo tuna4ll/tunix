@@ -82,6 +82,7 @@
 #define OP_TIME            0x74U
 #define SCRIPT_MAX_STEPS   512U
 #define SCRIPT_MAX_DEPTH   8U
+#define PUSH_USABLE_BYTES  0xFC0U
 
 struct probe {
     uint64_t bar0;
@@ -514,14 +515,23 @@ static void run_named(struct probe *probe, const struct lvds_output *out, const 
 }
 
 static uint32_t push_at;
+static int push_overflow;
 
 static void push(struct probe *probe, uint32_t method, uint32_t data) {
+    if (push_at + 8U > PUSH_USABLE_BYTES) {
+        push_overflow = 1;
+        return;
+    }
     vram_wr32(probe, VRAM_PUSH + push_at, (1U << 18) | method);
     vram_wr32(probe, VRAM_PUSH + push_at + 4U, data);
     push_at += 8U;
 }
 
 static int kick(struct probe *probe) {
+    if (push_overflow) {
+        say(probe, "  the push buffer would overflow\n");
+        return -1;
+    }
     if (vram_flush(probe) != 0) {
         say(probe, "  flush before kick did not finish\n");
         return -1;
@@ -557,6 +567,83 @@ static int query_capabilities(struct probe *probe) {
     for (uint32_t offset = 0; offset < 0x54U; offset += 4U)
         say_reg(probe, "notifier       ", offset, vram_rd32(probe, VRAM_SYNC + offset));
     return kicked && done ? 0 : -1;
+}
+
+struct method_mirror {
+    uint16_t method;
+    uint32_t reg;
+};
+
+struct method_list {
+    uint16_t method_stride;
+    uint16_t reg_stride;
+    uint8_t count;
+    const struct method_mirror *entries;
+    uint8_t entry_count;
+};
+
+static const struct method_mirror dac_methods[] = {
+    {0x0400, 0x610B58}, {0x0404, 0x610BDC}, {0x0420, 0x610BC4}};
+static const struct method_mirror sor_methods[] = {{0x0600, 0x610794}};
+static const struct method_mirror pior_methods[] = {{0x0700, 0x610B80}};
+static const struct method_mirror head_methods[] = {
+    {0x0800, 0x610AD8}, {0x0804, 0x610AD0}, {0x0808, 0x610A48}, {0x080C, 0x610A78},
+    {0x0810, 0x610AC0}, {0x0814, 0x610AF8}, {0x0818, 0x610B00}, {0x081C, 0x610AE8},
+    {0x0820, 0x610AF0}, {0x0824, 0x610B08}, {0x0828, 0x610B10}, {0x082C, 0x610A68},
+    {0x0830, 0x610A60}, {0x0838, 0x610A40}, {0x0840, 0x610A24}, {0x0844, 0x610A2C},
+    {0x0848, 0x610AA8}, {0x084C, 0x610AB0}, {0x085C, 0x610C5C}, {0x0860, 0x610A84},
+    {0x0864, 0x610A90}, {0x0868, 0x610B18}, {0x086C, 0x610B20}, {0x0870, 0x610AC8},
+    {0x0874, 0x610A38}, {0x0878, 0x610C50}, {0x0880, 0x610A58}, {0x0884, 0x610A9C},
+    {0x089C, 0x610C68}, {0x08A0, 0x610A70}, {0x08A4, 0x610A50}, {0x08A8, 0x610AE0},
+    {0x08C0, 0x610B28}, {0x08C4, 0x610B30}, {0x08C8, 0x610B40}, {0x08D4, 0x610B38},
+    {0x08D8, 0x610B48}, {0x08DC, 0x610B50}, {0x0900, 0x610A18}, {0x0904, 0x610AB8},
+    {0x0910, 0x610C70}, {0x0914, 0x610C78}};
+
+static const struct method_list core_lists[] = {
+    {0x80, 8, 3, dac_methods, sizeof(dac_methods) / sizeof(dac_methods[0])},
+    {0x40, 8, 4, sor_methods, sizeof(sor_methods) / sizeof(sor_methods[0])},
+    {0x40, 8, 3, pior_methods, sizeof(pior_methods) / sizeof(pior_methods[0])},
+    {0x400, 0x540, 2, head_methods, sizeof(head_methods) / sizeof(head_methods[0])},
+};
+
+static unsigned restore_armed_state(struct probe *probe) {
+    unsigned restored = 0;
+    for (size_t list = 0; list < sizeof(core_lists) / sizeof(core_lists[0]); list++) {
+        const struct method_list *methods = &core_lists[list];
+        for (uint8_t instance = 0; instance < methods->count; instance++) {
+            for (uint8_t entry = 0; entry < methods->entry_count; entry++) {
+                uint32_t reg = methods->entries[entry].reg + instance * methods->reg_stride;
+                uint32_t method =
+                    methods->entries[entry].method + instance * methods->method_stride;
+                uint32_t pending = rd32(probe, reg);
+                uint32_t armed = rd32(probe, reg + 4U);
+                if (pending == armed) continue;
+                push(probe, method, armed);
+                restored++;
+                say(probe, "  restore ");
+                say_hex(probe, method, 4);
+                say(probe, " ");
+                say_hex(probe, pending, 8);
+                say(probe, " -> ");
+                say_hex(probe, armed, 8);
+                say(probe, "\n");
+            }
+        }
+    }
+    return restored;
+}
+
+static void show_error(struct probe *probe) {
+    show(probe, "disp intr 0    ", PDISP_INTR_0);
+    show(probe, "core error adr ", PDISP_ERROR_ADDR);
+    show(probe, "core error data", PDISP_ERROR_DATA);
+    for (uint32_t offset = 0x610600U; offset < 0x610640U; offset += 8U) {
+        say(probe, "  recent method ");
+        say_hex(probe, rd32(probe, offset + 4U), 4);
+        say(probe, " data ");
+        say_hex(probe, rd32(probe, offset), 8);
+        say(probe, "\n");
+    }
 }
 
 static void draw_surface(struct probe *probe, uint32_t width, uint32_t height, uint32_t pitch) {
@@ -648,8 +735,10 @@ static int modeset(struct probe *probe) {
     draw_surface(probe, width, height, pitch);
 
     vram_wr32(probe, VRAM_SYNC, 0);
-    push_at = 0;
     push(probe, CORE_SET_CONTEXT_DMA_NOTIFY, HANDLE_SYNC);
+    say(probe, "  restoring the vbios state the channel reset\n");
+    unsigned restored = restore_armed_state(probe);
+    say(probe, restored ? "  restored the methods above\n" : "  nothing to restore\n");
     push(probe, HEAD_SET_OFFSET, VRAM_SURFACE >> 8);
     push(probe, HEAD_SET_SIZE, (height << 16) | width);
     push(probe, HEAD_SET_STORAGE, STORAGE_PITCH_LAYOUT | ((pitch >> 8) << 8));
@@ -665,6 +754,7 @@ static int modeset(struct probe *probe) {
     if (kick(probe) != 0) return -1;
     say(probe, "  update sent\n");
     int result = service_supervisors(probe, &out);
+    if (result != 0 || (rd32(probe, PDISP_INTR_0) & 0x001F0000U)) show_error(probe);
     say_reg(probe, "notifier 0     ", VRAM_SYNC, vram_rd32(probe, VRAM_SYNC));
     show(probe, "head offset    ", 0x610A88U);
     show(probe, "head size      ", 0x610B1CU);
