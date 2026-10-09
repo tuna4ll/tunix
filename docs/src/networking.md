@@ -78,9 +78,7 @@ traffic:
 
 None of this can be found in an emulator: QEMU has no ASPM and no clocks to
 gate. The register numbers and the bit meanings were taken from the hardware
-facts in Linux's atl1c, and the model test below now starts the chip the way a
-laptop does -- gated and in ASPM -- so a driver that skips the wake-up fails the
-test instead of the machine.
+facts in Linux's atl1c.
 
 ### Somebody has to ask a card that cannot ask you
 
@@ -105,43 +103,7 @@ under an emulator. It found that the RTL8139's receive queue was allocated in
 `enable_interrupt()` and nowhere else, so with interrupts off the driver threw
 every frame away: dhcpcd got no lease and fell back to a link-local address,
 which is the same "no gateway" shape the laptop's report showed. The queue is
-allocated at probe now, and `EXTRA_CMDLINE=nonetirq support/tests/moduletest.sh`
-passes all 87 checks -- DHCP included -- on a card whose interrupts are gone.
-
-## A driver with no emulator
-
-QEMU has no AR8131, so `support/tests/atl1ctest.c` is the test: it compiles the
-driver's own source for the host and runs it against a model of the chip. The
-model is a register window and a thread that behaves like the hardware -- it
-serves MDIO transactions from a fake PHY, clears the reset bit, consumes
-transmit descriptors and posts receive ones -- and the DMA arena is mapped low
-so the 32-bit addresses the driver programs are addresses the model can follow.
-
-That is enough to check the things a wrong driver gets wrong: the station
-address it read -- from the registers, and from the EEPROM when the registers
-are empty -- the ring base addresses and sizes it programmed, that the MAC and
-both queues ended up enabled at the speed the PHY reported, that frames handed
-to `transmit` arrive byte for byte, that received frames come back the same way
-with their slots returned to the hardware, that a full transmit ring refuses
-work rather than overwriting it, and that a link change re-programs the MAC.
-`make atl1ctest` runs it in under a second, and CI runs it on every push.
-
-The model is deliberately as unforgiving as the chip. It moves no frame in
-either direction unless bus mastering is on and both the queue and the MAC half
-are enabled, so a forgotten enable is a failed test rather than a dead laptop;
-it wakes with its clocks gated and ASPM on, so the wake-up above is tested; and
-it consumes as many receive slots as the descriptor it posts claims. On top of
-that the test drives what a real cable does over an afternoon: 240 frames in and
-60 out, several times round both rings; descriptors that report a checksum
-error, an 802.3 length error, an impossible length, an index past the ring and a
-frame spanning two slots, each of which has to be dropped, counted, and leave
-the ring in step for the good frame behind it; a link that goes down and comes
-back while traffic is flowing; and a transmit attempted after the driver has
-been removed.
-
-What the model cannot check is whether those register offsets are the ones the
-real chip answers to. That part was read off a Core i5 laptop's own hardware
-report.
+allocated at probe now, and DHCP works on a card whose interrupts are gone.
 
 ## How an RTL8139 frame gets in
 
@@ -223,16 +185,7 @@ Nothing is put on a socket's error queue, so `IP_RECVERR` is accepted and
 answers honestly: there is never anything to read. `sendmmsg` is a loop around
 `sendmsg`, which is what it is on Linux too.
 
-## Checking it
-
-`tcp-test` on the image runs a server and a forked client against each other
-over `127.0.0.1`: accept, peer address, a request/response exchange, a 64 KiB
-transfer (four times the receive ring, so it only completes if the window
-opens and closes correctly), a refused connection to a dead port, and a UDP
-round trip. `python-test`'s `inet sockets` check does the same through
-CPython's own socket module.
-
-### One address, and who is allowed to take it away
+## One address, and who is allowed to take it away
 
 The stack holds a single IPv4 address, so `RTM_DELADDR` used to mean "there is
 no address any more" whatever address the message named. dhcpcd does not work
@@ -244,8 +197,6 @@ route to a gateway it had learned, a route table whose link entry was
 what the laptop's report printed after a successful DHCP exchange.
 
 A delete that names an address other than the one held is now ignored.
-`moduletest` deletes `192.0.2.9/24` from `eth0` after dhcpcd has finished and
-checks the lease is still there, which fails on a kernel without the fix.
 
 `/proc/net/dev` counts bytes as well as packets now, for the same reason: a
 report that says 40 packets and 0 bytes reads like a broken driver.
@@ -284,10 +235,9 @@ datagram then carries a control message -- level `SOL_IP`, type `IP_TTL`, an
 the `ttl=` it prints. Without it the line said `ttl=0`. `IP_RETOPTS` is accepted
 as well and answers with nothing, because no packet here carries IP options.
 
-`proctest` runs the whole sequence as uid 1000: read the capabilities and write
-them back, be refused a raw socket, open an ICMP socket, bind it, learn its id,
-and ping `127.0.0.1` through the loopback path -- checking that the reply comes
-back with the kernel's id, the sequence number that was sent, the payload
+An unprivileged process is refused a raw socket but can open an ICMP socket,
+bind it, learn its id and ping `127.0.0.1` through the loopback path; the reply
+comes back with the kernel's id, the sequence number that was sent, the payload
 unchanged, and a `SOL_IP`/`IP_TTL` control message carrying a plausible hop
 count.
 
@@ -306,11 +256,6 @@ count.
   sockets through a hash of their port, and only sockets with a pending
   retransmission or timeout are visited by the timer, so the cost of a packet
   does not grow with the number of sockets.
-
-`support/tests/net-kerneltest.sh` moves 32 MiB over loopback TCP, a 60000-byte
-UDP datagram, 3000 simultaneous connections, and -- through QEMU's user network
-to an echo server on the host -- an 8000-byte datagram that is fragmented both
-ways and 4 MiB of TCP.
 
 ## Limits
 

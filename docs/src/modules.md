@@ -169,44 +169,7 @@ exists for this) and free what the probe allocated -- an interrupt arriving
 into unmapped module text is a fault with no handler, and the fault report names
 the module it came from so it can at least be read.
 
-## Testing it
-
-`support/tests/moduletest.sh` boots a root made of Void's own `kmod`,
-`pciutils`, `udevd` and `dhcpcd` -- copied out of the sysroot with their
-libraries -- and drives the whole surface on either architecture:
-
-```
-sh support/tests/moduletest.sh build/kernel.elf
-ARCH=aarch64 sh support/tests/moduletest.sh build/kernel-aarch64-core.img
-```
-
-It checks `insmod` with parameters, the sysfs files, loading a second module
-that needs the first's symbols, `EBUSY` on the module in use and on the module
-whose PCM device is open, `modprobe` pulling a dependency in, `modprobe -r`,
-options from `/etc/modprobe.d`, the `modules-load.d` path Void's init uses,
-`modinfo`, `lspci` and `lspci -k`, the sound card appearing and disappearing
-with its module, udev autoloading it from the device's modalias, and -- with
-`NIC=rtl8139`, which is the default where that module exists -- a DHCP lease
-over a network card whose driver was loaded by udev.
-
-Failing is part of it, because most of the loader is what happens when
-something is wrong. A truncated `.ko`, a file that is not ELF at all, one
-whose `vermagic` has been rewritten, one built for the other architecture, one
-that needs a symbol nobody exports, one whose parameters do not parse, and one
-whose `init` returns an error are all refused -- each leaving nothing in
-`/proc/modules` or `/sys/module` and the next load working. An unprivileged
-process gets `EPERM` from `finit_module` whatever the file is.
-
-Eight copies of one module (renamed in the file, which is all a module name
-is) load at once at eight addresses, and the window the first one had is
-handed back: after they go, the next module starts where the first did.
-Twenty load-unload cycles move `MemFree` by less than a page, which is the
-cheapest leak detector there is.
-
-A module can also crash: the test loads one that writes to address zero on
-purpose, and the fault report has to name it --
-`Page Fault in kmod[280] at tunix_probe+0x7f` -- because a module that faults
-without saying which module it was is a stack trace into nowhere.
+## Two HD Audio controllers
 
 The emulated machine has two HD Audio controllers and only one of them has a
 codec, which is the shape of a real one with an onboard card and an HDMI audio
@@ -214,9 +177,6 @@ function on the GPU. The driver binds the controller it can use and leaves the
 other alone -- and each controller gets its own register window, because the
 fixed address the driver used to map into meant the second probe would have
 been talking to the first controller.
-
-`support/tests/soundtest.sh` loads `snd_hda.ko` itself with `finit_module`
-before it opens the PCM device, which is the same path with no userland at all.
 
 ## On a machine that is not the emulator
 

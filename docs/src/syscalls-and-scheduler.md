@@ -206,13 +206,12 @@ them out of each other's way:
   real-time priority, or more than one tick ahead in virtual runtime) and sends
   that processor alone a reschedule interrupt, which runs the same check at
   once. An interactive task that slept while CPU-bound work ran gets a
-  processor within microseconds; `support/tests/wakelat-kerneltest.sh`
-  measures it.
+  processor within microseconds.
 - `sched_setaffinity` stores a non-empty mask limited to online CPUs;
   `sched_getaffinity` reports the selected thread's effective mask. Masks are
   inherited by fork and clone, and a task excluded from its current CPU is
   migrated at the next scheduling point.
-- `activate_process` (`kernel/process.c:397`) is the only place that makes
+- `activate_process` (`kernel/process.c`) is the only place that makes
   a process "the" running one: it sets `current`, resets the quantum if it
   had run out, stamps `last_scheduled_ns`, sets state to `RUNNING`, points
   both kernel-stack registers (this processor's TSS `rsp0` and the
@@ -220,67 +219,17 @@ them out of each other's way:
   page tables, and reloads `IA32_FS_BASE` for TLS. `current` is per-processor:
   it lives in the block `GS` points at.
 
+  FPU and SIMD registers are saved and loaded only when the process actually
+  changes. Re-activating the process that is already running, as the
+  interrupt path does when a signal is pending, leaves them alone: they are
+  live, and the copy in memory is from the last time it was switched out.
+
   `vmm_activate(cr3)` runs only when the incoming process's address space is
   not the one already loaded. Writing CR3 discards every translation the
   processor had cached, and two threads of one process share a `cr3`, so
-  switching between them used to flush the TLB for nothing. Measured, the two
-  halves of the `SWITCH` benchmark — a ping-pong between two threads of one
-  process, and the same between two processes — cost 2606 ns each before and
-  1848 ns against 2575 ns after.
-
-### Scheduler benchmark
-
-`support/tests/schedbench.c` is the program, and `make schedbench` builds a machine
-whose entire userland is it and boots it. It is freestanding — it issues its own
-syscalls and links no libc — so it cannot go the way the last one did, and it
-asks for KVM because a reload of CR3, a TLB that has to be refilled and a cache
-line another processor owns are exactly the costs an emulator does not have.
-
-Seven measurements, on four processors under KVM, over three runs:
-
-```
-NICE      ratio 9.05-9.06                (the weights ask for 9.31)
-QUANTUM   two equals, median wait 12.03 ms; four equals, 12.03 ms
-WAKE      six spinners, median 3.99 ms p95 4.00 ms
-SWITCH    thread 1848-1901 ns, process 2575-2723 ns
-PARALLEL  four workers, speedup 3.46-3.82 (0.99 on one processor)
-SLEEPER   a spinner starved for 20-24 ms
-```
-
-`SLEEPER` read 1500.070 ms before waking tasks were placed, and `SWITCH`
-thread read 2606 ns — the same as `SWITCH` process — before the address space
-stopped being reloaded when it had not changed.
-
-The numbers below are older, from QEMU TCG with one virtual CPU and the 250 Hz
-timer. Two CPU-bound children ran for four seconds on CPU 0, one at nice 0 and
-one at nice 10. A second workload placed six CPU-bound children on CPU 0 while
-the parent requested 100 sleeps of 20 ms and measured wake-up lateness. Three
-post-change runs were used rather than selecting one favourable sample:
-
-```
-                              before       after (three-run range)
-nice 0 / nice 10 CPU ratio      1.01x       9.06x–9.14x
-wake latency median           76.073 ms     3.984–3.998 ms
-wake latency p95             100.107 ms     4.013–4.032 ms
-wake latency maximum         100.142 ms     4.019–4.350 ms
-```
-
-The nice target implied by weights 1024 and 110 is 9.31x. A separate four-CPU
-run booted all four processors, pinned the workload through
-`sched_setaffinity`, and measured 9.34x with 4.015 ms p95 wake latency. This
-also exercises affinity as scheduling behaviour rather than only checking its
-returned mask.
-
-There is no separate "context switch" assembly routine that swaps callee-
-saved registers on a kernel stack the way a traditional preemptive kernel
-does. Because every kernel-side path (a syscall handler, or the timer
-interrupt handler) runs to completion on its own stack without ever sleeping
-outside of a few defined points, a "switch" is just: copy the outgoing
-process's register snapshot into its `saved_frame`, copy the incoming
-process's `saved_frame` into the frame that is about to be returned to user
-space via `iretq`, and call `activate_process`. This happens in
-`switch_to_next` (`kernel/process.c:456`) for syscall-driven switches, and
-inline in `process_timer_interrupt` for preemption.
+  switching between them used to flush the TLB for nothing. Measured, a
+  ping-pong between two threads of one process and the same between two
+  processes cost 2606 ns each before and 1848 ns against 2575 ns after.
 
 ### Preemption
 

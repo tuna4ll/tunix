@@ -106,11 +106,6 @@ So the kernel decides first:
 A press queues the power-off on a kernel worker. Flushing the disks sleeps on
 locks and on I/O, which an interrupt cannot do.
 
-`support/tests/acpi-kerneltest.sh` boots q35 four times -- plain, with an SSDT
-declaring an embedded controller, and with each override -- presses the button
-through QMP, and checks the decision, the press and whether the machine went
-off.
-
 ## Temperature
 
 On Intel processors with a digital thermal sensor (CPUID 06H:EAX[0] and the
@@ -130,8 +125,7 @@ The readings are `/sys/class/hwmon/hwmon0` in Linux's coretemp layout, and the
 logger in `rc.local` that appends uptime, load, every core's temperature and
 the three busiest processes to `/tunix-thermal.log` every five seconds and
 syncs it, so a machine that switches itself off leaves the minutes before it
-on the disk. `make thermaltest` runs the thermal code on the host against a
-modelled sensor.
+on the disk.
 
 ## Speed
 
@@ -150,8 +144,7 @@ SpeedStep off are left alone.
 Once a second each core also reads APERF and MPERF, whose ratio is the speed it
 actually ran at while it was busy. Both show up in
 `/sys/devices/system/cpu/cpuN/cpufreq/scaling_cur_freq`, in the `hwreport`
-boot's `frequency` section, and in `/tunix-thermal.log`. `make thermaltest`
-also runs this code on the host against modelled registers.
+boot's `frequency` section, and in `/tunix-thermal.log`.
 
 ## Running it
 

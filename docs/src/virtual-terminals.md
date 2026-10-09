@@ -5,10 +5,18 @@ them, `chvt` does the same from a program, and each one keeps its own screen,
 its own keyboard queue and its own idea of who is in the foreground. The first
 is the desktop; the second, third and fourth run a login prompt.
 
-![A text console on Tunix](../screenshots/console.png)
+A terminal looks like the Linux one: a black screen, the standard VGA palette
+with grey text, and an 8x16 bitmap font drawn edge to edge with no margin. The
+glyphs are `eurlatgr`'s, the 512-character console font from kbd, compiled into
+`kernel/tty/terminal_font.c` with its Unicode map, so Latin, Turkish, box
+drawing and block characters all have a glyph and anything else falls back to
+`U+FFFD`. Bold turns the eight normal colours into their bright halves, as the
+Linux console does, rather than drawing a heavier glyph.
 
 The banner is `/etc/issue`, drawn out of half-block characters, and the colours
-are agetty's `\e{...}` escapes landing on the palette in `kernel/tty/terminal.c`.
+are agetty's `\e{...}` escapes landing on that palette. The shell prompt,
+`user@host [cwd]` in bright green with a white `@`, comes from
+`/etc/bash/bashrc.d/prompt.sh`, so it is the same for root and for `tunix`.
 
 Before this there was one console. Every question about which terminal was
 active had the same answer, `VT_ACTIVATE` refused anything but terminal 1, and
@@ -102,8 +110,7 @@ device the client's buffer is the scanout and the console's framebuffer is only
 on screen while no resource is bound to it.
 
 A program that has `/dev/fb0` mapped is the exception: the mapping is the real
-scanout, so it goes on writing to the screen across a switch. Nothing on the
-image does that outside `fb-test`.
+scanout, so it goes on writing to the screen across a switch.
 
 ### The console never reads the screen back
 
@@ -212,7 +219,7 @@ is `base-files/services`.
 
 Terminal 1 has none. Weston takes whichever terminal is active when it starts,
 which is the first, and a login prompt sharing it would draw into the same
-cells -- see [The desktop](desktop.md).
+cells.
 
 `chvt`, from the kbd package, switches to a numbered terminal.
 

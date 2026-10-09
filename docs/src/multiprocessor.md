@@ -271,8 +271,7 @@ its own timer for it, and when it fires it expires every deadline that has
 passed, wherever it was recorded (`timer_run_deadlines`). So a sleeper wakes
 within microseconds of its deadline instead of on the next 4 ms tick, and the
 woken task preempts the one running there if it is further behind
-(`process_deadline_interrupt`). `support/tests/timerlat-kerneltest.sh` measures
-it.
+(`process_deadline_interrupt`).
 
 An idle processor is told about new work with a reschedule interrupt. A
 processor that blocks picks the next runnable process itself, immediately.
@@ -407,13 +406,7 @@ interrupt context (terminal input, attaching a USB disk, USB hub changes),
 They show up in `ps`, cannot be signalled, and sleep between jobs.
 
 `/proc/overlap` reports the largest number of processors seen inside the kernel
-at once since it was last reset (write `1` to reset, `0` to stop). The SMP part
-of `perftest` pins four workers to four processors, checks that the peak reaches
-four, verifies bytes sent concurrently over four independent Unix socket
-channels, and runs `dup`/`close` against continuous readers.
-`smp-stress-kerneltest` runs four threads through pipes, sockets, files,
-`/proc`, `mmap` and `fork` at once and fails on a wrong byte or any `LOCK:`
-line in the kernel log.
+at once since it was last reset (write `1` to reset, `0` to stop).
 
 One consequence shows up in `isr_dispatch`: interrupts are acknowledged before
 they are handled, not after. A tick that ends up parking the processor — the
@@ -690,13 +683,6 @@ memory
   usable_mib  4084
 ```
 
-The benchmarks go the same way. `make testimage TEST=schedbench` builds the
-image without booting it -- `IMAGE_TABLE=mbr` for an old BIOS booting from a
-stick -- and the program writes everything it prints to
-`/tunix-<test>-results.txt` as well as to the console, so a run on real hardware
-can be read afterwards without a cable. `TEST` is `schedbench`, `perftest` or
-`drmtest`.
-
 Three of the report's lines are there because of a specific way a real machine
 can go wrong and an emulated one cannot:
 
@@ -726,12 +712,9 @@ switch cannot fake. It was `bin/smp-test`, built against the kernel's own libc;
 that libc is gone and so is the program, but the measurement it produced is
 what the numbers below are.
 
-`support/tests/schedbench.c` is what measures it now, and `make schedbench` is how.
-It is freestanding rather than built against a libc, so it cannot go the same
-way, and its root filesystem is one static binary — no Void download, no
-filesystem that has to hold ownership, a few seconds to build and boot. It runs
-under KVM where there is one, because the costs that separate one processor
-from four are the ones an emulator does not have.
+The numbers below come from a freestanding benchmark of the same shape whose
+root filesystem was one static binary. It ran under KVM, because the costs that
+separate one processor from four are the ones an emulator does not have.
 
 On `-smp 4` (four consecutive runs gave 338, 297, 362 and 327 percent):
 

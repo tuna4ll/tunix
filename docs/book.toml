@@ -1,0 +1,8 @@
+[book]
+title = "Tunix Kernel"
+authors = ["Tuna Kılıç"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"

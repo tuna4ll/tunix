@@ -60,14 +60,6 @@ umount /mnt/scratch
 An unknown `-o` name is an error rather than being ignored — silently dropping
 `ro` would mount read-write.
 
-## Checking it
-
-`mount-test` on the image asserts what a mount is *for* rather than what it
-returns: a file written at the mountpoint disappears when a filesystem is
-mounted over it and comes back when it is unmounted, a file written inside the
-mounted tree does not survive the unmount, and a bind mount makes `/etc/passwd`
-readable through a second path while leaving the original alone.
-
 ## Limits
 
 - **No block-device filesystem can be mounted.** `ext2.c` keeps its superblock,

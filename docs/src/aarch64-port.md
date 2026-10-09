@@ -16,20 +16,15 @@ BLOCK: sda (nvme0), 131072 sectors
 BLOCK: root on sda
 EXT3: journal ready, 1024 blocks
 TUNIX: starting /sbin/init
-PROCTEST fork ok
-PROCTEST parent tls+fpu across switches ok
-PROCTEST clone thread ok
-PROCTEST thread tls and stack ok
-PROCTEST sigreturn reads the context ok
-PROCTEST read restarted with SA_RESTART ok
-PROCTEST execve ok
-PROCTEST PASS
+process: ok    the test runs as pid 1
+process: ok    fork hands the parent a new pid
+...
+process: ok    and its status says SIGKILL
+process: PASS 15/15
 ```
 
-`support/tests/proctest.c` builds for both architectures from one source, so the
-same checks — fork, CLONE_SETTLS threads, TLS and FPU state across context
-switches, SA_SIGINFO handlers and their context, EINTR against SA_RESTART,
-execve — run on either kernel.
+Every test in `tools/tests` builds for both architectures from one source, so
+the same checks run on either kernel.
 
 The userland above it is unmodified Void Linux for aarch64. From the published
 `void-aarch64-ROOTFS` tarball written to an ext3 disk, runit comes up as PID 1,
@@ -105,7 +100,7 @@ firmware's Graphics Output Protocol framebuffer is used instead (see below).
 
 The desktop image boots itself on any 64-bit ARM UEFI machine. Its EFI system
 partition carries Limine's `BOOTAA64.EFI` and `boot/limine/limine.conf`
-(`support/limine-aarch64.conf`), which loads `boot/Image` with the Linux arm64
+(`tools/limine-aarch64.conf`), which loads `boot/Image` with the Linux arm64
 protocol. Limine exits boot services and passes a device tree whose `/chosen`
 names the UEFI system table and memory map; when the firmware has no device tree
 of its own, that tree holds nothing else.
@@ -161,39 +156,25 @@ make run-aarch64-core QEMU_AARCH64_CORE_DISKS="-drive file=disk.img,if=none,id=n
 ```
 
 The toolchain is `aarch64-linux-gnu-gcc`. A root disk is an ext2/ext3 image made
-with the same `mkfs` options `support/image.sh` uses for x86-64:
+with the same `mkfs` options `tools/image.sh` uses for x86-64:
 
 ```sh
 mkdir -p root/sbin root/dev root/proc root/sys root/tmp
 aarch64-linux-gnu-gcc -static -nostdlib -nostartfiles -ffreestanding -O2 \
-    support/tests/proctest.c -o root/sbin/init
+    -fno-pie -no-pie -fno-builtin tools/tests/process.c -o root/sbin/init
 truncate -s 64M disk.img
 mkfs.ext3 -q -r 1 -b 4096 -I 128 -m 1 -L tunix-root \
     -O ^resize_inode,^dir_index,^ext_attr,^metadata_csum,^64bit,^huge_file,^dir_nlink,^extra_isize \
     -d root disk.img
 ```
 
-The kernel tests boot the same way on either architecture through
-`support/tests/kerneltest.sh`; `ARCH=aarch64` builds the test with the cross
-compiler and boots `virt` with the Image instead of Limine:
+The tests boot the same way on either architecture; `make test-aarch64`
+builds each one with the cross compiler and boots `virt` with the Image instead
+of Limine:
 
 ```sh
-ARCH=aarch64 sh support/tests/proctest.sh build/kernel-aarch64-core.img
-ARCH=aarch64 sh support/tests/clone3-kerneltest.sh build/kernel-aarch64-core.img
-ARCH=aarch64 sh support/tests/scm-rights-kerneltest.sh build/kernel-aarch64-core.img
-ARCH=aarch64 sh support/tests/eventfs-kerneltest.sh build/kernel-aarch64-core.img
-ARCH=aarch64 support/tests/soundtest.sh 2 build/kernel-aarch64-core.img
-ARCH=aarch64 support/tests/drmtest.sh 4 build/kernel-aarch64-core.img
-ARCH=aarch64 support/tests/inputtest.sh 4 build/kernel-aarch64-core.img
-ARCH=aarch64 support/tests/perftest.sh 4 build/kernel-aarch64-core.img
-ARCH=aarch64 support/tests/schedbench.sh 4 build/kernel-aarch64-core.img
+make test-aarch64
 ```
-
-The sound test plays through the emulated HD Audio codec into a wav file and
-checks that what came out is audible and never ran dry. The DRM, input,
-performance and scheduler tests keep their x86-64 system call numbers in the
-source; `support/tests/tunix_syscall.h` turns them into AArch64 calls, standing
-in `openat`, `clone`, `pipe2` and `unlinkat` for the calls AArch64 does not have.
 
 ## How the port is put together
 

@@ -53,16 +53,3 @@ its device metadata.
 A producer may publish while holding any lock ranked before eventfs (72); one
 that holds a lock ranked after it, such as the heap or the device tables, has
 to publish after dropping that lock, as block registration does.
-
-Run the queue and protocol unit tests from the repository root:
-
-```sh
-support/tests/eventfstest.sh
-```
-
-Run the in-kernel blocking, poll, overflow, and close-race test against a built
-kernel with:
-
-```sh
-support/tests/eventfs-kerneltest.sh build/kernel.elf build/limine
-```

@@ -103,10 +103,9 @@ Mass Storage Reset with both bulk endpoints put back the same way.
 finds the report ID, the buttons and the relative X, Y and wheel fields, of
 whatever size and position the device chose. Boot protocol is only the fallback
 for a boot mouse whose descriptor says nothing usable. Keyboards stay on boot
-protocol. `support/tests/hidparse.c` checks the parser on the host against
-descriptors shaped like a plain mouse, a Logitech-style receiver (report ID,
-16 buttons, 12-bit motion), a 16-bit gaming mouse, a keyboard and mouse sharing
-one interface, and an absolute tablet, which is refused.
+protocol. The parser handles a plain mouse, a Logitech-style receiver (report
+ID, 16 buttons, 12-bit motion), a 16-bit gaming mouse and a keyboard and mouse
+sharing one interface; an absolute tablet is refused.
 
 `/dev/input/event1` exists whether or not a mouse was there at boot. It used to
 be created only when one was, so a mouse plugged in later was enumerated by the
@@ -118,14 +117,6 @@ rather than assumed to be eight. Every keyboard and mouse interface of a device
 is used, so a receiver carrying both works, and a device the driver does not
 know has its interfaces listed in the log. A controller
 that cannot address 64 bits gets all of its rings and buffers below 4 GiB.
-
-`support/tests/usbtest.sh` exercises all of it on QEMU: two controllers, a
-keyboard, a mouse and a full-speed disk behind a hub, a high-speed disk on the
-second controller, a keyboard moved between controllers and hot-plugged behind
-the hub, and a disk plugged in and pulled out during I/O, with key and mouse
-events counted and every disk block written and read back. `XHCI=` picks the
-controller model and its interrupt mode (`qemu-xhci,msix=off,msi=on`,
-`nec-usb-xhci`, `qemu-xhci,msix=off,msi=off`); `ARCH=aarch64` runs it on `virt`.
 
 Not tested in the emulator: endpoint stall recovery, which QEMU gives no way to
 provoke, and controllers limited to 32-bit addresses.
@@ -168,10 +159,8 @@ from absent.
 - **Hubs, but only one level of them.** See below.
 - **No hot-plug.** Devices are found at boot.
 
-The translator path cannot be tested in the emulator, which has no high-speed
-hub; with its fields forced on for devices on a root port, keyboard, mouse and
-disks still pass `MODE=ehci support/tests/usbtest.sh`, which checks everything
-but the hub's side of the handshake.
+The translator path cannot be exercised in the emulator, which has no
+high-speed hub.
 
 ## Ports have to be turned on before they can be asked
 
@@ -358,10 +347,8 @@ to a waiting reader between commands, so 16 KiB costs a read at most one more
 millisecond on USB 2, and QEMU's EHCI stick went from 5 to 20 MB/s. Writes do
 not use the 64 KiB chain: on a throttled stick a chained write often left the
 status stage unanswered until the ten-second timeout, a stall the old 4 KiB
-writes hit too but far less often, and 16 KiB writes never hit in the same
-test (`support/tests/iolatency-kerneltest.sh`: 112 s and two stalls before, 30
-s and none after). `support/tests/usbio-kerneltest.sh` reads a checksummed
-file, writes another, and checks every byte of it on the host afterwards.
+writes hit too but far less often, and 16 KiB writes never hit under the same
+load (112 s and two stalls before, 30 s and none after).
 
 ## The shape of the driver
 

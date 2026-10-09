@@ -45,7 +45,7 @@ ext3 by default, and refuses only what it genuinely cannot write correctly:
   the mount. A driver that does not understand one of those may still read the
   filesystem, but must not write to it.
 
-So `support/image.sh` asks only for what mke2fs would otherwise add on a
+So `tools/image.sh` asks only for what mke2fs would otherwise add on a
 system whose `mke2fs.conf` leans towards ext4:
 
 ```sh
@@ -67,11 +67,6 @@ count of zero, until the last descriptor closes; that is also when its blocks
 are freed. `umount` refuses with `EBUSY` while anything under the mount point is
 open, mapped, used as a working directory or mounted on, and otherwise commits
 the journal and marks the filesystem clean.
-
-`support/tests/ext2-kerneltest.sh` makes three filesystems with 1, 2 and 4 KiB
-blocks, indexed directories and attribute blocks, mounts them next to the root,
-writes, links, truncates, renames across them, unmounts and remounts, and then
-runs `e2fsck -fn` on each image on the host.
 
 ## The journal
 
@@ -168,14 +163,14 @@ Before this, every `write()` went through the log with its contents
 (`data=journal`) and committed on the spot, with four cache flushes and the
 superblock and every group descriptor rewritten each time, all while one lock
 over the whole kernel was held. Writing 24 MiB to a USB stick limited to
-2 MB/s and 60 writes a second (`support/tests/iolatency-kerneltest.sh`) took
+2 MB/s and 60 writes a second took
 307 seconds, and in that time a thread sleeping 5 ms woke up to 3.2 seconds
 late -- which on the real laptop was the mouse and the clock stopping during
-`xbps-install`. The same test now returns from `write()` in 17 ms, the sleeping
+`xbps-install`. The same write now returns from `write()` in 17 ms, the sleeping
 thread is at most 19 ms late, and reading a cached file on the root meanwhile
 takes at most 104 ms. The `fsync` at the end takes as long as the stick needs.
 
-That test writes one file. `xbps-install -Sy gimp` onto a root on a USB stick
+That is one file. `xbps-install -Sy gimp` onto a root on a USB stick
 (QEMU, xHCI, 8 MB/s and 100 writes a second) still stopped the Weston clock for
 three to thirteen seconds at a time, dozens of times. Measuring every lock held
 or waited on for more than 50 ms showed why: the commit thread and the data

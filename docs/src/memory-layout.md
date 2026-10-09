@@ -106,9 +106,6 @@ allocator track a terabyte of address space it can never hand out. Reclaimable
 regions stay in, which keeps Limine's page tables at 2046 MiB inside the range
 on a 2 GiB machine.
 
-`support/tests/limits-kerneltest.sh` with `MEMORY=10G` touches 8.4 GiB of
-anonymous memory and reads every page back.
-
 ## Changing a kernel mapping
 
 The top half of every address space is the same memory: `vmm_create_address_space`
