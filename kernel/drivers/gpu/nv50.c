@@ -2,7 +2,8 @@
 #include <stdint.h>
 
 #include <tunix/cpu.h>
-#include <tunix/framebuffer.h>
+#include <tunix/boot.h>
+#include <tunix/boot_framebuffer.h>
 #include <tunix/nv50.h>
 #include <tunix/pci.h>
 #include <tunix/time.h>
@@ -32,6 +33,9 @@
 #define PDISP_CORE_PUT      0x640000U
 #define PDISP_CORE_GET      0x640004U
 #define PDISP_VBIOS_OWNS    0x00000100U
+#define PDISP_VBIOS_POINTER 0x619F04U
+#define PCI_VENDOR_NVIDIA   0x10DEU
+#define NV_BAR0_BYTES       0x1000000ULL
 
 #define VRAM_INSTANCE       0x00800000U
 #define VRAM_INSTANCE_BYTES 0x10000U
@@ -91,6 +95,9 @@ struct probe {
     uint32_t pramin_saved;
     const uint8_t *vbios;
     uint32_t vbios_bytes;
+    uint32_t surface_width;
+    uint32_t surface_height;
+    uint32_t surface_pitch;
     unsigned script_steps;
     char *log;
     size_t used;
@@ -656,33 +663,6 @@ static void show_error(struct probe *probe) {
     }
 }
 
-static void draw_surface(struct probe *probe, uint32_t width, uint32_t height, uint32_t pitch) {
-    uint64_t bytes = (uint64_t)pitch * height;
-    volatile uint32_t *surface =
-        (volatile uint32_t *)vmm_map_device(probe->bar1 + VRAM_SURFACE, bytes);
-    if (!surface) {
-        say(probe, "  surface not mapped\n");
-        return;
-    }
-    const uint8_t *console = framebuffer_scanout();
-    uint32_t console_width = framebuffer_width();
-    uint32_t console_height = framebuffer_height();
-    uint32_t console_pitch = framebuffer_pitch();
-    for (uint32_t y = 0; y < height; y++) {
-        volatile uint32_t *row = surface + (uint64_t)y * (pitch / 4U);
-        for (uint32_t x = 0; x < width; x++) {
-            uint32_t color = 0;
-            if (console && x < console_width && y < console_height)
-                color =
-                    *(const volatile uint32_t *)(console + (uint64_t)y * console_pitch + x * 4U);
-            if (x < 4U || y < 4U || x >= width - 4U || y >= height - 4U) color = 0x0000FF00U;
-            if (x >= width - 40U && y >= height - 40U) color = 0x00FF0000U;
-            row[x] = color;
-        }
-    }
-    say(probe, "  surface drawn: the console, a green frame, a red corner\n");
-}
-
 static int service_supervisors(struct probe *probe, const struct lvds_output *out) {
     uint64_t deadline = time_uptime_ns() + SUPERVISOR_TIMEOUT_NS;
     while (time_uptime_ns() < deadline) {
@@ -751,7 +731,9 @@ static int modeset(struct probe *probe) {
     show(probe, "vpll coeffs    ", 0x614104U);
     show(probe, "vpll fraction  ", 0x614108U);
 
-    draw_surface(probe, width, height, pitch);
+    probe->surface_width = width;
+    probe->surface_height = height;
+    probe->surface_pitch = pitch;
 
     vram_wr32(probe, VRAM_SYNC, 0);
     push(probe, CORE_SET_CONTEXT_DMA_NOTIFY, HANDLE_SYNC);
@@ -784,43 +766,136 @@ static int modeset(struct probe *probe) {
     return result;
 }
 
-size_t nv50_display_probe(const struct pci_device *device, uint64_t bar0, const uint8_t *vbios,
-                          uint32_t vbios_bytes, char *log, size_t capacity) {
-    struct probe probe = {0};
-    probe.bar0 = bar0;
-    probe.vbios = vbios;
-    probe.vbios_bytes = vbios_bytes;
-    probe.bar1 = pci_bar_address(device, 1);
-    probe.log = log;
-    probe.capacity = capacity;
-    if (!capacity) return 0;
-    log[0] = '\0';
+static uint8_t vbios_image[0x20000];
+static char log_buffer[32768];
+static size_t log_bytes;
 
+static int read_vbios(struct probe *probe) {
+    uint32_t pointer = rd32(probe, PDISP_VBIOS_POINTER);
+    say_reg(probe, "vbios pointer  ", PDISP_VBIOS_POINTER, pointer);
+    if (!(pointer & 0x8U) || (pointer & 0x3U) != 1U) return -1;
+    uint64_t address = (uint64_t)(pointer & 0xFFFFFF00U) << 8;
+    uint32_t saved = rd32(probe, PBUS_PRAMIN_BASE);
+    if (!address) address = ((uint64_t)saved << 16) + 0xF0000ULL;
+    wr32(probe, PBUS_PRAMIN_BASE, (uint32_t)(address >> 16));
+    uint32_t inside = (uint32_t)(address & 0xFFFFULL);
+    for (uint32_t offset = 0; offset < sizeof(vbios_image); offset += 4U) {
+        uint32_t value = rd32(probe, PRAMIN_WINDOW + inside + offset);
+        vbios_image[offset + 0U] = (uint8_t)value;
+        vbios_image[offset + 1U] = (uint8_t)(value >> 8);
+        vbios_image[offset + 2U] = (uint8_t)(value >> 16);
+        vbios_image[offset + 3U] = (uint8_t)(value >> 24);
+    }
+    wr32(probe, PBUS_PRAMIN_BASE, saved);
+    probe->vbios = vbios_image;
+    probe->vbios_bytes = sizeof(vbios_image);
+    return vbios_image[0] == 0x55U && vbios_image[1] == 0xAAU ? 0 : -1;
+}
+
+static int find_gpu(uint8_t *bus_out, uint8_t *slot_out, uint8_t *function_out) {
+    for (unsigned bus = 0; bus < 256U; bus++) {
+        for (uint8_t slot = 0; slot < 32U; slot++) {
+            uint32_t header = pci_config_read32((uint8_t)bus, slot, 0, 0x0CU);
+            uint8_t functions = (header & 0x00800000U) ? 8U : 1U;
+            for (uint8_t function = 0; function < functions; function++) {
+                uint32_t id = pci_config_read32((uint8_t)bus, slot, function, 0);
+                if ((id & 0xFFFFU) == 0xFFFFU) continue;
+                uint32_t class_code = pci_config_read32((uint8_t)bus, slot, function, 0x08U);
+                if ((id & 0xFFFFU) != PCI_VENDOR_NVIDIA || (class_code >> 24) != 0x03U) continue;
+                *bus_out = (uint8_t)bus;
+                *slot_out = slot;
+                *function_out = function;
+                return 0;
+            }
+        }
+    }
+    return -1;
+}
+
+int nv50_early_init(const struct boot_framebuffer_info *boot, struct boot_framebuffer_info *out) {
+    if (!boot || !out || !boot_command_line_flag("nv50")) return -1;
+    struct probe probe = {0};
+    probe.log = log_buffer;
+    probe.capacity = sizeof(log_buffer);
+    log_buffer[0] = '\0';
+    say(&probe, "nv50 early display setup\n");
+
+    uint8_t bus = 0, slot = 0, function = 0;
+    if (find_gpu(&bus, &slot, &function) != 0) {
+        say(&probe, "  no nvidia display controller\n");
+        log_bytes = probe.used;
+        return -1;
+    }
+    uint32_t bar0 = pci_config_read32(bus, slot, function, 0x10U);
+    uint32_t bar1_low = pci_config_read32(bus, slot, function, 0x14U);
+    uint32_t bar1_high =
+        ((bar1_low >> 1) & 3U) == 2U ? pci_config_read32(bus, slot, function, 0x18U) : 0;
+    probe.bar1 = ((uint64_t)bar1_high << 32) | (bar1_low & 0xFFFFFFF0U);
+    say_reg(&probe, "bar0           ", 0x10U, bar0);
+    say_reg(&probe, "bar1 low       ", 0x14U, bar1_low);
+    if ((bar0 & 1U) || !(bar0 & 0xFFFFFFF0U) || !probe.bar1) {
+        say(&probe, "  bars are not assigned\n");
+        log_bytes = probe.used;
+        return -1;
+    }
+    probe.bar0 = vmm_map_device(bar0 & 0xFFFFFFF0U, NV_BAR0_BYTES);
+    if (!probe.bar0) {
+        say(&probe, "  bar0 not mapped\n");
+        log_bytes = probe.used;
+        return -1;
+    }
+
+    uint32_t boot0 = rd32(&probe, 0);
     uint32_t vram = rd32(&probe, 0x10020CU);
     probe.vram_bytes = vram & 0xFFFFFF00U;
-    say(&probe, "nv50 display probe\n");
-    say_reg(&probe, "boot0          ", 0, rd32(&probe, 0));
+    say_reg(&probe, "boot0          ", 0, boot0);
     say_reg(&probe, "vram size      ", 0x10020CU, vram);
-    say(&probe, "  framebuffer   ");
-    say_hex(&probe, framebuffer_physical_address(), 16);
-    say(&probe, " bar1 ");
-    say_hex(&probe, probe.bar1, 16);
-    say(&probe, "\n");
+    if (((boot0 >> 20) & 0x1F0U) != 0x50U && ((boot0 >> 20) & 0x1F0U) != 0x80U &&
+        ((boot0 >> 20) & 0x1F0U) != 0x90U && ((boot0 >> 20) & 0x1F0U) != 0xA0U) {
+        say(&probe, "  not an nv50 family chip\n");
+        log_bytes = probe.used;
+        return -1;
+    }
+    if (read_vbios(&probe) != 0) {
+        say(&probe, "  no video bios image\n");
+        log_bytes = probe.used;
+        return -1;
+    }
 
     probe.pramin_saved = rd32(&probe, PBUS_PRAMIN_BASE);
     state(&probe, "before");
     pramin_select(&probe, VRAM_INSTANCE);
-
     int ok = test_vram(&probe) == 0 && build_objects(&probe) == 0;
     if (ok) {
         take_over(&probe);
         ok = start_core(&probe) == 0 && query_capabilities(&probe) == 0 && modeset(&probe) == 0;
     }
-
     state(&probe, "after");
     wr32(&probe, PBUS_PRAMIN_BASE, probe.pramin_saved);
     say(&probe,
-        ok ? "result: the panel runs from our surface\n"
+        ok ? "result: the console runs on our surface\n"
            : "result: stopped at the first failure\n");
-    return probe.used;
+    log_bytes = probe.used;
+    if (!ok) return -1;
+
+    *out = *boot;
+    out->physical_address = probe.bar1 + VRAM_SURFACE;
+    out->pitch = probe.surface_pitch;
+    out->width = (uint16_t)probe.surface_width;
+    out->height = (uint16_t)probe.surface_height;
+    out->bits_per_pixel = 32;
+    out->red_mask_size = 8;
+    out->red_field_position = 16;
+    out->green_mask_size = 8;
+    out->green_field_position = 8;
+    out->blue_mask_size = 8;
+    out->blue_field_position = 0;
+    out->reserved_mask_size = 8;
+    out->reserved_field_position = 24;
+    return 0;
+}
+
+const char *nv50_early_log(size_t *bytes) {
+    if (bytes) *bytes = log_bytes;
+    return log_bytes ? log_buffer : NULL;
 }

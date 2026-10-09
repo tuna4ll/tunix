@@ -2,11 +2,10 @@
 #define TUNIX_NV50_H
 
 #include <stddef.h>
-#include <stdint.h>
 
-struct pci_device;
+struct boot_framebuffer_info;
 
-size_t nv50_display_probe(const struct pci_device *device, uint64_t bar0, const uint8_t *vbios,
-                          uint32_t vbios_bytes, char *log, size_t capacity);
+int nv50_early_init(const struct boot_framebuffer_info *boot, struct boot_framebuffer_info *out);
+const char *nv50_early_log(size_t *bytes);
 
 #endif

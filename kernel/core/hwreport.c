@@ -586,7 +586,6 @@ static void write_to_disk(void) { (void)write_file(REPORT_PATH, report, used); }
 #define GPU_REGS_PATH       "/tunix-gpu-regs.bin"
 #define GPU_REGS_AFTER_PATH "/tunix-gpu-regs-after.bin"
 #define NV50_LOG_PATH       "/tunix-nv50.log"
-#define NV50_LOG_BYTES      32768U
 
 struct register_range {
     uint32_t start;
@@ -795,13 +794,10 @@ static void put_nvidia(const struct pci_device *device, uint8_t *buffer) {
     put(" MiB\n");
     put_nv_pramin(bar0, buffer);
     put_nv_registers(bar0, GPU_REGS_PATH);
-    if (!boot_command_line_flag("nv50")) return;
-    char *log = kmalloc(NV50_LOG_BYTES);
-    if (!log) return;
-    size_t bytes = nv50_display_probe(device, bar0, buffer, VBIOS_MAX, log, NV50_LOG_BYTES);
-    kprintf("%s", log);
-    if (write_file(NV50_LOG_PATH, log, bytes) == 0) put("  nv50 probe  -> " NV50_LOG_PATH "\n");
-    kfree(log);
+    size_t bytes = 0;
+    const char *log = nv50_early_log(&bytes);
+    if (log && write_file(NV50_LOG_PATH, log, bytes) == 0)
+        put("  nv50 setup  -> " NV50_LOG_PATH "\n");
     put_nv_registers(bar0, GPU_REGS_AFTER_PATH);
 }
 
