@@ -798,7 +798,7 @@ static void put_nvidia(const struct pci_device *device, uint8_t *buffer) {
     if (!boot_command_line_flag("nv50")) return;
     char *log = kmalloc(NV50_LOG_BYTES);
     if (!log) return;
-    size_t bytes = nv50_display_probe(device, bar0, log, NV50_LOG_BYTES);
+    size_t bytes = nv50_display_probe(device, bar0, buffer, VBIOS_MAX, log, NV50_LOG_BYTES);
     kprintf("%s", log);
     if (write_file(NV50_LOG_PATH, log, bytes) == 0) put("  nv50 probe  -> " NV50_LOG_PATH "\n");
     kfree(log);

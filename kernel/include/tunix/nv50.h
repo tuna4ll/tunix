@@ -6,7 +6,7 @@
 
 struct pci_device;
 
-size_t nv50_display_probe(const struct pci_device *device, uint64_t bar0, char *log,
-                          size_t capacity);
+size_t nv50_display_probe(const struct pci_device *device, uint64_t bar0, const uint8_t *vbios,
+                          uint32_t vbios_bytes, char *log, size_t capacity);
 
 #endif
