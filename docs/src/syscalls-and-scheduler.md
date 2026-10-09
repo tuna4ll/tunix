@@ -224,6 +224,14 @@ them out of each other's way:
   interrupt path does when a signal is pending, leaves them alone: they are
   live, and the copy in memory is from the last time it was switched out.
 
+  A switch made from inside a syscall or an interrupt hands the next process
+  the frame it is returning through, so it goes back to user space on the
+  kernel stack of the process that gave up the processor. That is only safe
+  while the return is short. When the next process has a signal to deliver or
+  a group exit to carry out, it is started on its own kernel stack instead
+  (`abandon_to`), because that work can take mutexes and sleep, and a process
+  must never sleep on a stack that belongs to someone else.
+
   `vmm_activate(cr3)` runs only when the incoming process's address space is
   not the one already loaded. Writing CR3 discards every translation the
   processor had cached, and two threads of one process share a `cr3`, so

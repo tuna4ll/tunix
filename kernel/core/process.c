@@ -1711,8 +1711,10 @@ static void abandon_to(struct process *next) {
     __builtin_unreachable();
 }
 
+static int needs_user_work(struct process *process);
+
 static void resume_by_frame(struct syscall_frame *frame, struct process *next) {
-    if (next->kernel_suspended) abandon_to(next);
+    if (next->kernel_suspended || needs_user_work(next)) abandon_to(next);
     *frame = next->saved_frame;
     activate_process(next);
 }
