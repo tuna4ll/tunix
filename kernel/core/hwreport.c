@@ -556,7 +556,8 @@ static void put_frequency(void) {
 }
 
 static int write_file(const char *path, const void *data, size_t bytes) {
-    struct vfs_node *node = vfs_create_file_node(path, 0644);
+    struct vfs_node *node = vfs_lookup(path);
+    if (!node) node = vfs_create_file_node(path, 0644);
     if (!node) {
         kprintf("HWREPORT: could not create %s\n", path);
         return -1;
