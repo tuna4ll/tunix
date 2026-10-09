@@ -16,7 +16,7 @@ XBPS_TARBALL="$CACHE/xbps-static-$XBPS_STATIC_VERSION.tar.xz"
 XBPS_DIR="$CACHE/xbps"
 
 if [ "$(id -u)" != 0 ]; then
-	echo "sysroot.sh: needs root -- the tarball carries ownership and device nodes" >&2
+	echo "sysroot.sh: run it through make, which gives it a user namespace" >&2
 	exit 1
 fi
 
@@ -63,6 +63,8 @@ echo ":: unpacking the base rootfs"
 rm -rf "$SYSROOT"
 mkdir -p "$SYSROOT"
 tar -xJpf "$ROOTFS_TARBALL" -C "$SYSROOT"
+mkdir -p "$SYSROOT/dev/shm"
+chmod 1777 "$SYSROOT/dev/shm"
 
 mkdir -p "$SYSROOT/etc/xbps.d"
 REPOSITORY="$MIRROR/current"
