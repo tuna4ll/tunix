@@ -6,12 +6,6 @@ understandable, and easy to test.
 
 ## Getting Started
 
-Initialize third-party sources:
-
-```sh
-git submodule update --init --recursive
-```
-
 Build the image:
 
 ```sh
@@ -55,6 +49,7 @@ At minimum, run:
 
 ```sh
 make all
+make test
 ```
 
 For boot or runtime changes, also run:
@@ -84,9 +79,8 @@ Update docs when behavior, build steps, or development workflow changes.
 Useful starting points:
 
 - [README.md](README.md)
-- [docs/build-and-run.md](docs/build-and-run.md)
-- [docs/boot.md](docs/boot.md)
-- [docs/userland.md](docs/userland.md)
+- [docs/README.md](docs/README.md)
+- [docs/src/boot.md](docs/src/boot.md)
 
 ## Commit Messages
 
