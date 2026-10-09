@@ -553,16 +553,276 @@ static void put_frequency(void) {
     }
 }
 
-static void write_to_disk(void) {
-    struct vfs_node *node = vfs_create_file_node(REPORT_PATH, 0644);
+static int write_file(const char *path, const void *data, size_t bytes) {
+    struct vfs_node *node = vfs_create_file_node(path, 0644);
     if (!node) {
-        kprintf("HWREPORT: could not create %s\n", REPORT_PATH);
-        return;
+        kprintf("HWREPORT: could not create %s\n", path);
+        return -1;
     }
     (void)vfs_truncate(node, 0);
-    if (vfs_write(node, 0, used, report) != (int64_t)used)
-        kprintf("HWREPORT: could not write %s\n", REPORT_PATH);
-    else kprintf("HWREPORT: written to %s\n", REPORT_PATH);
+    if (vfs_write(node, 0, bytes, data) != (int64_t)bytes || vfs_fsync(node) != 0) {
+        kprintf("HWREPORT: could not write %s\n", path);
+        return -1;
+    }
+    kprintf("HWREPORT: written to %s\n", path);
+    return 0;
+}
+
+static void write_to_disk(void) { (void)write_file(REPORT_PATH, report, used); }
+
+#define PCI_VENDOR_NVIDIA   0x10DEU
+#define PCI_CLASS_DISPLAY   0x03U
+#define PCI_ROM_REGISTER    0x30U
+#define PCI_ROM_ENABLE      0x1U
+#define VBIOS_MAX           0x20000U
+#define LEGACY_VBIOS_BASE   0xC0000ULL
+#define NV_BAR0_BYTES       0x1000000ULL
+#define NV_PMC_BOOT_0       0x000000U
+#define NV_PBUS_PRAMIN_BASE 0x001700U
+#define NV_PFB_VRAM_SIZE    0x10020CU
+#define NV_PDISP_VBIOS_PTR  0x619F04U
+#define NV_PRAMIN_WINDOW    0x700000U
+#define GPU_REGS_PATH       "/tunix-gpu-regs.bin"
+
+struct register_range {
+    uint32_t start;
+    uint32_t bytes;
+};
+
+static const struct register_range nv_register_ranges[] = {
+    {0x000000U, 0x400U},  {0x001000U, 0x1000U}, {0x004000U, 0x1000U},
+    {0x00E000U, 0x1000U}, {0x100000U, 0x1000U}, {0x610000U, 0x10000U},
+};
+
+struct display_list {
+    struct pci_device devices[8];
+    unsigned count;
+};
+
+static void collect_display(const struct pci_device *device, void *context) {
+    struct display_list *list = (struct display_list *)context;
+    if (device->class_code != PCI_CLASS_DISPLAY || list->count >= 8U) return;
+    list->devices[list->count++] = *device;
+}
+
+static uint32_t rom_image_bytes(const uint8_t *rom, uint32_t available, uint16_t *vendor,
+                                uint16_t *device, int *checksum_ok) {
+    uint32_t total = 0;
+    *checksum_ok = 0;
+    *vendor = 0;
+    *device = 0;
+    for (;;) {
+        if (total + 0x1AU > available) break;
+        const uint8_t *image = rom + total;
+        if (image[0] != 0x55U || image[1] != 0xAAU) break;
+        uint16_t data = (uint16_t)(image[0x18] | (image[0x19] << 8));
+        if (total + data + 0x18U > available) break;
+        const uint8_t *pcir = image + data;
+        if (pcir[0] != 'P' || pcir[1] != 'C' || pcir[2] != 'I' || pcir[3] != 'R') break;
+        uint32_t length = (uint32_t)(pcir[0x10] | (pcir[0x11] << 8)) * 512U;
+        if (!length || total + length > available) break;
+        if (!total) {
+            *vendor = (uint16_t)(pcir[4] | (pcir[5] << 8));
+            *device = (uint16_t)(pcir[6] | (pcir[7] << 8));
+            uint8_t sum = 0;
+            uint32_t first = (uint32_t)image[2] * 512U;
+            if (first && first <= available) {
+                for (uint32_t index = 0; index < first; index++)
+                    sum = (uint8_t)(sum + image[index]);
+                *checksum_ok = sum == 0;
+            }
+        }
+        total += length;
+        if (pcir[0x15] & 0x80U) break;
+    }
+    return total;
+}
+
+static void put_vbios(const char *source, const char *path, const uint8_t *rom,
+                      uint32_t available) {
+    put("  vbios       ");
+    put(source);
+    if (!rom) {
+        put(": unavailable\n");
+        return;
+    }
+    uint16_t vendor = 0;
+    uint16_t device = 0;
+    int checksum_ok = 0;
+    uint32_t bytes = rom_image_bytes(rom, available, &vendor, &device, &checksum_ok);
+    if (!bytes) {
+        put(": no 55aa image\n");
+        return;
+    }
+    put(": ");
+    put_number(bytes);
+    put(" bytes, pcir ");
+    put_hex_fixed(vendor, 4);
+    put(":");
+    put_hex_fixed(device, 4);
+    put(checksum_ok ? ", checksum ok" : ", checksum BAD");
+    if (write_file(path, rom, bytes) == 0) {
+        put(" -> ");
+        put(path);
+    }
+    put("\n");
+}
+
+static void copy_from_device(uint8_t *out, uint64_t mapped, uint32_t bytes) {
+    volatile const uint32_t *source = (volatile const uint32_t *)mapped;
+    for (uint32_t index = 0; index < bytes / 4U; index++) {
+        uint32_t value = source[index];
+        memcpy(out + index * 4U, &value, sizeof(value));
+    }
+}
+
+static void put_legacy_vbios(uint8_t *buffer) {
+#if !defined(__x86_64__)
+    put_vbios("legacy 0xc0000", "/tunix-vbios-legacy.rom", NULL, 0);
+    return;
+#endif
+    uint64_t mapped = vmm_map_device(LEGACY_VBIOS_BASE, VBIOS_MAX);
+    if (mapped) copy_from_device(buffer, mapped, VBIOS_MAX);
+    put_vbios("legacy 0xc0000", "/tunix-vbios-legacy.rom", mapped ? buffer : NULL, VBIOS_MAX);
+}
+
+static void put_pci_rom(const struct pci_device *device, uint8_t *buffer) {
+    uint32_t saved =
+        pci_config_read32(device->bus, device->slot, device->function, PCI_ROM_REGISTER);
+    uint64_t address = saved & 0xFFFFF800U;
+    put("  rom bar     ");
+    put_hex(saved);
+    put("\n");
+    if (!address) {
+        put_vbios("pci rom bar", "/tunix-vbios-pcirom.rom", NULL, 0);
+        return;
+    }
+    uint64_t mapped = vmm_map_device(address, VBIOS_MAX);
+    if (mapped) {
+        pci_config_write32(device->bus, device->slot, device->function, PCI_ROM_REGISTER,
+                           saved | PCI_ROM_ENABLE);
+        copy_from_device(buffer, mapped, VBIOS_MAX);
+        pci_config_write32(device->bus, device->slot, device->function, PCI_ROM_REGISTER, saved);
+    }
+    put_vbios("pci rom bar", "/tunix-vbios-pcirom.rom", mapped ? buffer : NULL, VBIOS_MAX);
+}
+
+static uint32_t nv_read(uint64_t bar0, uint32_t offset) {
+    return *(volatile const uint32_t *)(bar0 + offset);
+}
+
+static void nv_write(uint64_t bar0, uint32_t offset, uint32_t value) {
+    *(volatile uint32_t *)(bar0 + offset) = value;
+}
+
+static void put_nv_pramin(uint64_t bar0, uint8_t *buffer) {
+    uint32_t pointer = nv_read(bar0, NV_PDISP_VBIOS_PTR);
+    put("  vbios ptr   ");
+    put_hex(pointer);
+    put("\n");
+    if (!(pointer & 0x8U) || (pointer & 0x3U) != 1U) {
+        put_vbios("pramin", "/tunix-vbios-pramin.rom", NULL, 0);
+        return;
+    }
+    uint64_t address = (uint64_t)(pointer & 0xFFFFFF00U) << 8;
+    uint32_t saved = nv_read(bar0, NV_PBUS_PRAMIN_BASE);
+    if (!address) address = ((uint64_t)saved << 16) + 0xF0000ULL;
+    nv_write(bar0, NV_PBUS_PRAMIN_BASE, (uint32_t)(address >> 16));
+    uint32_t inside = (uint32_t)(address & 0xFFFFULL);
+    copy_from_device(buffer, bar0 + NV_PRAMIN_WINDOW + inside, VBIOS_MAX);
+    nv_write(bar0, NV_PBUS_PRAMIN_BASE, saved);
+    put_vbios("pramin", "/tunix-vbios-pramin.rom", buffer, VBIOS_MAX);
+}
+
+static void put_nv_registers(uint64_t bar0) {
+    uint64_t bytes = 0;
+    for (size_t index = 0; index < sizeof(nv_register_ranges) / sizeof(nv_register_ranges[0]);
+         index++)
+        bytes += 8U + nv_register_ranges[index].bytes;
+    uint8_t *dump = kmalloc((size_t)bytes);
+    if (!dump) return;
+    uint64_t at = 0;
+    for (size_t index = 0; index < sizeof(nv_register_ranges) / sizeof(nv_register_ranges[0]);
+         index++) {
+        const struct register_range *range = &nv_register_ranges[index];
+        uint32_t header[2] = {range->start, range->bytes};
+        memcpy(dump + at, header, sizeof(header));
+        at += sizeof(header);
+        for (uint32_t offset = 0; offset < range->bytes; offset += 4U) {
+            uint32_t value = nv_read(bar0, range->start + offset);
+            memcpy(dump + at, &value, sizeof(value));
+            at += sizeof(value);
+        }
+    }
+    if (write_file(GPU_REGS_PATH, dump, (size_t)at) == 0) {
+        put("  registers   ");
+        put_number(at);
+        put(" bytes -> " GPU_REGS_PATH "\n");
+    }
+    kfree(dump);
+}
+
+static void put_nvidia(const struct pci_device *device, uint8_t *buffer) {
+    uint64_t bar0_physical = pci_bar_address(device, 0);
+    put("  bar0        ");
+    put_hex(bar0_physical);
+    put("\n  bar1        ");
+    put_hex(pci_bar_address(device, 1));
+    put("\n");
+    if (!bar0_physical) return;
+    uint64_t bar0 = vmm_map_device(bar0_physical, NV_BAR0_BYTES);
+    if (!bar0) return;
+    uint32_t boot0 = nv_read(bar0, NV_PMC_BOOT_0);
+    put("  boot0       ");
+    put_hex(boot0);
+    put(" chipset ");
+    put_hex((boot0 >> 20) & 0x1FFU);
+    put(" stepping ");
+    put_hex(boot0 & 0xFFU);
+    put("\n");
+    uint32_t vram = nv_read(bar0, NV_PFB_VRAM_SIZE);
+    uint64_t vram_bytes = ((uint64_t)(vram & 0xFFU) << 32) | (vram & 0xFFFFFF00U);
+    put("  vram        ");
+    put_number(vram_bytes / (1024ULL * 1024ULL));
+    put(" MiB\n");
+    put_nv_pramin(bar0, buffer);
+    put_nv_registers(bar0);
+}
+
+static void put_gpu(void) {
+    put("gpu\n");
+    struct display_list *list = kmalloc(sizeof(*list));
+    uint8_t *buffer = kmalloc(VBIOS_MAX);
+    if (!list || !buffer) {
+        put("  out of memory\n");
+        kfree(list);
+        kfree(buffer);
+        return;
+    }
+    list->count = 0;
+    pci_for_each_device(collect_display, list);
+    if (!list->count) put("  no display controller on pci\n");
+    put_legacy_vbios(buffer);
+    for (unsigned index = 0; index < list->count; index++) {
+        const struct pci_device *device = &list->devices[index];
+        put("  device      0000:");
+        put_hex_fixed(device->bus, 2);
+        put(":");
+        put_hex_fixed(device->slot, 2);
+        put(".");
+        put_hex_fixed(device->function, 1);
+        put(" ");
+        put_hex_fixed(device->vendor_id, 4);
+        put(":");
+        put_hex_fixed(device->device_id, 4);
+        put(" subclass ");
+        put_hex_fixed(device->subclass, 2);
+        put("\n");
+        put_pci_rom(device, buffer);
+        if (device->vendor_id == PCI_VENDOR_NVIDIA) put_nvidia(device, buffer);
+    }
+    kfree(buffer);
+    kfree(list);
 }
 
 void hwreport_emit(void) {
@@ -590,6 +850,7 @@ void hwreport_emit(void) {
         put_pci(aliases);
         kfree(aliases);
     }
+    put_gpu();
 
     uint64_t console_started = time_uptime_ns();
     kprintf("%s", report);
