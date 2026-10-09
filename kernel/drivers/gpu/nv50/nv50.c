@@ -17,8 +17,15 @@
 
 extern void kprintf(const char *fmt, ...);
 
+#define BUFFER_ALIGN 0x100000U
+#define DRM_BUFFERS  2U
+
 static struct nv50_device gpu;
 static uint8_t vbios_image[VBIOS_IMAGE_BYTES];
+static uint8_t gpu_bus, gpu_slot, gpu_function;
+static uint8_t *buffer_map[DRM_BUFFERS];
+static uint32_t buffer_vram[DRM_BUFFERS];
+static unsigned back_index;
 
 static int find_gpu(uint8_t *bus_out, uint8_t *slot_out, uint8_t *function_out) {
     for (unsigned bus = 0; bus < 256U; bus++) {
@@ -48,6 +55,9 @@ static int is_nv50_family(uint32_t boot0) {
 static int map_gpu(void) {
     uint8_t bus = 0, slot = 0, function = 0;
     if (find_gpu(&bus, &slot, &function) != 0) return -1;
+    gpu_bus = bus;
+    gpu_slot = slot;
+    gpu_function = function;
     uint32_t bar0 = pci_config_read32(bus, slot, function, 0x10U);
     uint32_t bar1_low = pci_config_read32(bus, slot, function, 0x14U);
     uint32_t bar1_high =
@@ -96,7 +106,68 @@ static int nv50_setup(const struct boot_framebuffer_info *boot, struct boot_fram
     return 0;
 }
 
+static uint8_t *back_buffer(void) { return buffer_map[back_index]; }
+
+static int flip_to_back(void) {
+    if (nv50_disp_flip(&gpu, buffer_vram[back_index]) != 0) return -1;
+    back_index = (back_index + 1U) % DRM_BUFFERS;
+    return 0;
+}
+
+static int flip_to_console(void) {
+    if (gpu.front == VRAM_SURFACE) return 0;
+    if (!nv50_disp_flip_idle(&gpu, 1)) return -1;
+    return nv50_disp_flip(&gpu, VRAM_SURFACE);
+}
+
+static int console_in_front(void) { return gpu.front == VRAM_SURFACE; }
+
+static int idle(int may_service) { return nv50_disp_flip_idle(&gpu, may_service); }
+
+static const struct display_flipper flipper = {
+    .back_buffer = back_buffer,
+    .flip_to_back = flip_to_back,
+    .flip_to_console = flip_to_console,
+    .console_in_front = console_in_front,
+    .idle = idle,
+};
+
+static int pci_probe(const struct pci_device *device) {
+    return device->bus == gpu_bus && device->slot == gpu_slot && device->function == gpu_function
+        ? 0
+        : -1;
+}
+
+static const struct pci_device_id pci_ids[] = {
+    {PCI_VENDOR_NVIDIA, PCI_ANY_ID, PCI_CLASS_DISPLAY, PCI_ANY_ID},
+};
+
+static struct pci_driver pci_driver = {
+    .name = "nv50",
+    .ids = pci_ids,
+    .id_count = sizeof(pci_ids) / sizeof(pci_ids[0]),
+    .probe = pci_probe,
+};
+
+static void nv50_late(void) {
+    (void)pci_register_driver(&pci_driver);
+    uint32_t bytes = gpu.pitch * gpu.height;
+    uint32_t stride = (bytes + BUFFER_ALIGN - 1U) & ~(BUFFER_ALIGN - 1U);
+    for (unsigned index = 0; index < DRM_BUFFERS; index++) {
+        buffer_vram[index] = VRAM_SURFACE + stride * (index + 1U);
+        buffer_map[index] =
+            (uint8_t *)vmm_map_device_write_combining(gpu.bar1 + buffer_vram[index], bytes);
+        if (!buffer_map[index]) {
+            kprintf("NV50: the flip buffers could not be mapped\n");
+            return;
+        }
+    }
+    display_register_flipper(&flipper);
+    kprintf("NV50: page flipping between two buffers\n");
+}
+
 const struct display_early_driver nv50_display_driver = {
     .name = "nv50",
     .setup = nv50_setup,
+    .late = nv50_late,
 };

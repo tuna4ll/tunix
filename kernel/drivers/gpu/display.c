@@ -13,6 +13,9 @@ static const struct display_early_driver *const early_drivers[] = {
     NULL,
 };
 
+static const struct display_early_driver *active_driver;
+static const struct display_flipper *active_flipper;
+
 int display_early_init(const struct boot_framebuffer_info *boot,
                        struct boot_framebuffer_info *out) {
     if (!boot || !out) return -1;
@@ -20,7 +23,16 @@ int display_early_init(const struct boot_framebuffer_info *boot,
         if (early_drivers[index]->setup(boot, out) != 0) continue;
         kprintf("DISPLAY: %s drives the console at %ux%u\n", early_drivers[index]->name,
                 (unsigned)out->width, (unsigned)out->height);
+        active_driver = early_drivers[index];
         return 0;
     }
     return -1;
 }
+
+void display_late_init(void) {
+    if (active_driver && active_driver->late) active_driver->late();
+}
+
+void display_register_flipper(const struct display_flipper *flipper) { active_flipper = flipper; }
+
+const struct display_flipper *display_flipper(void) { return active_flipper; }

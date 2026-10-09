@@ -43,6 +43,9 @@ struct nv50_device {
     uint32_t vpll_coefficients;
     uint32_t vpll_fraction;
     struct nv50_lvds lvds;
+    uint32_t front;
+    int flip_pending;
+    int warned;
 };
 
 static inline uint32_t nv50_rd32(const struct nv50_device *gpu, uint32_t offset) {
@@ -66,5 +69,7 @@ int nv50_bios_run(struct nv50_device *gpu, uint16_t script);
 
 int nv50_disp_init(struct nv50_device *gpu);
 int nv50_disp_modeset(struct nv50_device *gpu);
+int nv50_disp_flip(struct nv50_device *gpu, uint32_t vram);
+int nv50_disp_flip_idle(struct nv50_device *gpu, int may_service);
 
 #endif

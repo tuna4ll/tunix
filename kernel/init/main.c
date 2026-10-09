@@ -108,6 +108,7 @@ void kmain(const struct boot_info *boot) {
     (void)xhci_init();
     (void)ehci_init();
     (void)virtgpu_init();
+    display_late_init();
 #if TUNIX_BOOT_TIMINGS
     boot_log_stage("memory/framebuffer/network init", &stage_started);
 #endif

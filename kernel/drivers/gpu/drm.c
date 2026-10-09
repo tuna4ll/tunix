@@ -4,6 +4,7 @@
 #include <tunix/cred.h>
 #include <tunix/percpu.h>
 #include <tunix/drm.h>
+#include <tunix/display.h>
 #include <tunix/file.h>
 #include <tunix/framebuffer.h>
 #include <tunix/heap.h>
@@ -1622,6 +1623,32 @@ static int32_t clamp_edge(int32_t value, uint32_t limit) {
     return (uint32_t)value > limit ? (int32_t)limit : value;
 }
 
+#define FLIP_WAIT_NS 50000000ULL
+
+static int present_via_flipper(const struct display_flipper *flipper,
+                               const struct drm_framebuffer *fb,
+                               const struct drm_dumb_buffer *buffer) {
+    uint64_t deadline = time_uptime_ns() + FLIP_WAIT_NS;
+    while (!flipper->idle(1)) {
+        if (time_uptime_ns() > deadline) return -EBUSY;
+        cpu_relax();
+    }
+    uint8_t *back = flipper->back_buffer();
+    if (!back) return -EPERM;
+    uint32_t screen_height = framebuffer_height();
+    uint32_t screen_pitch = framebuffer_pitch();
+    uint32_t rows = fb->height < screen_height ? fb->height : screen_height;
+    uint32_t row_bytes = fb->pitch < screen_pitch ? fb->pitch : screen_pitch;
+    for (uint32_t row = 0; row < rows; row++) {
+        copy_row_span(fb, buffer, back + (uint64_t)row * screen_pitch, row, 0, row_bytes);
+        smp_service_flush();
+    }
+    framebuffer_present();
+    if (flipper->flip_to_back() != 0) return -EIO;
+    scanout_current = 1;
+    return 0;
+}
+
 static int present_framebuffer(const struct file *client, uint32_t fb_id,
                                const struct drm_damage *damage) {
     struct drm_framebuffer *fb = client ? framebuffer_of(client, fb_id) : framebuffer_find(fb_id);
@@ -1647,6 +1674,9 @@ static int present_framebuffer(const struct file *client, uint32_t fb_id,
             return 0;
         }
     }
+
+    const struct display_flipper *flipper = display_flipper();
+    if (flipper) return present_via_flipper(flipper, fb, buffer);
 
     uint8_t *scanout = framebuffer_scanout();
     if (!scanout) return -EPERM;
@@ -1751,6 +1781,8 @@ static int flip_head_ready(const struct drm_event_queue *queue, int reclaim) {
     uint64_t now = time_uptime_ns();
     uint64_t due = queue->due_ns[queue->head];
     if (now < due) return 0;
+    const struct display_flipper *flipper = display_flipper();
+    if (flipper && !flipper->idle(reclaim)) return now - due > FLIP_FENCE_PATIENCE_NS;
     uint64_t fence = queue->fences[queue->head];
     if (fence <= virtgpu_completed()) return 1;
     if (reclaim && virtgpu_sequence_done(fence)) return 1;
@@ -2406,6 +2438,13 @@ void drm_display_suspend(void) {
 }
 
 void drm_console_present(void) {
+    const struct display_flipper *flipper = display_flipper();
+    if (flipper) {
+        if (flipper->console_in_front() || !mutex_trylock(&drm_lock)) return;
+        (void)flipper->flip_to_console();
+        mutex_unlock(&drm_lock);
+        return;
+    }
     if (!virtgpu_available()) return;
     if (!mutex_trylock(&drm_lock)) return;
     uint32_t pitch = framebuffer_pitch();

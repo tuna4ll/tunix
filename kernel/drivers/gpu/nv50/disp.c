@@ -55,6 +55,8 @@
 #define PIXEL_CLOCK_NOT_DRIVER      0x02000000U
 #define SURFACE_PITCH_ALIGN         256U
 #define PUSH_USABLE_BYTES           0xFC0U
+#define PUSH_JUMP_TO_START          0x20000000U
+#define FLIP_BATCH_BYTES            32U
 #define TIMEOUT_NS                  2000000000ULL
 #define SUPERVISOR_TIMEOUT_NS       5000000000ULL
 
@@ -357,8 +359,49 @@ int nv50_disp_modeset(struct nv50_device *gpu) {
         nv50_wr32(gpu, PBUS_PRAMIN_BASE, gpu->pramin_saved);
         return -1;
     }
-    nv50_wr32(gpu, PBUS_PRAMIN_BASE, gpu->pramin_saved);
+    gpu->front = VRAM_SURFACE;
     kprintf("NV50: %ux%u at %u khz, %u methods restored\n", gpu->width, gpu->height, clock,
             restored);
+    return 0;
+}
+
+int nv50_disp_flip(struct nv50_device *gpu, uint32_t vram) {
+    if (gpu->flip_pending) return -1;
+    if (gpu->push_at + FLIP_BATCH_BYTES + 4U > PUSH_USABLE_BYTES) {
+        vram_wr32(gpu, VRAM_PUSH + gpu->push_at, PUSH_JUMP_TO_START);
+        gpu->push_at = 0;
+    }
+    vram_wr32(gpu, VRAM_SYNC, 0);
+    push(gpu, HEAD_SET_OFFSET, vram >> 8);
+    push(gpu, CORE_SET_NOTIFIER_CONTROL, NOTIFY_ENABLE);
+    push(gpu, CORE_UPDATE, 0);
+    push(gpu, CORE_SET_NOTIFIER_CONTROL, 0);
+    if (kick(gpu) != 0) {
+        if (!gpu->warned++) kprintf("NV50: a flip was not consumed\n");
+        return -1;
+    }
+    gpu->front = vram;
+    gpu->flip_pending = 1;
+    return 0;
+}
+
+int nv50_disp_flip_idle(struct nv50_device *gpu, int may_service) {
+    if (!gpu->flip_pending) return 1;
+    if (vram_rd32(gpu, VRAM_SYNC) & 1U) {
+        gpu->flip_pending = 0;
+        return 1;
+    }
+    if (!may_service) return 0;
+    if (nv50_rd32(gpu, PDISP_INTR_0) & 0x001F0000U) {
+        if (!gpu->warned++) report_error(gpu);
+        gpu->flip_pending = 0;
+        return 1;
+    }
+    if (nv50_rd32(gpu, PDISP_INTR_1) & 0x70U) {
+        if (!gpu->warned++) kprintf("NV50: a flip raised a supervisor\n");
+        (void)service_supervisors(gpu);
+        gpu->flip_pending = 0;
+        return 1;
+    }
     return 0;
 }
