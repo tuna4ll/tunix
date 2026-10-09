@@ -84,7 +84,11 @@ clean:
 	rm -rf $(BUILD)/kernel $(BUILD)/modules $(KERNEL) $(IMAGE)
 
 distclean:
-	rm -rf $(BUILD)
+	$(USERNS) rm -rf $(BUILD)
+
+ifneq ($(SUDO_UID),)
+$(error do not run make with sudo: the build runs in a user namespace and needs no privileges)
+endif
 
 USERNS ?= $(if $(filter 0,$(shell id -u)),,unshare --map-auto --map-root-user)
 
@@ -162,14 +166,13 @@ $(IMAGE): $(KERNEL) $(MODULES) $(LIMINE_EXE) tools/limine.conf tools/image.sh $(
 QEMU_MEMORY ?= 4G
 QEMU_SMP    ?= 4
 COMMA := ,
-SUDO_RUNTIME := $(if $(SUDO_UID),/run/user/$(SUDO_UID))
 PULSE_SOCKET := $(firstword $(wildcard /mnt/wslg/PulseServer \
-	$(XDG_RUNTIME_DIR)/pulse/native $(SUDO_RUNTIME)/pulse/native))
+	$(XDG_RUNTIME_DIR)/pulse/native))
 PULSE_TUNING := $(COMMA)out.latency=100000$(COMMA)out.buffer-length=200000
 QEMU_AUDIO_BACKEND ?= $(if $(PULSE_SOCKET),pa$(COMMA)server=$(PULSE_SOCKET)$(PULSE_TUNING),none)
 AUDIO_NOTE = $(if $(PULSE_SOCKET),@echo ":: audio -> $(PULSE_SOCKET)",\
 	@echo ":: audio -> nowhere: no PulseAudio socket found, so the machine will be silent." \
-	; echo ":: run as yourself rather than under sudo, or set PULSE_SOCKET=/path/to/native")
+	; echo ":: set PULSE_SOCKET=/path/to/native to choose one")
 QEMU_AUDIO  ?= -audiodev $(QEMU_AUDIO_BACKEND)$(COMMA)id=snd0 \
 	-device intel-hda -device hda-output,audiodev=snd0
 QEMU_NET    ?= -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0

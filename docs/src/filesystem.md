@@ -229,10 +229,11 @@ asynchronous commit, fast commit -- stops the mount rather than being ignored,
 the same rule the filesystem superblock's incompatible features get. `mkfs.ext3`
 sets none of them.
 
-The image is a plain ext3 filesystem, so it mounts on Linux:
+The image is a plain ext3 filesystem, so Linux tools read it without
+mounting it:
 
 ```sh
-sudo mount -o loop,offset=$((133120*512)) build/tunix.img /mnt
+debugfs -R "ls -l /" "build/tunix.img?offset=$((133120*512))"
 ```
 
 ## Volatile directories

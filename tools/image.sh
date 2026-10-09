@@ -102,7 +102,4 @@ dd if="$WORK/root.img" of="$IMAGE" bs=4M oflag=seek_bytes \
 [ "$ARCH" != x86_64 ] || "$LIMINE_DIR/limine" bios-install "$IMAGE"
 
 rm -rf "$WORK"
-if [ -n "${SUDO_UID:-}" ] && [ -n "${SUDO_GID:-}" ]; then
-	chown "$SUDO_UID:$SUDO_GID" "$IMAGE"
-fi
 echo ":: $IMAGE ready, $TABLE ($(du -h "$IMAGE" | cut -f1))"
