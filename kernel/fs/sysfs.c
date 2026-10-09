@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
+#include <tunix/backlight.h>
 #include <tunix/devnum.h>
 #include <tunix/drm.h>
 #include <tunix/pci.h>
@@ -961,6 +962,146 @@ static void publish_input_parent(const char *name, const char *label) {
     (void)vfs_create_symlink(link, target, 0);
 }
 
+#define BACKLIGHT_EINVAL 22
+#define BACKLIGHT_EIO    5
+
+enum backlight_attribute {
+    BACKLIGHT_BRIGHTNESS,
+    BACKLIGHT_ACTUAL,
+    BACKLIGHT_MAX,
+    BACKLIGHT_TYPE,
+};
+
+static const struct backlight_device *backlight;
+static uint32_t backlight_level;
+
+static int64_t backlight_read(struct vfs_node *node, uint64_t offset, size_t size, void *output) {
+    char text[32];
+    size_t length = 0;
+    if (!backlight) return 0;
+    switch (node->inode) {
+    case BACKLIGHT_BRIGHTNESS: append_number(text, sizeof(text), &length, backlight_level); break;
+    case BACKLIGHT_ACTUAL:     append_number(text, sizeof(text), &length, backlight->get()); break;
+    case BACKLIGHT_MAX:
+        append_number(text, sizeof(text), &length, backlight->max_brightness);
+        break;
+    default: append_string(text, sizeof(text), &length, backlight->type); break;
+    }
+    append_string(text, sizeof(text), &length, "\n");
+    return attribute_reply(text, length, offset, size, output);
+}
+
+static int64_t backlight_write(struct vfs_node *node, uint64_t offset, size_t size,
+                               const void *buffer) {
+    (void)offset;
+    if (!backlight || node->inode != BACKLIGHT_BRIGHTNESS) return -BACKLIGHT_EINVAL;
+    const char *text = (const char *)buffer;
+    size_t index = 0;
+    while (index < size && text[index] == ' ') index++;
+    size_t first = index;
+    uint32_t value = 0;
+    for (; index < size && text[index] >= '0' && text[index] <= '9'; index++) {
+        value = value * 10U + (uint32_t)(text[index] - '0');
+        if (value > backlight->max_brightness) return -BACKLIGHT_EINVAL;
+    }
+    if (index == first) return -BACKLIGHT_EINVAL;
+    for (; index < size; index++)
+        if (text[index] != '\n' && text[index] != ' ' && text[index] != '\0')
+            return -BACKLIGHT_EINVAL;
+    if (backlight->set(value) != 0) return -BACKLIGHT_EIO;
+    backlight_level = value;
+    return (int64_t)size;
+}
+
+static void backlight_attribute(struct vfs_node *parent, const char *name, uint64_t which,
+                                int writable) {
+    struct vfs_node *node = vfs_alloc_node(name, VFS_FILE);
+    if (!node) return;
+    node->mode = writable ? 0644 : 0444;
+    node->length = 64;
+    node->read = backlight_read;
+    if (writable) node->write = backlight_write;
+    node->inode = which;
+    if (vfs_attach(parent, node) != 0) vfs_free_node(node);
+}
+
+static struct pci_device backlight_parent;
+static int backlight_has_parent;
+static int sysfs_ready;
+
+static void publish_backlight(void) {
+    const struct backlight_device *device = backlight;
+    const struct pci_device *parent = backlight_has_parent ? &backlight_parent : NULL;
+
+    char devpath[128];
+    size_t used = 0;
+    if (parent) {
+        append_string(devpath, sizeof(devpath), &used, "/devices/pci0000:00/");
+        pci_slot_name(devpath, sizeof(devpath), &used, parent);
+        append_string(devpath, sizeof(devpath), &used, "/backlight/");
+    } else {
+        append_string(devpath, sizeof(devpath), &used, "/devices/virtual/backlight/");
+    }
+    append_string(devpath, sizeof(devpath), &used, device->name);
+    devpath[used] = '\0';
+
+    char path[160];
+    used = 0;
+    append_string(path, sizeof(path), &used, "/sys");
+    append_string(path, sizeof(path), &used, devpath);
+    path[used] = '\0';
+    struct vfs_node *directory = vfs_mkdir_p(path);
+    if (!directory) return;
+
+    backlight_level = device->get();
+    backlight_attribute(directory, "brightness", BACKLIGHT_BRIGHTNESS, 1);
+    backlight_attribute(directory, "actual_brightness", BACKLIGHT_ACTUAL, 0);
+    backlight_attribute(directory, "max_brightness", BACKLIGHT_MAX, 0);
+    backlight_attribute(directory, "type", BACKLIGHT_TYPE, 0);
+
+    char file[176];
+    used = 0;
+    append_string(file, sizeof(file), &used, path);
+    append_string(file, sizeof(file), &used, "/uevent");
+    file[used] = '\0';
+    static const char properties[] = "SUBSYSTEM=backlight\n";
+    struct sysfs_device *registered =
+        register_uevent(devpath, file, properties, sizeof(properties) - 1);
+
+    (void)vfs_mkdir_p("/sys/class/backlight");
+    used = 0;
+    append_string(file, sizeof(file), &used, path);
+    append_string(file, sizeof(file), &used, "/subsystem");
+    file[used] = '\0';
+    (void)vfs_create_symlink(file, "/sys/class/backlight", 0);
+
+    char link[96];
+    used = 0;
+    append_string(link, sizeof(link), &used, "/sys/class/backlight/");
+    append_string(link, sizeof(link), &used, device->name);
+    link[used] = '\0';
+    char target[160];
+    used = 0;
+    append_string(target, sizeof(target), &used, "../..");
+    append_string(target, sizeof(target), &used, devpath);
+    target[used] = '\0';
+    (void)vfs_create_symlink(link, target, 0);
+
+    if (registered) uevent_send(registered, "add");
+}
+
+void sysfs_publish_backlight(const struct backlight_device *device,
+                             const struct pci_device *parent) {
+    VFS_GUARD;
+    if (backlight || !device || !device->get || !device->set) return;
+    backlight = device;
+    if (parent) {
+        backlight_parent = *parent;
+        backlight_has_parent = 1;
+    }
+    if (sysfs_ready) publish_backlight();
+}
+
 static struct vfs_node *tty0_active;
 
 static int64_t tty0_active_read(struct vfs_node *node, uint64_t offset, size_t size, void *output) {
@@ -1051,4 +1192,7 @@ void sysfs_init(void) {
         publish_device(name, devname, "input", tags, DEV_MAJOR_INPUT,
                        DEV_MINOR_INPUT_EVENT_BASE + device);
     }
+
+    sysfs_ready = 1;
+    if (backlight) publish_backlight();
 }
