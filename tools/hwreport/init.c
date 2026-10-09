@@ -15,6 +15,7 @@
 #define SQUARE              96U
 #define REPORT_PATH         "/tunix-display.txt"
 #define KMSG_PATH           "/tunix-kmsg.txt"
+#define BACKLIGHT           "/sys/class/backlight/nv_backlight/"
 #define KERNEL_DONE         "TUNIX: starting"
 #define KERNEL_WAIT_MS      120000
 
@@ -310,6 +311,73 @@ static void wait_for_kernel_report(void) {
         sleep_ms(100);
 }
 
+static s64 read_number(const char *path) {
+    char text[32];
+    int fd = (int)open(path, O_RDONLY, 0);
+    if (fd < 0) return -1;
+    s64 got = read(fd, text, sizeof(text));
+    close(fd);
+    if (got <= 0 || text[0] < '0' || text[0] > '9') return -1;
+    s64 value = 0;
+    for (s64 index = 0; index < got && text[index] >= '0' && text[index] <= '9'; index++)
+        value = value * 10 + (text[index] - '0');
+    return value;
+}
+
+static int write_text(const char *path, const char *text) {
+    int fd = (int)open(path, O_WRONLY, 0);
+    if (fd < 0) return -1;
+    s64 length = (s64)strlen(text);
+    s64 wrote = write(fd, text, (u64)length);
+    close(fd);
+    return wrote == length ? 0 : -1;
+}
+
+static void format_number(char *out, s64 value) {
+    char digits[24];
+    int count = 0;
+    do {
+        digits[count++] = (char)('0' + value % 10);
+        value /= 10;
+    } while (value);
+    while (count) *out++ = digits[--count];
+    *out++ = '\n';
+    *out = '\0';
+}
+
+static int set_backlight(s64 level) {
+    char text[24];
+    format_number(text, level);
+    return write_text(BACKLIGHT "brightness", text);
+}
+
+static void backlight_check(void) {
+    s64 most = read_number(BACKLIGHT "max_brightness");
+    if (most <= 0) {
+        note("backlight: none\n");
+        return;
+    }
+    s64 start = read_number(BACKLIGHT "brightness");
+    note("backlight: max ");
+    note_number(most);
+    note(", at ");
+    note_number(start);
+    note(", type ");
+    note_file(BACKLIGHT "type");
+    int refused = set_backlight(most + 1) != 0 && write_text(BACKLIGHT "brightness", "dim\n") != 0;
+    note(refused ? "backlight: bad values refused\n" : "backlight: a bad value was taken\n");
+    const s64 levels[] = {most / 5, most * 3 / 5, start};
+    for (unsigned index = 0; index < sizeof(levels) / sizeof(levels[0]); index++) {
+        int status = set_backlight(levels[index]);
+        sleep_ms(1000);
+        note("backlight: set ");
+        note_number(levels[index]);
+        note(status ? " failed" : " reads ");
+        if (!status) note_number(read_number(BACKLIGHT "actual_brightness"));
+        note("\n");
+    }
+}
+
 static void save_kernel_log(void) {
     s64 total = read_kernel_log();
     int out = (int)open(KMSG_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -323,6 +391,7 @@ static void run(int argc, char **argv) {
     (void)argv;
     wait_for_kernel_report();
     display_check();
+    backlight_check();
     int fd = (int)open(REPORT_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd >= 0) {
         write(fd, summary, summary_used);
