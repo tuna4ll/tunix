@@ -15,6 +15,8 @@
 #define SQUARE              96U
 #define REPORT_PATH         "/tunix-display.txt"
 #define KMSG_PATH           "/tunix-kmsg.txt"
+#define KERNEL_DONE         "TUNIX: starting"
+#define KERNEL_WAIT_MS      120000
 
 struct drm_mode_info {
     u32 clock;
@@ -227,14 +229,39 @@ static void display_check(void) {
     close(fd);
 }
 
-static void save_kernel_log(void) {
-    static char log[256 * 1024];
+static char log[256 * 1024];
+
+static s64 read_kernel_log(void) {
     int in = (int)open("/dev/kmsg", O_RDONLY, 0);
-    if (in < 0) return;
+    if (in < 0) return 0;
     s64 total = 0, got;
     while (total < (s64)sizeof(log) && (got = read(in, log + total, sizeof(log) - (u64)total)) > 0)
         total += got;
     close(in);
+    return total;
+}
+
+static int same(const char *left, const char *right, u64 size) {
+    for (u64 index = 0; index < size; index++)
+        if (left[index] != right[index]) return 0;
+    return 1;
+}
+
+static int log_contains(s64 length, const char *text) {
+    u64 size = strlen(text);
+    for (s64 at = 0; at + (s64)size <= length; at++)
+        if (same(log + at, text, size)) return 1;
+    return 0;
+}
+
+static void wait_for_kernel_report(void) {
+    s64 start = now_ms();
+    while (!log_contains(read_kernel_log(), KERNEL_DONE) && now_ms() - start < KERNEL_WAIT_MS)
+        sleep_ms(100);
+}
+
+static void save_kernel_log(void) {
+    s64 total = read_kernel_log();
     int out = (int)open(KMSG_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (out < 0) return;
     write(out, log, (u64)total);
@@ -244,6 +271,7 @@ static void save_kernel_log(void) {
 static void run(int argc, char **argv) {
     (void)argc;
     (void)argv;
+    wait_for_kernel_report();
     display_check();
     int fd = (int)open(REPORT_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd >= 0) {
