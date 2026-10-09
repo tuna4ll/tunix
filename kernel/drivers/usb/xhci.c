@@ -1,24 +1,24 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#include "../../include/cpu.h"
-#include "../../include/hid.h"
-#include "../../include/hid_input.h"
-#include "../../include/irq.h"
-#include "../../include/pci.h"
-#include "../../include/pmm.h"
-#include "../../include/vmm.h"
-#include "../../include/time.h"
-#include "../../include/heap.h"
-#include "../../include/kstring.h"
-#include "../../include/input.h"
-#include "../../include/usb.h"
-#include "../../include/xhci.h"
-#include "../../include/iowait.h"
-#include "../../include/lock.h"
-#include "../../include/mutex.h"
-#include "../../include/process.h"
-#include "../../include/workqueue.h"
+#include <tunix/cpu.h>
+#include <tunix/hid.h>
+#include <tunix/hid_input.h>
+#include <tunix/irq.h>
+#include <tunix/pci.h>
+#include <tunix/pmm.h>
+#include <tunix/vmm.h>
+#include <tunix/time.h>
+#include <tunix/heap.h>
+#include <tunix/kstring.h>
+#include <tunix/input.h>
+#include <tunix/usb.h>
+#include <tunix/xhci.h>
+#include <tunix/iowait.h>
+#include <tunix/lock.h>
+#include <tunix/mutex.h>
+#include <tunix/process.h>
+#include <tunix/workqueue.h>
 
 extern void kprintf(const char *fmt, ...);
 

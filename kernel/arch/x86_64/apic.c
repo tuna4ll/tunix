@@ -1,15 +1,15 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#include "../../include/acpi.h"
-#include "../../include/apic.h"
-#include "../../include/cpu.h"
-#include "../../include/percpu.h"
-#include "../../include/pic.h"
-#include "../../include/smp.h"
-#include "../../include/time.h"
-#include "../../include/timer.h"
-#include "../../include/vmm.h"
+#include <tunix/acpi.h>
+#include <tunix/apic.h>
+#include <tunix/cpu.h>
+#include <tunix/percpu.h>
+#include <tunix/pic.h>
+#include <tunix/smp.h>
+#include <tunix/time.h>
+#include <tunix/timer.h>
+#include <tunix/vmm.h>
 
 extern void kprintf(const char *fmt, ...);
 

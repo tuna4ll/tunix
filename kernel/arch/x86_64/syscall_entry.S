@@ -41,7 +41,6 @@ syscall_entry:
     mov rdi, rsp
     call syscall_dispatch
 
-    /* Move onto the resumed process's stack before letting the old one go. */
 syscall_return_to_user:
     mov rsp, qword ptr gs:[CPU_KERNEL_RSP]
     sub rsp, 144

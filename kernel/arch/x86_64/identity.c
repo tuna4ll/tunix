@@ -1,6 +1,6 @@
 #include <stdint.h>
 
-#include "../../include/cpu.h"
+#include <tunix/cpu.h>
 
 static void copy_words(char *out, const uint32_t *words, unsigned count) {
     for (unsigned word = 0; word < count; word++)

@@ -1,8 +1,8 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../include/eventfd.h"
-#include "../include/heap.h"
-#include "../include/lock.h"
+#include <tunix/eventfd.h>
+#include <tunix/heap.h>
+#include <tunix/lock.h>
 
 static struct lock eventfd_lock = LOCK_INITIALIZER("eventfd", LOCK_RANK_OBJECT);
 

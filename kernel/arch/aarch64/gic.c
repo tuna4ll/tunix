@@ -1,7 +1,7 @@
 #include <stdint.h>
 
-#include "../../include/percpu.h"
-#include "../../include/vmm.h"
+#include <tunix/percpu.h>
+#include <tunix/vmm.h>
 #include "aarch64.h"
 
 extern void kprintf(const char *fmt, ...);

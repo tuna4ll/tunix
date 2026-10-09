@@ -1,11 +1,11 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../include/epoll.h"
-#include "../include/file.h"
-#include "../include/heap.h"
-#include "../include/kstring.h"
-#include "../include/lock.h"
-#include "../include/syscall.h"
+#include <tunix/epoll.h>
+#include <tunix/file.h>
+#include <tunix/heap.h>
+#include <tunix/kstring.h>
+#include <tunix/lock.h>
+#include <tunix/syscall.h>
 
 static struct lock epoll_lock = LOCK_INITIALIZER("epoll", LOCK_RANK_OBJECT);
 

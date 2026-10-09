@@ -1,22 +1,22 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../include/acl.h"
-#include "../include/cgroup.h"
-#include "../include/cred.h"
-#include "../include/defer.h"
-#include "../include/heap.h"
-#include "../include/lock.h"
-#include "../include/mutex.h"
-#include "../include/pmm.h"
-#include "../include/vmm.h"
-#include "../include/inotify.h"
-#include "../include/kstring.h"
-#include "../include/time.h"
-#include "../include/ext2.h"
-#include "../include/fatfs.h"
-#include "../include/pipe.h"
-#include "../include/process.h"
-#include "../include/vfs.h"
+#include <tunix/acl.h>
+#include <tunix/cgroup.h>
+#include <tunix/cred.h>
+#include <tunix/defer.h>
+#include <tunix/heap.h>
+#include <tunix/lock.h>
+#include <tunix/mutex.h>
+#include <tunix/pmm.h>
+#include <tunix/vmm.h>
+#include <tunix/inotify.h>
+#include <tunix/kstring.h>
+#include <tunix/time.h>
+#include <tunix/ext2.h>
+#include <tunix/fatfs.h>
+#include <tunix/pipe.h>
+#include <tunix/process.h>
+#include <tunix/vfs.h>
 
 extern void kprintf(const char *fmt, ...);
 

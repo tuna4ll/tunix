@@ -1,15 +1,15 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../include/file.h"
-#include "../include/heap.h"
-#include "../include/kstring.h"
-#include "../include/lock.h"
+#include <tunix/file.h>
+#include <tunix/heap.h>
+#include <tunix/kstring.h>
+#include <tunix/lock.h>
 
 static int64_t pipe_read_locked(struct pipe_buffer *pipe, size_t size, void *buffer);
 static int64_t pipe_write_locked(struct pipe_buffer *pipe, size_t size, const void *buffer);
 static int pipe_resize_locked(struct pipe_buffer *pipe, size_t capacity);
-#include "../include/pipe.h"
-#include "../include/process.h"
+#include <tunix/pipe.h>
+#include <tunix/process.h>
 
 #define EAGAIN 11
 

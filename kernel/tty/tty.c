@@ -1,15 +1,15 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../include/heap.h"
-#include "../include/io.h"
-#include "../include/input.h"
-#include "../include/kstring.h"
-#include "../include/process.h"
-#include "../include/signal.h"
-#include "../include/tty.h"
-#include "../include/terminal.h"
-#include "../include/vt.h"
-#include "../include/tunix/input_event.h"
+#include <tunix/heap.h>
+#include <tunix/io.h>
+#include <tunix/input.h>
+#include <tunix/kstring.h>
+#include <tunix/process.h>
+#include <tunix/signal.h>
+#include <tunix/tty.h>
+#include <tunix/terminal.h>
+#include <tunix/vt.h>
+#include <uapi/input_event.h>
 
 struct mutex tty_lock = MUTEX_INITIALIZER("tty", LOCK_RANK_TTY);
 

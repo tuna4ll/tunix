@@ -138,13 +138,13 @@ report and udev can read the same file at once.
 
 ## Finding the processors
 
-`acpi_describe_machine` (`kernel/drivers/acpi.c`) walks the MADT. A type 0 entry is
+`acpi_describe_machine` (`kernel/drivers/acpi/acpi.c`) walks the MADT. A type 0 entry is
 a processor: it carries an ACPI id, a local APIC id, and flags saying whether
 the socket is filled. The APIC id is what a startup message is addressed to and
 it is **not** the index — firmware numbers processors however it likes, and a
 machine with hyperthreading disabled in its BIOS leaves gaps.
 
-`SMP_MAX_CPUS` (256, `kernel/include/percpu.h`) is the ceiling: the xAPIC id
+`SMP_MAX_CPUS` (256, `kernel/include/tunix/percpu.h`) is the ceiling: the xAPIC id
 space. Only small per-processor scalars are sized by it; idle stacks and the
 GDT, TSS and fault stack are allocated for processors that exist, and affinity
 is a 256-bit `struct cpu_mask`. Idle processors skip the scheduler on their
@@ -153,7 +153,7 @@ idle tick behind the scheduler lock.
 
 ## Bringing one up
 
-`smp_init` (`kernel/smp.c`) runs at the end of `kmain`, after the APIC, the
+`smp_init` (`kernel/arch/x86_64/smp.c`) runs at the end of `kmain`, after the APIC, the
 timer and the syscall MSRs, and before the first process starts. For each
 processor other than the one running:
 
@@ -197,7 +197,7 @@ mistake in here is a triple fault and a silent reboot, not a message.
 
 ## What each processor owns
 
-`struct cpu` (`kernel/include/percpu.h`) is reached through `GS`. That is
+`struct cpu` (`kernel/include/tunix/percpu.h`) is reached through `GS`. That is
 the only way a piece of kernel code can find out which processor is running it:
 every other name in the kernel is shared.
 
@@ -285,11 +285,11 @@ own, and system calls and interrupts enter the kernel without taking anything.
 
 There are two kinds of lock.
 
-A **spinlock** (`struct lock`, `kernel/lock.c`) is a fair ticket lock that the
+A **spinlock** (`struct lock`, `kernel/locking/lock.c`) is a fair ticket lock that the
 same processor may take again. It is held for a short stretch of code and never
 across anything that sleeps.
 
-A **mutex** (`struct mutex`, `kernel/mutex.c`) is owned by a process. A process
+A **mutex** (`struct mutex`, `kernel/locking/mutex.c`) is owned by a process. A process
 that finds one taken sleeps and the processor runs something else; when the
 owner lets go, the mutex is handed to the process that has waited longest, so a
 thread that takes it in a loop cannot starve the others. It may be held across
@@ -312,7 +312,7 @@ and carries on. A processor that waits longer than twenty seconds for a
 spinlock prints who holds it and what else they hold. Returning to user mode or
 going idle with a lock still held is reported too.
 
-The ranks, outermost first (`kernel/include/lock.h`):
+The ranks, outermost first (`kernel/include/tunix/lock.h`):
 
 | Rank | Mutexes | Spinlocks |
 | --- | --- | --- |
@@ -364,7 +364,7 @@ stack that returns to user mode through the system call exit path.
 
 What belongs to a processor rather than a process moves with the switch: the
 file pins a system call holds are per process, and a process asleep in the
-kernel is counted as still inside it by `kernel/defer.c`, so nothing it read
+kernel is counted as still inside it by `kernel/core/defer.c`, so nothing it read
 under RCU-style protection is freed while it sleeps.
 
 Interrupts stay off while a processor is in the kernel, so a long system
@@ -381,7 +381,7 @@ path in process context instead, because both may need locks that sleep.
 
 ### Waiting for hardware
 
-A driver waiting for a disk calls `io_poll()` (`kernel/iowait.c`): it spins for
+A driver waiting for a disk calls `io_poll()` (`kernel/core/iowait.c`): it spins for
 half a millisecond, which covers most SSD commands, and after that sleeps and
 looks again every millisecond or on every tick. The disk drivers hold their
 mutex across a command; the USB host drivers drop their spinlock while they
@@ -455,7 +455,7 @@ The kernel reaches user memory by walking the page tables in software
 enough: a processor still holding a translation to a page that has just been
 freed would keep writing into memory handed to somebody else.
 
-`smp_flush_address_space` (`kernel/smp.c`) is called wherever a mapping is
+`smp_flush_address_space` (`kernel/arch/x86_64/smp.c`) is called wherever a mapping is
 removed or narrowed: `vmm_unmap_page_in`, `vmm_protect_page_in`, the copy path
 of `vmm_handle_cow_fault` (before the frame goes back to the allocator), and
 `vmm_clone_address_space`, which clears write permission on the *parent*'s
@@ -746,7 +746,7 @@ looks: `nproc` and every thread pool that sizes itself ask that first and only
 fall back to `/proc/cpuinfo`, so a kernel that returns `ENOSYS` there reports
 one processor however many it is running. `sched_setaffinity` narrows the mask
 for real — see the scheduler section above, and `allowed_on_this_cpu()` in
-`kernel/process.c`.
+`kernel/core/process.c`.
 
 The other proof was a desktop: a full Xfce session — Xorg, xfwm4, xfce4-panel,
 xfdesktop, Thunar, all of it heavily threaded — coming up and staying up on four

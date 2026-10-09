@@ -1,7 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "../../include/serial.h"
+#include <tunix/serial.h>
 #include "aarch64.h"
 
 extern void kprintf(const char *fmt, ...);

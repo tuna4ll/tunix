@@ -1,8 +1,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "../include/block.h"
-#include "../include/kstring.h"
+#include <tunix/block.h>
+#include <tunix/kstring.h>
 
 extern void kprintf(const char *fmt, ...);
 

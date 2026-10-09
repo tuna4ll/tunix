@@ -1,13 +1,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "../../include/cpu.h"
-#include "../../include/kstring.h"
-#include "../../include/percpu.h"
-#include "../../include/power.h"
-#include "../../include/thermal.h"
-#include "../../include/time.h"
-#include "../../include/workqueue.h"
+#include <tunix/cpu.h>
+#include <tunix/kstring.h>
+#include <tunix/percpu.h>
+#include <tunix/power.h>
+#include <tunix/thermal.h>
+#include <tunix/time.h>
+#include <tunix/workqueue.h>
 
 extern void kprintf(const char *fmt, ...);
 

@@ -1,14 +1,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "../../include/boot.h"
-#include "../../include/kstring.h"
-#include "../../include/percpu.h"
-#include "../../include/pmm.h"
-#include "../../include/sdhci.h"
-#include "../../include/serial.h"
-#include "../../include/vmm.h"
-#include "../../include/hwcap.h"
+#include <tunix/boot.h>
+#include <tunix/kstring.h>
+#include <tunix/percpu.h>
+#include <tunix/pmm.h>
+#include <tunix/sdhci.h>
+#include <tunix/serial.h>
+#include <tunix/vmm.h>
+#include <tunix/hwcap.h>
 #include "aarch64.h"
 
 #define DESC_SH_INNER (3ULL << 8)

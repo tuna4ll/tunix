@@ -1,33 +1,33 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../include/file.h"
-#include "../include/pipe.h"
+#include <tunix/file.h>
+#include <tunix/pipe.h>
 
 static int64_t file_read_locked(struct file *file, size_t size, void *buffer);
 static int64_t file_write_locked(struct file *file, size_t size, const void *buffer);
-#include "../include/heap.h"
+#include <tunix/heap.h>
 
 extern uint64_t process_current_pid(void);
 extern int process_pidfd_exited(uint64_t pid, uint64_t start_ns);
-#include "../include/kstring.h"
-#include "../include/drm.h"
-#include "../include/framebuffer.h"
-#include "../include/eventfd.h"
-#include "../include/eventfs.h"
-#include "../include/timerfd.h"
-#include "../include/epoll.h"
-#include "../include/inotify.h"
-#include "../include/io_uring.h"
-#include "../include/input.h"
-#include "../include/memfd.h"
-#include "../include/signalfd.h"
-#include "../include/pipe.h"
-#include "../include/pty.h"
-#include "../include/vt.h"
-#include "../include/vfs.h"
-#include "../include/unix_socket.h"
-#include "../include/net/inet_socket.h"
-#include "../include/net/netlink.h"
+#include <tunix/kstring.h>
+#include <tunix/drm.h>
+#include <tunix/framebuffer.h>
+#include <tunix/eventfd.h>
+#include <tunix/eventfs.h>
+#include <tunix/timerfd.h>
+#include <tunix/epoll.h>
+#include <tunix/inotify.h>
+#include <tunix/io_uring.h>
+#include <tunix/input.h>
+#include <tunix/memfd.h>
+#include <tunix/signalfd.h>
+#include <tunix/pipe.h>
+#include <tunix/pty.h>
+#include <tunix/vt.h>
+#include <tunix/vfs.h>
+#include <tunix/unix_socket.h>
+#include <tunix/net/inet_socket.h>
+#include <tunix/net/netlink.h>
 
 #define EAGAIN 11
 #define EBADF 9

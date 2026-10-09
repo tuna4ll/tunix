@@ -1,8 +1,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "../../include/cpu.h"
-#include "../../include/random.h"
+#include <tunix/cpu.h>
+#include <tunix/random.h>
 
 static int cpu_has_rndr(void) {
     uint64_t isar0;

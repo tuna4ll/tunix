@@ -10,7 +10,7 @@ There is no port that means "power down". The ports are named by the FADT, and
 the *value* to write to them lives in the DSDT as an AML object, so getting a
 machine to switch itself off needs both tables.
 
-`acpi_describe_machine` (`kernel/drivers/acpi.c`) walks the RSDP to the RSDT or
+`acpi_describe_machine` (`kernel/drivers/acpi/acpi.c`) walks the RSDP to the RSDT or
 XSDT and reads two tables from it:
 
 - the **MADT**, which describes the processors and the interrupt controllers.
@@ -78,7 +78,7 @@ The flush is `ext2fs_sync` and an ATA cache flush. File writes reach ext2 as
 they happen, so this is metadata and the drive's own cache rather than a
 writeback cache of file contents, and it finishes in milliseconds.
 
-`kernel/power.c` holds that sequence rather than the syscall, because the
+`kernel/core/power.c` holds that sequence rather than the syscall, because the
 power button's interrupt wants the same thing.
 
 ## The power button

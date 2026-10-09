@@ -1,20 +1,20 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../../include/block.h"
-#include "../../include/cpu.h"
-#include "../../include/devfs.h"
-#include "../../include/partition.h"
-#include "../../include/dma.h"
-#include "../../include/heap.h"
-#include "../../include/kstring.h"
-#include "../../include/pmm.h"
-#include "../../include/usb_storage.h"
-#include "../../include/vmm.h"
-#include "../../include/usb.h"
-#include "../../include/lock.h"
-#include "../../include/mutex.h"
-#include "../../include/time.h"
-#include "../../include/workqueue.h"
+#include <tunix/block.h>
+#include <tunix/cpu.h>
+#include <tunix/devfs.h>
+#include <tunix/partition.h>
+#include <tunix/dma.h>
+#include <tunix/heap.h>
+#include <tunix/kstring.h>
+#include <tunix/pmm.h>
+#include <tunix/usb_storage.h>
+#include <tunix/vmm.h>
+#include <tunix/usb.h>
+#include <tunix/lock.h>
+#include <tunix/mutex.h>
+#include <tunix/time.h>
+#include <tunix/workqueue.h>
 
 extern void kprintf(const char *fmt, ...);
 

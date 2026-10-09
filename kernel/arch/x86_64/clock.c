@@ -1,8 +1,8 @@
 #include <stdint.h>
 
-#include "../../include/cpu.h"
-#include "../../include/io.h"
-#include "../../include/time.h"
+#include <tunix/cpu.h>
+#include <tunix/io.h>
+#include <tunix/time.h>
 
 #define PIT_FREQUENCY 1193182ULL
 #define PIT_SAMPLE_TICKS 23864U

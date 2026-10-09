@@ -1,12 +1,12 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../include/cred.h"
-#include "../include/eventfs.h"
-#include "../include/heap.h"
-#include "../include/lock.h"
-#include "../include/kstring.h"
-#include "../include/process.h"
-#include "../include/vfs.h"
+#include <tunix/cred.h>
+#include <tunix/eventfs.h>
+#include <tunix/heap.h>
+#include <tunix/lock.h>
+#include <tunix/kstring.h>
+#include <tunix/process.h>
+#include <tunix/vfs.h>
 
 #define EAGAIN 11
 #define EMSGSIZE 90
@@ -41,7 +41,6 @@ static void eventfs_guard_release(int *unused) {
     (void)unused;
     lock_release(&eventfs_lock);
     if (lock_held(&eventfs_lock)) return;
-    /* Emitters may hold the scheduler lock, so readers are woken only after the ring is unlocked. */
     if (__atomic_exchange_n(&wake_pending, 0, __ATOMIC_ACQ_REL)) process_wake_all(&wait_token);
 }
 

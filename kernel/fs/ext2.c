@@ -1,16 +1,16 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../include/block.h"
-#include "../include/build_config.h"
-#include "../include/ext2.h"
-#include "../include/ext3.h"
-#include "../include/heap.h"
-#include "../include/kstring.h"
-#include "../include/mutex.h"
-#include "../include/process.h"
-#include "../include/random.h"
-#include "../include/time.h"
-#include "../include/vfs.h"
+#include <tunix/block.h>
+#include <tunix/build_config.h>
+#include <tunix/ext2.h>
+#include <tunix/ext3.h>
+#include <tunix/heap.h>
+#include <tunix/kstring.h>
+#include <tunix/mutex.h>
+#include <tunix/process.h>
+#include <tunix/random.h>
+#include <tunix/time.h>
+#include <tunix/vfs.h>
 
 static void vfs_guard_release(int *unused) {
     (void)unused;

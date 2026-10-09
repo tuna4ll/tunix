@@ -1,6 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../include/terminal_font.h"
+#include <tunix/terminal_font.h>
 
 struct glyph_map {
     uint16_t codepoint;

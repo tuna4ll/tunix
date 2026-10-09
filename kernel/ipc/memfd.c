@@ -1,11 +1,11 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../include/heap.h"
-#include "../include/kstring.h"
-#include "../include/memfd.h"
-#include "../include/pmm.h"
-#include "../include/vmm.h"
-#include "../include/lock.h"
+#include <tunix/heap.h>
+#include <tunix/kstring.h>
+#include <tunix/memfd.h>
+#include <tunix/pmm.h>
+#include <tunix/vmm.h>
+#include <tunix/lock.h>
 
 static struct lock memfd_lock = LOCK_INITIALIZER("memfd", LOCK_RANK_OBJECT);
 

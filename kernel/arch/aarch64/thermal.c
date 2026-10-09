@@ -1,7 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "../../include/thermal.h"
+#include <tunix/thermal.h>
 
 static struct thermal_state state;
 

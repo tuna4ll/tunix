@@ -1,10 +1,10 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../include/heap.h"
-#include "../include/time.h"
-#include "../include/timer.h"
-#include "../include/timerfd.h"
-#include "../include/lock.h"
+#include <tunix/heap.h>
+#include <tunix/time.h>
+#include <tunix/timer.h>
+#include <tunix/timerfd.h>
+#include <tunix/lock.h>
 
 static struct lock timerfd_lock = LOCK_INITIALIZER("timerfd", LOCK_RANK_OBJECT);
 

@@ -1,13 +1,13 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../include/heap.h"
-#include "../include/io_uring.h"
-#include "../include/kstring.h"
-#include "../include/memfd.h"
-#include "../include/mutex.h"
-#include "../include/time.h"
-#include "../include/usercopy.h"
-#include "../include/vmm.h"
+#include <tunix/heap.h>
+#include <tunix/io_uring.h>
+#include <tunix/kstring.h>
+#include <tunix/memfd.h>
+#include <tunix/mutex.h>
+#include <tunix/time.h>
+#include <tunix/usercopy.h>
+#include <tunix/vmm.h>
 
 #define ENOENT 2
 #define EBADF 9

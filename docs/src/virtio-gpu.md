@@ -10,7 +10,7 @@ make run-gpu
 
 ## Why it exists
 
-`/dev/dri/card0` has no GPU behind it (see `kernel/drivers/drm.c`). The display is
+`/dev/dri/card0` has no GPU behind it (see `kernel/drivers/gpu/drm.c`). The display is
 the region the bootloader set up over VBE, there is no CRTC to reprogram, and so
 presenting a framebuffer means blitting it: a full screen of `memcpy` on the
 CPU, per frame, in the kernel, with the giant lock held. At 1280x720 that is
@@ -27,14 +27,14 @@ screenful of copying goes away.
 | --- | --- |
 | `kernel/drivers/virtio/virtio_pci.c` | The virtio 1.0 PCI transport |
 | `kernel/drivers/virtio/virtio_ring.c` | A split virtqueue |
-| `kernel/drivers/virtio/virtio_gpu.c` | The device: resources, scanout, flush |
-| `kernel/include/virtio.h`, `virtgpu.h` | The interfaces between them |
+| `kernel/drivers/gpu/virtio_gpu.c` | The device: resources, scanout, flush |
+| `kernel/include/tunix/virtio.h`, `virtgpu.h` | The interfaces between them |
 
 A modern virtio device publishes no registers at a fixed offset. It chains
 vendor-specific PCI capabilities, each naming a BAR, an offset and a length, and
 the driver walks that chain to find the common configuration, the notification
 area and the device configuration. `virtio_pci.c` maps whichever BARs those name
-into the shared device window described in `kernel/include/vmm.h`.
+into the shared device window described in `kernel/include/tunix/vmm.h`.
 
 Requests are **posted and left**: each carries its own request, payload and
 response memory from a pool of slots, descriptors come from a free list, and a

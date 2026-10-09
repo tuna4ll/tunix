@@ -1,6 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../include/kstring.h"
+#include <tunix/kstring.h>
 
 #if defined(__x86_64__)
 

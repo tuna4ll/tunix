@@ -1,7 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "../../include/cpufreq.h"
+#include <tunix/cpufreq.h>
 
 static struct cpufreq_state state;
 

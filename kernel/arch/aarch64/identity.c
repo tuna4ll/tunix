@@ -1,6 +1,6 @@
 #include <stdint.h>
 
-#include "../../include/cpu.h"
+#include <tunix/cpu.h>
 
 struct part_name {
     uint16_t part;

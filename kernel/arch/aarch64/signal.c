@@ -1,9 +1,9 @@
 #include <stdint.h>
 
-#include "../../include/pmm.h"
-#include "../../include/process_arch.h"
-#include "../../include/vmm.h"
-#include "../../include/vmm_arch.h"
+#include <tunix/pmm.h>
+#include <tunix/process_arch.h>
+#include <tunix/vmm.h>
+#include <tunix/vmm_arch.h>
 
 #define INSTRUCTION_MOV_X8_RT_SIGRETURN 0xD2801168U
 #define INSTRUCTION_SVC_0 0xD4000001U

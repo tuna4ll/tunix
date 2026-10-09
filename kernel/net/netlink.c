@@ -1,11 +1,11 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../include/heap.h"
-#include "../include/kstring.h"
-#include "../include/cred.h"
-#include "../include/net/netlink.h"
-#include "../include/net/net.h"
-#include "../include/process.h"
+#include <tunix/heap.h>
+#include <tunix/kstring.h>
+#include <tunix/cred.h>
+#include <tunix/net/netlink.h>
+#include <tunix/net/net.h>
+#include <tunix/process.h>
 
 #define EAGAIN 11
 #define ENOENT 2

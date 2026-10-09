@@ -1,21 +1,21 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../include/workqueue.h"
-#include "../include/drm.h"
-#include "../include/framebuffer.h"
-#include "../include/input.h"
-#include "../include/io.h"
-#include "../include/kstring.h"
-#include "../include/process.h"
-#include "../include/signal.h"
-#include "../include/sysfs.h"
-#include "../include/terminal.h"
-#include "../include/serial.h"
-#include "../include/tty.h"
-#include "../include/usercopy.h"
-#include "../include/vfs.h"
-#include "../include/vt.h"
-#include "../include/tunix/input_event.h"
+#include <tunix/workqueue.h>
+#include <tunix/drm.h>
+#include <tunix/framebuffer.h>
+#include <tunix/input.h>
+#include <tunix/io.h>
+#include <tunix/kstring.h>
+#include <tunix/process.h>
+#include <tunix/signal.h>
+#include <tunix/sysfs.h>
+#include <tunix/terminal.h>
+#include <tunix/serial.h>
+#include <tunix/tty.h>
+#include <tunix/usercopy.h>
+#include <tunix/vfs.h>
+#include <tunix/vt.h>
+#include <uapi/input_event.h>
 
 #define EPERM 1
 #define ENXIO 6

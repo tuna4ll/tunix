@@ -1,14 +1,14 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../include/boot.h"
-#include "../include/cpu.h"
-#include "../include/heap.h"
-#include "../include/kstring.h"
-#include "../include/time.h"
-#include "../include/net/inet_socket.h"
-#include "../include/net/net.h"
-#include "../include/net/virtio_net.h"
-#include "../include/workqueue.h"
+#include <tunix/boot.h>
+#include <tunix/cpu.h>
+#include <tunix/heap.h>
+#include <tunix/kstring.h>
+#include <tunix/time.h>
+#include <tunix/net/inet_socket.h>
+#include <tunix/net/net.h>
+#include <tunix/net/virtio_net.h>
+#include <tunix/workqueue.h>
 
 extern void kprintf(const char *fmt, ...);
 

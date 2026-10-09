@@ -1,16 +1,16 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../../include/ahci.h"
-#include "../../include/block.h"
-#include "../../include/cpu.h"
-#include "../../include/dma.h"
-#include "../../include/heap.h"
-#include "../../include/kstring.h"
-#include "../../include/pci.h"
-#include "../../include/vmm.h"
-#include "../../include/iowait.h"
-#include "../../include/lock.h"
-#include "../../include/mutex.h"
+#include <tunix/ahci.h>
+#include <tunix/block.h>
+#include <tunix/cpu.h>
+#include <tunix/dma.h>
+#include <tunix/heap.h>
+#include <tunix/kstring.h>
+#include <tunix/pci.h>
+#include <tunix/vmm.h>
+#include <tunix/iowait.h>
+#include <tunix/lock.h>
+#include <tunix/mutex.h>
 
 extern void kprintf(const char *fmt, ...);
 

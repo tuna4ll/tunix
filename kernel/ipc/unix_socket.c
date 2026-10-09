@@ -1,15 +1,15 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../include/heap.h"
-#include "../include/file.h"
-#include "../include/kstring.h"
-#include "../include/cred.h"
-#include "../include/pipe.h"
-#include "../include/process.h"
-#include "../include/lock.h"
-#include "../include/syscall.h"
-#include "../include/spinlock.h"
-#include "../include/unix_socket.h"
+#include <tunix/heap.h>
+#include <tunix/file.h>
+#include <tunix/kstring.h>
+#include <tunix/cred.h>
+#include <tunix/pipe.h>
+#include <tunix/process.h>
+#include <tunix/lock.h>
+#include <tunix/syscall.h>
+#include <tunix/spinlock.h>
+#include <tunix/unix_socket.h>
 
 #define EADDRINUSE 98
 #define EAFNOSUPPORT 97

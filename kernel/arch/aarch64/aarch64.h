@@ -4,8 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "../../include/interrupt.h"
-#include "../../include/syscall.h"
+#include <tunix/interrupt.h>
+#include <tunix/syscall.h>
 
 #define AARCH64_KERNEL_VIRTUAL_BASE 0xFFFFFFFF80000000ULL
 #define AARCH64_EARLY_DEVICE_BASE 0xFFFFFFFFFE000000ULL

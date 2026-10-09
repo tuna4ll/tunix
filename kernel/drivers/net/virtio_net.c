@@ -1,11 +1,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "../../include/dma.h"
-#include "../../include/kstring.h"
-#include "../../include/virtio.h"
-#include "../../include/net/net.h"
-#include "../../include/net/virtio_net.h"
+#include <tunix/dma.h>
+#include <tunix/kstring.h>
+#include <tunix/virtio.h>
+#include <tunix/net/net.h>
+#include <tunix/net/virtio_net.h>
 
 #define VIRTIO_NET_DEVICE_ID 0x1041U
 #define VIRTIO_NET_F_MAC 5U

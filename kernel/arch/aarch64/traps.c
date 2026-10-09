@@ -1,15 +1,15 @@
 #include <stdint.h>
 
-#include "../../include/irq.h"
-#include "../../include/kentry.h"
-#include "../../include/percpu.h"
-#include "../../include/process.h"
-#include "../../include/process_arch.h"
-#include "../../include/signal.h"
-#include "../../include/smp.h"
-#include "../../include/timer.h"
+#include <tunix/irq.h>
+#include <tunix/kentry.h>
+#include <tunix/percpu.h>
+#include <tunix/process.h>
+#include <tunix/process_arch.h>
+#include <tunix/signal.h>
+#include <tunix/smp.h>
+#include <tunix/timer.h>
 #include "aarch64.h"
-#include "../../include/module.h"
+#include <tunix/module.h>
 
 extern void kprintf(const char *fmt, ...);
 extern void panic(const char *message) __attribute__((noreturn));

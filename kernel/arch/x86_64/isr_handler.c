@@ -1,22 +1,22 @@
 #include <stdint.h>
-#include "../../include/acpi.h"
-#include "../../include/input.h"
-#include "../../include/power.h"
-#include "../../include/interrupt.h"
-#include "../../include/irq.h"
-#include "../../include/kentry.h"
-#include "../../include/percpu.h"
-#include "../../include/pic.h"
-#include "../../include/apic.h"
-#include "../../include/boot.h"
-#include "../../include/file.h"
-#include "../../include/module.h"
-#include "../../include/process.h"
-#include "../../include/vmm.h"
-#include "../../include/vfs.h"
-#include "../../include/signal.h"
-#include "../../include/smp.h"
-#include "../../include/timer.h"
+#include <tunix/acpi.h>
+#include <tunix/input.h>
+#include <tunix/power.h>
+#include <tunix/interrupt.h>
+#include <tunix/irq.h>
+#include <tunix/kentry.h>
+#include <tunix/percpu.h>
+#include <tunix/pic.h>
+#include <tunix/apic.h>
+#include <tunix/boot.h>
+#include <tunix/file.h>
+#include <tunix/module.h>
+#include <tunix/process.h>
+#include <tunix/vmm.h>
+#include <tunix/vfs.h>
+#include <tunix/signal.h>
+#include <tunix/smp.h>
+#include <tunix/timer.h>
 
 extern void kprintf(const char *fmt, ...);
 extern void panic(const char *msg);

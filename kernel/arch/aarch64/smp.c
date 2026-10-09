@@ -1,15 +1,15 @@
 #include <stdint.h>
 
-#include "../../include/boot.h"
-#include "../../include/cpu.h"
-#include "../../include/percpu.h"
-#include "../../include/process.h"
-#include "../../include/smp.h"
-#include "../../include/time.h"
-#include "../../include/timer.h"
-#include "../../include/vmm.h"
-#include "../../include/vmm_arch.h"
-#include "../../include/hwcap.h"
+#include <tunix/boot.h>
+#include <tunix/cpu.h>
+#include <tunix/percpu.h>
+#include <tunix/process.h>
+#include <tunix/smp.h>
+#include <tunix/time.h>
+#include <tunix/timer.h>
+#include <tunix/vmm.h>
+#include <tunix/vmm_arch.h>
+#include <tunix/hwcap.h>
 #include "aarch64.h"
 
 extern void kprintf(const char *fmt, ...);

@@ -50,7 +50,7 @@ $(BUILD)/%.S.o: %.S | $(LIMINE_HEADER)
 	$(CC) $(KERNEL_CFLAGS) -MMD -MP -c $< -o $@
 
 
-KERNEL_RELEASE := $(shell sed -n 's/^#define UTS_RELEASE "\(.*\)"/\1/p' kernel/include/uts.h)
+KERNEL_RELEASE := $(shell sed -n 's/^#define UTS_RELEASE "\(.*\)"/\1/p' kernel/include/tunix/uts.h)
 
 MODULE_SOURCES := $(wildcard kernel/modules/*.c) $(wildcard kernel/modules/x86_64/*.c)
 MODULES := $(patsubst kernel/modules/%.c,$(BUILD)/modules/%.ko,$(MODULE_SOURCES))
@@ -244,7 +244,7 @@ AARCH64_CORE_CFLAGS := -std=gnu11 -Wall -Wextra -Werror -ffreestanding \
 	-mstrict-align -march=armv8-a -mno-outline-atomics -Os \
 	-ffunction-sections -fdata-sections \
 	-Ikernel/include $(KERNEL_CFLAGS_EXTRA)
-AARCH64_CORE_EXCLUDE := kernel/drivers/ata.c kernel/drivers/net/rtl8139.c
+AARCH64_CORE_EXCLUDE := kernel/drivers/storage/ata.c
 AARCH64_CORE_SOURCES := $(filter-out $(AARCH64_CORE_EXCLUDE),$(shell find kernel -path kernel/arch -prune -o -path kernel/modules -prune -o \( -name '*.c' -o -name '*.S' \) -print)) \
 	$(shell find kernel/arch/aarch64 \( -name '*.c' -o -name '*.S' \) -print)
 AARCH64_CORE_OBJECTS := $(AARCH64_CORE_SOURCES:%=$(AARCH64_CORE_BUILD)/%.o)

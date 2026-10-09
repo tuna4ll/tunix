@@ -185,16 +185,16 @@ only renames an operation, x86-64 compiles to the same instructions.
 
 | Seam | x86-64 | AArch64 |
 | --- | --- | --- |
-| `include/cpu.h` | `pause`, `cli`/`sti`, `rdtsc`, `cpuid` | `yield`, DAIF, `cntvct_el0`, `MIDR_EL1` |
-| `include/percpu.h` | GS base | `TPIDR_EL1` |
-| `include/syscall_abi.h` | `rax`, `rdi`…`r9`, `syscall` is 2 bytes | `x8`, `x0`…`x5`, `svc` is 4 bytes |
-| `include/process_arch.h` | register file, FS base, `ucontext` | `x0`–`x30`, `TPIDR_EL0`, arm64 `ucontext` |
-| `include/vmm_arch.h` | x86 page table entries, CR3 | arm64 descriptors, TTBR0/TTBR1 |
-| `include/platform.h` | PIC, GDT/IDT, IOAPIC routing | GIC, PCIe ECAM, generic timer |
+| `include/tunix/cpu.h` | `pause`, `cli`/`sti`, `rdtsc`, `cpuid` | `yield`, DAIF, `cntvct_el0`, `MIDR_EL1` |
+| `include/tunix/percpu.h` | GS base | `TPIDR_EL1` |
+| `include/tunix/syscall_abi.h` | `rax`, `rdi`…`r9`, `syscall` is 2 bytes | `x8`, `x0`…`x5`, `svc` is 4 bytes |
+| `include/tunix/process_arch.h` | register file, FS base, `ucontext` | `x0`–`x30`, `TPIDR_EL0`, arm64 `ucontext` |
+| `include/tunix/vmm_arch.h` | x86 page table entries, CR3 | arm64 descriptors, TTBR0/TTBR1 |
+| `include/tunix/platform.h` | PIC, GDT/IDT, IOAPIC routing | GIC, PCIe ECAM, generic timer |
 | `time.h` hooks | TSC calibration, CMOS | `CNTFRQ_EL0`, PL031 |
 | `random.h` hooks | RDSEED/RDRAND | RNDRRS/RNDR |
 
-**Paging.** `kernel/vmm.c` is shared. AArch64 with a 4 KiB granule and 48-bit
+**Paging.** `kernel/mm/vmm.c` is shared. AArch64 with a 4 KiB granule and 48-bit
 virtual addresses walks four levels indexed exactly like x86-64, so copy-on-write,
 fork, pruning, translation and user copies are one implementation; only the entry
 encoding differs. Every address space has one root that is written to both

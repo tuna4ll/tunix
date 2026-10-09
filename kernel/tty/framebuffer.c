@@ -1,16 +1,16 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../include/cpu.h"
-#include "../include/file.h"
-#include "../include/framebuffer.h"
-#include "../include/time.h"
-#include "../include/terminal.h"
-#include "../include/usercopy.h"
-#include "../include/vmm.h"
-#include "../include/vt.h"
+#include <tunix/cpu.h>
+#include <tunix/file.h>
+#include <tunix/framebuffer.h>
+#include <tunix/time.h>
+#include <tunix/terminal.h>
+#include <tunix/usercopy.h>
+#include <tunix/vmm.h>
+#include <tunix/vt.h>
 
-#include "../include/tunix/framebuffer.h"
-#include "../include/lock.h"
+#include <uapi/framebuffer.h>
+#include <tunix/lock.h>
 
 static struct lock graphics_lock = LOCK_INITIALIZER("graphics owner", LOCK_RANK_LEAF);
 

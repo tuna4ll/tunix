@@ -1,9 +1,9 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../include/heap.h"
-#include "../include/kstring.h"
-#include "../include/process.h"
-#include "../include/signalfd.h"
+#include <tunix/heap.h>
+#include <tunix/kstring.h>
+#include <tunix/process.h>
+#include <tunix/signalfd.h>
 
 #define EAGAIN 11
 #define EINVAL 22

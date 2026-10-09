@@ -1,14 +1,14 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../include/cred.h"
-#include "../include/file.h"
-#include "../include/heap.h"
-#include "../include/kstring.h"
-#include "../include/memfd.h"
-#include "../include/sysvshm.h"
-#include "../include/time.h"
-#include "../include/lock.h"
-#include "../include/syscall.h"
+#include <tunix/cred.h>
+#include <tunix/file.h>
+#include <tunix/heap.h>
+#include <tunix/kstring.h>
+#include <tunix/memfd.h>
+#include <tunix/sysvshm.h>
+#include <tunix/time.h>
+#include <tunix/lock.h>
+#include <tunix/syscall.h>
 
 static struct lock shm_lock = LOCK_INITIALIZER("sysv shm", LOCK_RANK_OBJECT);
 

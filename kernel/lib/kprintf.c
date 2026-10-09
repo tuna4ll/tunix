@@ -1,10 +1,10 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdarg.h>
-#include "../include/cpu.h"
-#include "../include/klog.h"
-#include "../include/smp.h"
-#include "../include/kstring.h"
+#include <tunix/cpu.h>
+#include <tunix/klog.h>
+#include <tunix/smp.h>
+#include <tunix/kstring.h>
 
 #define KLOG_CAPACITY 16384U
 

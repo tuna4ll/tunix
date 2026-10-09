@@ -1,7 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "../../include/hwcap.h"
+#include <tunix/hwcap.h>
 
 static const char *const names[] = {
     "fp", "asimd", "evtstrm", "aes", "pmull", "sha1", "sha2", "crc32",

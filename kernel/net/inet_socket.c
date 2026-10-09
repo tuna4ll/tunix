@@ -1,11 +1,11 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../include/heap.h"
-#include "../include/kstring.h"
-#include "../include/time.h"
-#include "../include/net/inet_socket.h"
-#include "../include/eventfs.h"
-#include "../include/net/net.h"
+#include <tunix/heap.h>
+#include <tunix/kstring.h>
+#include <tunix/time.h>
+#include <tunix/net/inet_socket.h>
+#include <tunix/eventfs.h>
+#include <tunix/net/net.h>
 
 extern void kprintf(const char *fmt, ...);
 

@@ -1,11 +1,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "../../include/kstring.h"
-#include "../../include/pci.h"
-#include "../../include/time.h"
-#include "../../include/virtio.h"
-#include "../../include/vmm.h"
+#include <tunix/kstring.h>
+#include <tunix/pci.h>
+#include <tunix/time.h>
+#include <tunix/virtio.h>
+#include <tunix/vmm.h>
 
 #define PCI_STATUS_CAPABILITIES (1U << 4)
 #define PCI_CAPABILITY_POINTER 0x34U

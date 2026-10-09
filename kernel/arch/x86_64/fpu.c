@@ -1,8 +1,8 @@
 #include <stdint.h>
 
-#include "../../include/kstring.h"
-#include "../../include/process.h"
-#include "../../include/process_arch.h"
+#include <tunix/kstring.h>
+#include <tunix/process.h>
+#include <tunix/process_arch.h>
 
 static uint64_t fpu_xstate_mask;
 static uint32_t fpu_xstate_size;

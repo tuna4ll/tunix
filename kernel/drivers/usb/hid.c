@@ -1,6 +1,6 @@
 #include <stdint.h>
 
-#include "../../include/hid.h"
+#include <tunix/hid.h>
 
 #define ITEM_MAIN 0U
 #define ITEM_GLOBAL 1U

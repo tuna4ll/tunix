@@ -1,14 +1,14 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../include/cpu.h"
-#include "../include/framebuffer.h"
-#include "../include/percpu.h"
-#include "../include/smp.h"
-#include "../include/heap.h"
-#include "../include/kstring.h"
-#include "../include/vfs.h"
-#include "../include/terminal.h"
-#include "../include/terminal_font.h"
+#include <tunix/cpu.h>
+#include <tunix/framebuffer.h>
+#include <tunix/percpu.h>
+#include <tunix/smp.h>
+#include <tunix/heap.h>
+#include <tunix/kstring.h>
+#include <tunix/vfs.h>
+#include <tunix/terminal.h>
+#include <tunix/terminal_font.h>
 
 #define CELL_BG_EXPLICIT 0x01U
 #define CONSOLE_DEFAULT_COLOR 7

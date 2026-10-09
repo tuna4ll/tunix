@@ -1,6 +1,6 @@
 #include <stdint.h>
 
-#include "../../include/process.h"
+#include <tunix/process.h>
 
 enum { SLOT_R15, SLOT_R14, SLOT_R13, SLOT_R12, SLOT_RBX, SLOT_RBP, SLOT_RETURN, SLOTS };
 

@@ -1,16 +1,16 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../include/cred.h"
-#include "../include/devnum.h"
-#include "../include/file.h"
-#include "../include/heap.h"
-#include "../include/kstring.h"
-#include "../include/process.h"
-#include "../include/pty.h"
-#include "../include/signal.h"
-#include "../include/tty.h"
-#include "../include/usercopy.h"
-#include "../include/vfs.h"
+#include <tunix/cred.h>
+#include <tunix/devnum.h>
+#include <tunix/file.h>
+#include <tunix/heap.h>
+#include <tunix/kstring.h>
+#include <tunix/process.h>
+#include <tunix/pty.h>
+#include <tunix/signal.h>
+#include <tunix/tty.h>
+#include <tunix/usercopy.h>
+#include <tunix/vfs.h>
 
 #define EINTR 4
 #define EAGAIN 11

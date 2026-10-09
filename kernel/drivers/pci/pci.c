@@ -1,0 +1,634 @@
+#include <stddef.h>
+#include <stdint.h>
+#if defined(__x86_64__)
+#include <tunix/io.h>
+#endif
+#if defined(__aarch64__)
+#include "../../arch/aarch64/aarch64.h"
+#include <tunix/heap.h>
+#include <tunix/irq.h>
+#endif
+#include <tunix/heap.h>
+#include <tunix/kstring.h>
+#include <tunix/pci.h>
+#include <tunix/sysfs.h>
+#include <tunix/vmm.h>
+#include <tunix/lock.h>
+
+#define PCI_COMMAND 0x04U
+#define PCI_STATUS_HAS_CAPABILITIES (1U << 4)
+#define PCI_CAPABILITY_POINTER 0x34U
+#define PCI_CAP_ID_MSIX 0x11U
+
+#define PCI_COMMAND_INTX_DISABLE (1U << 10)
+
+#define MSIX_MESSAGE_CONTROL 2U
+#define MSIX_TABLE_LOCATION 4U
+#define MSIX_CONTROL_ENABLE (1U << 15)
+#define MSIX_CONTROL_FUNCTION_MASK (1U << 14)
+#define MSIX_CONTROL_TABLE_SIZE_MASK 0x07FFU
+#define MSIX_TABLE_BIR_MASK 0x7U
+
+#define MSIX_ENTRY_WORDS 4U
+#define MSIX_ENTRY_ADDRESS_LOW 0U
+#define MSIX_ENTRY_ADDRESS_HIGH 1U
+#define MSIX_ENTRY_DATA 2U
+#define MSIX_ENTRY_CONTROL 3U
+#define MSIX_ENTRY_MASKED 1U
+
+#if defined(__x86_64__)
+
+#define PCI_ADDRESS 0xCF8U
+#define PCI_DATA 0xCFCU
+
+static uint32_t pci_address(uint8_t bus, uint8_t slot, uint8_t function, uint8_t offset) {
+    return 0x80000000U | ((uint32_t)bus << 16) | ((uint32_t)slot << 11) |
+           ((uint32_t)function << 8) | (offset & 0xFCU);
+}
+
+static struct lock config_lock = LOCK_INITIALIZER("pci config", LOCK_RANK_LEAF);
+
+uint32_t pci_config_read32(uint8_t bus, uint8_t slot, uint8_t function, uint8_t offset) {
+    lock_acquire(&config_lock);
+    outl(PCI_ADDRESS, pci_address(bus, slot, function, offset));
+    uint32_t value = inl(PCI_DATA);
+    lock_release(&config_lock);
+    return value;
+}
+
+void pci_config_write32(uint8_t bus, uint8_t slot, uint8_t function, uint8_t offset, uint32_t value) {
+    lock_acquire(&config_lock);
+    outl(PCI_ADDRESS, pci_address(bus, slot, function, offset));
+    outl(PCI_DATA, value);
+    lock_release(&config_lock);
+}
+
+#else
+
+static uint64_t ecam_base;
+static uint8_t ecam_first_bus;
+static uint8_t ecam_last_bus;
+
+void pci_ecam_attach(uint64_t virtual_base, uint8_t first_bus, uint8_t last_bus) {
+    ecam_first_bus = first_bus;
+    ecam_last_bus = last_bus;
+    ecam_base = virtual_base;
+}
+
+static volatile uint32_t *ecam_register(uint8_t bus, uint8_t slot, uint8_t function,
+                                        uint8_t offset) {
+    if (!ecam_base || bus < ecam_first_bus || bus > ecam_last_bus) return (volatile uint32_t *)0;
+    if (slot >= 32U || function >= 8U) return (volatile uint32_t *)0;
+    uint64_t index = ((uint64_t)(bus - ecam_first_bus) << 20) | ((uint64_t)slot << 15) |
+                     ((uint64_t)function << 12) | (offset & 0xFCU);
+    return (volatile uint32_t *)(ecam_base + index);
+}
+
+uint32_t pci_config_read32(uint8_t bus, uint8_t slot, uint8_t function, uint8_t offset) {
+    volatile uint32_t *reg = ecam_register(bus, slot, function, offset);
+    return reg ? *reg : 0xFFFFFFFFU;
+}
+
+struct bar_window {
+    uint64_t next;
+    uint64_t end;
+};
+
+static int window_take(struct bar_window *window, uint64_t size, uint64_t *address) {
+    uint64_t base = (window->next + size - 1U) & ~(size - 1U);
+    if (!window->end || base < window->next || base + size > window->end) return -1;
+    *address = base;
+    window->next = base + size;
+    return 0;
+}
+
+static void assign_function(uint8_t bus, uint8_t slot, uint8_t function,
+                            struct bar_window *low, struct bar_window *high) {
+    uint32_t header = pci_config_read32(bus, slot, function, 0x0C);
+    if (((header >> 16) & 0x7FU) != 0) return;
+    uint32_t command = pci_config_read32(bus, slot, function, 0x04);
+    pci_config_write32(bus, slot, function, 0x04, command & ~0x7U);
+
+    for (unsigned index = 0; index < 6U; index++) {
+        uint8_t offset = (uint8_t)(0x10U + index * 4U);
+        uint32_t original = pci_config_read32(bus, slot, function, offset);
+        if (original & 1U) continue;
+        int wide = ((original >> 1) & 3U) == 2U;
+        pci_config_write32(bus, slot, function, offset, 0xFFFFFFFFU);
+        uint64_t mask = pci_config_read32(bus, slot, function, offset) & ~0xFULL;
+        if (wide && index < 5U) {
+            pci_config_write32(bus, slot, function, (uint8_t)(offset + 4U), 0xFFFFFFFFU);
+            mask |= (uint64_t)pci_config_read32(bus, slot, function, (uint8_t)(offset + 4U)) << 32;
+        } else {
+            mask |= 0xFFFFFFFF00000000ULL;
+        }
+        if (!(mask & 0xFFFFFFF0ULL) && !(mask >> 32)) {
+            pci_config_write32(bus, slot, function, offset, original);
+            continue;
+        }
+        uint64_t size = ~mask + 1U;
+        uint64_t address = 0;
+        int placed = wide ? window_take(high, size, &address) : -1;
+        if (placed != 0) placed = window_take(low, size, &address);
+        if (placed != 0) {
+            pci_config_write32(bus, slot, function, offset, original);
+            if (wide) index++;
+            continue;
+        }
+        pci_config_write32(bus, slot, function, offset, (uint32_t)address | (original & 0xFU));
+        if (wide) {
+            pci_config_write32(bus, slot, function, (uint8_t)(offset + 4U), (uint32_t)(address >> 32));
+            index++;
+        }
+    }
+    pci_config_write32(bus, slot, function, 0x04, command | 0x2U);
+}
+
+void pci_assign_resources(uint64_t mmio32_base, uint64_t mmio32_size,
+                          uint64_t mmio64_base, uint64_t mmio64_size) {
+    struct bar_window low = { mmio32_base, mmio32_size ? mmio32_base + mmio32_size : 0 };
+    struct bar_window high = { mmio64_base, mmio64_size ? mmio64_base + mmio64_size : 0 };
+    uint8_t bus = ecam_first_bus;
+    for (unsigned slot = 0; slot < 32U; slot++) {
+        uint32_t id = pci_config_read32(bus, (uint8_t)slot, 0, 0);
+        if ((uint16_t)id == 0xFFFFU) continue;
+        uint32_t header = pci_config_read32(bus, (uint8_t)slot, 0, 0x0C);
+        unsigned functions = (header & 0x00800000U) ? 8U : 1U;
+        for (unsigned function = 0; function < functions; function++) {
+            if ((uint16_t)pci_config_read32(bus, (uint8_t)slot, (uint8_t)function, 0) == 0xFFFFU)
+                continue;
+            assign_function(bus, (uint8_t)slot, (uint8_t)function, &low, &high);
+        }
+    }
+}
+
+void pci_config_write32(uint8_t bus, uint8_t slot, uint8_t function, uint8_t offset, uint32_t value) {
+    volatile uint32_t *reg = ecam_register(bus, slot, function, offset);
+    if (reg) *reg = value;
+}
+
+#endif
+
+static void fill_device(struct pci_device *out, uint8_t bus, uint8_t slot, uint8_t function) {
+    memset(out, 0, sizeof(*out));
+    out->bus = bus;
+    out->slot = slot;
+    out->function = function;
+    uint32_t id = pci_config_read32(bus, slot, function, 0x00);
+    out->vendor_id = (uint16_t)id;
+    out->device_id = (uint16_t)(id >> 16);
+    uint32_t class_value = pci_config_read32(bus, slot, function, 0x08);
+    out->prog_if = (uint8_t)(class_value >> 8);
+    out->subclass = (uint8_t)(class_value >> 16);
+    out->class_code = (uint8_t)(class_value >> 24);
+    for (unsigned index = 0; index < 6; index++)
+        out->bar[index] = pci_config_read32(bus, slot, function, (uint8_t)(0x10 + index * 4));
+    out->irq_line = (uint8_t)pci_config_read32(bus, slot, function, 0x3C);
+
+    uint8_t capability = pci_find_capability(out, PCI_CAP_ID_MSIX);
+    if (capability) {
+        uint32_t header = pci_config_read32(bus, slot, function, capability);
+        uint16_t control = (uint16_t)(header >> 16);
+        out->msix_capability = capability;
+        out->msix_entries = (uint16_t)((control & MSIX_CONTROL_TABLE_SIZE_MASK) + 1U);
+    }
+}
+
+static void fill_device(struct pci_device *out, uint8_t bus, uint8_t slot, uint8_t function);
+
+struct pci_binding {
+    uint8_t bus;
+    uint8_t slot;
+    uint8_t function;
+    struct pci_driver *driver;
+};
+
+static struct pci_binding *bindings;
+static unsigned binding_capacity;
+static struct pci_driver *drivers;
+static struct lock binding_lock = LOCK_INITIALIZER("pci bindings", LOCK_RANK_REGISTRY);
+
+static struct pci_binding *binding_of(uint8_t bus, uint8_t slot, uint8_t function) {
+    for (unsigned index = 0; index < binding_capacity; index++) {
+        struct pci_binding *binding = &bindings[index];
+        if (binding->driver && binding->bus == bus && binding->slot == slot &&
+            binding->function == function)
+            return binding;
+    }
+    return NULL;
+}
+
+const char *pci_device_driver(const struct pci_device *device) {
+    if (!device) return NULL;
+    lock_acquire(&binding_lock);
+    struct pci_binding *binding = binding_of(device->bus, device->slot, device->function);
+    const char *name = binding ? binding->driver->name : NULL;
+    lock_release(&binding_lock);
+    return name;
+}
+
+static int identifier_matches(const struct pci_device_id *id,
+                              const struct pci_device *device) {
+    if (id->vendor != PCI_ANY_ID && id->vendor != device->vendor_id) return 0;
+    if (id->device != PCI_ANY_ID && id->device != device->device_id) return 0;
+    if (id->class_code != PCI_ANY_ID && id->class_code != device->class_code) return 0;
+    if (id->subclass != PCI_ANY_ID && id->subclass != device->subclass) return 0;
+    return 1;
+}
+
+static void bind_device(const struct pci_device *device, struct pci_driver *driver) {
+    lock_acquire(&binding_lock);
+    unsigned index = 0;
+    while (index < binding_capacity && bindings[index].driver) index++;
+    if (index == binding_capacity) {
+        unsigned capacity = binding_capacity ? binding_capacity * 2 : 32;
+        struct pci_binding *grown = kmalloc(capacity * sizeof(*grown));
+        if (!grown) {
+            lock_release(&binding_lock);
+            return;
+        }
+        memset(grown, 0, capacity * sizeof(*grown));
+        if (binding_capacity) memcpy(grown, bindings, binding_capacity * sizeof(*grown));
+        kfree(bindings);
+        bindings = grown;
+        binding_capacity = capacity;
+    }
+    bindings[index].bus = device->bus;
+    bindings[index].slot = device->slot;
+    bindings[index].function = device->function;
+    bindings[index].driver = driver;
+    lock_release(&binding_lock);
+    sysfs_pci_bound(device, driver->name);
+}
+
+static void probe_one(const struct pci_device *device, void *context) {
+    struct pci_driver *driver = (struct pci_driver *)context;
+    if (pci_device_driver(device)) return;
+    for (unsigned index = 0; index < driver->id_count; index++) {
+        if (!identifier_matches(&driver->ids[index], device)) continue;
+        if (driver->probe && driver->probe(device) != 0) return;
+        bind_device(device, driver);
+        return;
+    }
+}
+
+int pci_register_driver(struct pci_driver *driver) {
+    if (!driver || !driver->name || !driver->ids) return -1;
+    lock_acquire(&binding_lock);
+    for (struct pci_driver *known = drivers; known; known = known->next)
+        if (known == driver) {
+            lock_release(&binding_lock);
+            return -1;
+        }
+    driver->next = drivers;
+    drivers = driver;
+    lock_release(&binding_lock);
+    sysfs_pci_driver_added(driver->name);
+    pci_for_each_device(probe_one, driver);
+    return 0;
+}
+
+void pci_unregister_driver(struct pci_driver *driver) {
+    if (!driver) return;
+    for (;;) {
+        lock_acquire(&binding_lock);
+        struct pci_binding *binding = NULL;
+        for (unsigned index = 0; index < binding_capacity && !binding; index++)
+            if (bindings[index].driver == driver) binding = &bindings[index];
+        if (!binding) {
+            lock_release(&binding_lock);
+            break;
+        }
+        uint8_t bus = binding->bus, slot = binding->slot, function = binding->function;
+        binding->driver = NULL;
+        lock_release(&binding_lock);
+        struct pci_device device;
+        fill_device(&device, bus, slot, function);
+        if (driver->remove) driver->remove(&device);
+        sysfs_pci_unbound(&device);
+    }
+    lock_acquire(&binding_lock);
+    struct pci_driver **link = &drivers;
+    while (*link && *link != driver) link = &(*link)->next;
+    if (*link) *link = driver->next;
+    driver->next = NULL;
+    lock_release(&binding_lock);
+    sysfs_pci_driver_removed(driver->name);
+}
+
+static void alias_hex(char *out, size_t capacity, size_t *used, uint32_t value,
+                      unsigned digits) {
+    static const char alphabet[] = "0123456789ABCDEF";
+    while (digits--) {
+        if (*used + 1 >= capacity) return;
+        out[(*used)++] = alphabet[(value >> (digits * 4)) & 0xFU];
+    }
+}
+
+static void alias_text(char *out, size_t capacity, size_t *used, const char *text) {
+    while (*text && *used + 1 < capacity) out[(*used)++] = *text++;
+}
+
+void pci_modalias(const struct pci_device *device, char *out, size_t capacity) {
+    if (!out || !capacity) return;
+    out[0] = '\0';
+    if (!device) return;
+
+    uint32_t subsystem = pci_config_read32(device->bus, device->slot,
+                                           device->function, 0x2C);
+    size_t used = 0;
+    alias_text(out, capacity, &used, "pci:v");
+    alias_hex(out, capacity, &used, device->vendor_id, 8);
+    alias_text(out, capacity, &used, "d");
+    alias_hex(out, capacity, &used, device->device_id, 8);
+    alias_text(out, capacity, &used, "sv");
+    alias_hex(out, capacity, &used, subsystem & 0xFFFFU, 8);
+    alias_text(out, capacity, &used, "sd");
+    alias_hex(out, capacity, &used, (subsystem >> 16) & 0xFFFFU, 8);
+    alias_text(out, capacity, &used, "bc");
+    alias_hex(out, capacity, &used, device->class_code, 2);
+    alias_text(out, capacity, &used, "sc");
+    alias_hex(out, capacity, &used, device->subclass, 2);
+    alias_text(out, capacity, &used, "i");
+    alias_hex(out, capacity, &used, device->prog_if, 2);
+    out[used] = '\0';
+}
+
+uint64_t pci_bar_address(const struct pci_device *device, unsigned index) {
+    if (!device || index >= 6U) return 0;
+    uint32_t low = device->bar[index];
+    if (!low || (low & 1U)) return 0;
+    uint64_t address = low & 0xFFFFFFF0U;
+    if (((low >> 1U) & 3U) == 2U) {
+        if (index + 1U >= 6U) return 0;
+        address |= (uint64_t)device->bar[index + 1U] << 32;
+    }
+    return address;
+}
+
+uint8_t pci_find_capability(const struct pci_device *device, uint8_t id) {
+    if (!device) return 0;
+    uint32_t status_command = pci_config_read32(device->bus, device->slot,
+                                                device->function, PCI_COMMAND);
+    if (!((status_command >> 16) & PCI_STATUS_HAS_CAPABILITIES)) return 0;
+
+    uint32_t pointer = pci_config_read32(device->bus, device->slot, device->function,
+                                         PCI_CAPABILITY_POINTER);
+    uint8_t offset = (uint8_t)(pointer & 0xFCU);
+    for (unsigned guard = 0; offset && guard < 48U; guard++) {
+        uint32_t header = pci_config_read32(device->bus, device->slot,
+                                            device->function, offset);
+        if ((uint8_t)header == id) return offset;
+        offset = (uint8_t)((header >> 8) & 0xFCU);
+    }
+    return 0;
+}
+
+#if defined(__x86_64__)
+#define APIC_MESSAGE_ADDRESS 0xFEE00000U
+#define APIC_MESSAGE_DESTINATION_SHIFT 12U
+
+static uint32_t initial_apic_id(void) {
+    uint32_t eax, ebx, ecx, edx;
+    __asm__ volatile("cpuid"
+                     : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                     : "a"(1U), "c"(0U));
+    return ebx >> 24;
+}
+
+#endif
+
+#if defined(__x86_64__) || defined(__aarch64__)
+static void msix_write_control(const struct pci_device *device, uint16_t control) {
+    uint32_t header = pci_config_read32(device->bus, device->slot, device->function,
+                                        device->msix_capability);
+    header = (header & 0x0000FFFFU) | ((uint32_t)control << 16);
+    pci_config_write32(device->bus, device->slot, device->function,
+                       device->msix_capability, header);
+}
+#endif
+
+int pci_msix_enable(struct pci_device *device) {
+#if !defined(__x86_64__) && !defined(__aarch64__)
+    (void)device;
+    return -1;
+#else
+    if (!device || !device->msix_capability || !device->msix_entries) return -1;
+    if (device->msix_table) return 0;
+#if defined(__aarch64__)
+    if (!its_ready()) return -1;
+#endif
+
+    uint32_t location = pci_config_read32(device->bus, device->slot, device->function,
+                                          (uint8_t)(device->msix_capability +
+                                                    MSIX_TABLE_LOCATION));
+    unsigned bar = location & MSIX_TABLE_BIR_MASK;
+    uint64_t physical = pci_bar_address(device, bar);
+    if (!physical) return -1;
+
+    uint64_t table = vmm_map_device(physical + (location & ~MSIX_TABLE_BIR_MASK),
+                                    (uint64_t)device->msix_entries * MSIX_ENTRY_WORDS *
+                                        sizeof(uint32_t));
+    if (!table) return -1;
+    device->msix_table = (volatile uint32_t *)table;
+
+    for (unsigned entry = 0; entry < device->msix_entries; entry++)
+        device->msix_table[entry * MSIX_ENTRY_WORDS + MSIX_ENTRY_CONTROL] =
+            MSIX_ENTRY_MASKED;
+
+    uint32_t command = pci_config_read32(device->bus, device->slot, device->function,
+                                         PCI_COMMAND);
+    pci_config_write32(device->bus, device->slot, device->function, PCI_COMMAND,
+                       command | PCI_COMMAND_INTX_DISABLE);
+
+    msix_write_control(device, MSIX_CONTROL_ENABLE);
+    return 0;
+#endif
+}
+
+int pci_msix_bind(struct pci_device *device, unsigned entry, unsigned vector) {
+    if (!device || !device->msix_table) return -1;
+    if (entry >= device->msix_entries) return -1;
+    if (vector < 32U || vector > 255U) return -1;
+
+#if defined(__x86_64__)
+    volatile uint32_t *slot = device->msix_table + entry * MSIX_ENTRY_WORDS;
+    slot[MSIX_ENTRY_ADDRESS_LOW] =
+        APIC_MESSAGE_ADDRESS | (initial_apic_id() << APIC_MESSAGE_DESTINATION_SHIFT);
+    slot[MSIX_ENTRY_ADDRESS_HIGH] = 0;
+    slot[MSIX_ENTRY_DATA] = vector;
+    slot[MSIX_ENTRY_CONTROL] = 0;
+    return 0;
+#elif defined(__aarch64__)
+    if (vector < IRQ_VECTOR_FIRST) return -1;
+    uint32_t requester = ((uint32_t)device->bus << 8) | ((uint32_t)device->slot << 3) |
+                         device->function;
+    uint32_t event = vector - IRQ_VECTOR_FIRST;
+    uint64_t address;
+    if (its_bind_msi(requester - aarch64_platform.msi_rid_base +
+                         aarch64_platform.msi_device_base,
+                     event, &address) != 0)
+        return -1;
+    volatile uint32_t *message = device->msix_table + entry * MSIX_ENTRY_WORDS;
+    message[MSIX_ENTRY_ADDRESS_LOW] = (uint32_t)address;
+    message[MSIX_ENTRY_ADDRESS_HIGH] = (uint32_t)(address >> 32);
+    message[MSIX_ENTRY_DATA] = event;
+    message[MSIX_ENTRY_CONTROL] = 0;
+    return 0;
+#else
+    return -1;
+#endif
+}
+
+int pci_msi_bind(struct pci_device *device, unsigned vector) {
+    if (!device || vector < 32U || vector > 255U) return -1;
+    uint8_t capability = pci_find_capability(device, 0x05U);
+    if (!capability) return -1;
+    uint64_t address;
+    uint32_t data;
+#if defined(__x86_64__)
+    address = APIC_MESSAGE_ADDRESS | (initial_apic_id() << APIC_MESSAGE_DESTINATION_SHIFT);
+    data = vector;
+#elif defined(__aarch64__)
+    if (vector < IRQ_VECTOR_FIRST || !its_ready()) return -1;
+    uint32_t requester = ((uint32_t)device->bus << 8) | ((uint32_t)device->slot << 3) |
+                         device->function;
+    data = vector - IRQ_VECTOR_FIRST;
+    if (its_bind_msi(requester - aarch64_platform.msi_rid_base +
+                         aarch64_platform.msi_device_base,
+                     data, &address) != 0)
+        return -1;
+#else
+    return -1;
+#endif
+    uint32_t header = pci_config_read32(device->bus, device->slot, device->function, capability);
+    uint16_t control = (uint16_t)(header >> 16);
+    int wide = (control & 0x80U) != 0;
+    if (!wide && (address >> 32)) return -1;
+    control = (uint16_t)(control & ~0x71U);
+    pci_config_write32(device->bus, device->slot, device->function, capability,
+                       (header & 0xFFFFU) | ((uint32_t)control << 16));
+    pci_config_write32(device->bus, device->slot, device->function, (uint8_t)(capability + 4U),
+                       (uint32_t)address);
+    uint8_t data_offset = (uint8_t)(capability + 8U);
+    if (wide) {
+        pci_config_write32(device->bus, device->slot, device->function, (uint8_t)(capability + 8U),
+                           (uint32_t)(address >> 32));
+        data_offset = (uint8_t)(capability + 12U);
+    }
+    uint32_t data_word = pci_config_read32(device->bus, device->slot, device->function, data_offset);
+    pci_config_write32(device->bus, device->slot, device->function, data_offset,
+                       (data_word & 0xFFFF0000U) | (data & 0xFFFFU));
+    if (control & 0x100U) {
+        uint8_t mask_offset = (uint8_t)(data_offset + 4U);
+        pci_config_write32(device->bus, device->slot, device->function, mask_offset, 0);
+    }
+    uint32_t command = pci_config_read32(device->bus, device->slot, device->function, PCI_COMMAND);
+    pci_config_write32(device->bus, device->slot, device->function, PCI_COMMAND,
+                       command | PCI_COMMAND_INTX_DISABLE);
+    control = (uint16_t)(control | 0x01U);
+    pci_config_write32(device->bus, device->slot, device->function, capability,
+                       (header & 0xFFFFU) | ((uint32_t)control << 16));
+    return 0;
+}
+
+void pci_for_each_device(void (*visit)(const struct pci_device *, void *),
+                         void *context) {
+    if (!visit) return;
+    for (unsigned bus = 0; bus < 256; bus++) {
+        for (unsigned slot = 0; slot < 32; slot++) {
+            uint32_t id0 = pci_config_read32((uint8_t)bus, (uint8_t)slot, 0, 0);
+            if ((uint16_t)id0 == 0xFFFFU) continue;
+            uint32_t header = pci_config_read32((uint8_t)bus, (uint8_t)slot, 0, 0x0C);
+            unsigned functions = (header & 0x00800000U) ? 8U : 1U;
+            for (unsigned function = 0; function < functions; function++) {
+                uint32_t id = pci_config_read32((uint8_t)bus, (uint8_t)slot,
+                                                (uint8_t)function, 0);
+                if ((uint16_t)id == 0xFFFFU) continue;
+                struct pci_device device;
+                fill_device(&device, (uint8_t)bus, (uint8_t)slot, (uint8_t)function);
+                visit(&device, context);
+            }
+        }
+    }
+}
+
+int pci_find_device(uint16_t vendor_id, uint16_t device_id, struct pci_device *out) {
+    if (!out) return -1;
+    for (unsigned bus = 0; bus < 256; bus++) {
+        for (unsigned slot = 0; slot < 32; slot++) {
+            uint32_t id0 = pci_config_read32((uint8_t)bus, (uint8_t)slot, 0, 0);
+            if ((uint16_t)id0 == 0xFFFFU) continue;
+            uint32_t header = pci_config_read32((uint8_t)bus, (uint8_t)slot, 0, 0x0C);
+            unsigned functions = (header & 0x00800000U) ? 8U : 1U;
+            for (unsigned function = 0; function < functions; function++) {
+                uint32_t id = pci_config_read32((uint8_t)bus, (uint8_t)slot, (uint8_t)function, 0);
+                if ((uint16_t)id == vendor_id && (uint16_t)(id >> 16) == device_id) {
+                    fill_device(out, (uint8_t)bus, (uint8_t)slot, (uint8_t)function);
+                    return 0;
+                }
+            }
+        }
+    }
+    return -1;
+}
+
+int pci_find_class(uint8_t class_code, uint8_t subclass, struct pci_device *out) {
+    if (!out) return -1;
+    for (unsigned bus = 0; bus < 256; bus++) {
+        for (unsigned slot = 0; slot < 32; slot++) {
+            uint32_t id0 = pci_config_read32((uint8_t)bus, (uint8_t)slot, 0, 0);
+            if ((uint16_t)id0 == 0xFFFFU) continue;
+            uint32_t header = pci_config_read32((uint8_t)bus, (uint8_t)slot, 0, 0x0C);
+            unsigned functions = (header & 0x00800000U) ? 8U : 1U;
+            for (unsigned function = 0; function < functions; function++) {
+                uint32_t id = pci_config_read32((uint8_t)bus, (uint8_t)slot,
+                                                (uint8_t)function, 0);
+                if ((uint16_t)id == 0xFFFFU) continue;
+                uint32_t class_value = pci_config_read32((uint8_t)bus, (uint8_t)slot,
+                                                         (uint8_t)function, 0x08);
+                if ((uint8_t)(class_value >> 24) == class_code &&
+                    (uint8_t)(class_value >> 16) == subclass) {
+                    fill_device(out, (uint8_t)bus, (uint8_t)slot,
+                                (uint8_t)function);
+                    return 0;
+                }
+            }
+        }
+    }
+    return -1;
+}
+
+int pci_find_nth_class(uint8_t class_code, uint8_t subclass, unsigned nth,
+                       struct pci_device *out) {
+    if (!out) return -1;
+    unsigned seen = 0;
+    for (unsigned bus = 0; bus < 256; bus++) {
+        for (unsigned slot = 0; slot < 32; slot++) {
+            uint32_t id0 = pci_config_read32((uint8_t)bus, (uint8_t)slot, 0, 0);
+            if ((uint16_t)id0 == 0xFFFFU) continue;
+            uint32_t header = pci_config_read32((uint8_t)bus, (uint8_t)slot, 0, 0x0C);
+            unsigned functions = (header & 0x00800000U) ? 8U : 1U;
+            for (unsigned function = 0; function < functions; function++) {
+                uint32_t id = pci_config_read32((uint8_t)bus, (uint8_t)slot,
+                                                (uint8_t)function, 0);
+                if ((uint16_t)id == 0xFFFFU) continue;
+                uint32_t class_value = pci_config_read32((uint8_t)bus, (uint8_t)slot,
+                                                         (uint8_t)function, 0x08);
+                if ((uint8_t)(class_value >> 24) != class_code ||
+                    (uint8_t)(class_value >> 16) != subclass) continue;
+                if (seen++ != nth) continue;
+                fill_device(out, (uint8_t)bus, (uint8_t)slot, (uint8_t)function);
+                return 0;
+            }
+        }
+    }
+    return -1;
+}
+
+void pci_enable_bus_mastering(const struct pci_device *device) {
+    if (!device) return;
+    uint32_t value = pci_config_read32(device->bus, device->slot, device->function, 0x04);
+    value |= 0x00000007U;
+    pci_config_write32(device->bus, device->slot, device->function, 0x04, value);
+}

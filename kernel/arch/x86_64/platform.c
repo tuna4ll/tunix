@@ -1,13 +1,13 @@
 #include <stdint.h>
 
-#include "../../include/acpi.h"
-#include "../../include/apic.h"
-#include "../../include/gdt.h"
-#include "../../include/idt.h"
-#include "../../include/input.h"
-#include "../../include/pic.h"
-#include "../../include/platform.h"
-#include "../../include/serial.h"
+#include <tunix/acpi.h>
+#include <tunix/apic.h>
+#include <tunix/gdt.h>
+#include <tunix/idt.h>
+#include <tunix/input.h>
+#include <tunix/pic.h>
+#include <tunix/platform.h>
+#include <tunix/serial.h>
 
 void arch_early_init(void) {
     pic_init();

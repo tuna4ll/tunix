@@ -1,10 +1,10 @@
 #include <stdint.h>
 
-#include "../../include/pci.h"
-#include "../../include/sdhci.h"
-#include "../../include/platform.h"
-#include "../../include/serial.h"
-#include "../../include/vmm.h"
+#include <tunix/pci.h>
+#include <tunix/sdhci.h>
+#include <tunix/platform.h>
+#include <tunix/serial.h>
+#include <tunix/vmm.h>
 #include "aarch64.h"
 
 extern void kprintf(const char *fmt, ...);

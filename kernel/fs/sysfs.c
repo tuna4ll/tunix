@@ -1,20 +1,20 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../include/devnum.h"
-#include "../include/drm.h"
-#include "../include/pci.h"
-#include "../include/virtgpu.h"
+#include <tunix/devnum.h>
+#include <tunix/drm.h>
+#include <tunix/pci.h>
+#include <tunix/virtgpu.h>
 
-#include "../include/heap.h"
-#include "../include/kstring.h"
-#include "../include/module.h"
-#include "../include/net/netlink.h"
-#include "../include/sound.h"
-#include "../include/sysfs.h"
-#include "../include/cpufreq.h"
-#include "../include/thermal.h"
-#include "../include/vt.h"
-#include "../include/vfs.h"
+#include <tunix/heap.h>
+#include <tunix/kstring.h>
+#include <tunix/module.h>
+#include <tunix/net/netlink.h>
+#include <tunix/sound.h>
+#include <tunix/sysfs.h>
+#include <tunix/cpufreq.h>
+#include <tunix/thermal.h>
+#include <tunix/vt.h>
+#include <tunix/vfs.h>
 
 static void vfs_guard_release(int *unused) {
     (void)unused;

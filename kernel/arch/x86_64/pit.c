@@ -1,7 +1,7 @@
 #include <stdint.h>
 
-#include "../../include/io.h"
-#include "../../include/timer.h"
+#include <tunix/io.h>
+#include <tunix/timer.h>
 
 #define PIT_INPUT_HZ 1193182U
 #define PIT_COMMAND 0x43U

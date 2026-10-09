@@ -1,11 +1,11 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../include/block.h"
-#include "../include/fatfs.h"
-#include "../include/heap.h"
-#include "../include/kstring.h"
-#include "../include/time.h"
-#include "../include/vfs.h"
+#include <tunix/block.h>
+#include <tunix/fatfs.h>
+#include <tunix/heap.h>
+#include <tunix/kstring.h>
+#include <tunix/time.h>
+#include <tunix/vfs.h>
 
 static void vfs_guard_release(int *unused) {
     (void)unused;

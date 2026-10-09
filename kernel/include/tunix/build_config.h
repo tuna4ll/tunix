@@ -1,0 +1,12 @@
+#ifndef TUNIX_BUILD_CONFIG_H
+#define TUNIX_BUILD_CONFIG_H
+
+#ifndef TUNIX_DEBUG_LOGS
+#define TUNIX_DEBUG_LOGS 0
+#endif
+
+#ifndef TUNIX_BOOT_TIMINGS
+#define TUNIX_BOOT_TIMINGS 0
+#endif
+
+#endif

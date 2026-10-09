@@ -1,6 +1,6 @@
 #include <stdint.h>
 
-#include "../../include/process.h"
+#include <tunix/process.h>
 
 enum { SLOT_X19, SLOT_X20, SLOT_X29 = 10, SLOT_X30, SLOTS };
 

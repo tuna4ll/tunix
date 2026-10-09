@@ -50,7 +50,7 @@ sit in a section of their own that the linker script keeps.
 | RSDP | Where the ACPI tables start |
 | Paging mode | Four levels, on a machine that could do five |
 
-All of it lands in one `struct boot_info` (`kernel/include/boot.h`) and nothing
+All of it lands in one `struct boot_info` (`kernel/include/tunix/boot.h`) and nothing
 below `kmain` knows which loader filled it in.
 
 Two of those need saying twice, because they are what the old bootloader let

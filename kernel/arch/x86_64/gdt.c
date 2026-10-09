@@ -1,8 +1,8 @@
 #include <stdint.h>
-#include "../../include/gdt.h"
-#include "../../include/heap.h"
-#include "../../include/kstring.h"
-#include "../../include/percpu.h"
+#include <tunix/gdt.h>
+#include <tunix/heap.h>
+#include <tunix/kstring.h>
+#include <tunix/percpu.h>
 
 struct gdt_entry {
     uint16_t limit_low;

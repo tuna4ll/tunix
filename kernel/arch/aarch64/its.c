@@ -1,10 +1,10 @@
 #include <stdint.h>
 
-#include "../../include/cpu.h"
-#include "../../include/dma.h"
-#include "../../include/heap.h"
-#include "../../include/kstring.h"
-#include "../../include/vmm.h"
+#include <tunix/cpu.h>
+#include <tunix/dma.h>
+#include <tunix/heap.h>
+#include <tunix/kstring.h>
+#include <tunix/vmm.h>
 #include "aarch64.h"
 
 extern void kprintf(const char *fmt, ...);

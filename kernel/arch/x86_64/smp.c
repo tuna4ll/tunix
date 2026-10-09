@@ -1,21 +1,21 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "../../include/acpi.h"
-#include "../../include/boot.h"
-#include "../../include/apic.h"
-#include "../../include/cpu.h"
-#include "../../include/gdt.h"
-#include "../../include/idt.h"
-#include "../../include/kstring.h"
-#include "../../include/percpu.h"
-#include "../../include/pmm.h"
-#include "../../include/process.h"
-#include "../../include/smp.h"
-#include "../../include/syscall.h"
-#include "../../include/time.h"
-#include "../../include/timer.h"
-#include "../../include/vmm.h"
+#include <tunix/acpi.h>
+#include <tunix/boot.h>
+#include <tunix/apic.h>
+#include <tunix/cpu.h>
+#include <tunix/gdt.h>
+#include <tunix/idt.h>
+#include <tunix/kstring.h>
+#include <tunix/percpu.h>
+#include <tunix/pmm.h>
+#include <tunix/process.h>
+#include <tunix/smp.h>
+#include <tunix/syscall.h>
+#include <tunix/time.h>
+#include <tunix/timer.h>
+#include <tunix/vmm.h>
 
 extern void kprintf(const char *fmt, ...);
 

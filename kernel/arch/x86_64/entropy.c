@@ -1,9 +1,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "../../include/cpu.h"
-#include "../../include/io.h"
-#include "../../include/random.h"
+#include <tunix/cpu.h>
+#include <tunix/io.h>
+#include <tunix/random.h>
 
 static int cpu_has_rdrand(void) {
     uint32_t a, b, c, d;

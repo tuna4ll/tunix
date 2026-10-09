@@ -1,17 +1,17 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../../include/apic.h"
-#include "../../include/cpu.h"
-#include "../../include/dma.h"
-#include "../../include/heap.h"
-#include "../../include/io.h"
-#include "../../include/irq.h"
-#include "../../include/kstring.h"
-#include "../../include/module.h"
-#include "../../include/pci.h"
-#include "../../include/time.h"
-#include "../../include/vmm.h"
-#include "../../include/net/net.h"
+#include <tunix/apic.h>
+#include <tunix/cpu.h>
+#include <tunix/dma.h>
+#include <tunix/heap.h>
+#include <tunix/io.h>
+#include <tunix/irq.h>
+#include <tunix/kstring.h>
+#include <tunix/module.h>
+#include <tunix/pci.h>
+#include <tunix/time.h>
+#include <tunix/vmm.h>
+#include <tunix/net/net.h>
 
 #define RTL_VENDOR 0x10ECU
 #define RTL_DEVICE 0x8139U

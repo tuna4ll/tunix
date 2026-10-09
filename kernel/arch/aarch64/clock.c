@@ -1,13 +1,12 @@
 #include <stdint.h>
 
-#include "../../include/time.h"
-#include "../../include/timer.h"
+#include <tunix/time.h>
+#include <tunix/timer.h>
 #include "aarch64.h"
 
 #define PL031_DATA 0x000U
 #define DEFAULT_EPOCH 1767225600ULL
 #define TIMER_MAX_DELAY_NS 1000000000ULL
-
 
 uint64_t arch_clock_frequency(void) {
     uint64_t frequency;

@@ -1,8 +1,8 @@
 #include <stdint.h>
-#include "../../include/acpi.h"
-#include "../../include/idt.h"
-#include "../../include/irq.h"
-#include "../../include/smp.h"
+#include <tunix/acpi.h>
+#include <tunix/idt.h>
+#include <tunix/irq.h>
+#include <tunix/smp.h>
 
 struct idt_entry {
     uint16_t base_low;

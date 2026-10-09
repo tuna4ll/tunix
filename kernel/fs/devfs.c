@@ -1,23 +1,23 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../include/block.h"
-#include "../include/devfs.h"
-#include "../include/devnum.h"
-#include "../include/klog.h"
-#include "../include/kstring.h"
-#include "../include/input.h"
-#include "../include/framebuffer.h"
-#include "../include/drm.h"
-#include "../include/virtgpu.h"
-#include "../include/pty.h"
-#include "../include/random.h"
-#include "../include/sound.h"
-#include "../include/time.h"
-#include "../include/tty.h"
-#include "../include/usercopy.h"
-#include "../include/vfs.h"
-#include "../include/vt.h"
-#include "../include/tunix/input_event.h"
+#include <tunix/block.h>
+#include <tunix/devfs.h>
+#include <tunix/devnum.h>
+#include <tunix/klog.h>
+#include <tunix/kstring.h>
+#include <tunix/input.h>
+#include <tunix/framebuffer.h>
+#include <tunix/drm.h>
+#include <tunix/virtgpu.h>
+#include <tunix/pty.h>
+#include <tunix/random.h>
+#include <tunix/sound.h>
+#include <tunix/time.h>
+#include <tunix/tty.h>
+#include <tunix/usercopy.h>
+#include <tunix/vfs.h>
+#include <tunix/vt.h>
+#include <uapi/input_event.h>
 
 #define EFAULT 14
 #define EINVAL 22

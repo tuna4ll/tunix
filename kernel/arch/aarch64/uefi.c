@@ -1,10 +1,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "../../include/boot_framebuffer.h"
-#include "../../include/pmm.h"
-#include "../../include/time.h"
-#include "../../include/vmm.h"
+#include <tunix/boot_framebuffer.h>
+#include <tunix/pmm.h>
+#include <tunix/time.h>
+#include <tunix/vmm.h>
 #include "aarch64.h"
 
 extern void kprintf(const char *fmt, ...);

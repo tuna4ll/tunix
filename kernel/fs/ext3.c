@@ -1,8 +1,8 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../include/ext3.h"
-#include "../include/heap.h"
-#include "../include/kstring.h"
+#include <tunix/ext3.h>
+#include <tunix/heap.h>
+#include <tunix/kstring.h>
 
 extern void kprintf(const char *fmt, ...);
 

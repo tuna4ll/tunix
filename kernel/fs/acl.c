@@ -1,10 +1,10 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../include/acl.h"
-#include "../include/cred.h"
-#include "../include/defer.h"
-#include "../include/kstring.h"
-#include "../include/vfs.h"
+#include <tunix/acl.h>
+#include <tunix/cred.h>
+#include <tunix/defer.h>
+#include <tunix/kstring.h>
+#include <tunix/vfs.h>
 
 #define EPERM 1
 #define EEXIST 17

@@ -1,12 +1,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "../../include/cpu.h"
-#include "../../include/dma.h"
-#include "../../include/kstring.h"
-#include "../../include/time.h"
-#include "../../include/virtio.h"
-#include "../../include/vmm.h"
+#include <tunix/cpu.h>
+#include <tunix/dma.h>
+#include <tunix/kstring.h>
+#include <tunix/time.h>
+#include <tunix/virtio.h>
+#include <tunix/vmm.h>
 
 extern void kprintf(const char *fmt, ...);
 

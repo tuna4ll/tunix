@@ -1,20 +1,20 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#include "../../include/cpu.h"
-#include "../../include/hid.h"
-#include "../../include/hid_input.h"
-#include "../../include/pci.h"
-#include "../../include/pmm.h"
-#include "../../include/vmm.h"
-#include "../../include/time.h"
-#include "../../include/heap.h"
-#include "../../include/kstring.h"
-#include "../../include/usb.h"
-#include "../../include/ehci.h"
-#include "../../include/iowait.h"
-#include "../../include/lock.h"
-#include "../../include/mutex.h"
+#include <tunix/cpu.h>
+#include <tunix/hid.h>
+#include <tunix/hid_input.h>
+#include <tunix/pci.h>
+#include <tunix/pmm.h>
+#include <tunix/vmm.h>
+#include <tunix/time.h>
+#include <tunix/heap.h>
+#include <tunix/kstring.h>
+#include <tunix/usb.h>
+#include <tunix/ehci.h>
+#include <tunix/iowait.h>
+#include <tunix/lock.h>
+#include <tunix/mutex.h>
 
 extern void kprintf(const char *fmt, ...);
 
@@ -1103,7 +1103,6 @@ static struct ehci_device *storage_device(int index, struct ehci **host_out) {
     }
     return NULL;
 }
-
 
 static int ehci_storage_count_unlocked(void) {
     int count = 0;

@@ -1,10 +1,10 @@
 #include <stdint.h>
 
-#include "../../include/hid.h"
-#include "../../include/hid_input.h"
-#include "../../include/input.h"
-#include "../../include/kstring.h"
-#include "../../include/tunix/input_event.h"
+#include <tunix/hid.h>
+#include <tunix/hid_input.h>
+#include <tunix/input.h>
+#include <tunix/kstring.h>
+#include <uapi/input_event.h>
 
 #define KEYBOARD_REPORT_KEYS 6U
 #define KEYBOARD_REPORT_KEYS_OFFSET 2U

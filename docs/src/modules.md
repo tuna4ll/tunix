@@ -52,7 +52,7 @@ whole module gets `PAGE_WRITE` while it is being relocated and then the text
 becomes read-execute, the rodata read-only and the data writable and
 non-executable.
 
-**Symbols.** Undefined symbols are looked up in `kernel/ksyms.c` -- a plain
+**Symbols.** Undefined symbols are looked up in `kernel/core/ksyms.c` -- a plain
 table of what the kernel offers a module, roughly sixty entries -- and then in
 the exports of every module already loaded. A module that resolves a symbol
 from another one takes a reference on it, which is what puts it in the second

@@ -1,11 +1,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "../../include/cpu.h"
-#include "../../include/cpufreq.h"
-#include "../../include/kstring.h"
-#include "../../include/percpu.h"
-#include "../../include/time.h"
+#include <tunix/cpu.h>
+#include <tunix/cpufreq.h>
+#include <tunix/kstring.h>
+#include <tunix/percpu.h>
+#include <tunix/time.h>
 
 extern void kprintf(const char *fmt, ...);
 

@@ -1,10 +1,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "../include/heap.h"
-#include "../include/kstring.h"
-#include "../include/module.h"
-#include "../include/time.h"
+#include <tunix/heap.h>
+#include <tunix/kstring.h>
+#include <tunix/module.h>
+#include <tunix/time.h>
 
 extern void kprintf(const char *fmt, ...);
 

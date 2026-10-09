@@ -1,53 +1,60 @@
-#ifndef TUNIX_FRAMEBUFFER_ABI_H
-#define TUNIX_FRAMEBUFFER_ABI_H
+#ifndef TUNIX_FRAMEBUFFER_H
+#define TUNIX_FRAMEBUFFER_H
 
+#include <stddef.h>
 #include <stdint.h>
+#include <tunix/boot_framebuffer.h>
 
-#define TUNIX_FB_ABI_VERSION 1U
+struct file;
+struct vfs_node;
 
-#define TUNIX_FB_PIXEL_FORMAT_BITMASK 1U
+int framebuffer_init(const struct boot_framebuffer_info *boot_info);
+int framebuffer_available(void);
+int framebuffer_console_active(void);
+uint32_t framebuffer_width(void);
+uint32_t framebuffer_height(void);
+uint32_t framebuffer_pitch(void);
+uint32_t framebuffer_bits_per_pixel(void);
+uint64_t framebuffer_physical_address(void);
+uint64_t framebuffer_byte_length(void);
+uint64_t framebuffer_mapping_size(void);
+uint64_t framebuffer_memory_offset(void);
+uint8_t framebuffer_red_size(void);
+uint8_t framebuffer_red_position(void);
+uint8_t framebuffer_green_size(void);
+uint8_t framebuffer_green_position(void);
+uint8_t framebuffer_blue_size(void);
+uint8_t framebuffer_blue_position(void);
+uint32_t framebuffer_pack_rgb(uint32_t rgb);
+void framebuffer_put_rgb(uint32_t x, uint32_t y, uint32_t rgb);
+void framebuffer_put_native(uint32_t x, uint32_t y, uint32_t native_pixel);
+void framebuffer_fill_rect_rgb(uint32_t x, uint32_t y, uint32_t width, uint32_t height,
+                               uint32_t rgb);
+void framebuffer_measure(unsigned rounds, uint64_t *read_rate, uint64_t *write_rate);
+void framebuffer_fill_rgb(uint32_t rgb);
 
-#define TUNIX_FB_MODE_CONSOLE  0U
-#define TUNIX_FB_MODE_GRAPHICS 1U
+uint8_t *framebuffer_scanout(void);
+void framebuffer_present(void);
 
-#define TUNIX_FB_FLAG_LINEAR      (1U << 0)
-#define TUNIX_FB_FLAG_DIRECT_MMAP (1U << 1)
+int framebuffer_claim_graphics(const void *owner);
+int framebuffer_release_graphics(const void *owner, int fail_if_not_owner);
 
-#define TUNIX_FBIO_GET_INFO 0x54460001UL
-#define TUNIX_FBIO_GET_MODE 0x54460002UL
-#define TUNIX_FBIO_SET_MODE 0x54460003UL
-#define TUNIX_FBIO_FLUSH    0x54460004UL
+void framebuffer_suspend_graphics(void);
+void framebuffer_resume_graphics(void);
 
-struct tunix_fb_info {
-    uint32_t abi_version;
-    uint32_t width;
-    uint32_t height;
-    uint32_t pitch;
-    uint32_t bits_per_pixel;
-    uint32_t pixel_format;
-    uint32_t red_mask_size;
-    uint32_t red_field_position;
-    uint32_t green_mask_size;
-    uint32_t green_field_position;
-    uint32_t blue_mask_size;
-    uint32_t blue_field_position;
-    uint32_t mode;
-    uint32_t flags;
-    uint64_t framebuffer_size;
-    uint64_t mapping_size;
-    uint64_t memory_offset;
-};
+int framebuffer_graphics_foreground(const void *owner);
+const uint8_t *framebuffer_font(void);
+uint32_t framebuffer_font_width(void);
+uint32_t framebuffer_font_height(void);
 
-struct tunix_fb_rect {
-    uint32_t x;
-    uint32_t y;
-    uint32_t width;
-    uint32_t height;
-};
-
-_Static_assert(sizeof(struct tunix_fb_info) == 80U,
-               "Tunix framebuffer info ABI must remain 80 bytes");
-_Static_assert(sizeof(struct tunix_fb_rect) == 16U,
-               "Tunix framebuffer rectangle ABI must remain 16 bytes");
+int64_t framebuffer_file_read(struct file *file, size_t size, void *buffer);
+int64_t framebuffer_file_write(struct file *file, size_t size, const void *buffer);
+int64_t framebuffer_file_ioctl(struct file *file, unsigned long request,
+                               uint64_t user_argument);
+void framebuffer_file_close(struct file *file);
+int64_t framebuffer_device_mmap(struct vfs_node *node, struct file *file,
+                                uint64_t cr3, uint64_t virtual_address,
+                                uint64_t length, uint64_t offset,
+                                uint64_t page_flags);
 
 #endif

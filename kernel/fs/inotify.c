@@ -1,9 +1,9 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../include/heap.h"
-#include "../include/inotify.h"
-#include "../include/kstring.h"
-#include "../include/lock.h"
+#include <tunix/heap.h>
+#include <tunix/inotify.h>
+#include <tunix/kstring.h>
+#include <tunix/lock.h>
 
 static struct lock inotify_lock = LOCK_INITIALIZER("inotify", LOCK_RANK_OBJECT);
 

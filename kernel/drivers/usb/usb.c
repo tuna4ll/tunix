@@ -1,11 +1,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "../../include/heap.h"
-#include "../../include/kstring.h"
-#include "../../include/usb.h"
-#include "../../include/usb_storage.h"
-#include "../../include/lock.h"
+#include <tunix/heap.h>
+#include <tunix/kstring.h>
+#include <tunix/usb.h>
+#include <tunix/usb_storage.h>
+#include <tunix/lock.h>
 
 #define USB_DEFAULT_TRANSFER 16384U
 

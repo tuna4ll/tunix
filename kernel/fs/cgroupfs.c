@@ -1,12 +1,12 @@
 #include <stddef.h>
 #include <stdint.h>
-#include "../include/cgroup.h"
-#include "../include/heap.h"
-#include "../include/inotify.h"
-#include "../include/kstring.h"
-#include "../include/lock.h"
-#include "../include/process.h"
-#include "../include/vfs.h"
+#include <tunix/cgroup.h>
+#include <tunix/heap.h>
+#include <tunix/inotify.h>
+#include <tunix/kstring.h>
+#include <tunix/lock.h>
+#include <tunix/process.h>
+#include <tunix/vfs.h>
 
 #define EPERM 1
 #define ENOENT 2

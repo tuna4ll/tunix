@@ -1,6 +1,6 @@
 #include <stdint.h>
-#include "../../include/io.h"
-#include "../../include/pic.h"
+#include <tunix/io.h>
+#include <tunix/pic.h>
 
 #define PIC1_COMMAND 0x20U
 #define PIC1_DATA    0x21U

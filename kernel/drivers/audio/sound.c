@@ -1,20 +1,20 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "../../include/cpu.h"
-#include "../../include/file.h"
-#include "../../include/devfs.h"
-#include "../../include/module.h"
-#include "../../include/kstring.h"
-#include "../../include/lock.h"
-#include "../../include/pmm.h"
-#include "../../include/sound.h"
-#include "../../include/sysfs.h"
-#include "../../include/time.h"
-#include "../../include/usercopy.h"
-#include "../../include/vfs.h"
-#include "../../include/vmm.h"
-#include "../../include/tunix/asound.h"
+#include <tunix/cpu.h>
+#include <tunix/file.h>
+#include <tunix/devfs.h>
+#include <tunix/module.h>
+#include <tunix/kstring.h>
+#include <tunix/lock.h>
+#include <tunix/pmm.h>
+#include <tunix/sound.h>
+#include <tunix/sysfs.h>
+#include <tunix/time.h>
+#include <tunix/usercopy.h>
+#include <tunix/vfs.h>
+#include <tunix/vmm.h>
+#include <uapi/asound.h>
 
 extern void kprintf(const char *fmt, ...);
 

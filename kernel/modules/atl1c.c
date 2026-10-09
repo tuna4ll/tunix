@@ -1,14 +1,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "../include/cpu.h"
-#include "../include/dma.h"
-#include "../include/kstring.h"
-#include "../include/module.h"
-#include "../include/pci.h"
-#include "../include/time.h"
-#include "../include/vmm.h"
-#include "../include/net/net.h"
+#include <tunix/cpu.h>
+#include <tunix/dma.h>
+#include <tunix/kstring.h>
+#include <tunix/module.h>
+#include <tunix/pci.h>
+#include <tunix/time.h>
+#include <tunix/vmm.h>
+#include <tunix/net/net.h>
 
 extern void kprintf(const char *fmt, ...);
 
