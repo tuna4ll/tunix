@@ -84,6 +84,8 @@ const struct acpi_events *acpi_event_state(void);
 
 const struct acpi_power *acpi_power_info(void);
 
+const void *acpi_table_at(unsigned index, char signature[4], uint32_t *length);
+
 int acpi_enable(void);
 
 void acpi_power_off(void);

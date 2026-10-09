@@ -189,6 +189,25 @@ static void parse_madt(const struct acpi_header *madt) {
     }
 }
 
+#define KNOWN_TABLES 48U
+
+static const struct acpi_header *known_tables[KNOWN_TABLES];
+static unsigned known_count;
+
+static void remember_table(const struct acpi_header *table) {
+    for (unsigned index = 0; index < known_count; index++)
+        if (known_tables[index] == table) return;
+    if (known_count < KNOWN_TABLES) known_tables[known_count++] = table;
+}
+
+const void *acpi_table_at(unsigned index, char signature[4], uint32_t *length) {
+    if (index >= known_count) return NULL;
+    const struct acpi_header *table = known_tables[index];
+    memcpy(signature, table->signature, SIGNATURE_BYTES);
+    *length = table->length;
+    return table;
+}
+
 static const struct acpi_header *find_table(uint64_t root_physical, int wide,
                                             const char *signature) {
     const struct acpi_header *root = map_table(root_physical);
@@ -337,6 +356,7 @@ static void parse_fadt(const struct acpi_header *fadt) {
     if (dsdt_physical) {
         const struct acpi_header *dsdt = map_table(dsdt_physical);
         if (dsdt && signature_is(dsdt->signature, DSDT_SIGNATURE, SIGNATURE_BYTES)) {
+            remember_table(dsdt);
             (void)parse_sleep_state(dsdt);
             scan_definition_block(dsdt);
         }
@@ -355,8 +375,9 @@ static void scan_secondary_tables(uint64_t root_physical, int wide) {
         uint64_t physical = wide ? *(const uint64_t *)(entries + i * entry_bytes)
                                  : *(const uint32_t *)(entries + i * entry_bytes);
         const struct acpi_header *table = map_table(physical);
-        if (!table || !signature_is(table->signature, SSDT_SIGNATURE, SIGNATURE_BYTES)) continue;
-        if (!checksum_ok(table, table->length)) continue;
+        if (!table || !checksum_ok(table, table->length)) continue;
+        remember_table(table);
+        if (!signature_is(table->signature, SSDT_SIGNATURE, SIGNATURE_BYTES)) continue;
         scan_definition_block(table);
     }
 }
