@@ -16,6 +16,8 @@
 #define REPORT_PATH         "/tunix-display.txt"
 #define KMSG_PATH           "/tunix-kmsg.txt"
 #define BACKLIGHT           "/sys/class/backlight/nv_backlight/"
+#define SMI_COUNT           "/sys/devices/system/cpu/smi_count"
+#define KEY_WATCH_MS        20000
 #define KERNEL_DONE         "TUNIX: starting"
 #define KERNEL_WAIT_MS      120000
 
@@ -378,6 +380,48 @@ static void backlight_check(void) {
     }
 }
 
+static void note_hex(u8 value) {
+    static const char alphabet[] = "0123456789abcdef";
+    char text[4] = {alphabet[value >> 4], alphabet[value & 15U], ' ', '\0'};
+    note(text);
+}
+
+static void key_watch(void) {
+    int keyboard = (int)open("/dev/input/keyboard", O_RDONLY | O_NONBLOCK, 0);
+    if (keyboard < 0) {
+        note("keys: no /dev/input/keyboard\n");
+        return;
+    }
+    print("\n>>> Press Fn + brightness DOWN three times, then Fn + brightness UP three times.\n"
+          ">>> Watching the keyboard and the panel for 20 seconds.\n\n");
+    s64 smi_before = read_number(SMI_COUNT);
+    s64 level = read_number(BACKLIGHT "actual_brightness");
+    s64 start = now_ms();
+    unsigned bytes = 0, changes = 0;
+    note("keys: bytes ");
+    while (now_ms() - start < KEY_WATCH_MS) {
+        u8 data[32];
+        s64 got = read(keyboard, data, sizeof(data));
+        for (s64 index = 0; index < got && bytes < 96U; index++, bytes++) note_hex(data[index]);
+        s64 now = read_number(BACKLIGHT "actual_brightness");
+        if (now != level) {
+            changes++;
+            level = now;
+        }
+        sleep_ms(50);
+    }
+    close(keyboard);
+    note("\nkeys: ");
+    note_number(bytes);
+    note(" bytes, panel level changed ");
+    note_number(changes);
+    note(" times by itself, ends at ");
+    note_number(level);
+    note(", smis ");
+    note_number(smi_before >= 0 ? read_number(SMI_COUNT) - smi_before : -1);
+    note("\n");
+}
+
 static void save_kernel_log(void) {
     s64 total = read_kernel_log();
     int out = (int)open(KMSG_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -392,6 +436,7 @@ static void run(int argc, char **argv) {
     wait_for_kernel_report();
     display_check();
     backlight_check();
+    key_watch();
     int fd = (int)open(REPORT_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd >= 0) {
         write(fd, summary, summary_used);
