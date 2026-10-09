@@ -1,19 +1,20 @@
 #define TEST_NAME "hwreport"
 #include "../tests/test.h"
 
-#define DRM_IOWR(nr, size)    ((3UL << 30) | ((u64)(size) << 16) | ('d' << 8) | (nr))
-#define DRM_GETCRTC           0xA1
-#define DRM_SETCRTC           0xA2
-#define DRM_ADDFB             0xAE
-#define DRM_PAGE_FLIP         0xB0
-#define DRM_CREATE_DUMB       0xB2
-#define DRM_MAP_DUMB          0xB3
-#define DRM_PAGE_FLIP_EVENT   1U
-#define DRM_EVENT_FLIP        2U
-#define DRM_CRTC              1U
-#define FRAMES                120
-#define SQUARE                96U
-#define REPORT_PATH           "/tunix-display.txt"
+#define DRM_IOWR(nr, size)  ((3UL << 30) | ((u64)(size) << 16) | ('d' << 8) | (nr))
+#define DRM_GETCRTC         0xA1
+#define DRM_SETCRTC         0xA2
+#define DRM_ADDFB           0xAE
+#define DRM_PAGE_FLIP       0xB0
+#define DRM_CREATE_DUMB     0xB2
+#define DRM_MAP_DUMB        0xB3
+#define DRM_PAGE_FLIP_EVENT 1U
+#define DRM_EVENT_FLIP      2U
+#define DRM_CRTC            1U
+#define FRAMES              120
+#define SQUARE              96U
+#define REPORT_PATH         "/tunix-display.txt"
+#define KMSG_PATH           "/tunix-kmsg.txt"
 
 struct drm_mode_info {
     u32 clock;
@@ -112,6 +113,35 @@ static int make_surface(int fd, u32 width, u32 height, struct surface *out) {
     return 0;
 }
 
+static s64 now_us(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return now.sec * 1000000 + now.nsec / 1000;
+}
+
+struct span {
+    s64 shortest, longest, total, count;
+};
+
+static void span_add(struct span *span, s64 value) {
+    if (!span->count || value < span->shortest) span->shortest = value;
+    if (value > span->longest) span->longest = value;
+    span->total += value;
+    span->count++;
+}
+
+static void note_span(const char *name, const struct span *span) {
+    note("display: ");
+    note(name);
+    note(" min ");
+    note_number(span->shortest);
+    note(" avg ");
+    note_number(span->count ? span->total / span->count : 0);
+    note(" max ");
+    note_number(span->longest);
+    note(" us\n");
+}
+
 static s64 wait_flip(int fd) {
     struct drm_event_vblank event;
     s64 start = now_ms();
@@ -154,46 +184,61 @@ static void display_check(void) {
         return;
     }
 
-    s64 shortest = 1000000, longest = 0, total = 0;
+    struct span drawing = {0}, flipping = {0}, waiting = {0};
     int missed = 0;
     s64 started = now_ms();
     for (int frame = 0; frame < FRAMES; frame++) {
         struct surface *surface = &surfaces[(frame + 1) % 2];
-        if (surface->square_x >= 0) fill(surface, (u32)surface->square_x, SQUARE, SQUARE, 0x00102040U);
+        s64 mark = now_us();
+        if (surface->square_x >= 0)
+            fill(surface, (u32)surface->square_x, SQUARE, SQUARE, 0x00102040U);
         surface->square_x = (s64)((u64)frame * (width - SQUARE) / (FRAMES - 1));
         fill(surface, (u32)surface->square_x, SQUARE, SQUARE, 0x00FFFFFFU);
+        span_add(&drawing, now_us() - mark);
         struct drm_page_flip flip = {DRM_CRTC, surface->fb, DRM_PAGE_FLIP_EVENT, 0, (u64)frame};
-        if (ioctl(fd, DRM_IOWR(DRM_PAGE_FLIP, sizeof(flip)), &flip) != 0) {
+        mark = now_us();
+        s64 status = ioctl(fd, DRM_IOWR(DRM_PAGE_FLIP, sizeof(flip)), &flip);
+        span_add(&flipping, now_us() - mark);
+        if (status != 0) {
             missed++;
             continue;
         }
-        s64 waited = wait_flip(fd);
-        if (waited < 0) {
+        mark = now_us();
+        if (wait_flip(fd) < 0) {
             missed++;
             continue;
         }
-        total += waited;
-        if (waited < shortest) shortest = waited;
-        if (waited > longest) longest = waited;
+        span_add(&waiting, now_us() - mark);
     }
     s64 elapsed = now_ms() - started;
     note("display: ");
     note_number(FRAMES);
     note(" flips in ");
     note_number(elapsed);
-    note(" ms, wait min ");
-    note_number(shortest);
-    note(" avg ");
-    note_number(FRAMES - missed ? total / (FRAMES - missed) : 0);
-    note(" max ");
-    note_number(longest);
     note(" ms, missed ");
     note_number(missed);
     note("\n");
+    note_span("draw", &drawing);
+    note_span("page flip ioctl", &flipping);
+    note_span("event wait", &waiting);
     sleep_ms(2000);
     crtc.fb_id = 0;
     (void)ioctl(fd, DRM_IOWR(DRM_SETCRTC, sizeof(crtc)), &crtc);
     close(fd);
+}
+
+static void save_kernel_log(void) {
+    static char log[256 * 1024];
+    int in = (int)open("/dev/kmsg", O_RDONLY, 0);
+    if (in < 0) return;
+    s64 total = 0, got;
+    while (total < (s64)sizeof(log) && (got = read(in, log + total, sizeof(log) - (u64)total)) > 0)
+        total += got;
+    close(in);
+    int out = (int)open(KMSG_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (out < 0) return;
+    write(out, log, (u64)total);
+    close(out);
 }
 
 static void run(int argc, char **argv) {
@@ -205,6 +250,7 @@ static void run(int argc, char **argv) {
         write(fd, summary, summary_used);
         close(fd);
     }
+    save_kernel_log();
     sync();
     print("\nTunix hardware report\n\n"
           "  /tunix-hwreport.txt       the report\n"
