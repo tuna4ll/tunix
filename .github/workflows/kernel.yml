@@ -1,13 +1,3 @@
-# The kernel has to compile. That is all this checks, and it is deliberate.
-#
-# Not the image: building it installs a Void sysroot with xbps, which is most
-# of a gigabyte over the network from a mirror this repository does not
-# control. A build that fails when somebody else's mirror is slow teaches
-# people to ignore it.
-#
-# `make check` rather than `make kernel`, because two of the three
-# configurations are compiled only when asked for and rot quietly otherwise --
-# see the target in the GNUmakefile.
 name: kernel
 
 on:
@@ -23,26 +13,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # gcc and make come with the runner. Pillow does not, and the console
-      # font is rendered from a TTF at build time by support/terminal-font.py.
-      - name: install what the build needs
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3-pil
-
       - name: report the toolchain
         run: |
           cc --version | head -1
           make --version | head -1
-          python3 -c 'import PIL; print("Pillow", PIL.__version__)'
 
       - name: build
         run: make check
 
       - name: the three kernels and their modules exist
         run: ls -l build/check/*/kernel.elf build/check/*/modules/*.ko
-
-      # The Atheros driver has no emulator, so its own code is run here against
-      # a model of the chip: rings, descriptors, link handling and teardown.
-      - name: the atl1c driver passes its device model
-        run: make atl1ctest

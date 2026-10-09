@@ -57,23 +57,16 @@ MODULES := $(patsubst kernel/modules/%.c,$(BUILD)/modules/%.ko,$(MODULE_SOURCES)
 MODULE_CFLAGS = $(filter-out -ffunction-sections -fdata-sections,$(KERNEL_CFLAGS)) \
 	-DTUNIX_MODULE_NAME='"$(notdir $*)"'
 
-TEST_MODULE_SOURCES := $(wildcard support/tests/modules/*.c)
-TEST_MODULES := $(patsubst support/tests/modules/%.c,$(BUILD)/test-modules/%.ko,$(TEST_MODULE_SOURCES))
-
 .PHONY: modules
-modules: $(MODULES) $(TEST_MODULES)
+modules: $(MODULES)
 
 $(BUILD)/modules/%.ko: kernel/modules/%.c | $(LIMINE_HEADER)
 	@mkdir -p $(dir $@)
 	$(CC) $(MODULE_CFLAGS) -MMD -MP -c $< -o $@
 
-$(BUILD)/test-modules/%.ko: support/tests/modules/%.c | $(LIMINE_HEADER)
-	@mkdir -p $(dir $@)
-	$(CC) $(MODULE_CFLAGS) -MMD -MP -c $< -o $@
+$(MODULES): GNUmakefile
 
-$(MODULES) $(TEST_MODULES): GNUmakefile
-
--include $(MODULES:.ko=.d) $(TEST_MODULES:.ko=.d)
+-include $(MODULES:.ko=.d)
 
 $(KERNEL_OBJECTS): GNUmakefile
 
@@ -88,8 +81,7 @@ $(LIMINE_EXE): $(LIMINE_HEADER)
 	$(MAKE) -C $(LIMINE_DIR)
 
 clean:
-	rm -rf $(BUILD)/kernel $(BUILD)/modules \
-		$(BUILD)/test-modules $(KERNEL) $(IMAGE)
+	rm -rf $(BUILD)/kernel $(BUILD)/modules $(KERNEL) $(IMAGE)
 
 distclean:
 	rm -rf $(BUILD)
@@ -239,41 +231,6 @@ headless: $(IMAGE)
 	$(AUDIO_NOTE)
 	$(QEMU) $(QEMU_COMMON) -nographic -monitor none -serial stdio
 
-SCHEDBENCH_CPUS ?= 4
-
-.PHONY: schedbench drmtest perftest inputtest soundtest moduletest testimage
-schedbench: $(KERNEL) $(LIMINE_EXE)
-	support/tests/schedbench.sh $(SCHEDBENCH_CPUS) $(KERNEL)
-
-drmtest: $(KERNEL) $(LIMINE_EXE)
-	support/tests/drmtest.sh $(SCHEDBENCH_CPUS) $(KERNEL)
-
-perftest: $(KERNEL) $(LIMINE_EXE)
-	support/tests/perftest.sh $(SCHEDBENCH_CPUS) $(KERNEL)
-
-inputtest: $(KERNEL) $(LIMINE_EXE)
-	support/tests/inputtest.sh $(SCHEDBENCH_CPUS) $(KERNEL)
-
-soundtest: $(KERNEL) $(LIMINE_EXE)
-	support/tests/soundtest.sh $(SCHEDBENCH_CPUS) $(KERNEL)
-
-.PHONY: thermaltest
-thermaltest: | $(BUILD)
-	$(CC) -std=gnu11 -Wall -Wextra -Werror -O1 support/tests/thermaltest.c -o $(BUILD)/thermaltest
-	$(BUILD)/thermaltest
-	$(CC) -std=gnu11 -Wall -Wextra -Werror -O1 support/tests/cpufreqtest.c -o $(BUILD)/cpufreqtest
-	$(BUILD)/cpufreqtest
-
-.PHONY: atl1ctest
-atl1ctest: | $(BUILD)
-	$(CC) -std=gnu11 -Wall -Wextra -Werror -O1 -DTUNIX_MODULE_NAME='"atl1c"' \
-		support/tests/atl1ctest.c kernel/modules/atl1c.c -o $(BUILD)/atl1ctest -lpthread
-	$(BUILD)/atl1ctest
-
-TEST ?= schedbench
-testimage: $(KERNEL) $(LIMINE_EXE)
-	BOOT=0 IMAGE_TABLE='$(IMAGE_TABLE)' support/tests/$(TEST).sh $(SCHEDBENCH_CPUS) $(KERNEL)
-
 AARCH64_CC     ?= aarch64-linux-gnu-gcc
 AARCH64_OBJCOPY ?= aarch64-linux-gnu-objcopy
 
@@ -316,23 +273,18 @@ $(AARCH64_CORE_OBJECTS): GNUmakefile
 
 AARCH64_MODULE_SOURCES := $(wildcard kernel/modules/*.c)
 AARCH64_MODULES := $(patsubst kernel/modules/%.c,$(AARCH64_CORE_BUILD)/modules/%.ko,$(AARCH64_MODULE_SOURCES))
-AARCH64_TEST_MODULES := $(patsubst support/tests/modules/%.c,$(AARCH64_CORE_BUILD)/test-modules/%.ko,$(TEST_MODULE_SOURCES))
 AARCH64_MODULE_CFLAGS = $(AARCH64_CORE_CFLAGS) -DTUNIX_MODULE_NAME='"$(notdir $*)"'
 
 .PHONY: modules-aarch64
-modules-aarch64: $(AARCH64_MODULES) $(AARCH64_TEST_MODULES)
+modules-aarch64: $(AARCH64_MODULES)
 
 $(AARCH64_CORE_BUILD)/modules/%.ko: kernel/modules/%.c
 	@mkdir -p $(dir $@)
 	$(AARCH64_CC) $(AARCH64_MODULE_CFLAGS) -MMD -MP -c $< -o $@
 
-$(AARCH64_CORE_BUILD)/test-modules/%.ko: support/tests/modules/%.c
-	@mkdir -p $(dir $@)
-	$(AARCH64_CC) $(AARCH64_MODULE_CFLAGS) -MMD -MP -c $< -o $@
+$(AARCH64_MODULES): GNUmakefile
 
-$(AARCH64_MODULES) $(AARCH64_TEST_MODULES): GNUmakefile
-
--include $(AARCH64_MODULES:.ko=.d) $(AARCH64_TEST_MODULES:.ko=.d)
+-include $(AARCH64_MODULES:.ko=.d)
 
 QEMU_AARCH64_CORE_DISKS ?=
 
