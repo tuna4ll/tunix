@@ -15,11 +15,10 @@ Log in as `root` with the password `tunix`.
 ## Layout
 
 ```
-kernel/       the kernel
+kernel/       the kernel, with kernel/rust/ for Rust code
 base-files/   files added to the Void userland
 tools/        image builder, boot config and tests
 docs/         kernel documentation
-rust/         Rust code, soon
 ```
 
 ## License
