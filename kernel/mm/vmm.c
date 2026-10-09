@@ -7,7 +7,7 @@
 
 static int vmm_map_page_in_locked(uint64_t cr3_physical, uint64_t virtual_address,
                                   uint64_t physical_address, uint64_t flags);
-static uint64_t map_device_locked(uint64_t *used, uint64_t physical, uint64_t bytes);
+static uint64_t map_device_locked(uint64_t physical, uint64_t bytes, uint64_t cache);
 #include <tunix/boot.h>
 #include <tunix/heap.h>
 #include <tunix/pmm.h>
@@ -315,17 +315,27 @@ void vmm_init(void) {
 
 uint64_t vmm_kernel_cr3(void) { return kernel_cr3_physical; }
 
+static uint64_t device_arena_used;
+
 uint64_t vmm_map_device(uint64_t physical, uint64_t bytes) {
-    static uint64_t arena_used = 0;
     if (!physical || !bytes) return 0;
     lock_acquire(&tables_lock);
-    uint64_t mapped = map_device_locked(&arena_used, physical, bytes);
+    uint64_t mapped = map_device_locked(physical, bytes, PAGE_UNCACHED);
     lock_release(&tables_lock);
     return mapped;
 }
 
-static uint64_t map_device_locked(uint64_t *used, uint64_t physical, uint64_t bytes) {
-    uint64_t arena_used = *used;
+uint64_t vmm_map_device_write_combining(uint64_t physical, uint64_t bytes) {
+    if (!physical || !bytes) return 0;
+    uint64_t cache = vmm_write_combining_available() ? PAGE_WRITE_COMBINING : PAGE_UNCACHED;
+    lock_acquire(&tables_lock);
+    uint64_t mapped = map_device_locked(physical, bytes, cache);
+    lock_release(&tables_lock);
+    return mapped;
+}
+
+static uint64_t map_device_locked(uint64_t physical, uint64_t bytes, uint64_t cache) {
+    uint64_t arena_used = device_arena_used;
 
     uint64_t page_offset = physical & 0xFFFULL;
     uint64_t first = physical - page_offset;
@@ -335,10 +345,10 @@ static uint64_t map_device_locked(uint64_t *used, uint64_t physical, uint64_t by
     uint64_t base = DEVICE_ARENA_BASE + arena_used;
     for (uint64_t offset = 0; offset < span; offset += 4096ULL) {
         if (vmm_map_page_in_locked(kernel_cr3_physical, base + offset, first + offset,
-                                   PAGE_WRITE | PAGE_DEVICE | PAGE_UNCACHED | PAGE_NX) != 0)
+                                   PAGE_WRITE | PAGE_DEVICE | cache | PAGE_NX) != 0)
             return 0;
     }
-    *used = arena_used + span;
+    device_arena_used = arena_used + span;
     return base + page_offset;
 }
 uint64_t vmm_current_cr3(void) { return vmm_arch_read_root(); }

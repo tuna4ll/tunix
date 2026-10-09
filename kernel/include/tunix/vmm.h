@@ -50,6 +50,7 @@ uint64_t vmm_virt_to_phys_direct(const void *virtual_address);
 uint64_t vmm_dma_physical(const void *pointer, uint64_t length);
 uint64_t vmm_kernel_cr3(void);
 uint64_t vmm_map_device(uint64_t physical, uint64_t bytes);
+uint64_t vmm_map_device_write_combining(uint64_t physical, uint64_t bytes);
 uint64_t vmm_current_cr3(void);
 uint64_t vmm_create_address_space(void);
 uint64_t vmm_clone_address_space(uint64_t source_cr3);
