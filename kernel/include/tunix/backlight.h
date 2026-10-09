@@ -15,5 +15,6 @@ struct backlight_device {
 
 void sysfs_publish_backlight(const struct backlight_device *device,
                              const struct pci_device *parent);
+int backlight_step(int brighter);
 
 #endif

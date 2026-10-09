@@ -1090,6 +1090,21 @@ static void publish_backlight(void) {
     if (registered) uevent_send(registered, "add");
 }
 
+#define BACKLIGHT_STEPS 10U
+
+int backlight_step(int brighter) {
+    VFS_GUARD;
+    if (!backlight) return -1;
+    uint32_t most = backlight->max_brightness;
+    uint32_t step = most / BACKLIGHT_STEPS ? most / BACKLIGHT_STEPS : 1U;
+    uint32_t level = backlight_level;
+    if (brighter) level = most - level < step ? most : level + step;
+    else level = level < step * 2U ? step : level - step;
+    if (backlight->set(level) != 0) return -1;
+    backlight_level = level;
+    return 0;
+}
+
 void sysfs_publish_backlight(const struct backlight_device *device,
                              const struct pci_device *parent) {
     VFS_GUARD;
