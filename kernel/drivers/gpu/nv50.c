@@ -98,6 +98,8 @@ struct probe {
 };
 
 struct lvds_output {
+    uint32_t vpll_coefficients;
+    uint32_t vpll_fraction;
     uint16_t hash_type;
     uint16_t hash_mask;
     uint8_t or_index;
@@ -606,6 +608,14 @@ static const struct method_list core_lists[] = {
     {0x400, 0x540, 2, head_methods, sizeof(head_methods) / sizeof(head_methods[0])},
 };
 
+static uint32_t sanitize_armed(uint32_t method, uint32_t value) {
+    if (method < 0x0800U || method >= 0x0C00U + 0x400U) return value;
+    uint32_t field = (method - 0x0800U) % 0x400U;
+    if (field == 0x004U) return value & ~0x02000000U;
+    if (field == 0x024U) return 1U;
+    return value;
+}
+
 static unsigned restore_armed_state(struct probe *probe) {
     unsigned restored = 0;
     for (size_t list = 0; list < sizeof(core_lists) / sizeof(core_lists[0]); list++) {
@@ -616,7 +626,7 @@ static unsigned restore_armed_state(struct probe *probe) {
                 uint32_t method =
                     methods->entries[entry].method + instance * methods->method_stride;
                 uint32_t pending = rd32(probe, reg);
-                uint32_t armed = rd32(probe, reg + 4U);
+                uint32_t armed = sanitize_armed(method, rd32(probe, reg + 4U));
                 if (pending == armed) continue;
                 push(probe, method, armed);
                 restored++;
@@ -691,8 +701,11 @@ static int service_supervisors(struct probe *probe, const struct lvds_output *ou
         wr32(probe, PDISP_INTR_1, pending);
         if (pending & 0x20U) {
             if (super & 0x80U) run_named(probe, out, "off int2", out->scripts[2]);
-            if (super & 0x200U)
-                say(probe, "  the pixel clock pll was requested; it is unchanged\n");
+            if (super & 0x200U) {
+                wr32(probe, 0x614104U, out->vpll_coefficients);
+                wr32(probe, 0x614108U, out->vpll_fraction);
+                say(probe, "  pixel clock pll rewritten with the vbios coefficients\n");
+            }
             if (super & 0x80U) {
                 run_named(probe, out, "on int2", out->on_int2);
                 mask32(probe, 0x614200U, 0x0000000FU, 0);
@@ -731,6 +744,12 @@ static int modeset(struct probe *probe) {
 
     struct lvds_output out = {0};
     if (find_lvds(probe, &out) != 0 || find_lvds_scripts(probe, &out, clock) != 0) return -1;
+
+    out.vpll_coefficients = rd32(probe, 0x614104U);
+    out.vpll_fraction = rd32(probe, 0x614108U);
+    show(probe, "vpll control   ", 0x614100U);
+    show(probe, "vpll coeffs    ", 0x614104U);
+    show(probe, "vpll fraction  ", 0x614108U);
 
     draw_surface(probe, width, height, pitch);
 
