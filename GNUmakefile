@@ -352,12 +352,22 @@ test-aarch64: $(AARCH64_CORE_IMAGE)
 	ARCH=aarch64 KERNEL=$(AARCH64_CORE_IMAGE) LIMINE=$(LIMINE_DIR) tools/tests/run.sh $(TESTS)
 
 CLANG_FORMAT ?= clang-format
+CLANG_TIDY   ?= clang-tidy
+NPROC        := $(shell nproc 2>/dev/null || echo 1)
 
 FORMAT_SOURCES := $(shell find kernel tools/tests -name '*.[ch]')
+LINT_FLAGS := -std=gnu11 -ffreestanding -m64 -mcmodel=kernel -mgeneral-regs-only \
+	-mno-red-zone -Ikernel/include -I$(LIMINE_DIR)
 
-.PHONY: format format-check
+.PHONY: format format-check lint
 format:
 	@$(CLANG_FORMAT) -i $(FORMAT_SOURCES)
 
 format-check:
 	@$(CLANG_FORMAT) --dry-run --Werror $(FORMAT_SOURCES)
+
+lint: | $(LIMINE_HEADER)
+	@printf '%s\n' $(filter %.c,$(KERNEL_SOURCES)) | \
+		xargs -P$(NPROC) -I{} $(CLANG_TIDY) --quiet {} -- $(LINT_FLAGS)
+	@printf '%s\n' $(MODULE_SOURCES) | \
+		xargs -P$(NPROC) -I{} $(CLANG_TIDY) --quiet {} -- $(LINT_FLAGS) -DTUNIX_MODULE_NAME='"lint"'

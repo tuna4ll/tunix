@@ -231,7 +231,7 @@ static int record_reserve(struct unix_record_queue *records) {
         kfree(senders);
         return -EAGAIN;
     }
-    for (int step = 0; step < records->count; step++) {
+    for (int step = 0; records->capacity && step < records->count; step++) {
         int from = (records->head + step) % records->capacity;
         lengths[step] = records->lengths[from];
         senders[step] = records->senders[from];

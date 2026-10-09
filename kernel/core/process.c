@@ -584,8 +584,7 @@ void process_dump_all(void) {
             item = item->next;
             continue;
         }
-        uint64_t rip =
-            item == current ? SYSCALL_IP(&item->saved_frame) : SYSCALL_IP(&item->saved_frame);
+        uint64_t rip = SYSCALL_IP(&item->saved_frame);
         uint64_t offset = 0;
         const char *object = object_at(item, rip, &offset);
         kprintf("  %d/%d %s %s", (int)item->pid, (int)item->tgid, item->name,
@@ -1422,11 +1421,11 @@ static struct process *first_allowed_rt(int above, const struct process *skip) {
             bits &= ~(1ULL << (level % 64));
             if (level <= above) return NULL;
             struct process *head = rt_heads[level];
-            struct process *walk = head;
-            do {
+            for (struct process *walk = head; walk;) {
                 if (walk != skip && runnable(walk)) return walk;
                 walk = walk->ready_next;
-            } while (walk != head);
+                if (walk == head) break;
+            }
         }
     }
     return NULL;

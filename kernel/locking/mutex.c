@@ -126,7 +126,7 @@ void mutex_lock(struct mutex *mutex) {
             if (self) remember(self, mutex);
             return;
         }
-        if (!sleeping) {
+        if (!sleeping || !self) {
             lock_release(&mutex->guard);
             smp_service_flush();
             cpu_relax();

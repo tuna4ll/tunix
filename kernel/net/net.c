@@ -585,9 +585,9 @@ static struct reassembly *reassembly_find(const struct ipv4_header *ip) {
             return entry;
     if (reassembly_count >= REASSEMBLY_LIMIT) {
         struct reassembly **oldest = &reassemblies;
-        while ((*oldest)->next) oldest = &(*oldest)->next;
+        while (*oldest && (*oldest)->next) oldest = &(*oldest)->next;
         stack_drop++;
-        reassembly_drop(oldest);
+        if (*oldest) reassembly_drop(oldest);
     }
     struct reassembly *entry = (struct reassembly *)kmalloc(sizeof(*entry));
     if (!entry) return NULL;

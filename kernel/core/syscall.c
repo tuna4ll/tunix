@@ -2434,10 +2434,7 @@ static int64_t sys_recvmsg(int fd, uint64_t user_message, int flags) {
             if (data != stage) kfree(data);
             return -EFAULT;
         }
-        if (data != stage) {
-            kfree(data);
-            data = stage;
-        }
+        if (data != stage) kfree(data);
         if (message.name && unix_socket_is_dgram(unix_value)) {
             struct tunix_sockaddr_un source;
             uint32_t actual = unix_source_address(unix_value, &source);
@@ -4289,7 +4286,6 @@ static int64_t sys_execve(struct syscall_frame *frame, uint64_t user_path, uint6
     if (argc == 0) {
         int status = vector_insert(arguments, &arguments->argv, 0, path);
         if (status != 0) return status;
-        argc = 1;
     }
     if (envc == 0) {
         const char *defaults[] = {"PATH=/usr/bin:/usr/sbin:/bin:/sbin", "HOME=/", "TERM=tunix",

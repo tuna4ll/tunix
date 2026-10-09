@@ -68,9 +68,14 @@ static size_t aligned_name_length(const char *name) {
 
 static void queue_bytes(struct inotify_context *context, const void *data, size_t size) {
     const uint8_t *bytes = data;
-    for (size_t index = 0; index < size; index++) {
-        context->queue[context->write_position] = bytes[index];
-        context->write_position = (context->write_position + 1U) % context->capacity;
+    size_t left = size;
+    while (left) {
+        size_t chunk = context->capacity - context->write_position;
+        if (chunk > left) chunk = left;
+        memcpy(context->queue + context->write_position, bytes, chunk);
+        context->write_position = (context->write_position + chunk) % context->capacity;
+        bytes += chunk;
+        left -= chunk;
     }
     context->queued += size;
 }
