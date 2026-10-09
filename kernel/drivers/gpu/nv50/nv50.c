@@ -4,9 +4,13 @@
 #include <tunix/boot.h>
 #include <tunix/boot_framebuffer.h>
 #include <tunix/display.h>
+#include <tunix/irq.h>
 #include <tunix/nv50.h>
 #include <tunix/pci.h>
+#include <tunix/process.h>
+#include <tunix/time.h>
 #include <tunix/vmm.h>
+#include <tunix/workqueue.h>
 
 #include "priv.h"
 
@@ -26,6 +30,11 @@ static uint8_t gpu_bus, gpu_slot, gpu_function;
 static uint8_t *buffer_map[DRM_BUFFERS];
 static uint32_t buffer_vram[DRM_BUFFERS];
 static unsigned back_index;
+static struct pci_device pci_device;
+static int pci_bound;
+static int vblank_live;
+static uint64_t vblank_count;
+static uint64_t vblank_ns;
 
 static int find_gpu(uint8_t *bus_out, uint8_t *slot_out, uint8_t *function_out) {
     for (unsigned bus = 0; bus < 256U; bus++) {
@@ -124,18 +133,28 @@ static int console_in_front(void) { return gpu.front == VRAM_SURFACE; }
 
 static int idle(int may_service) { return nv50_disp_flip_idle(&gpu, may_service); }
 
+static int vblank(uint64_t *sequence, uint64_t *time_ns) {
+    if (!__atomic_load_n(&vblank_live, __ATOMIC_ACQUIRE)) return -1;
+    *sequence = __atomic_load_n(&vblank_count, __ATOMIC_ACQUIRE);
+    *time_ns = __atomic_load_n(&vblank_ns, __ATOMIC_ACQUIRE);
+    return 0;
+}
+
 static const struct display_flipper flipper = {
     .back_buffer = back_buffer,
     .flip_to_back = flip_to_back,
     .flip_to_console = flip_to_console,
     .console_in_front = console_in_front,
     .idle = idle,
+    .vblank = vblank,
 };
 
 static int pci_probe(const struct pci_device *device) {
-    return device->bus == gpu_bus && device->slot == gpu_slot && device->function == gpu_function
-        ? 0
-        : -1;
+    if (device->bus != gpu_bus || device->slot != gpu_slot || device->function != gpu_function)
+        return -1;
+    pci_device = *device;
+    pci_bound = 1;
+    return 0;
 }
 
 static const struct pci_device_id pci_ids[] = {
@@ -148,6 +167,45 @@ static struct pci_driver pci_driver = {
     .id_count = sizeof(pci_ids) / sizeof(pci_ids[0]),
     .probe = pci_probe,
 };
+
+static void vblank_wake(void *unused) {
+    (void)unused;
+    (void)process_wake_io();
+    process_io_recheck();
+}
+
+static struct work vblank_work = WORK_INITIALIZER(vblank_wake, NULL);
+
+static void interrupt(void *context) {
+    (void)context;
+    if (!__atomic_load_n(&vblank_live, __ATOMIC_ACQUIRE)) return;
+    int status = nv50_disp_interrupt(&gpu);
+    if (status < 0) {
+        nv50_disp_vblank_stop(&gpu);
+        __atomic_store_n(&vblank_live, 0, __ATOMIC_RELEASE);
+        kprintf("NV50: an unexpected interrupt, vblank goes back to the timer\n");
+        return;
+    }
+    if (!status) return;
+    __atomic_store_n(&vblank_ns, time_uptime_ns(), __ATOMIC_RELEASE);
+    __atomic_add_fetch(&vblank_count, 1, __ATOMIC_ACQ_REL);
+    if (gpu.flip_pending) work_queue(&vblank_work);
+}
+
+static void start_vblank_interrupt(void) {
+    if (!pci_bound) return;
+    unsigned vector = irq_request("nv50", "PCI-MSI", interrupt, NULL);
+    if (!vector) return;
+    pci_enable_bus_mastering(&pci_device);
+    if (pci_msi_bind(&pci_device, vector) != 0) {
+        irq_release(vector);
+        kprintf("NV50: no msi, vblank stays on the timer\n");
+        return;
+    }
+    __atomic_store_n(&vblank_live, 1, __ATOMIC_RELEASE);
+    nv50_disp_vblank_start(&gpu);
+    kprintf("NV50: vblank interrupt on vector %u\n", vector);
+}
 
 static void nv50_late(void) {
     (void)pci_register_driver(&pci_driver);
@@ -162,6 +220,7 @@ static void nv50_late(void) {
             return;
         }
     }
+    start_vblank_interrupt();
     display_register_flipper(&flipper);
     kprintf("NV50: page flipping between two buffers\n");
 }

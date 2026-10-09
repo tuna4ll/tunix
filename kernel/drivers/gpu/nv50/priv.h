@@ -71,5 +71,8 @@ int nv50_disp_init(struct nv50_device *gpu);
 int nv50_disp_modeset(struct nv50_device *gpu);
 int nv50_disp_flip(struct nv50_device *gpu, uint32_t vram);
 int nv50_disp_flip_idle(struct nv50_device *gpu, int may_service);
+void nv50_disp_vblank_start(struct nv50_device *gpu);
+void nv50_disp_vblank_stop(struct nv50_device *gpu);
+int nv50_disp_interrupt(struct nv50_device *gpu);
 
 #endif

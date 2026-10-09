@@ -10,6 +10,8 @@
 #define PDISP_OBJECTS    0x610010U
 #define PDISP_INTR_0     0x610020U
 #define PDISP_INTR_1     0x610024U
+#define PDISP_INTR_EN_0  0x610028U
+#define PDISP_INTR_EN_1  0x61002CU
 #define PDISP_SUPERVISOR 0x610030U
 #define PDISP_ERROR_ADDR 0x610080U
 #define PDISP_ERROR_DATA 0x610084U
@@ -22,6 +24,11 @@
 #define PDISP_CORE_PUT   0x640000U
 #define PDISP_CORE_GET   0x640004U
 #define VBIOS_OWNS       0x00000100U
+#define PMC_INTR         0x000100U
+#define PMC_INTR_ENABLE  0x000140U
+#define PMC_INTR_DISP    0x04000000U
+#define INTR_1_VBLANK_0  0x00000004U
+#define PCI_MSI_REARM    0x088068U
 
 #define RAMHT_BYTES     0x1000U
 #define RAMHT_BITS      9U
@@ -404,4 +411,26 @@ int nv50_disp_flip_idle(struct nv50_device *gpu, int may_service) {
         return 1;
     }
     return 0;
+}
+
+void nv50_disp_vblank_start(struct nv50_device *gpu) {
+    nv50_wr32(gpu, PDISP_INTR_EN_0, 0);
+    nv50_wr32(gpu, PDISP_INTR_1, INTR_1_VBLANK_0);
+    nv50_wr32(gpu, PDISP_INTR_EN_1, INTR_1_VBLANK_0);
+    nv50_wr32(gpu, PMC_INTR_ENABLE, 1);
+}
+
+void nv50_disp_vblank_stop(struct nv50_device *gpu) {
+    nv50_wr32(gpu, PMC_INTR_ENABLE, 0);
+    nv50_wr32(gpu, PDISP_INTR_EN_1, 0);
+}
+
+int nv50_disp_interrupt(struct nv50_device *gpu) {
+    uint32_t pending = nv50_rd32(gpu, PMC_INTR);
+    if (!pending) return 0;
+    if (pending & ~PMC_INTR_DISP) return -1;
+    if (!(nv50_rd32(gpu, PDISP_INTR_1) & INTR_1_VBLANK_0)) return -1;
+    nv50_wr32(gpu, PDISP_INTR_1, INTR_1_VBLANK_0);
+    *(volatile uint8_t *)(gpu->bar0 + PCI_MSI_REARM) = 0xFFU;
+    return 1;
 }

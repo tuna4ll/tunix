@@ -1751,6 +1751,17 @@ static struct drm_event_queue *event_queue_of(const struct file *client, int cre
     return spare;
 }
 
+#define FLIP_FENCE_PATIENCE_NS 100000000ULL
+
+static int hardware_vblank(uint64_t *sequence, uint64_t *time_ns) {
+    const struct display_flipper *flipper = display_flipper();
+    uint64_t count = 0, at = 0;
+    if (!flipper || !flipper->vblank || flipper->vblank(&count, &at) != 0) return 0;
+    if (sequence) *sequence = count;
+    if (time_ns) *time_ns = at;
+    return 1;
+}
+
 static void queue_flip_event(const struct file *client, uint64_t user_data) {
     struct drm_event_queue *queue = event_queue_of(client, 1);
     if (!queue) return;
@@ -1765,16 +1776,16 @@ static void queue_flip_event(const struct file *client, uint64_t user_data) {
     event->user_data = user_data;
     ++flip_sequence;
     event->crtc_id = DRM_CRTC_ID;
-    uint64_t due = (time_uptime_ns() / DRM_VBLANK_NS + 1U) * DRM_VBLANK_NS;
+    uint64_t now = time_uptime_ns();
+    uint64_t due = (now / DRM_VBLANK_NS + 1U) * DRM_VBLANK_NS;
+    if (hardware_vblank(NULL, NULL)) due = now;
     queue->fences[queue->tail] = virtgpu_flip_fence();
     queue->due_ns[queue->tail] = due;
     queue->tail = (queue->tail + 1U) % DRM_MAX_EVENTS;
-    timer_note_deadline(due);
+    timer_note_deadline(due == now ? now + FLIP_FENCE_PATIENCE_NS : due);
     __atomic_add_fetch(&queue->count, 1, __ATOMIC_RELEASE);
     (void)process_wake_io();
 }
-
-#define FLIP_FENCE_PATIENCE_NS 100000000ULL
 
 static int flip_head_ready(const struct drm_event_queue *queue, int reclaim) {
     if (!__atomic_load_n(&queue->count, __ATOMIC_ACQUIRE)) return 0;
@@ -1800,6 +1811,7 @@ int64_t drm_file_read(struct file *file, size_t size, void *buffer) {
         struct drm_event_vblank *event = &queue->events[queue->head];
         uint64_t vblank = time_uptime_ns() / DRM_VBLANK_NS;
         uint64_t at = vblank * DRM_VBLANK_NS;
+        (void)hardware_vblank(&vblank, &at);
         event->tv_sec = (uint32_t)(at / 1000000000ULL);
         event->tv_usec = (uint32_t)((at % 1000000000ULL) / 1000ULL);
         event->sequence = (uint32_t)vblank;

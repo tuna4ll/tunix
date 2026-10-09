@@ -17,6 +17,7 @@ struct display_flipper {
     int (*flip_to_console)(void);
     int (*console_in_front)(void);
     int (*idle)(int may_service);
+    int (*vblank)(uint64_t *sequence, uint64_t *time_ns);
 };
 
 int display_early_init(const struct boot_framebuffer_info *boot, struct boot_framebuffer_info *out);
