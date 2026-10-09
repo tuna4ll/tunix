@@ -42,7 +42,8 @@ else
 	fi
 	esp_copy "$KERNEL" boot/Image
 fi
-esp_copy "$SYSROOT/usr/share/weston/wallpapers/tunix.png" boot/wallpaper.png
+WALLPAPER=$SYSROOT/usr/share/weston/wallpapers/tunix.png
+[ ! -f "$WALLPAPER" ] || esp_copy "$WALLPAPER" boot/wallpaper.png
 mcopy -s -i "$WORK/esp.img" "$WORK/esp-root"/* ::
 
 if [ -n "${MODULES:-}" ]; then

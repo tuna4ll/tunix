@@ -338,3 +338,12 @@ run-aarch64-core: $(AARCH64_CORE_IMAGE)
 		-no-reboot -kernel $(AARCH64_CORE_IMAGE) $(QEMU_AARCH64_CORE_DISKS)
 
 QEMU_AARCH64 ?= qemu-system-aarch64
+
+TESTS ?=
+
+.PHONY: test test-aarch64
+test: $(KERNEL) $(LIMINE_EXE)
+	KERNEL=$(KERNEL) LIMINE=$(LIMINE_DIR) tools/tests/run.sh $(TESTS)
+
+test-aarch64: $(AARCH64_CORE_IMAGE)
+	ARCH=aarch64 KERNEL=$(AARCH64_CORE_IMAGE) LIMINE=$(LIMINE_DIR) tools/tests/run.sh $(TESTS)
