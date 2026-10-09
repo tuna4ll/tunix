@@ -21,6 +21,7 @@ typedef unsigned char u8;
 #define SYS_pread64         17
 #define SYS_nanosleep       35
 #define SYS_sync            162
+#define SYS_ioctl           16
 #define SYS_getpid          39
 #define SYS_sendmsg         46
 #define SYS_recvmsg         47
@@ -72,6 +73,7 @@ typedef unsigned char u8;
 #define SYS_exit_group      94
 #define SYS_nanosleep       101
 #define SYS_sync            81
+#define SYS_ioctl           29
 #define SYS_clock_gettime   113
 #define SYS_kill            129
 #define SYS_rt_sigaction    134
@@ -339,6 +341,14 @@ static inline s64 sendmsg(int fd, const struct msghdr *message, int flags) {
 
 static inline s64 recvmsg(int fd, struct msghdr *message, int flags) {
     return SYSCALL(SYS_recvmsg, fd, message, flags, 0, 0, 0);
+}
+
+static inline s64 ioctl(int fd, u64 request, void *argument) {
+    return SYSCALL(SYS_ioctl, fd, request, argument, 0, 0, 0);
+}
+
+static inline void *mmap_file(u64 length, int protection, int fd, s64 offset) {
+    return (void *)SYSCALL(SYS_mmap, 0, length, protection, MAP_SHARED, fd, offset);
 }
 
 static inline s64 sync(void) { return SYSCALL(SYS_sync, 0, 0, 0, 0, 0, 0); }
