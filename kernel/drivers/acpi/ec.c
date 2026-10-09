@@ -177,8 +177,6 @@ static const struct ec_board *find_board(char *oem, char *table) {
 void ec_init(void) {
     const struct acpi_power *power = acpi_power_info();
     if (!power || !power->embedded_controller) return;
-    const struct acpi_events *events = acpi_event_state();
-    if (events && events->handed_over) return;
     const char *choice = boot_command_line_value("ec");
     if (choice && strncmp(choice, "off", 3) == 0) return;
     if (inb(EC_COMMAND_PORT) == 0xFFU) return;
