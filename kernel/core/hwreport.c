@@ -10,6 +10,7 @@
 #include <tunix/hwreport.h>
 #include <tunix/kstring.h>
 #include <tunix/module.h>
+#include <tunix/nv50.h>
 #include <tunix/pci.h>
 #include <tunix/uts.h>
 #include <tunix/percpu.h>
@@ -583,6 +584,9 @@ static void write_to_disk(void) { (void)write_file(REPORT_PATH, report, used); }
 #define NV_PDISP_VBIOS_PTR  0x619F04U
 #define NV_PRAMIN_WINDOW    0x700000U
 #define GPU_REGS_PATH       "/tunix-gpu-regs.bin"
+#define GPU_REGS_AFTER_PATH "/tunix-gpu-regs-after.bin"
+#define NV50_LOG_PATH       "/tunix-nv50.log"
+#define NV50_LOG_BYTES      32768U
 
 struct register_range {
     uint32_t start;
@@ -736,7 +740,7 @@ static void put_nv_pramin(uint64_t bar0, uint8_t *buffer) {
     put_vbios("pramin", "/tunix-vbios-pramin.rom", buffer, VBIOS_MAX);
 }
 
-static void put_nv_registers(uint64_t bar0) {
+static void put_nv_registers(uint64_t bar0, const char *path) {
     uint64_t bytes = 0;
     for (size_t index = 0; index < sizeof(nv_register_ranges) / sizeof(nv_register_ranges[0]);
          index++)
@@ -756,10 +760,12 @@ static void put_nv_registers(uint64_t bar0) {
             at += sizeof(value);
         }
     }
-    if (write_file(GPU_REGS_PATH, dump, (size_t)at) == 0) {
+    if (write_file(path, dump, (size_t)at) == 0) {
         put("  registers   ");
         put_number(at);
-        put(" bytes -> " GPU_REGS_PATH "\n");
+        put(" bytes -> ");
+        put(path);
+        put("\n");
     }
     kfree(dump);
 }
@@ -788,7 +794,15 @@ static void put_nvidia(const struct pci_device *device, uint8_t *buffer) {
     put_number(vram_bytes / (1024ULL * 1024ULL));
     put(" MiB\n");
     put_nv_pramin(bar0, buffer);
-    put_nv_registers(bar0);
+    put_nv_registers(bar0, GPU_REGS_PATH);
+    if (!boot_command_line_flag("nv50")) return;
+    char *log = kmalloc(NV50_LOG_BYTES);
+    if (!log) return;
+    size_t bytes = nv50_display_probe(device, bar0, log, NV50_LOG_BYTES);
+    kprintf("%s", log);
+    if (write_file(NV50_LOG_PATH, log, bytes) == 0) put("  nv50 probe  -> " NV50_LOG_PATH "\n");
+    kfree(log);
+    put_nv_registers(bar0, GPU_REGS_AFTER_PATH);
 }
 
 static void put_gpu(void) {
