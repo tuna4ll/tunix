@@ -10,7 +10,7 @@
 #include <tunix/hwreport.h>
 #include <tunix/kstring.h>
 #include <tunix/module.h>
-#include <tunix/nv50.h>
+#include <tunix/klog.h>
 #include <tunix/pci.h>
 #include <tunix/uts.h>
 #include <tunix/percpu.h>
@@ -25,6 +25,7 @@
 extern void kprintf(const char *fmt, ...);
 
 #define REPORT_PATH "/tunix-hwreport.txt"
+#define KMSG_PATH   "/tunix-kmsg.txt"
 #define REPORT_MAX  32768
 
 static char report[REPORT_MAX];
@@ -571,6 +572,15 @@ static int write_file(const char *path, const void *data, size_t bytes) {
 
 static void write_to_disk(void) { (void)write_file(REPORT_PATH, report, used); }
 
+static void write_kernel_log(void) {
+    size_t bytes = klog_size();
+    char *copy = bytes ? kmalloc(bytes) : NULL;
+    if (!copy) return;
+    int64_t read = klog_read(0, bytes, copy);
+    if (read > 0) (void)write_file(KMSG_PATH, copy, (size_t)read);
+    kfree(copy);
+}
+
 #define PCI_VENDOR_NVIDIA   0x10DEU
 #define PCI_CLASS_DISPLAY   0x03U
 #define PCI_ROM_REGISTER    0x30U
@@ -584,8 +594,6 @@ static void write_to_disk(void) { (void)write_file(REPORT_PATH, report, used); }
 #define NV_PDISP_VBIOS_PTR  0x619F04U
 #define NV_PRAMIN_WINDOW    0x700000U
 #define GPU_REGS_PATH       "/tunix-gpu-regs.bin"
-#define GPU_REGS_AFTER_PATH "/tunix-gpu-regs-after.bin"
-#define NV50_LOG_PATH       "/tunix-nv50.log"
 
 struct register_range {
     uint32_t start;
@@ -794,11 +802,6 @@ static void put_nvidia(const struct pci_device *device, uint8_t *buffer) {
     put(" MiB\n");
     put_nv_pramin(bar0, buffer);
     put_nv_registers(bar0, GPU_REGS_PATH);
-    size_t bytes = 0;
-    const char *log = nv50_early_log(&bytes);
-    if (log && write_file(NV50_LOG_PATH, log, bytes) == 0)
-        put("  nv50 setup  -> " NV50_LOG_PATH "\n");
-    put_nv_registers(bar0, GPU_REGS_AFTER_PATH);
 }
 
 static void put_gpu(void) {
@@ -864,6 +867,7 @@ void hwreport_emit(void) {
     }
     put_gpu();
 
+    write_kernel_log();
     uint64_t console_started = time_uptime_ns();
     kprintf("%s", report);
     kprintf("HWREPORT: the console took %u ms to print it\n",

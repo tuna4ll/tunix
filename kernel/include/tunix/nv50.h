@@ -1,11 +1,8 @@
 #ifndef TUNIX_NV50_H
 #define TUNIX_NV50_H
 
-#include <stddef.h>
+struct display_early_driver;
 
-struct boot_framebuffer_info;
-
-int nv50_early_init(const struct boot_framebuffer_info *boot, struct boot_framebuffer_info *out);
-const char *nv50_early_log(size_t *bytes);
+extern const struct display_early_driver nv50_display_driver;
 
 #endif
