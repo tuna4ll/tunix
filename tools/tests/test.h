@@ -11,6 +11,8 @@ typedef unsigned char u8;
 #define SYS_read            0
 #define SYS_write           1
 #define SYS_close           3
+#define SYS_fchmod          91
+#define SYS_memfd_create    319
 #define SYS_fstat           5
 #define SYS_lseek           8
 #define SYS_mmap            9
@@ -61,6 +63,8 @@ typedef unsigned char u8;
 #define SYS_ftruncate       46
 #define SYS_openat          56
 #define SYS_close           57
+#define SYS_fchmod          52
+#define SYS_memfd_create    279
 #define SYS_pipe2           59
 #define SYS_getdents64      61
 #define SYS_lseek           62
@@ -99,6 +103,8 @@ typedef unsigned char u8;
 #define AT_REMOVEDIR 0x200
 
 #define O_RDONLY   0
+#define SEEK_SET   0
+#define SEEK_END   2
 #define O_WRONLY   1
 #define O_RDWR     2
 #define O_CREAT    0100
@@ -253,6 +259,12 @@ static inline s64 open(const char *path, int flags, int mode) {
 }
 
 static inline s64 close(int fd) { return SYSCALL(SYS_close, fd, 0, 0, 0, 0, 0); }
+
+static inline s64 fchmod(int fd, u32 mode) { return SYSCALL(SYS_fchmod, fd, mode, 0, 0, 0, 0); }
+
+static inline s64 memfd_create(const char *name, u32 flags) {
+    return SYSCALL(SYS_memfd_create, name, flags, 0, 0, 0, 0);
+}
 
 static inline s64 lseek(int fd, s64 offset, int whence) {
     return SYSCALL(SYS_lseek, fd, offset, whence, 0, 0, 0);

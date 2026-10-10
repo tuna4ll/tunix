@@ -92,6 +92,18 @@ static void names(void) {
     expect_eq(open("/tmp/files/b", O_RDONLY, 0), -ENOENT, "nothing is left behind");
 }
 
+static void memory_file(void) {
+    int fd = (int)memfd_create("tunix", 0);
+    expect(fd >= 0, "memfd_create gives a file");
+    expect_eq(write(fd, "tunix", 5), 5, "a memfd takes writes");
+    expect_eq(lseek(fd, 0, SEEK_SET), 0, "lseek rewinds a memfd");
+    char text[8] = {0};
+    expect_eq(read(fd, text, sizeof(text)), 5, "and the data reads back from the start");
+    expect(memeq(text, "tunix", 5), "unchanged");
+    expect_eq(lseek(fd, 0, SEEK_END), 5, "SEEK_END is the memfd's size");
+    close(fd);
+}
+
 static void run(int argc, char **argv) {
     (void)argc;
     (void)argv;
@@ -99,4 +111,5 @@ static void run(int argc, char **argv) {
     read_and_write();
     large_file();
     names();
+    memory_file();
 }

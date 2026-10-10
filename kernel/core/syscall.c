@@ -3138,12 +3138,15 @@ static int64_t sys_lseek(int fd, int64_t offset, int whence) {
         if (whence == SEEK_SET) return 0;
         return whence == SEEK_END ? drm_dmabuf_size(file) : -EINVAL;
     }
-    if ((file->kind != FILE_KIND_VFS && file->kind != FILE_KIND_FRAMEBUFFER) || !file->node)
-        return -ESPIPE;
+    int64_t end;
+    if (file->kind == FILE_KIND_MEMFD && file->memfd) end = (int64_t)memfd_size(file->memfd);
+    else if ((file->kind == FILE_KIND_VFS || file->kind == FILE_KIND_FRAMEBUFFER) && file->node)
+        end = (int64_t)file->node->length;
+    else return -ESPIPE;
     int64_t base;
     if (whence == SEEK_SET) base = 0;
     else if (whence == SEEK_CUR) base = (int64_t)file->offset;
-    else if (whence == SEEK_END) base = (int64_t)file->node->length;
+    else if (whence == SEEK_END) base = end;
     else return -EINVAL;
     if ((offset < 0 && base < -offset) || (offset > 0 && base > INT64_MAX - offset)) return -EINVAL;
     int64_t result = base + offset;

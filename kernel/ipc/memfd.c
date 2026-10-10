@@ -19,6 +19,10 @@ static void memfd_guard_release(int *unused) {
 
 #define MEMFD_PAGE_SIZE 4096ULL
 
+#define MEMFD_NOT_PERMITTED (-1)
+#define MEMFD_NO_MEMORY     (-12)
+#define MEMFD_TOO_BIG       (-27)
+
 struct memfd_object {
     int refs;
     uint64_t size;
@@ -174,5 +178,15 @@ int64_t memfd_read(struct memfd_object *object, uint64_t offset, size_t length, 
 
 int64_t memfd_write(struct memfd_object *object, uint64_t offset, size_t length, const void *in) {
     MEMFD_LOCKED;
+    if (!object) return 0;
+    if (length > UINT64_MAX - offset) return MEMFD_TOO_BIG;
+    uint64_t end = offset + length;
+    if (end > object->size) {
+        if (object->seals & MEMFD_SEAL_GROW) {
+            if (offset >= object->size) return MEMFD_NOT_PERMITTED;
+        } else if (memfd_truncate(object, end) != 0) {
+            return MEMFD_NO_MEMORY;
+        }
+    }
     return transfer(object, offset, length, NULL, in);
 }
