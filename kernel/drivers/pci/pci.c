@@ -64,6 +64,37 @@ void pci_config_write32(uint8_t bus, uint8_t slot, uint8_t function, uint8_t off
     lock_release(&config_lock);
 }
 
+uint16_t pci_config_read16(uint8_t bus, uint8_t slot, uint8_t function, uint8_t offset) {
+    lock_acquire(&config_lock);
+    outl(PCI_ADDRESS, pci_address(bus, slot, function, offset));
+    uint16_t value = inw((uint16_t)(PCI_DATA + (offset & 2U)));
+    lock_release(&config_lock);
+    return value;
+}
+
+uint8_t pci_config_read8(uint8_t bus, uint8_t slot, uint8_t function, uint8_t offset) {
+    lock_acquire(&config_lock);
+    outl(PCI_ADDRESS, pci_address(bus, slot, function, offset));
+    uint8_t value = inb((uint16_t)(PCI_DATA + (offset & 3U)));
+    lock_release(&config_lock);
+    return value;
+}
+
+void pci_config_write16(uint8_t bus, uint8_t slot, uint8_t function, uint8_t offset,
+                        uint16_t value) {
+    lock_acquire(&config_lock);
+    outl(PCI_ADDRESS, pci_address(bus, slot, function, offset));
+    outw((uint16_t)(PCI_DATA + (offset & 2U)), value);
+    lock_release(&config_lock);
+}
+
+void pci_config_write8(uint8_t bus, uint8_t slot, uint8_t function, uint8_t offset, uint8_t value) {
+    lock_acquire(&config_lock);
+    outl(PCI_ADDRESS, pci_address(bus, slot, function, offset));
+    outb((uint16_t)(PCI_DATA + (offset & 3U)), value);
+    lock_release(&config_lock);
+}
+
 #else
 
 static uint64_t ecam_base;
@@ -88,6 +119,27 @@ static volatile uint32_t *ecam_register(uint8_t bus, uint8_t slot, uint8_t funct
 uint32_t pci_config_read32(uint8_t bus, uint8_t slot, uint8_t function, uint8_t offset) {
     volatile uint32_t *reg = ecam_register(bus, slot, function, offset);
     return reg ? *reg : 0xFFFFFFFFU;
+}
+
+uint16_t pci_config_read16(uint8_t bus, uint8_t slot, uint8_t function, uint8_t offset) {
+    volatile uint32_t *reg = ecam_register(bus, slot, function, offset);
+    return reg ? *(volatile uint16_t *)((volatile uint8_t *)reg + (offset & 2U)) : 0xFFFFU;
+}
+
+uint8_t pci_config_read8(uint8_t bus, uint8_t slot, uint8_t function, uint8_t offset) {
+    volatile uint32_t *reg = ecam_register(bus, slot, function, offset);
+    return reg ? *((volatile uint8_t *)reg + (offset & 3U)) : 0xFFU;
+}
+
+void pci_config_write16(uint8_t bus, uint8_t slot, uint8_t function, uint8_t offset,
+                        uint16_t value) {
+    volatile uint32_t *reg = ecam_register(bus, slot, function, offset);
+    if (reg) *(volatile uint16_t *)((volatile uint8_t *)reg + (offset & 2U)) = value;
+}
+
+void pci_config_write8(uint8_t bus, uint8_t slot, uint8_t function, uint8_t offset, uint8_t value) {
+    volatile uint32_t *reg = ecam_register(bus, slot, function, offset);
+    if (reg) *((volatile uint8_t *)reg + (offset & 3U)) = value;
 }
 
 struct bar_window {
