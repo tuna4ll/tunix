@@ -95,6 +95,13 @@ fi
 echo ":: applying base-files"
 cp -a base-files/overlay/. "$SYSROOT/"
 [ -d "base-files/overlay-${DESKTOP:-weston}" ] && cp -a "base-files/overlay-${DESKTOP:-weston}/." "$SYSROOT/"
+if ls "$SYSROOT"/usr/share/glib-2.0/schemas/*.gschema.override >/dev/null 2>&1; then
+	if ! command -v glib-compile-schemas >/dev/null; then
+		echo "sysroot.sh: glib-compile-schemas is needed for the settings overrides" >&2
+		exit 1
+	fi
+	glib-compile-schemas "$SYSROOT/usr/share/glib-2.0/schemas"
+fi
 
 for file in passwd group shadow; do
 	[ -f "base-files/append/$file" ] || continue

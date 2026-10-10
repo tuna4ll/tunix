@@ -150,7 +150,7 @@ VOID_INSTALL_GRAPHICAL ?= mesa-dri xorg-server-xwayland xkeyboard-config dejavu-
 VOID_INSTALL_DESKTOP_gnome ?= dbus elogind polkit gdm gnome-core gnome-console \
 	gnome-text-editor gnome-system-monitor gnome-calculator
 
-VOID_INSTALL_DESKTOP_weston ?= weston seatd
+VOID_INSTALL_DESKTOP_weston ?= weston seatd acpid
 
 ifeq ($(filter $(DESKTOP_NAME),gnome weston),)
 $(error DESKTOP must be weston or gnome, not '$(DESKTOP)')
