@@ -35,7 +35,7 @@ boot() {
 
 failed=
 for name in $tests; do
-	source=tools/tests/$name.c
+	source=testsuites/kernel-tests/$name.c
 	test -f "$source" || { echo "run.sh: no test called $name" >&2; exit 1; }
 	dir=$work/$name
 	mkdir -p "$dir/root/sbin" "$dir/root/dev" "$dir/root/proc" "$dir/root/tmp"

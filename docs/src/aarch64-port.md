@@ -23,7 +23,7 @@ process: ok    and its status says SIGKILL
 process: PASS 15/15
 ```
 
-Every test in `tools/tests` builds for both architectures from one source, so
+Every test in `testsuites/kernel-tests` builds for both architectures from one source, so
 the same checks run on either kernel.
 
 The userland above it is unmodified Void Linux for aarch64. From the published
@@ -161,7 +161,7 @@ with the same `mkfs` options `tools/image.sh` uses for x86-64:
 ```sh
 mkdir -p root/sbin root/dev root/proc root/sys root/tmp
 aarch64-linux-gnu-gcc -static -nostdlib -nostartfiles -ffreestanding -O2 \
-    -fno-pie -no-pie -fno-builtin tools/tests/process.c -o root/sbin/init
+    -fno-pie -no-pie -fno-builtin testsuites/kernel-tests/process.c -o root/sbin/init
 truncate -s 64M disk.img
 mkfs.ext3 -q -r 1 -b 4096 -I 128 -m 1 -L tunix-root \
     -O ^resize_inode,^dir_index,^ext_attr,^metadata_csum,^64bit,^huge_file,^dir_nlink,^extra_isize \

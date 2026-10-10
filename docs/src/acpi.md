@@ -87,7 +87,7 @@ limit is applied by `cpufreq` on each core's next tick.
 QEMU has no embedded controller, so `make acpi-test` builds the drivers on the
 host against uACPI and a model machine: I/O ports, an embedded controller that
 answers queries from a queue, and physical memory holding an RSDP, an XSDT, a
-FADT and a DSDT compiled by `iasl` from `tools/tests/acpi/machine.asl`. That
+FADT and a DSDT compiled by `iasl` from `testsuites/acpi-tests/machine.asl`. That
 DSDT is shaped like a real laptop's: brightness keys that arrive as one query
 with a code in controller RAM and are notified to two outputs, a throttle
 request that changes `_PPC`, a thermal zone that reads the controller, a lid.

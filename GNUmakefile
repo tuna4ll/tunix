@@ -270,10 +270,10 @@ TESTS ?=
 
 .PHONY: test test-aarch64
 test: $(KERNEL) $(LIMINE_EXE)
-	KERNEL=$(KERNEL) LIMINE=$(LIMINE_DIR) tools/tests/run.sh $(TESTS)
+	KERNEL=$(KERNEL) LIMINE=$(LIMINE_DIR) testsuites/kernel-tests/run.sh $(TESTS)
 
 test-aarch64: $(AARCH64_CORE_IMAGE)
-	ARCH=aarch64 KERNEL=$(AARCH64_CORE_IMAGE) LIMINE=$(LIMINE_DIR) tools/tests/run.sh $(TESTS)
+	ARCH=aarch64 KERNEL=$(AARCH64_CORE_IMAGE) LIMINE=$(LIMINE_DIR) testsuites/kernel-tests/run.sh $(TESTS)
 
 .PHONY: ci-boot ci-boot-aarch64
 ci-boot: $(KERNEL) $(LIMINE_EXE)
@@ -283,7 +283,7 @@ ci-boot-aarch64: $(AARCH64_CORE_IMAGE)
 	ARCH=aarch64 KERNEL=$(AARCH64_CORE_IMAGE) LIMINE=$(LIMINE_DIR) ci/boot.sh
 
 CLANG_FORMAT ?= clang-format
-FORMAT_SOURCES := $(shell find kernel tools/tests utils -path kernel/subprojects -prune -o \
+FORMAT_SOURCES := $(shell find kernel testsuites utils -path kernel/subprojects -prune -o \
 	-path $(KERNEL_BUILD) -prune -o -name '*.[ch]' -print)
 
 .PHONY: format format-check
@@ -299,7 +299,7 @@ HWREPORT_IMAGE := $(BUILD)/hwreport.img
 hwreport-image: $(HWREPORT_IMAGE)
 
 $(HWREPORT_IMAGE): $(KERNEL) $(LIMINE_EXE) tools/hwreport/build.sh tools/hwreport/init.c \
-		tools/hwreport/limine.conf tools/image.sh tools/tests/test.h
+		tools/hwreport/limine.conf tools/image.sh testsuites/kernel-tests/test.h
 	TABLE='$(IMAGE_TABLE)' tools/hwreport/build.sh $@ $(KERNEL) $(LIMINE_DIR)
 
 run-hwreport: $(HWREPORT_IMAGE)

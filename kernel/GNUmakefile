@@ -76,7 +76,7 @@ $(LIMINE_HEADER):
 
 IASL           ?= iasl
 HOST_CC        ?= cc
-ACPI_TEST      ?= ../tools/tests/acpi
+ACPI_TEST      ?= ../testsuites/acpi-tests
 ACPI_TEST_DIR  := $(BUILD)/acpi-test
 ACPI_DRIVERS   := bus ec video button thermal_zone processor
 ACPI_TEST_SRCS  = $(ACPI_TEST)/host.c $(ACPI_DRIVERS:%=drivers/acpi/%.c) $(UACPI_SOURCES)

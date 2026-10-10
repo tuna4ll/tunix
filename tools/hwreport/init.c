@@ -1,5 +1,5 @@
 #define TEST_NAME "hwreport"
-#include "../tests/test.h"
+#include "../../testsuites/kernel-tests/test.h"
 
 #define DRM_IOWR(nr, size)  ((3UL << 30) | ((u64)(size) << 16) | ('d' << 8) | (nr))
 #define DRM_GETCRTC         0xA1
