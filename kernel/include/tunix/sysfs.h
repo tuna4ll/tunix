@@ -1,6 +1,8 @@
 #ifndef TUNIX_SYSFS_H
 #define TUNIX_SYSFS_H
 
+#include <stdint.h>
+
 struct module;
 struct pci_device;
 
@@ -15,5 +17,8 @@ void sysfs_pci_driver_added(const char *driver);
 void sysfs_pci_driver_removed(const char *driver);
 void sysfs_publish_sound(void);
 void sysfs_remove_sound(void);
+
+typedef int (*thermal_zone_reader)(unsigned index, int32_t *millicelsius);
+void sysfs_publish_thermal_zone(unsigned index, const char *type, thermal_zone_reader reader);
 
 #endif

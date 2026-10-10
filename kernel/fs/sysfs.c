@@ -1117,6 +1117,76 @@ void sysfs_publish_backlight(const struct backlight_device *device,
     if (sysfs_ready) publish_backlight();
 }
 
+#define THERMAL_ZONES_MAX 16U
+
+static thermal_zone_reader zone_reader;
+
+static int64_t thermal_zone_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
+    char text[24];
+    size_t length = 0;
+    int32_t millicelsius = 0;
+    if (!zone_reader || zone_reader((unsigned)node->inode, &millicelsius) != 0) return -5;
+    if (millicelsius < 0) {
+        append_string(text, sizeof(text), &length, "-");
+        millicelsius = -millicelsius;
+    }
+    append_number(text, sizeof(text), &length, (uint32_t)millicelsius);
+    append_string(text, sizeof(text), &length, "\n");
+    return attribute_reply(text, length, offset, size, output);
+}
+
+void sysfs_publish_thermal_zone(unsigned index, const char *type, thermal_zone_reader reader) {
+    VFS_GUARD;
+    if (index >= THERMAL_ZONES_MAX || !reader) return;
+    zone_reader = reader;
+    char name[32];
+    size_t used = 0;
+    append_string(name, sizeof(name), &used, "thermal_zone");
+    append_number(name, sizeof(name), &used, index);
+    name[used] = '\0';
+    char path[96];
+    used = 0;
+    append_string(path, sizeof(path), &used, "/sys/devices/virtual/thermal/");
+    append_string(path, sizeof(path), &used, name);
+    path[used] = '\0';
+    struct vfs_node *directory = vfs_mkdir_p(path);
+    if (!directory) return;
+
+    char file[128];
+    char text[48];
+    size_t length = 0;
+    append_string(text, sizeof(text), &length, type);
+    append_string(text, sizeof(text), &length, "\n");
+    used = 0;
+    append_string(file, sizeof(file), &used, path);
+    append_string(file, sizeof(file), &used, "/type");
+    file[used] = '\0';
+    (void)vfs_create_file(file, text, length, 0, 1);
+
+    struct vfs_node *temp = vfs_alloc_node("temp", VFS_FILE);
+    if (temp) {
+        temp->mode = 0444;
+        temp->length = 64;
+        temp->read = thermal_zone_read;
+        temp->inode = index;
+        if (vfs_attach(directory, temp) != 0) vfs_free_node(temp);
+    }
+
+    (void)vfs_mkdir_p("/sys/class/thermal");
+    char link[96];
+    used = 0;
+    append_string(link, sizeof(link), &used, "/sys/class/thermal/");
+    append_string(link, sizeof(link), &used, name);
+    link[used] = '\0';
+    char target[96];
+    used = 0;
+    append_string(target, sizeof(target), &used, "../../devices/virtual/thermal/");
+    append_string(target, sizeof(target), &used, name);
+    target[used] = '\0';
+    (void)vfs_create_symlink(link, target, 0);
+}
+
 static struct vfs_node *tty0_active;
 
 static int64_t tty0_active_read(struct vfs_node *node, uint64_t offset, size_t size, void *output) {
