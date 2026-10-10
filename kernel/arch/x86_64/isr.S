@@ -344,13 +344,6 @@ irq12:
     push 44
     jmp isr_common_stub
 
-.global irq_sci
-irq_sci:
-    cli
-    push 0
-    push 0x30
-    jmp isr_common_stub
-
 .global irq_lapic_timer
 irq_lapic_timer:
     cli

@@ -1,201 +1,251 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include <tunix/acpi.h>
-#include <tunix/backlight.h>
-#include <tunix/boot.h>
-#include <tunix/ec.h>
-#include <tunix/input.h>
 #include <tunix/io.h>
-#include <tunix/kstring.h>
 #include <tunix/process.h>
 #include <tunix/time.h>
-#include <uapi/input_event.h>
+#include <uacpi/event.h>
+#include <uacpi/kernel_api.h>
+#include <uacpi/namespace.h>
+#include <uacpi/opregion.h>
+#include <uacpi/resources.h>
+#include <uacpi/uacpi.h>
+#include <uacpi/utilities.h>
+
+#include "priv.h"
 
 extern void kprintf(const char *fmt, ...);
 
-#if defined(__x86_64__)
-
-#define EC_DATA_PORT    0x62U
-#define EC_COMMAND_PORT 0x66U
 #define EC_OUTPUT_FULL  0x01U
 #define EC_INPUT_FULL   0x02U
 #define EC_SCI_EVENT    0x20U
 #define EC_READ         0x80U
+#define EC_WRITE        0x81U
 #define EC_QUERY        0x84U
-#define EC_WAIT_NS      50000000ULL
-#define EC_POLL_NS      50000000ULL
-#define EC_DRAIN_MAX    8U
-#define EC_LOG_REPEATS  3U
+#define EC_WAIT_NS      500000000ULL
+#define EC_POLL_NS      250000000ULL
+#define EC_QUERIES_MAX  32U
+#define EC_LOCK_FOREVER 0xFFFFU
+#define EC_NO_GPE       0xFFFFU
+#define EC_PORTS        2U
 
-#define DSDT_OEM_ID       10U
-#define DSDT_OEM_ID_BYTES 6U
-#define DSDT_TABLE_ID     16U
-#define DSDT_TABLE_BYTES  8U
-
-struct ec_hotkey {
-    uint8_t query;
-    uint8_t reads_ram;
-    uint8_t ram;
-    uint8_t value;
-    uint16_t keycode;
+struct embedded_controller {
+    uacpi_namespace_node *node;
+    uint16_t ports[EC_PORTS];
+    unsigned port_count;
+    uint16_t gpe;
+    int global_lock;
+    uacpi_handle mutex;
+    volatile uint32_t query_queued;
+    volatile uint64_t events;
+    int started;
 };
 
-struct ec_board {
-    const char *oem;
-    const char *table;
-    const struct ec_hotkey *keys;
-    unsigned count;
-};
+static struct embedded_controller ec = {.gpe = EC_NO_GPE};
+static const char poll_channel;
 
-static const struct ec_hotkey casper_era_keys[] = {
-    {0x10, 0, 0, 0, TUNIX_KEY_BRIGHTNESSDOWN},
-    {0x11, 0, 0, 0, TUNIX_KEY_BRIGHTNESSUP},
-    {0x60, 1, 0xA3, 0x04, TUNIX_KEY_BRIGHTNESSDOWN},
-    {0x60, 1, 0xA3, 0x05, TUNIX_KEY_BRIGHTNESSUP},
-};
+static uint16_t data_port(void) { return ec.ports[0]; }
 
-static const struct ec_board boards[] = {
-    {"CASPER", "ERA", casper_era_keys, sizeof(casper_era_keys) / sizeof(casper_era_keys[0])},
-};
-
-static const struct ec_board *board;
-static uint8_t query_seen[256];
-static const char ec_channel;
+static uint16_t command_port(void) { return ec.ports[1]; }
 
 static int wait_status(uint8_t mask, uint8_t want) {
     uint64_t deadline = time_uptime_ns() + EC_WAIT_NS;
-    while ((inb(EC_COMMAND_PORT) & mask) != want)
+    while ((inb(command_port()) & mask) != want)
         if (time_uptime_ns() > deadline) return -1;
     return 0;
 }
 
-static int send_command(uint8_t command) {
-    if (wait_status(EC_INPUT_FULL, 0) != 0) return -1;
-    outb(EC_COMMAND_PORT, command);
+static int lock_ec(uint32_t *sequence) {
+    if (uacpi_kernel_acquire_mutex(ec.mutex, EC_LOCK_FOREVER) != UACPI_STATUS_OK) return -1;
+    if (ec.global_lock && uacpi_acquire_global_lock(EC_LOCK_FOREVER, sequence) != UACPI_STATUS_OK) {
+        uacpi_kernel_release_mutex(ec.mutex);
+        return -1;
+    }
     return 0;
 }
 
-static int read_data(uint8_t *value) {
+static void unlock_ec(uint32_t sequence) {
+    if (ec.global_lock) (void)uacpi_release_global_lock(sequence);
+    uacpi_kernel_release_mutex(ec.mutex);
+}
+
+static int read_locked(uint8_t address, uint8_t *value) {
+    if (wait_status(EC_INPUT_FULL, 0) != 0) return -1;
+    outb(command_port(), EC_READ);
+    if (wait_status(EC_INPUT_FULL, 0) != 0) return -1;
+    outb(data_port(), address);
     if (wait_status(EC_OUTPUT_FULL, EC_OUTPUT_FULL) != 0) return -1;
-    *value = inb(EC_DATA_PORT);
+    *value = inb(data_port());
     return 0;
 }
 
-static int ec_query(uint8_t *query) {
-    if (send_command(EC_QUERY) != 0) return -1;
-    return read_data(query);
-}
-
-static int ec_read(uint8_t address, uint8_t *value) {
-    if (send_command(EC_READ) != 0) return -1;
+static int write_locked(uint8_t address, uint8_t value) {
     if (wait_status(EC_INPUT_FULL, 0) != 0) return -1;
-    outb(EC_DATA_PORT, address);
-    return read_data(value);
+    outb(command_port(), EC_WRITE);
+    if (wait_status(EC_INPUT_FULL, 0) != 0) return -1;
+    outb(data_port(), address);
+    if (wait_status(EC_INPUT_FULL, 0) != 0) return -1;
+    outb(data_port(), value);
+    return wait_status(EC_INPUT_FULL, 0);
 }
 
-static uint16_t hotkey_for(uint8_t query, uint8_t *ram_out, int *ram_read) {
-    for (unsigned index = 0; index < board->count; index++) {
-        const struct ec_hotkey *key = &board->keys[index];
-        if (key->query != query) continue;
-        if (!key->reads_ram) return key->keycode;
-        if (!*ram_read) {
-            if (ec_read(key->ram, ram_out) != 0) return 0;
-            *ram_read = 1;
-        }
-        if (*ram_out == key->value) return key->keycode;
-    }
+static int query_locked(uint8_t *query) {
+    if (wait_status(EC_INPUT_FULL, 0) != 0) return -1;
+    outb(command_port(), EC_QUERY);
+    if (wait_status(EC_OUTPUT_FULL, EC_OUTPUT_FULL) != 0) return -1;
+    *query = inb(data_port());
     return 0;
 }
 
-static void handle_query(uint8_t query) {
-    uint8_t ram = 0;
-    int ram_read = 0;
-    uint16_t keycode = hotkey_for(query, &ram, &ram_read);
-    if (query_seen[query] < EC_LOG_REPEATS || boot_command_line_flag("hwreport")) {
-        if (query_seen[query] < 255U) query_seen[query]++;
-        if (ram_read) kprintf("EC: query %x code %x key %u\n", query, ram, keycode);
-        else kprintf("EC: query %x key %u\n", query, keycode);
+static uacpi_status transfer(uacpi_region_op op, uacpi_region_rw_data *rw) {
+    uint32_t sequence = 0;
+    if (rw->offset + rw->byte_width > 0x100U) return UACPI_STATUS_INVALID_ARGUMENT;
+    if (lock_ec(&sequence) != 0) return UACPI_STATUS_TIMEOUT;
+    int failed = 0;
+    uint64_t value = op == UACPI_REGION_OP_READ ? 0 : rw->value;
+    for (unsigned index = 0; index < rw->byte_width && !failed; index++) {
+        uint8_t address = (uint8_t)(rw->offset + index);
+        if (op == UACPI_REGION_OP_READ) {
+            uint8_t byte = 0;
+            failed = read_locked(address, &byte) != 0;
+            value |= (uint64_t)byte << (index * 8U);
+        } else {
+            failed = write_locked(address, (uint8_t)(value >> (index * 8U))) != 0;
+        }
     }
-    if (!keycode) return;
-    if (input_report_hotkey(keycode)) return;
-    if (keycode == TUNIX_KEY_BRIGHTNESSUP) (void)backlight_step(1);
-    if (keycode == TUNIX_KEY_BRIGHTNESSDOWN) (void)backlight_step(0);
+    unlock_ec(sequence);
+    if (failed) return UACPI_STATUS_HARDWARE_TIMEOUT;
+    if (op == UACPI_REGION_OP_READ) rw->value = value;
+    return UACPI_STATUS_OK;
 }
 
-static void drain(void) {
-    for (unsigned count = 0; count < EC_DRAIN_MAX; count++) {
-        if (!(inb(EC_COMMAND_PORT) & EC_SCI_EVENT)) return;
+static uacpi_status region_handler(uacpi_region_op op, uacpi_handle data) {
+    switch (op) {
+    case UACPI_REGION_OP_ATTACH:
+    case UACPI_REGION_OP_DETACH: return UACPI_STATUS_OK;
+    case UACPI_REGION_OP_READ:
+    case UACPI_REGION_OP_WRITE:  return transfer(op, (uacpi_region_rw_data *)data);
+    default:                     return UACPI_STATUS_INVALID_ARGUMENT;
+    }
+}
+
+static void run_query(uint8_t query) {
+    static const char hex[] = "0123456789ABCDEF";
+    char method[5] = {'_', 'Q', hex[query >> 4], hex[query & 0xFU], '\0'};
+    __atomic_add_fetch(&ec.events, 1U, __ATOMIC_RELAXED);
+    uacpi_namespace_node *target = NULL;
+    if (uacpi_namespace_node_find(ec.node, method, &target) != UACPI_STATUS_OK) {
+        kprintf("ACPI: ec event %x has no %s method\n", query, method);
+        return;
+    }
+    uacpi_status status = uacpi_execute(ec.node, method, NULL);
+    if (status != UACPI_STATUS_OK)
+        kprintf("ACPI: ec %s failed: %s\n", method, uacpi_status_to_string(status));
+}
+
+static void drain_queries(uacpi_handle unused) {
+    (void)unused;
+    __atomic_store_n(&ec.query_queued, 0U, __ATOMIC_RELEASE);
+    for (unsigned count = 0; count < EC_QUERIES_MAX; count++) {
+        if (!(inb(command_port()) & EC_SCI_EVENT)) return;
+        uint32_t sequence = 0;
         uint8_t query = 0;
-        if (ec_query(&query) != 0 || !query) return;
-        handle_query(query);
+        if (lock_ec(&sequence) != 0) return;
+        int failed = query_locked(&query) != 0;
+        unlock_ec(sequence);
+        if (failed || !query) return;
+        run_query(query);
     }
 }
 
-static void ec_thread(void *unused) {
+static void queue_queries(void) {
+    if (__atomic_exchange_n(&ec.query_queued, 1U, __ATOMIC_ACQ_REL)) return;
+    if (uacpi_kernel_schedule_work(UACPI_WORK_GPE_EXECUTION, drain_queries, NULL) !=
+        UACPI_STATUS_OK)
+        __atomic_store_n(&ec.query_queued, 0U, __ATOMIC_RELEASE);
+}
+
+static uacpi_interrupt_ret gpe_handler(uacpi_handle context, uacpi_namespace_node *device,
+                                       uacpi_u16 index) {
+    (void)context;
+    (void)device;
+    (void)index;
+    if (inb(command_port()) & EC_SCI_EVENT) queue_queries();
+    return UACPI_INTERRUPT_HANDLED | UACPI_GPE_REENABLE;
+}
+
+static void poller(void *unused) {
     (void)unused;
     for (;;) {
-        drain();
-        process_prepare_wait(&ec_channel, time_uptime_ns() + EC_POLL_NS);
+        if (inb(command_port()) & EC_SCI_EVENT) queue_queries();
+        process_prepare_wait(&poll_channel, time_uptime_ns() + EC_POLL_NS);
         process_wait();
         process_finish_wait();
     }
 }
 
-static int field_is(const uint8_t *field, unsigned bytes, const char *text) {
-    size_t length = strlen(text);
-    if (length > bytes || memcmp(field, text, length) != 0) return 0;
-    for (size_t index = length; index < bytes; index++)
-        if (field[index] != 0 && field[index] != ' ') return 0;
-    return 1;
+static uacpi_iteration_decision take_port(void *user, uacpi_resource *resource) {
+    (void)user;
+    uint16_t port = 0;
+    if (resource->type == UACPI_RESOURCE_TYPE_IO) port = resource->io.minimum;
+    else if (resource->type == UACPI_RESOURCE_TYPE_FIXED_IO) port = resource->fixed_io.address;
+    else return UACPI_ITERATION_DECISION_CONTINUE;
+    if (ec.port_count < EC_PORTS) ec.ports[ec.port_count++] = port;
+    return ec.port_count == EC_PORTS ? UACPI_ITERATION_DECISION_BREAK
+                                     : UACPI_ITERATION_DECISION_CONTINUE;
 }
 
-static const struct ec_board *find_board(char *oem, char *table) {
-    char signature[4];
-    uint32_t length = 0;
-    const uint8_t *dsdt = NULL;
-    for (unsigned index = 0;; index++) {
-        const void *found = acpi_table_at(index, signature, &length);
-        if (!found) break;
-        if (memcmp(signature, "DSDT", 4) == 0) {
-            dsdt = found;
-            break;
-        }
-    }
-    if (!dsdt || length < DSDT_TABLE_ID + DSDT_TABLE_BYTES) return NULL;
-    memcpy(oem, dsdt + DSDT_OEM_ID, DSDT_OEM_ID_BYTES);
-    oem[DSDT_OEM_ID_BYTES] = '\0';
-    memcpy(table, dsdt + DSDT_TABLE_ID, DSDT_TABLE_BYTES);
-    table[DSDT_TABLE_BYTES] = '\0';
-    for (unsigned index = 0; index < sizeof(boards) / sizeof(boards[0]); index++)
-        if (field_is(dsdt + DSDT_OEM_ID, DSDT_OEM_ID_BYTES, boards[index].oem) &&
-            field_is(dsdt + DSDT_TABLE_ID, DSDT_TABLE_BYTES, boards[index].table))
-            return &boards[index];
-    return NULL;
+static uacpi_iteration_decision take_device(void *user, uacpi_namespace_node *node,
+                                            uacpi_u32 depth) {
+    (void)user;
+    (void)depth;
+    ec.node = node;
+    return UACPI_ITERATION_DECISION_BREAK;
 }
 
-void ec_init(void) {
-    const struct acpi_power *power = acpi_power_info();
-    if (!power || !power->embedded_controller) return;
-    const char *choice = boot_command_line_value("ec");
-    if (choice && strncmp(choice, "off", 3) == 0) return;
-    if (inb(EC_COMMAND_PORT) == 0xFFU) return;
-
-    char oem[DSDT_OEM_ID_BYTES + 1], table[DSDT_TABLE_BYTES + 1];
-    board = find_board(oem, table);
-    if (!board) {
-        kprintf("EC: no hotkey map for %s %s, left alone\n", oem, table);
-        return;
+int acpi_ec_probe(void) {
+    if (uacpi_find_devices("PNP0C09", take_device, NULL) != UACPI_STATUS_OK || !ec.node) return -1;
+    char path[64];
+    if (uacpi_for_each_device_resource(ec.node, "_CRS", take_port, NULL) != UACPI_STATUS_OK ||
+        ec.port_count != EC_PORTS) {
+        kprintf("ACPI: ec %s has no usable ports\n", acpi_node_path(ec.node, path, sizeof(path)));
+        ec.node = NULL;
+        return -1;
     }
-    if (!process_create_kthread("kec", ec_thread, NULL)) {
-        kprintf("EC: cannot start the event thread\n");
-        return;
+    uint64_t value = 0;
+    if (uacpi_eval_simple_integer(ec.node, "_GPE", &value) == UACPI_STATUS_OK)
+        ec.gpe = (uint16_t)value;
+    if (uacpi_eval_simple_integer(ec.node, "_GLK", &value) == UACPI_STATUS_OK)
+        ec.global_lock = value != 0;
+    ec.mutex = uacpi_kernel_create_mutex();
+    if (!ec.mutex) return -1;
+    uacpi_status status = uacpi_install_address_space_handler(
+        ec.node, UACPI_ADDRESS_SPACE_EMBEDDED_CONTROLLER, region_handler, NULL);
+    if (status != UACPI_STATUS_OK) {
+        kprintf("ACPI: ec region handler: %s\n", uacpi_status_to_string(status));
+        ec.node = NULL;
+        return -1;
     }
-    kprintf("EC: hotkeys for %s %s\n", board->oem, board->table);
+    kprintf("ACPI: ec %s at %x/%x, gpe %x\n", acpi_node_path(ec.node, path, sizeof(path)),
+            data_port(), command_port(), ec.gpe);
+    return 0;
 }
 
-#else
+void acpi_ec_start(void) {
+    if (!ec.node || ec.started) return;
+    ec.started = 1;
+    if (ec.gpe != EC_NO_GPE) {
+        uacpi_status status =
+            uacpi_install_gpe_handler(NULL, ec.gpe, UACPI_GPE_TRIGGERING_EDGE, gpe_handler, NULL);
+        if (status == UACPI_STATUS_OK) status = uacpi_enable_gpe(NULL, ec.gpe);
+        if (status != UACPI_STATUS_OK)
+            kprintf("ACPI: ec gpe %x: %s\n", ec.gpe, uacpi_status_to_string(status));
+    }
+    if (!process_create_kthread("kacpi-ec", poller, NULL))
+        kprintf("ACPI: cannot start the ec poller\n");
+    queue_queries();
+}
 
-void ec_init(void) {}
+int acpi_ec_present(void) { return ec.node != NULL; }
 
-#endif
+uint64_t acpi_ec_events(void) { return __atomic_load_n(&ec.events, __ATOMIC_RELAXED); }

@@ -7,7 +7,6 @@
 #include <tunix/cpu.h>
 #include <tunix/framebuffer.h>
 #include <tunix/heap.h>
-#include <tunix/io.h>
 #include <tunix/hwreport.h>
 #include <tunix/kstring.h>
 #include <tunix/module.h>
@@ -16,7 +15,6 @@
 #include <tunix/uts.h>
 #include <tunix/percpu.h>
 #include <tunix/pmm.h>
-#include <tunix/process.h>
 #include <tunix/vmm.h>
 #include <tunix/smp.h>
 #include <tunix/cpufreq.h>
@@ -434,40 +432,20 @@ static void put_acpi(void) {
         put("  fadt        none\n");
         return;
     }
-    const struct acpi_events *events = acpi_event_state();
+    struct acpi_subsystem_info info;
+    acpi_describe_subsystem(&info);
     put("  sci         ");
     put_number(power->sci_interrupt);
-    put(", enabled at boot ");
-    put(events->sci_enabled_at_boot ? "yes" : "no");
-    put(", handed over ");
-    put(events->handed_over ? "yes" : "no");
-    put("\n");
-    put("  power key   ");
-    put(events->decision ? events->decision : "not set up");
-    put("\n");
-    put("  firmware    embedded controller ");
-    put(power->embedded_controller ? "yes" : "no");
+    put(", aml ");
+    put(info.ready ? "running" : "not running");
+    put("\n  devices     embedded controller ");
+    put(info.embedded_controller ? "yes" : "no");
     put(", thermal zones ");
-    put_number(power->thermal_zones);
-    put("\n");
-    put("  gpe0        ");
-    put_hex(power->gpe0_block);
-    put(" length ");
-    put_number(power->gpe0_length);
-    put(", enabled at boot ");
-    put_hex(events->gpe_enabled_at_boot);
-    put("\n");
-    put("  gpe1        ");
-    put_hex(power->gpe1_block);
-    put(" length ");
-    put_number(power->gpe1_length);
-    put("\n");
-    put("  events      sci ");
-    put_number(events->sci_count);
-    put(", gpe ");
-    put_number(events->gpe_events);
-    put(", button ");
-    put_number(events->button_events);
+    put_number(info.thermal_zones);
+    put(", video outputs ");
+    put_number(info.video_outputs);
+    put("\n  ec events   ");
+    put_number(info.ec_events);
     put("\n");
 }
 
@@ -861,71 +839,6 @@ static void write_acpi_tables(void) {
     }
 }
 
-#if defined(__x86_64__)
-#define EVENT_WATCH_NS 240000000000ULL
-#define EVENT_POLL_NS  5000000ULL
-#define EVENT_LINES    300U
-#define EC_STATUS_PORT 0x66U
-#define GPE_STATUS_MAX 8U
-
-static const char event_channel;
-
-static uint8_t sample_events(uint8_t *gpe, unsigned bytes) {
-    const struct acpi_power *power = acpi_power_info();
-    for (unsigned index = 0; index < bytes; index++)
-        gpe[index] = inb((uint16_t)(power->gpe0_block + index));
-    return inb(EC_STATUS_PORT);
-}
-
-static void report_events(uint64_t at, const uint8_t *gpe, unsigned bytes, uint8_t ec) {
-    uint32_t low = 0, high = 0;
-    for (unsigned index = 0; index < bytes && index < 4U; index++)
-        low |= (uint32_t)gpe[index] << (index * 8U);
-    for (unsigned index = 4; index < bytes; index++)
-        high |= (uint32_t)gpe[index] << ((index - 4U) * 8U);
-    kprintf("HWREPORT: at %u ms gpe0 status %x %x ec status %x\n", (unsigned)(at / 1000000ULL), low,
-            high, ec);
-}
-
-static void event_watch(void *unused) {
-    (void)unused;
-    const struct acpi_power *power = acpi_power_info();
-    unsigned bytes = power->gpe0_length / 2U;
-    if (bytes > GPE_STATUS_MAX) bytes = GPE_STATUS_MAX;
-    uint8_t last[GPE_STATUS_MAX] = {0}, now[GPE_STATUS_MAX] = {0};
-    uint8_t last_ec = sample_events(last, bytes);
-    report_events(time_uptime_ns(), last, bytes, last_ec);
-    uint64_t end = time_uptime_ns() + EVENT_WATCH_NS;
-    unsigned lines = 0;
-    while (time_uptime_ns() < end && lines < EVENT_LINES) {
-        process_prepare_wait(&event_channel, time_uptime_ns() + EVENT_POLL_NS);
-        process_wait();
-        process_finish_wait();
-        uint8_t ec = sample_events(now, bytes);
-        if (ec == last_ec && memcmp(now, last, bytes) == 0) continue;
-        report_events(time_uptime_ns(), now, bytes, ec);
-        memcpy(last, now, bytes);
-        last_ec = ec;
-        lines++;
-    }
-    kprintf("HWREPORT: event watch over\n");
-    for (;;) {
-        process_prepare_wait(&event_channel, 0);
-        process_wait();
-        process_finish_wait();
-    }
-}
-
-static void start_event_watch(void) {
-    const struct acpi_power *power = acpi_power_info();
-    if (!power || !power->gpe0_block || power->gpe0_length < 2U) return;
-    if (!process_create_kthread("hwreport-events", event_watch, NULL))
-        kprintf("HWREPORT: cannot watch acpi events\n");
-}
-#else
-static void start_event_watch(void) {}
-#endif
-
 void hwreport_emit(void) {
     if (!boot_command_line_flag("hwreport")) return;
 
@@ -953,7 +866,6 @@ void hwreport_emit(void) {
     }
     put_gpu();
     write_acpi_tables();
-    start_event_watch();
 
     write_kernel_log();
     uint64_t console_started = time_uptime_ns();

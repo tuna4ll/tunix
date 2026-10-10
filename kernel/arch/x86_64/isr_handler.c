@@ -1,7 +1,5 @@
 #include <stdint.h>
-#include <tunix/acpi.h>
 #include <tunix/input.h>
-#include <tunix/power.h>
 #include <tunix/interrupt.h>
 #include <tunix/irq.h>
 #include <tunix/kentry.h>
@@ -93,11 +91,6 @@ static void isr_dispatch(struct interrupt_frame *regs) {
     if (regs->int_no == PIC_MASTER_VECTOR + 1U || regs->int_no == PIC_SLAVE_VECTOR + 4U) {
         interrupt_acknowledge((unsigned)regs->int_no);
         input_irq();
-        return;
-    }
-    if (regs->int_no == ACPI_SCI_VECTOR) {
-        apic_send_eoi();
-        if (acpi_sci_interrupt()) power_button_pressed();
         return;
     }
     if (regs->int_no >= IRQ_VECTOR_FIRST && regs->int_no < IRQ_VECTOR_FIRST + IRQ_VECTOR_COUNT) {

@@ -65,22 +65,7 @@ struct acpi_power {
     uint32_t gpe1_block;
     uint8_t gpe0_length;
     uint8_t gpe1_length;
-    uint8_t embedded_controller;
-    uint32_t thermal_zones;
 };
-
-struct acpi_events {
-    int sci_enabled_at_boot;
-    int handed_over;
-    const char *decision;
-    uint64_t sci_count;
-    uint64_t gpe_events;
-    uint64_t button_events;
-    int gpe_seen;
-    uint32_t gpe_enabled_at_boot;
-};
-
-const struct acpi_events *acpi_event_state(void);
 
 const struct acpi_power *acpi_power_info(void);
 
@@ -92,10 +77,18 @@ void acpi_power_off(void);
 
 void acpi_reset(void) __attribute__((noreturn));
 
-#define ACPI_SCI_VECTOR 0x30U
+struct acpi_subsystem_info {
+    int ready;
+    int embedded_controller;
+    uint64_t ec_events;
+    unsigned thermal_zones;
+    unsigned video_outputs;
+};
 
-void acpi_power_button_enable(unsigned vector);
-
-int acpi_sci_interrupt(void);
+void acpi_subsystem_init(void);
+void acpi_describe_subsystem(struct acpi_subsystem_info *out);
+int acpi_subsystem_ready(void);
+int acpi_subsystem_power_off(void);
+int acpi_subsystem_reboot(void);
 
 #endif

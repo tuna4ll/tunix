@@ -16,12 +16,20 @@ LIMINE_DIR     := $(BUILD)/limine
 LIMINE_HEADER  := $(LIMINE_DIR)/limine.h
 LIMINE_EXE     := $(LIMINE_DIR)/limine
 
+UACPI_VERSION := 6.1.1
+UACPI_DIR     := $(BUILD)/uacpi
+UACPI_HEADER  := $(UACPI_DIR)/include/uacpi/uacpi.h
+UACPI_NAMES   := tables types uacpi utilities interpreter opcodes namespace stdlib \
+	shareable opregion default_handlers io notify sleep registers resources event mutex osi
+UACPI_OBJECTS  = $(UACPI_NAMES:%=$(BUILD)/uacpi-objects/%.c.o)
+
 KERNEL_CFLAGS := -std=gnu11 -Wall -Wextra -Werror -ffreestanding \
 	-fno-stack-protector -fno-pic -fno-pie -fno-builtin \
 	-fno-asynchronous-unwind-tables -fno-unwind-tables -mno-red-zone -m64 \
 	-Os -ffunction-sections -fdata-sections -mcmodel=kernel -mgeneral-regs-only \
-	-Ikernel/include -I$(LIMINE_DIR) \
+	-Ikernel/include -I$(LIMINE_DIR) -I$(UACPI_DIR)/include \
 	$(KERNEL_CFLAGS_EXTRA)
+UACPI_CFLAGS = $(filter-out -Werror -Wextra,$(KERNEL_CFLAGS)) -Wno-unused-parameter
 KERNEL_LDFLAGS := -nostdlib -no-pie -Wl,-T,kernel/arch/x86_64/linker.ld \
 	-Wl,--gc-sections -Wl,--build-id=none -Wl,-z,max-page-size=0x1000
 
@@ -34,18 +42,22 @@ all: image
 kernel: $(KERNEL)
 
 check:
-	$(MAKE) kernel modules BUILD=$(BUILD)/check/default LIMINE_DIR=$(LIMINE_DIR)
-	$(MAKE) kernel modules BUILD=$(BUILD)/check/debug LIMINE_DIR=$(LIMINE_DIR) KERNEL_CFLAGS_EXTRA=-DTUNIX_DEBUG_LOGS=1
-	$(MAKE) kernel modules BUILD=$(BUILD)/check/timings LIMINE_DIR=$(LIMINE_DIR) KERNEL_CFLAGS_EXTRA=-DTUNIX_BOOT_TIMINGS=1
+	$(MAKE) kernel modules BUILD=$(BUILD)/check/default LIMINE_DIR=$(LIMINE_DIR) UACPI_DIR=$(UACPI_DIR)
+	$(MAKE) kernel modules BUILD=$(BUILD)/check/debug LIMINE_DIR=$(LIMINE_DIR) UACPI_DIR=$(UACPI_DIR) KERNEL_CFLAGS_EXTRA=-DTUNIX_DEBUG_LOGS=1
+	$(MAKE) kernel modules BUILD=$(BUILD)/check/timings LIMINE_DIR=$(LIMINE_DIR) UACPI_DIR=$(UACPI_DIR) KERNEL_CFLAGS_EXTRA=-DTUNIX_BOOT_TIMINGS=1
 
-$(KERNEL): $(KERNEL_OBJECTS) kernel/arch/x86_64/linker.ld
-	$(CC) $(KERNEL_LDFLAGS) $(KERNEL_OBJECTS) -o $@
+$(KERNEL): $(KERNEL_OBJECTS) $(UACPI_OBJECTS) kernel/arch/x86_64/linker.ld
+	$(CC) $(KERNEL_LDFLAGS) $(KERNEL_OBJECTS) $(UACPI_OBJECTS) -o $@
 
-$(BUILD)/%.c.o: %.c | $(LIMINE_HEADER)
+$(BUILD)/uacpi-objects/%.c.o: $(UACPI_HEADER)
+	@mkdir -p $(dir $@)
+	$(CC) $(UACPI_CFLAGS) -MMD -MP -c $(UACPI_DIR)/source/$*.c -o $@
+
+$(BUILD)/%.c.o: %.c | $(LIMINE_HEADER) $(UACPI_HEADER)
 	@mkdir -p $(dir $@)
 	$(CC) $(KERNEL_CFLAGS) -MMD -MP -c $< -o $@
 
-$(BUILD)/%.S.o: %.S | $(LIMINE_HEADER)
+$(BUILD)/%.S.o: %.S | $(LIMINE_HEADER) $(UACPI_HEADER)
 	@mkdir -p $(dir $@)
 	$(CC) $(KERNEL_CFLAGS) -MMD -MP -c $< -o $@
 
@@ -63,7 +75,7 @@ MODULE_CFLAGS = $(filter-out -ffunction-sections -fdata-sections,$(KERNEL_CFLAGS
 .PHONY: modules
 modules: $(MODULES)
 
-$(BUILD)/modules/%.ko: kernel/modules/%.c | $(LIMINE_HEADER)
+$(BUILD)/modules/%.ko: kernel/modules/%.c | $(LIMINE_HEADER) $(UACPI_HEADER)
 	@mkdir -p $(dir $@)
 	$(CC) $(MODULE_CFLAGS) -MMD -MP -c $< -o $@
 
@@ -74,17 +86,23 @@ $(MODULES): GNUmakefile
 $(KERNEL_OBJECTS): GNUmakefile
 
 -include $(KERNEL_DEPS)
+-include $(UACPI_OBJECTS:.o=.d)
 
 $(LIMINE_HEADER):
 	rm -rf $(LIMINE_DIR)
 	git clone --depth=1 --branch=$(LIMINE_VERSION) \
 		https://github.com/limine-bootloader/limine.git $(LIMINE_DIR)
 
+$(UACPI_HEADER):
+	rm -rf $(UACPI_DIR)
+	git clone --depth=1 --branch=$(UACPI_VERSION) \
+		https://github.com/uACPI/uACPI.git $(UACPI_DIR)
+
 $(LIMINE_EXE): $(LIMINE_HEADER)
 	$(MAKE) -C $(LIMINE_DIR)
 
 clean:
-	rm -rf $(BUILD)/kernel $(BUILD)/modules $(KERNEL) $(IMAGE)
+	rm -rf $(BUILD)/kernel $(BUILD)/modules $(BUILD)/uacpi-objects $(KERNEL) $(IMAGE)
 
 distclean:
 	$(USERNS) rm -rf $(BUILD)
@@ -247,7 +265,8 @@ AARCH64_CORE_CFLAGS := -std=gnu11 -Wall -Wextra -Werror -ffreestanding \
 	-mstrict-align -march=armv8-a -mno-outline-atomics -Os \
 	-ffunction-sections -fdata-sections \
 	-Ikernel/include $(KERNEL_CFLAGS_EXTRA)
-AARCH64_CORE_EXCLUDE := kernel/drivers/storage/ata.c
+AARCH64_CORE_EXCLUDE := kernel/drivers/storage/ata.c \
+	$(filter-out kernel/drivers/acpi/acpi.c,$(wildcard kernel/drivers/acpi/*.c))
 AARCH64_CORE_SOURCES := $(filter-out $(AARCH64_CORE_EXCLUDE),$(shell find kernel -path kernel/arch -prune -o -path kernel/modules -prune -o \( -name '*.c' -o -name '*.S' \) -print)) \
 	$(shell find kernel/arch/aarch64 \( -name '*.c' -o -name '*.S' \) -print)
 AARCH64_CORE_OBJECTS := $(AARCH64_CORE_SOURCES:%=$(AARCH64_CORE_BUILD)/%.o)
@@ -360,7 +379,7 @@ NPROC        := $(shell nproc 2>/dev/null || echo 1)
 
 FORMAT_SOURCES := $(shell find kernel tools/tests -name '*.[ch]')
 LINT_FLAGS := -std=gnu11 -ffreestanding -m64 -mcmodel=kernel -mgeneral-regs-only \
-	-mno-red-zone -Ikernel/include -I$(LIMINE_DIR)
+	-mno-red-zone -Ikernel/include -I$(LIMINE_DIR) -I$(UACPI_DIR)/include
 
 .PHONY: format format-check lint
 format:
@@ -369,7 +388,7 @@ format:
 format-check:
 	@$(CLANG_FORMAT) --dry-run --Werror $(FORMAT_SOURCES)
 
-lint: | $(LIMINE_HEADER)
+lint: | $(LIMINE_HEADER) $(UACPI_HEADER)
 	@printf '%s\n' $(filter %.c,$(KERNEL_SOURCES)) | \
 		xargs -P$(NPROC) -I{} $(CLANG_TIDY) --quiet {} -- $(LINT_FLAGS)
 	@printf '%s\n' $(MODULE_SOURCES) | \

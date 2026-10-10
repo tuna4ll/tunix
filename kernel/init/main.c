@@ -11,7 +11,6 @@
 #include <tunix/heap.h>
 #include <tunix/hwreport.h>
 #include <tunix/display.h>
-#include <tunix/ec.h>
 #include <tunix/input.h>
 #include <tunix/ehci.h>
 #include <tunix/eventfs.h>
@@ -173,7 +172,7 @@ void kmain(const struct boot_info *boot) {
     ext2fs_start();
     timer_init();
     arch_route_timer();
-    ec_init();
+    acpi_subsystem_init();
     smp_init();
     sysfs_publish_cpus(percpu_online_count());
     hwreport_emit();

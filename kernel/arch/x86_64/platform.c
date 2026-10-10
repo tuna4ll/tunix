@@ -1,6 +1,5 @@
 #include <stdint.h>
 
-#include <tunix/acpi.h>
 #include <tunix/apic.h>
 #include <tunix/gdt.h>
 #include <tunix/idt.h>
@@ -27,7 +26,6 @@ void arch_route_legacy_interrupts(void) {
         if (apic) apic_route_legacy_irq(12U);
         else pic_unmask(12U);
     }
-    if (apic) acpi_power_button_enable(ACPI_SCI_VECTOR);
 }
 
 void arch_route_timer(void) {
