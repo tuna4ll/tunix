@@ -63,6 +63,9 @@ log_thermals() {
 		for sensor in /sys/class/hwmon/hwmon0/temp*_input; do
 			[ -r "$sensor" ] && line="$line $(($(cat "$sensor") / 1000))C"
 		done
+		for zone in /sys/class/thermal/thermal_zone*/temp; do
+			[ -r "$zone" ] && line="$line zone $(($(cat "$zone") / 1000))C"
+		done
 		for speed in /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq; do
 			[ -r "$speed" ] && line="$line $(($(cat "$speed") / 1000))MHz"
 		done
@@ -71,7 +74,7 @@ log_thermals() {
 		line="$line read $((($1 - ${read_before:-$1}) / 2048))MB written $((($2 - ${written_before:-$2}) / 2048))MB dirty $(($3 / 1024))MB smi $((smi - ${smi_before:-$smi}))"
 		read_before=$1 written_before=$2 smi_before=$smi
 		busiest=$(ps -eo pcpu=,comm= --sort=-pcpu 2>/dev/null | grep -v ' ps$' | head -3 | tr -s ' ' | tr '\n' ',')
-		events=$(grep -aE 'THERMAL|CPUFREQ|ACPI: general|EHCI: bulk|USB-STORAGE|BLOCK: (read|write)' /dev/kmsg 2>/dev/null | tail -1)
+		events=$(grep -aE 'THERMAL|CPUFREQ|ACPI: (thermal|firmware|no firmware|ec|error|warning)|POWER|EHCI: bulk|USB-STORAGE|BLOCK: (read|write)' /dev/kmsg 2>/dev/null | tail -1)
 		[ "$events" = "$reported" ] && events= || reported="$events"
 		echo "$line sync ${synced:-0}ms top$busiest $events" >> "$log"
 		before=$(cut -d' ' -f1 /proc/uptime | tr -d .)
