@@ -23,5 +23,6 @@ int thermal_supported(void);
 void thermal_tick(void);
 int thermal_read(unsigned cpu, struct thermal_reading *out);
 const struct thermal_state *thermal_state(void);
+void thermal_set_passive(int on);
 
 #endif

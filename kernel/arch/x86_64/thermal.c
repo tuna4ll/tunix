@@ -36,6 +36,7 @@ struct core_state {
 };
 
 static int support = -1;
+static volatile int passive_request;
 static struct thermal_state state = {DEFAULT_TJMAX, -1, 0, 0, 0};
 static struct core_state cores[SMP_MAX_CPUS];
 
@@ -98,14 +99,15 @@ void thermal_tick(void) {
     core->reading.celsius = celsius;
     if (celsius > core->reading.peak) core->reading.peak = celsius;
 
+    int passive = __atomic_load_n(&passive_request, __ATOMIC_ACQUIRE);
     if (state.clock_modulation && !core->reading.throttled &&
-        celsius >= state.tjmax - THROTTLE_MARGIN) {
+        (passive || celsius >= state.tjmax - THROTTLE_MARGIN)) {
         cpu_write_msr(MSR_CLOCK_MODULATION, CLOCK_MODULATION_ENABLE | CLOCK_MODULATION_HALF);
         core->reading.throttled = 1;
         __atomic_add_fetch(&state.throttle_events, 1, __ATOMIC_RELAXED);
-        kprintf("THERMAL: cpu %u at %d C (limit %d C); running it at half speed\n", index, celsius,
-                state.tjmax);
-    } else if (core->reading.throttled && celsius <= state.tjmax - RELEASE_MARGIN) {
+        kprintf("THERMAL: cpu %u at %d C (limit %d C%s); running it at half speed\n", index,
+                celsius, state.tjmax, passive ? ", firmware asked" : "");
+    } else if (core->reading.throttled && !passive && celsius <= state.tjmax - RELEASE_MARGIN) {
         cpu_write_msr(MSR_CLOCK_MODULATION, 0);
         core->reading.throttled = 0;
         kprintf("THERMAL: cpu %u back to %d C; full speed\n", index, celsius);
@@ -128,3 +130,5 @@ int thermal_read(unsigned index, struct thermal_reading *out) {
 }
 
 const struct thermal_state *thermal_state(void) { return &state; }
+
+void thermal_set_passive(int on) { __atomic_store_n(&passive_request, on != 0, __ATOMIC_RELEASE); }

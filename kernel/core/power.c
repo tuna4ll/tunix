@@ -56,6 +56,13 @@ static void power_off_from_work(void *unused) {
 
 static struct work button_work = WORK_INITIALIZER(power_off_from_work, NULL);
 
+static struct work critical_work = WORK_INITIALIZER(power_off_from_work, NULL);
+
+void power_critical(void) {
+    kprintf("POWER: critical temperature\n");
+    work_queue(&critical_work);
+}
+
 void power_button_pressed(void) {
     if (!button_handled) return;
     kprintf("POWER: power button\n");

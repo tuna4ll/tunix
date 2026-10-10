@@ -16,3 +16,5 @@ int thermal_read(unsigned index, struct thermal_reading *out) {
 }
 
 const struct thermal_state *thermal_state(void) { return &state; }
+
+void thermal_set_passive(int on) { (void)on; }
