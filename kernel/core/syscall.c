@@ -3557,7 +3557,7 @@ static int64_t sys_fchown(int fd, uint32_t uid, uint32_t gid) {
 static int64_t sys_fchmod(int fd, uint32_t mode) {
     struct file *file = fd_file(fd);
     if (!file) return -EBADF;
-    if (file->kind != FILE_KIND_VFS || !file->node) return -EBADF;
+    if (file->kind != FILE_KIND_VFS || !file->node) return 0;
     return change_mode(file->node, mode);
 }
 

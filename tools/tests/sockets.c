@@ -81,10 +81,19 @@ static void passing_descriptors(void) {
     close(sockets[1]);
 }
 
+static void socket_mode(void) {
+    int fds[2];
+    socketpair(AF_UNIX, SOCK_STREAM, fds);
+    expect_eq(fchmod(fds[0], 0660), 0, "fchmod on a socket succeeds, as daemons expect");
+    close(fds[0]);
+    close(fds[1]);
+}
+
 static void run(int argc, char **argv) {
     (void)argc;
     (void)argv;
     stream();
     datagrams();
     passing_descriptors();
+    socket_mode();
 }
