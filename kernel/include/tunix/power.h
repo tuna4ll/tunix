@@ -5,7 +5,6 @@ void power_off(void) __attribute__((noreturn));
 void power_restart(void) __attribute__((noreturn));
 void power_halt(void) __attribute__((noreturn));
 
-void power_set_button_handled(int handled);
 void power_button_pressed(void);
 void power_critical(void);
 

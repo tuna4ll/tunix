@@ -1250,8 +1250,12 @@ void sysfs_init(void) {
         }
     }
 
-    static const char *const input_names[] = {"Tunix keyboard", "Tunix mouse", "Tunix USB Tablet"};
-    for (unsigned device = 0; device < 3U; device++) {
+    static const char *const input_names[] = {"Tunix keyboard", "Tunix mouse", "Tunix USB Tablet",
+                                              "Power Button"};
+    static const char *const input_tags[] = {
+        "ID_INPUT=1\nID_INPUT_KEYBOARD=1\n", "ID_INPUT=1\nID_INPUT_MOUSE=1\n",
+        "ID_INPUT=1\nID_INPUT_MOUSE=1\n", "ID_INPUT=1\nID_INPUT_KEY=1\n"};
+    for (unsigned device = 0; device < sizeof(input_names) / sizeof(input_names[0]); device++) {
         char parent[48];
         size_t parent_used = 0;
         append_string(parent, sizeof(parent), &parent_used, "virtual/input/input");
@@ -1271,10 +1275,7 @@ void sysfs_init(void) {
         append_number(devname, sizeof(devname), &devname_used, device);
         devname[devname_used] = '\0';
 
-        const char *tags =
-            device == 0U ? "ID_INPUT=1\nID_INPUT_KEYBOARD=1\n" : "ID_INPUT=1\nID_INPUT_MOUSE=1\n";
-
-        publish_device(name, devname, "input", tags, DEV_MAJOR_INPUT,
+        publish_device(name, devname, "input", input_tags[device], DEV_MAJOR_INPUT,
                        DEV_MINOR_INPUT_EVENT_BASE + device);
     }
 

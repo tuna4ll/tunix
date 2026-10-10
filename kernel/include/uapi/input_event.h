@@ -8,6 +8,7 @@
 #define TUNIX_INPUT_DEVICE_KEYBOARD 0U
 #define TUNIX_INPUT_DEVICE_MOUSE    1U
 #define TUNIX_INPUT_DEVICE_TABLET   2U
+#define TUNIX_INPUT_DEVICE_POWER    3U
 
 #define TUNIX_INPUT_NAME_MAX 32U
 #define TUNIX_EVIOCGINFO     0x54490001UL
@@ -142,6 +143,7 @@ struct tunix_input_device_info {
 #define TUNIX_KEY_PAGEDOWN       109U
 #define TUNIX_KEY_INSERT         110U
 #define TUNIX_KEY_DELETE         111U
+#define TUNIX_KEY_POWER          116U
 #define TUNIX_KEY_PAUSE          119U
 #define TUNIX_KEY_LEFTMETA       125U
 #define TUNIX_KEY_RIGHTMETA      126U

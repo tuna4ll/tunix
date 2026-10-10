@@ -6,14 +6,13 @@
 #endif
 #include <tunix/cpu.h>
 #include <tunix/ext2.h>
+#include <tunix/input.h>
 #include <tunix/vfs.h>
 #include <tunix/platform.h>
 #include <tunix/power.h>
 #include <tunix/workqueue.h>
 
 extern void kprintf(const char *fmt, ...);
-
-static int button_handled = 1;
 
 static void flush_disks(void) {
     (void)vfs_sync();
@@ -47,14 +46,19 @@ void power_halt(void) {
     park();
 }
 
-void power_set_button_handled(int handled) { button_handled = handled != 0; }
-
 static void power_off_from_work(void *unused) {
     (void)unused;
     power_off();
 }
 
-static struct work button_work = WORK_INITIALIZER(power_off_from_work, NULL);
+static void button_from_work(void *unused) {
+    (void)unused;
+    if (input_report_power_button()) return;
+    kprintf("POWER: power button, nobody listens for it\n");
+    power_off();
+}
+
+static struct work button_work = WORK_INITIALIZER(button_from_work, NULL);
 
 static struct work critical_work = WORK_INITIALIZER(power_off_from_work, NULL);
 
@@ -63,8 +67,4 @@ void power_critical(void) {
     work_queue(&critical_work);
 }
 
-void power_button_pressed(void) {
-    if (!button_handled) return;
-    kprintf("POWER: power button\n");
-    work_queue(&button_work);
-}
+void power_button_pressed(void) { work_queue(&button_work); }

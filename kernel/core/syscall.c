@@ -5298,8 +5298,8 @@ static int64_t sys_reboot(uint32_t magic1, uint32_t magic2, uint32_t command) {
         return -EINVAL;
 
     switch (command) {
-    case LINUX_REBOOT_CMD_CAD_ON:    power_set_button_handled(1); return 0;
-    case LINUX_REBOOT_CMD_CAD_OFF:   power_set_button_handled(0); return 0;
+    case LINUX_REBOOT_CMD_CAD_ON:
+    case LINUX_REBOOT_CMD_CAD_OFF:   return 0;
     case LINUX_REBOOT_CMD_RESTART:   power_restart();
     case LINUX_REBOOT_CMD_HALT:      power_halt();
     case LINUX_REBOOT_CMD_POWER_OFF: power_off();

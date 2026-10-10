@@ -255,7 +255,8 @@ static void input_emit_at(unsigned device_id, uint64_t timestamp, uint16_t type,
     unsigned delivered = 0;
     for (struct input_reader *reader = input_readers; reader; reader = reader->next) {
         if (reader->device_id != device_id) continue;
-        if (!vt_input_delivered_to(reader->vt_index)) continue;
+        if (device_id != TUNIX_INPUT_DEVICE_POWER && !vt_input_delivered_to(reader->vt_index))
+            continue;
         reader_push(reader, &event);
         delivered++;
     }
@@ -390,6 +391,19 @@ static void mouse_emit_button(uint64_t timestamp, uint8_t changed, uint8_t state
 void input_external_key(uint16_t keycode, int released) {
     INPUT_LOCKED;
     (void)keyboard_emit_key(keycode, released);
+}
+
+int input_report_power_button(void) {
+    INPUT_LOCKED;
+    int heard = 0;
+    for (struct input_reader *reader = input_readers; reader; reader = reader->next)
+        if (reader->device_id == TUNIX_INPUT_DEVICE_POWER) heard = 1;
+    uint64_t timestamp = time_uptime_ns();
+    input_emit_at(TUNIX_INPUT_DEVICE_POWER, timestamp, TUNIX_EV_KEY, TUNIX_KEY_POWER, 1);
+    input_sync_at(TUNIX_INPUT_DEVICE_POWER, timestamp);
+    input_emit_at(TUNIX_INPUT_DEVICE_POWER, timestamp, TUNIX_EV_KEY, TUNIX_KEY_POWER, 0);
+    input_sync_at(TUNIX_INPUT_DEVICE_POWER, timestamp);
+    return heard;
 }
 
 int input_report_hotkey(uint16_t keycode) {
@@ -697,6 +711,11 @@ int input_get_device_info(unsigned device_id, struct tunix_input_device_info *in
         memcpy(info->name, "Tunix USB Tablet", sizeof("Tunix USB Tablet"));
         return 0;
     }
+    if (device_id == TUNIX_INPUT_DEVICE_POWER) {
+        info->event_types = (1U << TUNIX_EV_SYN) | (1U << TUNIX_EV_KEY);
+        memcpy(info->name, "Power Button", sizeof("Power Button"));
+        return 0;
+    }
     return -EINVAL;
 }
 
@@ -751,7 +770,7 @@ int64_t input_read_scancodes(size_t size, void *buffer) {
 
 struct input_reader *input_reader_open(unsigned device_id) {
     if (device_id != TUNIX_INPUT_DEVICE_KEYBOARD && device_id != TUNIX_INPUT_DEVICE_MOUSE &&
-        device_id != TUNIX_INPUT_DEVICE_TABLET)
+        device_id != TUNIX_INPUT_DEVICE_TABLET && device_id != TUNIX_INPUT_DEVICE_POWER)
         return NULL;
 
     struct input_reader *reader = (struct input_reader *)kmalloc(sizeof(*reader));
@@ -837,6 +856,7 @@ struct evdev_id {
 };
 
 #define BUS_I8042 0x11
+#define BUS_HOST  0x19
 #define BUS_USB   0x03
 
 static void bitmap_set(uint8_t *bits, size_t limit, unsigned bit) {
@@ -880,6 +900,10 @@ static void evdev_key_bits(unsigned device_id, uint8_t *bits, size_t limit) {
             bitmap_set(bits, limit, TUNIX_BTN_EXTRA);
         }
 #endif
+        return;
+    }
+    if (device_id == TUNIX_INPUT_DEVICE_POWER) {
+        bitmap_set(bits, limit, TUNIX_KEY_POWER);
         return;
     }
     for (unsigned key = TUNIX_KEY_ESC; key <= TUNIX_KEY_COMPOSE; key++)
@@ -929,10 +953,14 @@ int64_t input_reader_ioctl(struct input_reader *reader, unsigned device_id, unsi
     }
 
     if (nr == EVIOCGID_NR) {
-        struct evdev_id id = {.bustype =
-                                  device_id == TUNIX_INPUT_DEVICE_TABLET ? BUS_USB : BUS_I8042,
+        struct evdev_id id = {.bustype = device_id == TUNIX_INPUT_DEVICE_TABLET ? BUS_USB
+                                  : device_id == TUNIX_INPUT_DEVICE_POWER       ? BUS_HOST
+                                                                                : BUS_I8042,
                               .vendor = device_id == TUNIX_INPUT_DEVICE_TABLET ? 0x0627 : 0,
-                              .product = device_id == TUNIX_INPUT_DEVICE_TABLET ? 0x0001 : 0,
+                              .product = device_id == TUNIX_INPUT_DEVICE_TABLET ||
+                                      device_id == TUNIX_INPUT_DEVICE_POWER
+                                  ? 0x0001
+                                  : 0,
                               .version = 0};
         return evdev_copy_out(user_argument, &id, sizeof(id), size) < 0 ? -EFAULT : 0;
     }
