@@ -16,3 +16,5 @@ int cpufreq_read(unsigned index, struct cpufreq_reading *out) {
 }
 
 const struct cpufreq_state *cpufreq_state(void) { return &state; }
+
+void cpufreq_set_limit_khz(uint64_t khz) { (void)khz; }

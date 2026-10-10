@@ -24,6 +24,7 @@ extern void kprintf(const char *fmt, ...);
 struct core_state {
     struct cpufreq_reading reading;
     uint8_t initialised;
+    uint32_t applied_limit;
     uint64_t aperf;
     uint64_t mperf;
     uint64_t sampled_ns;
@@ -33,6 +34,7 @@ static int support = -1;
 static unsigned ratio_shift;
 static struct cpufreq_state state;
 static struct core_state cores[SMP_MAX_CPUS];
+static volatile uint32_t limit_ratio;
 
 static int atom_model(uint32_t model) {
     static const uint8_t atoms[] = {0x1C, 0x26, 0x27, 0x35, 0x36, 0x37, 0x4A, 0x4C, 0x4D, 0x5A,
@@ -87,14 +89,28 @@ static uint32_t current_ratio(void) {
     return (uint32_t)((cpu_read_msr(MSR_PERF_STATUS) >> ratio_shift) & 0xFFU);
 }
 
+static void write_ratio(uint32_t ratio) {
+    uint64_t control = cpu_read_msr(MSR_PERF_CTL);
+    control &= ~(0xFFULL << ratio_shift);
+    control |= (uint64_t)ratio << ratio_shift;
+    cpu_write_msr(MSR_PERF_CTL, control);
+}
+
+static void apply_limit(struct core_state *core, unsigned index) {
+    uint32_t limit = __atomic_load_n(&limit_ratio, __ATOMIC_ACQUIRE);
+    if (limit == core->applied_limit || !state.eist_enabled) return;
+    core->applied_limit = limit;
+    uint32_t ratio = limit && limit < state.target_ratio ? limit : state.target_ratio;
+    write_ratio(ratio);
+    if (index == 0)
+        kprintf("CPUFREQ: firmware limit %s, ratio %u\n", limit ? "set" : "lifted", ratio);
+}
+
 static void first_sample(struct core_state *core, unsigned index) {
     core->initialised = 1;
     core->reading.boot_ratio = current_ratio();
     if (!state.eist_enabled || core->reading.boot_ratio >= state.target_ratio) return;
-    uint64_t control = cpu_read_msr(MSR_PERF_CTL);
-    control &= ~(0xFFULL << ratio_shift);
-    control |= (uint64_t)state.target_ratio << ratio_shift;
-    cpu_write_msr(MSR_PERF_CTL, control);
+    write_ratio(state.target_ratio);
     state.requested = 1;
     kprintf("CPUFREQ: cpu %u was at ratio %u, asked for %u\n", index, core->reading.boot_ratio,
             state.target_ratio);
@@ -108,6 +124,7 @@ void cpufreq_tick(void) {
     uint64_t now = time_uptime_ns();
     if (core->sampled_ns && now - core->sampled_ns < SAMPLE_NS) return;
     if (!core->initialised) first_sample(core, cpu->index);
+    apply_limit(core, cpu->index);
     core->sampled_ns = now ? now : 1;
     core->reading.ratio = current_ratio();
     core->reading.valid = 1;
@@ -131,3 +148,12 @@ int cpufreq_read(unsigned index, struct cpufreq_reading *out) {
 }
 
 const struct cpufreq_state *cpufreq_state(void) { return &state; }
+
+void cpufreq_set_limit_khz(uint64_t khz) {
+    uint32_t ratio = 0;
+    if (khz && cpufreq_supported() > 0 && state.ratio_khz) {
+        ratio = (uint32_t)(khz / state.ratio_khz);
+        if (ratio < state.min_ratio) ratio = state.min_ratio;
+    }
+    __atomic_store_n(&limit_ratio, ratio, __ATOMIC_RELEASE);
+}
