@@ -24,42 +24,36 @@ they were, so a short table is an old one rather than a broken one. Every field
 is read through an accessor that answers zero past the table's own length,
 which is what makes ignoring the difference safe.
 
-## \_S5_, and the small amount of AML this reads
+## \_S5_
 
-The FADT points at the DSDT, which is AML bytecode. Interpreting it properly
-means a bytecode machine with a namespace and operation-region drivers -- a
-subsystem, not a function -- and nothing else here needs one.
+With the [ACPI](acpi.md) subsystem running, S5 is entered the way the firmware
+expects: `_PTS` and `_GTS` run, then uACPI writes the sleep type from `_S5` to
+the PM1 control blocks.
 
-What `parse_sleep_state` does instead is scan the DSDT for the four characters
-`_S5_` followed by a package opcode, and decode the one or two small integers
-inside it. Those are the SLP_TYP values for the two PM1 blocks. Names in AML
-are always four characters with short ones padded, which is why the object the
-source calls `_S5` is `_S5_` in the table.
-
-A false match is rejected by the package opcode that has to follow it. If one
-somehow got through, the result would be a machine that declined to power off,
-not one that did something unexpected.
+The early table code keeps a fallback for machines where AML never came up --
+`acpi=off`, or a firmware uACPI rejects. `parse_sleep_state` scans the DSDT for
+the four characters `_S5_` followed by a package opcode and decodes the one or
+two small integers inside it. Names in AML are always four characters with
+short ones padded, which is why the object the source calls `_S5` is `_S5_` in
+the table. A false match is rejected by the package opcode that has to follow
+it.
 
 ## Turning it off
 
-`acpi_power_off` writes `SLP_TYP << 10 | SLP_EN` to PM1a_CNT, and to PM1b_CNT
-where the machine has one. Before that it calls `acpi_enable`, which writes the
-FADT's enable value to the SMI command port and waits for SCI_EN to appear --
-firmware hands the fixed hardware over on request, and until it does the sleep
-registers are the firmware's. A machine that boots through UEFI usually arrives
-with ACPI mode already on, which `acpi_enable` notices and leaves alone.
+`acpi_power_off` asks the ACPI subsystem first. Without it, it writes
+`SLP_TYP << 10 | SLP_EN` to PM1a_CNT, and to PM1b_CNT where the machine has
+one, after `acpi_enable` has written the FADT's enable value to the SMI command
+port and waited for SCI_EN -- until the firmware hands the fixed hardware over,
+the sleep registers are the firmware's.
 
 ## Restarting
 
-`acpi_reset` tries three things in order:
-
-1. the FADT's reset register, when the table says it has one. It can be a port
-   or a memory address; both are handled.
-2. the keyboard controller's reset line, which predates ACPI by a decade and is
-   still wired on every PC. QEMU's `pc` machine advertises no reset register, so
-   this is the one that actually runs there.
-3. a triple fault. An empty interrupt table means the processor cannot deliver
-   a breakpoint, cannot deliver the double fault that follows, and resets.
+`acpi_reset` tries, in order, the ACPI subsystem's reset, the FADT's reset
+register when the table says it has one (a port or a memory address), the
+keyboard controller's reset line, which predates ACPI by a decade and is still
+wired on every PC, and finally a triple fault: an empty interrupt table means
+the processor cannot deliver a breakpoint, cannot deliver the double fault
+that follows, and resets.
 
 ## reboot(2)
 
@@ -83,30 +77,21 @@ power button's interrupt wants the same thing.
 
 ## The power button
 
-The FADT names a global interrupt for the SCI, and `acpi_power_button_enable`
-routes it to vector 0x30 with polarity and trigger from the MADT's overrides --
-QEMU wires its SCI active *high* and says so, so the ACPI default of
-level-triggered active-low is not a safe guess.
+The ACPI subsystem installs a handler for the FADT's fixed power button, and a
+notify handler for control-method buttons (`PNP0C0C`). Both call
+`power_button_pressed`, which queues the power-off on a kernel worker:
+flushing the disks sleeps on locks and on I/O, which an interrupt cannot do.
+`RB_DISABLE_CAD` hands the button to userspace, as on Linux.
 
-Taking the SCI means taking the machine out of legacy mode, and that hands the
-OS more than a button. On a laptop the firmware's embedded controller raises
-general-purpose events for temperature, fans, the lid and the battery, and in
-ACPI mode it waits for the OS to answer them by running AML. Tunix runs none.
-So the kernel decides first:
-
-- If the DSDT or an SSDT declares an embedded controller (`PNP0C09`) and the
-  firmware booted in legacy mode, the kernel leaves it there. The firmware keeps
-  doing what it did before any OS ran, and the button is the firmware's.
-- Otherwise it enables ACPI mode, turns off every PM1 fixed event but
-  PWRBTN_EN, clears their status, and writes zero to every GPE enable register:
-  an event nobody handles must not hold a level-triggered SCI asserted. A GPE
-  that fires anyway is cleared and masked by the interrupt and counted.
-- `acpi_button=on` or `acpi_button=off` on the command line overrides that.
-
-A press queues the power-off on a kernel worker. Flushing the disks sleeps on
-locks and on I/O, which an interrupt cannot do.
+Earlier versions of Tunix ran no AML, and on a laptop whose embedded controller
+expects the operating system to answer its events they had to leave the
+firmware in legacy mode and the button with it. Running the AML removed that
+choice: every machine is put in ACPI mode, and the controller's events are
+answered by the methods the firmware wrote for them.
 
 ## Temperature
+
+Two things watch the temperature.
 
 On Intel processors with a digital thermal sensor (CPUID 06H:EAX[0] and the
 ACPI thermal MSRs, 01H:EDX[22]) each core reads its own IA32_THERM_STATUS once
@@ -120,12 +105,17 @@ the models that have it, 100 C otherwise.
   as the button: flushed, rather than cut by the hardware with the disk caches
   still in memory.
 
-The readings are `/sys/class/hwmon/hwmon0` in Linux's coretemp layout, and the
-`hwreport` boot prints them with the ACPI decision. That boot also starts a
-logger in `rc.local` that appends uptime, load, every core's temperature and
-the three busiest processes to `/tunix-thermal.log` every five seconds and
-syncs it, so a machine that switches itself off leaves the minutes before it
-on the disk.
+The firmware's thermal zones are the other: above a zone's `_PSV` every core
+is slowed the same way, at `_CRT` the machine powers off, as described in
+[ACPI](acpi.md). The firmware's trip points are usually set for the whole
+machine -- the case, the battery -- rather than only the processor die.
+
+The processor readings are `/sys/class/hwmon/hwmon0` in Linux's coretemp
+layout, the zones `/sys/class/thermal/thermal_zoneN`. The `hwreport` boot
+prints both and starts a logger in `rc.local` that appends uptime, load, every
+core's temperature and the three busiest processes to `/tunix-thermal.log`
+every five seconds and syncs it, so a machine that switches itself off leaves
+the minutes before it on the disk.
 
 ## Speed
 
@@ -140,6 +130,11 @@ turbo, as the first laptop this ran on does, is left alone.
 Nehalem and Westmere take the ratio in bits 7:0 of the register, Sandy Bridge
 and later in bits 15:8; Atoms, older parts and machines whose firmware turned
 SpeedStep off are left alone.
+
+The firmware can lower that ceiling. When a processor object's `_PPC` names a
+slower state from its `_PSS` table -- an embedded controller does this when the
+machine runs hot -- each core's next tick asks for that state's ratio instead,
+and the full ratio again once `_PPC` is back to zero.
 
 Once a second each core also reads APERF and MPERF, whose ratio is the speed it
 actually ran at while it was busy. Both show up in
