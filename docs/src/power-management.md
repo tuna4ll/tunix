@@ -66,7 +66,7 @@ away, so a wild syscall with plausible arguments must not be able to reach it.
 | `RB_POWER_OFF` | flush, then S5 |
 | `RB_AUTOBOOT` | flush, then reset |
 | `RB_HALT_SYSTEM` | flush, then stop |
-| `RB_ENABLE_CAD` / `RB_DISABLE_CAD` | hand the power button to the kernel, or away from it |
+| `RB_ENABLE_CAD` / `RB_DISABLE_CAD` | accepted; they concern Ctrl+Alt+Del only |
 
 The flush is `ext2fs_sync` and an ATA cache flush. File writes reach ext2 as
 they happen, so this is metadata and the drive's own cache rather than a
@@ -77,17 +77,21 @@ power button's interrupt wants the same thing.
 
 ## The power button
 
-The ACPI subsystem installs a handler for the FADT's fixed power button, and a
-notify handler for control-method buttons (`PNP0C0C`). Both call
-`power_button_pressed`, which queues the power-off on a kernel worker:
-flushing the disks sleeps on locks and on I/O, which an interrupt cannot do.
-`RB_DISABLE_CAD` hands the button to userspace, as on Linux.
+As on Linux, a press is reported as `KEY_POWER` from an input device of its own,
+`/dev/input/event3`, named "Power Button" and tagged `ID_INPUT_KEY` so that
+udev marks it as a power switch. The ACPI subsystem raises it from the FADT's
+fixed power button and from control-method buttons (`PNP0C0C`).
 
-Earlier versions of Tunix ran no AML, and on a laptop whose embedded controller
-expects the operating system to answer its events they had to leave the
-firmware in legacy mode and the button with it. Running the AML removed that
-choice: every machine is put in ACPI mode, and the controller's events are
-answered by the methods the firmware wrote for them.
+What happens next is userspace's decision, as it is on Linux. elogind powers
+off, or leaves it to GNOME when GNOME holds its inhibitor; the GNOME image sets
+GNOME's action to the shutdown dialog, since Tunix has no suspend to fall back
+to. The Weston image runs acpid, whose handler runs `shutdown`. When nothing has
+the device open -- a shell as init, the test and report images -- the kernel
+flushes the disks and powers off itself, from a worker rather than the
+interrupt.
+
+`RB_DISABLE_CAD`, which runit sends at boot, used to take the button away from
+the kernel. It is about Ctrl+Alt+Del and no longer touches the button.
 
 ## Temperature
 
