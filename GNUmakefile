@@ -130,10 +130,10 @@ IMAGE_TABLE ?= gpt
 
 IMAGE_SLACK_MIB ?= 4096
 
-$(IMAGE): $(KERNEL) $(MODULES) $(LIMINE_EXE) tools/limine.conf tools/image.sh $(SYSROOT_STAMP)
+$(IMAGE): $(KERNEL) $(MODULES) $(LIMINE_EXE) boot/limine.conf tools/image.sh $(SYSROOT_STAMP)
 	$(USERNS) env TABLE='$(IMAGE_TABLE)' ROOT_SLACK_MIB='$(IMAGE_SLACK_MIB)' \
 	MODULES='$(KERNEL_BUILD)/modules' RELEASE='$(KERNEL_RELEASE)' \
-		tools/image.sh $@ $(KERNEL) $(LIMINE_DIR) tools/limine.conf $(SYSROOT)
+		tools/image.sh $@ $(KERNEL) $(LIMINE_DIR) boot/limine.conf $(SYSROOT)
 
 QEMU_MEMORY ?= 4G
 QEMU_SMP    ?= 4
@@ -230,10 +230,10 @@ $(SYSROOT_AARCH64_STAMP): tools/sysroot.sh $(BASE_FILES) $(SYSROOT_RECIPE) | $(B
 
 image-aarch64: $(IMAGE_AARCH64)
 
-$(IMAGE_AARCH64): $(AARCH64_CORE_IMAGE) $(AARCH64_MODULES) $(LIMINE_EXE) tools/limine-aarch64.conf tools/image.sh $(SYSROOT_AARCH64_STAMP)
+$(IMAGE_AARCH64): $(AARCH64_CORE_IMAGE) $(AARCH64_MODULES) $(LIMINE_EXE) boot/limine-aarch64.conf tools/image.sh $(SYSROOT_AARCH64_STAMP)
 	$(USERNS) env ARCH=aarch64 TABLE='$(IMAGE_TABLE)' ROOT_SLACK_MIB='$(IMAGE_SLACK_MIB)' \
 	MODULES='$(AARCH64_CORE_BUILD)/modules' RELEASE='$(KERNEL_RELEASE)' \
-		tools/image.sh $@ $(AARCH64_CORE_IMAGE) $(LIMINE_DIR) tools/limine-aarch64.conf $(SYSROOT_AARCH64)
+		tools/image.sh $@ $(AARCH64_CORE_IMAGE) $(LIMINE_DIR) boot/limine-aarch64.conf $(SYSROOT_AARCH64)
 
 QEMU_AARCH64_DEVICES ?= -device ramfb -device qemu-xhci -device usb-kbd -device usb-mouse \
 	-netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0

@@ -100,7 +100,7 @@ firmware's Graphics Output Protocol framebuffer is used instead (see below).
 
 The desktop image boots itself on any 64-bit ARM UEFI machine. Its EFI system
 partition carries Limine's `BOOTAA64.EFI` and `boot/limine/limine.conf`
-(`tools/limine-aarch64.conf`), which loads `boot/Image` with the Linux arm64
+(`boot/limine-aarch64.conf`), which loads `boot/Image` with the Linux arm64
 protocol. Limine exits boot services and passes a device tree whose `/chosen`
 names the UEFI system table and memory map; when the firmware has no device tree
 of its own, that tree holds nothing else.

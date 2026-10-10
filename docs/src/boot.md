@@ -9,7 +9,7 @@ that loader had written -- no ISO, no USB stick somebody else prepared, no
 firmware that only speaks EFI. Limine is a boot protocol rather than a program
 to maintain: the kernel declares what it needs and gets it.
 
-The menu is `tools/limine.conf`. Its wallpaper is the desktop's, copied off
+The menu is `boot/limine.conf`. Its wallpaper is the desktop's, copied off
 the sysroot onto the EFI system partition. `interface_resolution` is named as
 well as the entries' `resolution`: they are different modes, and left to itself
 the menu comes up at 1024x768 with a 16:9 wallpaper stretched into it.
