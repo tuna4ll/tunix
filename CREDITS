@@ -1,0 +1,52 @@
+	This is a list of the projects Tunix is built on, used by, or learned
+	from. Tunix would not boot, run a desktop, or pass its tests without them.
+
+	Entries are sorted by name. The fields are the name (N), the web page (W),
+	the license of the part Tunix uses (L), and a description (D).
+
+----------
+
+N: ACPICA
+W: https://github.com/acpica/acpica
+L: Intel ACPI license, or GPL-2.0, or BSD-3-Clause
+D: iasl, which compiles the firmware model in testsuites/acpi-tests
+
+N: kbd
+W: https://kbd-project.org
+L: GPL, as stated in kbd's README.eurlatgr
+D: The eurlatgr console font, based on latarcyrheb-sun16, whose glyphs
+D: kernel/tty/terminal_font.c draws
+
+N: Limine
+W: https://github.com/limine-bootloader/limine
+L: BSD-2-Clause
+D: The bootloader on every image and the boot protocol the x86_64
+D: kernel enters through, kernel/arch/x86_64/limine_entry.c
+
+N: Linux
+W: https://kernel.org
+L: GPL-2.0
+D: The system call ABI Tunix implements so that an unmodified userland
+D: runs, and the model for its virtual terminals, sysfs and procfs
+
+N: mdBook
+W: https://github.com/rust-lang/mdBook
+L: MPL-2.0
+D: Builds the documentation in docs/
+
+N: QEMU
+W: https://www.qemu.org
+L: GPL-2.0
+D: The machine every test, CI boot and development session runs on
+
+N: uACPI
+W: https://github.com/uACPI/uACPI
+L: MIT
+D: The AML interpreter behind the ACPI subsystem, fetched by
+D: kernel/subprojects/uacpi/RECIPE and compiled into the kernel
+
+N: Void Linux
+W: https://voidlinux.org
+L: Each package under its own license
+D: The userland on every image: runit, xbps, Weston, GNOME, Mesa,
+D: Firefox and the rest, installed unmodified by tools/sysroot.sh
