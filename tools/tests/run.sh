@@ -2,16 +2,16 @@
 set -eu
 
 arch=${ARCH:-x86_64}
-limine=${LIMINE:-build/limine}
+limine=${LIMINE:-kernel/build/limine}
 cpus=${CPUS:-2}
 wait=${TIMEOUT:-120}
 tests=${*:-process memory files pipes sockets time}
 
 if [ "$arch" = aarch64 ]; then
-	kernel=${KERNEL:-build/kernel-aarch64-core.img}
+	kernel=${KERNEL:-kernel/build/kernel-aarch64-core.img}
 	compiler=aarch64-linux-gnu-gcc
 else
-	kernel=${KERNEL:-build/kernel.elf}
+	kernel=${KERNEL:-kernel/build/kernel.elf}
 	compiler=cc
 fi
 test -f "$kernel" || { echo "run.sh: no kernel at $kernel" >&2; exit 1; }

@@ -1,0 +1,21 @@
+UACPI_VERSION := 6.1.1
+UACPI_URL     := https://github.com/uACPI/uACPI.git
+UACPI_RECIPE  := $(lastword $(MAKEFILE_LIST))
+UACPI_DIR     := $(BUILD)/uacpi
+UACPI_STAMP   := $(UACPI_DIR)/.version-$(UACPI_VERSION)
+UACPI_NAMES   := tables types uacpi utilities interpreter opcodes namespace stdlib \
+	shareable opregion default_handlers io notify sleep registers resources event mutex osi
+UACPI_SOURCES := $(UACPI_NAMES:%=$(UACPI_DIR)/source/%.c)
+UACPI_OBJECTS := $(UACPI_NAMES:%=$(BUILD)/uacpi-objects/%.c.o)
+UACPI_CFLAGS   = $(filter-out -Werror -Wextra,$(KERNEL_CFLAGS)) -Wno-unused-parameter
+
+$(UACPI_STAMP):
+	rm -rf $(UACPI_DIR)
+	git clone --depth=1 --branch=$(UACPI_VERSION) $(UACPI_URL) $(UACPI_DIR)
+	@touch $@
+
+$(BUILD)/uacpi-objects/%.c.o: $(UACPI_STAMP)
+	@mkdir -p $(dir $@)
+	$(CC) $(UACPI_CFLAGS) -MMD -MP -c $(UACPI_DIR)/source/$*.c -o $@
+
+-include $(UACPI_OBJECTS:.o=.d)

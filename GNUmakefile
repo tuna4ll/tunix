@@ -9,58 +9,17 @@ endif
 QEMU    ?= qemu-system-x86_64
 
 BUILD   := build
-KERNEL  := $(BUILD)/kernel.elf
 
-LIMINE_VERSION := v9.x-binary
-LIMINE_DIR     := $(BUILD)/limine
+KERNEL_BUILD := kernel/build
+KERNEL       := $(KERNEL_BUILD)/kernel.elf
+
+LIMINE_DIR     := $(KERNEL_BUILD)/limine
 LIMINE_HEADER  := $(LIMINE_DIR)/limine.h
 LIMINE_EXE     := $(LIMINE_DIR)/limine
 
-UACPI_VERSION := 6.1.1
-UACPI_DIR     := $(BUILD)/uacpi
-UACPI_HEADER  := $(UACPI_DIR)/include/uacpi/uacpi.h
-UACPI_NAMES   := tables types uacpi utilities interpreter opcodes namespace stdlib \
-	shareable opregion default_handlers io notify sleep registers resources event mutex osi
-UACPI_OBJECTS  = $(UACPI_NAMES:%=$(BUILD)/uacpi-objects/%.c.o)
-
-KERNEL_CFLAGS := -std=gnu11 -Wall -Wextra -Werror -ffreestanding \
-	-fno-stack-protector -fno-pic -fno-pie -fno-builtin \
-	-fno-asynchronous-unwind-tables -fno-unwind-tables -mno-red-zone -m64 \
-	-Os -ffunction-sections -fdata-sections -mcmodel=kernel -mgeneral-regs-only \
-	-Ikernel/include -I$(LIMINE_DIR) -I$(UACPI_DIR)/include \
-	$(KERNEL_CFLAGS_EXTRA)
-UACPI_CFLAGS = $(filter-out -Werror -Wextra,$(KERNEL_CFLAGS)) -Wno-unused-parameter
-KERNEL_LDFLAGS := -nostdlib -no-pie -Wl,-T,kernel/arch/x86_64/linker.ld \
-	-Wl,--gc-sections -Wl,--build-id=none -Wl,-z,max-page-size=0x1000
-
-KERNEL_SOURCES := $(shell find kernel -path kernel/arch/aarch64 -prune -o -path kernel/modules -prune -o \( -name '*.c' -o -name '*.S' \) -print)
-KERNEL_OBJECTS := $(KERNEL_SOURCES:%=$(BUILD)/%.o)
-KERNEL_DEPS    := $(KERNEL_OBJECTS:.o=.d)
-
-.PHONY: all kernel check clean distclean
-all: image
-kernel: $(KERNEL)
-
-check:
-	$(MAKE) kernel modules BUILD=$(BUILD)/check/default LIMINE_DIR=$(LIMINE_DIR) UACPI_DIR=$(UACPI_DIR)
-	$(MAKE) kernel modules BUILD=$(BUILD)/check/debug LIMINE_DIR=$(LIMINE_DIR) UACPI_DIR=$(UACPI_DIR) KERNEL_CFLAGS_EXTRA=-DTUNIX_DEBUG_LOGS=1
-	$(MAKE) kernel modules BUILD=$(BUILD)/check/timings LIMINE_DIR=$(LIMINE_DIR) UACPI_DIR=$(UACPI_DIR) KERNEL_CFLAGS_EXTRA=-DTUNIX_BOOT_TIMINGS=1
-
-$(KERNEL): $(KERNEL_OBJECTS) $(UACPI_OBJECTS) kernel/arch/x86_64/linker.ld
-	$(CC) $(KERNEL_LDFLAGS) $(KERNEL_OBJECTS) $(UACPI_OBJECTS) -o $@
-
-$(BUILD)/uacpi-objects/%.c.o: $(UACPI_HEADER)
-	@mkdir -p $(dir $@)
-	$(CC) $(UACPI_CFLAGS) -MMD -MP -c $(UACPI_DIR)/source/$*.c -o $@
-
-$(BUILD)/%.c.o: %.c | $(LIMINE_HEADER) $(UACPI_HEADER)
-	@mkdir -p $(dir $@)
-	$(CC) $(KERNEL_CFLAGS) -MMD -MP -c $< -o $@
-
-$(BUILD)/%.S.o: %.S | $(LIMINE_HEADER) $(UACPI_HEADER)
-	@mkdir -p $(dir $@)
-	$(CC) $(KERNEL_CFLAGS) -MMD -MP -c $< -o $@
-
+KERNEL_VARS := AARCH64_CC AARCH64_OBJCOPY KERNEL_CFLAGS_EXTRA IASL HOST_CC CLANG_TIDY
+KERNEL_MAKE = $(MAKE) -C kernel CC='$(CC)' BUILD=build \
+	$(foreach v,$(KERNEL_VARS),$(if $(filter file,$(origin $v)),$v='$($v)'))
 
 KERNEL_RELEASE := $(shell sed -n 's/^#define UTS_RELEASE[[:space:]]*"\(.*\)"/\1/p' kernel/include/tunix/uts.h)
 ifeq ($(KERNEL_RELEASE),)
@@ -68,59 +27,36 @@ $(error cannot read UTS_RELEASE from kernel/include/tunix/uts.h)
 endif
 
 MODULE_SOURCES := $(wildcard kernel/modules/*.c) $(wildcard kernel/modules/x86_64/*.c)
-MODULES := $(patsubst kernel/modules/%.c,$(BUILD)/modules/%.ko,$(MODULE_SOURCES))
-MODULE_CFLAGS = $(filter-out -ffunction-sections -fdata-sections,$(KERNEL_CFLAGS)) \
-	-DTUNIX_MODULE_NAME='"$(notdir $*)"'
+MODULES := $(patsubst kernel/modules/%.c,$(KERNEL_BUILD)/modules/%.ko,$(MODULE_SOURCES))
 
-.PHONY: modules
-modules: $(MODULES)
+KERNEL_TARGETS := kernel modules check aarch64-core modules-aarch64 acpi-test lint
 
-$(BUILD)/modules/%.ko: kernel/modules/%.c | $(LIMINE_HEADER) $(UACPI_HEADER)
-	@mkdir -p $(dir $@)
-	$(CC) $(MODULE_CFLAGS) -MMD -MP -c $< -o $@
+.PHONY: all clean distclean kernel-fetch FORCE $(KERNEL_TARGETS)
+all: image
 
-$(MODULES): GNUmakefile
+kernel-fetch:
+	$(KERNEL_MAKE) fetch
 
--include $(MODULES:.ko=.d)
+$(KERNEL_TARGETS): | kernel-fetch
+	$(KERNEL_MAKE) $@
 
-$(KERNEL_OBJECTS): GNUmakefile
+$(KERNEL) $(MODULES) &: FORCE | kernel-fetch
+	$(KERNEL_MAKE) kernel modules
 
--include $(KERNEL_DEPS)
--include $(UACPI_OBJECTS:.o=.d)
+$(LIMINE_HEADER): | kernel-fetch
 
-$(LIMINE_HEADER):
-	rm -rf $(LIMINE_DIR)
-	git clone --depth=1 --branch=$(LIMINE_VERSION) \
-		https://github.com/limine-bootloader/limine.git $(LIMINE_DIR)
-
-IASL           ?= iasl
-HOST_CC        ?= cc
-ACPI_TEST_DIR  := $(BUILD)/acpi-test
-ACPI_DRIVERS   := bus ec video button thermal_zone processor
-ACPI_TEST_SRCS  = tools/tests/acpi/host.c $(ACPI_DRIVERS:%=kernel/drivers/acpi/%.c) \
-	$(UACPI_NAMES:%=$(UACPI_DIR)/source/%.c)
-
-.PHONY: acpi-test
-acpi-test: $(UACPI_HEADER)
-	@mkdir -p $(ACPI_TEST_DIR)
-	$(IASL) -vw 3168 -p $(ACPI_TEST_DIR)/machine tools/tests/acpi/machine.asl >/dev/null
-	$(HOST_CC) -std=gnu11 -O1 -Wall -Wno-unused-parameter -Itools/tests/acpi/stubs \
-		-Ikernel/include -I$(UACPI_DIR)/include $(ACPI_TEST_SRCS) -o $(ACPI_TEST_DIR)/run
-	$(ACPI_TEST_DIR)/run $(ACPI_TEST_DIR)/machine.aml
-
-$(UACPI_HEADER):
-	rm -rf $(UACPI_DIR)
-	git clone --depth=1 --branch=$(UACPI_VERSION) \
-		https://github.com/uACPI/uACPI.git $(UACPI_DIR)
-
-$(LIMINE_EXE): $(LIMINE_HEADER)
+$(LIMINE_EXE): | $(LIMINE_HEADER)
 	$(MAKE) -C $(LIMINE_DIR)
 
+FORCE:
+
 clean:
-	rm -rf $(BUILD)/kernel $(BUILD)/modules $(BUILD)/uacpi-objects $(KERNEL) $(IMAGE)
+	$(KERNEL_MAKE) clean
+	rm -rf $(IMAGE)
 
 distclean:
 	$(USERNS) rm -rf $(BUILD)
+	$(KERNEL_MAKE) distclean
 
 ifneq ($(SUDO_UID),)
 $(error do not run make with sudo: the build runs in a user namespace and needs no privileges)
@@ -196,7 +132,7 @@ IMAGE_SLACK_MIB ?= 4096
 
 $(IMAGE): $(KERNEL) $(MODULES) $(LIMINE_EXE) tools/limine.conf tools/image.sh $(SYSROOT_STAMP)
 	$(USERNS) env TABLE='$(IMAGE_TABLE)' ROOT_SLACK_MIB='$(IMAGE_SLACK_MIB)' \
-	MODULES='$(BUILD)/modules' RELEASE='$(KERNEL_RELEASE)' \
+	MODULES='$(KERNEL_BUILD)/modules' RELEASE='$(KERNEL_RELEASE)' \
 		tools/image.sh $@ $(KERNEL) $(LIMINE_DIR) tools/limine.conf $(SYSROOT)
 
 QEMU_MEMORY ?= 4G
@@ -270,61 +206,12 @@ headless: $(IMAGE)
 	$(AUDIO_NOTE)
 	$(QEMU) $(QEMU_COMMON) -nographic -monitor none -serial stdio
 
-AARCH64_CC     ?= aarch64-linux-gnu-gcc
-AARCH64_OBJCOPY ?= aarch64-linux-gnu-objcopy
+AARCH64_CORE_BUILD := $(KERNEL_BUILD)/aarch64-core
+AARCH64_CORE_IMAGE := $(KERNEL_BUILD)/kernel-aarch64-core.img
+AARCH64_MODULES := $(patsubst kernel/modules/%.c,$(AARCH64_CORE_BUILD)/modules/%.ko,$(wildcard kernel/modules/*.c))
 
-AARCH64_CORE_BUILD := $(BUILD)/aarch64-core
-AARCH64_CORE_CFLAGS := -std=gnu11 -Wall -Wextra -Werror -ffreestanding \
-	-fno-stack-protector -fno-pic -fno-pie -fno-builtin \
-	-fno-asynchronous-unwind-tables -fno-unwind-tables -mgeneral-regs-only \
-	-mstrict-align -march=armv8-a -mno-outline-atomics -Os \
-	-ffunction-sections -fdata-sections \
-	-Ikernel/include $(KERNEL_CFLAGS_EXTRA)
-AARCH64_CORE_EXCLUDE := kernel/drivers/storage/ata.c \
-	$(filter-out kernel/drivers/acpi/acpi.c,$(wildcard kernel/drivers/acpi/*.c))
-AARCH64_CORE_SOURCES := $(filter-out $(AARCH64_CORE_EXCLUDE),$(shell find kernel -path kernel/arch -prune -o -path kernel/modules -prune -o \( -name '*.c' -o -name '*.S' \) -print)) \
-	$(shell find kernel/arch/aarch64 \( -name '*.c' -o -name '*.S' \) -print)
-AARCH64_CORE_OBJECTS := $(AARCH64_CORE_SOURCES:%=$(AARCH64_CORE_BUILD)/%.o)
-AARCH64_CORE_KERNEL := $(BUILD)/kernel-aarch64-core.elf
-AARCH64_CORE_IMAGE := $(BUILD)/kernel-aarch64-core.img
-
-.PHONY: aarch64-core run-aarch64-core
-aarch64-core: $(AARCH64_CORE_IMAGE)
-
-$(AARCH64_CORE_KERNEL): $(AARCH64_CORE_OBJECTS) kernel/arch/aarch64/linker.ld
-	$(AARCH64_CC) -nostdlib -static -Wl,-T,kernel/arch/aarch64/linker.ld \
-		-Wl,--gc-sections -Wl,--build-id=none -Wl,-z,max-page-size=0x1000 \
-		$(AARCH64_CORE_OBJECTS) -lgcc -o $@
-
-$(AARCH64_CORE_IMAGE): $(AARCH64_CORE_KERNEL)
-	$(AARCH64_OBJCOPY) -O binary $< $@
-
-$(AARCH64_CORE_BUILD)/%.c.o: %.c
-	@mkdir -p $(dir $@)
-	$(AARCH64_CC) $(AARCH64_CORE_CFLAGS) -MMD -MP -c $< -o $@
-
-$(AARCH64_CORE_BUILD)/%.S.o: %.S
-	@mkdir -p $(dir $@)
-	$(AARCH64_CC) $(AARCH64_CORE_CFLAGS) -MMD -MP -c $< -o $@
-
-$(AARCH64_CORE_OBJECTS): GNUmakefile
-
--include $(AARCH64_CORE_OBJECTS:.o=.d)
-
-AARCH64_MODULE_SOURCES := $(wildcard kernel/modules/*.c)
-AARCH64_MODULES := $(patsubst kernel/modules/%.c,$(AARCH64_CORE_BUILD)/modules/%.ko,$(AARCH64_MODULE_SOURCES))
-AARCH64_MODULE_CFLAGS = $(AARCH64_CORE_CFLAGS) -DTUNIX_MODULE_NAME='"$(notdir $*)"'
-
-.PHONY: modules-aarch64
-modules-aarch64: $(AARCH64_MODULES)
-
-$(AARCH64_CORE_BUILD)/modules/%.ko: kernel/modules/%.c
-	@mkdir -p $(dir $@)
-	$(AARCH64_CC) $(AARCH64_MODULE_CFLAGS) -MMD -MP -c $< -o $@
-
-$(AARCH64_MODULES): GNUmakefile
-
--include $(AARCH64_MODULES:.ko=.d)
+$(AARCH64_CORE_IMAGE) $(AARCH64_MODULES) &: FORCE | kernel-fetch
+	$(KERNEL_MAKE) aarch64-core modules-aarch64
 
 QEMU_AARCH64_CORE_DISKS ?=
 
@@ -361,7 +248,7 @@ $(OVMF_AARCH64_VARS): $(OVMF_AARCH64)
 	@mkdir -p $(dir $@)
 	cp $(CACHE)/edk2-ovmf/ovmf-vars-aarch64.fd $@
 
-.PHONY: run-aarch64-image-kernel
+.PHONY: run-aarch64-image-kernel run-aarch64-core
 run-aarch64-image: $(IMAGE_AARCH64) $(OVMF_AARCH64) $(OVMF_AARCH64_VARS)
 	$(QEMU_AARCH64) -M virt,gic-version=3 -cpu cortex-a72 -smp $(QEMU_SMP) -m $(QEMU_MEMORY) \
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_AARCH64) \
@@ -389,25 +276,15 @@ test-aarch64: $(AARCH64_CORE_IMAGE)
 	ARCH=aarch64 KERNEL=$(AARCH64_CORE_IMAGE) LIMINE=$(LIMINE_DIR) tools/tests/run.sh $(TESTS)
 
 CLANG_FORMAT ?= clang-format
-CLANG_TIDY   ?= clang-tidy
-NPROC        := $(shell nproc 2>/dev/null || echo 1)
+FORMAT_SOURCES := $(shell find kernel tools/tests -path kernel/subprojects -prune -o \
+	-path $(KERNEL_BUILD) -prune -o -name '*.[ch]' -print)
 
-FORMAT_SOURCES := $(shell find kernel tools/tests -name '*.[ch]')
-LINT_FLAGS := -std=gnu11 -ffreestanding -m64 -mcmodel=kernel -mgeneral-regs-only \
-	-mno-red-zone -Ikernel/include -I$(LIMINE_DIR) -I$(UACPI_DIR)/include
-
-.PHONY: format format-check lint
+.PHONY: format format-check
 format:
 	@$(CLANG_FORMAT) -i $(FORMAT_SOURCES)
 
 format-check:
 	@$(CLANG_FORMAT) --dry-run --Werror $(FORMAT_SOURCES)
-
-lint: | $(LIMINE_HEADER) $(UACPI_HEADER)
-	@printf '%s\n' $(filter %.c,$(KERNEL_SOURCES)) | \
-		xargs -P$(NPROC) -I{} $(CLANG_TIDY) --quiet {} -- $(LINT_FLAGS)
-	@printf '%s\n' $(MODULE_SOURCES) | \
-		xargs -P$(NPROC) -I{} $(CLANG_TIDY) --quiet {} -- $(LINT_FLAGS) -DTUNIX_MODULE_NAME='"lint"'
 
 HWREPORT_IMAGE := $(BUILD)/hwreport.img
 

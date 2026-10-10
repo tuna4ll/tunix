@@ -68,7 +68,7 @@ translates every address through the bus ranges, takes the mini UART as a
 ext3 from it and starts all four processors:
 
 ```sh
-qemu-system-aarch64 -M raspi4b -kernel build/kernel-aarch64-core.img \
+qemu-system-aarch64 -M raspi4b -kernel kernel/build/kernel-aarch64-core.img \
     -dtb bcm2711-rpi-4-b.dtb -append root=LABEL=tunix-root \
     -nographic -serial null -serial stdio -drive file=sd.img,if=sd,format=raw
 ```
@@ -150,7 +150,7 @@ screen. Firefox opens its window in about a minute under full emulation.
 ## Building and running
 
 ```sh
-make aarch64-core            # -> build/kernel-aarch64-core.img, an arm64 Image
+make aarch64-core            # -> kernel/build/kernel-aarch64-core.img, an arm64 Image
 make run-aarch64-core QEMU_AARCH64_CORE_DISKS="-drive file=disk.img,if=none,id=nv0,format=raw \
     -device nvme,drive=nv0,serial=tunix -append root=LABEL=tunix-root"
 ```

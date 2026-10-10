@@ -8,10 +8,11 @@ what each machine wants, one machine at a time. Tunix runs it.
 
 ## uACPI
 
-The interpreter is [uACPI](https://github.com/uACPI/uACPI), MIT licensed, pinned
-in `GNUmakefile` as `UACPI_VERSION`. Like Limine it is cloned into the build
-directory on the first build rather than kept in this tree, and its sources are
-compiled with the kernel's flags minus `-Werror`.
+The interpreter is [uACPI](https://github.com/uACPI/uACPI), MIT licensed. Its
+recipe, `kernel/subprojects/uacpi/RECIPE`, pins `UACPI_VERSION` and lists the
+sources the kernel uses. The kernel's own makefile includes it, so `make` in
+`kernel/` clones uACPI into `kernel/build/uacpi` on the first build and compiles
+it with the kernel's flags minus `-Werror`. Nothing of uACPI is kept in this tree.
 
 uACPI needs a small host interface, `kernel/drivers/acpi/host.c`:
 

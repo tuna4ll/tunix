@@ -14,12 +14,14 @@ make run    # boot it in QEMU
 make test   # run the kernel tests
 ```
 
+`make -C kernel` builds only the kernel and its modules, into `kernel/build/`.
+
 Log in as `root` with the password `tunix`.
 
 ## Layout
 
 ```
-kernel/       the kernel
+kernel/       the kernel, with its own GNUmakefile and subprojects/
 base-files/   files added to the Void userland
 tools/        image builder, boot config and tests
 docs/         kernel documentation
