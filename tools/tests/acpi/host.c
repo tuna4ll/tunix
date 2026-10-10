@@ -605,6 +605,10 @@ static void check_brightness_keys(void) {
     raise_ec_event(0x55, 0);
     expect("an event with no method is reported", logged("ec event 55 has no _Q55 method"), 1);
     expect("the ec queue is empty", ec_head == ec_tail, 1);
+    struct acpi_subsystem_info info;
+    acpi_describe_subsystem(&info);
+    expect("notifications nobody claims are counted", info.notifications > 0, 1);
+    expect("and do not warn", logged("no listeners"), 0);
 }
 
 static void check_processor_limit(void) {

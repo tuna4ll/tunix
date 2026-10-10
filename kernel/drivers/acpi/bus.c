@@ -8,6 +8,7 @@
 #include <uacpi/acpi.h>
 #include <uacpi/event.h>
 #include <uacpi/namespace.h>
+#include <uacpi/notify.h>
 #include <uacpi/sleep.h>
 #include <uacpi/uacpi.h>
 #include <uacpi/utilities.h>
@@ -17,6 +18,16 @@
 extern void kprintf(const char *fmt, ...);
 
 static int subsystem_ready;
+static uint64_t notifications;
+
+static uacpi_status system_notify(uacpi_handle context, uacpi_namespace_node *node,
+                                  uacpi_u64 value) {
+    (void)context;
+    (void)node;
+    (void)value;
+    __atomic_add_fetch(&notifications, 1U, __ATOMIC_RELAXED);
+    return UACPI_STATUS_OK;
+}
 
 int acpi_device_present(uacpi_namespace_node *node) {
     uacpi_u32 flags = 0;
@@ -63,6 +74,8 @@ void acpi_subsystem_init(void) {
     int embedded = acpi_ec_probe() == 0;
     if (step("namespace initialization", uacpi_namespace_initialize()) != 0) return;
     subsystem_ready = 1;
+    (void)step("system notify handler",
+               uacpi_install_notify_handler(uacpi_namespace_root(), system_notify, NULL));
     acpi_processor_probe();
     acpi_button_probe();
     acpi_video_probe();
@@ -80,6 +93,7 @@ void acpi_describe_subsystem(struct acpi_subsystem_info *out) {
     out->ec_events = acpi_ec_events();
     out->thermal_zones = acpi_thermal_zones();
     out->video_outputs = acpi_video_outputs();
+    out->notifications = __atomic_load_n(&notifications, __ATOMIC_RELAXED);
 }
 
 int acpi_subsystem_power_off(void) {

@@ -50,6 +50,7 @@ DefinitionBlock ("", "DSDT", 2, "TUNIX", "MACHINE", 1)
 
                     Method (_Q60, 0, NotSerialized)
                     {
+                        Notify (\_SB.WMI2, 0x80)
                         If ((CBSC == 0x04))
                         {
                             Notify (^^^GFX0.LCD0, 0x87)
@@ -118,6 +119,12 @@ DefinitionBlock ("", "DSDT", 2, "TUNIX", "MACHINE", 1)
                     }
                 }
             }
+        }
+
+        Device (WMI2)
+        {
+            Name (_HID, EisaId ("PNP0C14"))
+            Name (_UID, 0x02)
         }
 
         Device (LID0)

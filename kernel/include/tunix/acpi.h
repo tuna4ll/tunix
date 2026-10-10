@@ -83,6 +83,7 @@ struct acpi_subsystem_info {
     uint64_t ec_events;
     unsigned thermal_zones;
     unsigned video_outputs;
+    uint64_t notifications;
 };
 
 void acpi_subsystem_init(void);

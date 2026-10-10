@@ -444,8 +444,10 @@ static void put_acpi(void) {
     put_number(info.thermal_zones);
     put(", video outputs ");
     put_number(info.video_outputs);
-    put("\n  ec events   ");
+    put("\n  events      ec ");
     put_number(info.ec_events);
+    put(", notifications ");
+    put_number(info.notifications);
     put("\n");
 }
 
