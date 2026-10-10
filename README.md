@@ -24,6 +24,8 @@ Log in as `root` with the password `tunix`.
 kernel/       the kernel, with its own GNUmakefile and subprojects/
 base-files/   files added to the Void userland
 tools/        image builder, boot config and tests
+utils/        small programs for Tunix images, such as the CI boot init
+ci/           the scripts CI runs, each one runnable locally
 docs/         kernel documentation
 ```
 

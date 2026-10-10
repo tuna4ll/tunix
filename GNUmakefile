@@ -275,8 +275,15 @@ test: $(KERNEL) $(LIMINE_EXE)
 test-aarch64: $(AARCH64_CORE_IMAGE)
 	ARCH=aarch64 KERNEL=$(AARCH64_CORE_IMAGE) LIMINE=$(LIMINE_DIR) tools/tests/run.sh $(TESTS)
 
+.PHONY: ci-boot ci-boot-aarch64
+ci-boot: $(KERNEL) $(LIMINE_EXE)
+	KERNEL=$(KERNEL) LIMINE=$(LIMINE_DIR) ci/boot.sh
+
+ci-boot-aarch64: $(AARCH64_CORE_IMAGE)
+	ARCH=aarch64 KERNEL=$(AARCH64_CORE_IMAGE) LIMINE=$(LIMINE_DIR) ci/boot.sh
+
 CLANG_FORMAT ?= clang-format
-FORMAT_SOURCES := $(shell find kernel tools/tests -path kernel/subprojects -prune -o \
+FORMAT_SOURCES := $(shell find kernel tools/tests utils -path kernel/subprojects -prune -o \
 	-path $(KERNEL_BUILD) -prune -o -name '*.[ch]' -print)
 
 .PHONY: format format-check

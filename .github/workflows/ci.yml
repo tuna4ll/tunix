@@ -23,14 +23,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu acpica-tools
 
-      - name: x86_64, every configuration
-        run: make -j"$(nproc)" check
-
-      - name: aarch64
-        run: make -j"$(nproc)" aarch64-core modules-aarch64
-
-      - name: acpi drivers against a firmware model
-        run: make acpi-test
+      - name: build every configuration and the acpi model
+        run: ci/build.sh
 
   style:
     name: format and lint
@@ -45,11 +39,8 @@ jobs:
       - name: install clang-format and clang-tidy
         run: pip install "clang-format==$CLANG_FORMAT_VERSION" "clang-tidy==$CLANG_TIDY_VERSION"
 
-      - name: format
-        run: make format-check
-
-      - name: lint
-        run: make lint
+      - name: format and lint
+        run: ci/style.sh
 
   test:
     name: test (${{ matrix.arch }})
@@ -74,8 +65,8 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      - name: run the tests
-        run: make -j"$(nproc)" ${{ matrix.arch == 'aarch64' && 'test-aarch64' || 'test' }}
+      - name: run the tests and the ci boot
+        run: ci/test.sh ${{ matrix.arch }}
 
   docs:
     name: docs
@@ -90,4 +81,4 @@ jobs:
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
 
       - name: build
-        run: mdbook build docs
+        run: ci/docs.sh
