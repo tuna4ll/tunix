@@ -891,13 +891,15 @@ static void release_set(struct file_pins *pins) {
     while (pins->count) file_unref(pins->files[--pins->count]);
 }
 
+static int defer_set(struct file_pins *pins);
+
 void syscall_release_pins_of(struct process *process) {
-    if (process) release_set(&process->pins);
+    if (!process) return;
+    if (process == process_current() && process_may_sleep()) release_set(&process->pins);
+    else if (defer_set(&process->pins) != 0) release_set(&process->pins);
 }
 
 void syscall_release_pins(void) { release_set(pins_here()); }
-
-static int defer_set(struct file_pins *pins);
 
 void syscall_orphan_pins(struct process *process) {
     struct file_pins *orphans = &orphan_pins[cpu_current()->index];
