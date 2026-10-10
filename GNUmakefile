@@ -93,6 +93,21 @@ $(LIMINE_HEADER):
 	git clone --depth=1 --branch=$(LIMINE_VERSION) \
 		https://github.com/limine-bootloader/limine.git $(LIMINE_DIR)
 
+IASL           ?= iasl
+HOST_CC        ?= cc
+ACPI_TEST_DIR  := $(BUILD)/acpi-test
+ACPI_DRIVERS   := bus ec video button thermal_zone processor
+ACPI_TEST_SRCS  = tools/tests/acpi/host.c $(ACPI_DRIVERS:%=kernel/drivers/acpi/%.c) \
+	$(UACPI_NAMES:%=$(UACPI_DIR)/source/%.c)
+
+.PHONY: acpi-test
+acpi-test: $(UACPI_HEADER)
+	@mkdir -p $(ACPI_TEST_DIR)
+	$(IASL) -vw 3168 -p $(ACPI_TEST_DIR)/machine tools/tests/acpi/machine.asl >/dev/null
+	$(HOST_CC) -std=gnu11 -O1 -Wall -Wno-unused-parameter -Itools/tests/acpi/stubs \
+		-Ikernel/include -I$(UACPI_DIR)/include $(ACPI_TEST_SRCS) -o $(ACPI_TEST_DIR)/run
+	$(ACPI_TEST_DIR)/run $(ACPI_TEST_DIR)/machine.aml
+
 $(UACPI_HEADER):
 	rm -rf $(UACPI_DIR)
 	git clone --depth=1 --branch=$(UACPI_VERSION) \

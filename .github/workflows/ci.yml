@@ -18,16 +18,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: install the aarch64 cross compiler
+      - name: install the aarch64 cross compiler and iasl
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu acpica-tools
 
       - name: x86_64, every configuration
         run: make -j"$(nproc)" check
 
       - name: aarch64
         run: make -j"$(nproc)" aarch64-core modules-aarch64
+
+      - name: acpi drivers against a firmware model
+        run: make acpi-test
 
   style:
     name: format and lint
