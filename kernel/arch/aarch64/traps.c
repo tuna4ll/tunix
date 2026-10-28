@@ -70,6 +70,7 @@ static void user_fault(struct interrupt_frame *frame, uint64_t esr, uint64_t far
         if (status == FSC_PERMISSION && class == EC_DABT_LOW && (esr & ESR_WNR) &&
             process_handle_cow_fault(far))
             return;
+        if (process_fatal_signal_pending()) return;
     }
 
     struct process_fault fault = {user_fault_signal(class), SI_KERNEL, 0, 0, (uint32_t)esr};

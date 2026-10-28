@@ -25,6 +25,7 @@
 #include <tunix/time.h>
 #include <tunix/vfs.h>
 #include <tunix/vmm.h>
+#include <tunix/errno.h>
 #include <tunix/net/inet_socket.h>
 #include <tunix/net/net.h>
 #include <tunix/hwcap.h>
@@ -152,6 +153,10 @@ static int64_t proc_meminfo_read(struct vfs_node *node, uint64_t offset, size_t 
     uint64_t total = pmm_usable_page_count() * 4ULL;
     uint64_t free = pmm_free_page_count() * 4ULL;
     uint64_t used = total >= free ? total - free : 0;
+    uint64_t cached = vfs_cached_bytes() / 1024ULL;
+    uint64_t dirty = vfs_dirty_pages() * 4ULL;
+    uint64_t available = free + (cached > dirty ? cached - dirty : 0);
+    if (available > total) available = total;
 
     text_string(&text, "MemTotal:       ");
     text_unsigned(&text, total);
@@ -160,12 +165,14 @@ static int64_t proc_meminfo_read(struct vfs_node *node, uint64_t offset, size_t 
     text_unsigned(&text, free);
     text_string(&text, " kB\n");
     text_string(&text, "MemAvailable:   ");
-    text_unsigned(&text, free);
+    text_unsigned(&text, available);
     text_string(&text, " kB\n");
     text_string(&text, "MemUsed:        ");
     text_unsigned(&text, used);
     text_string(&text, " kB\n");
-    text_string(&text, "Buffers:        0 kB\nCached:         0 kB\n");
+    text_string(&text, "Buffers:        0 kB\nCached:         ");
+    text_unsigned(&text, cached);
+    text_string(&text, " kB\n");
     text_string(&text, "SwapTotal:      0 kB\nSwapFree:       0 kB\n");
     text_string(&text, "Shmem:          0 kB\nSReclaimable:   0 kB\n");
     text_string(&text, "Dirty:          ");
@@ -756,8 +763,12 @@ static int64_t proc_status_read(struct vfs_node *node, uint64_t offset, size_t s
     PROCESS_REF process = process_get(node_pid(node));
     if (!process) return 0;
     TEXT_BUFFER text = {0};
-    uint64_t pages = vmm_count_user_pages(process->cr3);
-    uint64_t memory_kb = pages * 4ULL;
+    uint64_t usage[VMM_USAGE_KINDS] = {0};
+    (void)vmm_usage(process->cr3, usage);
+    uint64_t resident_kb =
+        (usage[VMM_USAGE_ANON] + usage[VMM_USAGE_FILE] + usage[VMM_USAGE_SHMEM]) * 4ULL;
+    uint64_t virtual_kb = process_virtual_bytes(process) / 1024ULL;
+    if (virtual_kb < resident_kb) virtual_kb = resident_kb;
 
     text_string(&text, "Name:\t");
     text_string(&text, process->name);
@@ -805,10 +816,18 @@ static int64_t proc_status_read(struct vfs_node *node, uint64_t offset, size_t s
     text_unsigned(&text, process->sid);
     text_char(&text, '\n');
     text_string(&text, "VmSize:\t");
-    text_unsigned(&text, memory_kb);
+    text_unsigned(&text, virtual_kb);
     text_string(&text, " kB\n");
     text_string(&text, "VmRSS:\t");
-    text_unsigned(&text, memory_kb);
+    text_unsigned(&text, resident_kb);
+    text_string(&text, " kB\nRssAnon:\t");
+    text_unsigned(&text, usage[VMM_USAGE_ANON] * 4ULL);
+    text_string(&text, " kB\nRssFile:\t");
+    text_unsigned(&text, usage[VMM_USAGE_FILE] * 4ULL);
+    text_string(&text, " kB\nRssShmem:\t");
+    text_unsigned(&text, usage[VMM_USAGE_SHMEM] * 4ULL);
+    text_string(&text, " kB\nVmSwap:\t");
+    text_unsigned(&text, usage[VMM_USAGE_SWAP] * 4ULL);
     text_string(&text, " kB\n");
     text_string(&text, "Threads:\t1\n");
     text_string(&text, "StartTicks:\t");
@@ -829,6 +848,8 @@ static int64_t proc_pid_stat_read(struct vfs_node *node, uint64_t offset, size_t
     if (!process) return 0;
     TEXT_BUFFER text = {0};
     uint64_t rss_pages = vmm_count_user_pages(process->cr3);
+    uint64_t virtual_bytes = process_virtual_bytes(process);
+    if (virtual_bytes < rss_pages * 4096ULL) virtual_bytes = rss_pages * 4096ULL;
     uint64_t ticks = process_runtime_ns(process) / 10000000ULL;
     uint64_t start = process->start_time_ns / 10000000ULL;
 
@@ -867,7 +888,7 @@ static int64_t proc_pid_stat_read(struct vfs_node *node, uint64_t offset, size_t
     text_string(&text, "0 ");
     text_unsigned(&text, start);
     text_char(&text, ' ');
-    text_unsigned(&text, rss_pages * 4096ULL);
+    text_unsigned(&text, virtual_bytes);
     text_char(&text, ' ');
     text_unsigned(&text, rss_pages);
     text_char(&text, ' ');
@@ -886,18 +907,20 @@ static int64_t proc_pid_statm_read(struct vfs_node *node, uint64_t offset, size_
     PROCESS_REF process = process_get(node_pid(node));
     if (!process) return 0;
     TEXT_BUFFER text = {0};
-    uint64_t pages = vmm_count_user_pages(process->cr3);
+    uint64_t usage[VMM_USAGE_KINDS] = {0};
+    (void)vmm_usage(process->cr3, usage);
+    uint64_t resident = usage[VMM_USAGE_ANON] + usage[VMM_USAGE_FILE] + usage[VMM_USAGE_SHMEM];
+    uint64_t pages = process_virtual_bytes(process) / 4096ULL;
+    if (pages < resident) pages = resident;
 
     text_unsigned(&text, pages);
     text_char(&text, ' ');
-    text_unsigned(&text, pages);
+    text_unsigned(&text, resident);
     text_char(&text, ' ');
-    text_string(&text, "0 ");
-    text_string(&text, "0 ");
-    text_string(&text, "0 ");
-    text_unsigned(&text, pages);
-    text_char(&text, ' ');
-    text_string(&text, "0\n");
+    text_unsigned(&text, usage[VMM_USAGE_FILE] + usage[VMM_USAGE_SHMEM]);
+    text_string(&text, " 0 0 ");
+    text_unsigned(&text, usage[VMM_USAGE_ANON]);
+    text_string(&text, " 0\n");
     return text_read(&text, offset, size, output);
 }
 
@@ -1398,6 +1421,62 @@ void procfs_init(void) {
     }
 }
 
+static int64_t proc_oom_score_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                   void *output) {
+    PROCESS_REF process = process_get(node_pid(node));
+    if (!process) return 0;
+    TEXT_BUFFER text = {0};
+    text_unsigned(&text, process_oom_points(process));
+    text_char(&text, '\n');
+    return text_read(&text, offset, size, output);
+}
+
+static int oom_legacy(struct vfs_node *node) { return node->name && node->name[4] == 'a'; }
+
+static int64_t proc_oom_adj_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
+    PROCESS_REF process = process_get(node_pid(node));
+    if (!process) return 0;
+    TEXT_BUFFER text = {0};
+    int value = process->oom_score_adj;
+    if (oom_legacy(node)) value = value == OOM_SCORE_ADJ_MAX ? 15 : value * 17 / -OOM_SCORE_ADJ_MIN;
+    text_signed(&text, value);
+    text_char(&text, '\n');
+    return text_read(&text, offset, size, output);
+}
+
+static int64_t proc_oom_adj_write(struct vfs_node *node, uint64_t offset, size_t size,
+                                  const void *input) {
+    (void)offset;
+    const char *text = (const char *)input;
+    size_t at = 0;
+    while (at < size && (text[at] == ' ' || text[at] == '\t')) at++;
+    int negative = at < size && text[at] == '-';
+    if (negative || (at < size && text[at] == '+')) at++;
+    if (at >= size || text[at] < '0' || text[at] > '9') return -EINVAL;
+    int64_t value = 0;
+    while (at < size && text[at] >= '0' && text[at] <= '9' && value <= 100000)
+        value = value * 10 + (text[at++] - '0');
+    while (at < size && (text[at] == '\n' || text[at] == ' ')) at++;
+    if (at != size) return -EINVAL;
+    if (negative) value = -value;
+    if (oom_legacy(node)) {
+        if (value < -17 || value > 15) return -EINVAL;
+        value = value == 15 ? OOM_SCORE_ADJ_MAX : value * -OOM_SCORE_ADJ_MIN / 17;
+    }
+    if (value < OOM_SCORE_ADJ_MIN || value > OOM_SCORE_ADJ_MAX) return -EINVAL;
+    PROCESS_REF process = process_get(node_pid(node));
+    if (!process) return -ESRCH;
+    struct process *self = process_current();
+    if (!self ||
+        (self->cred.euid != 0 && self->cred.euid != process->cred.uid &&
+         self->cred.euid != process->cred.euid))
+        return -EACCES;
+    if (value < process->oom_score_adj && self->cred.euid != 0) return -EACCES;
+    process_set_oom_score_adj(process, (int)value);
+    return (int64_t)size;
+}
+
 static void populate_process_files(struct vfs_node *directory, uint64_t pid) {
     if (!vfs_find_child(directory, "status"))
         virtual_file(directory, "status", proc_status_read, pid);
@@ -1426,6 +1505,18 @@ static void populate_process_files(struct vfs_node *directory, uint64_t pid) {
             environ->uid = directory->uid;
             environ->gid = directory->gid;
         }
+    }
+    if (!vfs_find_child(directory, "oom_score"))
+        virtual_file(directory, "oom_score", proc_oom_score_read, pid);
+    static const char *const oom_knobs[] = {"oom_score_adj", "oom_adj"};
+    for (unsigned index = 0; index < 2; index++) {
+        if (vfs_find_child(directory, oom_knobs[index])) continue;
+        struct vfs_node *knob = virtual_file(directory, oom_knobs[index], proc_oom_adj_read, pid);
+        if (!knob) continue;
+        knob->mode = 0644;
+        knob->uid = directory->uid;
+        knob->gid = directory->gid;
+        knob->write = proc_oom_adj_write;
     }
     if (!vfs_find_child(directory, "mem")) {
         struct vfs_node *mem = virtual_file(directory, "mem", proc_pid_mem_read, pid);

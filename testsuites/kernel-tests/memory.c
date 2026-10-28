@@ -129,6 +129,90 @@ static void many_mappings(void) {
     munmap(fresh, PAGE_SIZE);
 }
 
+static s64 status_field_kb(const char *field) {
+    char text[2048];
+    s64 fd = open("/proc/self/status", O_RDONLY, 0);
+    if (fd < 0) return -1;
+    s64 length = read((int)fd, text, sizeof(text) - 1);
+    close((int)fd);
+    if (length <= 0) return -1;
+    text[length] = 0;
+    u64 wanted = strlen(field);
+    for (s64 at = 0; at < length; at++) {
+        if ((at && text[at - 1] != '\n') || !memeq(text + at, field, wanted)) continue;
+        s64 value = 0;
+        for (at += (s64)wanted; at < length && (text[at] < '0' || text[at] > '9'); at++) {}
+        while (at < length && text[at] >= '0' && text[at] <= '9')
+            value = value * 10 + text[at++] - '0';
+        return value;
+    }
+    return -1;
+}
+
+static s64 write_text(const char *path, const char *text) {
+    s64 fd = open(path, O_WRONLY, 0);
+    if (fd < 0) return fd;
+    s64 written = write((int)fd, text, strlen(text));
+    close((int)fd);
+    return written;
+}
+
+static int read_text(const char *path, char *text, u64 room) {
+    s64 fd = open(path, O_RDONLY, 0);
+    if (fd < 0) return -1;
+    s64 length = read((int)fd, text, room - 1);
+    close((int)fd);
+    if (length < 0) return -1;
+    text[length] = 0;
+    return 0;
+}
+
+static void usage_reporting(void) {
+    u64 bytes = 32UL << 20;
+    s64 before = status_field_kb("RssAnon:");
+    u8 *area = mmap(0, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS);
+    for (u64 at = 0; at < bytes; at += PAGE_SIZE) area[at] = 1;
+    s64 during = status_field_kb("RssAnon:");
+    expect(before >= 0 && during - before >= 32768, "RssAnon counts 32 MiB of touched pages");
+    expect(status_field_kb("VmRSS:") >= during, "VmRSS includes them");
+    expect(status_field_kb("VmSize:") >= status_field_kb("VmRSS:"), "VmSize is at least VmRSS");
+    munmap(area, bytes);
+    s64 after = status_field_kb("RssAnon:");
+    expect(during - after >= 32768, "RssAnon drops again after munmap");
+    char text[32];
+    expect_eq(write_text("/proc/self/oom_score_adj", "500\n"), 4, "oom_score_adj accepts 500");
+    expect(read_text("/proc/self/oom_score_adj", text, sizeof(text)) == 0 && streq(text, "500\n"),
+           "and reads it back");
+    expect(read_text("/proc/self/oom_adj", text, sizeof(text)) == 0 && streq(text, "8\n"),
+           "oom_adj shows the legacy scale");
+    expect_eq(write_text("/proc/self/oom_score_adj", "1001"), -22, "values past 1000 are refused");
+    expect_eq(write_text("/proc/self/oom_adj", "-17"), 3, "oom_adj -17 is accepted");
+    expect(read_text("/proc/self/oom_score_adj", text, sizeof(text)) == 0 && streq(text, "-1000\n"),
+           "and means oom_score_adj -1000");
+    expect_eq(write_text("/proc/self/oom_score_adj", "0"), 1, "oom_score_adj goes back to 0");
+}
+
+static void out_of_memory(void) {
+    s64 child = fork();
+    if (child == 0) {
+        write_text("/proc/self/oom_score_adj", "1000");
+        for (;;) {
+            u8 *chunk = mmap(0, 64UL << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS);
+            if ((s64)chunk < 0) continue;
+            for (u64 at = 0; at < (64UL << 20); at += PAGE_SIZE) chunk[at] = 1;
+        }
+    }
+    int status = 0;
+    waitpid(child, &status, 0);
+    expect_eq(killed_by(status), SIGKILL, "a process that eats all memory is killed with SIGKILL");
+    u64 bytes = 256UL << 20;
+    u8 *area = mmap(0, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS);
+    int usable = (s64)area > 0;
+    for (u64 at = 0; usable && at < bytes; at += PAGE_SIZE) area[at] = 2;
+    expect(usable, "its memory comes back afterwards");
+    if (usable) munmap(area, bytes);
+}
+
 static void run(int argc, char **argv) {
     (void)argc;
     (void)argv;
@@ -138,4 +222,6 @@ static void run(int argc, char **argv) {
     shared_mapping();
     program_break();
     many_mappings();
+    usage_reporting();
+    out_of_memory();
 }

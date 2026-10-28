@@ -2322,39 +2322,124 @@ struct vm_area *process_find_area(uint64_t address) {
     return area && address < area->end ? area : NULL;
 }
 
-static int reclaim_or_kill(void) {
-    if (vfs_reclaim_file_data(vfs_root)) return 1;
+#define OOM_GRACE_NS (3ULL * 1000ULL * 1000ULL * 1000ULL)
+#define OOM_NAP_NS   (10ULL * 1000ULL * 1000ULL)
+#define OOM_ATTEMPTS 500U
 
+static uint64_t oom_victim;
+static uint64_t oom_victim_since;
+static const char oom_channel;
+
+static int fatal_signal_pending(const struct process *process) {
+    return process->group_exit_pending || (process->signal_pending & signal_bit(SIGKILL));
+}
+
+static uint64_t oom_points_locked(struct process *process, uint64_t total) {
+    if (!process || !process->cr3 || process->is_kthread || process->pid <= 1) return 0;
+    if (process->oom_score_adj <= OOM_SCORE_ADJ_MIN) return 0;
+    uint64_t usage[VMM_USAGE_KINDS];
+    if (vmm_usage(process->cr3, usage) != 0) return 0;
+    int64_t points = (int64_t)(usage[VMM_USAGE_ANON] + usage[VMM_USAGE_FILE] +
+                               usage[VMM_USAGE_SHMEM] + usage[VMM_USAGE_SWAP]);
+    points += (int64_t)process->oom_score_adj * (int64_t)(total / 1000ULL);
+    return points > 0 ? (uint64_t)points : 1ULL;
+}
+
+static uint64_t oom_total_pages(void) { return pmm_usable_page_count(); }
+
+uint64_t process_oom_points(struct process *process) {
+    uint64_t total = oom_total_pages();
     SCHED_LOCKED;
+    uint64_t points = oom_points_locked(process, total);
+    if (!points || !total) return 0;
+    uint64_t scaled = points * 1000ULL / total;
+    return scaled > 2000ULL ? 2000ULL : scaled;
+}
+
+uint64_t process_virtual_bytes(struct process *process) {
+    struct process_memory *memory = process_memory_get(process);
+    if (!memory) return 0;
+    mutex_lock(&memory->lock);
+    uint64_t bytes = memory->brk_end > memory->brk_start ? memory->brk_end - memory->brk_start : 0;
+    for (struct vm_area *area = memory->areas; area; area = area->next)
+        bytes += area->end - area->start;
+    mutex_unlock(&memory->lock);
+    process_memory_put(memory);
+    return bytes;
+}
+
+static int oom_victim_alive_locked(void) {
+    if (!oom_victim) return 0;
+    struct process *victim = process_find(oom_victim);
+    if (victim && victim->state != PROCESS_ZOMBIE && victim->state != PROCESS_DEAD &&
+        time_uptime_ns() - oom_victim_since < OOM_GRACE_NS)
+        return 1;
+    oom_victim = 0;
+    return 0;
+}
+
+static void oom_kill(void) {
+    uint64_t total = oom_total_pages();
+    SCHED_LOCKED;
+    if (oom_victim_alive_locked()) return;
     struct process *victim = NULL;
     uint64_t worst = 0;
     struct process *item = queue;
     if (item) do {
-            if (item->pid > 1 && !item->is_thread && item->state != PROCESS_ZOMBIE &&
-                item->state != PROCESS_DEAD && item->cr3 && !item->group_exit_pending) {
-                uint64_t pages = vmm_count_user_pages(item->cr3);
-                if (pages > worst) {
-                    worst = pages;
+            if (!item->is_thread && item->state != PROCESS_ZOMBIE && item->state != PROCESS_DEAD &&
+                !fatal_signal_pending(item)) {
+                uint64_t points = oom_points_locked(item, total);
+                if (points > worst) {
+                    worst = points;
                     victim = item;
                 }
             }
             item = item->next;
         } while (item != queue);
 
-    if (!victim) return 0;
-    kprintf("OOM: killing pid=%u (%s), %u MiB resident\n", (unsigned)victim->pid, victim->name,
-            (unsigned)(worst / 256U));
+    if (!victim) return;
+    uint64_t usage[VMM_USAGE_KINDS] = {0};
+    (void)vmm_usage(victim->cr3, usage);
+    kprintf(
+        "OOM: killing pid %u (%s), %u KiB resident, %u KiB swapped, oom_score_adj %d\n",
+        (unsigned)victim->tgid, victim->name,
+        (unsigned)((usage[VMM_USAGE_ANON] + usage[VMM_USAGE_FILE] + usage[VMM_USAGE_SHMEM]) * 4U),
+        (unsigned)(usage[VMM_USAGE_SWAP] * 4U), victim->oom_score_adj);
+    oom_victim = victim->tgid;
+    oom_victim_since = time_uptime_ns();
     wake_bump();
     struct signal_info info;
     signal_info_init(&info, SIGKILL, SI_KERNEL);
-    (void)send_signal((int64_t)victim->pid, &info, 0);
-    return 0;
+    (void)send_signal((int64_t)victim->tgid, &info, 0);
 }
 
 static uint64_t alloc_user_page(void) {
-    uint64_t physical = (uint64_t)pmm_alloc_page();
-    if (!physical && reclaim_or_kill()) physical = (uint64_t)pmm_alloc_page();
-    return physical;
+    for (unsigned attempt = 0;; attempt++) {
+        uint64_t physical = (uint64_t)pmm_alloc_page();
+        if (physical) return physical;
+        if (vfs_reclaim_file_data(vfs_root)) continue;
+        if (!current || fatal_signal_pending(current) || attempt >= OOM_ATTEMPTS ||
+            !process_may_sleep())
+            return 0;
+        oom_kill();
+        process_prepare_wait(&oom_channel, time_uptime_ns() + OOM_NAP_NS);
+        process_wait();
+        process_finish_wait();
+    }
+}
+
+uint64_t process_alloc_user_page(void) { return alloc_user_page(); }
+
+int process_fatal_signal_pending(void) { return current && fatal_signal_pending(current); }
+
+void process_set_oom_score_adj(struct process *process, int value) {
+    SCHED_LOCKED;
+    if (!process) return;
+    struct process *item = queue;
+    if (item) do {
+            if (item->tgid == process->tgid) item->oom_score_adj = value;
+            item = item->next;
+        } while (item != queue);
 }
 
 #define COMMIT_AHEAD_PAGES 16ULL
@@ -2910,6 +2995,7 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame, const struct fork
     child->no_new_privs = parent->no_new_privs;
     child->timerslack_ns = parent->timerslack_ns;
     child->thp_disable = parent->thp_disable;
+    child->oom_score_adj = parent->oom_score_adj;
     strncpy(child->name, parent->name, sizeof(child->name) - 1);
     child->exe_path = copy_text(parent->exe_path);
     memcpy(child->rlimits, parent->rlimits, sizeof(child->rlimits));
@@ -3030,6 +3116,7 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame, uint64_t 
     child->no_new_privs = parent->no_new_privs;
     child->timerslack_ns = parent->timerslack_ns;
     child->thp_disable = parent->thp_disable;
+    child->oom_score_adj = parent->oom_score_adj;
     strncpy(child->name, parent->name, sizeof(child->name) - 1);
     child->exe_path = copy_text(parent->exe_path);
     memcpy(child->rlimits, parent->rlimits, sizeof(child->rlimits));

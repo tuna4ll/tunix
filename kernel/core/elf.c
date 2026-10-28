@@ -73,7 +73,7 @@ static int map_segment_pages(struct process *process, const struct tunix_elf_seg
                 return -1;
             continue;
         }
-        uint64_t physical = (uint64_t)pmm_alloc_page();
+        uint64_t physical = process_alloc_user_page();
         if (!physical) return -1;
         memset(vmm_phys_to_virt(physical), 0, 4096);
         if (vmm_map_page_in(process->cr3, address, physical,
@@ -341,7 +341,7 @@ int elf_load_process(struct process *process, struct vfs_node *file, const char 
     uint64_t stack_bottom = USER_STACK_TOP - stack_pages * 4096ULL;
     if (stack_bottom < process_stack_floor(process)) goto done;
     for (uint64_t address = stack_bottom; address < USER_STACK_TOP; address += 4096) {
-        uint64_t physical = (uint64_t)pmm_alloc_page();
+        uint64_t physical = process_alloc_user_page();
         if (!physical) goto done;
         memset(vmm_phys_to_virt(physical), 0, 4096);
         if (vmm_map_page_in(process->cr3, address, physical,

@@ -148,6 +148,7 @@ struct process {
     int keep_capabilities;
     int child_subreaper;
     int thp_disable;
+    int oom_score_adj;
     uint64_t timerslack_ns;
     uint64_t start_time_ns;
     uint64_t runtime_ns;
@@ -425,6 +426,14 @@ int64_t process_futex_wake_op(uint64_t address, int wake, uint64_t second, int w
 int process_is_live(const struct process *process);
 void process_for_each(int (*visit)(struct process *process, void *context), void *context);
 void process_kernel_yield(void);
+#define OOM_SCORE_ADJ_MIN (-1000)
+#define OOM_SCORE_ADJ_MAX 1000
+
+uint64_t process_oom_points(struct process *process);
+uint64_t process_virtual_bytes(struct process *process);
+uint64_t process_alloc_user_page(void);
+int process_fatal_signal_pending(void);
+void process_set_oom_score_adj(struct process *process, int value);
 struct process *process_create_kthread(const char *name, void (*body)(void *), void *argument);
 void process_user_resume(void);
 void process_reschedule_interrupt(struct interrupt_frame *frame);

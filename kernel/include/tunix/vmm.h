@@ -79,6 +79,13 @@ int vmm_copy_to_space(uint64_t cr3_physical, uint64_t destination_user, const vo
 
 void vmm_map_page(uint64_t virtual_address, uint64_t physical_address, uint16_t flags);
 void vmm_unmap_page(uint64_t virtual_address);
+#define VMM_USAGE_ANON  0
+#define VMM_USAGE_FILE  1
+#define VMM_USAGE_SHMEM 2
+#define VMM_USAGE_SWAP  3
+#define VMM_USAGE_KINDS 4
+
+int vmm_usage(uint64_t cr3_physical, uint64_t usage[VMM_USAGE_KINDS]);
 uint64_t vmm_count_user_pages(uint64_t cr3_physical);
 
 #endif

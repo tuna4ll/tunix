@@ -3902,7 +3902,7 @@ static int64_t sys_utimens_at(int dirfd, uint64_t user_path, uint64_t user_times
 static int map_zero_pages(struct process *process, uint64_t start, uint64_t end, uint64_t flags) {
     for (uint64_t address = start; address < end; address += 4096) {
         if (vmm_translate(process->cr3, address, NULL, NULL) == 0) continue;
-        uint64_t physical = (uint64_t)pmm_alloc_page();
+        uint64_t physical = process_alloc_user_page();
         if (!physical) return -1;
         memset(vmm_phys_to_virt(physical), 0, 4096);
         if (vmm_map_page_in(process->cr3, address, physical, flags | PAGE_USER | PAGE_PRESENT) !=

@@ -154,6 +154,8 @@ static void isr_dispatch(struct interrupt_frame *regs) {
             return;
         }
 
+        if (regs->int_no == 14 && (regs->cs & 3U) == 3U && process_fatal_signal_pending()) return;
+
         struct process_fault fault = user_fault(regs, fault_address);
         if (process_signal_has_handler(fault.signal) && process_fault_from_interrupt(regs, &fault))
             return;
