@@ -36,6 +36,8 @@ static int next_pending_signal(struct process *process);
 #include <tunix/vt.h>
 #include <tunix/vfs.h>
 #include <tunix/vmm.h>
+#include <tunix/swap.h>
+#include <tunix/reclaim.h>
 #include <tunix/kprintf.h>
 #include <tunix/errno.h>
 
@@ -2314,6 +2316,12 @@ int process_sync_file_areas(uint64_t start, uint64_t end) {
     return covered;
 }
 
+uint32_t process_memory_area_kind(struct process_memory *memory, uint64_t address) {
+    struct vm_area *area = area_at_or_before(memory, address);
+    if (!area || address >= area->end) return 0;
+    return area->kind | (area_writes_file(area) ? VM_SHARED_WRITE : 0);
+}
+
 struct vm_area *process_find_area(uint64_t address) {
     MEMORY_LOCKED;
     struct process_memory *memory = area_owner();
@@ -2415,9 +2423,14 @@ static void oom_kill(void) {
 
 static uint64_t alloc_user_page(void) {
     for (unsigned attempt = 0;; attempt++) {
+        int may_sleep = current && process_may_sleep();
+        if (may_sleep && pmm_free_page_count() < reclaim_min_pages()) (void)reclaim_pages(32);
         uint64_t physical = (uint64_t)pmm_alloc_page();
-        if (physical) return physical;
-        if (vfs_reclaim_file_data(vfs_root)) continue;
+        if (physical) {
+            reclaim_note_allocation();
+            return physical;
+        }
+        if (may_sleep && reclaim_pages(64)) continue;
         if (!current || fatal_signal_pending(current) || attempt >= OOM_ATTEMPTS ||
             !process_may_sleep())
             return 0;
@@ -2429,6 +2442,32 @@ static uint64_t alloc_user_page(void) {
 }
 
 uint64_t process_alloc_user_page(void) { return alloc_user_page(); }
+
+unsigned process_collect_memories(struct process_memory **out, unsigned capacity, unsigned skip) {
+    SCHED_LOCKED;
+    unsigned count = 0;
+    unsigned seen = 0;
+    struct process *item = queue;
+    if (item) do {
+            struct process_memory *memory = item->memory;
+            int fresh = memory && memory->cr3 && !item->is_kthread &&
+                item->state != PROCESS_ZOMBIE && item->state != PROCESS_DEAD;
+            if (fresh && item->is_thread) {
+                struct process *leader = process_find(item->tgid);
+                fresh = !leader || leader->state == PROCESS_ZOMBIE ||
+                    leader->state == PROCESS_DEAD || leader->memory != memory;
+            }
+            if (fresh) {
+                if (seen++ >= skip) {
+                    if (count == capacity) return count;
+                    memory_ref(memory);
+                    out[count++] = memory;
+                }
+            }
+            item = item->next;
+        } while (item != queue);
+    return count;
+}
 
 int process_fatal_signal_pending(void) { return current && fatal_signal_pending(current); }
 
@@ -2486,9 +2525,14 @@ static int commit_file(struct vm_area *area, uint64_t page) {
         return commit_zero(page, area->page_flags | PAGE_USER | PAGE_PRESENT);
     uint64_t window = index & ~(VFS_READAHEAD_PAGES - 1ULL);
     vfs_prefetch(node, window * 4096ULL, VFS_READAHEAD_PAGES * 4096ULL);
-    uint64_t physical = vfs_page_physical(node, index) & ~0xFFFULL;
+    uint64_t physical = vfs_page_pin(node, index) & ~0xFFFULL;
     if (!physical) return 0;
-    return map_shared_page(page, physical, shared_page_flags(area));
+    uint64_t flags = shared_page_flags(area);
+    if (vmm_map_page_in(current->cr3, page, physical, flags) != 0) {
+        pmm_free_page((void *)physical);
+        return 0;
+    }
+    return 1;
 }
 
 static int commit_memfd(struct vm_area *area, uint64_t page) {
@@ -2507,6 +2551,8 @@ int process_commit_area(uint64_t fault_address) {
     MEMORY_LOCKED;
     if (!current || current->state != PROCESS_RUNNING || !current->cr3) return 0;
     uint64_t page = fault_address & ~4095ULL;
+    int swapped = swap_fault_in(current->cr3, page);
+    if (swapped != 0) return swapped > 0;
     struct vm_area *area = process_find_area(page);
     if (area && (area->kind & VM_MEMFD)) return commit_memfd(area, page);
     if (area && (area->kind & VM_FILE_PAGES)) return commit_file(area, page);
@@ -2551,6 +2597,8 @@ int process_grow_user_stack(uint64_t fault_address) {
     if (fault_address >= USER_STACK_TOP || fault_address < process_stack_floor(current)) return 0;
 
     uint64_t page = fault_address & ~4095ULL;
+    int swapped = swap_fault_in(current->cr3, page);
+    if (swapped != 0) return swapped > 0;
     uint64_t existing_physical = 0;
     uint64_t existing_flags = 0;
     if (vmm_translate(current->cr3, page, &existing_physical, &existing_flags) == 0) return 1;
@@ -2568,7 +2616,15 @@ int process_grow_user_stack(uint64_t fault_address) {
 int process_handle_cow_fault(uint64_t fault_address) {
     MEMORY_LOCKED;
     if (!current || current->state != PROCESS_RUNNING || !current->cr3) return 0;
-    return vmm_handle_cow_fault(current->cr3, fault_address & ~4095ULL) == 0;
+    uint64_t page = fault_address & ~4095ULL;
+    uint64_t spare = 0;
+    int status = vmm_handle_cow_fault(current->cr3, page, &spare);
+    if (status == -2) {
+        spare = alloc_user_page();
+        status = spare ? vmm_handle_cow_fault(current->cr3, page, &spare) : -1;
+    }
+    if (spare) pmm_free_page((void *)spare);
+    return status == 0;
 }
 
 int process_signal_has_handler(int signal_number) {

@@ -56,7 +56,7 @@ uint64_t vmm_map_device_write_combining(uint64_t physical, uint64_t bytes);
 uint64_t vmm_current_cr3(void);
 uint64_t vmm_create_address_space(void);
 uint64_t vmm_clone_address_space(uint64_t source_cr3);
-int vmm_handle_cow_fault(uint64_t cr3_physical, uint64_t virtual_address);
+int vmm_handle_cow_fault(uint64_t cr3_physical, uint64_t virtual_address, uint64_t *spare);
 void vmm_destroy_address_space(uint64_t cr3_physical);
 void vmm_activate(uint64_t cr3_physical);
 int vmm_map_page_in(uint64_t cr3_physical, uint64_t virtual_address, uint64_t physical_address,
@@ -86,6 +86,34 @@ void vmm_unmap_page(uint64_t virtual_address);
 #define VMM_USAGE_KINDS 4
 
 int vmm_usage(uint64_t cr3_physical, uint64_t usage[VMM_USAGE_KINDS]);
+int vmm_lookup(uint64_t cr3_physical, uint64_t virtual_address, uint64_t *physical_out,
+               uint64_t *flags_out);
+int vmm_page_occupied(uint64_t cr3_physical, uint64_t virtual_address);
+int vmm_swap_lookup(uint64_t cr3_physical, uint64_t virtual_address, uint64_t *slot_out,
+                    uint64_t *flags_out);
+int vmm_swap_install(uint64_t cr3_physical, uint64_t virtual_address, uint64_t slot,
+                     uint64_t physical);
+int vmm_find_swap(uint64_t cr3_physical, uint64_t low_slot, uint64_t high_slot, uint64_t *address);
+void vmm_unmap_range(uint64_t cr3_physical, uint64_t start, uint64_t end);
+int vmm_range_empty(uint64_t cr3_physical, uint64_t start, uint64_t end);
+int vmm_mark_young(uint64_t cr3_physical, uint64_t virtual_address);
+
+#define VMM_RECLAIM_KEEP 0
+#define VMM_RECLAIM_DROP 1
+#define VMM_RECLAIM_SWAP 2
+
+struct vmm_reclaim {
+    uint64_t cursor;
+    uint64_t budget;
+    uint64_t visited;
+    uint64_t aged;
+    uint64_t dropped;
+    uint64_t swapped;
+    int (*decide)(void *context, uint64_t virtual_address, uint64_t flags);
+    void *context;
+};
+
+int vmm_reclaim_scan(uint64_t cr3_physical, struct vmm_reclaim *scan);
 uint64_t vmm_count_user_pages(uint64_t cr3_physical);
 
 #endif

@@ -6,6 +6,7 @@
 enum lock_rank {
     LOCK_RANK_RING = 4,
     LOCK_RANK_TTY = 6,
+    LOCK_RANK_SWAPON = 7,
     LOCK_RANK_CHAR = 8,
     LOCK_RANK_FILE = 9,
     LOCK_RANK_MEMORY = 10,
@@ -27,6 +28,7 @@ enum lock_rank {
     LOCK_RANK_REGISTRY = 74,
     LOCK_RANK_HEAP = 75,
     LOCK_RANK_KERNEL_MAP = 80,
+    LOCK_RANK_SWAP = 82,
     LOCK_RANK_PAGES = 85,
     LOCK_RANK_LEAF = 90,
 };

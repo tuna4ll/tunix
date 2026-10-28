@@ -365,6 +365,7 @@ int64_t file_pwrite(struct file *file, uint64_t offset, size_t size, const void 
     if (!file || !buffer) return -EBADF;
     if (file->kind == FILE_KIND_MEMFD) return memfd_write(file->memfd, offset, size, buffer);
     if (file->kind != FILE_KIND_VFS || !file->node) return -EBADF;
+    if (vfs_node_is_swapfile(file->node)) return -ETXTBSY;
     return vfs_write(file->node, offset, size, buffer);
 }
 
@@ -438,6 +439,7 @@ static int64_t file_write_locked(struct file *file, size_t size, const void *buf
         return moved;
     }
     if (file->kind != FILE_KIND_VFS || !file->node) return -EBADF;
+    if (vfs_node_is_swapfile(file->node)) return -ETXTBSY;
     if ((file->flags & O_APPEND) && (file->node->flags & 0xFFU) == VFS_FILE) {
         vfs_lock_acquire();
         file->offset = file->node->length;

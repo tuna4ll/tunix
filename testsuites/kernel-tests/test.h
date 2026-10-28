@@ -50,6 +50,10 @@ typedef unsigned char u8;
 #define SYS_epoll_create1   291
 #define SYS_dup3            292
 #define SYS_pipe2           293
+#define SYS_fsync           74
+#define SYS_sysinfo         99
+#define SYS_swapon          167
+#define SYS_swapoff         168
 #define SA_RESTORER         0x04000000UL
 #elif defined(__aarch64__)
 #define SYS_eventfd2        19
@@ -94,6 +98,10 @@ typedef unsigned char u8;
 #define SYS_mmap            222
 #define SYS_mprotect        226
 #define SYS_wait4           260
+#define SYS_fsync           82
+#define SYS_sysinfo         179
+#define SYS_swapon          224
+#define SYS_swapoff         225
 #define SA_RESTORER         0UL
 #else
 #error "tests are written for x86_64 and aarch64"
@@ -366,6 +374,35 @@ static inline void *mmap_file(u64 length, int protection, int fd, s64 offset) {
 }
 
 static inline s64 sync(void) { return SYSCALL(SYS_sync, 0, 0, 0, 0, 0, 0); }
+
+static inline s64 fsync(int fd) { return SYSCALL(SYS_fsync, fd, 0, 0, 0, 0, 0); }
+
+static inline s64 swapon(const char *path, int flags) {
+    return SYSCALL(SYS_swapon, path, flags, 0, 0, 0, 0);
+}
+
+static inline s64 swapoff(const char *path) { return SYSCALL(SYS_swapoff, path, 0, 0, 0, 0, 0); }
+
+struct sysinfo {
+    s64 uptime;
+    u64 loads[3];
+    u64 totalram;
+    u64 freeram;
+    u64 sharedram;
+    u64 bufferram;
+    u64 totalswap;
+    u64 freeswap;
+    u16 procs;
+    u16 pad;
+    u64 totalhigh;
+    u64 freehigh;
+    u32 mem_unit;
+    char reserved[4];
+};
+
+static inline s64 sysinfo(struct sysinfo *info) {
+    return SYSCALL(SYS_sysinfo, info, 0, 0, 0, 0, 0);
+}
 
 static inline s64 nanosleep(const struct timespec *duration) {
     return SYSCALL(SYS_nanosleep, duration, 0, 0, 0, 0, 0);

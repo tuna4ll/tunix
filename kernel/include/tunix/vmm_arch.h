@@ -37,6 +37,14 @@ static inline void pte_table_grant_user(uint64_t *entry, uint64_t leaf_flags) {
     if ((leaf_flags & PAGE_USER) && !(*entry & PAGE_USER)) *entry |= PAGE_USER;
 }
 
+#define PTE_ACCESSED (1ULL << 5)
+
+static inline int pte_young(uint64_t entry) { return (entry & PTE_ACCESSED) != 0; }
+
+static inline uint64_t pte_mkold(uint64_t entry) { return entry & ~PTE_ACCESSED; }
+
+static inline uint64_t pte_mkyoung(uint64_t entry) { return entry | PTE_ACCESSED; }
+
 static inline uint64_t vmm_arch_read_root(void) {
     uint64_t value;
     __asm__ volatile("mov %%cr3, %0" : "=r"(value));
@@ -156,6 +164,12 @@ static inline void pte_table_grant_user(uint64_t *entry, uint64_t leaf_flags) {
     (void)entry;
     (void)leaf_flags;
 }
+
+static inline int pte_young(uint64_t entry) { return (entry & PTE_AF) != 0; }
+
+static inline uint64_t pte_mkold(uint64_t entry) { return entry & ~PTE_AF; }
+
+static inline uint64_t pte_mkyoung(uint64_t entry) { return entry | PTE_AF; }
 
 static inline uint64_t vmm_arch_read_root(void) {
     uint64_t value;

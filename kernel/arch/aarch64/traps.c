@@ -11,6 +11,7 @@
 #include "aarch64.h"
 #include <tunix/module.h>
 #include <tunix/kprintf.h>
+#include <tunix/vmm.h>
 
 #define EC_UNKNOWN      0x00U
 #define EC_SVC64        0x15U
@@ -64,6 +65,8 @@ static void user_fault(struct interrupt_frame *frame, uint64_t esr, uint64_t far
     uint32_t class = (uint32_t)(esr >> 26);
     if (class == EC_DABT_LOW || class == EC_IABT_LOW) {
         uint32_t status = (uint32_t)esr & FSC_TYPE_MASK;
+        struct process *self = process_current();
+        if (status == FSC_ACCESS && self && vmm_mark_young(self->cr3, far)) return;
         if ((status == FSC_TRANSLATION || status == FSC_ACCESS) &&
             (process_grow_user_stack(far) || process_commit_area(far)))
             return;

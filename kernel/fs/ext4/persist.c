@@ -738,6 +738,77 @@ static int sync_node(struct vfs_node *node) {
 
 static int sync_all(void) { return ext4_commit_volumes(1, 1); }
 
+static int map_blocks(struct vfs_node *node, uint64_t pages, int *block,
+                      struct vfs_block_run **runs_out, uint32_t *count_out) {
+    if (!pages) return -EINVAL;
+    uint32_t capacity = 16;
+    struct vfs_block_run *runs = (struct vfs_block_run *)kmalloc(capacity * sizeof(*runs));
+    if (!runs) return -ENOMEM;
+    uint32_t count = 0;
+    int status = 0;
+    mutex_lock(&ext4_lock);
+    struct ext4_volume *volume = ext4_active_volume_of(node);
+    if (!volume || volume->read_only) {
+        mutex_unlock(&ext4_lock);
+        kfree(runs);
+        return -EINVAL;
+    }
+    struct ext4_volume *saved = ext4_enter(volume);
+    struct ext4_inode inode;
+    uint32_t per_page = (uint32_t)(VFS_PAGE_SIZE / fs->block_size);
+    if (inode_read(node->disk_inode, &inode) != 0 || (inode.i_flags & EXT4_INLINE_DATA_FL))
+        status = -EINVAL;
+    for (uint64_t page = 0; !status && page < pages; page++) {
+        uint64_t first_block = 0;
+        for (uint32_t part = 0; part < per_page && !status; part++) {
+            uint32_t run = 0;
+            int unwritten = 0;
+            int64_t mapped =
+                inode_map(node->disk_inode, &inode, page * per_page + part, &run, &unwritten);
+            if (mapped <= 0) status = -EINVAL;
+            else if (part == 0) first_block = (uint64_t)mapped;
+            else if ((uint64_t)mapped != first_block + part) status = -EINVAL;
+        }
+        if (status) break;
+        uint64_t sector = first_block * fs->sectors_per_block;
+        if (count &&
+            runs[count - 1].sector + runs[count - 1].pages * (VFS_PAGE_SIZE / 512U) == sector) {
+            runs[count - 1].pages++;
+            continue;
+        }
+        if (count == capacity) {
+            struct vfs_block_run *grown =
+                (struct vfs_block_run *)kmalloc(capacity * 2U * sizeof(*grown));
+            if (!grown) {
+                status = -ENOMEM;
+                break;
+            }
+            memcpy(grown, runs, capacity * sizeof(*runs));
+            kfree(runs);
+            runs = grown;
+            capacity *= 2U;
+        }
+        runs[count].first_page = page;
+        runs[count].pages = 1;
+        runs[count].sector = sector;
+        count++;
+    }
+    int device = -1;
+    for (int index = 0; !status && index < block_device_count(); index++)
+        if (block_device_at(index) == volume->device) device = index;
+    if (!status && device < 0) status = -ENODEV;
+    fs = saved;
+    mutex_unlock(&ext4_lock);
+    if (status) {
+        kfree(runs);
+        return status;
+    }
+    *block = device;
+    *runs_out = runs;
+    *count_out = count;
+    return 0;
+}
+
 static const struct vfs_persist_ops persist_ops = {
     .created = event_created,
     .removed = event_removed,
@@ -752,6 +823,7 @@ static const struct vfs_persist_ops persist_ops = {
     .writeback = writeback,
     .sync_node = sync_node,
     .sync_all = sync_all,
+    .map_blocks = map_blocks,
 };
 
 void ext4_set_persist_ops(void) { vfs_set_persist_ops(&persist_ops); }

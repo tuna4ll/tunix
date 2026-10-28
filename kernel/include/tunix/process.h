@@ -43,11 +43,12 @@ struct vfs_node;
 struct pty_pair;
 struct interrupt_frame;
 
-#define VM_ANONYMOUS  0x1U
-#define VM_FILE_PAGES 0x2U
-#define VM_MEMFD      0x4U
-#define VM_PRIVATE    0x8U
-#define VM_DEVICE     0x10U
+#define VM_ANONYMOUS    0x1U
+#define VM_FILE_PAGES   0x2U
+#define VM_MEMFD        0x4U
+#define VM_PRIVATE      0x8U
+#define VM_DEVICE       0x10U
+#define VM_SHARED_WRITE 0x80000000U
 
 struct vm_area {
     uint64_t start;
@@ -73,6 +74,7 @@ struct process_memory {
     uint64_t mmap_base;
     struct vm_area *areas;
     struct vm_area *area_root;
+    uint64_t reclaim_cursor;
     struct process_memory *release_next;
 };
 
@@ -432,6 +434,8 @@ void process_kernel_yield(void);
 uint64_t process_oom_points(struct process *process);
 uint64_t process_virtual_bytes(struct process *process);
 uint64_t process_alloc_user_page(void);
+unsigned process_collect_memories(struct process_memory **out, unsigned capacity, unsigned skip);
+uint32_t process_memory_area_kind(struct process_memory *memory, uint64_t address);
 int process_fatal_signal_pending(void);
 void process_set_oom_score_adj(struct process *process, int value);
 struct process *process_create_kthread(const char *name, void (*body)(void *), void *argument);

@@ -3,11 +3,13 @@ set -eu
 
 . testsuites/boot.sh
 
-tests=${*:-process memory files pipes sockets time drm}
+tests=${*:-process memory swap files pipes sockets time drm}
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/tunix-tests.XXXXXX")
 trap 'rm -rf "$work"' EXIT INT TERM
 
+base_memory=${MEMORY:-1G}
+base_slack=${ROOT_SLACK_MIB:-32}
 failed=
 for name in $tests; do
 	source=testsuites/kernel-tests/$name.c
@@ -17,8 +19,20 @@ for name in $tests; do
 	$cc -std=gnu11 -Wall -Wextra -Werror -O2 -static -nostdlib -nostartfiles \
 		-ffreestanding -fno-stack-protector -fno-pic -fno-pie -no-pie -fno-builtin \
 		-fno-asynchronous-unwind-tables "$source" -o "$dir/root/sbin/init"
+	memory=$base_memory
+	slack=$base_slack
+	wait=${TIMEOUT:-120}
+	if [ "$name" = swap ]; then
+		memory=320M
+		slack=640
+		wait=${TIMEOUT:-900}
+	fi
+	ROOT_SLACK_MIB=$slack
+	export ROOT_SLACK_MIB
 	tunix_image "$dir/tunix.img" "$dir/root"
-	tunix_boot "$dir/tunix.img" "$dir/serial.log" "${TIMEOUT:-120}"
+	MEMORY=$memory
+	export MEMORY
+	tunix_boot "$dir/tunix.img" "$dir/serial.log" "$wait"
 	if grep -a "^$name: " "$dir/serial.log" | tee "$dir/result" | grep -q "^$name: PASS"; then
 		grep -a "^$name: PASS" "$dir/result"
 	else

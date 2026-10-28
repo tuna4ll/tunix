@@ -25,6 +25,7 @@
 #define VFS_MOUNTPOINT  0x20000U
 #define VFS_EVENTSTREAM 0x40000U
 #define VFS_UNSIZED     0x80000U
+#define VFS_SWAPFILE    0x100000U
 
 #define VFS_MS_RDONLY  0x0001U
 #define VFS_MS_NOSUID  0x0002U
@@ -191,6 +192,12 @@ const struct vfs_mount *vfs_node_mount(const struct vfs_node *node);
 int vfs_node_is_mount_root(const struct vfs_node *node);
 void vfs_mounts_find_devices(void);
 
+struct vfs_block_run {
+    uint64_t first_page;
+    uint64_t pages;
+    uint64_t sector;
+};
+
 struct vfs_persist_ops {
     void (*created)(struct vfs_node *node);
     void (*removed)(struct vfs_node *node);
@@ -206,6 +213,8 @@ struct vfs_persist_ops {
     int (*writeback)(struct vfs_node *node, const struct vfs_writeback *batch);
     int (*sync_node)(struct vfs_node *node);
     int (*sync_all)(void);
+    int (*map_blocks)(struct vfs_node *node, uint64_t pages, int *block,
+                      struct vfs_block_run **runs, uint32_t *count);
 };
 
 void vfs_set_persist_ops(const struct vfs_persist_ops *ops);
@@ -220,6 +229,8 @@ void vfs_forget_backing(struct vfs_node *node);
 void *vfs_page(struct vfs_node *node, uint64_t index, int for_write);
 void *vfs_page_peek(struct vfs_node *node, uint64_t index);
 uint64_t vfs_page_physical(struct vfs_node *node, uint64_t index);
+uint64_t vfs_page_pin(struct vfs_node *node, uint64_t index);
+uint64_t vfs_reclaim_pages(uint64_t wanted);
 int vfs_page_is_dirty(struct vfs_node *node, uint64_t index);
 void vfs_page_clear_dirty(struct vfs_node *node, uint64_t index);
 void vfs_start_writeback(void);
@@ -231,6 +242,9 @@ int vfs_fsync(struct vfs_node *node);
 int vfs_sync(void);
 uint64_t vfs_page_span(struct vfs_node *node);
 void vfs_release_data(struct vfs_node *node);
+int vfs_map_blocks(struct vfs_node *node, uint64_t pages, int *block, struct vfs_block_run **runs,
+                   uint32_t *count);
+int vfs_node_is_swapfile(const struct vfs_node *node);
 uint64_t vfs_drop_clean_pages(struct vfs_node *node);
 
 void vfs_node_ref(struct vfs_node *node);

@@ -20,6 +20,7 @@
 #include <tunix/process.h>
 #include <tunix/procfs.h>
 #include <tunix/random.h>
+#include <tunix/reclaim.h>
 #include <tunix/syscall.h>
 #include <tunix/ext4.h>
 #include <tunix/time.h>
@@ -193,6 +194,7 @@ void kmain(const struct boot_info *boot) {
     }
     workqueue_init();
     vfs_start_writeback();
+    reclaim_start();
     ext4fs_start();
     timer_init();
     arch_route_timer();

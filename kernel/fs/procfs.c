@@ -26,6 +26,7 @@
 #include <tunix/vfs.h>
 #include <tunix/vmm.h>
 #include <tunix/errno.h>
+#include <tunix/swap.h>
 #include <tunix/net/inet_socket.h>
 #include <tunix/net/net.h>
 #include <tunix/hwcap.h>
@@ -173,7 +174,13 @@ static int64_t proc_meminfo_read(struct vfs_node *node, uint64_t offset, size_t 
     text_string(&text, "Buffers:        0 kB\nCached:         ");
     text_unsigned(&text, cached);
     text_string(&text, " kB\n");
-    text_string(&text, "SwapTotal:      0 kB\nSwapFree:       0 kB\n");
+    text_string(&text, "SwapCached:     ");
+    text_unsigned(&text, swap_cached_pages() * 4ULL);
+    text_string(&text, " kB\nSwapTotal:      ");
+    text_unsigned(&text, swap_total_pages() * 4ULL);
+    text_string(&text, " kB\nSwapFree:       ");
+    text_unsigned(&text, swap_free_pages() * 4ULL);
+    text_string(&text, " kB\n");
     text_string(&text, "Shmem:          0 kB\nSReclaimable:   0 kB\n");
     text_string(&text, "Dirty:          ");
     text_unsigned(&text, vfs_dirty_pages() * 4U);
@@ -192,6 +199,37 @@ static int64_t proc_meminfo_read(struct vfs_node *node, uint64_t offset, size_t 
     text_string(&text, "KernelHeapMax:  ");
     text_unsigned(&text, heap_limit / 1024ULL);
     text_string(&text, " kB\n");
+    return text_read(&text, offset, size, output);
+}
+
+static void pad_to(struct text_buffer *text, size_t start, size_t column) {
+    while (text->length < start + column) text_char(text, ' ');
+    text_char(text, '\t');
+}
+
+static void swaps_row(void *context, const char *path, int is_file, uint64_t size_kb,
+                      uint64_t used_kb, int priority) {
+    struct text_buffer *text = (struct text_buffer *)context;
+    size_t start = text->length;
+    text_string(text, path);
+    pad_to(text, start, 39);
+    text_string(text, is_file ? "file" : "partition");
+    text_char(text, '\t');
+    text_unsigned(text, size_kb);
+    text_char(text, '\t');
+    text_char(text, '\t');
+    text_unsigned(text, used_kb);
+    text_char(text, '\t');
+    text_char(text, '\t');
+    text_signed(text, priority);
+    text_char(text, '\n');
+}
+
+static int64_t proc_swaps_read(struct vfs_node *node, uint64_t offset, size_t size, void *output) {
+    (void)node;
+    TEXT_BUFFER text = {0};
+    text_string(&text, "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n");
+    swap_report(swaps_row, &text);
     return text_read(&text, offset, size, output);
 }
 
@@ -1357,6 +1395,7 @@ void procfs_init(void) {
     }
     virtual_file(root, "version", proc_version_read, 0);
     virtual_file(root, "mounts", proc_mounts_read, 0);
+    virtual_file(root, "swaps", proc_swaps_read, 0);
     virtual_file(root, "modules", proc_modules_read, 0);
     virtual_file(root, "stat", proc_stat_read, 0);
     virtual_file(root, "loadavg", proc_loadavg_read, 0);

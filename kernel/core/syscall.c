@@ -47,6 +47,7 @@
 #include <tunix/vfs.h>
 #include <tunix/terminal.h>
 #include <tunix/vmm.h>
+#include <tunix/swap.h>
 #include <tunix/unix_socket.h>
 #include <tunix/net/inet_socket.h>
 #include <tunix/drm.h>
@@ -205,6 +206,8 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136,
 #define SYS_RMDIR                  84
 #define SYS_MOUNT                  165
 #define SYS_UMOUNT2                166
+#define SYS_SWAPON                 167
+#define SYS_SWAPOFF                168
 #define SYS_LINK                   86
 #define SYS_UNLINK                 87
 #define SYS_SYMLINK                88
@@ -1482,6 +1485,8 @@ static int64_t open_at(int dirfd, uint64_t user_path, uint64_t flags, uint64_t m
     if (!(flags & O_PATH) && (node->flags & VFS_READONLY) &&
         ((flags & O_ACCMODE) != O_RDONLY || (flags & O_TRUNC)))
         return -EROFS;
+    if (!(flags & O_PATH) && (flags & O_TRUNC) && kind == VFS_FILE && vfs_node_is_swapfile(node))
+        return -ETXTBSY;
     if (!(flags & O_PATH) && (flags & O_TRUNC) && kind == VFS_FILE && vfs_truncate(node, 0) != 0)
         return -EIO;
 
@@ -2731,6 +2736,7 @@ static int64_t sys_ftruncate(int fd, uint64_t length) {
     if (file->kind == FILE_KIND_MEMFD)
         return memfd_truncate(file->memfd, length) == 0 ? 0 : -ENOMEM;
     if (file->kind != FILE_KIND_VFS || !file->node) return -EINVAL;
+    if (vfs_node_is_swapfile(file->node)) return -ETXTBSY;
     return vfs_truncate(file->node, length) == 0 ? 0 : -EIO;
 }
 
@@ -2746,6 +2752,7 @@ static int64_t sys_truncate(uint64_t user_path, int64_t length) {
     if (kind != VFS_FILE) return -EINVAL;
     if (node->flags & VFS_READONLY) return -EROFS;
     if (cred_may(node, CRED_WRITE) != 0) return -EACCES;
+    if (vfs_node_is_swapfile(node)) return -ETXTBSY;
     return vfs_truncate(node, (uint64_t)length) == 0 ? 0 : -EIO;
 }
 
@@ -2764,6 +2771,7 @@ static int64_t sys_fallocate(int fd, int mode, uint64_t offset, uint64_t length)
         return memfd_truncate(file->memfd, needed) == 0 ? 0 : -ENOSPC;
     }
     if (file->kind == FILE_KIND_VFS && file->node) {
+        if (vfs_node_is_swapfile(file->node)) return -ETXTBSY;
         if (needed <= file->node->length) return 0;
         return vfs_truncate(file->node, needed) == 0 ? 0 : -ENOSPC;
     }
@@ -3605,6 +3613,7 @@ static int64_t sys_unlink_at(int dirfd, uint64_t user_path, int flags) {
     if ((flags & AT_REMOVEDIR) && node->children) return -ENOTEMPTY;
     int permitted = cred_may_remove(path, node);
     if (permitted != 0) return permitted;
+    if (vfs_node_is_swapfile(node)) return -EPERM;
     if (vfs_remove(path, (flags & AT_REMOVEDIR) != 0) != 0) return -EIO;
     struct process *process = process_current();
     eventfs_emit_file_remove(process->cred.euid, process->tgid, path);
@@ -3628,6 +3637,7 @@ static int64_t sys_rename_at(int old_dirfd, uint64_t user_old_path, int new_dirf
     struct vfs_node *existing = vfs_lookup_nofollow(new_path);
     permitted = existing ? cred_may_remove(new_path, existing) : cred_may_write_parent(new_path);
     if (permitted != 0) return permitted;
+    if (vfs_node_is_swapfile(node) || (existing && vfs_node_is_swapfile(existing))) return -EPERM;
     if (vfs_rename(old_path, new_path) != 0) return -EIO;
     struct process *process = process_current();
     eventfs_emit_file_rename(process->cred.euid, process->tgid, old_path, new_path);
@@ -3681,6 +3691,32 @@ static int64_t sys_mount(uint64_t user_source, uint64_t user_target, uint64_t us
         return -EFAULT;
     return vfs_mount(user_source ? source : NULL, target, user_type ? type : "", (uint32_t)flags,
                      options);
+}
+
+static int64_t swap_target(uint64_t user_path, char **path, struct vfs_node **node) {
+    const struct credentials *cred = cred_current();
+    if (cred && cred->euid != 0) return -EPERM;
+    int status = copy_path_at(AT_FDCWD, user_path, path);
+    if (status != 0) return status;
+    *node = vfs_lookup(*path);
+    if (!*node) return lookup_errno(*path, 1);
+    return 0;
+}
+
+static int64_t sys_swapon(uint64_t user_path, int flags) {
+    VFS_PATH_SCOPED path = NULL;
+    struct vfs_node *node = NULL;
+    int64_t status = swap_target(user_path, &path, &node);
+    if (status != 0) return status;
+    return swap_activate(node, path, flags);
+}
+
+static int64_t sys_swapoff(uint64_t user_path) {
+    VFS_PATH_SCOPED path = NULL;
+    struct vfs_node *node = NULL;
+    int64_t status = swap_target(user_path, &path, &node);
+    if (status != 0) return status;
+    return swap_deactivate(node);
 }
 
 static int64_t sys_umount2(uint64_t user_target, int flags) {
@@ -3901,7 +3937,7 @@ static int64_t sys_utimens_at(int dirfd, uint64_t user_path, uint64_t user_times
 
 static int map_zero_pages(struct process *process, uint64_t start, uint64_t end, uint64_t flags) {
     for (uint64_t address = start; address < end; address += 4096) {
-        if (vmm_translate(process->cr3, address, NULL, NULL) == 0) continue;
+        if (vmm_page_occupied(process->cr3, address)) continue;
         uint64_t physical = process_alloc_user_page();
         if (!physical) return -1;
         memset(vmm_phys_to_virt(physical), 0, 4096);
@@ -3927,7 +3963,7 @@ static int map_shared_object(struct process *process, uint64_t start, uint64_t e
         uint64_t physical = memfd_page(object, index);
 
         if (!physical) continue;
-        if (vmm_translate(process->cr3, address, NULL, NULL) == 0) continue;
+        if (vmm_page_occupied(process->cr3, address)) continue;
         if (pmm_page_ref(physical) != 0) return -1;
         if (vmm_map_page_in(process->cr3, address, physical,
                             flags | extra | PAGE_USER | PAGE_PRESENT) != 0) {
@@ -3942,14 +3978,7 @@ static void unmap_pages(struct process *process, uint64_t start, uint64_t end) {
     process_unmap_area(start, end);
 
     vmm_flush_batch_begin();
-    for (uint64_t address = start; address < end; address += 4096) {
-        uint64_t physical;
-        uint64_t flags;
-        if (vmm_translate(process->cr3, address, &physical, &flags) == 0) {
-            vmm_unmap_page_in(process->cr3, address);
-            if (!(flags & PAGE_DEVICE)) vmm_free_page_after_flush(physical & ~0xFFFULL);
-        }
-    }
+    vmm_unmap_range(process->cr3, start, end);
     vmm_prune_empty_tables(process->cr3, start, end);
     vmm_flush_batch_end();
 }
@@ -3977,10 +4006,7 @@ static int mapping_range_free(struct process *process, uint64_t base, uint64_t l
     if (!process || !length || base >= USER_ADDRESS_LIMIT || length > USER_ADDRESS_LIMIT - base)
         return 0;
     if (!process_area_range_free(base, base + length)) return 0;
-    for (uint64_t page = base; page < base + length; page += 4096) {
-        if (vmm_translate(process->cr3, page, NULL, NULL) == 0) return 0;
-    }
-    return 1;
+    return vmm_range_empty(process->cr3, base, base + length);
 }
 
 static int find_mapping_range(struct process *process, uint64_t start, uint64_t length,
@@ -4134,6 +4160,8 @@ static int64_t sys_mmap(uint64_t address, uint64_t length, int prot, int flags, 
         (file->node->flags & 0xFFU) == VFS_FILE) {
         if ((flags & MAP_SHARED) && (prot & PROT_WRITE) && (file->flags & O_ACCMODE) == O_RDONLY)
             return -EACCES;
+        if ((flags & MAP_SHARED) && (prot & PROT_WRITE) && vfs_node_is_swapfile(file->node))
+            return -ETXTBSY;
         uint32_t kind = VM_FILE_PAGES | ((flags & MAP_PRIVATE) ? VM_PRIVATE : 0);
         if (process_map_area(base, base + length, page_flags, kind, file, offset) != 0)
             return -ENOMEM;
@@ -4223,8 +4251,7 @@ static int64_t sys_mlock(uint64_t address, uint64_t length, int flags) {
     uint64_t end = align_up(address + length, 4096);
     if (end > USER_ADDRESS_LIMIT) return -ENOMEM;
     for (uint64_t page = start; page < end; page += 4096)
-        if (vmm_translate(process->cr3, page, NULL, NULL) != 0 && !process_find_area(page))
-            return -ENOMEM;
+        if (!vmm_page_occupied(process->cr3, page) && !process_find_area(page)) return -ENOMEM;
     return 0;
 }
 
@@ -4421,8 +4448,7 @@ static int64_t sys_mremap(uint64_t address, uint64_t old_length, uint64_t new_le
     old_length = align_up(old_length, 4096);
     new_length = align_up(new_length, 4096);
     if (address >= USER_ADDRESS_LIMIT || new_length > USER_ADDRESS_LIMIT - address) return -EINVAL;
-    if (vmm_translate(process->cr3, address, NULL, NULL) != 0 && !process_find_area(address))
-        return -EFAULT;
+    if (!vmm_page_occupied(process->cr3, address) && !process_find_area(address)) return -EFAULT;
 
     if (new_length == old_length) return (int64_t)address;
 
@@ -4453,7 +4479,7 @@ static int64_t sys_mprotect(uint64_t address, uint64_t length, int prot) {
     vmm_flush_batch_begin();
     for (uint64_t page = address; page < address + length; page += 4096) {
         uint64_t old_flags;
-        if (vmm_translate(process->cr3, page, NULL, &old_flags) != 0) {
+        if (vmm_lookup(process->cr3, page, NULL, &old_flags) < 0) {
             if (reserved) continue;
             failed = 1;
             break;
@@ -4807,6 +4833,8 @@ static int64_t sys_sysinfo(uint64_t user_buffer) {
 
     value.totalram = pmm_usable_page_count() * PMM_PAGE_SIZE;
     value.freeram = pmm_free_page_count() * PMM_PAGE_SIZE;
+    value.totalswap = swap_total_pages() * PMM_PAGE_SIZE;
+    value.freeswap = swap_free_pages() * PMM_PAGE_SIZE;
     value.procs = (uint16_t)process_count();
     value.mem_unit = 1;
     return copy_to_user(user_buffer, &value, sizeof(value)) == 0 ? 0 : -EFAULT;
@@ -7483,6 +7511,10 @@ static void syscall_run(struct syscall_frame *frame) {
             (uint64_t)sys_mount(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame),
                                 SYSCALL_ARG3(frame), SYSCALL_ARG4(frame));
         break;
+    case SYS_SWAPON:
+        SYSCALL_RET(frame) = (uint64_t)sys_swapon(SYSCALL_ARG0(frame), (int)SYSCALL_ARG1(frame));
+        break;
+    case SYS_SWAPOFF: SYSCALL_RET(frame) = (uint64_t)sys_swapoff(SYSCALL_ARG0(frame)); break;
     case SYS_UMOUNT2:
         SYSCALL_RET(frame) = (uint64_t)sys_umount2(SYSCALL_ARG0(frame), (int)SYSCALL_ARG1(frame));
         break;
