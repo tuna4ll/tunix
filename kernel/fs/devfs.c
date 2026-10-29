@@ -149,6 +149,70 @@ static int64_t disk_write(struct vfs_node *node, uint64_t offset, size_t size, c
     return block_device_write_bytes(disk_of(node), offset, size, buffer) == 0 ? (int64_t)size : -1;
 }
 
+#define BLKROGET     0x125EUL
+#define BLKGETSIZE   0x1260UL
+#define BLKFLSBUF    0x1261UL
+#define BLKSSZGET    0x1268UL
+#define BLKDISCARD   0x1277UL
+#define BLKIOMIN     0x1278UL
+#define BLKIOOPT     0x1279UL
+#define BLKPBSZGET   0x127BUL
+#define BLKGETSIZE64 0x80081272UL
+
+static int64_t put_value(uint64_t user_argument, const void *value, size_t size) {
+    if (!user_argument) return -EFAULT;
+    return copy_to_user(user_argument, value, size) == 0 ? 0 : -EFAULT;
+}
+
+static int64_t disk_ioctl(struct vfs_node *node, unsigned long request, uint64_t user_argument) {
+    const struct block_device *device = disk_of(node);
+    if (!device) return -ENODEV;
+    switch (request) {
+    case BLKGETSIZE64: {
+        uint64_t bytes = device->sectors * BLOCK_SECTOR_SIZE;
+        return put_value(user_argument, &bytes, sizeof(bytes));
+    }
+    case BLKGETSIZE: {
+        uint64_t sectors = device->sectors;
+        return put_value(user_argument, &sectors, sizeof(sectors));
+    }
+    case BLKSSZGET:
+    case BLKPBSZGET:
+    case BLKIOMIN:   {
+        int size = (int)BLOCK_SECTOR_SIZE;
+        if (request != BLKSSZGET) size = 4096;
+        return put_value(user_argument, &size, sizeof(size));
+    }
+    case BLKIOOPT: {
+        unsigned value = 0;
+        return put_value(user_argument, &value, sizeof(value));
+    }
+    case BLKROGET: {
+        int read_only = device->write == NULL;
+        return put_value(user_argument, &read_only, sizeof(read_only));
+    }
+    case BLKFLSBUF:  return block_device_flush(device) == 0 ? 0 : -EIO;
+    case BLKDISCARD: {
+        uint64_t range[2];
+        if (!user_argument || copy_from_user(range, user_argument, sizeof(range)) != 0)
+            return -EFAULT;
+        if ((range[0] | range[1]) % BLOCK_SECTOR_SIZE) return -EINVAL;
+        if (!device->discard) return -EOPNOTSUPP;
+        uint64_t lba = range[0] / BLOCK_SECTOR_SIZE;
+        uint64_t count = range[1] / BLOCK_SECTOR_SIZE;
+        if (lba > device->sectors || count > device->sectors - lba) return -EINVAL;
+        while (count) {
+            uint32_t step = count > 0x10000ULL ? 0x10000U : (uint32_t)count;
+            if (block_device_discard(device, lba, step) != 0) return -EIO;
+            lba += step;
+            count -= step;
+        }
+        return 0;
+    }
+    default: return -ENOTTY;
+    }
+}
+
 static int64_t keyboard_read(struct vfs_node *node, uint64_t offset, size_t size, void *buffer) {
     (void)node;
     (void)offset;
@@ -219,6 +283,7 @@ void devfs_add_block(int index) {
                                           device->write ? disk_write : NULL, NULL);
     if (!disk) return;
     disk->length = device->sectors * BLOCK_SECTOR_SIZE;
+    disk->ioctl = disk_ioctl;
     disk->gid = DEV_GROUP_DISK;
     disk->dev_major = device->major;
     disk->dev_minor = device->minor;
