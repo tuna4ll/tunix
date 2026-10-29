@@ -86,6 +86,36 @@ void vfs_notify_meta_changed(struct vfs_node *node) {
 }
 
 static uint64_t cached_bytes;
+static struct vfs_node *cache_head;
+static struct vfs_node *cache_tail;
+static uint64_t cache_nodes;
+
+static void cache_forget(struct vfs_node *node) {
+    if (!node->cache_listed) return;
+    if (node->cache_prev) node->cache_prev->cache_next = node->cache_next;
+    else cache_head = node->cache_next;
+    if (node->cache_next) node->cache_next->cache_prev = node->cache_prev;
+    else cache_tail = node->cache_prev;
+    node->cache_next = node->cache_prev = NULL;
+    node->cache_listed = 0;
+    cache_nodes--;
+}
+
+static void cache_touch(struct vfs_node *node) {
+    if (!node->disk_inode || !node->pages || !node->pages->resident) {
+        cache_forget(node);
+        return;
+    }
+    if (node->cache_listed && cache_tail == node) return;
+    cache_forget(node);
+    node->cache_prev = cache_tail;
+    node->cache_next = NULL;
+    if (cache_tail) cache_tail->cache_next = node;
+    else cache_head = node;
+    cache_tail = node;
+    node->cache_listed = 1;
+    cache_nodes++;
+}
 
 #define WB_BATCH_PAGES          32U
 #define WB_AGE_NS               (5ULL * 1000ULL * 1000ULL * 1000ULL)
@@ -164,7 +194,7 @@ static void wb_mark(struct vfs_node *node) {
 
 static void page_free_one(struct vfs_node *node, struct vfs_page_map *map, uint64_t index);
 static void page_map_free(struct vfs_node *node);
-static uint64_t reclaim_below(struct vfs_node *node, uint32_t newer_than);
+static uint64_t reclaim_listed(uint64_t wanted);
 
 static int cacheable(const struct vfs_node *node) {
     return node && (node->flags & 0xFFU) == VFS_FILE && node->disk_inode && node->pages &&
@@ -200,6 +230,7 @@ void vfs_forget_backing(struct vfs_node *node) {
     }
     node->disk_inode = 0;
     node->io_generation++;
+    cache_forget(node);
 }
 
 void vfs_map_ref(struct vfs_node *node) {
@@ -270,29 +301,10 @@ uint64_t vfs_drop_clean_pages(struct vfs_node *node) {
     return drop_unused_pages(node, UINT64_MAX) * VFS_PAGE_SIZE;
 }
 
-static uint64_t reclaim_pages_below(struct vfs_node *node, uint32_t newer_than, uint64_t budget) {
-    if (!node || node->link_target || !budget) return 0;
-    uint64_t dropped = 0;
-    uint32_t touched = node->atime > node->mtime ? node->atime : node->mtime;
-    if ((node->flags & 0xFFU) == VFS_FILE && touched < newer_than)
-        dropped += drop_unused_pages(node, budget);
-    for (struct vfs_node *child = node->children; child && dropped < budget; child = child->next)
-        dropped += reclaim_pages_below(child, newer_than, budget - dropped);
-    return dropped;
-}
-
 uint64_t vfs_reclaim_pages(uint64_t wanted) {
     if (!wanted || !__atomic_load_n(&cached_bytes, __ATOMIC_RELAXED)) return 0;
     VFS_LOCKED;
-    uint32_t now = (uint32_t)time_epoch_seconds();
-    static const uint32_t ages[] = {300U, 60U, 10U, 1U, 0U};
-    uint64_t dropped = 0;
-    for (unsigned index = 0; index < sizeof(ages) / sizeof(ages[0]) && dropped < wanted; index++) {
-        uint32_t cutoff = now > ages[index] ? now - ages[index] : 0;
-        if (!ages[index]) cutoff = 0xFFFFFFFFU;
-        dropped += reclaim_pages_below(vfs_root, cutoff, wanted - dropped);
-    }
-    return dropped;
+    return reclaim_listed(wanted);
 }
 
 uint64_t vfs_page_pin(struct vfs_node *node, uint64_t index) {
@@ -329,43 +341,30 @@ void vfs_release_data(struct vfs_node *node) {
     (void)vfs_drop_clean_pages(node);
 }
 
-static uint64_t reclaim_below(struct vfs_node *node, uint32_t newer_than) {
-    if (!node || node->link_target) return 0;
-
-    uint64_t reclaimed = 0;
-    uint32_t touched = node->atime > node->mtime ? node->atime : node->mtime;
-    if ((node->flags & 0xFFU) == VFS_FILE && touched < newer_than)
-        reclaimed += vfs_drop_clean_pages(node);
-
-    for (struct vfs_node *child = node->children; child; child = child->next)
-        reclaimed += reclaim_below(child, newer_than);
-
-    return reclaimed;
+static uint64_t reclaim_listed(uint64_t wanted) {
+    uint64_t dropped = 0;
+    uint64_t visits = cache_nodes;
+    while (dropped < wanted && visits-- && cache_head) {
+        struct vfs_node *node = cache_head;
+        dropped += drop_unused_pages(node, wanted - dropped);
+        cache_touch(node);
+    }
+    return dropped;
 }
 
 uint64_t vfs_reclaim_file_data(struct vfs_node *node) {
+    (void)node;
     VFS_LOCKED;
-    return reclaim_below(node, 0xFFFFFFFFU);
+    return reclaim_listed(UINT64_MAX) * VFS_PAGE_SIZE;
 }
 
 void vfs_trim_cache(uint64_t budget) {
     if (!budget || __atomic_load_n(&cached_bytes, __ATOMIC_RELAXED) <= budget) return;
     VFS_LOCKED;
     static uint64_t retry_above;
-
     if (!budget || cached_bytes <= budget || cached_bytes < retry_above) return;
-
-    uint32_t now = (uint32_t)time_epoch_seconds();
-    static const uint32_t ages[] = {60U, 10U, 1U, 0U};
-    for (unsigned index = 0; index < sizeof(ages) / sizeof(ages[0]); index++) {
-        uint32_t cutoff = now > ages[index] ? now - ages[index] : 0;
-        (void)reclaim_below(vfs_root, cutoff);
-        if (cached_bytes <= budget) {
-            retry_above = 0;
-            return;
-        }
-    }
-    retry_above = cached_bytes + budget / 8;
+    (void)reclaim_listed((cached_bytes - budget) / VFS_PAGE_SIZE + 1ULL);
+    retry_above = cached_bytes <= budget ? 0 : cached_bytes + budget / 8;
 }
 
 static void free_node_data(struct vfs_node *node) {
@@ -456,6 +455,7 @@ static void index_rebuild(struct vfs_node *directory) {
 void vfs_free_node(struct vfs_node *node) {
     VFS_LOCKED;
     if (!node) return;
+    cache_forget(node);
     cursor_forget(node);
     index_drop(node);
     acl_release(node);
@@ -751,10 +751,12 @@ static void page_free_one(struct vfs_node *node, struct vfs_page_map *map, uint6
     map->page[index] = NULL;
     clear_page_dirty(node, index);
     if (map->resident) map->resident--;
+    if (!map->resident) cache_forget(node);
     if (physical) pmm_free_page((void *)physical);
 }
 
 static void page_map_free(struct vfs_node *node) {
+    cache_forget(node);
     struct vfs_page_map *map = node->pages;
     if (!map) return;
     for (uint64_t index = 0; index < map->count; index++) page_free_one(node, map, index);
@@ -804,7 +806,7 @@ static struct vfs_page_map *page_map_grow(struct vfs_node *node, uint64_t needed
 static uint8_t *page_allocate(struct vfs_node *node, struct vfs_page_map *map, uint64_t index) {
     void *physical = pmm_alloc_page();
     if (!physical) {
-        if (reclaim_below(vfs_root, (uint32_t)time_epoch_seconds())) physical = pmm_alloc_page();
+        if (reclaim_listed(32)) physical = pmm_alloc_page();
     }
     if (!physical) return NULL;
     uint8_t *page = (uint8_t *)vmm_phys_to_virt((uint64_t)physical);
@@ -812,6 +814,7 @@ static uint8_t *page_allocate(struct vfs_node *node, struct vfs_page_map *map, u
     map->page[index] = page;
     map->resident++;
     if (node->disk_inode) cached_bytes += VFS_PAGE_SIZE;
+    cache_touch(node);
     return page;
 }
 
@@ -835,6 +838,7 @@ void *vfs_page(struct vfs_node *node, uint64_t index, int for_write) {
         }
     }
     if (for_write) mark_page_dirty(node, index);
+    if (node->cache_listed && cache_tail != node) cache_touch(node);
     return map->page[index];
 }
 
@@ -926,6 +930,7 @@ void vfs_prefetch(struct vfs_node *node, uint64_t offset, uint64_t size) {
                 map->page[indices[index]] = pages[index];
                 map->resident++;
                 cached_bytes += VFS_PAGE_SIZE;
+                cache_touch(node);
                 installed = 1;
             }
         }

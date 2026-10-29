@@ -139,6 +139,9 @@ struct vfs_node {
     uint64_t wb_since;
     struct vfs_node *wb_next;
     struct vfs_node *wb_prev;
+    uint8_t cache_listed;
+    struct vfs_node *cache_next;
+    struct vfs_node *cache_prev;
     struct vfs_acl *acl;
     struct vfs_xattr *xattrs;
     uint8_t xattr_dirty;

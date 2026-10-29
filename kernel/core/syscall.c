@@ -6176,7 +6176,6 @@ static void syscall_run(struct syscall_frame *frame) {
     process_reap_deferred();
 
     vfs_trim_cache(file_cache_budget());
-    if (heap_under_pressure()) vfs_reclaim_file_data(vfs_root);
     struct process *caller = process_current();
     uint64_t syscall_number = SYSCALL_NR(frame);
     uint64_t first_argument = SYSCALL_ARG0(frame);
