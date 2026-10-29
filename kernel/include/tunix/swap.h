@@ -28,6 +28,8 @@ int swap_install_decision(uint64_t slot, uint64_t physical, uint64_t *flags);
 int swap_fault_in(uint64_t cr3, uint64_t address);
 unsigned swap_writeback(unsigned budget);
 int swap_reserve_entries(unsigned wanted);
+int swap_block_in_use(int block);
+void swap_discard_released(void);
 
 typedef void (*swap_report_fn)(void *context, const char *path, int is_file, uint64_t size_kb,
                                uint64_t used_kb, int priority);

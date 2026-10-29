@@ -127,6 +127,7 @@ static void kswapd(void *unused) {
             else idle_rounds++;
         }
         if (swap_cached_pages()) (void)swap_writeback(256U);
+        else swap_discard_released();
     }
 }
 

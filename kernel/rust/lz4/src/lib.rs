@@ -38,6 +38,12 @@ pub const fn bound(length: usize) -> usize {
     length.saturating_add(length / 255).saturating_add(16)
 }
 
+fn copy(target: &mut [u8], source: &[u8]) {
+    for (to, from) in target.iter_mut().zip(source) {
+        *to = *from;
+    }
+}
+
 fn read_u32(data: &[u8], at: usize) -> Option<u32> {
     let end = at.checked_add(4)?;
     let bytes: [u8; 4] = data.get(at..end)?.try_into().ok()?;
@@ -63,7 +69,7 @@ impl Writer<'_> {
 
     fn bytes(&mut self, data: &[u8]) -> Option<()> {
         let end = self.at.checked_add(data.len())?;
-        self.buffer.get_mut(self.at..end)?.copy_from_slice(data);
+        copy(self.buffer.get_mut(self.at..end)?, data);
         self.at = end;
         Some(())
     }
@@ -220,7 +226,7 @@ pub fn decompress(input: &[u8], output: &mut [u8]) -> Result<(), Error> {
         let literal_end = at.checked_add(literals).ok_or(Error::Malformed)?;
         let out_end = out.checked_add(literals).ok_or(Error::Malformed)?;
         let source = input.get(at..literal_end).ok_or(Error::Malformed)?;
-        output.get_mut(out..out_end).ok_or(Error::OutputSize)?.copy_from_slice(source);
+        copy(output.get_mut(out..out_end).ok_or(Error::OutputSize)?, source);
         at = literal_end;
         out = out_end;
         if at == input.len() {
@@ -256,7 +262,7 @@ pub fn decompress(input: &[u8], output: &mut [u8]) -> Result<(), Error> {
             let (head, tail) = output.split_at_mut_checked(out).ok_or(Error::Malformed)?;
             let source = head.get(from..from.saturating_add(matched)).ok_or(Error::Malformed)?;
             let target = tail.get_mut(..matched).ok_or(Error::Malformed)?;
-            target.copy_from_slice(source);
+            copy(target, source);
         } else {
             for index in out..match_end {
                 let value = *output.get(from).ok_or(Error::Malformed)?;

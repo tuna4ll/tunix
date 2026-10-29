@@ -54,6 +54,9 @@ struct swap_area {
     struct swap_extent *extents;
     uint32_t extent_count;
     struct vfs_node *node;
+    uint64_t *discards;
+    uint64_t discard_pending;
+    uint64_t discard_cursor;
     char path[SWAP_PATH_BYTES];
 };
 
@@ -166,6 +169,69 @@ static void slot_release(struct swap_area *area, uint64_t offset) {
     area->used--;
     total_used--;
     if (offset < area->cursor) area->cursor = offset;
+    if (area->discards && !(area->discards[offset / 64U] & (1ULL << (offset % 64U)))) {
+        area->discards[offset / 64U] |= 1ULL << (offset % 64U);
+        area->discard_pending++;
+    }
+}
+
+static uint32_t collect_discards(struct swap_area *area, uint64_t *offsets, uint32_t room) {
+    uint32_t count = 0;
+    uint64_t words = (area->pages + 63U) / 64U;
+    for (uint64_t step = 0; step < words && count < room && area->discard_pending; step++) {
+        uint64_t word = (area->discard_cursor + step) % words;
+        while (area->discards[word] && count < room) {
+            unsigned bit = (unsigned)__builtin_ctzll(area->discards[word]);
+            uint64_t offset = word * 64U + bit;
+            area->discards[word] &= ~(1ULL << bit);
+            area->discard_pending--;
+            if (area->map[offset]) continue;
+            area->map[offset] = SWAP_BAD;
+            offsets[count++] = offset;
+        }
+        area->discard_cursor = word;
+    }
+    return count;
+}
+
+void swap_discard_released(void) {
+    for (unsigned index = 0; index < SWAP_AREAS; index++) {
+        for (unsigned batch = 0; batch < 64U; batch++) {
+            uint64_t offsets[256];
+            uint32_t count = 0;
+            int block = -1;
+            {
+                SWAP_LOCKED;
+                struct swap_area *area = &areas[index];
+                if (!area->active || !area->discards || !area->discard_pending) break;
+                count = collect_discards(area, offsets, 256U);
+                block = area->block;
+            }
+            const struct block_device *device = block_device_at(block);
+            for (uint32_t at = 0; device && at < count;) {
+                uint32_t run = 1;
+                while (at + run < count && offsets[at + run] == offsets[at] + run && run < 4096U)
+                    run++;
+                (void)block_device_discard(device, offsets[at] * SWAP_SECTORS,
+                                           (uint32_t)(run * SWAP_SECTORS));
+                at += run;
+            }
+            SWAP_LOCKED;
+            for (uint32_t at = 0; at < count; at++)
+                if (areas[index].map && areas[index].map[offsets[at]] == SWAP_BAD)
+                    areas[index].map[offsets[at]] = 0;
+            if (!count) break;
+        }
+    }
+}
+
+int swap_block_in_use(int block) {
+    SWAP_LOCKED;
+    for (unsigned index = 0; index < SWAP_AREAS; index++)
+        if ((areas[index].active || areas[index].node) && !areas[index].is_file &&
+            areas[index].block == block)
+            return 1;
+    return 0;
 }
 
 static void cache_drop(struct swap_cached *entry) {
@@ -480,6 +546,7 @@ int swap_fault_in(uint64_t cr3, uint64_t address) {
 }
 
 unsigned swap_writeback(unsigned budget) {
+    swap_discard_released();
     unsigned freed = 0;
     for (unsigned visited = 0; visited < budget; visited++) {
         uint64_t slot = 0, physical = 0;
@@ -705,8 +772,17 @@ int swap_activate(struct vfs_node *node, const char *path, int flags) {
         map = (uint16_t *)kmalloc(pages * sizeof(uint16_t));
         if (!map) status = -ENOMEM;
     }
+    const struct block_device *target = block_device_at(candidate.block);
+    if (!status && !candidate.is_file && target && target->discard) {
+        uint64_t words = (pages + 63U) / 64U;
+        candidate.discards = (uint64_t *)kmalloc(words * sizeof(uint64_t));
+        if (!candidate.discards) status = -ENOMEM;
+        else memset(candidate.discards, 0, words * sizeof(uint64_t));
+    }
     if (status) {
         kfree(bad);
+        kfree(map);
+        kfree(candidate.discards);
         kfree(candidate.extents);
         mutex_unlock(&swapon_mutex);
         return status;
@@ -818,6 +894,7 @@ int swap_deactivate(struct vfs_node *node) {
     vfs_node_unref(released.node);
     kfree(released.map);
     kfree(released.extents);
+    kfree(released.discards);
     kprintf("SWAP: removed %s\n", released.path);
     return 0;
 }

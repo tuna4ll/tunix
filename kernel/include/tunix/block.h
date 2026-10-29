@@ -20,9 +20,6 @@ struct block_device {
     int parent;
     uint64_t sectors;
 
-    /* Numbered the way Linux numbers SCSI disks, since every disk here is an
-     * sdX: major 8 with sixteen minors a disk, and partitions past the
-     * fifteenth in the extended major 259. */
     uint32_t major;
     uint32_t minor;
 
@@ -30,10 +27,14 @@ struct block_device {
     int (*write)(void *context, uint64_t lba, uint32_t count, const void *source);
 
     int (*flush)(void *context);
+    int (*discard)(void *context, uint64_t lba, uint32_t count);
     void *context;
 };
 
 int block_register(const struct block_device *device);
+int block_register_named(const struct block_device *device, const char *name, uint32_t major,
+                         uint32_t minor);
+void block_set_sectors(int index, uint64_t sectors);
 
 int block_register_partition(int parent, int number, uint64_t start, uint64_t sectors);
 int block_device_count(void);
@@ -53,6 +54,7 @@ int block_device_read(const struct block_device *device, uint64_t lba, uint32_t 
 int block_device_write(const struct block_device *device, uint64_t lba, uint32_t count,
                        const void *source);
 int block_device_flush(const struct block_device *device);
+int block_device_discard(const struct block_device *device, uint64_t lba, uint32_t count);
 
 void block_probe(void);
 

@@ -3,7 +3,7 @@ set -eu
 
 . testsuites/boot.sh
 
-tests=${*:-process memory swap files pipes sockets time drm}
+tests=${*:-process memory swap zram files pipes sockets time drm}
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/tunix-tests.XXXXXX")
 trap 'rm -rf "$work"' EXIT INT TERM
@@ -26,6 +26,10 @@ for name in $tests; do
 		memory=320M
 		slack=640
 		wait=${TIMEOUT:-900}
+	fi
+	if [ "$name" = zram ]; then
+		memory=320M
+		wait=${TIMEOUT:-600}
 	fi
 	ROOT_SLACK_MIB=$slack
 	export ROOT_SLACK_MIB

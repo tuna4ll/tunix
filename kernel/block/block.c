@@ -59,6 +59,13 @@ static int partition_flush(void *context) {
     return disk->flush ? disk->flush(disk->context) : 0;
 }
 
+static int partition_discard(void *context, uint64_t lba, uint32_t count) {
+    const struct partition_context *part = context;
+    const struct block_device *disk = block_device_at(part->parent);
+    if (!disk || !disk->discard) return -1;
+    return disk->discard(disk->context, part->start + lba, count);
+}
+
 static void announce(int index) {
     kprintf("BLOCK: %s (%s), %u sectors%s\n", devices[index]->dev_name, devices[index]->name,
             (unsigned)devices[index]->sectors, devices[index]->write ? "" : ", read only");
@@ -117,6 +124,35 @@ int block_register(const struct block_device *device) {
     return index;
 }
 
+int block_register_named(const struct block_device *device, const char *name, uint32_t major,
+                         uint32_t minor) {
+    if (!device || !device->read || !name || strlen(name) >= BLOCK_NAME_BYTES) return -1;
+    lock_acquire(&registry_lock);
+    struct block_device *entry = new_entry();
+    if (!entry) {
+        lock_release(&registry_lock);
+        return -1;
+    }
+    *entry = *device;
+    entry->name[sizeof entry->name - 1] = '\0';
+    entry->parent = -1;
+    strncpy(entry->dev_name, name, sizeof entry->dev_name - 1);
+    entry->dev_name[sizeof entry->dev_name - 1] = '\0';
+    entry->major = major;
+    entry->minor = minor;
+    announce(device_count);
+    int index = device_count;
+    __atomic_store_n(&device_count, index + 1, __ATOMIC_RELEASE);
+    lock_release(&registry_lock);
+    eventfs_emit_device_attach("block", entry->dev_name);
+    return index;
+}
+
+void block_set_sectors(int index, uint64_t sectors) {
+    REGISTRY_LOCKED;
+    if (index >= 0 && index < device_count) devices[index]->sectors = sectors;
+}
+
 int block_register_partition(int parent, int number, uint64_t start, uint64_t sectors) {
     const struct block_device *disk = block_device_at(parent);
     if (!disk || disk->parent != -1 || number < 1 || number > 99999) return -1;
@@ -157,6 +193,7 @@ int block_register_partition(int parent, int number, uint64_t start, uint64_t se
     entry->read = partition_read;
     entry->write = disk->write ? partition_write : NULL;
     entry->flush = partition_flush;
+    entry->discard = disk->discard ? partition_discard : NULL;
     entry->context = context;
     announce(device_count);
     int index = device_count;
@@ -261,6 +298,12 @@ int block_device_write(const struct block_device *device, uint64_t lba, uint32_t
                         : "");
     }
     return status;
+}
+
+int block_device_discard(const struct block_device *device, uint64_t lba, uint32_t count) {
+    if (!device || !device->discard || !count) return -1;
+    if (lba + count > device->sectors) return -1;
+    return device->discard(device->context, lba, count);
 }
 
 int block_device_flush(const struct block_device *device) {

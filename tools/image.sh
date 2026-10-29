@@ -56,7 +56,7 @@ if [ -n "${MODULES:-}" ]; then
 		[ -d "$directory" ] || continue
 		find "$directory" -name '*.ko' -exec cp {} "$TARGET/kernel/" \;
 	done
-	: > "$TARGET/modules.builtin"
+	echo kernel/drivers/block/zram/zram.ko > "$TARGET/modules.builtin"
 	: > "$TARGET/modules.builtin.modinfo"
 	: > "$TARGET/modules.order"
 	if command -v depmod >/dev/null; then
