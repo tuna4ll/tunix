@@ -4,6 +4,7 @@
 
 - [Boot](boot.md)
 - [Memory Layout](memory-layout.md)
+- [Memory Management](memory-management.md)
 - [Syscalls and Scheduler](syscalls-and-scheduler.md)
 - [Multiprocessor](multiprocessor.md)
 - [Modules](modules.md)
