@@ -37,6 +37,7 @@ static int next_pending_signal(struct process *process);
 #include <tunix/vfs.h>
 #include <tunix/vmm.h>
 #include <tunix/swap.h>
+#include <tunix/cpu.h>
 #include <tunix/reclaim.h>
 #include <tunix/kprintf.h>
 #include <tunix/errno.h>
@@ -2330,9 +2331,10 @@ struct vm_area *process_find_area(uint64_t address) {
     return area && address < area->end ? area : NULL;
 }
 
-#define OOM_GRACE_NS (3ULL * 1000ULL * 1000ULL * 1000ULL)
-#define OOM_NAP_NS   (10ULL * 1000ULL * 1000ULL)
-#define OOM_ATTEMPTS 500U
+#define OOM_GRACE_NS    (3ULL * 1000ULL * 1000ULL * 1000ULL)
+#define OOM_NAP_NS      (10ULL * 1000ULL * 1000ULL)
+#define OOM_PATIENCE_NS (30ULL * 1000ULL * 1000ULL * 1000ULL)
+#define OOM_STALLS      16U
 
 static uint64_t oom_victim;
 static uint64_t oom_victim_since;
@@ -2408,11 +2410,19 @@ static void oom_kill(void) {
     if (!victim) return;
     uint64_t usage[VMM_USAGE_KINDS] = {0};
     (void)vmm_usage(victim->cr3, usage);
-    kprintf(
-        "OOM: killing pid %u (%s), %u KiB resident, %u KiB swapped, oom_score_adj %d\n",
-        (unsigned)victim->tgid, victim->name,
-        (unsigned)((usage[VMM_USAGE_ANON] + usage[VMM_USAGE_FILE] + usage[VMM_USAGE_SHMEM]) * 4U),
-        (unsigned)(usage[VMM_USAGE_SWAP] * 4U), victim->oom_score_adj);
+    kprintf("OOM: killing pid %u (%s): anon %u KiB, file %u KiB, shmem %u KiB, swapped %u KiB, "
+            "oom_score_adj %d; free %u KiB, swap %u of %u KiB free\n",
+            (unsigned)victim->tgid, victim->name, (unsigned)(usage[VMM_USAGE_ANON] * 4U),
+            (unsigned)(usage[VMM_USAGE_FILE] * 4U), (unsigned)(usage[VMM_USAGE_SHMEM] * 4U),
+            (unsigned)(usage[VMM_USAGE_SWAP] * 4U), victim->oom_score_adj,
+            (unsigned)(pmm_free_page_count() * 4U), (unsigned)(swap_free_pages() * 4U),
+            (unsigned)(swap_total_pages() * 4U));
+    struct reclaim_stats stats;
+    reclaim_statistics(&stats);
+    kprintf("OOM: reclaim so far: %u reclaimed, %u swapped out, %u dropped, %u scanned, "
+            "%u aged, %u busy address spaces skipped\n",
+            (unsigned)stats.reclaimed, (unsigned)stats.swapped_out, (unsigned)stats.dropped,
+            (unsigned)stats.scanned, (unsigned)stats.aged, (unsigned)stats.skipped);
     oom_victim = victim->tgid;
     oom_victim_since = time_uptime_ns();
     wake_bump();
@@ -2421,24 +2431,52 @@ static void oom_kill(void) {
     (void)send_signal((int64_t)victim->tgid, &info, 0);
 }
 
+static struct process_memory *park_memory(void) {
+    struct process_memory *memory = current ? current->memory : NULL;
+    if (!memory || !mutex_held(&memory->lock)) return NULL;
+    __atomic_add_fetch(&memory->reclaim_parked, 1, __ATOMIC_SEQ_CST);
+    return memory;
+}
+
+static void unpark_memory(struct process_memory *memory) {
+    if (!memory) return;
+    __atomic_sub_fetch(&memory->reclaim_parked, 1, __ATOMIC_SEQ_CST);
+    while (__atomic_load_n(&memory->reclaim_scanners, __ATOMIC_SEQ_CST)) cpu_relax();
+}
+
 static uint64_t alloc_user_page(void) {
-    for (unsigned attempt = 0;; attempt++) {
-        int may_sleep = current && process_may_sleep();
-        if (may_sleep && pmm_free_page_count() < reclaim_min_pages()) (void)reclaim_pages(32);
+    if (pmm_free_page_count() > reclaim_min_pages()) {
         uint64_t physical = (uint64_t)pmm_alloc_page();
         if (physical) {
             reclaim_note_allocation();
             return physical;
         }
-        if (may_sleep && reclaim_pages(64)) continue;
-        if (!current || fatal_signal_pending(current) || attempt >= OOM_ATTEMPTS ||
-            !process_may_sleep())
-            return 0;
-        oom_kill();
+    }
+    int may_sleep = current && process_may_sleep();
+    uint64_t physical = 0;
+    unsigned stalls = 0;
+    uint64_t deadline = time_uptime_ns() + OOM_PATIENCE_NS;
+    for (unsigned attempt = 0;; attempt++) {
+        if (may_sleep && pmm_free_page_count() < reclaim_min_pages()) (void)reclaim_pages(32);
+        int reserved = may_sleep && pmm_free_page_count() <= reclaim_min_pages() / 4ULL;
+        physical = reserved ? 0 : (uint64_t)pmm_alloc_page();
+        if (physical || !may_sleep || !current || fatal_signal_pending(current)) break;
+        if (reclaim_pages(64)) {
+            stalls = 0;
+            if (attempt < 4096U) continue;
+        } else if (++stalls >= OOM_STALLS) {
+            oom_kill();
+        }
+        if (time_uptime_ns() > deadline) break;
+        struct process_memory *parked = park_memory();
+        reclaim_wake();
         process_prepare_wait(&oom_channel, time_uptime_ns() + OOM_NAP_NS);
         process_wait();
         process_finish_wait();
+        unpark_memory(parked);
     }
+    if (physical) reclaim_note_allocation();
+    return physical;
 }
 
 uint64_t process_alloc_user_page(void) { return alloc_user_page(); }
@@ -2526,6 +2564,12 @@ static int commit_file(struct vm_area *area, uint64_t page) {
     uint64_t window = index & ~(VFS_READAHEAD_PAGES - 1ULL);
     vfs_prefetch(node, window * 4096ULL, VFS_READAHEAD_PAGES * 4096ULL);
     uint64_t physical = vfs_page_pin(node, index) & ~0xFFFULL;
+    for (unsigned attempt = 0; !physical && attempt < 8U; attempt++) {
+        uint64_t spare = alloc_user_page();
+        if (!spare) return 0;
+        pmm_free_page((void *)spare);
+        physical = vfs_page_pin(node, index) & ~0xFFFULL;
+    }
     if (!physical) return 0;
     uint64_t flags = shared_page_flags(area);
     if (vmm_map_page_in(current->cr3, page, physical, flags) != 0) {
@@ -2624,6 +2668,11 @@ int process_handle_cow_fault(uint64_t fault_address) {
         status = spare ? vmm_handle_cow_fault(current->cr3, page, &spare) : -1;
     }
     if (spare) pmm_free_page((void *)spare);
+    if (status != 0) {
+        uint64_t flags = 0;
+        int state = vmm_lookup(current->cr3, page, NULL, &flags);
+        if (state == 1 || (state == 0 && (flags & (PAGE_WRITE | PAGE_COW)) == PAGE_WRITE)) return 1;
+    }
     return status == 0;
 }
 

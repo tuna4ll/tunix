@@ -75,6 +75,8 @@ struct process_memory {
     struct vm_area *areas;
     struct vm_area *area_root;
     uint64_t reclaim_cursor;
+    volatile int reclaim_parked;
+    volatile int reclaim_scanners;
     struct process_memory *release_next;
 };
 

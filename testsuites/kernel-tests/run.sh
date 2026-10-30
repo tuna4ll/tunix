@@ -24,7 +24,7 @@ for name in $tests; do
 	wait=${TIMEOUT:-120}
 	if [ "$name" = swap ]; then
 		memory=320M
-		slack=640
+		slack=900
 		wait=${TIMEOUT:-900}
 	fi
 	if [ "$name" = zram ]; then

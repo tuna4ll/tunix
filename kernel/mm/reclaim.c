@@ -24,6 +24,9 @@ static uint64_t scan_rotation;
 static uint64_t pages_reclaimed;
 static uint64_t pages_swapped_out;
 static uint64_t pages_dropped;
+static uint64_t pages_scanned;
+static uint64_t pages_aged;
+static uint64_t memories_skipped;
 
 uint64_t reclaim_min_pages(void) {
     uint64_t pages = pmm_usable_page_count() / 128ULL;
@@ -59,10 +62,19 @@ static uint64_t scan_memories(uint64_t wanted, int may_swap) {
     if (!count) return 0;
     uint64_t released = 0;
     uint64_t start = scan_rotation++ % count;
-    for (unsigned pass = 0; pass < RECLAIM_PASSES && released < wanted; pass++) {
+    unsigned passes = may_swap ? RECLAIM_PASSES : 1U;
+    for (unsigned pass = 0; pass < passes && released < wanted; pass++) {
         for (unsigned step = 0; step < count && released < wanted; step++) {
             struct process_memory *memory = memories[(start + step) % count];
-            if (!mutex_trylock(&memory->lock)) continue;
+            int locked = mutex_trylock(&memory->lock);
+            if (!locked) {
+                __atomic_add_fetch(&memory->reclaim_scanners, 1, __ATOMIC_SEQ_CST);
+                if (!__atomic_load_n(&memory->reclaim_parked, __ATOMIC_SEQ_CST)) {
+                    __atomic_sub_fetch(&memory->reclaim_scanners, 1, __ATOMIC_SEQ_CST);
+                    __atomic_add_fetch(&memories_skipped, 1, __ATOMIC_RELAXED);
+                    continue;
+                }
+            }
             struct scan_context context = {memory, may_swap};
             struct vmm_reclaim scan = {
                 .cursor = memory->reclaim_cursor,
@@ -75,8 +87,11 @@ static uint64_t scan_memories(uint64_t wanted, int may_swap) {
                 released += scan.dropped + scan.swapped;
                 __atomic_add_fetch(&pages_dropped, scan.dropped, __ATOMIC_RELAXED);
                 __atomic_add_fetch(&pages_swapped_out, scan.swapped, __ATOMIC_RELAXED);
+                __atomic_add_fetch(&pages_scanned, scan.visited, __ATOMIC_RELAXED);
+                __atomic_add_fetch(&pages_aged, scan.aged, __ATOMIC_RELAXED);
             }
-            mutex_unlock(&memory->lock);
+            if (locked) mutex_unlock(&memory->lock);
+            else __atomic_sub_fetch(&memory->reclaim_scanners, 1, __ATOMIC_SEQ_CST);
         }
     }
     for (unsigned index = 0; index < count; index++) process_memory_put(memories[index]);
@@ -88,17 +103,16 @@ uint64_t reclaim_pages(uint64_t wanted) {
     uint64_t before = pmm_free_page_count();
     int may_swap = swap_free_pages() > 0;
     if (may_swap) (void)swap_reserve_entries(256U);
-    (void)swap_writeback(64U);
-    uint64_t freed = vfs_reclaim_pages(wanted);
-    if (freed < wanted) {
-        (void)scan_memories(wanted - freed, may_swap);
-        (void)swap_writeback((unsigned)(wanted > 4096ULL ? 4096ULL : wanted) * 2U);
-        if (pmm_free_page_count() <= before + freed) (void)vfs_reclaim_pages(wanted - freed);
+    uint64_t progress = swap_writeback(64U);
+    progress += vfs_reclaim_pages(wanted);
+    if (progress < wanted) {
+        progress += scan_memories(wanted - progress, may_swap);
+        progress += swap_writeback((unsigned)(wanted > 4096ULL ? 4096ULL : wanted) * 2U);
     }
     uint64_t after = pmm_free_page_count();
     uint64_t gained = after > before ? after - before : 0;
     __atomic_add_fetch(&pages_reclaimed, gained, __ATOMIC_RELAXED);
-    return gained;
+    return gained > progress ? gained : progress;
 }
 
 void reclaim_wake(void) {
@@ -136,8 +150,11 @@ void reclaim_start(void) {
     if (!kswapd_task) kprintf("RECLAIM: cannot start kswapd\n");
 }
 
-void reclaim_statistics(uint64_t *reclaimed, uint64_t *swapped_out, uint64_t *dropped) {
-    *reclaimed = __atomic_load_n(&pages_reclaimed, __ATOMIC_RELAXED);
-    *swapped_out = __atomic_load_n(&pages_swapped_out, __ATOMIC_RELAXED);
-    *dropped = __atomic_load_n(&pages_dropped, __ATOMIC_RELAXED);
+void reclaim_statistics(struct reclaim_stats *stats) {
+    stats->reclaimed = __atomic_load_n(&pages_reclaimed, __ATOMIC_RELAXED);
+    stats->swapped_out = __atomic_load_n(&pages_swapped_out, __ATOMIC_RELAXED);
+    stats->dropped = __atomic_load_n(&pages_dropped, __ATOMIC_RELAXED);
+    stats->scanned = __atomic_load_n(&pages_scanned, __ATOMIC_RELAXED);
+    stats->aged = __atomic_load_n(&pages_aged, __ATOMIC_RELAXED);
+    stats->skipped = __atomic_load_n(&memories_skipped, __ATOMIC_RELAXED);
 }

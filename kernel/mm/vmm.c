@@ -849,6 +849,7 @@ int vmm_copy_to_space(uint64_t cr3_physical, uint64_t destination_user, const vo
     if (destination_user >= USER_ADDRESS_LIMIT || length > USER_ADDRESS_LIMIT - destination_user)
         return -1;
     const uint8_t *in = (const uint8_t *)source;
+    unsigned retries = 0;
     while (length) {
         uint64_t physical;
         uint64_t flags;
@@ -861,7 +862,11 @@ int vmm_copy_to_space(uint64_t cr3_physical, uint64_t destination_user, const vo
             if (status == -2 && cr3_physical == vmm_arch_read_root())
                 status = process_handle_cow_fault(page) ? 0 : -1;
             if (status != 0) return -1;
-            if (vmm_translate(cr3_physical, destination_user, &physical, &flags) != 0) return -1;
+            if (vmm_translate(cr3_physical, destination_user, &physical, &flags) != 0 ||
+                !(flags & PAGE_WRITE)) {
+                if (++retries > 16U) return -1;
+                continue;
+            }
         }
         if (!(flags & PAGE_WRITE)) return -1;
         size_t chunk = 4096 - (size_t)(destination_user & 0xFFF);
@@ -1349,7 +1354,6 @@ void vmm_unmap_range(uint64_t cr3_physical, uint64_t start, uint64_t end) {
     uint64_t *pml4 = space ? page_table_pointer(cr3) : NULL;
     if (end > USER_ADDRESS_LIMIT) end = USER_ADDRESS_LIMIT;
     vmm_flush_batch_begin();
-    int changed = 0;
     for (uint64_t at = start & ~0xFFFULL; pml4 && at < end;) {
         uint64_t *pdpt = table_from_entry(pml4[(at >> 39) & 0x1FF]);
         if (!pdpt) {
@@ -1377,11 +1381,10 @@ void vmm_unmap_range(uint64_t cr3_physical, uint64_t start, uint64_t end) {
             }
             if (!pte_present(entry)) continue;
             if (cr3 == vmm_arch_read_root()) vmm_arch_invalidate(at);
-            changed = 1;
+            flush_others(cr3);
             if (!(pte_flags(entry) & PAGE_DEVICE)) vmm_free_page_after_flush(pte_address(entry));
         }
     }
-    if (changed) flush_others(cr3);
     vmm_flush_batch_end();
     lock_release(&tables_lock);
 }
@@ -1410,7 +1413,6 @@ int vmm_reclaim_scan(uint64_t cr3_physical, struct vmm_reclaim *scan) {
         return -1;
     }
     vmm_flush_batch_begin();
-    int changed = 0;
     uint64_t at = scan->cursor & ~0xFFFULL;
     if (at >= USER_ADDRESS_LIMIT) at = 0;
     while (scan->visited < scan->budget && at < USER_ADDRESS_LIMIT) {
@@ -1439,7 +1441,8 @@ int vmm_reclaim_scan(uint64_t cr3_physical, struct vmm_reclaim *scan) {
             if (pte_young(entry)) {
                 pt[index] = pte_mkold(entry);
                 scan->aged++;
-                changed = 1;
+                if (cr3 == vmm_arch_read_root()) vmm_arch_invalidate(at);
+                flush_others(cr3);
                 continue;
             }
             int action = scan->decide(scan->context, at, flags);
@@ -1456,15 +1459,12 @@ int vmm_reclaim_scan(uint64_t cr3_physical, struct vmm_reclaim *scan) {
             }
             pt[index] = replacement;
             account(space, entry, replacement);
-            changed = 1;
+            if (cr3 == vmm_arch_read_root()) vmm_arch_invalidate(at);
+            flush_others(cr3);
             vmm_free_page_after_flush(physical);
         }
     }
     scan->cursor = at >= USER_ADDRESS_LIMIT ? 0 : at;
-    if (changed) {
-        if (cr3 == vmm_arch_read_root()) vmm_arch_write_root(cr3);
-        flush_others(cr3);
-    }
     vmm_flush_batch_end();
     lock_release(&tables_lock);
     return 0;

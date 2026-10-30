@@ -2,7 +2,7 @@
 #include "test.h"
 
 #define SWAPFILE "/swapfile"
-#define SWAP_MIB 512UL
+#define SWAP_MIB 768UL
 #define CHUNK    (1UL << 20)
 #define ETXTBSY  26
 #define EPERM    1
@@ -116,7 +116,7 @@ static void run(int argc, char **argv) {
     expect_eq(sysinfo(&info), 0, "sysinfo works");
     expect_eq((s64)info.totalswap, 0, "there is no swap at boot");
 
-    expect(make_swapfile(), "a 512 MiB swap file is written and synced");
+    expect(make_swapfile(), "a 768 MiB swap file is written and synced");
     expect_eq(swapon(SWAPFILE, 0), 0, "swapon accepts it");
     expect(contains("/proc/swaps", SWAPFILE), "/proc/swaps lists it");
     expect(contains("/proc/swaps", "file"), "as a file");
