@@ -264,10 +264,14 @@ pub fn decompress(input: &[u8], output: &mut [u8]) -> Result<(), Error> {
             let target = tail.get_mut(..matched).ok_or(Error::Malformed)?;
             copy(target, source);
         } else {
-            for index in out..match_end {
-                let value = *output.get(from).ok_or(Error::Malformed)?;
-                *output.get_mut(index).ok_or(Error::Malformed)? = value;
-                from = from.saturating_add(1);
+            let mut at = out;
+            while at < match_end {
+                let step = offset.min(match_end.saturating_sub(at));
+                let (head, tail) = output.split_at_mut_checked(at).ok_or(Error::Malformed)?;
+                let source = head.get(from..from.saturating_add(step)).ok_or(Error::Malformed)?;
+                copy(tail.get_mut(..step).ok_or(Error::Malformed)?, source);
+                at = at.saturating_add(step);
+                from = from.saturating_add(step);
             }
         }
         out = match_end;
