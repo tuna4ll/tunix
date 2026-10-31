@@ -272,10 +272,10 @@ QEMU_AARCH64 ?= qemu-system-aarch64
 TESTS ?=
 
 .PHONY: test test-aarch64
-test: $(KERNEL) $(LIMINE_EXE)
+test: $(KERNEL) $(MODULES) $(LIMINE_EXE)
 	KERNEL=$(KERNEL) LIMINE=$(LIMINE_DIR) testsuites/kernel-tests/run.sh $(TESTS)
 
-test-aarch64: $(AARCH64_CORE_IMAGE)
+test-aarch64: $(AARCH64_CORE_IMAGE) $(AARCH64_MODULES)
 	ARCH=aarch64 KERNEL=$(AARCH64_CORE_IMAGE) LIMINE=$(LIMINE_DIR) testsuites/kernel-tests/run.sh $(TESTS)
 
 .PHONY: posix-test posix-test-aarch64

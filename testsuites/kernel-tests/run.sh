@@ -3,7 +3,7 @@ set -eu
 
 . testsuites/boot.sh
 
-tests=${*:-process memory swap zram files pipes sockets time drm}
+tests=${*:-process memory swap zram files pipes sockets time drm sound}
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/tunix-tests.XXXXXX")
 trap 'rm -rf "$work"' EXIT INT TERM
@@ -31,12 +31,27 @@ for name in $tests; do
 		memory=320M
 		wait=${TIMEOUT:-600}
 	fi
+	QEMU_EXTRA=
+	if [ "$name" = sound ]; then
+		if [ "$arch" = aarch64 ]; then
+			module=${SOUND_MODULE:-kernel/build/aarch64-core/modules/snd_hda.ko}
+		else
+			module=${SOUND_MODULE:-kernel/build/modules/snd_hda.ko}
+		fi
+		cp "$module" "$dir/root/snd_hda.ko"
+		QEMU_EXTRA="-audiodev wav,id=snd0,path=$dir/out.wav,out.frequency=48000,out.channels=2,out.format=s16 -audiodev none,id=snd1 -device intel-hda,id=hda0 -device hda-output,bus=hda0.0,audiodev=snd0 -device intel-hda,id=hda1 -device hda-duplex,bus=hda1.0,audiodev=snd1"
+	fi
+	export QEMU_EXTRA
 	ROOT_SLACK_MIB=$slack
 	export ROOT_SLACK_MIB
 	tunix_image "$dir/tunix.img" "$dir/root"
 	MEMORY=$memory
 	export MEMORY
 	tunix_boot "$dir/tunix.img" "$dir/serial.log" "$wait"
+	if [ "$name" = sound ] && ! testsuites/kernel-tests/wavcheck.sh "$dir/out.wav" 90000 >>"$dir/serial.log"; then
+		echo "sound: FAIL  the reference tone did not reach the audio device intact" >>"$dir/serial.log"
+		sed -i "s/^sound: PASS/sound: FAIL/" "$dir/serial.log"
+	fi
 	if grep -a "^$name: " "$dir/serial.log" | tee "$dir/result" | grep -q "^$name: PASS"; then
 		grep -a "^$name: PASS" "$dir/result"
 	else
