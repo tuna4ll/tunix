@@ -68,6 +68,20 @@ typedef void (*vfs_close_fn)(struct vfs_node *);
 typedef int64_t (*vfs_mmap_fn)(struct vfs_node *, struct file *, uint64_t, uint64_t, uint64_t,
                                uint64_t, uint64_t);
 
+#define VFS_POLL_IN  0x001U
+#define VFS_POLL_OUT 0x004U
+#define VFS_POLL_ERR 0x008U
+#define VFS_POLL_HUP 0x010U
+
+struct vfs_file_ops {
+    int (*open)(struct file *file);
+    void (*release)(struct file *file);
+    int64_t (*read)(struct file *file, size_t size, void *buffer);
+    int64_t (*write)(struct file *file, size_t size, const void *buffer);
+    uint32_t (*poll)(struct file *file);
+    int64_t (*ioctl)(struct file *file, unsigned long request, uint64_t argument);
+};
+
 struct vfs_page_map {
     uint64_t count;
     uint8_t **page;
@@ -106,6 +120,7 @@ struct vfs_node {
     int (*adopt)(struct vfs_node *directory, struct vfs_node *child);
     vfs_ioctl_fn ioctl;
     vfs_file_ioctl_fn file_ioctl;
+    const struct vfs_file_ops *file_ops;
     vfs_mmap_fn mmap;
     vfs_ready_fn read_ready;
     vfs_ready_fn write_ready;

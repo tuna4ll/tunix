@@ -71,6 +71,7 @@ struct file {
     uint32_t edge_generation;
     uint32_t notify_seen;
     uint32_t pipe_writers_seen;
+    void *private_data;
 };
 
 static inline uint64_t file_lock_owner(const struct file *file) {
@@ -93,6 +94,7 @@ static inline int file_pipe_writes(const struct file *file) {
 int64_t file_pread(struct file *file, uint64_t offset, size_t size, void *buffer);
 int64_t file_pwrite(struct file *file, uint64_t offset, size_t size, const void *buffer);
 struct file *file_open_node(struct vfs_node *node, uint32_t flags);
+struct file *file_open_node_status(struct vfs_node *node, uint32_t flags, int *status);
 struct file *file_create_pipe_end(struct pipe_buffer *pipe, int write_end);
 struct file *file_create_socket(struct unix_socket *socket);
 struct file *file_create_inet_socket(struct inet_socket *socket);

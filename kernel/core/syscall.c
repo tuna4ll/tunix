@@ -1509,7 +1509,9 @@ static int64_t open_at(int dirfd, uint64_t user_path, uint64_t flags, uint64_t m
     } else if (strncmp(path, "/dev/pts/", 9) == 0) {
         file = pty_open_slave(node, status_flags);
     } else {
-        file = file_open_node(node, status_flags);
+        int opened = 0;
+        file = file_open_node_status(node, status_flags, &opened);
+        if (!file && opened < 0 && opened != -ENOMEM) return opened;
     }
     if (!file) {
         if (strcmp(path, "/dev/tty") == 0) return -ENXIO;
@@ -3047,6 +3049,9 @@ static int64_t sys_ioctl(int fd, unsigned long request, uint64_t user_argument) 
         if (status < 0) return status;
         return copy_to_user(user_argument, argument, argument_size) == 0 ? 0 : -EFAULT;
     }
+    if (file->kind == FILE_KIND_VFS && file->node && file->node->file_ops &&
+        file->node->file_ops->ioctl)
+        return file->node->file_ops->ioctl(file, request, user_argument);
     uint32_t node_kind = file->node ? file->node->flags & 0xFFU : 0;
     if (file->kind != FILE_KIND_VFS ||
         (node_kind != VFS_CHARDEVICE && node_kind != VFS_BLOCKDEVICE))

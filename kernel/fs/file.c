@@ -35,6 +35,11 @@ extern int process_pidfd_exited(uint64_t pid, uint64_t start_ns);
 #define O_APPEND    02000
 
 struct file *file_open_node(struct vfs_node *node, uint32_t flags) {
+    return file_open_node_status(node, flags, NULL);
+}
+
+struct file *file_open_node_status(struct vfs_node *node, uint32_t flags, int *status) {
+    if (status) *status = -ENOMEM;
     if (!node) return NULL;
     struct file *file = (struct file *)kmalloc(sizeof(*file));
     if (!file) return NULL;
@@ -93,9 +98,18 @@ struct file *file_open_node(struct vfs_node *node, uint32_t flags) {
             return NULL;
         }
         file->kind = FILE_KIND_INPUT;
+    } else if (node->file_ops && node->file_ops->open) {
+        int opened = node->file_ops->open(file);
+        if (opened < 0) {
+            if (status) *status = opened;
+            vfs_node_unref(node);
+            kfree(file);
+            return NULL;
+        }
     } else if (node->open) {
         node->open(node);
     }
+    if (status) *status = 0;
     return file;
 }
 
@@ -313,6 +327,9 @@ void file_unref(struct file *file) {
 
     if (file->kind == FILE_KIND_VFS && file->node && file->node->file_ioctl == drm_file_ioctl)
         drm_file_close(file);
+    if (file->kind == FILE_KIND_VFS && file->node && file->node->file_ops &&
+        file->node->file_ops->release)
+        file->node->file_ops->release(file);
     if (file->kind == FILE_KIND_VFS && file->node && file->node->close)
         file->node->close(file->node);
     if (file->kind == FILE_KIND_INPUT && file->input_reader) input_reader_close(file->input_reader);
@@ -365,6 +382,8 @@ int64_t file_pwrite(struct file *file, uint64_t offset, size_t size, const void 
     if (!file || !buffer) return -EBADF;
     if (file->kind == FILE_KIND_MEMFD) return memfd_write(file->memfd, offset, size, buffer);
     if (file->kind != FILE_KIND_VFS || !file->node) return -EBADF;
+    if (file->node->file_ops && file->node->file_ops->write)
+        return file->node->file_ops->write(file, size, buffer);
     if (vfs_node_is_swapfile(file->node)) return -ETXTBSY;
     return vfs_write(file->node, offset, size, buffer);
 }
@@ -396,6 +415,9 @@ static int64_t file_read_locked(struct file *file, size_t size, void *buffer) {
     if (file->kind == FILE_KIND_EVENTFS) return eventfs_read(file->eventfs, size, buffer);
     if (file->kind == FILE_KIND_VFS && file->node && file->node->file_ioctl == drm_file_ioctl)
         return drm_file_read(file, size, buffer);
+    if (file->kind == FILE_KIND_VFS && file->node && file->node->file_ops &&
+        file->node->file_ops->read)
+        return file->node->file_ops->read(file, size, buffer);
 
     if (file->kind == FILE_KIND_MEMFD) {
         int64_t moved = memfd_read(file->memfd, file->offset, size, buffer);
@@ -515,12 +537,16 @@ uint32_t file_poll_events_nested(struct file *file, uint32_t requested, unsigned
     } else if (file->kind == FILE_KIND_VFS && file->node) {
         if (__atomic_load_n(&file->node->notify_generation, __ATOMIC_ACQUIRE) != file->notify_seen)
             events |= pollerr | 0x002U;
-        if (file->node->file_ioctl == drm_file_ioctl) {
-            if (drm_file_read_ready(file)) events |= pollin;
-        } else if (file->node->read_ready ? file->node->read_ready(file->node)
-                                          : ((file->node->flags & 0xFFU) != VFS_CHARDEVICE))
-            events |= pollin;
-        if (!file->node->write_ready || file->node->write_ready(file->node)) events |= pollout;
+        if (file->node->file_ops && file->node->file_ops->poll) {
+            events |= file->node->file_ops->poll(file);
+        } else {
+            if (file->node->file_ioctl == drm_file_ioctl) {
+                if (drm_file_read_ready(file)) events |= pollin;
+            } else if (file->node->read_ready ? file->node->read_ready(file->node)
+                                              : ((file->node->flags & 0xFFU) != VFS_CHARDEVICE))
+                events |= pollin;
+            if (!file->node->write_ready || file->node->write_ready(file->node)) events |= pollout;
+        }
     } else {
         events |= pollerr;
     }
