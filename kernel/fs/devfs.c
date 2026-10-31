@@ -289,38 +289,53 @@ void devfs_add_block(int index) {
     disk->dev_minor = device->minor;
 }
 
-void devfs_publish_sound(void) {
+static void sound_node_name(char *out, const char *prefix, unsigned card, const char *suffix) {
+    size_t at = 0;
+    for (; prefix[at]; at++) out[at] = prefix[at];
+    if (card >= 10U) out[at++] = (char)('0' + card / 10U);
+    out[at++] = (char)('0' + card % 10U);
+    for (size_t index = 0; suffix[index]; index++) out[at++] = suffix[index];
+    out[at] = '\0';
+}
+
+static void publish_sound_node(struct vfs_node *snd, const char *name, uint32_t minor, int pcm) {
+    if (vfs_find_entry(snd, name)) return;
+    struct vfs_node *node = attach_device(snd, name, VFS_CHARDEVICE, 0660, NULL, NULL, NULL);
+    if (!node) return;
+    node->dev_major = DEV_MAJOR_SOUND;
+    node->dev_minor = minor;
+    node->gid = DEV_GROUP_AUDIO;
+    node->file_ops = pcm ? sound_pcm_file_ops() : sound_control_file_ops();
+    if (pcm) node->mmap = sound_pcm_mmap;
+}
+
+void devfs_publish_sound(unsigned card, int playback, int capture) {
     struct vfs_node *snd = vfs_mkdir_p("/dev/snd");
     if (!snd) return;
-
-    struct vfs_node *control =
-        attach_device(snd, "controlC0", VFS_CHARDEVICE, 0660, NULL, NULL, NULL);
-    if (control) {
-        control->dev_major = DEV_MAJOR_SOUND;
-        control->dev_minor = DEV_MINOR_SOUND_CONTROL;
-        control->ioctl = sound_control_ioctl;
-        control->gid = DEV_GROUP_AUDIO;
-    }
-
-    struct vfs_node *playback =
-        attach_device(snd, "pcmC0D0p", VFS_CHARDEVICE, 0660, NULL, sound_pcm_write, NULL);
+    char name[24];
+    sound_node_name(name, "controlC", card, "");
+    publish_sound_node(snd, name, card * 32U, 0);
     if (playback) {
-        playback->dev_major = DEV_MAJOR_SOUND;
-        playback->dev_minor = DEV_MINOR_SOUND_PCM_PLAYBACK;
-        playback->ioctl = sound_pcm_ioctl;
-        playback->mmap = sound_pcm_mmap;
-        playback->write_ready = sound_pcm_write_ready;
-        playback->open = sound_pcm_open;
-        playback->close = sound_pcm_close;
-        playback->gid = DEV_GROUP_AUDIO;
+        sound_node_name(name, "pcmC", card, "D0p");
+        publish_sound_node(snd, name, card * 32U + 16U, 1);
+    }
+    if (capture) {
+        sound_node_name(name, "pcmC", card, "D0c");
+        publish_sound_node(snd, name, card * 32U + 24U, 1);
     }
 }
 
-void devfs_remove_sound(void) {
+void devfs_remove_sound(unsigned card) {
     struct vfs_node *snd = vfs_lookup("/dev/snd");
     if (!snd) return;
-    while (snd->children) (void)vfs_detach_child(snd, snd->children);
-    if (snd->parent) (void)vfs_detach_child(snd->parent, snd);
+    static const char *const suffixes[] = {"", "D0p", "D0c"};
+    for (unsigned index = 0; index < 3U; index++) {
+        char name[24];
+        sound_node_name(name, index ? "pcmC" : "controlC", card, suffixes[index]);
+        struct vfs_node *node = vfs_find_entry(snd, name);
+        if (node) (void)vfs_detach_child(snd, node);
+    }
+    if (!snd->children && snd->parent) (void)vfs_detach_child(snd->parent, snd);
 }
 
 void devfs_init(void) {

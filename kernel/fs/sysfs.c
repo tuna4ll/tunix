@@ -928,20 +928,42 @@ static void announce(const char *name) {
     }
 }
 
-void sysfs_publish_sound(void) {
-    VFS_GUARD;
-    publish_device("controlC0", "snd/controlC0", "sound", NULL, DEV_MAJOR_SOUND,
-                   DEV_MINOR_SOUND_CONTROL);
-    publish_device("pcmC0D0p", "snd/pcmC0D0p", "sound", NULL, DEV_MAJOR_SOUND,
-                   DEV_MINOR_SOUND_PCM_PLAYBACK);
-    announce("controlC0");
-    announce("pcmC0D0p");
+static void sound_device_name(char *out, size_t capacity, const char *prefix, unsigned card,
+                              const char *suffix) {
+    size_t used = 0;
+    append_string(out, capacity, &used, prefix);
+    append_number(out, capacity, &used, card);
+    append_string(out, capacity, &used, suffix);
+    out[used] = '\0';
 }
 
-void sysfs_remove_sound(void) {
+void sysfs_publish_sound(unsigned card, int playback, int capture) {
     VFS_GUARD;
-    remove_published("controlC0");
-    remove_published("pcmC0D0p");
+    static const char *const prefixes[] = {"controlC", "pcmC", "pcmC"};
+    static const char *const suffixes[] = {"", "D0p", "D0c"};
+    const uint32_t minors[] = {card * 32U, card * 32U + 16U, card * 32U + 24U};
+    const int present[] = {1, playback, capture};
+    for (unsigned index = 0; index < 3U; index++) {
+        if (!present[index]) continue;
+        char name[24];
+        char devname[32];
+        sound_device_name(name, sizeof(name), prefixes[index], card, suffixes[index]);
+        sound_device_name(devname, sizeof(devname), index ? "snd/pcmC" : "snd/controlC", card,
+                          suffixes[index]);
+        publish_device(name, devname, "sound", NULL, DEV_MAJOR_SOUND, minors[index]);
+        announce(name);
+    }
+}
+
+void sysfs_remove_sound(unsigned card) {
+    VFS_GUARD;
+    static const char *const prefixes[] = {"controlC", "pcmC", "pcmC"};
+    static const char *const suffixes[] = {"", "D0p", "D0c"};
+    for (unsigned index = 0; index < 3U; index++) {
+        char name[24];
+        sound_device_name(name, sizeof(name), prefixes[index], card, suffixes[index]);
+        remove_published(name);
+    }
 }
 
 static void publish_input_parent(const char *name, const char *label) {

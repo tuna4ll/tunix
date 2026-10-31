@@ -36,6 +36,10 @@ struct snd_timespec {
 #define SNDRV_PCM_FORMAT_S16_LE 2
 #define SNDRV_PCM_FORMAT_S32_LE 10
 
+#define SNDRV_PCM_TSTAMP_TYPE_GETTIMEOFDAY  0
+#define SNDRV_PCM_TSTAMP_TYPE_MONOTONIC     1
+#define SNDRV_PCM_TSTAMP_TYPE_MONOTONIC_RAW 2
+
 #define SNDRV_PCM_SUBFORMAT_STD 0
 
 #define SNDRV_PCM_STATE_OPEN         0
@@ -61,6 +65,7 @@ struct snd_timespec {
 #define SNDRV_PCM_INFO_JOINT_DUPLEX     0x00200000U
 #define SNDRV_PCM_INFO_SYNC_START       0x00400000U
 #define SNDRV_PCM_INFO_NO_PERIOD_WAKEUP 0x00800000U
+#define SNDRV_PCM_INFO_HAS_WALL_CLOCK   0x01000000U
 
 #define SNDRV_PCM_HW_PARAM_ACCESS         0
 #define SNDRV_PCM_HW_PARAM_FORMAT         1
@@ -274,12 +279,22 @@ struct snd_ctl_card_info {
 #define SNDRV_CTL_ELEM_IFACE_MIXER 2
 #define SNDRV_CTL_ELEM_IFACE_PCM   3
 
-#define SNDRV_CTL_ELEM_TYPE_BOOLEAN 1
-#define SNDRV_CTL_ELEM_TYPE_INTEGER 2
+#define SNDRV_CTL_ELEM_TYPE_BOOLEAN    1
+#define SNDRV_CTL_ELEM_TYPE_INTEGER    2
+#define SNDRV_CTL_ELEM_TYPE_ENUMERATED 3
 
 #define SNDRV_CTL_ELEM_ACCESS_READ      0x0001U
 #define SNDRV_CTL_ELEM_ACCESS_WRITE     0x0002U
 #define SNDRV_CTL_ELEM_ACCESS_READWRITE 0x0003U
+#define SNDRV_CTL_ELEM_ACCESS_VOLATILE  0x0004U
+#define SNDRV_CTL_ELEM_ACCESS_TLV_READ  0x0010U
+
+#define SNDRV_CTL_TLVT_DB_SCALE      1
+#define SNDRV_CTL_TLVD_DB_SCALE_MUTE 0x10000U
+
+#define SNDRV_CTL_EVENT_ELEM       0
+#define SNDRV_CTL_EVENT_MASK_VALUE 0x1U
+#define SNDRV_CTL_EVENT_MASK_INFO  0x2U
 
 struct snd_ctl_elem_id {
     unsigned int numid;
@@ -311,6 +326,13 @@ struct snd_ctl_elem_info {
             long max;
             long step;
         } integer;
+        struct {
+            unsigned int items;
+            unsigned int item;
+            char name[64];
+            uint64_t names_ptr;
+            unsigned int names_length;
+        } enumerated;
         unsigned char reserved[128];
     } value;
     unsigned short dimen[4];
@@ -322,6 +344,7 @@ struct snd_ctl_elem_value {
     unsigned int indirect;
     union {
         long integer_value[128];
+        unsigned int enumerated_item[128];
         unsigned char reserved[1024];
     } value;
     struct snd_timespec tstamp;
@@ -334,10 +357,33 @@ struct snd_ctl_elem_value {
 #define SNDRV_CTL_IOCTL_NR_ELEM_INFO            0x11
 #define SNDRV_CTL_IOCTL_NR_ELEM_READ            0x12
 #define SNDRV_CTL_IOCTL_NR_ELEM_WRITE           0x13
+#define SNDRV_CTL_IOCTL_NR_ELEM_LOCK            0x14
+#define SNDRV_CTL_IOCTL_NR_ELEM_UNLOCK          0x15
 #define SNDRV_CTL_IOCTL_NR_SUBSCRIBE_EVENTS     0x16
+#define SNDRV_CTL_IOCTL_NR_TLV_READ             0x1A
+#define SNDRV_CTL_IOCTL_NR_HWDEP_NEXT_DEVICE    0x20
 #define SNDRV_CTL_IOCTL_NR_PCM_NEXT_DEVICE      0x30
 #define SNDRV_CTL_IOCTL_NR_PCM_INFO             0x31
 #define SNDRV_CTL_IOCTL_NR_PCM_PREFER_SUBDEVICE 0x32
+#define SNDRV_CTL_IOCTL_NR_RAWMIDI_NEXT_DEVICE  0x40
+#define SNDRV_CTL_IOCTL_NR_UMP_NEXT_DEVICE      0x43
+#define SNDRV_CTL_IOCTL_NR_POWER                0xD0
 #define SNDRV_CTL_IOCTL_NR_POWER_STATE          0xD1
+
+struct snd_ctl_event {
+    int type;
+    union {
+        struct {
+            unsigned int mask;
+            struct snd_ctl_elem_id id;
+        } elem;
+        unsigned char data8[60];
+    } data;
+};
+
+struct snd_ctl_tlv {
+    unsigned int numid;
+    unsigned int length;
+};
 
 #endif

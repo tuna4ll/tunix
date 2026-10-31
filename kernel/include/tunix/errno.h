@@ -51,6 +51,7 @@
 #define EOVERFLOW       75
 #define EBADFD          77
 #define EILSEQ          84
+#define ESTRPIPE        86
 #define EUSERS          87
 #define ENOTSOCK        88
 #define EDESTADDRREQ    89

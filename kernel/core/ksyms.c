@@ -4,6 +4,7 @@
 #include <tunix/heap.h>
 #include <tunix/irq.h>
 #include <tunix/kstring.h>
+#include <tunix/lock.h>
 #include <tunix/module.h>
 #if defined(__x86_64__)
 #include <tunix/apic.h>
@@ -75,6 +76,11 @@ const struct module_export kernel_symbols[] = {
     EXPORT(pci_device_driver),
     EXPORT(snd_register_card),
     EXPORT(snd_unregister_card),
+    EXPORT(snd_pcm_period_elapsed),
+    EXPORT(snd_ctl_notify),
+    EXPORT(lock_init),
+    EXPORT(lock_acquire),
+    EXPORT(lock_release),
 #if defined(__x86_64__)
     EXPORT(apic_route_global),
 #endif

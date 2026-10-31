@@ -23,6 +23,7 @@
 #include <tunix/smp.h>
 #include <tunix/syscall_abi.h>
 #include <tunix/time.h>
+#include <tunix/sound.h>
 #include <tunix/vfs.h>
 #include <tunix/vmm.h>
 #include <tunix/errno.h>
@@ -1370,6 +1371,104 @@ static void proc_root_refresh(struct vfs_node *directory) {
     point_at_caller(thread_self_link, process_current_tid());
 }
 
+#define ASOUND_TEXT 2048U
+
+static int64_t asound_reply(const char *text, size_t length, uint64_t offset, size_t size,
+                            void *output) {
+    if (length >= ASOUND_TEXT) length = ASOUND_TEXT - 1U;
+    if (!output || offset >= length) return 0;
+    size_t available = length - (size_t)offset;
+    if (size > available) size = available;
+    memcpy(output, text + offset, size);
+    return (int64_t)size;
+}
+
+static int64_t proc_asound_global_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                       void *output) {
+    char *text = kmalloc(ASOUND_TEXT);
+    if (!text) return -ENOMEM;
+    size_t length = 0;
+    switch ((uintptr_t)node->data) {
+    case 0:  length = sound_proc_cards(text, ASOUND_TEXT); break;
+    case 1:  length = sound_proc_devices(text, ASOUND_TEXT); break;
+    case 2:  length = sound_proc_pcm(text, ASOUND_TEXT); break;
+    default: {
+        static const char version[] = "Advanced Linux Sound Architecture Driver Version k6.6.0.\n";
+        length = sizeof(version) - 1U;
+        memcpy(text, version, length);
+        break;
+    }
+    }
+    int64_t result = asound_reply(text, length, offset, size, output);
+    kfree(text);
+    return result;
+}
+
+static const char *const asound_card_files[] = {"id",
+                                                "pcm0p/info",
+                                                "pcm0p/sub0/status",
+                                                "pcm0p/sub0/hw_params",
+                                                "pcm0p/sub0/sw_params",
+                                                "pcm0c/info",
+                                                "pcm0c/sub0/status",
+                                                "pcm0c/sub0/hw_params",
+                                                "pcm0c/sub0/sw_params"};
+
+static int64_t proc_asound_card_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                     void *output) {
+    uintptr_t which = (uintptr_t)node->data;
+    unsigned card = (unsigned)(which >> 8);
+    unsigned file = (unsigned)(which & 0xFFU);
+    if (file >= sizeof(asound_card_files) / sizeof(asound_card_files[0])) return 0;
+    char *text = kmalloc(ASOUND_TEXT);
+    if (!text) return -ENOMEM;
+    size_t length = sound_proc_card_file(card, asound_card_files[file], text, ASOUND_TEXT);
+    int64_t result = asound_reply(text, length, offset, size, output);
+    kfree(text);
+    return result;
+}
+
+static void asound_stream_dir(struct vfs_node *card_dir, unsigned card, int capture) {
+    struct vfs_node *pcm = vfs_alloc_node(capture ? "pcm0c" : "pcm0p", VFS_DIRECTORY);
+    if (!pcm) return;
+    pcm->mode = 0555;
+    if (vfs_attach(card_dir, pcm) != 0) return;
+    unsigned base = capture ? 5U : 1U;
+    virtual_file(pcm, "info", proc_asound_card_read, ((uint64_t)card << 8) | base);
+    struct vfs_node *sub = vfs_alloc_node("sub0", VFS_DIRECTORY);
+    if (!sub) return;
+    sub->mode = 0555;
+    if (vfs_attach(pcm, sub) != 0) return;
+    virtual_file(sub, "status", proc_asound_card_read, ((uint64_t)card << 8) | (base + 1U));
+    virtual_file(sub, "hw_params", proc_asound_card_read, ((uint64_t)card << 8) | (base + 2U));
+    virtual_file(sub, "sw_params", proc_asound_card_read, ((uint64_t)card << 8) | (base + 3U));
+}
+
+static int asound_refreshing;
+
+static void proc_asound_refresh(struct vfs_node *directory) {
+    if (asound_refreshing) return;
+    asound_refreshing = 1;
+    for (unsigned card = 0; card < SND_MAX_CARDS; card++) {
+        char name[8] = "card0";
+        name[4] = (char)('0' + card);
+        int playback = 0;
+        int capture = 0;
+        int present = sound_card_info(card, &playback, &capture);
+        struct vfs_node *existing = vfs_find_child(directory, name);
+        if (existing && !present) (void)vfs_detach_child(directory, existing);
+        if (existing || !present) continue;
+        struct vfs_node *card_dir = vfs_alloc_node(name, VFS_DIRECTORY);
+        if (!card_dir) continue;
+        card_dir->mode = 0555;
+        if (vfs_attach(directory, card_dir) != 0) continue;
+        virtual_file(card_dir, "id", proc_asound_card_read, (uint64_t)card << 8);
+        if (playback) asound_stream_dir(card_dir, card, 0);
+        if (capture) asound_stream_dir(card_dir, card, 1);
+    }
+    asound_refreshing = 0;
+}
+
 void procfs_init(void) {
     struct vfs_node *root = vfs_mkdir_p("/proc");
     if (!root) return;
@@ -1401,6 +1500,15 @@ void procfs_init(void) {
     virtual_file(root, "loadavg", proc_loadavg_read, 0);
     virtual_file(root, "cmdline", proc_cmdline_line_read, 0);
     virtual_file(root, "interrupts", proc_interrupts_read, 0);
+    struct vfs_node *asound = vfs_mkdir_p("/proc/asound");
+    if (asound) {
+        asound->mode = 0555;
+        asound->refresh = proc_asound_refresh;
+        virtual_file(asound, "cards", proc_asound_global_read, 0);
+        virtual_file(asound, "devices", proc_asound_global_read, 1);
+        virtual_file(asound, "pcm", proc_asound_global_read, 2);
+        virtual_file(asound, "version", proc_asound_global_read, 3);
+    }
 
     struct vfs_node *kernel = vfs_mkdir_p("/proc/sys/kernel");
     if (kernel) {
