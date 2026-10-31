@@ -22,6 +22,7 @@ static int next_pending_signal(struct process *process);
 #include <tunix/posix_lock.h>
 #include <tunix/posix_timer.h>
 #include <tunix/process.h>
+#include <tunix/sysvsem.h>
 #include <tunix/workqueue.h>
 #include <tunix/process_arch.h>
 #include <tunix/procfs.h>
@@ -3043,6 +3044,7 @@ void process_exit_from_syscall(struct syscall_frame *frame, int status) {
         vt_process_exited(exiting->pid, exiting->sid == exiting->pid ? exiting->sid : 0);
         pty_process_exited(exiting);
         posix_timers_release(exiting->tgid);
+        sysvsem_exit((int64_t)exiting->tgid);
     }
 
     SCHED_LOCKED;

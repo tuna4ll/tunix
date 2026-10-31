@@ -13,6 +13,7 @@
 #include <tunix/module.h>
 #include <tunix/signalfd.h>
 #include <tunix/sysvshm.h>
+#include <tunix/sysvsem.h>
 #include <tunix/framebuffer.h>
 #include <tunix/input.h>
 #include <tunix/heap.h>
@@ -102,6 +103,10 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136,
 #define SYS_SHMAT                  30
 #define SYS_SHMCTL                 31
 #define SYS_SHMDT                  67
+#define SYS_SEMGET                 64
+#define SYS_SEMOP                  65
+#define SYS_SEMCTL                 66
+#define SYS_SEMTIMEDOP             220
 #define SYS_FADVISE64              221
 #define SYS_RT_SIGACTION           13
 #define SYS_RT_SIGPROCMASK         14
@@ -6301,6 +6306,28 @@ static void syscall_run(struct syscall_frame *frame) {
     case SYS_SHMCTL:
         SYSCALL_RET(frame) = (uint64_t)sys_shmctl((int)SYSCALL_ARG0(frame),
                                                   (int)SYSCALL_ARG1(frame), SYSCALL_ARG2(frame));
+        break;
+    case SYS_SEMGET:
+        SYSCALL_RET(frame) = (uint64_t)(int64_t)sysvsem_get(
+            (int32_t)SYSCALL_ARG0(frame), (int)SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame));
+        break;
+    case SYS_SEMOP:
+    case SYS_SEMTIMEDOP: {
+        int64_t timeout = -1;
+        if (syscall_number == SYS_SEMTIMEDOP)
+            timeout = read_timespec_timeout_ns(SYSCALL_ARG3(frame));
+        if (timeout < -1) {
+            SYSCALL_RET(frame) = (uint64_t)timeout;
+            break;
+        }
+        SYSCALL_RET(frame) = (uint64_t)sysvsem_op((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame),
+                                                  (unsigned)SYSCALL_ARG2(frame), timeout);
+        break;
+    }
+    case SYS_SEMCTL:
+        SYSCALL_RET(frame) =
+            (uint64_t)sysvsem_ctl((int)SYSCALL_ARG0(frame), (int)SYSCALL_ARG1(frame),
+                                  (int)SYSCALL_ARG2(frame), SYSCALL_ARG3(frame));
         break;
     case SYS_BRK: SYSCALL_RET(frame) = (uint64_t)memory_call_brk(SYSCALL_ARG0(frame)); break;
     case SYS_RT_SIGACTION:
