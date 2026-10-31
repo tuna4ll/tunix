@@ -955,6 +955,12 @@ void sysfs_publish_sound(unsigned card, int playback, int capture) {
     }
 }
 
+void sysfs_publish_sound_timer(void) {
+    VFS_GUARD;
+    publish_device("timer", "snd/timer", "sound", NULL, DEV_MAJOR_SOUND, 33);
+    announce("timer");
+}
+
 void sysfs_remove_sound(unsigned card) {
     VFS_GUARD;
     static const char *const prefixes[] = {"controlC", "pcmC", "pcmC"};

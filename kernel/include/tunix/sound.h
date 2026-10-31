@@ -107,6 +107,7 @@ int sound_card_available(void);
 
 const struct vfs_file_ops *sound_control_file_ops(void);
 const struct vfs_file_ops *sound_pcm_file_ops(void);
+const struct vfs_file_ops *sound_timer_file_ops(void);
 int64_t sound_pcm_mmap(struct vfs_node *node, struct file *file, uint64_t cr3,
                        uint64_t virtual_address, uint64_t length, uint64_t offset,
                        uint64_t page_flags);

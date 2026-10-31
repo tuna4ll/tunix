@@ -17,6 +17,7 @@ void sysfs_pci_driver_added(const char *driver);
 void sysfs_pci_driver_removed(const char *driver);
 void sysfs_publish_sound(unsigned card, int playback, int capture);
 void sysfs_remove_sound(unsigned card);
+void sysfs_publish_sound_timer(void);
 
 typedef int (*thermal_zone_reader)(unsigned index, int32_t *millicelsius);
 void sysfs_publish_thermal_zone(unsigned index, const char *type, thermal_zone_reader reader);

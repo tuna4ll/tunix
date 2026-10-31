@@ -325,6 +325,17 @@ void devfs_publish_sound(unsigned card, int playback, int capture) {
     }
 }
 
+void devfs_publish_sound_timer(void) {
+    struct vfs_node *snd = vfs_mkdir_p("/dev/snd");
+    if (!snd || vfs_find_entry(snd, "timer")) return;
+    struct vfs_node *node = attach_device(snd, "timer", VFS_CHARDEVICE, 0660, NULL, NULL, NULL);
+    if (!node) return;
+    node->dev_major = DEV_MAJOR_SOUND;
+    node->dev_minor = 33;
+    node->gid = DEV_GROUP_AUDIO;
+    node->file_ops = sound_timer_file_ops();
+}
+
 void devfs_remove_sound(unsigned card) {
     struct vfs_node *snd = vfs_lookup("/dev/snd");
     if (!snd) return;
@@ -335,7 +346,6 @@ void devfs_remove_sound(unsigned card) {
         struct vfs_node *node = vfs_find_entry(snd, name);
         if (node) (void)vfs_detach_child(snd, node);
     }
-    if (!snd->children && snd->parent) (void)vfs_detach_child(snd->parent, snd);
 }
 
 void devfs_init(void) {

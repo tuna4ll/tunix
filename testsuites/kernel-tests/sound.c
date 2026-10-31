@@ -213,27 +213,68 @@ _Static_assert(sizeof(struct elem_info) == 272, "elem_info");
 _Static_assert(sizeof(struct elem_value) == 1224, "elem_value");
 _Static_assert(sizeof(struct ctl_event) == 72, "ctl_event");
 
-#define PCM_HW_REFINE  IOWR('A', 0x10, sizeof(struct hw_params))
-#define PCM_HW_PARAMS  IOWR('A', 0x11, sizeof(struct hw_params))
-#define PCM_SW_PARAMS  IOWR('A', 0x13, sizeof(struct sw_params))
-#define PCM_STATUS     IOR('A', 0x20, sizeof(struct pcm_status))
-#define PCM_SYNC_PTR   IOWR('A', 0x23, sizeof(struct sync_ptr))
-#define PCM_PREPARE    IOC(0U, 'A', 0x40, 0)
-#define PCM_START      IOC(0U, 'A', 0x42, 0)
-#define PCM_DROP       IOC(0U, 'A', 0x43, 0)
-#define PCM_DRAIN      IOC(0U, 'A', 0x44, 0)
-#define PCM_PAUSE      IOW('A', 0x45, sizeof(int))
-#define PCM_REWIND     IOW('A', 0x46, sizeof(u64))
-#define PCM_FORWARD    IOW('A', 0x49, sizeof(u64))
-#define PCM_WRITEI     IOW('A', 0x50, sizeof(struct xferi))
-#define PCM_READI      IOR('A', 0x51, sizeof(struct xferi))
-#define CTL_CARD_INFO  IOR('U', 0x01, sizeof(struct card_info))
-#define CTL_ELEM_LIST  IOWR('U', 0x10, sizeof(struct elem_list))
-#define CTL_ELEM_INFO  IOWR('U', 0x11, sizeof(struct elem_info))
-#define CTL_ELEM_READ  IOWR('U', 0x12, sizeof(struct elem_value))
-#define CTL_ELEM_WRITE IOWR('U', 0x13, sizeof(struct elem_value))
-#define CTL_SUBSCRIBE  IOWR('U', 0x16, sizeof(int))
-#define CTL_TLV_READ   IOWR('U', 0x1a, 8)
+#define PCM_HW_REFINE   IOWR('A', 0x10, sizeof(struct hw_params))
+#define PCM_HW_PARAMS   IOWR('A', 0x11, sizeof(struct hw_params))
+#define PCM_SW_PARAMS   IOWR('A', 0x13, sizeof(struct sw_params))
+#define PCM_STATUS      IOR('A', 0x20, sizeof(struct pcm_status))
+#define PCM_SYNC_PTR    IOWR('A', 0x23, sizeof(struct sync_ptr))
+#define PCM_PREPARE     IOC(0U, 'A', 0x40, 0)
+#define PCM_START       IOC(0U, 'A', 0x42, 0)
+#define PCM_DROP        IOC(0U, 'A', 0x43, 0)
+#define PCM_DRAIN       IOC(0U, 'A', 0x44, 0)
+#define PCM_PAUSE       IOW('A', 0x45, sizeof(int))
+#define PCM_REWIND      IOW('A', 0x46, sizeof(u64))
+#define PCM_FORWARD     IOW('A', 0x49, sizeof(u64))
+#define PCM_WRITEI      IOW('A', 0x50, sizeof(struct xferi))
+#define PCM_READI       IOR('A', 0x51, sizeof(struct xferi))
+#define CTL_CARD_INFO   IOR('U', 0x01, sizeof(struct card_info))
+#define CTL_ELEM_LIST   IOWR('U', 0x10, sizeof(struct elem_list))
+#define CTL_ELEM_INFO   IOWR('U', 0x11, sizeof(struct elem_info))
+#define CTL_ELEM_READ   IOWR('U', 0x12, sizeof(struct elem_value))
+#define CTL_ELEM_WRITE  IOWR('U', 0x13, sizeof(struct elem_value))
+#define CTL_SUBSCRIBE   IOWR('U', 0x16, sizeof(int))
+#define CTL_TLV_READ    IOWR('U', 0x1a, 8)
+#define CTL_TLV_WRITE   IOWR('U', 0x1b, 8)
+#define CTL_ELEM_ADD    IOWR('U', 0x17, sizeof(struct elem_info))
+#define CTL_ELEM_REMOVE IOWR('U', 0x19, sizeof(struct elem_id))
+
+struct timer_id {
+    int dev_class;
+    int dev_sclass;
+    int card;
+    int device;
+    int subdevice;
+};
+
+struct timer_select {
+    struct timer_id id;
+    u8 reserved[32];
+};
+
+struct timer_params {
+    u32 flags;
+    u32 ticks;
+    u32 queue_size;
+    u32 reserved0;
+    u32 filter;
+    u8 reserved[60];
+};
+
+struct timer_tread {
+    int event;
+    int pad1;
+    s64 sec;
+    s64 nsec;
+    u32 value;
+    int pad2;
+};
+
+#define TIMER_PVERSION IOR('T', 0x00, sizeof(int))
+#define TIMER_TREAD    IOW('T', 0x02, sizeof(int))
+#define TIMER_SELECT   IOW('T', 0x10, sizeof(struct timer_select))
+#define TIMER_PARAMS   IOW('T', 0x12, sizeof(struct timer_params))
+#define TIMER_START    IOC(0U, 'T', 0xa0, 0)
+#define TIMER_STOP     IOC(0U, 'T', 0xa1, 0)
 
 #define STATE_SETUP    1
 #define STATE_PREPARED 2
@@ -439,6 +480,51 @@ static void controls(void) {
     value.value.integer[0] = old;
     value.value.integer[1] = old;
     expect_eq(ioctl((int)fd, CTL_ELEM_WRITE, &value), 0, "the volume is restored");
+    while (ppoll1((int)fd, POLLIN, 50) > 0) read((int)fd, &event, sizeof(event));
+
+    for (u64 at = 0; at < sizeof(info); at++) ((u8 *)&info)[at] = 0;
+    info.id.iface = 2;
+    const char *label = "Test Playback Volume";
+    for (u64 at = 0; label[at]; at++) info.id.name[at] = (u8)label[at];
+    info.type = 2;
+    info.count = 2;
+    info.access = 3;
+    info.value.integer.min = 0;
+    info.value.integer.max = 255;
+    info.value.integer.step = 1;
+    expect_eq(ioctl((int)fd, CTL_ELEM_ADD, &info), 0, "a user control is added");
+    u32 user_numid = info.id.numid;
+    expect(user_numid > volume.numid, "and gets its own number");
+    expect((ppoll1((int)fd, POLLIN, 500) & POLLIN) != 0, "the addition raises an event");
+    expect_eq(read((int)fd, &event, sizeof(event)), (s64)sizeof(event), "which is read");
+    expect((event.data.elem.mask & 4U) && event.data.elem.id.numid == user_numid,
+           "and announces the new element");
+    expect_eq(ioctl((int)fd, CTL_ELEM_ADD, &info), -EBUSY, "the same name cannot be added twice");
+    struct elem_id found;
+    expect_eq(find_element((int)fd, label, &found), 0, "the list includes it");
+    for (u64 at = 0; at < sizeof(value); at++) ((u8 *)&value)[at] = 0;
+    value.id = found;
+    value.value.integer[0] = 200;
+    value.value.integer[1] = 100;
+    expect_eq(ioctl((int)fd, CTL_ELEM_WRITE, &value), 0, "it stores a value");
+    value.value.integer[0] = 0;
+    expect_eq(ioctl((int)fd, CTL_ELEM_READ, &value), 0, "it reads back");
+    expect(value.value.integer[0] == 200 && value.value.integer[1] == 100, "per channel");
+    value.value.integer[0] = 300;
+    expect_eq(ioctl((int)fd, CTL_ELEM_WRITE, &value), -22, "values out of range are refused");
+    struct ctl_tlv user_tlv = {user_numid, 16, {1, 8, (u32)-5100, 20}};
+    expect_eq(ioctl((int)fd, CTL_TLV_WRITE, &user_tlv), 0, "a dB scale is attached");
+    struct ctl_tlv back = {user_numid, sizeof(back.tlv), {0}};
+    expect_eq(ioctl((int)fd, CTL_TLV_READ, &back), 0, "and read back");
+    expect(back.tlv[0] == 1 && back.tlv[2] == (u32)-5100 && back.tlv[3] == 20, "unchanged");
+    while (ppoll1((int)fd, POLLIN, 50) > 0) read((int)fd, &event, sizeof(event));
+    expect_eq(ioctl((int)fd, CTL_ELEM_REMOVE, &found), 0, "the user control is removed");
+    expect((ppoll1((int)fd, POLLIN, 500) & POLLIN) != 0, "removal raises an event");
+    read((int)fd, &event, sizeof(event));
+    expect(event.data.elem.mask == ~0U, "marked as removal");
+    info.id.numid = user_numid;
+    expect_eq(ioctl((int)fd, CTL_ELEM_INFO, &info), -ENOENT, "the element is gone");
+    expect_eq(ioctl((int)fd, CTL_ELEM_REMOVE, &volume), -1, "driver controls cannot be removed");
     close((int)fd);
 }
 
@@ -586,6 +672,58 @@ static void playback(void) {
     expect((ppoll1((int)fd, POLLOUT, 500) & POLLOUT) != 0, "poll reports room after a period");
     expect_eq(writei((int)fd, tone, PERIOD), (s64)PERIOD, "and the write then goes in");
     munmap(ring, BUFFER * 4U);
+    close((int)fd);
+
+    expect_eq(open("/dev/snd/pcmC0D0p", O_RDWR | O_APPEND, 0), -EBADFD,
+              "append needs an open stream to join");
+    fd = open("/dev/snd/pcmC0D0p", O_RDWR, 0);
+    expect(fd >= 0, "the device opens for the timer test");
+    if (fd < 0) return;
+    s64 joined = open("/dev/snd/pcmC0D0p", O_RDWR | O_APPEND, 0);
+    expect(joined >= 0, "a second opener joins with O_APPEND");
+    expect_eq(configure((int)fd, ACCESS_RW, PERIOD, PERIODS), 0, "configured for the timer");
+    expect_eq(set_thresholds((int)fd, BUFFER, BUFFER), 0, "thresholds for the timer");
+    expect_eq(ioctl((int)fd, PCM_PREPARE, 0), 0, "prepared for the timer");
+    if (joined >= 0)
+        expect_eq(pcm_state((int)joined, &status), STATE_PREPARED,
+                  "the joined opener shares the stream");
+
+    s64 timer = open("/dev/snd/timer", O_RDONLY | O_NONBLOCK, 0);
+    expect(timer >= 0, "the timer device opens");
+    int version = 0;
+    expect_eq(ioctl((int)timer, TIMER_PVERSION, &version), 0, "the timer answers its version");
+    int tread = 1;
+    expect_eq(ioctl((int)timer, TIMER_TREAD, &tread), 0, "timestamped reads are chosen");
+    struct timer_select select;
+    for (u64 at = 0; at < sizeof(select); at++) ((u8 *)&select)[at] = 0;
+    select.id.dev_class = 3;
+    expect_eq(ioctl((int)timer, TIMER_SELECT, &select), 0, "the playback timer is selected");
+    struct timer_params tp;
+    for (u64 at = 0; at < sizeof(tp); at++) ((u8 *)&tp)[at] = 0;
+    tp.ticks = 1;
+    tp.filter = 1U << 1;
+    expect_eq(ioctl((int)timer, TIMER_PARAMS, &tp), 0, "ticks are requested");
+    expect_eq(ioctl((int)timer, TIMER_START, 0), 0, "the timer starts");
+    start = now_us();
+    expect_eq(writei((int)fd, tone, RATE / 2U), (s64)(RATE / 2U), "half a second is played");
+    unsigned ticks = 0;
+    unsigned events = 0;
+    struct timer_tread record;
+    while (now_us() - start < 700000) {
+        if (ppoll1((int)timer, POLLIN, 100) <= 0) continue;
+        while (read((int)timer, &record, sizeof(record)) == (s64)sizeof(record)) {
+            if (record.event == 1) {
+                ticks += record.value;
+                events++;
+            }
+        }
+    }
+    expect(ticks >= 18 && ticks <= 40, "the timer ticks once per period");
+    expect(events > 0, "and wakes its poller");
+    ioctl((int)timer, TIMER_STOP, 0);
+    close((int)timer);
+    if (joined >= 0) close((int)joined);
+    ioctl((int)fd, PCM_DROP, 0);
     close((int)fd);
 }
 

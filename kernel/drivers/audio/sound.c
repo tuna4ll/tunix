@@ -27,8 +27,13 @@
 #define WAIT_TIMEOUT_NS  (10ULL * 1000ULL * 1000ULL * 1000ULL)
 #define EVENT_QUEUE      64U
 #define CONTROL_MAX      256U
+#define USER_CONTROLS    32U
+#define USER_VALUES      128U
+#define USER_ITEMS       64U
+#define USER_TLV_WORDS   64U
 #define NSEC             1000000000ULL
 #define O_NONBLOCK_FLAG  04000U
+#define O_APPEND_FLAG    02000U
 #define POLL_INTERVAL_NS (250ULL * 1000ULL * 1000ULL)
 
 _Static_assert(sizeof(struct snd_pcm_hw_params) == 608, "hw_params layout");
@@ -104,6 +109,17 @@ struct snd_ctl_subscriber {
     struct snd_ctl_event events[EVENT_QUEUE];
 };
 
+struct user_control {
+    int used;
+    struct snd_control control;
+    char name[44];
+    const char *items[USER_ITEMS];
+    char *item_text;
+    long values[USER_VALUES];
+    uint32_t tlv_words;
+    uint32_t tlv[USER_TLV_WORDS];
+};
+
 struct snd_card {
     int present;
     int index;
@@ -114,10 +130,54 @@ struct snd_card {
     struct snd_ctl_subscriber *subscribers;
     unsigned control_opens;
     char id[16];
+    struct user_control *user;
 };
 
 static struct lock cards_lock = LOCK_INITIALIZER("sound cards", LOCK_RANK_DEVICE - 1);
 static struct snd_card cards[SND_MAX_CARDS];
+
+#define TIMER_QUEUE           64U
+#define TIMER_CLASS_PCM       3
+#define TIMER_EVENT_TICK      1
+#define TIMER_EVENT_START     2
+#define TIMER_EVENT_STOP      3
+#define TIMER_EVENT_EARLY     6
+#define TIMER_EVENT_MSTART    12
+#define TIMER_EVENT_MSTOP     13
+#define TIMER_EVENT_MCONTINUE 14
+#define TIMER_EVENT_MPAUSE    15
+#define TIMER_PARAM_EARLY     0x4U
+
+struct timer_event {
+    int event;
+    uint32_t value;
+    uint64_t when_ns;
+};
+
+struct timer_client {
+    struct timer_client *next;
+    int selected;
+    int card;
+    int device;
+    int subdevice;
+    int tread;
+    int running;
+    uint32_t flags;
+    uint32_t filter;
+    uint32_t ticks_wanted;
+    uint32_t ticks_pending;
+    uint32_t resolution;
+    uint32_t lost;
+    uint32_t overrun;
+    uint64_t last_ns;
+    unsigned head;
+    unsigned count;
+    struct timer_event queue[TIMER_QUEUE];
+};
+
+static struct lock timers_lock = LOCK_INITIALIZER("sound timers", LOCK_RANK_DEVICE + 1);
+static struct timer_client *timer_clients;
+static int timer_published;
 
 static void copy_field(unsigned char *destination, size_t size, const char *text) {
     memset(destination, 0, size);
@@ -253,6 +313,63 @@ static int64_t stream_hw_avail(const struct snd_stream *s) {
     return (int64_t)s->buffer_size - stream_avail(s);
 }
 
+static void timer_queue(struct timer_client *client, int event, uint32_t value, uint64_t now) {
+    if (client->tread && !(client->filter & (1U << event))) return;
+    if (!client->tread && event != TIMER_EVENT_TICK) return;
+    if (!client->tread && client->count) {
+        struct timer_event *last =
+            &client->queue[(client->head + client->count - 1U) % TIMER_QUEUE];
+        last->value += value;
+        return;
+    }
+    if (client->count == TIMER_QUEUE) {
+        client->overrun++;
+        client->lost += value;
+        return;
+    }
+    struct timer_event *slot = &client->queue[(client->head + client->count) % TIMER_QUEUE];
+    slot->event = event;
+    slot->value = value;
+    slot->when_ns = now;
+    client->count++;
+    client->last_ns = now;
+    process_wake_all(client);
+}
+
+static uint32_t stream_resolution(const struct snd_stream *s) {
+    if (!s->rate || !s->period_size) return 1000000U;
+    uint64_t ns = s->period_size * NSEC / s->rate;
+    return ns > UINT32_MAX ? UINT32_MAX : (uint32_t)ns;
+}
+
+static void timer_stream_event(struct snd_stream *s, int event, uint64_t ticks) {
+    if (!__atomic_load_n(&timer_clients, __ATOMIC_ACQUIRE)) return;
+    uint64_t now = time_uptime_ns();
+    int woke = 0;
+    lock_acquire(&timers_lock);
+    for (struct timer_client *client = timer_clients; client; client = client->next) {
+        if (!client->selected || client->card != s->card->index || client->device != 0 ||
+            client->subdevice != s->direction)
+            continue;
+        client->resolution = stream_resolution(s);
+        if (event != TIMER_EVENT_TICK) {
+            timer_queue(client, event, 0, now);
+            woke = 1;
+            continue;
+        }
+        if (!client->running) continue;
+        client->ticks_pending += (uint32_t)ticks;
+        uint32_t wanted = client->ticks_wanted ? client->ticks_wanted : 1U;
+        if (client->ticks_pending < wanted) continue;
+        uint32_t value = client->ticks_pending;
+        client->ticks_pending = 0;
+        timer_queue(client, TIMER_EVENT_TICK, value, now);
+        woke = 1;
+    }
+    lock_release(&timers_lock);
+    if (woke) process_wake_io();
+}
+
 static void stream_wake(struct snd_stream *s) {
     if (s->waiters) process_wake_all(s);
 }
@@ -263,6 +380,7 @@ static void stream_trigger(struct snd_stream *s, int command) {
 
 static void stream_set_xrun(struct snd_stream *s) {
     stream_trigger(s, SND_TRIGGER_STOP);
+    timer_stream_event(s, TIMER_EVENT_MSTOP, 0);
     s->state = SNDRV_PCM_STATE_XRUN;
     s->xruns++;
     s->trigger_ns = stream_now(s);
@@ -308,7 +426,10 @@ static void stream_update(struct snd_stream *s) {
         if (s->direction == SND_PLAYBACK && s->silence_size >= s->boundary)
             ring_zero_frames(s, s->hw_ptr, delta);
         s->hw_ptr = (s->hw_ptr + delta) % s->boundary;
+        uint64_t periods_before = s->hw_frames / s->period_size;
         s->hw_frames += delta;
+        uint64_t periods = s->hw_frames / s->period_size - periods_before;
+        if (periods) timer_stream_event(s, TIMER_EVENT_TICK, periods);
     }
 
     int64_t avail = stream_avail(s);
@@ -317,6 +438,7 @@ static void stream_update(struct snd_stream *s) {
     if (s->direction == SND_PLAYBACK && s->state == SNDRV_PCM_STATE_DRAINING) {
         if (avail >= (int64_t)s->buffer_size) {
             stream_trigger(s, SND_TRIGGER_STOP);
+            timer_stream_event(s, TIMER_EVENT_MSTOP, 0);
             s->state = SNDRV_PCM_STATE_SETUP;
             stream_wake(s);
         }
@@ -334,17 +456,21 @@ static void stream_update(struct snd_stream *s) {
 static int stream_start(struct snd_stream *s) {
     if (s->state == SNDRV_PCM_STATE_RUNNING) return 0;
     if (s->state != SNDRV_PCM_STATE_PREPARED) return -EBADFD;
-    if (s->direction == SND_PLAYBACK && stream_hw_avail(s) <= 0) return -EPIPE;
+    if (s->direction == SND_PLAYBACK && s->stop_threshold < s->boundary && stream_hw_avail(s) <= 0)
+        return -EPIPE;
     if (s->ops->trigger(s->card->backend->context, SND_TRIGGER_START) != 0) return -EIO;
     s->state = SNDRV_PCM_STATE_RUNNING;
     s->trigger_ns = stream_now(s);
     s->update_ns = time_uptime_ns();
+    timer_stream_event(s, TIMER_EVENT_MSTART, 0);
     return 0;
 }
 
 static void stream_stop(struct snd_stream *s, int state) {
-    if (stream_running(s) || s->state == SNDRV_PCM_STATE_PAUSED)
+    if (stream_running(s) || s->state == SNDRV_PCM_STATE_PAUSED) {
         stream_trigger(s, SND_TRIGGER_STOP);
+        timer_stream_event(s, TIMER_EVENT_MSTOP, 0);
+    }
     if (s->state != state) s->trigger_ns = stream_now(s);
     s->state = state;
     s->generation++;
@@ -1274,11 +1400,13 @@ static int stream_pause(struct snd_stream *s, int push) {
             return s->state == SNDRV_PCM_STATE_XRUN ? -EPIPE : -EBADFD;
         if (s->ops->trigger(s->card->backend->context, SND_TRIGGER_PAUSE) != 0) return -EIO;
         s->state = SNDRV_PCM_STATE_PAUSED;
+        timer_stream_event(s, TIMER_EVENT_MPAUSE, 0);
     } else {
         if (s->state != SNDRV_PCM_STATE_PAUSED) return -EBADFD;
         if (s->ops->trigger(s->card->backend->context, SND_TRIGGER_RELEASE) != 0) return -EIO;
         s->state = SNDRV_PCM_STATE_RUNNING;
         s->update_ns = time_uptime_ns();
+        timer_stream_event(s, TIMER_EVENT_MCONTINUE, 0);
     }
     s->trigger_ns = stream_now(s);
     stream_wake(s);
@@ -1428,17 +1556,26 @@ static int pcm_open(struct file *file) {
     }
     lock_acquire(&card->lock);
     struct snd_stream *s = &card->streams[direction];
-    if (s->open) {
+    int append = (file->flags & O_APPEND_FLAG) != 0;
+    if (s->open && !append) {
         lock_release(&card->lock);
         lock_release(&cards_lock);
         kfree(open_file);
         return -EBUSY;
     }
-    s->open = 1;
-    s->state = SNDRV_PCM_STATE_OPEN;
-    s->configured = 0;
-    s->tstamp_type = SNDRV_PCM_TSTAMP_TYPE_GETTIMEOFDAY;
-    s->xruns = 0;
+    if (!s->open && append) {
+        lock_release(&card->lock);
+        lock_release(&cards_lock);
+        kfree(open_file);
+        return -EBADFD;
+    }
+    if (!s->open) {
+        s->state = SNDRV_PCM_STATE_OPEN;
+        s->configured = 0;
+        s->tstamp_type = SNDRV_PCM_TSTAMP_TYPE_GETTIMEOFDAY;
+        s->xruns = 0;
+    }
+    s->open++;
     lock_release(&card->lock);
     if (card->owner) (void)module_get(card->owner);
     lock_release(&cards_lock);
@@ -1453,12 +1590,14 @@ static void pcm_release(struct file *file) {
     struct snd_stream *s = pcm_file_stream(file, &card);
     if (!s) return;
     lock_acquire(&card->lock);
-    if (card->present) {
-        stream_stop(s, SNDRV_PCM_STATE_OPEN);
-        if (s->configured && s->ops && s->ops->release) s->ops->release(card->backend->context);
+    if (s->open) s->open--;
+    if (!s->open) {
+        if (card->present) {
+            stream_stop(s, SNDRV_PCM_STATE_OPEN);
+            if (s->configured && s->ops && s->ops->release) s->ops->release(card->backend->context);
+        }
+        s->configured = 0;
     }
-    s->configured = 0;
-    s->open = 0;
     struct module *owner = card->owner;
     lock_release(&card->lock);
     if (owner) module_put(owner);
@@ -1754,10 +1893,31 @@ static unsigned control_count(const struct snd_card *card) {
     return count > CONTROL_MAX ? CONTROL_MAX : count;
 }
 
+static unsigned element_slots(const struct snd_card *card) {
+    return control_count(card) + USER_CONTROLS;
+}
+
+static const struct snd_control *element_control(const struct snd_card *card, unsigned index) {
+    unsigned builtin = control_count(card);
+    if (index < builtin) return &card->backend->controls[index];
+    index -= builtin;
+    if (index >= USER_CONTROLS || !card->user || !card->user[index].used) return NULL;
+    return &card->user[index].control;
+}
+
+static struct user_control *element_user(struct snd_card *card, unsigned index) {
+    unsigned builtin = control_count(card);
+    if (index < builtin || !card->user) return NULL;
+    index -= builtin;
+    if (index >= USER_CONTROLS || !card->user[index].used) return NULL;
+    return &card->user[index];
+}
+
 static void fill_element_id(const struct snd_card *card, unsigned index,
                             struct snd_ctl_elem_id *id) {
-    const struct snd_control *control = &card->backend->controls[index];
+    const struct snd_control *control = element_control(card, index);
     memset(id, 0, sizeof(*id));
+    if (!control) return;
     id->numid = index + 1U;
     id->iface = (int)control->iface;
     id->index = control->index;
@@ -1765,15 +1925,45 @@ static void fill_element_id(const struct snd_card *card, unsigned index,
 }
 
 static int element_lookup(const struct snd_card *card, const struct snd_ctl_elem_id *id) {
-    unsigned count = control_count(card);
-    if (id->numid) return id->numid <= count ? (int)id->numid - 1 : -ENOENT;
-    for (unsigned index = 0; index < count; index++) {
-        const struct snd_control *control = &card->backend->controls[index];
+    unsigned slots = element_slots(card);
+    if (id->numid) {
+        if (id->numid > slots || !element_control(card, id->numid - 1U)) return -ENOENT;
+        return (int)id->numid - 1;
+    }
+    for (unsigned index = 0; index < slots; index++) {
+        const struct snd_control *control = element_control(card, index);
+        if (!control) continue;
         if ((int)control->iface != id->iface || control->index != id->index) continue;
         if (id->device || id->subdevice) continue;
         if (!strncmp((const char *)id->name, control->name, sizeof(id->name))) return (int)index;
     }
     return -ENOENT;
+}
+
+static unsigned element_count_of(const struct snd_control *control) {
+    unsigned count = control->count ? control->count : 1U;
+    return count > USER_VALUES ? USER_VALUES : count;
+}
+
+static int element_get(struct snd_card *card, unsigned index, long *values) {
+    struct user_control *user = element_user(card, index);
+    if (user) {
+        memcpy(values, user->values, sizeof(long) * element_count_of(&user->control));
+        return 0;
+    }
+    return card->backend->control_get(card->backend->context, index, values) == 0 ? 0 : -EIO;
+}
+
+static int element_put(struct snd_card *card, unsigned index, const long *values) {
+    struct user_control *user = element_user(card, index);
+    if (!user) {
+        if (!card->backend->control_put) return -EPERM;
+        return card->backend->control_put(card->backend->context, index, values);
+    }
+    unsigned count = element_count_of(&user->control);
+    int changed = memcmp(user->values, values, sizeof(long) * count) != 0;
+    memcpy(user->values, values, sizeof(long) * count);
+    return changed;
 }
 
 static void ctl_queue_event(struct snd_card *card, unsigned index, unsigned mask) {
@@ -1783,12 +1973,14 @@ static void ctl_queue_event(struct snd_card *card, unsigned index, unsigned mask
     event.type = SNDRV_CTL_EVENT_ELEM;
     event.data.elem.mask = mask;
     fill_element_id(card, index, &event.data.elem.id);
+    event.data.elem.id.numid = index + 1U;
     for (struct snd_ctl_subscriber *sub = card->subscribers; sub; sub = sub->next) {
         if (!sub->subscribed) continue;
         int merged = 0;
-        for (unsigned at = 0; at < sub->count; at++) {
+        for (unsigned at = 0; at < sub->count && mask != SNDRV_CTL_EVENT_MASK_REMOVE; at++) {
             struct snd_ctl_event *queued = &sub->events[(sub->head + at) % EVENT_QUEUE];
-            if (queued->data.elem.id.numid == event.data.elem.id.numid) {
+            if (queued->data.elem.id.numid == event.data.elem.id.numid &&
+                queued->data.elem.mask != SNDRV_CTL_EVENT_MASK_REMOVE) {
                 queued->data.elem.mask |= mask;
                 merged = 1;
                 break;
@@ -1808,10 +2000,16 @@ static void ctl_queue_event(struct snd_card *card, unsigned index, unsigned mask
 static int64_t ioctl_elem_list(struct snd_card *card, uint64_t argument) {
     struct snd_ctl_elem_list list;
     if (copy_in(card, &list, argument, sizeof(list)) != 0) return -EFAULT;
-    unsigned total = control_count(card);
+    unsigned slots = element_slots(card);
+    unsigned total = 0;
+    for (unsigned index = 0; index < slots; index++)
+        if (element_control(card, index)) total++;
     list.count = total;
     list.used = 0;
-    for (unsigned index = list.offset; index < total && list.used < list.space; index++) {
+    unsigned seen = 0;
+    for (unsigned index = 0; index < slots && list.used < list.space; index++) {
+        if (!element_control(card, index)) continue;
+        if (seen++ < list.offset) continue;
         struct snd_ctl_elem_id id;
         fill_element_id(card, index, &id);
         if (copy_out(card, list.pids + (uint64_t)list.used * sizeof(id), &id, sizeof(id)) != 0)
@@ -1821,19 +2019,27 @@ static int64_t ioctl_elem_list(struct snd_card *card, uint64_t argument) {
     return copy_out(card, argument, &list, sizeof(list));
 }
 
+static int has_tlv(struct snd_card *card, unsigned index, const struct snd_control *control) {
+    struct user_control *user = element_user(card, index);
+    if (user) return user->tlv_words != 0;
+    return control->db_step || control->db_min;
+}
+
 static int64_t ioctl_elem_info(struct snd_card *card, uint64_t argument) {
     struct snd_ctl_elem_info info;
     if (copy_in(card, &info, argument, sizeof(info)) != 0) return -EFAULT;
     int index = element_lookup(card, &info.id);
     if (index < 0) return index;
-    const struct snd_control *control = &card->backend->controls[index];
+    const struct snd_control *control = element_control(card, (unsigned)index);
     unsigned requested_item = info.value.enumerated.item;
     memset(&info.value, 0, sizeof(info.value));
     memset(info.dimen, 0, sizeof(info.dimen));
     fill_element_id(card, (unsigned)index, &info.id);
     info.type = (int)control->type;
     info.access = control->access & (SND_CONTROL_READ | SND_CONTROL_WRITE | SND_CONTROL_VOLATILE);
-    if (control->db_step || control->db_min) info.access |= SNDRV_CTL_ELEM_ACCESS_TLV_READ;
+    if (element_user(card, (unsigned)index))
+        info.access |= SNDRV_CTL_ELEM_ACCESS_USER | SNDRV_CTL_ELEM_ACCESS_TLV_WRITE;
+    if (has_tlv(card, (unsigned)index, control)) info.access |= SNDRV_CTL_ELEM_ACCESS_TLV_READ;
     info.count = control->count ? control->count : 1U;
     info.owner = -1;
     if (control->type == SND_CONTROL_ENUMERATED) {
@@ -1857,72 +2063,238 @@ static int64_t ioctl_elem_info(struct snd_card *card, uint64_t argument) {
 }
 
 static int64_t ioctl_elem_read(struct snd_card *card, uint64_t argument) {
-    struct snd_ctl_elem_value value;
-    if (copy_in(card, &value, argument, sizeof(value)) != 0) return -EFAULT;
-    int index = element_lookup(card, &value.id);
-    if (index < 0) return index;
-    const struct snd_control *control = &card->backend->controls[index];
-    if (!(control->access & SND_CONTROL_READ)) return -EPERM;
-    long values[8];
-    memset(values, 0, sizeof(values));
-    if (card->backend->control_get(card->backend->context, (unsigned)index, values) != 0)
-        return -EIO;
-    fill_element_id(card, (unsigned)index, &value.id);
-    memset(&value.value, 0, sizeof(value.value));
-    unsigned count = control->count ? control->count : 1U;
-    if (count > 8U) count = 8U;
-    for (unsigned at = 0; at < count; at++) {
-        if (control->type == SND_CONTROL_ENUMERATED)
-            value.value.enumerated_item[at] = (unsigned)values[at];
-        else value.value.integer_value[at] = values[at];
+    struct snd_ctl_elem_value *value = kmalloc(sizeof(*value));
+    if (!value) return -ENOMEM;
+    int64_t result = copy_in(card, value, argument, sizeof(*value));
+    int index = result == 0 ? element_lookup(card, &value->id) : -1;
+    if (result == 0 && index < 0) result = index;
+    const struct snd_control *control = index >= 0 ? element_control(card, (unsigned)index) : NULL;
+    if (result == 0 && !(control->access & SND_CONTROL_READ)) result = -EPERM;
+    long values[USER_VALUES];
+    if (result == 0) {
+        memset(values, 0, sizeof(values));
+        result = element_get(card, (unsigned)index, values);
     }
-    return copy_out(card, argument, &value, sizeof(value));
+    if (result == 0) {
+        fill_element_id(card, (unsigned)index, &value->id);
+        memset(&value->value, 0, sizeof(value->value));
+        unsigned count = element_count_of(control);
+        for (unsigned at = 0; at < count; at++) {
+            if (control->type == SND_CONTROL_ENUMERATED)
+                value->value.enumerated_item[at] = (unsigned)values[at];
+            else value->value.integer_value[at] = values[at];
+        }
+        result = copy_out(card, argument, value, sizeof(*value));
+    }
+    kfree(value);
+    return result;
 }
 
 static int64_t ioctl_elem_write(struct snd_card *card, uint64_t argument) {
-    struct snd_ctl_elem_value value;
-    if (copy_in(card, &value, argument, sizeof(value)) != 0) return -EFAULT;
-    int index = element_lookup(card, &value.id);
-    if (index < 0) return index;
-    const struct snd_control *control = &card->backend->controls[index];
-    if (!(control->access & SND_CONTROL_WRITE) || !card->backend->control_put) return -EPERM;
-    unsigned count = control->count ? control->count : 1U;
-    if (count > 8U) count = 8U;
-    long values[8];
-    memset(values, 0, sizeof(values));
-    for (unsigned at = 0; at < count; at++) {
-        long item = control->type == SND_CONTROL_ENUMERATED ? (long)value.value.enumerated_item[at]
-                                                            : value.value.integer_value[at];
-        if (control->type == SND_CONTROL_BOOLEAN && (item < 0 || item > 1)) return -EINVAL;
-        if (control->type == SND_CONTROL_INTEGER && (item < control->min || item > control->max))
-            return -EINVAL;
-        if (control->type == SND_CONTROL_ENUMERATED &&
-            (item < 0 || item >= (long)control->item_count))
-            return -EINVAL;
-        values[at] = item;
+    struct snd_ctl_elem_value *value = kmalloc(sizeof(*value));
+    if (!value) return -ENOMEM;
+    int64_t result = copy_in(card, value, argument, sizeof(*value));
+    int index = result == 0 ? element_lookup(card, &value->id) : -1;
+    if (result == 0 && index < 0) result = index;
+    const struct snd_control *control = index >= 0 ? element_control(card, (unsigned)index) : NULL;
+    if (result == 0 && !(control->access & SND_CONTROL_WRITE)) result = -EPERM;
+    long values[USER_VALUES];
+    if (result == 0) {
+        memset(values, 0, sizeof(values));
+        unsigned count = element_count_of(control);
+        for (unsigned at = 0; at < count && result == 0; at++) {
+            long item = control->type == SND_CONTROL_ENUMERATED
+                ? (long)value->value.enumerated_item[at]
+                : value->value.integer_value[at];
+            if (control->type == SND_CONTROL_BOOLEAN && (item < 0 || item > 1)) result = -EINVAL;
+            if (control->type == SND_CONTROL_INTEGER &&
+                (item < control->min || item > control->max))
+                result = -EINVAL;
+            if (control->type == SND_CONTROL_ENUMERATED &&
+                (item < 0 || item >= (long)control->item_count))
+                result = -EINVAL;
+            values[at] = item;
+        }
     }
-    int changed = card->backend->control_put(card->backend->context, (unsigned)index, values);
-    if (changed < 0) return changed;
-    fill_element_id(card, (unsigned)index, &value.id);
-    if (copy_out(card, argument, &value, sizeof(value)) != 0) return -EFAULT;
-    if (changed > 0) ctl_queue_event(card, (unsigned)index, SNDRV_CTL_EVENT_MASK_VALUE);
+    int changed = 0;
+    if (result == 0) {
+        changed = element_put(card, (unsigned)index, values);
+        if (changed < 0) result = changed;
+    }
+    if (result == 0) {
+        fill_element_id(card, (unsigned)index, &value->id);
+        result = copy_out(card, argument, value, sizeof(*value));
+    }
+    if (result == 0 && changed > 0)
+        ctl_queue_event(card, (unsigned)index, SNDRV_CTL_EVENT_MASK_VALUE);
+    kfree(value);
+    return result;
+}
+
+static int64_t ioctl_tlv(struct snd_card *card, uint64_t argument, int write) {
+    struct snd_ctl_tlv header;
+    if (copy_in(card, &header, argument, sizeof(header)) != 0) return -EFAULT;
+    if (!header.numid || header.numid > element_slots(card)) return -ENOENT;
+    unsigned index = header.numid - 1U;
+    const struct snd_control *control = element_control(card, index);
+    if (!control) return -ENOENT;
+    struct user_control *user = element_user(card, index);
+    if (write) {
+        if (!user) return -ENXIO;
+        if (header.length < 8U || header.length > sizeof(user->tlv) || header.length % 4U)
+            return -EINVAL;
+        uint32_t words[USER_TLV_WORDS];
+        if (copy_in(card, words, argument + sizeof(header), header.length) != 0) return -EFAULT;
+        if (words[1] + 8U > header.length) return -EINVAL;
+        user = element_user(card, index);
+        if (!user) return -ENOENT;
+        int changed =
+            user->tlv_words != header.length / 4U || memcmp(user->tlv, words, header.length) != 0;
+        memcpy(user->tlv, words, header.length);
+        user->tlv_words = header.length / 4U;
+        if (changed) ctl_queue_event(card, index, SNDRV_CTL_EVENT_MASK_TLV);
+        return 0;
+    }
+    uint32_t words[USER_TLV_WORDS];
+    uint32_t length;
+    if (user) {
+        if (!user->tlv_words) return -ENXIO;
+        length = user->tlv_words * 4U;
+        memcpy(words, user->tlv, length);
+    } else {
+        if (!control->db_step && !control->db_min) return -ENXIO;
+        words[0] = SNDRV_CTL_TLVT_DB_SCALE;
+        words[1] = 8;
+        words[2] = (uint32_t)control->db_min;
+        words[3] = ((uint32_t)control->db_step & 0xFFFFU) |
+            (control->db_mute ? SNDRV_CTL_TLVD_DB_SCALE_MUTE : 0U);
+        length = 16;
+    }
+    if (header.length < length) return -ENOMEM;
+    return copy_out(card, argument + sizeof(header), words, length);
+}
+
+static int user_control_from_info(struct snd_card *card, struct user_control *user,
+                                  const struct snd_ctl_elem_info *info) {
+    memset(user, 0, sizeof(*user));
+    if (info->type != SND_CONTROL_BOOLEAN && info->type != SND_CONTROL_INTEGER &&
+        info->type != SND_CONTROL_ENUMERATED)
+        return -EINVAL;
+    if (!info->count || info->count > USER_VALUES) return -EINVAL;
+    if (info->id.device || info->id.subdevice) return -EINVAL;
+    copy_field((unsigned char *)user->name, sizeof(user->name), (const char *)info->id.name);
+    if (!user->name[0]) return -EINVAL;
+    struct snd_control *control = &user->control;
+    control->name = user->name;
+    control->iface = (uint32_t)info->id.iface;
+    control->index = info->id.index;
+    control->type = (uint32_t)info->type;
+    control->count = info->count;
+    control->access = SND_CONTROL_READ | SND_CONTROL_WRITE;
+    if (info->type == SND_CONTROL_INTEGER) {
+        if (info->value.integer.min > info->value.integer.max) return -EINVAL;
+        if (info->value.integer.min < INT32_MIN || info->value.integer.max > INT32_MAX)
+            return -EINVAL;
+        control->min = (int32_t)info->value.integer.min;
+        control->max = (int32_t)info->value.integer.max;
+        control->step = (int32_t)info->value.integer.step;
+        for (unsigned at = 0; at < info->count; at++) user->values[at] = control->min;
+    } else if (info->type == SND_CONTROL_BOOLEAN) {
+        control->min = 0;
+        control->max = 1;
+    } else {
+        unsigned items = info->value.enumerated.items;
+        unsigned length = info->value.enumerated.names_length;
+        if (!items || items > USER_ITEMS || !length || length > 4096U) return -EINVAL;
+        char *text = kmalloc(length + 1U);
+        if (!text) return -ENOMEM;
+        if (copy_in(card, text, info->value.enumerated.names_ptr, length) != 0) {
+            kfree(text);
+            return -EFAULT;
+        }
+        text[length] = '\0';
+        unsigned at = 0;
+        for (unsigned item = 0; item < items; item++) {
+            if (at >= length) {
+                kfree(text);
+                return -EINVAL;
+            }
+            user->items[item] = text + at;
+            at += (unsigned)strlen(text + at) + 1U;
+        }
+        user->item_text = text;
+        control->items = user->items;
+        control->item_count = items;
+        control->max = (int32_t)items - 1;
+    }
     return 0;
 }
 
-static int64_t ioctl_tlv_read(struct snd_card *card, uint64_t argument) {
-    struct snd_ctl_tlv header;
-    if (copy_in(card, &header, argument, sizeof(header)) != 0) return -EFAULT;
-    if (!header.numid || header.numid > control_count(card)) return -ENOENT;
-    const struct snd_control *control = &card->backend->controls[header.numid - 1U];
-    if (!control->db_step && !control->db_min) return -ENXIO;
-    unsigned tlv[4];
-    tlv[0] = SNDRV_CTL_TLVT_DB_SCALE;
-    tlv[1] = 8;
-    tlv[2] = (unsigned)control->db_min;
-    tlv[3] = ((unsigned)control->db_step & 0xFFFFU) |
-        (control->db_mute ? SNDRV_CTL_TLVD_DB_SCALE_MUTE : 0U);
-    if (header.length < sizeof(tlv)) return -ENOMEM;
-    return copy_out(card, argument + sizeof(header), tlv, sizeof(tlv));
+static void user_control_free(struct user_control *user) {
+    kfree(user->item_text);
+    memset(user, 0, sizeof(*user));
+}
+
+static int64_t ioctl_elem_add(struct snd_card *card, uint64_t argument, int replace) {
+    struct snd_ctl_elem_info info;
+    if (copy_in(card, &info, argument, sizeof(info)) != 0) return -EFAULT;
+    struct snd_ctl_elem_id lookup = info.id;
+    lookup.numid = 0;
+    int existing = element_lookup(card, &lookup);
+    if (existing >= 0) {
+        if (!replace || !element_user(card, (unsigned)existing)) return replace ? -EPERM : -EBUSY;
+        user_control_free(element_user(card, (unsigned)existing));
+        ctl_queue_event(card, (unsigned)existing, SNDRV_CTL_EVENT_MASK_REMOVE);
+    } else if (replace) {
+        return -ENOENT;
+    }
+    if (!card->user) {
+        lock_release(&card->lock);
+        struct user_control *table = kmalloc(sizeof(*table) * USER_CONTROLS);
+        lock_acquire(&card->lock);
+        if (!table) return -ENOMEM;
+        if (card->user) {
+            kfree(table);
+        } else {
+            memset(table, 0, sizeof(*table) * USER_CONTROLS);
+            card->user = table;
+        }
+    }
+    unsigned slot = USER_CONTROLS;
+    for (unsigned index = 0; index < USER_CONTROLS; index++)
+        if (!card->user[index].used) {
+            slot = index;
+            break;
+        }
+    if (slot == USER_CONTROLS) return -ENOMEM;
+    struct user_control fresh;
+    int status = user_control_from_info(card, &fresh, &info);
+    if (status < 0) return status;
+    if (element_lookup(card, &lookup) >= 0 || card->user[slot].used) {
+        user_control_free(&fresh);
+        return -EBUSY;
+    }
+    fresh.used = 1;
+    card->user[slot] = fresh;
+    card->user[slot].control.name = card->user[slot].name;
+    if (fresh.item_text) card->user[slot].control.items = card->user[slot].items;
+    unsigned index = control_count(card) + slot;
+    fill_element_id(card, index, &info.id);
+    if (copy_out(card, argument, &info, sizeof(info)) != 0) return -EFAULT;
+    ctl_queue_event(card, index, SNDRV_CTL_EVENT_MASK_ADD);
+    return 0;
+}
+
+static int64_t ioctl_elem_remove(struct snd_card *card, uint64_t argument) {
+    struct snd_ctl_elem_id id;
+    if (copy_in(card, &id, argument, sizeof(id)) != 0) return -EFAULT;
+    int index = element_lookup(card, &id);
+    if (index < 0) return index;
+    struct user_control *user = element_user(card, (unsigned)index);
+    if (!user) return -EPERM;
+    ctl_queue_event(card, (unsigned)index, SNDRV_CTL_EVENT_MASK_REMOVE);
+    user_control_free(user);
+    return 0;
 }
 
 static struct snd_ctl_subscriber *control_subscriber(struct file *file) {
@@ -2084,7 +2456,11 @@ static int64_t control_ioctl_locked(struct snd_card *card, struct snd_ctl_subscr
         process_wake_all(card);
         return 0;
     }
-    case SNDRV_CTL_IOCTL_NR_TLV_READ:            return ioctl_tlv_read(card, argument);
+    case SNDRV_CTL_IOCTL_NR_TLV_READ:            return ioctl_tlv(card, argument, 0);
+    case SNDRV_CTL_IOCTL_NR_TLV_WRITE:           return ioctl_tlv(card, argument, 1);
+    case SNDRV_CTL_IOCTL_NR_ELEM_ADD:            return ioctl_elem_add(card, argument, 0);
+    case SNDRV_CTL_IOCTL_NR_ELEM_REPLACE:        return ioctl_elem_add(card, argument, 1);
+    case SNDRV_CTL_IOCTL_NR_ELEM_REMOVE:         return ioctl_elem_remove(card, argument);
     case SNDRV_CTL_IOCTL_NR_HWDEP_NEXT_DEVICE:
     case SNDRV_CTL_IOCTL_NR_RAWMIDI_NEXT_DEVICE:
     case SNDRV_CTL_IOCTL_NR_UMP_NEXT_DEVICE:     {
@@ -2137,6 +2513,332 @@ static const struct vfs_file_ops control_file_ops = {
 };
 
 const struct vfs_file_ops *sound_control_file_ops(void) { return &control_file_ops; }
+
+struct timer_id {
+    int dev_class;
+    int dev_sclass;
+    int card;
+    int device;
+    int subdevice;
+};
+
+struct timer_select {
+    struct timer_id id;
+    unsigned char reserved[32];
+};
+
+struct timer_info {
+    unsigned int flags;
+    int card;
+    unsigned char id[64];
+    unsigned char name[80];
+    unsigned long reserved0;
+    unsigned long resolution;
+    unsigned char reserved[64];
+};
+
+struct timer_params {
+    unsigned int flags;
+    unsigned int ticks;
+    unsigned int queue_size;
+    unsigned int reserved0;
+    unsigned int filter;
+    unsigned char reserved[60];
+};
+
+struct timer_status {
+    struct snd_timespec tstamp;
+    unsigned int resolution;
+    unsigned int lost;
+    unsigned int overrun;
+    unsigned int queue;
+    unsigned char reserved[64];
+};
+
+struct timer_tread {
+    int event;
+    int pad1;
+    int64_t sec;
+    int64_t nsec;
+    unsigned int value;
+    int pad2;
+};
+
+struct timer_read {
+    unsigned int resolution;
+    unsigned int ticks;
+};
+
+_Static_assert(sizeof(struct timer_tread) == 32, "timer_tread layout");
+_Static_assert(sizeof(struct timer_info) == 232, "timer_info layout");
+_Static_assert(sizeof(struct timer_params) == 80, "timer_params layout");
+_Static_assert(sizeof(struct timer_status) == 96, "timer_status layout");
+
+static int timer_stream_exists(int card, int device, int subdevice) {
+    if (card < 0 || card >= (int)SND_MAX_CARDS || device != 0 || subdevice < 0 || subdevice > 1)
+        return 0;
+    return cards[card].present && cards[card].backend->streams[subdevice];
+}
+
+static int timer_next(struct timer_id *id) {
+    int card = 0;
+    int subdevice = 0;
+    if (id->dev_class >= 0) {
+        if (id->dev_class > TIMER_CLASS_PCM) goto none;
+        if (id->dev_class == TIMER_CLASS_PCM) {
+            card = id->card < 0 ? 0 : id->card;
+            subdevice = id->subdevice + 1;
+            if (id->card < 0) subdevice = 0;
+        }
+    }
+    for (; card < (int)SND_MAX_CARDS; card++, subdevice = 0)
+        for (; subdevice < 2; subdevice++)
+            if (timer_stream_exists(card, 0, subdevice)) {
+                id->dev_class = TIMER_CLASS_PCM;
+                id->dev_sclass = 0;
+                id->card = card;
+                id->device = 0;
+                id->subdevice = subdevice;
+                return 0;
+            }
+none:
+    id->dev_class = -1;
+    id->dev_sclass = -1;
+    id->card = -1;
+    id->device = -1;
+    id->subdevice = -1;
+    return 0;
+}
+
+static int timer_open(struct file *file) {
+    struct timer_client *client = kmalloc(sizeof(*client));
+    if (!client) return -ENOMEM;
+    memset(client, 0, sizeof(*client));
+    client->ticks_wanted = 1;
+    client->filter = ~0U;
+    lock_acquire(&timers_lock);
+    client->next = timer_clients;
+    __atomic_store_n(&timer_clients, client, __ATOMIC_RELEASE);
+    lock_release(&timers_lock);
+    file->private_data = client;
+    return 0;
+}
+
+static void timer_release(struct file *file) {
+    struct timer_client *client = file->private_data;
+    if (!client) return;
+    lock_acquire(&timers_lock);
+    for (struct timer_client **link = &timer_clients; *link; link = &(*link)->next)
+        if (*link == client) {
+            *link = client->next;
+            break;
+        }
+    lock_release(&timers_lock);
+    kfree(client);
+    file->private_data = NULL;
+}
+
+static int64_t timer_read_file(struct file *file, size_t size, void *buffer) {
+    struct timer_client *client = file->private_data;
+    if (!client) return -EBADFD;
+    lock_acquire(&timers_lock);
+    size_t unit = client->tread ? sizeof(struct timer_tread) : sizeof(struct timer_read);
+    if (size < unit) {
+        lock_release(&timers_lock);
+        return -EINVAL;
+    }
+    while (!client->count) {
+        if (file->flags & O_NONBLOCK_FLAG) {
+            lock_release(&timers_lock);
+            return -EAGAIN;
+        }
+        lock_release(&timers_lock);
+        if (process_prepare_wait_interruptible(client, 0) != 0) return -ERESTARTSYS;
+        lock_acquire(&timers_lock);
+        int ready = client->count != 0;
+        lock_release(&timers_lock);
+        if (!ready) process_wait();
+        process_finish_wait();
+        lock_acquire(&timers_lock);
+        if (!client->count && process_wait_interrupted()) {
+            lock_release(&timers_lock);
+            return -ERESTARTSYS;
+        }
+    }
+    size_t done = 0;
+    uint8_t *out = buffer;
+    while (client->count && size - done >= unit) {
+        struct timer_event *event = &client->queue[client->head];
+        if (client->tread) {
+            struct timer_tread record;
+            memset(&record, 0, sizeof(record));
+            record.event = event->event;
+            record.sec = (int64_t)(event->when_ns / NSEC);
+            record.nsec = (int64_t)(event->when_ns % NSEC);
+            record.value = event->value;
+            memcpy(out + done, &record, sizeof(record));
+        } else {
+            struct timer_read record = {client->resolution, event->value};
+            memcpy(out + done, &record, sizeof(record));
+        }
+        client->head = (client->head + 1U) % TIMER_QUEUE;
+        client->count--;
+        done += unit;
+    }
+    lock_release(&timers_lock);
+    return (int64_t)done;
+}
+
+static int64_t timer_write_file(struct file *file, size_t size, const void *buffer) {
+    (void)file;
+    (void)size;
+    (void)buffer;
+    return -EINVAL;
+}
+
+static uint32_t timer_poll(struct file *file) {
+    struct timer_client *client = file->private_data;
+    if (!client) return VFS_POLL_ERR;
+    lock_acquire(&timers_lock);
+    uint32_t mask = client->count ? VFS_POLL_IN : 0U;
+    lock_release(&timers_lock);
+    return mask;
+}
+
+static int64_t timer_copy_out(uint64_t user, const void *source, size_t size) {
+    return copy_to_user(user, source, size) == 0 ? 0 : -EFAULT;
+}
+
+static int64_t timer_ioctl(struct file *file, unsigned long request, uint64_t argument) {
+    struct timer_client *client = file->private_data;
+    if (!client) return -EBADFD;
+    if (SND_IOC_TYPE(request) != 'T') return -ENOTTY;
+    switch (SND_IOC_NR(request)) {
+    case 0x00: {
+        int version = SNDRV_PROTOCOL_VERSION(2, 0, 8);
+        return timer_copy_out(argument, &version, sizeof(version));
+    }
+    case 0x01: {
+        struct timer_id id;
+        if (copy_from_user(&id, argument, sizeof(id)) != 0) return -EFAULT;
+        lock_acquire(&cards_lock);
+        (void)timer_next(&id);
+        lock_release(&cards_lock);
+        return timer_copy_out(argument, &id, sizeof(id));
+    }
+    case 0x02:
+    case 0xA4: {
+        int enable = 0;
+        if (copy_from_user(&enable, argument, sizeof(enable)) != 0) return -EFAULT;
+        lock_acquire(&timers_lock);
+        int busy = client->running;
+        if (!busy) {
+            client->tread = enable != 0;
+            client->count = 0;
+        }
+        lock_release(&timers_lock);
+        return busy ? -EBUSY : 0;
+    }
+    case 0x10: {
+        struct timer_select select;
+        if (copy_from_user(&select, argument, sizeof(select)) != 0) return -EFAULT;
+        lock_acquire(&cards_lock);
+        int exists = select.id.dev_class == TIMER_CLASS_PCM &&
+            timer_stream_exists(select.id.card, select.id.device, select.id.subdevice);
+        lock_release(&cards_lock);
+        if (!exists) return -ENODEV;
+        lock_acquire(&timers_lock);
+        client->selected = 1;
+        client->card = select.id.card;
+        client->device = select.id.device;
+        client->subdevice = select.id.subdevice;
+        client->running = 0;
+        client->count = 0;
+        client->ticks_pending = 0;
+        lock_release(&timers_lock);
+        return 0;
+    }
+    case 0x11: {
+        if (!client->selected) return -EBADFD;
+        struct timer_info info;
+        memset(&info, 0, sizeof(info));
+        info.card = client->card;
+        uint32_t resolution = 1000000U;
+        lock_acquire(&cards_lock);
+        if (timer_stream_exists(client->card, client->device, client->subdevice)) {
+            struct snd_card *card = &cards[client->card];
+            lock_acquire(&card->lock);
+            resolution = stream_resolution(&card->streams[client->subdevice]);
+            lock_release(&card->lock);
+        }
+        lock_release(&cards_lock);
+        copy_field(info.id, sizeof(info.id), client->subdevice ? "PCM capture" : "PCM playback");
+        copy_field(info.name, sizeof(info.name),
+                   client->subdevice ? "PCM capture 0-0" : "PCM playback 0-0");
+        info.resolution = resolution;
+        return timer_copy_out(argument, &info, sizeof(info));
+    }
+    case 0x12: {
+        struct timer_params params;
+        if (copy_from_user(&params, argument, sizeof(params)) != 0) return -EFAULT;
+        if (!client->selected) return -EBADFD;
+        if (!params.ticks) return -EINVAL;
+        lock_acquire(&timers_lock);
+        client->flags = params.flags;
+        client->ticks_wanted = params.ticks;
+        client->filter = params.filter ? params.filter : ~0U;
+        client->count = 0;
+        lock_release(&timers_lock);
+        return 0;
+    }
+    case 0x14: {
+        struct timer_status status;
+        memset(&status, 0, sizeof(status));
+        lock_acquire(&timers_lock);
+        ns_to_timespec(client->last_ns, &status.tstamp);
+        status.resolution = client->resolution;
+        status.lost = client->lost;
+        status.overrun = client->overrun;
+        status.queue = client->count;
+        lock_release(&timers_lock);
+        return timer_copy_out(argument, &status, sizeof(status));
+    }
+    case 0xA0:
+    case 0xA2: {
+        if (!client->selected) return -EBADFD;
+        uint64_t now = time_uptime_ns();
+        lock_acquire(&timers_lock);
+        client->running = 1;
+        client->ticks_pending = 0;
+        timer_queue(client, SND_IOC_NR(request) == 0xA0 ? TIMER_EVENT_START : 4, 0, now);
+        if (client->flags & TIMER_PARAM_EARLY) timer_queue(client, TIMER_EVENT_EARLY, 0, now);
+        lock_release(&timers_lock);
+        return 0;
+    }
+    case 0xA1:
+    case 0xA3: {
+        if (!client->selected) return -EBADFD;
+        uint64_t now = time_uptime_ns();
+        lock_acquire(&timers_lock);
+        client->running = 0;
+        timer_queue(client, SND_IOC_NR(request) == 0xA1 ? TIMER_EVENT_STOP : 5, 0, now);
+        lock_release(&timers_lock);
+        return 0;
+    }
+    default: return -ENOTTY;
+    }
+}
+
+static const struct vfs_file_ops timer_file_ops = {
+    .open = timer_open,
+    .release = timer_release,
+    .read = timer_read_file,
+    .write = timer_write_file,
+    .poll = timer_poll,
+    .ioctl = timer_ioctl,
+};
+
+const struct vfs_file_ops *sound_timer_file_ops(void) { return &timer_file_ops; }
 
 static int poller_started;
 static const char poller_channel;
@@ -2228,6 +2930,10 @@ int snd_register_card(const struct snd_backend *backend) {
     if (start_poller) poller_started = 1;
     lock_release(&cards_lock);
     if (start_poller && !process_create_kthread("ksoundd", sound_poller, NULL)) poller_started = 0;
+    if (!__atomic_exchange_n(&timer_published, 1, __ATOMIC_ACQ_REL)) {
+        devfs_publish_sound_timer();
+        sysfs_publish_sound_timer();
+    }
     devfs_publish_sound((unsigned)index, backend->streams[SND_PLAYBACK] != NULL,
                         backend->streams[SND_CAPTURE] != NULL);
     sysfs_publish_sound((unsigned)index, backend->streams[SND_PLAYBACK] != NULL,
@@ -2256,6 +2962,11 @@ void snd_unregister_card(const struct snd_backend *backend) {
         if (s->waiters) process_wake_all(s);
     }
     card->present = 0;
+    if (card->user) {
+        for (unsigned slot = 0; slot < USER_CONTROLS; slot++) user_control_free(&card->user[slot]);
+        kfree(card->user);
+        card->user = NULL;
+    }
     process_wake_all(card);
     int index = card->index;
     int busy = card->streams[0].open || card->streams[1].open || card->control_opens;
