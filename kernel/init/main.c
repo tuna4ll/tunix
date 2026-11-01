@@ -1,3 +1,4 @@
+#include <tunix/kasan.h>
 #include <stdint.h>
 #include <tunix/workqueue.h>
 #include <tunix/boot.h>
@@ -128,6 +129,9 @@ void kmain(const struct boot_info *boot) {
     heap_init();
     if (terminal_init() != 0) panic("framebuffer terminal initialization failed");
     vt_init();
+#if defined(TUNIX_KASAN)
+    if (boot_command_line_value("kasantest")) kasan_selftest();
+#endif
 #if TUNIX_BOOT_TIMINGS
     boot_log_stage("terminal initialization", &stage_started);
 #endif

@@ -3,6 +3,7 @@
 #include <tunix/pmm.h>
 #include <tunix/lock.h>
 #include <tunix/kprintf.h>
+#include <tunix/kasan.h>
 
 #define HEAP_START        HEAP_VIRTUAL_BASE
 #define HEAP_INITIAL_SIZE (1024 * 1024)
@@ -92,6 +93,10 @@ void heap_init(void) {
     head->free_next = NULL;
     tail = head;
     free_insert(head);
+#if defined(TUNIX_KASAN)
+    if (kasan_cover(HEAP_START, HEAP_INITIAL_SIZE) != 0) panic("KASAN: no shadow for the heap");
+    kasan_poison(HEAP_START, HEAP_INITIAL_SIZE, KASAN_FREE_SPACE);
+#endif
 }
 
 static int heap_grow(size_t min_size) {
@@ -143,6 +148,10 @@ static int heap_grow(size_t min_size) {
         free_insert(new_block);
     }
 
+#if defined(TUNIX_KASAN)
+    if (kasan_cover(HEAP_START + heap_size, growth) != 0) return -1;
+    kasan_poison(HEAP_START + heap_size, growth, KASAN_FREE_SPACE);
+#endif
     heap_size += growth;
     return 0;
 }
@@ -229,6 +238,10 @@ static heap_block_t *find_fit(uint64_t size, int page_aligned) {
 
 void *kmalloc(size_t size) {
     if (size == 0) return NULL;
+#if defined(TUNIX_KASAN)
+    size_t kasan_requested = size;
+    size += KASAN_REDZONE_MIN;
+#endif
     size = (size + (HEAP_ALIGN - 1)) & ~(HEAP_ALIGN - 1);
     int page_aligned = size >= HEAP_PAGE_ALIGN_MIN;
 
@@ -279,11 +292,67 @@ void *kmalloc(size_t size) {
         chosen->pages_released = 0;
         chosen->is_free = 0;
         heap_allocated += chosen->size;
+        void *payload = (void *)((uint8_t *)chosen + sizeof(heap_block_t));
+#if defined(TUNIX_KASAN)
+        uint64_t guarded = ((uint64_t)payload + kasan_requested + 7U) & ~7ULL;
+        kasan_unpoison((uint64_t)payload, kasan_requested);
+        kasan_poison(guarded, (uint64_t)payload + chosen->size - guarded, KASAN_REDZONE);
+#endif
         lock_release(&heap_lock);
-        return (void *)((uint8_t *)chosen + sizeof(heap_block_t));
+        return payload;
     }
 }
 
+#if defined(TUNIX_KASAN)
+#define QUARANTINE_SLOTS 8192U
+#define QUARANTINE_MAGIC 0xDEAD1234U
+static void *quarantine_ring[QUARANTINE_SLOTS];
+static uint64_t quarantine_head;
+static uint64_t quarantine_count;
+static uint64_t quarantine_bytes;
+
+static void kfree_internal(void *ptr);
+
+static void quarantine_flush(uint64_t keep_bytes) {
+    while (quarantine_count &&
+           (quarantine_count >= QUARANTINE_SLOTS || quarantine_bytes > keep_bytes)) {
+        void *oldest = quarantine_ring[quarantine_head];
+        quarantine_head = (quarantine_head + 1U) % QUARANTINE_SLOTS;
+        quarantine_count--;
+        heap_block_t *block = (heap_block_t *)((uint8_t *)oldest - sizeof(heap_block_t));
+        quarantine_bytes -= block->size;
+        kfree_internal(oldest);
+    }
+}
+
+void kfree(void *ptr) {
+    if (!ptr) return;
+    lock_acquire(&heap_lock);
+    heap_block_t *block = (heap_block_t *)((uint8_t *)ptr - sizeof(heap_block_t));
+    if (block->magic == QUARANTINE_MAGIC) {
+        lock_release(&heap_lock);
+        kasan_report_free(ptr, (uint64_t)__builtin_return_address(0), 1);
+        return;
+    }
+    if (block->magic != HEAP_MAGIC || block->is_free) {
+        lock_release(&heap_lock);
+        kasan_report_free(ptr, (uint64_t)__builtin_return_address(0), 0);
+        return;
+    }
+    block->magic = QUARANTINE_MAGIC;
+    kasan_poison((uint64_t)ptr, block->size, KASAN_FREED);
+    quarantine_ring[(quarantine_head + quarantine_count) % QUARANTINE_SLOTS] = ptr;
+    quarantine_count++;
+    quarantine_bytes += block->size;
+    quarantine_flush(KASAN_QUARANTINE);
+    lock_release(&heap_lock);
+}
+
+static void kfree_internal(void *ptr) {
+    heap_block_t *block = (heap_block_t *)((uint8_t *)ptr - sizeof(heap_block_t));
+    block->magic = HEAP_MAGIC;
+    kasan_poison((uint64_t)ptr, block->size, KASAN_FREE_SPACE);
+#else
 void kfree(void *ptr) {
     if (!ptr) return;
 
@@ -304,6 +373,7 @@ void kfree(void *ptr) {
         }
         return;
     }
+#endif
     heap_allocated -= block->size;
     block->is_free = 1;
     heap_release_pages(block);
@@ -329,7 +399,9 @@ void kfree(void *ptr) {
     }
     free_insert(block);
 
+#if !defined(TUNIX_KASAN)
     lock_release(&heap_lock);
+#endif
 }
 
 int heap_under_pressure(void) {
