@@ -31,6 +31,10 @@ for name in $tests; do
 		memory=320M
 		wait=${TIMEOUT:-600}
 	fi
+	if [ "$name" = fuzz ]; then
+		memory=512M
+		wait=${TIMEOUT:-900}
+	fi
 	QEMU_EXTRA=
 	if [ "$name" = sound ]; then
 		if [ "$arch" = aarch64 ]; then

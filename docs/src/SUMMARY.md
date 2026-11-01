@@ -17,6 +17,7 @@
 - [USB](usb.md)
 - [virtio-gpu](virtio-gpu.md)
 - [Sound](sound.md)
+- [Fuzzing](fuzzing.md)
 - [ACPI](acpi.md)
 - [Power Management](power-management.md)
 - [aarch64 Port](aarch64-port.md)
