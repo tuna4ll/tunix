@@ -6,6 +6,7 @@
 #include <tunix/ext4.h>
 #include <tunix/heap.h>
 #include <tunix/irq.h>
+#include <tunix/kallsyms.h>
 #include <tunix/file.h>
 #include <tunix/kstring.h>
 #include <tunix/pmm.h>
@@ -493,6 +494,42 @@ static void text_hex64(struct text_buffer *text, uint64_t value) {
     static const char alphabet[] = "0123456789abcdef";
     for (unsigned shift = 64; shift; shift -= 4)
         text_char(text, alphabet[(value >> (shift - 4)) & 0xFULL]);
+}
+
+static int64_t proc_kallsyms_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                  void *output) {
+    (void)node;
+    if (!output) return 0;
+    const struct credentials *cred = cred_current();
+    int reveal = !cred || cred->euid == 0;
+    char *out = (char *)output;
+    uint64_t position = 0;
+    size_t written = 0;
+    struct kallsyms_symbol symbol;
+    for (uint64_t index = 0; written < size && kallsyms_at(index, &symbol) == 0; index++) {
+        char line[160];
+        size_t used = 0;
+        uint64_t address = reveal ? symbol.address : 0;
+        for (unsigned shift = 64; shift; shift -= 4)
+            line[used++] = "0123456789abcdef"[(address >> (shift - 4)) & 0xFULL];
+        line[used++] = ' ';
+        line[used++] = symbol.type;
+        line[used++] = ' ';
+        for (const char *name = symbol.name; *name && used < sizeof(line) - 1U; name++)
+            line[used++] = *name;
+        line[used++] = '\n';
+        if (position + used <= offset) {
+            position += used;
+            continue;
+        }
+        size_t skip = offset > position ? (size_t)(offset - position) : 0;
+        size_t take = used - skip;
+        if (take > size - written) take = size - written;
+        memcpy(out + written, line + skip, take);
+        written += take;
+        position += used;
+    }
+    return (int64_t)written;
 }
 
 static int64_t proc_modules_read(struct vfs_node *node, uint64_t offset, size_t size,
@@ -1502,6 +1539,7 @@ void procfs_init(void) {
     virtual_file(root, "mounts", proc_mounts_read, 0);
     virtual_file(root, "swaps", proc_swaps_read, 0);
     virtual_file(root, "modules", proc_modules_read, 0);
+    virtual_file(root, "kallsyms", proc_kallsyms_read, 0);
     virtual_file(root, "stat", proc_stat_read, 0);
     virtual_file(root, "loadavg", proc_loadavg_read, 0);
     virtual_file(root, "cmdline", proc_cmdline_line_read, 0);

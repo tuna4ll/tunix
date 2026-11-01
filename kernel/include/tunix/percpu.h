@@ -25,6 +25,8 @@ static inline int cpu_mask_empty(const struct cpu_mask *mask) {
 
 struct process;
 
+#define PERCPU_IDLE_STACK_BYTES 16384
+
 struct cpu {
     uint64_t kernel_rsp;
     uint64_t user_rsp;

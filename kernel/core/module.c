@@ -96,6 +96,7 @@ struct image {
     const struct elf64_symbol *symbols;
     unsigned symbol_count;
     const char *strings;
+    uint64_t strings_size;
     uint64_t *addresses;
 };
 
@@ -151,6 +152,32 @@ const char *module_state_name(const struct module *module) {
     if (module->state == MODULE_STATE_LOADING) return "Loading";
     if (module->state == MODULE_STATE_UNLOADING) return "Unloading";
     return "Live";
+}
+
+int module_symbolize(uint64_t address, const char **module_name, const char **function,
+                     uint64_t *offset, uint64_t *size) {
+    for (struct module *module = modules; module; module = module->next) {
+        if (address < module->base || address >= module->base + module->bytes) continue;
+        if (module_name) *module_name = module->name;
+        const struct module_symbol *best = NULL;
+        for (unsigned index = 0; index < module->symbol_count; index++) {
+            const struct module_symbol *symbol = &module->symbols[index];
+            if (symbol->address > address) break;
+            if (address - symbol->address < symbol->size) best = symbol;
+        }
+        if (!best) return -1;
+        if (function) *function = module->symbol_names + best->name;
+        if (offset) *offset = address - best->address;
+        if (size) *size = best->size;
+        return 0;
+    }
+    return -1;
+}
+
+int module_is_text(uint64_t address) {
+    for (struct module *module = modules; module; module = module->next)
+        if (address >= module->text && address < module->text + module->text_bytes) return 1;
+    return 0;
 }
 
 int module_address_owner(uint64_t address, const char **name, uint64_t *offset) {
@@ -612,9 +639,61 @@ int module_param_format(const struct module *module, unsigned index, char *out, 
     return (int)used;
 }
 
+static void record_functions(struct module *module, const struct image *image) {
+    unsigned count = 0;
+    uint64_t name_bytes = 0;
+    for (unsigned pass = 0; pass < 2U; pass++) {
+        for (unsigned index = 0; index < image->symbol_count; index++) {
+            const struct elf64_symbol *symbol = &image->symbols[index];
+            if ((symbol->info & 0xFU) != STT_FUNC || !symbol->size) continue;
+            if (symbol->shndx == SHN_UNDEF || symbol->shndx >= image->section_count) continue;
+            if (!image->addresses[symbol->shndx] || symbol->name >= image->strings_size) continue;
+            const char *name = image->strings + symbol->name;
+            uint64_t length = 0;
+            while (symbol->name + length < image->strings_size && name[length]) length++;
+            if (symbol->name + length >= image->strings_size) continue;
+            if (pass == 0) {
+                count++;
+                name_bytes += length + 1U;
+                continue;
+            }
+            struct module_symbol *entry = &module->symbols[module->symbol_count++];
+            entry->address = image->addresses[symbol->shndx] + symbol->value;
+            entry->size = symbol->size;
+            entry->name = (uint32_t)name_bytes;
+            memcpy(module->symbol_names + name_bytes, name, length + 1U);
+            name_bytes += length + 1U;
+        }
+        if (pass == 0) {
+            if (!count || name_bytes > 0xFFFFFFFFULL) return;
+            module->symbols = kmalloc(sizeof(*module->symbols) * count);
+            module->symbol_names = kmalloc(name_bytes);
+            if (!module->symbols || !module->symbol_names) {
+                kfree(module->symbols);
+                kfree(module->symbol_names);
+                module->symbols = NULL;
+                module->symbol_names = NULL;
+                return;
+            }
+            name_bytes = 0;
+        }
+    }
+    for (unsigned index = 1; index < module->symbol_count; index++) {
+        struct module_symbol moving = module->symbols[index];
+        unsigned at = index;
+        while (at && module->symbols[at - 1U].address > moving.address) {
+            module->symbols[at] = module->symbols[at - 1U];
+            at--;
+        }
+        module->symbols[at] = moving;
+    }
+}
+
 static void release_module(struct module *module) {
     for (unsigned index = 0; index < module->use_count; index++) module_put(module->uses[index]);
     kfree(module->uses);
+    kfree(module->symbols);
+    kfree(module->symbol_names);
     if (module->base) unmap_window(module->base, module->bytes);
     if (module->physical) pmm_free_pages((void *)module->physical, module->bytes / 4096ULL);
     kfree(module->arguments);
@@ -761,6 +840,7 @@ static int prepare_image(struct image *image, const void *contents, size_t bytes
         image->symbols = (const struct elf64_symbol *)(image->bytes + section->offset);
         image->symbol_count = (unsigned)(section->size / sizeof(struct elf64_symbol));
         image->strings = (const char *)(image->bytes + strings->offset);
+        image->strings_size = strings->size;
         break;
     }
     return image->symbols ? 0 : -ENOEXEC;
@@ -832,6 +912,7 @@ int module_load(const void *contents, size_t bytes, const char *arguments) {
 
     result = apply_relocations(module, &image);
     if (result != 0) goto failed;
+    record_functions(module, &image);
 
     int descriptor_index = read_tables(module, &image);
     if (descriptor_index < 0) {

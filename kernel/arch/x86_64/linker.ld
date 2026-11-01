@@ -23,7 +23,9 @@ SECTIONS
     . = ALIGN(CONSTANT(MAXPAGESIZE));
 
     .text : {
+        _stext = .;
         *(.text .text.*)
+        _etext = .;
     } :text
 
     . = ALIGN(CONSTANT(MAXPAGESIZE));

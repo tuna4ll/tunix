@@ -6,14 +6,13 @@
 
 #define IA32_GS_BASE        0xC0000101U
 #define IA32_KERNEL_GS_BASE 0xC0000102U
-#define IDLE_STACK_BYTES    16384
 
 static struct cpu cpus[SMP_MAX_CPUS];
-static uint8_t boot_idle_stack[IDLE_STACK_BYTES] __attribute__((aligned(16)));
+static uint8_t boot_idle_stack[PERCPU_IDLE_STACK_BYTES] __attribute__((aligned(16)));
 static uint8_t *idle_stacks[SMP_MAX_CPUS] = {boot_idle_stack};
 
 static uint8_t *idle_stack(unsigned index) {
-    if (!idle_stacks[index]) idle_stacks[index] = (uint8_t *)kmalloc(IDLE_STACK_BYTES);
+    if (!idle_stacks[index]) idle_stacks[index] = (uint8_t *)kmalloc(PERCPU_IDLE_STACK_BYTES);
     return idle_stacks[index];
 }
 
@@ -32,7 +31,8 @@ void percpu_activate(unsigned index) {
     struct cpu *cpu = &cpus[index];
     cpu->self = cpu;
     cpu->index = index;
-    cpu->idle_stack_top = idle_stack(index) ? (uint64_t)(idle_stacks[index] + IDLE_STACK_BYTES) : 0;
+    cpu->idle_stack_top =
+        idle_stack(index) ? (uint64_t)(idle_stacks[index] + PERCPU_IDLE_STACK_BYTES) : 0;
 #if defined(__x86_64__)
     write_msr(IA32_GS_BASE, (uint64_t)cpu);
     write_msr(IA32_KERNEL_GS_BASE, 0);
@@ -43,7 +43,7 @@ void percpu_activate(unsigned index) {
 
 uint64_t percpu_boot_stack(unsigned index) {
     if (index >= SMP_MAX_CPUS || !idle_stack(index)) return 0;
-    return (uint64_t)(idle_stacks[index] + IDLE_STACK_BYTES);
+    return (uint64_t)(idle_stacks[index] + PERCPU_IDLE_STACK_BYTES);
 }
 
 void percpu_mark_online(unsigned index) {

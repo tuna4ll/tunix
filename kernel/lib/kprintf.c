@@ -4,6 +4,7 @@
 #include <tunix/cpu.h>
 #include <tunix/klog.h>
 #include <tunix/kprintf.h>
+#include <tunix/oops.h>
 #include <tunix/smp.h>
 #include <tunix/kstring.h>
 
@@ -193,7 +194,9 @@ void panic(const char *msg) {
     terminal_paint_lock_reset();
     int painting = paint_begin();
     panic_sgr(NULL, 0);
-    kprintf("PANIC: %s\n", msg);
+    kprintf("Kernel panic - not syncing: %s\n", msg);
+    if (!oops_in_progress()) dump_stack();
+    kprintf("---[ end Kernel panic - not syncing: %s ]---\n", msg);
     static const unsigned heading[] = {34U};
     static const unsigned alarm[] = {1U, 31U};
     panic_sgr(heading, 1U);

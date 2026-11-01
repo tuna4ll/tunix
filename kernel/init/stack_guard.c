@@ -1,13 +1,21 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <tunix/cpu.h>
+#include <tunix/kallsyms.h>
 #include <tunix/random.h>
 #include <tunix/kprintf.h>
 
 uint64_t __stack_chk_guard = 0x5D1C7A3E9B20F600ULL;
 
 void __stack_chk_fail(void) __attribute__((noreturn));
-void __stack_chk_fail(void) { panic("stack protector: a kernel stack frame was overwritten"); }
+__attribute__((no_stack_protector)) void __stack_chk_fail(void) {
+    static const char prefix[] = "stack-protector: Kernel stack is corrupted in: ";
+    static char message[sizeof(prefix) + 160];
+    size_t used = 0;
+    for (; prefix[used]; used++) message[used] = prefix[used];
+    kallsyms_format((uint64_t)__builtin_return_address(0), message + used, sizeof(message) - used);
+    panic(message);
+}
 
 __attribute__((no_stack_protector)) void stack_guard_init(void) {
     uint64_t values[18];

@@ -9,8 +9,10 @@ SECTIONS
     kernel_image_start = .;
 
     .text : {
+        _stext = .;
         KEEP(*(.text.head))
         *(.text .text.*)
+        _etext = .;
     }
 
     . = ALIGN(4096);

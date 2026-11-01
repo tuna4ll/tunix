@@ -1,4 +1,5 @@
 override MAKEFLAGS += -rR
+COMMA := ,
 .DEFAULT_GOAL := all
 
 -include local.mk
@@ -23,6 +24,11 @@ KERNEL_CFLAGS := -std=gnu11 -Wall -Wextra -Werror -ffreestanding \
 	-Os -ffunction-sections -fdata-sections -mcmodel=kernel -mgeneral-regs-only \
 	-Iinclude -I$(LIMINE_DIR) -I$(UACPI_DIR)/include \
 	$(KERNEL_CFLAGS_EXTRA)
+ifeq ($(FRAME_POINTERS),1)
+  DEBUG_CFLAGS += -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer -DTUNIX_FRAME_POINTERS=1
+endif
+
+KERNEL_CFLAGS += $(DEBUG_CFLAGS)
 KERNEL_LDFLAGS := -nostdlib -no-pie -Wl,-T,arch/x86_64/linker.ld \
 	-Wl,--gc-sections -Wl,--build-id=none -Wl,-z,max-page-size=0x1000
 
@@ -43,9 +49,21 @@ check:
 	$(MAKE) kernel modules BUILD=$(BUILD)/check/debug LIMINE_DIR=$(LIMINE_DIR) UACPI_DIR=$(UACPI_DIR) RUST_HOME=$(RUST_HOME) KERNEL_CFLAGS_EXTRA=-DTUNIX_DEBUG_LOGS=1
 	$(MAKE) kernel modules BUILD=$(BUILD)/check/timings LIMINE_DIR=$(LIMINE_DIR) UACPI_DIR=$(UACPI_DIR) RUST_HOME=$(RUST_HOME) KERNEL_CFLAGS_EXTRA=-DTUNIX_BOOT_TIMINGS=1
 
-$(KERNEL): $(KERNEL_OBJECTS) $(UACPI_OBJECTS) $(RUST_X86_LIB) arch/x86_64/linker.ld
-	$(CC) $(KERNEL_LDFLAGS) $(KERNEL_OBJECTS) $(UACPI_OBJECTS) $(RUST_X86_LIB) -o $@.tmp
-	$(call rust_panic_free,nm,$@.tmp)
+NM ?= nm
+
+link_with_kallsyms = scripts/kallsyms.sh $(1) >$(3).kallsyms.S && \
+	$(2) -c $(3).kallsyms.S -o $(3).kallsyms.o && $(4) $(3).kallsyms.o -o $(3) && \
+	scripts/kallsyms.sh $(1) $(3) >$(3).kallsyms.S && \
+	$(2) -c $(3).kallsyms.S -o $(3).kallsyms.o && $(4) $(3).kallsyms.o -o $(3) && \
+	scripts/kallsyms.sh $(1) $(3) | cmp -s - $(3).kallsyms.S || \
+	{ echo "$(3): the symbol table moved the code it describes" >&2; rm -f $(3); exit 1; }
+
+$(KERNEL): $(KERNEL_OBJECTS) $(UACPI_OBJECTS) $(RUST_X86_LIB) arch/x86_64/linker.ld \
+		scripts/kallsyms.sh
+	$(call link_with_kallsyms,$(NM),$(CC),$@.tmp,$(CC) $(KERNEL_LDFLAGS) $(KERNEL_OBJECTS) \
+		$(UACPI_OBJECTS) $(RUST_X86_LIB))
+	$(call rust_panic_free,$(NM),$@.tmp)
+	rm -f $@.tmp.kallsyms.S $@.tmp.kallsyms.o
 	mv $@.tmp $@
 
 $(BUILD)/kernel/%.c.o: %.c | $(LIMINE_HEADER) $(UACPI_STAMP)
@@ -110,7 +128,7 @@ AARCH64_CORE_CFLAGS := -std=gnu11 -Wall -Wextra -Werror -ffreestanding \
 	-fno-asynchronous-unwind-tables -fno-unwind-tables -mgeneral-regs-only \
 	-mstrict-align -march=armv8-a -mno-outline-atomics -Os \
 	-ffunction-sections -fdata-sections \
-	-Iinclude $(KERNEL_CFLAGS_EXTRA)
+	-Iinclude $(KERNEL_CFLAGS_EXTRA) $(DEBUG_CFLAGS)
 AARCH64_CORE_EXCLUDE := drivers/storage/ata.c \
 	$(filter-out drivers/acpi/acpi.c,$(wildcard drivers/acpi/*.c))
 AARCH64_CORE_SOURCES := $(filter-out $(AARCH64_CORE_EXCLUDE),$(call find-sources,-path ./arch -prune -o)) \
@@ -122,11 +140,14 @@ AARCH64_CORE_IMAGE := $(BUILD)/kernel-aarch64-core.img
 .PHONY: aarch64-core
 aarch64-core: $(AARCH64_CORE_IMAGE)
 
-$(AARCH64_CORE_KERNEL): $(AARCH64_CORE_OBJECTS) $(RUST_ARM_LIB) arch/aarch64/linker.ld
-	$(AARCH64_CC) -nostdlib -static -Wl,-T,arch/aarch64/linker.ld \
-		-Wl,--gc-sections -Wl,--build-id=none -Wl,-z,max-page-size=0x1000 \
-		$(AARCH64_CORE_OBJECTS) $(RUST_ARM_LIB) -lgcc -o $@.tmp
+$(AARCH64_CORE_KERNEL): $(AARCH64_CORE_OBJECTS) $(RUST_ARM_LIB) arch/aarch64/linker.ld \
+		scripts/kallsyms.sh
+	$(call link_with_kallsyms,$(AARCH64_NM),$(AARCH64_CC),$@.tmp,$(AARCH64_CC) -nostdlib -static \
+		-Wl$(COMMA)-T$(COMMA)arch/aarch64/linker.ld -Wl$(COMMA)--gc-sections \
+		-Wl$(COMMA)--build-id=none -Wl$(COMMA)-z$(COMMA)max-page-size=0x1000 \
+		$(AARCH64_CORE_OBJECTS) $(RUST_ARM_LIB) -lgcc)
 	$(call rust_panic_free,$(AARCH64_NM),$@.tmp)
+	rm -f $@.tmp.kallsyms.S $@.tmp.kallsyms.o
 	mv $@.tmp $@
 
 $(AARCH64_CORE_IMAGE): $(AARCH64_CORE_KERNEL)

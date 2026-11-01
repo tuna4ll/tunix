@@ -8,6 +8,7 @@
 #include <tunix/smp.h>
 #include <tunix/time.h>
 #include <tunix/kprintf.h>
+#include <tunix/oops.h>
 
 #define MUTEX_REPORTS         16U
 #define OWNER_SPIN_NS         50000ULL
@@ -47,9 +48,11 @@ static void check_order(struct process *self, const struct mutex *mutex) {
     for (uint32_t index = 0; index < count; index++) {
         const struct mutex *other = self->held_mutexes[index];
         if (other->rank <= mutex->rank) continue;
-        if (may_report())
+        if (may_report()) {
             kprintf("LOCK: pid %u takes %s (rank %u) while holding %s (rank %u)\n",
                     (unsigned)self->pid, mutex->name, mutex->rank, other->name, other->rank);
+            oops_report("WARNING: possible circular locking dependency detected");
+        }
         return;
     }
 }
@@ -182,7 +185,10 @@ void mutex_lock(struct mutex *mutex) {
 void mutex_unlock(struct mutex *mutex) {
     struct process *token = holder_token();
     if (mutex->owner != token) {
-        if (may_report()) kprintf("LOCK: releases %s it does not hold\n", mutex->name);
+        if (may_report()) {
+            kprintf("LOCK: releases %s it does not hold\n", mutex->name);
+            oops_report("WARNING: bad unlock balance detected!");
+        }
         return;
     }
     if (--mutex->depth) return;
@@ -224,7 +230,9 @@ void mutex_reacquire(struct mutex *mutex, unsigned depth) {
 void mutex_check_released(const char *where) {
     struct process *self = process_current();
     if (!self || !self->held_mutex_count) return;
-    if (may_report())
+    if (may_report()) {
         kprintf("LOCK: pid %u leaves %s holding %u mutex(es), first %s\n", (unsigned)self->pid,
                 where, (unsigned)self->held_mutex_count, self->held_mutexes[0]->name);
+        oops_report("WARNING: lock held when returning to user space!");
+    }
 }

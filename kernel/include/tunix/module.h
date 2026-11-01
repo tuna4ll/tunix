@@ -41,6 +41,12 @@ struct module_descriptor {
     void (*exit)(void);
 };
 
+struct module_symbol {
+    uint64_t address;
+    uint64_t size;
+    uint32_t name;
+};
+
 struct module {
     char name[MODULE_NAME_MAX];
     uint64_t base;
@@ -61,6 +67,9 @@ struct module {
     struct module **uses;
     unsigned use_capacity;
     unsigned use_count;
+    struct module_symbol *symbols;
+    unsigned symbol_count;
+    char *symbol_names;
     struct module *next;
 };
 
@@ -78,6 +87,9 @@ const char *module_state_name(const struct module *module);
 int module_param_format(const struct module *module, unsigned index, char *out, size_t capacity);
 int module_param_set(struct module *module, unsigned index, const char *text, size_t length);
 int module_address_owner(uint64_t address, const char **name, uint64_t *offset);
+int module_is_text(uint64_t address);
+int module_symbolize(uint64_t address, const char **module, const char **function, uint64_t *offset,
+                     uint64_t *size);
 int module_image_info(const void *contents, size_t bytes, const char *key, unsigned occurrence,
                       char *out, size_t capacity);
 int module_export_value(const struct module *module, const char *name, uint64_t *value);

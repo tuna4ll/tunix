@@ -6,6 +6,7 @@
 #include <tunix/smp.h>
 #include <tunix/time.h>
 #include <tunix/kprintf.h>
+#include <tunix/oops.h>
 
 #define HELD_MAX         24U
 #define ORDER_REPORTS    16U
@@ -38,6 +39,7 @@ static void check_order(struct held_locks *mine, const struct lock *lock) {
         if (__atomic_fetch_add(&order_reports, 1, __ATOMIC_RELAXED) >= ORDER_REPORTS) return;
         kprintf("LOCK: cpu %u takes %s (rank %u) while holding %s (rank %u)\n",
                 cpu_current()->index, lock->name, lock->rank, other->name, other->rank);
+        oops_report("WARNING: possible circular locking dependency detected");
         return;
     }
 }
@@ -64,6 +66,7 @@ static void report_stuck(const struct lock *lock, uint32_t ticket) {
     kprintf("LOCK: cpu %u stuck on %s ticket %u, serving %u, held by cpu %d\n",
             cpu_current()->index, lock->name, (unsigned)ticket,
             (unsigned)__atomic_load_n(&lock->serving, __ATOMIC_RELAXED), (int)owner - 1);
+    oops_report("BUG: spinlock lockup suspected");
     if (!owner || owner > SMP_MAX_CPUS) return;
     struct held_locks *theirs = &held[owner - 1U];
     uint32_t top = theirs->count < HELD_MAX ? theirs->count : HELD_MAX;
@@ -120,6 +123,7 @@ void lock_release(struct lock *lock) {
     uint32_t me = self_id();
     if (__atomic_load_n(&lock->owner, __ATOMIC_RELAXED) != me) {
         kprintf("LOCK: cpu %u releases %s it does not hold\n", me - 1U, lock->name);
+        oops_report("WARNING: bad unlock balance detected!");
         return;
     }
     if (--lock->depth) return;
@@ -142,6 +146,7 @@ void lock_check_released(const char *where) {
         mine->reported = 1;
         kprintf("LOCK: cpu %u leaves %s holding %u lock(s), first %s\n", cpu_current()->index,
                 where, (unsigned)mine->count, mine->locks[0]->name);
+        oops_report("WARNING: lock held when returning to user space!");
     }
 }
 
@@ -162,6 +167,7 @@ void lock_report_sleep(const char *what) {
     if (__atomic_fetch_add(&order_reports, 1, __ATOMIC_RELAXED) >= ORDER_REPORTS) return;
     kprintf("LOCK: cpu %u sleeps in %s holding %u lock(s), first %s\n", cpu_current()->index, what,
             (unsigned)mine->count, mine->count ? mine->locks[0]->name : "none");
+    oops_report("BUG: sleeping function called from invalid context");
 }
 
 void lock_drop(struct lock *lock) {

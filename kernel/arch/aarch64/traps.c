@@ -9,8 +9,8 @@
 #include <tunix/smp.h>
 #include <tunix/timer.h>
 #include "aarch64.h"
-#include <tunix/module.h>
 #include <tunix/kprintf.h>
+#include <tunix/oops.h>
 #include <tunix/vmm.h>
 
 #define EC_UNKNOWN      0x00U
@@ -127,18 +127,66 @@ int aarch64_el0_sync(struct syscall_frame *frame) {
     return 2;
 }
 
+#define EC_IABT_CUR 0x21U
+#define EC_DABT_CUR 0x25U
+
+static const char *exception_class_name(uint32_t class) {
+    switch (class) {
+    case EC_UNKNOWN:      return "Unknown/Uncategorized";
+    case EC_SVC64:        return "SVC (AArch64)";
+    case EC_SYS64:        return "MSR/MRS (AArch64)";
+    case EC_IABT_LOW:     return "IABT (lower EL)";
+    case EC_IABT_CUR:     return "IABT (current EL)";
+    case EC_PC_ALIGN:     return "PC Alignment";
+    case EC_DABT_LOW:     return "DABT (lower EL)";
+    case EC_DABT_CUR:     return "DABT (current EL)";
+    case EC_SP_ALIGN:     return "SP Alignment";
+    case EC_FP_EXCEPTION: return "FP/SIMD";
+    case EC_BRK64:        return "BRK (AArch64)";
+    default:              return "unexpected";
+    }
+}
+
 void aarch64_el1_sync(struct syscall_frame *frame) {
     uint64_t esr = read_esr();
-    kprintf("\nKERNEL EXCEPTION: class %x esr %p elr %p far %p sp %p\n", (unsigned)(esr >> 26),
-            (void *)esr, (void *)frame->elr, (void *)read_far(),
-            (void *)((uint64_t)frame + sizeof(*frame)));
-    const char *module = NULL;
-    uint64_t offset = 0;
-    if (module_address_owner(frame->elr, &module, &offset) == 0)
-        kprintf("in module %s+%p\n", module, (void *)offset);
-    kprintf("x0 %p x1 %p x2 %p x3 %p x30 %p\n", (void *)frame->x[0], (void *)frame->x[1],
-            (void *)frame->x[2], (void *)frame->x[3], (void *)frame->x[30]);
-    panic("kernel exception");
+    uint64_t far = read_far();
+    uint32_t class = (uint32_t)(esr >> 26);
+    uint64_t sp = (uint64_t)frame + sizeof(*frame);
+    unsigned depth = oops_begin();
+    if (depth > 2U) panic("recursive fault while reporting a fault");
+    if (class == EC_DABT_CUR || class == EC_IABT_CUR) {
+        kprintf("Unable to handle kernel %s at virtual address ",
+                far < 4096U ? "NULL pointer dereference" : "paging request");
+        oops_print_hex(far);
+        kprintf("\nMem abort info:\n  ESR = 0x");
+        oops_print_hex(esr);
+        kprintf("\n  EC = 0x%x: %s, IL = %u bits\n", class, exception_class_name(class),
+                (esr & (1U << 25)) ? 32U : 16U);
+        kprintf("Internal error: Oops: ");
+    } else {
+        kprintf("Internal error: Oops - %s: ", exception_class_name(class));
+    }
+    oops_print_hex(esr);
+    kprintf(" [#%u] SMP\n", depth);
+    oops_print_task();
+    kprintf("pc : ");
+    oops_print_symbol(frame->elr);
+    kprintf("\nlr : ");
+    oops_print_symbol(frame->x[30]);
+    kprintf("\nsp : ");
+    oops_print_hex(sp);
+    kprintf("\n");
+    for (int index = 29; index >= 0; index -= 2) {
+        kprintf("x%d: ", index);
+        oops_print_hex(frame->x[index]);
+        if (index > 0) {
+            kprintf(" x%d: ", index - 1);
+            oops_print_hex(frame->x[index - 1]);
+        }
+        kprintf("\n");
+    }
+    if (depth == 1U) oops_print_trace(frame->x[29], sp);
+    panic("Oops: Fatal exception");
 }
 
 void aarch64_unexpected(struct syscall_frame *frame, uint64_t kind) {

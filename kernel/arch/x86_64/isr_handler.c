@@ -16,6 +16,8 @@
 #include <tunix/smp.h>
 #include <tunix/timer.h>
 #include <tunix/kprintf.h>
+#include <tunix/kallsyms.h>
+#include <tunix/oops.h>
 
 #define VERBOSE_FAULT_LIMIT 24U
 
@@ -90,6 +92,94 @@ static struct process_fault user_fault(const struct interrupt_frame *regs, uint6
     return fault;
 }
 
+static const char *const trap_names[] = {"divide error",
+                                         "debug",
+                                         "nmi",
+                                         "int3",
+                                         "overflow",
+                                         "bounds",
+                                         "invalid opcode",
+                                         "device not available",
+                                         "double fault",
+                                         "coprocessor segment overrun",
+                                         "invalid TSS",
+                                         "segment not present",
+                                         "stack segment",
+                                         "general protection fault",
+                                         "page fault",
+                                         "spurious interrupt bug",
+                                         "coprocessor error",
+                                         "alignment check",
+                                         "machine check",
+                                         "simd exception",
+                                         "virtualization exception",
+                                         "control protection fault"};
+
+static uint64_t read_control(unsigned which) {
+    uint64_t value = 0;
+    if (which == 3U) __asm__ volatile("mov %%cr3, %0" : "=r"(value));
+    else if (which == 4U) __asm__ volatile("mov %%cr4, %0" : "=r"(value));
+    return value;
+}
+
+static void register_line(const char *a, uint64_t va, const char *b, uint64_t vb, const char *c,
+                          uint64_t vc) {
+    kprintf("%s: ", a);
+    oops_print_hex(va);
+    kprintf(" %s: ", b);
+    oops_print_hex(vb);
+    if (c) {
+        kprintf(" %s: ", c);
+        oops_print_hex(vc);
+    }
+    kprintf("\n");
+}
+
+__attribute__((noreturn)) static void kernel_oops(const struct interrupt_frame *regs,
+                                                  uint64_t address) {
+    unsigned depth = oops_begin();
+    unsigned vector = (unsigned)regs->int_no;
+    if (depth > 2U) panic("recursive fault while reporting a fault");
+    if (vector == 14U) {
+        if (address < 4096U) kprintf("BUG: kernel NULL pointer dereference, address: ");
+        else kprintf("BUG: unable to handle page fault for address: ");
+        oops_print_hex(address);
+        kprintf("\n#PF: supervisor %s access in kernel mode\n",
+                (regs->err_code & 16U)      ? "instruction fetch"
+                    : (regs->err_code & 2U) ? "write"
+                                            : "read");
+        kprintf("#PF: error_code(0x");
+        oops_print_hex_width(regs->err_code, 4U);
+        kprintf(") - %s\n",
+                (regs->err_code & 8U)       ? "reserved bit violation"
+                    : (regs->err_code & 1U) ? "permissions violation"
+                                            : "not-present page");
+        kprintf("Oops: ");
+    } else {
+        kprintf("%s: ",
+                vector < sizeof(trap_names) / sizeof(trap_names[0]) ? trap_names[vector]
+                                                                    : "exception");
+    }
+    oops_print_hex_width(regs->err_code, 4U);
+    kprintf(" [#%u] SMP\n", depth);
+    oops_print_task();
+    kprintf("RIP: 0010:");
+    oops_print_symbol(regs->rip);
+    kprintf("\nRSP: 0018:");
+    oops_print_hex(regs->rsp);
+    kprintf(" EFLAGS: ");
+    oops_print_hex_width(regs->rflags, 8U);
+    kprintf("\n");
+    register_line("RAX", regs->rax, "RBX", regs->rbx, "RCX", regs->rcx);
+    register_line("RDX", regs->rdx, "RSI", regs->rsi, "RDI", regs->rdi);
+    register_line("RBP", regs->rbp, "R08", regs->r8, "R09", regs->r9);
+    register_line("R10", regs->r10, "R11", regs->r11, "R12", regs->r12);
+    register_line("R13", regs->r13, "R14", regs->r14, "R15", regs->r15);
+    register_line("CR2", address, "CR3", read_control(3U), "CR4", read_control(4U));
+    if (depth == 1U) oops_print_trace(regs->rbp, regs->rsp);
+    panic("Fatal exception");
+}
+
 static void interrupt_acknowledge(unsigned vector) {
     if (apic_is_active()) apic_send_eoi();
     else pic_send_eoi(vector);
@@ -129,6 +219,7 @@ static void isr_dispatch(struct interrupt_frame *regs) {
         uint64_t fault_cs = regs->cs;
         uint64_t fault_address = 0;
         if (regs->int_no == 14) __asm__ volatile("mov %%cr2, %0" : "=r"(fault_address));
+        if ((regs->cs & 3U) != 3U) kernel_oops(regs, fault_address);
 
         if (boot_verbose() && (regs->cs & 3U) == 3U) {
             static unsigned traced;
@@ -262,6 +353,12 @@ void isr_handler(struct interrupt_frame *regs) {
     if (regs->int_no == VECTOR_DOUBLE_FAULT) {
         uint64_t cr2;
         __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+        oops_begin();
+        kprintf("PANIC: double fault, error_code: 0x%x\n", (unsigned)regs->err_code);
+        oops_print_task();
+        kprintf("RIP: 0010:");
+        oops_print_symbol(regs->rip);
+        kprintf("\n");
         kprintf("DOUBLE FAULT: rip %p cs %x rsp %p ss %x cr2 %p rflags %x\n", (void *)regs->rip,
                 (unsigned)regs->cs, (void *)regs->rsp, (unsigned)regs->ss, (void *)cr2,
                 (unsigned)regs->rflags);
@@ -281,8 +378,10 @@ void isr_handler(struct interrupt_frame *regs) {
         unsigned shown = 0;
         for (unsigned index = 0; index < 512 && shown < 24; index++) {
             uint64_t value = word[index];
-            if (value < 0xFFFFFFFF80100000ULL || value >= 0xFFFFFFFF80400000ULL) continue;
-            kprintf("  [%u] %p\n", index, (void *)value);
+            if (!kallsyms_is_text(value)) continue;
+            kprintf("  [%u] ? ", index);
+            oops_print_symbol(value);
+            kprintf("\n");
             shown++;
         }
         panic("double fault");
