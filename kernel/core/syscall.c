@@ -30,6 +30,7 @@
 #include <tunix/posix_timer.h>
 #include <tunix/power.h>
 #include <tunix/process.h>
+#include <tunix/seccomp.h>
 #include <tunix/random.h>
 #include <tunix/signal.h>
 #include <tunix/syscall.h>
@@ -266,6 +267,8 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136,
 #define SYS_TIMER_DELETE           226
 #define SYS_ARCH_PRCTL             158
 #define SYS_PRCTL                  157
+#define SYS_SECCOMP                317
+#define SECCOMP_SI_CODE            1
 #define SYS_GETTID                 186
 #define SYS_FUTEX                  202
 #define SYS_SET_TID_ADDRESS        218
@@ -518,6 +521,7 @@ struct linux_clone_args {
 #define PR_SET_NAME              15
 #define PR_GET_NAME              16
 #define PR_GET_SECCOMP           21
+#define PR_SET_SECCOMP           22
 #define PR_CAPBSET_READ          23
 #define PR_CAPBSET_DROP          24
 #define PR_GET_SECUREBITS        27
@@ -5325,6 +5329,16 @@ static int64_t sys_capset(uint64_t user_header, uint64_t user_data) {
     return 0;
 }
 
+static int64_t sys_seccomp(uint64_t operation, uint64_t flags, uint64_t args) {
+    switch (operation) {
+    case SECCOMP_SET_MODE_STRICT:  return flags || args ? -EINVAL : seccomp_set_mode_strict();
+    case SECCOMP_SET_MODE_FILTER:  return seccomp_set_mode_filter((uint32_t)flags, args);
+    case SECCOMP_GET_ACTION_AVAIL:
+    case SECCOMP_GET_NOTIF_SIZES:  return -EOPNOTSUPP;
+    default:                       return -EINVAL;
+    }
+}
+
 static int64_t sys_prctl(int option, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5) {
     struct process *process = process_current();
     if (!process) return -EINVAL;
@@ -5390,8 +5404,9 @@ static int64_t sys_prctl(int option, uint64_t arg2, uint64_t arg3, uint64_t arg4
 
         process->keep_capabilities = (int)arg2;
         return 0;
-    case PR_GET_SECUREBITS:
-    case PR_GET_SECCOMP:    return 0;
+    case PR_GET_SECCOMP:    return (int64_t)process->seccomp_mode;
+    case PR_SET_SECCOMP:    return seccomp_prctl_set(arg2, arg3);
+    case PR_GET_SECUREBITS: return 0;
     case PR_SET_SECUREBITS: return arg2 == 0 ? 0 : -EINVAL;
     case PR_CAPBSET_READ:   return 0;
     case PR_CAPBSET_DROP:
@@ -6207,6 +6222,28 @@ static void syscall_run(struct syscall_frame *frame) {
     if (caller && caller->io_wait_active && caller->io_wait_syscall != syscall_number)
         clear_io_wait(caller);
     int skip_signal_delivery = 0;
+
+    if (caller && seccomp_active(caller)) {
+        uint32_t action = seccomp_decide(frame, SYSCALL_NATIVE_NR(frame));
+        uint32_t full = action & SECCOMP_RET_ACTION_FULL;
+        if (full != SECCOMP_RET_ALLOW && full != SECCOMP_RET_LOG) {
+            if (full == SECCOMP_RET_ERRNO) {
+                uint32_t code = action & SECCOMP_RET_DATA;
+                if (code > 4095U) code = 4095U;
+                SYSCALL_RET(frame) = (uint64_t)(-(int64_t)code);
+            } else if (full == SECCOMP_RET_TRAP) {
+                process_signal_from_syscall(frame, SIGSYS, SECCOMP_SI_CODE, 0, SYSCALL_IP(frame));
+                return;
+            } else if (full == SECCOMP_RET_TRACE || full == SECCOMP_RET_USER_NOTIF) {
+                SYSCALL_RET(frame) = (uint64_t)(-(int64_t)ENOSYS);
+            } else {
+                process_signal_from_syscall(frame, SIGSYS, SECCOMP_SI_CODE, 1, SYSCALL_IP(frame));
+                return;
+            }
+            process_prepare_user_return(frame);
+            return;
+        }
+    }
 
     switch (syscall_number) {
     case SYS_READ: {
@@ -7759,6 +7796,10 @@ static void syscall_run(struct syscall_frame *frame) {
         }
         break;
     }
+    case SYS_SECCOMP:
+        SYSCALL_RET(frame) =
+            (uint64_t)sys_seccomp(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame));
+        break;
     default:
 
         KDEBUG("syscall: ENOSYS pid=%u nr=%u\n", (unsigned)process_current_pid(),

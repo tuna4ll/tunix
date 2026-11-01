@@ -98,6 +98,8 @@ struct process_rlimit {
 
 struct posix_timer;
 
+struct seccomp_filter;
+
 struct signal_entry {
     struct signal_entry *next;
     struct posix_timer *timer;
@@ -275,6 +277,8 @@ struct process {
     uint64_t *kcov_area;
     uint64_t kcov_words;
     uint32_t kcov_mode;
+    uint32_t seccomp_mode;
+    struct seccomp_filter *seccomp_filters;
 };
 
 #define PROCESS_RESTARTED INT64_MIN
@@ -351,6 +355,8 @@ struct process_fault {
 };
 
 int process_fault_from_interrupt(struct interrupt_frame *frame, const struct process_fault *fault);
+int process_signal_from_syscall(struct syscall_frame *frame, int signal_number, int code, int fatal,
+                                uint64_t address);
 void process_run_child_first_from_syscall(struct syscall_frame *frame, uint64_t child_pid);
 void process_reap_deferred(void);
 void process_io_recheck(void);

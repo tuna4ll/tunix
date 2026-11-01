@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <tunix/kcov.h>
+#include <tunix/seccomp.h>
 #include <tunix/build_config.h>
 #include <tunix/cred.h>
 #include <tunix/elf.h>
@@ -2730,6 +2731,31 @@ int process_fault_from_interrupt(struct interrupt_frame *frame, const struct pro
     return 1;
 }
 
+int process_signal_from_syscall(struct syscall_frame *frame, int signal_number, int code, int fatal,
+                                uint64_t address) {
+    if (!frame || !current || current->state != PROCESS_RUNNING) return 0;
+    struct syscall_frame resume = *frame;
+    {
+        SCHED_LOCKED;
+        wake_bump();
+        uint64_t bit = signal_bit(signal_number);
+        struct tunix_sigaction *action = &current->signal_actions[signal_number - 1];
+        if (fatal || (current->signal_blocked & bit) || action->handler == SIG_IGN) {
+            action->handler = SIG_DFL;
+            current->signal_blocked &= ~bit;
+        }
+        struct signal_info info;
+        signal_info_init(&info, signal_number, code);
+        info.fields.fault.address = address;
+        (void)queue_signal(current, &info);
+    }
+    process_prepare_user_return(&resume);
+    if (!current || current->state != PROCESS_RUNNING) return 1;
+    current->saved_frame = resume;
+    *frame = resume;
+    return 1;
+}
+
 static int needs_user_work(struct process *process) {
     return process->group_exit_pending ||
         (!process->in_signal && next_pending_signal(process) != 0);
@@ -3030,6 +3056,7 @@ void process_exit_from_syscall(struct syscall_frame *frame, int status) {
         panic("init exited");
     }
     kcov_task_exit(exiting);
+    seccomp_release(exiting);
     eventfs_emit_process_exit(exiting->cred.euid, exiting->pid, status);
     exiting->exit_status = status;
     syscall_release_pins();
@@ -3154,6 +3181,7 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame, const struct fork
     SYSCALL_RET(&child->saved_frame) = 0;
     child->signal_blocked = parent->signal_blocked;
     memcpy(child->signal_actions, parent->signal_actions, sizeof(child->signal_actions));
+    seccomp_inherit(child, parent);
 
     child->files = file_table_clone(parent->files);
     if (!child->files) {
@@ -3255,6 +3283,7 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame, uint64_t 
     SYSCALL_USER_SP(&child->saved_frame) = child_stack;
     child->signal_blocked = parent->signal_blocked;
     memcpy(child->signal_actions, parent->signal_actions, sizeof(child->signal_actions));
+    seccomp_inherit(child, parent);
 
     child->files = parent->files;
     file_table_ref(child->files);
