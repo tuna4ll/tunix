@@ -365,6 +365,10 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136,
 #define SOCKET_MESSAGE_MAX      PIPE_CAPACITY
 #define UIO_MAXIOV              1024
 #define SO_SNDBUF               7
+#define SO_PRIORITY             12
+#define SO_SNDBUFFORCE          32
+#define SO_RCVBUFFORCE          33
+#define SO_PASSSEC              34
 #define SO_RCVBUF               8
 #define MSG_CTRUNC              0x08
 #define MSG_TRUNC               0x20
@@ -1809,7 +1813,8 @@ static int64_t sys_bind(int fd, uint64_t user_address, uint64_t length) {
         return netlink_socket_bind(netlink_value, length ? address : NULL, (size_t)length);
     }
     struct inet_socket *inet_value = inet_socket_from_fd(fd);
-    if (!inet_value || !user_address || length < 2 || length > 32) return -EBADF;
+    if (!inet_value) return fd_file(fd) ? -ENOTSOCK : -EBADF;
+    if (!user_address || length < 2 || length > 32) return -EINVAL;
     uint8_t address[32];
     if (copy_from_user(address, user_address, (size_t)length) != 0) return -EFAULT;
     return inet_socket_bind(inet_value, address, (size_t)length);
@@ -1819,7 +1824,8 @@ static int64_t sys_listen(int fd, int backlog) {
     struct unix_socket *socket = socket_from_fd(fd);
     if (socket) return unix_socket_listen(socket, backlog);
     struct inet_socket *inet_value = inet_socket_from_fd(fd);
-    return inet_value ? inet_socket_listen(inet_value, backlog) : -EBADF;
+    if (!inet_value) return fd_file(fd) ? -ENOTSOCK : -EBADF;
+    return inet_socket_listen(inet_value, backlog);
 }
 
 static int socket_path_target(const char *resolved, char key[SOCKET_KEY_BYTES]) {
@@ -1848,7 +1854,8 @@ static int64_t sys_connect(int fd, uint64_t user_address, uint64_t length) {
                                    address.path[0] ? key : NULL);
     }
     struct inet_socket *inet_value = inet_socket_from_fd(fd);
-    if (!inet_value || !user_address || length < 2 || length > 32) return -EBADF;
+    if (!inet_value) return fd_file(fd) ? -ENOTSOCK : -EBADF;
+    if (!user_address || length < 2 || length > 32) return -EINVAL;
     uint8_t address[32];
     if (copy_from_user(address, user_address, (size_t)length) != 0) return -EFAULT;
     struct process *process = process_current();
@@ -1907,7 +1914,7 @@ static int64_t sys_accept(int fd, uint64_t user_address, uint64_t user_length, i
     }
 
     struct inet_socket *inet_listener = inet_socket_from_fd(fd);
-    if (!inet_listener) return -EBADF;
+    if (!inet_listener) return fd_file(fd) ? -ENOTSOCK : -EBADF;
     if (!inet_socket_is_listener(inet_listener)) return -EINVAL;
     struct inet_socket *accepted = inet_socket_accept(inet_listener);
     if (!accepted) return -EAGAIN;
@@ -2029,7 +2036,7 @@ static int64_t sys_sendto(int fd, uint64_t user_data, size_t length, int flags,
                             addressed ? sizeof(destination) : 0U);
     }
     struct inet_socket *socket = inet_socket_from_fd(fd);
-    if (!socket) return -EBADF;
+    if (!socket) return fd_file(fd) ? -ENOTSOCK : -EBADF;
     if (length > SOCKET_MESSAGE_MAX) {
         if (!inet_socket_is_stream(socket)) return -EMSGSIZE;
         length = SOCKET_MESSAGE_MAX;
@@ -2090,7 +2097,7 @@ static int64_t sys_recvfrom(int fd, uint64_t user_data, size_t length, int flags
         return result;
     }
     struct inet_socket *socket = inet_socket_from_fd(fd);
-    if (!socket) return -EBADF;
+    if (!socket) return fd_file(fd) ? -ENOTSOCK : -EBADF;
     if (length > SOCKET_MESSAGE_MAX) length = SOCKET_MESSAGE_MAX;
     uint8_t address[32];
     size_t address_length = sizeof(address);
@@ -2280,7 +2287,7 @@ static int64_t sys_sendmsg(int fd, uint64_t user_message, int flags) {
 
     if (!stream_socket) {
         if (data != stage) kfree(data);
-        return -EBADF;
+        return fd_file(fd) ? -ENOTSOCK : -EBADF;
     }
     uint8_t address[32];
     const void *address_pointer = NULL;
@@ -2535,7 +2542,7 @@ static int64_t sys_recvmsg(int fd, uint64_t user_message, int flags) {
     }
 
     struct inet_socket *socket = inet_socket_from_fd(fd);
-    if (!socket) return -EBADF;
+    if (!socket) return fd_file(fd) ? -ENOTSOCK : -EBADF;
     uint8_t address[32];
     size_t address_length =
         message.name_length < sizeof(address) ? message.name_length : sizeof(address);
@@ -2598,7 +2605,7 @@ static int64_t sys_socket_name(int fd, uint64_t user_address, uint64_t user_leng
         return copy_to_user(user_length, &output_length, sizeof(output_length)) == 0 ? 0 : -EFAULT;
     }
     struct inet_socket *socket = inet_socket_from_fd(fd);
-    if (!socket) return -EBADF;
+    if (!socket) return fd_file(fd) ? -ENOTSOCK : -EBADF;
     uint8_t address[32];
     size_t length = supplied < sizeof(address) ? supplied : sizeof(address);
     int status = peer ? inet_socket_getpeername(socket, address, &length)
@@ -2612,6 +2619,10 @@ static int64_t sys_socket_name(int fd, uint64_t user_address, uint64_t user_leng
 static int64_t sys_setsockopt(int fd, int level, int option, uint64_t user_value, size_t length) {
     struct unix_socket *unix_value = socket_from_fd(fd);
     if (unix_value) {
+        if (level == SOL_SOCKET && length >= sizeof(int32_t) &&
+            (option == SO_PRIORITY || option == SO_SNDBUF || option == SO_RCVBUF ||
+             option == SO_SNDBUFFORCE || option == SO_RCVBUFFORCE || option == SO_PASSSEC))
+            return 0;
         if (level != SOL_SOCKET || option != SO_PASSCRED || length < sizeof(int32_t))
             return -EOPNOTSUPP;
         int32_t enabled;
@@ -2637,7 +2648,7 @@ static int64_t sys_setsockopt(int fd, int level, int option, uint64_t user_value
         return 0;
     }
     struct inet_socket *socket = inet_socket_from_fd(fd);
-    if (!socket) return -EBADF;
+    if (!socket) return fd_file(fd) ? -ENOTSOCK : -EBADF;
     if (length > 256U) return -EINVAL;
     uint8_t value[256];
     if (length && copy_from_user(value, user_value, length) != 0) return -EFAULT;
@@ -2703,7 +2714,7 @@ static int64_t sys_getsockopt(int fd, int level, int option, uint64_t user_value
             uint32_t length = sizeof(enabled);
             return copy_to_user(user_length, &length, sizeof(length)) == 0 ? 0 : -EFAULT;
         }
-        return -EOPNOTSUPP;
+        return -ENOPROTOOPT;
     }
     struct netlink_socket *netlink = netlink_socket_from_fd(fd);
     if (netlink) {
@@ -2726,7 +2737,7 @@ static int64_t sys_getsockopt(int fd, int level, int option, uint64_t user_value
         return copy_to_user(user_length, &output_length, sizeof(output_length)) == 0 ? 0 : -EFAULT;
     }
     struct inet_socket *socket = inet_socket_from_fd(fd);
-    if (!socket) return -EBADF;
+    if (!socket) return fd_file(fd) ? -ENOTSOCK : -EBADF;
     uint8_t value[256];
     size_t length = supplied < sizeof(value) ? supplied : sizeof(value);
     int status = inet_socket_getsockopt(socket, level, option, value, &length);

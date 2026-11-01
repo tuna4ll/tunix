@@ -89,6 +89,41 @@ static void socket_mode(void) {
     close(fds[1]);
 }
 
+#if defined(__x86_64__)
+#define SYS_sendto     44
+#define SYS_recvfrom   45
+#define SYS_setsockopt 54
+#else
+#define SYS_sendto     206
+#define SYS_recvfrom   207
+#define SYS_setsockopt 208
+#endif
+
+#define ENOTSOCK 88
+
+static void not_sockets(void) {
+    int fds[2];
+    expect_eq(pipe2(fds, 0), 0, "a pipe is made");
+    char byte = 'x';
+    expect_eq(SYSCALL(SYS_sendto, fds[1], &byte, 1, 0, 0, 0), -ENOTSOCK,
+              "send on a pipe says it is not a socket");
+    expect_eq(SYSCALL(SYS_recvfrom, fds[0], &byte, 1, 0x40, 0, 0), -ENOTSOCK,
+              "and so does recv, which libpulse relies on");
+    expect_eq(SYSCALL(SYS_sendto, 1000, &byte, 1, 0, 0, 0), -EBADF, "a closed descriptor is EBADF");
+    close(fds[0]);
+    close(fds[1]);
+    int pair[2];
+    socketpair(AF_UNIX, SOCK_STREAM, pair);
+    int value = 6;
+    expect_eq(SYSCALL(SYS_setsockopt, pair[0], SOL_SOCKET, 12, &value, sizeof(value), 0), 0,
+              "SO_PRIORITY is accepted on a unix socket");
+    value = 65536;
+    expect_eq(SYSCALL(SYS_setsockopt, pair[0], SOL_SOCKET, 7, &value, sizeof(value), 0), 0,
+              "and so is SO_SNDBUF");
+    close(pair[0]);
+    close(pair[1]);
+}
+
 static void run(int argc, char **argv) {
     (void)argc;
     (void)argv;
@@ -96,4 +131,5 @@ static void run(int argc, char **argv) {
     datagrams();
     passing_descriptors();
     socket_mode();
+    not_sockets();
 }
