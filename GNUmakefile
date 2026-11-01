@@ -278,6 +278,10 @@ test: $(KERNEL) $(MODULES) $(LIMINE_EXE)
 test-aarch64: $(AARCH64_CORE_IMAGE) $(AARCH64_MODULES)
 	ARCH=aarch64 KERNEL=$(AARCH64_CORE_IMAGE) LIMINE=$(LIMINE_DIR) testsuites/kernel-tests/run.sh $(TESTS)
 
+.PHONY: hda-test
+hda-test:
+	testsuites/hda-sim/run.sh
+
 .PHONY: posix-test posix-test-aarch64
 posix-test: $(KERNEL) $(LIMINE_EXE)
 	KERNEL=$(KERNEL) LIMINE=$(LIMINE_DIR) testsuites/posix-tests/run.sh
