@@ -1,133 +1,252 @@
 # Sound
 
-Tunix has one sound card: the Intel HD Audio controller, behind ALSA's
-`/dev/snd` interface. Void's own alsa-lib opens it, and SuperTuxKart plays
-through it by way of OpenAL Soft.
+Tunix speaks ALSA's kernel interface, the same one Linux exposes under
+`/dev/snd`, so Void's own alsa-lib, alsa-utils, OpenAL Soft and Firefox run on
+it unchanged. The stack, from a game down to the hardware:
 
 ```
-game -> OpenAL Soft -> alsa-lib -> /dev/snd/pcmC0D0p -> snd_hda.ko -> the controller
+SuperTuxKart -> OpenAL Soft -> alsa-lib "default":  plug -> softvol -> dmix
+                                                                       |
+            /dev/snd/pcmC0D0p, controlC0, timer  <---------------------+
+                                  |
+            kernel/drivers/audio/sound.c   (PCM, control and timer devices)
+                                  |
+            kernel/modules/snd_hda.c       (Intel HD Audio controller and codec)
 ```
 
-The driver is a module (`kernel/modules/snd_hda.c`), loaded by udev from the
-controller's PCI modalias; `/dev/snd` and the sound class in sysfs appear when
-it registers the card and go away when it is removed. See
-[Modules](modules.md).
+`default` is alsa-lib's stock configuration for an HD Audio card: dmix mixes
+every program into one stream, softvol adds the `PCM` volume, and plug converts
+whatever a program asks for. Several programs play at once, as on any Linux
+machine without a sound server. Nothing in `/etc` overrides it.
 
-The driver was written and verified in 2026-08 against programs built here.
-Everything below is what it took to make Void's stack, which had never touched
-it, work.
+## Devices
 
-## Four things stood between a working driver and a sound
+Each card registered by a driver gets Linux's names and numbers (major 116):
 
-**The device nodes were in a group nobody was in.** `/dev/snd` is created
-`0660 root:audio`, and the kernel had audio as group 29, which is Debian's
-number. On this image 29 names no group at all and `audio` is 12. A node in a
-group nobody is in is a node only root can open, and nothing says so: a program
-reports that the machine has no sound card. `devnum.h` now carries Void's
-numbers, and they have to be checked against the image's `/etc/group` if the
-userland is ever changed underneath.
+| node                 | minor           | what                               |
+|----------------------|-----------------|------------------------------------|
+| `controlC<n>`        | `32n`           | mixer controls and card information |
+| `pcmC<n>D0p`         | `32n + 16`      | playback                           |
+| `pcmC<n>D0c`         | `32n + 24`      | capture                            |
+| `timer`              | 33              | ALSA timers, one per PCM stream    |
 
-**The session is given exactly the groups it is named.** `chpst -u
-tunix:tunix:_seatd` hands over those two groups and no others, whatever
-`/etc/group` says, so the desktop could not reach the card even after the
-numbers were right. The service runs `chpst -u tunix:tunix:_seatd:audio` now.
-This is worth remembering because a login shell behaves differently: `login`
-reads `/etc/group` and grants everything there, so the same command works by
-hand and fails in the session.
+Up to four cards; `/proc/asound` has `cards`, `devices`, `pcm`, `version` and
+per card `id`, `codec#0` (the driver's view of the codec, below),
+`pcm0p/info` and `pcm0p/sub0/{status,hw_params,sw_params}` (capture likewise).
 
-**A refine has to say what it changed.** `SNDRV_PCM_IOCTL_HW_REFINE` answers
-with the parameters narrowed to what the hardware can do, and `cmask` says
-which of them moved. The driver answered `cmask = rmask`, meaning "everything
-you asked about changed". Opening the card directly survives that, because the
-`hw` plugin takes the answer and asks nothing more. A plugin chain does not:
-alsa-lib refines the slave, maps whatever `cmask` names back up the chain, and
-repeats until nothing changes. Told that everything changed, it re-derives the
-client parameters from a slave that never moved and gives up in the library, so
-`snd_pcm_hw_params` returns EINVAL with no ioctl behind it. `aplay -D hw:0,0`
-worked; `aplay -D default` did not, and neither did anything else going through
-`plug`, which is nearly every program.
+In sysfs a card sits below its PCI device the way Linux puts it,
+`/sys/devices/pci0000:00/0000:00:1b.0/sound/card0` with `number` and `id`, and
+the control and PCM devices below the card, each with a `device` link back up.
+udev's `78-sound-card.rules` relies on that shape: when `controlC0` appears it
+writes `change` into the card's `uevent`, and the card's change event is what
+marks it `SOUND_INITIALIZED`, the property PipeWire waits for. The nodes, the
+sysfs devices and the udev events appear when a driver registers a card and
+disappear when it unregisters.
 
-**A buffer is a whole number of periods.** Asked for a 528 frame period and a
-1536 frame buffer, the driver answered that periods lay between 2 and 3, which
-is true and useless: there is no such configuration. alsa-lib believed it, and
-found out only when it committed. Refusing the impossible set is what sends the
-caller back to ask for 1584 frames, which is what OpenAL does, and then the
-whole thing works.
+## The PCM core
 
-## What the game needed on top
+`sound.c` holds no driver knowledge: a driver describes what its hardware can
+do (rates, formats, valid bits, channel and period limits) and supplies five
+callbacks (`configure`, `prepare`, `trigger`, `position`, `release`). The core
+does everything an application sees:
 
-OpenAL Soft asks for a 33 millisecond buffer: three periods of 512 frames, and
-it raises its mixing thread's priority so it can keep one that small. Both
-halves of that mattered here.
+- **Parameter refinement** with Linux's interval arithmetic: open and closed
+  bounds, integer intervals, and the same rules tying sample bits, frame bits,
+  channels, rate, period and buffer sizes, times and byte counts together, run
+  to a fixed point. `HW_PARAMS` chooses the remaining free values the way
+  Linux does (first of everything, largest buffer). OpenAL asking for
+  1024 x 8 frames gets 1024 x 8 frames.
+- **Transfers**: blocking `WRITEI`/`READI` and `write()`/`read()` move every
+  frame, sleeping as needed; non-blocking ones move what fits and then answer
+  `EAGAIN`. `poll` reports room or data against `avail_min`.
+- **States**: prepare, start (playback starts on its own at `start_threshold`),
+  drop, drain (sleeps until the queue has played; non-blocking answers
+  `EAGAIN`), pause and resume, rewind and forward, reset, and underruns or
+  overruns at `stop_threshold`, which a following call reports as `EPIPE`.
+- **mmap** of the ring and `SYNC_PTR`, which is how alsa-lib drives it; an mmap
+  commit does not start the stream, exactly as on Linux.
+- **Silence**: with `silence_size` at the boundary (dmix sets that) the core
+  zeroes every frame the hardware has played, so a stream that never stops
+  plays silence rather than old audio; the threshold mode fills ahead of the
+  application pointer. Nothing is filled unless asked for.
+- **The hardware pointer** is read from the driver whenever anything looks at
+  the stream and at every timer tick. Positions that the elapsed time cannot
+  explain (QEMU's controller steps a few frames back when it resumes) are
+  ignored, and a pointer that wrapped the whole ring while nobody looked is
+  caught from the elapsed time.
+- **Shared opens**: a second `open` of a busy stream fails with `EBUSY`, unless
+  it says `O_APPEND`, in which case it joins the stream already open. That is
+  how dmix's secondary clients reach the card.
 
-The kernel had one priority level, so `pthread_setschedparam` was refused and
-the mixer ran level with the game drawing a hundred frames a second beside it.
-The stream underran continuously: `mmap commit error: Broken pipe`, over and
-over, and silence. It has priorities now (see
-[Syscalls and Scheduler](syscalls-and-scheduler.md)), and with the same image
-and the same emulator, only the kernel differing, a run of the game went from
-**322 underruns to none**.
+Per-open state lives in `struct file`'s `private_data`, which character
+devices can now keep through `struct vfs_file_ops` (open, release, read,
+write, poll, ioctl).
 
-`/etc/openal/alsoft.conf` still asks for 8192 frames, which is 170
-milliseconds, because the priority is not the whole story: 512 frames times 4
-was tried once priorities existed and produced 5086 underruns under a software
-renderer. Something here still stops for longer than 43 milliseconds at a time.
+## Timers
 
-`/etc/asound.conf` is the other half: the stock configuration for an HD Audio
-card sends `default` through dmix, which mixes in the library using SysV
-semaphores this kernel does not implement, and asks the driver for a software
-volume control it does not have. `default` is the card with the plug layer above
-it, so one program at a time gets the card. That is what a machine with no sound
-server has anyway.
+dmix and dsnoop sleep on an ALSA timer that ticks once per hardware period of
+the stream they share, not on the PCM device. `/dev/snd/timer` offers one
+PCM-class timer per stream (`hw:CLASS=3,SCLASS=0,CARD=n,DEV=0,SUBDEV=0` for
+playback, `SUBDEV=1` for capture) with Linux's ioctls: version, next device,
+select, info, params (ticks, event filter, early event), status, start, stop,
+pause and continue. Reads return timestamped events (`TREAD`) or plain tick
+counts. Starting, stopping and pausing the PCM stream are reported to the
+timer's readers as well.
+
+## Controls
+
+A driver lists its controls (name, interface, type, count, range, enumerated
+items, a dB scale) and answers get and put. The core numbers them, answers
+`ELEM_LIST`, `ELEM_INFO`, `ELEM_READ`, `ELEM_WRITE` and `TLV_READ` (the dB scale
+that makes `amixer` and PulseAudio-style mixers show decibels), and queues
+events for every subscriber: a value change from any opener or from the driver
+(a headphone plugged in) wakes `poll` on the control device and is read as
+`struct snd_ctl_event`.
+
+Programs can add controls of their own (`ELEM_ADD`, `ELEM_REPLACE`,
+`ELEM_REMOVE`, `TLV_WRITE`), integer, boolean or enumerated, up to 32 per card.
+softvol does that to create `PCM Playback Volume`; the control lasts as long as
+the card.
+
+## The HD Audio driver
+
+`snd_hda.ko` binds every HD Audio controller (up to four). For each it resets
+the link, starts the command rings, and parses the first codec with an analog
+output:
+
+- **Outputs**: every connected line-out, speaker and headphone pin, in the
+  order the firmware's pin configuration gives them, each routed to its own
+  converter where the codec has enough of them. Mixers on the way are set to
+  pass the converter and mute everything else (the analog loopback inputs are
+  a common source of hiss). EAPD, the external amplifier enable most laptops
+  need for their speakers, is switched on for every pin that has it.
+- **Inputs**: microphone jacks, internal microphones and line inputs, routed to
+  the first converter that reaches them, with the 80% reference voltage
+  microphones expect.
+- **Formats and rates** come from the converters' own capabilities: 16-bit
+  where that is all a codec does (QEMU's), and 32-bit samples with 20 or 24
+  valid bits where the codec has those, programmed with the matching width.
+- **Jacks**: pins that can sense a plug are polled four times a second by the
+  sound core's `ksoundd` thread. Plugging headphones mutes the speakers and
+  line outs (`Auto-Mute Mode`), plugging a microphone switches capture to it,
+  and either change is an event on the control device.
+- **Interrupts**: one per period through MSI, both arches, with the timer tick
+  as the fallback where MSI is missing.
+- **Controllers that only drive HDMI or DisplayPort** (the NVIDIA one next to
+  the laptop's GPU) are left alone.
+- On Intel controllers the traffic class is cleared and PCI Express no-snoop is
+  turned off, as Linux does, so audio DMA always sees what the CPU wrote.
+
+`/proc/asound/card<n>/codec#0` lists the codec, every widget with its
+capabilities, amplifiers, pin configuration, current pin control, EAPD and
+plug state, and connections (the selected one starred), followed by the paths
+the driver chose, for example
+`Speaker: 0x02 -> 0x0c[0] -> 0x14[0]`. That is the first thing to read when a
+machine stays silent.
+
+Controls, with Linux's names: `Master Playback Volume` and `Switch` (with the
+codec's dB scale), one `Playback Switch` per output (`Speaker`, `Headphone`,
+`Line Out`), `Auto-Mute Mode`, `Capture Volume` and `Switch`, `Input Source`
+when there is a choice to make, `Mic Boost Volume` and friends, and a `Jack`
+control per pin that can sense (a `Phantom Jack` for the ones that cannot).
+
+## Userland
+
+- **alsa-utils is on the image.** udev runs `alsactl restore` when a control
+  device appears, which on a first boot initialises the card the way Linux
+  distributions do (Master at -20 dB), and the `alsa` service stores the mixer
+  state at shutdown. `aplay -l`, `amixer`, `alsamixer`, `speaker-test` and
+  `arecord` work.
+- **dmix needs System V semaphores**, which the kernel now has (`semget`,
+  `semop`, `semtimedop`, `semctl` with `SEM_UNDO`, timeouts, removal waking the
+  waiters with `EIDRM`); see `kernel/ipc/sysvsem.c`.
+- `/etc/openal/alsoft.conf` asks for four periods of 1024 frames, 85 ms. Under
+  QEMU with the game rendering in software on four CPUs, 512 x 3 (32 ms)
+  underran once in a 108 second race, 1024 x 4 never did. The old setting,
+  1024 x 8, was needed only because the driver was wrong (below).
+
+## PipeWire
+
+The images do not run a sound server (Weston has none installed; the GNOME and
+KDE images carry PipeWire but do not start it), but the kernel side has been
+checked against one: a small Void root with `pipewire`, `wireplumber`,
+`pipewire-pulse`, `alsa-pipewire` and eudev, booted under QEMU. WirePlumber
+finds the card through udev and builds `Built-in Audio Analog Stereo` from
+alsa-card-profiles, `pactl` talks to pipewire-pulse, and a program playing
+through ALSA's `pipewire` plugin reaches the card intact (the frame counter
+arrived without a gap over six seconds, `xruns: 0`).
+
+Two things it needed beyond ALSA itself: `send()` and `recv()` on a descriptor
+that is not a socket must fail with `ENOTSOCK`, not `EBADF` (libpulse writes to
+its wakeup pipe with `send()` and falls back to `write()` only on `ENOTSOCK`),
+and unix sockets accept `SO_PRIORITY` and the buffer-size options.
+
+Under QEMU, PipeWire wants some headroom (`api.alsa.headroom = 1024`): without
+it the first tenth of a second after starting can underrun once, because the
+emulated controller's position moves in steps. Linux's PipeWire applies that by
+itself when DMI says the machine is a VM; Tunix does not publish DMI yet, so a
+WirePlumber rule would have to say it. Real controllers move smoothly and need
+none.
+
+## What was wrong before 2026-10-25
+
+Measured by playing a known signal (a 1 kHz sine on the left, a frame counter
+on the right) through the same path the game uses, recording QEMU's output to a
+WAV file and checking every frame:
+
+- **The stream played at 70% of real time.** The driver offered 32-bit samples
+  without asking the codec, OpenAL took them, and QEMU's codec, which only does
+  16-bit, consumed the ring at the wrong rate. Six seconds of OpenAL became 4.2
+  seconds of recording; through PulseAudio on the host that is constant
+  stutter. On real codecs, which mostly stop at 24 bits, it was a gamble.
+- **Parameter refinement forced every interval to be closed and integer**, so
+  alsa-lib's "nearest" searches went astray: OpenAL asked for 1024 x 8 and got
+  1008 x 3.
+- **A blocking write returned after a fraction of its frames**, which Linux
+  never does. Programs that do not loop on short writes lost the rest:
+  measured, 49 frames out of every 1056.
+- **Silence was written ahead of the application** whenever half the ring was
+  free, over audio OpenAL was in the middle of rendering into the mmap'd ring.
+- Drain spun on the CPU with the sound lock held for up to 300 ms, pause was
+  refused, there was no capture, one card, one program, and two mixer
+  controls without a dB scale.
+
+All of that measured clean after the rewrite: the counter arrives without a
+single missing, repeated or zeroed frame, at real time, through `hw`, through
+`plug` and through dmix with two programs playing at once (each channel a
+clean sine, worst residual 2 of 12000).
+
+SuperTuxKart in the Weston desktop, three-lap race recorded through QEMU's
+`wav` backend: 122 seconds of recording for 122 seconds of wall time, no gap of
+digital silence as short as 5 ms inside the race, no clipping, `xruns: 0` in
+`/proc/asound/card0/pcm0p/sub0/status`, and no underrun in OpenAL's log.
+
+## Tests
+
+`make hda-test` runs the driver's codec parser on the host against simulated
+codecs: a laptop Realtek ALC269 (internal speaker and headphone jack on their
+own DACs, microphone jack and internal microphone behind a mixer), a desktop
+codec with a capture selector and front and rear microphones, QEMU's codec and
+an HDMI-only one. It checks the routes, the formats and rates, the controls and
+their dB scales, unplugged and plugged headphones (the speaker is muted and
+comes back), microphone switching and the codec dump: the parts of the driver
+QEMU's codecs, which have one pin and no jack sensing, cannot exercise.
+
+`make test` runs `sound`: QEMU gets two HD Audio controllers, one playing into a
+WAV file and one with a codec that has a line input, and the test loads
+`snd_hda.ko` itself. It checks card information, controls, dB scales, events,
+user controls, refinement (period and buffer times near what OpenAL asks for),
+a two-second blocking write at the hardware rate, status and `/proc/asound`,
+drain, underrun and recovery, pause and resume, rewind and forward,
+non-blocking writes and `poll`, mmap with `SYNC_PTR`, `O_APPEND` joining, the
+PCM timer ticking once per period, and a one-second blocking capture at the
+hardware rate on the second card. Afterwards `wavcheck.sh` reads the recording
+on the host and fails the test unless the reference tone's frame counter
+arrived in one unbroken run. `ipc` covers the semaphores.
 
 ## Where the sound comes out
 
-The card is always there; what was missing was anywhere for it to play. QEMU
-was started with `-audiodev none`, which is a working driver and a silent
-machine, and the two are hard to tell apart. The build now looks for a
-PulseAudio socket, at `/mnt/wslg/PulseServer` under WSL or in
-`XDG_RUNTIME_DIR` on a Linux desktop, and uses it where there is one.
-
-## Why it arrived in pieces
-
-Sound that plays but stutters is a different fault from sound that does not
-play, and it was not in the guest. Measured from inside the driver, as the
-longest the application went without feeding the card in each five second
-window:
-
-```
-file sink (-audiodev wav):     41, 43, 48, 42, 44, 44, 41, 43 ms
-PulseAudio, as it was:         41, 896, 111, 41, 50, 44, 262 ms
-PulseAudio, with room:         41, 41, 44, 41, 41, 45, 48, 40 ms
-```
-
-The guest is identical in all three. What changed is the host: QEMU asks
-PulseAudio for 15 milliseconds of latency by default, which is a fair bargain
-when the sound server is a local process, and a bad one under WSL, where the
-samples go over an RDP channel to Windows. When that channel takes its time it
-stops the emulator with it, and 896 milliseconds is five times the whole
-buffer, so what comes out is pieces. The build now asks for a tenth of a second
-of latency and twice that of buffer.
-
-A handful of glitches remained after that, in the first seconds while the game
-loaded its assets, and they were not a buffering problem: raising the buffer
-from 170 to 256 milliseconds removed two of eleven. Scheduling priorities
-removed all of them.
-
-## Verified
-
-SuperTuxKart, run under weston, recorded through QEMU's `wav` backend:
-
-```
-recorded 86.7 seconds, peak amplitude 19747 of 32767, 62% of samples above 1000
-underruns: 0
-```
-
-Recording is the only honest check available from here, since nobody is
-listening: "it plays" has to mean "these samples left the machine".
-
-`alsa-utils` is deliberately not on the image. It is the right tool for
-checking sound by hand, and `aplay`, `speaker-test` and `amixer` all work, but
-it ships a udev rule that runs `alsactl restore` when the control device
-appears, and that hangs for the sixty seconds udev waits before giving up. Add
-it once that is understood.
+`make run` looks for a PulseAudio socket, at `/mnt/wslg/PulseServer` under WSL
+or in `XDG_RUNTIME_DIR` on a Linux desktop, and plays there with a tenth of a
+second of latency, which WSL's RDP audio channel needs; without one the machine
+is silent (`-audiodev none`).
