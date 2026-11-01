@@ -7,6 +7,7 @@
 #include <tunix/heap.h>
 #include <tunix/irq.h>
 #include <tunix/kallsyms.h>
+#include <tunix/namespace.h>
 #include <tunix/file.h>
 #include <tunix/kstring.h>
 #include <tunix/pmm.h>
@@ -1668,6 +1669,74 @@ static int64_t proc_oom_adj_write(struct vfs_node *node, uint64_t offset, size_t
     return (int64_t)size;
 }
 
+static int64_t proc_uid_map_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
+    (void)node;
+    char text[256];
+    int64_t total = user_ns_read_uid_map(0, text, sizeof(text));
+    if (total <= 0 || (uint64_t)total <= offset) return 0;
+    size_t available = (size_t)total - (size_t)offset;
+    if (size > available) size = available;
+    memcpy(output, text + offset, size);
+    return (int64_t)size;
+}
+
+static int64_t proc_gid_map_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
+    (void)node;
+    char text[256];
+    int64_t total = user_ns_read_uid_map(1, text, sizeof(text));
+    if (total <= 0 || (uint64_t)total <= offset) return 0;
+    size_t available = (size_t)total - (size_t)offset;
+    if (size > available) size = available;
+    memcpy(output, text + offset, size);
+    return (int64_t)size;
+}
+
+static int64_t proc_setgroups_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                   void *output) {
+    (void)node;
+    static const char text[] = "allow\n";
+    uint64_t length = sizeof(text) - 1U;
+    if (offset >= length) return 0;
+    size_t available = (size_t)(length - offset);
+    if (size > available) size = available;
+    memcpy(output, text + offset, size);
+    return (int64_t)size;
+}
+
+static int64_t proc_uid_map_write(struct vfs_node *node, uint64_t offset, size_t size,
+                                  const void *input) {
+    (void)node;
+    (void)offset;
+    return user_ns_write_uid_map(0, (const char *)input, size);
+}
+
+static int64_t proc_gid_map_write(struct vfs_node *node, uint64_t offset, size_t size,
+                                  const void *input) {
+    (void)node;
+    (void)offset;
+    return user_ns_write_uid_map(1, (const char *)input, size);
+}
+
+static int64_t proc_setgroups_write(struct vfs_node *node, uint64_t offset, size_t size,
+                                    const void *input) {
+    (void)node;
+    (void)offset;
+    return user_ns_write_setgroups((const char *)input, size);
+}
+
+static void add_map_file(struct vfs_node *directory, const char *name, vfs_read_fn reader,
+                         vfs_write_fn writer) {
+    if (vfs_find_child(directory, name)) return;
+    struct vfs_node *file = virtual_file(directory, name, reader, 0);
+    if (!file) return;
+    file->mode = 0666;
+    file->uid = directory->uid;
+    file->gid = directory->gid;
+    file->write = writer;
+}
+
 static void populate_process_files(struct vfs_node *directory, uint64_t pid) {
     if (!vfs_find_child(directory, "status"))
         virtual_file(directory, "status", proc_status_read, pid);
@@ -1685,6 +1754,9 @@ static void populate_process_files(struct vfs_node *directory, uint64_t pid) {
         virtual_file(directory, "cgroup", proc_pid_cgroup_read, pid);
     if (!vfs_find_child(directory, "syscall"))
         virtual_file(directory, "syscall", proc_pid_syscall_read, pid);
+    add_map_file(directory, "uid_map", proc_uid_map_read, proc_uid_map_write);
+    add_map_file(directory, "gid_map", proc_gid_map_read, proc_gid_map_write);
+    add_map_file(directory, "setgroups", proc_setgroups_read, proc_setgroups_write);
     if (!vfs_find_child(directory, "mountinfo"))
         virtual_file(directory, "mountinfo", proc_mountinfo_read, pid);
     if (!vfs_find_child(directory, "mounts"))
@@ -1769,6 +1841,8 @@ void procfs_register_process(struct process *process) {
     struct vfs_node *task = vfs_mkdir_p(path);
     if (!task) return;
     task->mode = 0555;
+    task->uid = process->cred.euid;
+    task->gid = process->cred.egid;
     populate_process_files(task, process->pid);
 }
 

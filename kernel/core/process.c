@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <tunix/kcov.h>
 #include <tunix/seccomp.h>
+#include <tunix/namespace.h>
 #include <tunix/build_config.h>
 #include <tunix/cred.h>
 #include <tunix/elf.h>
@@ -1309,6 +1310,7 @@ static void set_exe_path(struct process *process, struct vfs_node *file, const c
 
 static void free_process_struct(struct process *process) {
     kcov_task_exit(process);
+    namespace_release(process);
     if (process->signal_queue) {
         SCHED_LOCKED;
         flush_signals(process, ~0ULL);
@@ -3057,6 +3059,7 @@ void process_exit_from_syscall(struct syscall_frame *frame, int status) {
     }
     kcov_task_exit(exiting);
     seccomp_release(exiting);
+    namespace_release(exiting);
     eventfs_emit_process_exit(exiting->cred.euid, exiting->pid, status);
     exiting->exit_status = status;
     syscall_release_pins();
@@ -3182,6 +3185,7 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame, const struct fork
     child->signal_blocked = parent->signal_blocked;
     memcpy(child->signal_actions, parent->signal_actions, sizeof(child->signal_actions));
     seccomp_inherit(child, parent);
+    namespace_inherit(child, parent);
 
     child->files = file_table_clone(parent->files);
     if (!child->files) {
@@ -3189,6 +3193,16 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame, const struct fork
         kfree((void *)child->kernel_stack_base);
         free_process_struct(child);
         return -EAGAIN;
+    }
+
+    if (request && request->ns_flags) {
+        int64_t ns_status = namespace_apply_clone(child, request->ns_flags);
+        if (ns_status != 0) {
+            memory_unref(child->memory);
+            kfree((void *)child->kernel_stack_base);
+            free_process_struct(child);
+            return ns_status;
+        }
     }
 
     if (request) {
@@ -3284,6 +3298,7 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame, uint64_t 
     child->signal_blocked = parent->signal_blocked;
     memcpy(child->signal_actions, parent->signal_actions, sizeof(child->signal_actions));
     seccomp_inherit(child, parent);
+    namespace_inherit(child, parent);
 
     child->files = parent->files;
     file_table_ref(child->files);

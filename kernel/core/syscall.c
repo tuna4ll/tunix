@@ -31,6 +31,7 @@
 #include <tunix/power.h>
 #include <tunix/process.h>
 #include <tunix/seccomp.h>
+#include <tunix/namespace.h>
 #include <tunix/random.h>
 #include <tunix/signal.h>
 #include <tunix/syscall.h>
@@ -268,6 +269,7 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136,
 #define SYS_ARCH_PRCTL             158
 #define SYS_PRCTL                  157
 #define SYS_SECCOMP                317
+#define SYS_UNSHARE                272
 #define SECCOMP_SI_CODE            1
 #define SYS_GETTID                 186
 #define SYS_FUTEX                  202
@@ -4812,13 +4814,19 @@ static int64_t sys_readv_writev(int fd, uint64_t user_iov, int count, int write_
 }
 
 static int64_t set_machine_name(int domain, uint64_t user_name, uint64_t length) {
-    const struct credentials *cred = cred_current();
-    if (cred && cred->euid != 0) return -EPERM;
+    if (!user_ns_capable()) return -EPERM;
     if (length > UTS_NAME_MAX) return -EINVAL;
 
     char value[UTS_NAME_MAX + 1];
     if (length && copy_from_user(value, user_name, (size_t)length) != 0) return -EFAULT;
     value[length] = '\0';
+    struct uts_namespace *uts = uts_ns_current();
+    if (!uts_ns_is_root(uts)) {
+        char *field = domain ? uts->domainname : uts->nodename;
+        memset(field, 0, UTS_FIELD_MAX);
+        strncpy(field, value, UTS_FIELD_MAX - 1);
+        return 0;
+    }
     if (domain) uts_set_domainname(value, (size_t)length);
     else uts_set_hostname(value, (size_t)length);
     return 0;
@@ -5006,12 +5014,15 @@ static int64_t sys_delete_module(uint64_t user_name, uint32_t flags) {
 static int64_t sys_uname(uint64_t user_buffer) {
     struct linux_utsname value;
     memset(&value, 0, sizeof(value));
+    struct uts_namespace *uts = uts_ns_current();
+    const char *node = uts_ns_is_root(uts) ? uts_hostname() : uts->nodename;
+    const char *dom = uts_ns_is_root(uts) ? uts_domainname() : uts->domainname;
     strncpy(value.sysname, UTS_SYSNAME, sizeof(value.sysname) - 1);
-    strncpy(value.nodename, uts_hostname(), sizeof(value.nodename) - 1);
+    strncpy(value.nodename, node, sizeof(value.nodename) - 1);
     strncpy(value.release, UTS_RELEASE, sizeof(value.release) - 1);
     strncpy(value.version, UTS_VERSION, sizeof(value.version) - 1);
     strncpy(value.machine, SYSCALL_UTS_MACHINE, sizeof(value.machine) - 1);
-    strncpy(value.domainname, uts_domainname(), sizeof(value.domainname) - 1);
+    strncpy(value.domainname, dom, sizeof(value.domainname) - 1);
     return copy_to_user(user_buffer, &value, sizeof(value)) == 0 ? 0 : -EFAULT;
 }
 
@@ -5530,12 +5541,14 @@ static int64_t sys_clone_fork_compat(struct syscall_frame *frame, uint64_t flags
             CLONE_SYSVSEM | CLONE_SETTLS | CLONE_FORK_METADATA_FLAGS;
         if (flags & ~(0xFFULL | vfork_allowed)) return -ENOSYS;
         if (exit_signal != 0 && exit_signal != SIGCHLD) return -EINVAL;
-        struct fork_request request = {child_stack, 0, 0, clear_handlers};
+        struct fork_request request = {child_stack, 0, 0, clear_handlers, 0};
         return give_pidfd(process_fork_from_syscall(frame, &request), pidfd_user);
     }
 
-    uint64_t unsupported = flags & ~(0xFFULL | CLONE_FORK_METADATA_FLAGS);
-    if (unsupported != 0 || (flags & CLONE_FORK_REJECT_FLAGS) != 0) {
+    uint64_t fork_ns = flags & (CLONE_NEWUSER | CLONE_NEWUTS);
+    uint64_t unsupported = flags & ~(0xFFULL | CLONE_FORK_METADATA_FLAGS | fork_ns);
+    if (unsupported != 0 || (flags & CLONE_FORK_REJECT_FLAGS) != 0 ||
+        (flags & CLONE_NAMESPACE_FLAGS & ~fork_ns) != 0) {
         KDEBUG("syscall: clone unsupported flags=0x%llx stack=0x%llx\n", (unsigned long long)flags,
                (unsigned long long)child_stack);
         return -ENOSYS;
@@ -5547,6 +5560,7 @@ static int64_t sys_clone_fork_compat(struct syscall_frame *frame, uint64_t flags
         (flags & CLONE_CHILD_SETTID) ? child_tid_user : 0,
         (flags & CLONE_CHILD_CLEARTID) ? child_tid_user : 0,
         clear_handlers,
+        fork_ns,
     };
     int64_t pid = process_fork_from_syscall(frame, &request);
     if (pid <= 0) return pid;
@@ -7240,11 +7254,27 @@ static void syscall_run(struct syscall_frame *frame) {
         else SYSCALL_RET(frame) = (uint64_t)seconds;
         break;
     }
-    case SYS_TIMES:   SYSCALL_RET(frame) = (uint64_t)sys_times(SYSCALL_ARG0(frame)); break;
-    case SYS_GETUID:  SYSCALL_RET(frame) = cred_current() ? cred_current()->uid : 0; break;
-    case SYS_GETGID:  SYSCALL_RET(frame) = cred_current() ? cred_current()->gid : 0; break;
-    case SYS_GETEUID: SYSCALL_RET(frame) = cred_current() ? cred_current()->euid : 0; break;
-    case SYS_GETEGID: SYSCALL_RET(frame) = cred_current() ? cred_current()->egid : 0; break;
+    case SYS_TIMES:  SYSCALL_RET(frame) = (uint64_t)sys_times(SYSCALL_ARG0(frame)); break;
+    case SYS_GETUID: {
+        struct process *p = process_current();
+        SYSCALL_RET(frame) = p ? user_ns_map_uid(p->user_ns, p->cred.uid) : 0;
+        break;
+    }
+    case SYS_GETGID: {
+        struct process *p = process_current();
+        SYSCALL_RET(frame) = p ? user_ns_map_gid(p->user_ns, p->cred.gid) : 0;
+        break;
+    }
+    case SYS_GETEUID: {
+        struct process *p = process_current();
+        SYSCALL_RET(frame) = p ? user_ns_map_uid(p->user_ns, p->cred.euid) : 0;
+        break;
+    }
+    case SYS_GETEGID: {
+        struct process *p = process_current();
+        SYSCALL_RET(frame) = p ? user_ns_map_gid(p->user_ns, p->cred.egid) : 0;
+        break;
+    }
     case SYS_SETUID:
         SYSCALL_RET(frame) = (uint64_t)cred_set_uid((uint32_t)SYSCALL_ARG0(frame));
         break;
@@ -7800,6 +7830,7 @@ static void syscall_run(struct syscall_frame *frame) {
         SYSCALL_RET(frame) =
             (uint64_t)sys_seccomp(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame));
         break;
+    case SYS_UNSHARE: SYSCALL_RET(frame) = (uint64_t)namespace_unshare(SYSCALL_ARG0(frame)); break;
     default:
 
         KDEBUG("syscall: ENOSYS pid=%u nr=%u\n", (unsigned)process_current_pid(),

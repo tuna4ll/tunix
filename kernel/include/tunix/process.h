@@ -99,6 +99,8 @@ struct process_rlimit {
 struct posix_timer;
 
 struct seccomp_filter;
+struct user_namespace;
+struct uts_namespace;
 
 struct signal_entry {
     struct signal_entry *next;
@@ -279,6 +281,8 @@ struct process {
     uint32_t kcov_mode;
     uint32_t seccomp_mode;
     struct seccomp_filter *seccomp_filters;
+    struct user_namespace *user_ns;
+    struct uts_namespace *uts_ns;
 };
 
 #define PROCESS_RESTARTED INT64_MIN
@@ -288,6 +292,7 @@ struct fork_request {
     uint64_t child_settid_user;
     uint64_t child_cleartid_user;
     int clear_signal_handlers;
+    uint64_t ns_flags;
 };
 
 void process_init(void);
