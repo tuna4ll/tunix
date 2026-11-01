@@ -584,6 +584,10 @@ static void playback(void) {
            "/proc/asound shows the stream running");
     expect(read_text("/proc/asound/cards", text, sizeof(text)) == 0 && contains(text, "HDA-Intel"),
            "/proc/asound/cards lists the card");
+    static char codec[16384];
+    expect(read_text("/proc/asound/card0/codec#0", codec, sizeof(codec)) == 0 &&
+               contains(codec, "Vendor Id: 0x1af40012") && contains(codec, "Paths:"),
+           "/proc/asound shows the codec and its paths");
 
     start = now_us();
     expect_eq(ioctl((int)fd, PCM_DRAIN, 0), 0, "drain waits for the queued audio");

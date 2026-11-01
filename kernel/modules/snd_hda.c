@@ -86,6 +86,9 @@
 
 #define VERB_GET_PARAMETER        0xF00U
 #define VERB_GET_CONNECT_LIST     0xF02U
+#define VERB_GET_CONNECT_SEL      0xF01U
+#define VERB_GET_PIN_CONTROL      0xF07U
+#define VERB_GET_EAPD             0xF0CU
 #define VERB_GET_PIN_SENSE        0xF09U
 #define VERB_GET_CONFIG_DEFAULT   0xF1CU
 #define VERB_GET_SUBSYSTEM_ID     0xF20U
@@ -239,6 +242,7 @@ struct output_path {
     uint8_t present;
     uint8_t enabled;
     unsigned jack_control;
+    char label[24];
 };
 
 struct input_path {
@@ -252,6 +256,7 @@ struct input_path {
     uint8_t present;
     long boost_value;
     unsigned jack_control;
+    char label[24];
 };
 
 struct control_info {
@@ -270,8 +275,13 @@ struct hda_stream {
     int configured;
 };
 
+struct hda_controller;
+
+typedef uint32_t (*hda_transport_fn)(struct hda_controller *hda, uint32_t verb);
+
 struct hda_controller {
     int present;
+    hda_transport_fn transport;
     struct pci_device pci;
     uint64_t base;
     unsigned vector;
@@ -443,12 +453,7 @@ static int start_command_rings(struct hda_controller *hda) {
     return 0;
 }
 
-static uint32_t codec_command_locked(struct hda_controller *hda, uint8_t nid, uint32_t verb,
-                                     uint32_t payload) {
-    uint32_t value = ((uint32_t)hda->codec << 28) | ((uint32_t)nid << 20);
-    if (verb > 0xFU) value |= (verb << 8) | (payload & 0xFFU);
-    else value |= (verb << 16) | (payload & 0xFFFFU);
-
+static uint32_t ring_transport(struct hda_controller *hda, uint32_t value) {
     uint16_t mask = (uint16_t)(hda->corb_entries - 1U);
     hda->corb_wp = (uint16_t)((hda->corb_wp + 1U) & mask);
     hda->corb[hda->corb_wp] = value;
@@ -477,8 +482,11 @@ static uint32_t codec_command_locked(struct hda_controller *hda, uint8_t nid, ui
 
 static uint32_t codec_command(struct hda_controller *hda, uint8_t nid, uint32_t verb,
                               uint32_t payload) {
+    uint32_t value = ((uint32_t)hda->codec << 28) | ((uint32_t)nid << 20);
+    if (verb > 0xFU) value |= (verb << 8) | (payload & 0xFFU);
+    else value |= (verb << 16) | (payload & 0xFFFFU);
     lock_acquire(&hda->codec_lock);
-    uint32_t response = codec_command_locked(hda, nid, verb, payload);
+    uint32_t response = hda->transport(hda, value);
     lock_release(&hda->codec_lock);
     return response;
 }
@@ -680,6 +688,50 @@ static const char *role_label(int role) {
     case ROLE_MIC:          return "Mic";
     case ROLE_INTERNAL_MIC: return "Internal Mic";
     default:                return "Line";
+    }
+}
+
+static const char *location_prefix(uint32_t config) {
+    uint32_t location = (config >> CONFIG_LOCATION_SHIFT) & 0x3FU;
+    if ((location & 0x30U) == 0x10U) return "Internal ";
+    if ((location & 0x30U) == 0x20U) return "Dock ";
+    switch (location & 0x0FU) {
+    case 0x1: return "Rear ";
+    case 0x2: return "Front ";
+    case 0x3: return "Left ";
+    case 0x4: return "Right ";
+    case 0x5: return "Top ";
+    case 0x6: return "Bottom ";
+    default:  return "";
+    }
+}
+
+static void make_label(char *out, size_t size, const char *prefix, const char *base) {
+    size_t at = 0;
+    for (size_t index = 0; prefix[index] && at + 1U < size; index++) out[at++] = prefix[index];
+    for (size_t index = 0; base[index] && at + 1U < size; index++) out[at++] = base[index];
+    out[at] = '\0';
+}
+
+static void label_paths(struct hda_controller *hda) {
+    for (unsigned index = 0; index < hda->output_count; index++) {
+        struct output_path *path = &hda->outputs[index];
+        unsigned same = 0;
+        for (unsigned other = 0; other < hda->output_count; other++)
+            if (hda->outputs[other].role == path->role) same++;
+        struct widget *pin = widget_for(hda, path->pin);
+        const char *prefix = same > 1 && pin ? location_prefix(pin->config) : "";
+        make_label(path->label, sizeof(path->label), prefix, role_label(path->role));
+    }
+    for (unsigned index = 0; index < hda->input_count; index++) {
+        struct input_path *path = &hda->inputs[index];
+        unsigned same = 0;
+        for (unsigned other = 0; other < hda->input_count; other++)
+            if (hda->inputs[other].role == path->role) same++;
+        struct widget *pin = widget_for(hda, path->pin);
+        const char *prefix =
+            same > 1 && pin && path->role != ROLE_INTERNAL_MIC ? location_prefix(pin->config) : "";
+        make_label(path->label, sizeof(path->label), prefix, role_label(path->role));
     }
 }
 
@@ -997,8 +1049,7 @@ static unsigned label_index(struct hda_controller *hda, const char *label, int o
                             unsigned upto) {
     unsigned same = 0;
     for (unsigned index = 0; index < upto; index++) {
-        const char *other =
-            output ? role_label(hda->outputs[index].role) : role_label(hda->inputs[index].role);
+        const char *other = output ? hda->outputs[index].label : hda->inputs[index].label;
         if (!strcmp(other, label)) same++;
     }
     return same;
@@ -1016,7 +1067,7 @@ static void build_controls(struct hda_controller *hda) {
     add_control(hda, "Master Playback Switch", 0, SND_IFACE_MIXER, SND_CONTROL_BOOLEAN, 2, rw, 0, 1,
                 CTL_MASTER_SWITCH, 0);
     for (unsigned index = 0; index < hda->output_count; index++) {
-        const char *label = role_label(hda->outputs[index].role);
+        const char *label = hda->outputs[index].label;
         compose(name, sizeof(name), label, " Playback Switch");
         add_control(hda, name, label_index(hda, label, 1, index), SND_IFACE_MIXER,
                     SND_CONTROL_BOOLEAN, 2, rw, 0, 1, CTL_OUTPUT_SWITCH, index);
@@ -1038,7 +1089,7 @@ static void build_controls(struct hda_controller *hda) {
     }
     if (hda->input_count > 1 && !hda->auto_mic) {
         for (unsigned index = 0; index < hda->input_count; index++)
-            hda->source_names[index] = role_label(hda->inputs[index].role);
+            hda->source_names[index] = hda->inputs[index].label;
         add_control(hda, "Input Source", 0, SND_IFACE_MIXER, SND_CONTROL_ENUMERATED, 1, rw, 0,
                     (int32_t)hda->input_count - 1, CTL_INPUT_SOURCE, 0);
         hda->controls[hda->control_count - 1U].items = hda->source_names;
@@ -1047,7 +1098,7 @@ static void build_controls(struct hda_controller *hda) {
     for (unsigned index = 0; index < hda->input_count; index++) {
         if (!hda->inputs[index].boost) continue;
         struct widget *pin = widget_for(hda, hda->inputs[index].boost);
-        const char *label = role_label(hda->inputs[index].role);
+        const char *label = hda->inputs[index].label;
         compose(name, sizeof(name), label, " Boost Volume");
         add_control(hda, name, label_index(hda, label, 0, index), SND_IFACE_MIXER,
                     SND_CONTROL_INTEGER, 2, rw, 0, (int32_t)amp_steps(pin->in_amp_cap), CTL_BOOST,
@@ -1058,7 +1109,7 @@ static void build_controls(struct hda_controller *hda) {
     uint32_t jack_access = SND_CONTROL_READ | SND_CONTROL_VOLATILE;
     for (unsigned index = 0; index < hda->output_count; index++) {
         struct output_path *path = &hda->outputs[index];
-        const char *label = role_label(path->role);
+        const char *label = path->label;
         compose(name, sizeof(name), label, path->detect ? " Jack" : " Phantom Jack");
         path->jack_control = hda->control_count;
         add_control(hda, name, label_index(hda, label, 1, index), SND_IFACE_CARD,
@@ -1066,7 +1117,7 @@ static void build_controls(struct hda_controller *hda) {
     }
     for (unsigned index = 0; index < hda->input_count; index++) {
         struct input_path *path = &hda->inputs[index];
-        const char *label = role_label(path->role);
+        const char *label = path->label;
         compose(name, sizeof(name), label, path->detect ? " Jack" : " Phantom Jack");
         path->jack_control = hda->control_count;
         add_control(hda, name, label_index(hda, label, 0, index), SND_IFACE_CARD,
@@ -1487,6 +1538,7 @@ static int probe_codec(struct hda_controller *hda, uint8_t address) {
         collect_outputs(hda);
         if (!hda->output_count) continue;
         collect_inputs(hda);
+        label_paths(hda);
         hda->vendor_id = parameter(hda, 0, PARAM_VENDOR_ID);
         hda->revision_id = parameter(hda, 0, PARAM_REVISION_ID);
         hda->subsystem_id = codec_command(hda, nid, VERB_GET_SUBSYSTEM_ID, 0);
@@ -1552,6 +1604,163 @@ static void setup_mixer(struct hda_controller *hda) {
     }
     apply_outputs(hda);
     apply_inputs(hda);
+}
+
+struct dump_text {
+    char *out;
+    size_t capacity;
+    size_t length;
+};
+
+static void dump_add(struct dump_text *text, const char *value) {
+    for (size_t index = 0; value[index]; index++) {
+        if (text->length + 1U < text->capacity) text->out[text->length] = value[index];
+        text->length++;
+    }
+}
+
+static void dump_hex(struct dump_text *text, uint32_t value, unsigned digits) {
+    char buffer[12];
+    size_t at = 0;
+    put_text(buffer, &at, sizeof(buffer), "0x");
+    put_hex(buffer, &at, sizeof(buffer), value, digits);
+    buffer[at] = '\0';
+    dump_add(text, buffer);
+}
+
+static void dump_number(struct dump_text *text, uint32_t value) {
+    char digits[12];
+    unsigned at = sizeof(digits) - 1U;
+    digits[at] = '\0';
+    do {
+        digits[--at] = (char)('0' + value % 10U);
+        value /= 10U;
+    } while (value && at);
+    dump_add(text, &digits[at]);
+}
+
+static const char *widget_type_name(uint8_t type) {
+    switch (type) {
+    case WIDGET_OUTPUT:   return "Audio Output";
+    case WIDGET_INPUT:    return "Audio Input";
+    case WIDGET_MIXER:    return "Audio Mixer";
+    case WIDGET_SELECTOR: return "Audio Selector";
+    case WIDGET_PIN:      return "Pin Complex";
+    case 0x5:             return "Power Widget";
+    case 0x6:             return "Volume Knob Widget";
+    case 0x7:             return "Beep Generator Widget";
+    default:              return "Vendor Defined Widget";
+    }
+}
+
+static void dump_amp(struct dump_text *text, const char *label, uint32_t cap) {
+    dump_add(text, "  ");
+    dump_add(text, label);
+    dump_add(text, " caps: ofs=");
+    dump_hex(text, amp_offset(cap), 2);
+    dump_add(text, ", nsteps=");
+    dump_hex(text, amp_steps(cap), 2);
+    dump_add(text, ", stepsize=");
+    dump_hex(text, (cap >> 16) & 0x7FU, 2);
+    dump_add(text, ", mute=");
+    dump_number(text, amp_mute_capable(cap) ? 1U : 0U);
+    dump_add(text, "\n");
+}
+
+static void dump_path(struct dump_text *text, const char *label, const struct step *steps,
+                      uint8_t length) {
+    dump_add(text, "  ");
+    dump_add(text, label);
+    dump_add(text, ":");
+    for (unsigned index = 0; index < length; index++) {
+        dump_add(text, index ? " -> " : " ");
+        dump_hex(text, steps[index].nid, 2);
+        if (index) {
+            dump_add(text, "[");
+            dump_number(text, steps[index].index);
+            dump_add(text, "]");
+        }
+    }
+    dump_add(text, "\n");
+}
+
+static size_t hda_proc_codec(void *context, char *out, size_t capacity) {
+    struct hda_controller *hda = context;
+    struct dump_text text = {out, capacity, 0};
+    if (!hda->present) return 0;
+    dump_add(&text, "Codec: ");
+    dump_add(&text, hda->mixer_name);
+    dump_add(&text, "\nAddress: ");
+    dump_number(&text, hda->codec);
+    dump_add(&text, "\nVendor Id: ");
+    dump_hex(&text, hda->vendor_id, 8);
+    dump_add(&text, "\nSubsystem Id: ");
+    dump_hex(&text, hda->subsystem_id, 8);
+    dump_add(&text, "\nRevision Id: ");
+    dump_hex(&text, hda->revision_id, 6);
+    dump_add(&text, "\nAFG: ");
+    dump_hex(&text, hda->afg, 2);
+    dump_add(&text, ", PCM ");
+    dump_hex(&text, hda->afg_pcm, 8);
+    dump_add(&text, "\n");
+    for (unsigned index = 0; index < hda->widget_count; index++) {
+        struct widget *widget = &hda->widgets[index];
+        dump_add(&text, "Node ");
+        dump_hex(&text, widget->nid, 2);
+        dump_add(&text, " [");
+        dump_add(&text, widget_type_name(widget->type));
+        dump_add(&text, "] wcaps ");
+        dump_hex(&text, widget->caps, 8);
+        dump_add(&text, (widget->caps & 1U) ? ": Stereo" : ": Mono");
+        if (widget->caps & AWCAP_DIGITAL) dump_add(&text, " Digital");
+        dump_add(&text, "\n");
+        if (widget->caps & AWCAP_IN_AMP) dump_amp(&text, "Amp-In", widget->in_amp_cap);
+        if (widget->caps & AWCAP_OUT_AMP) dump_amp(&text, "Amp-Out", widget->out_amp_cap);
+        if (widget->type == WIDGET_OUTPUT || widget->type == WIDGET_INPUT) {
+            dump_add(&text, "  PCM: ");
+            dump_hex(&text, widget->pcm_caps, 8);
+            dump_add(&text, "\n");
+        }
+        if (widget->type == WIDGET_PIN) {
+            dump_add(&text, "  Pincap ");
+            dump_hex(&text, widget->pin_caps, 8);
+            dump_add(&text, ", Pin Default ");
+            dump_hex(&text, widget->config, 8);
+            dump_add(&text, ", Pin-ctls ");
+            dump_hex(&text, codec_command(hda, widget->nid, VERB_GET_PIN_CONTROL, 0) & 0xFFU, 2);
+            if (widget->pin_caps & PINCAP_EAPD) {
+                dump_add(&text, ", EAPD ");
+                dump_hex(&text, codec_command(hda, widget->nid, VERB_GET_EAPD, 0) & 0xFFU, 2);
+            }
+            if (pin_detectable(widget))
+                dump_add(&text, read_presence(hda, widget->nid) ? ", plugged" : ", unplugged");
+            dump_add(&text, "\n");
+        }
+        if (widget->connection_count) {
+            dump_add(&text, "  Connection: ");
+            dump_number(&text, widget->connection_count);
+            dump_add(&text, "\n    ");
+            uint32_t selected = widget->connection_count > 1 && widget->type != WIDGET_MIXER
+                ? codec_command(hda, widget->nid, VERB_GET_CONNECT_SEL, 0) & 0xFFU
+                : 0xFFU;
+            for (unsigned slot = 0; slot < widget->connection_count; slot++) {
+                dump_add(&text, slot ? " " : "");
+                dump_hex(&text, widget->connections[slot], 2);
+                if (slot == selected) dump_add(&text, "*");
+            }
+            dump_add(&text, "\n");
+        }
+    }
+    dump_add(&text, "Paths:\n");
+    for (unsigned index = 0; index < hda->output_count; index++)
+        dump_path(&text, hda->outputs[index].label, hda->outputs[index].steps,
+                  hda->outputs[index].length);
+    for (unsigned index = 0; index < hda->input_count; index++)
+        dump_path(&text, hda->inputs[index].label, hda->inputs[index].steps,
+                  hda->inputs[index].length);
+    if (text.capacity)
+        text.out[text.length < text.capacity ? text.length : text.capacity - 1U] = '\0';
+    return text.length < text.capacity ? text.length : text.capacity - 1U;
 }
 
 static void enable_interrupts(struct hda_controller *hda) {
@@ -1621,6 +1830,7 @@ static int hda_probe(const struct pci_device *found) {
     if (!hda) return -1;
     memset(hda, 0, sizeof(*hda));
     hda->pci = *found;
+    hda->transport = ring_transport;
     lock_init(&hda->codec_lock, "hda codec", 42);
 
     pci_enable_bus_mastering(&hda->pci);
@@ -1733,16 +1943,17 @@ static int hda_probe(const struct pci_device *found) {
     hda->backend.control_get = hda_control_get;
     hda->backend.control_put = hda_control_put;
     hda->backend.poll = hda_poll;
+    hda->backend.proc_codec = hda_proc_codec;
 
     for (unsigned index = 0; index < hda->output_count; index++) {
         const struct output_path *path = &hda->outputs[index];
-        kprintf("HDA: %s pin %u <- dac %u%s%s\n", role_label(path->role), (unsigned)path->pin,
+        kprintf("HDA: %s pin %u <- dac %u%s%s\n", path->label, (unsigned)path->pin,
                 (unsigned)path->dac, path->detect ? ", jack" : "",
                 path->detect && path->present ? " (plugged)" : "");
     }
     for (unsigned index = 0; index < hda->input_count; index++) {
         const struct input_path *path = &hda->inputs[index];
-        kprintf("HDA: %s pin %u -> adc %u%s\n", role_label(path->role), (unsigned)path->pin,
+        kprintf("HDA: %s pin %u -> adc %u%s\n", path->label, (unsigned)path->pin,
                 (unsigned)path->adc, path->detect ? ", jack" : "");
     }
     kprintf("HDA: %s codec %u, playback rates %u-%u%s, %s\n", hda->mixer_name, (unsigned)hda->codec,

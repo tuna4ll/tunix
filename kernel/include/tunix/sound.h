@@ -97,6 +97,7 @@ struct snd_backend {
     int (*control_get)(void *context, unsigned control, long *values);
     int (*control_put)(void *context, unsigned control, const long *values);
     void (*poll)(void *context);
+    size_t (*proc_codec)(void *context, char *out, size_t capacity);
 };
 
 int snd_register_card(const struct snd_backend *backend);

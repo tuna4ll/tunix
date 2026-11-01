@@ -3170,6 +3170,13 @@ size_t sound_proc_card_file(unsigned index, const char *path, char *out, size_t 
         lock_release(&cards_lock);
         return text.length;
     }
+    if (!strcmp(path, "codec#0")) {
+        size_t length = 0;
+        if (card->backend->proc_codec)
+            length = card->backend->proc_codec(card->backend->context, out, capacity);
+        lock_release(&cards_lock);
+        return length;
+    }
     int direction = -1;
     const char *rest = NULL;
     if (!strncmp(path, "pcm0p/", 6)) {

@@ -1371,11 +1371,13 @@ static void proc_root_refresh(struct vfs_node *directory) {
     point_at_caller(thread_self_link, process_current_tid());
 }
 
-#define ASOUND_TEXT 2048U
+#define ASOUND_TEXT       2048U
+#define ASOUND_CODEC      32768U
+#define ASOUND_CODEC_FILE 9U
 
-static int64_t asound_reply(const char *text, size_t length, uint64_t offset, size_t size,
-                            void *output) {
-    if (length >= ASOUND_TEXT) length = ASOUND_TEXT - 1U;
+static int64_t asound_reply(const char *text, size_t length, size_t capacity, uint64_t offset,
+                            size_t size, void *output) {
+    if (length >= capacity) length = capacity - 1U;
     if (!output || offset >= length) return 0;
     size_t available = length - (size_t)offset;
     if (size > available) size = available;
@@ -1399,7 +1401,7 @@ static int64_t proc_asound_global_read(struct vfs_node *node, uint64_t offset, s
         break;
     }
     }
-    int64_t result = asound_reply(text, length, offset, size, output);
+    int64_t result = asound_reply(text, length, ASOUND_TEXT, offset, size, output);
     kfree(text);
     return result;
 }
@@ -1412,7 +1414,8 @@ static const char *const asound_card_files[] = {"id",
                                                 "pcm0c/info",
                                                 "pcm0c/sub0/status",
                                                 "pcm0c/sub0/hw_params",
-                                                "pcm0c/sub0/sw_params"};
+                                                "pcm0c/sub0/sw_params",
+                                                "codec#0"};
 
 static int64_t proc_asound_card_read(struct vfs_node *node, uint64_t offset, size_t size,
                                      void *output) {
@@ -1420,10 +1423,11 @@ static int64_t proc_asound_card_read(struct vfs_node *node, uint64_t offset, siz
     unsigned card = (unsigned)(which >> 8);
     unsigned file = (unsigned)(which & 0xFFU);
     if (file >= sizeof(asound_card_files) / sizeof(asound_card_files[0])) return 0;
-    char *text = kmalloc(ASOUND_TEXT);
+    size_t capacity = file == ASOUND_CODEC_FILE ? ASOUND_CODEC : ASOUND_TEXT;
+    char *text = kmalloc(capacity);
     if (!text) return -ENOMEM;
-    size_t length = sound_proc_card_file(card, asound_card_files[file], text, ASOUND_TEXT);
-    int64_t result = asound_reply(text, length, offset, size, output);
+    size_t length = sound_proc_card_file(card, asound_card_files[file], text, capacity);
+    int64_t result = asound_reply(text, length, capacity, offset, size, output);
     kfree(text);
     return result;
 }
@@ -1463,6 +1467,8 @@ static void proc_asound_refresh(struct vfs_node *directory) {
         card_dir->mode = 0555;
         if (vfs_attach(directory, card_dir) != 0) continue;
         virtual_file(card_dir, "id", proc_asound_card_read, (uint64_t)card << 8);
+        virtual_file(card_dir, "codec#0", proc_asound_card_read,
+                     ((uint64_t)card << 8) | ASOUND_CODEC_FILE);
         if (playback) asound_stream_dir(card_dir, card, 0);
         if (capture) asound_stream_dir(card_dir, card, 1);
     }
