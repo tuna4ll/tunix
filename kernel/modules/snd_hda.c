@@ -1934,6 +1934,8 @@ static int hda_probe(const struct pci_device *found) {
     hda->backend.longname = hda->longname;
     hda->backend.mixer_name = hda->mixer_name;
     hda->backend.components = hda->components;
+    hda->backend.location = SOUND_ON_PCI | ((uint32_t)found->bus << 16) |
+        ((uint32_t)found->slot << 8) | found->function;
     hda->backend.context = hda;
     hda->backend.streams[SND_PLAYBACK] = &hda->ops[SND_PLAYBACK];
     hda->backend.streams[SND_CAPTURE] =

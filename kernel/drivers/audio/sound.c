@@ -1449,7 +1449,7 @@ static void fill_status(struct snd_stream *s, struct snd_pcm_status *status) {
     if (s->configured) stream_update(s);
     status->state = s->state;
     ns_to_timespec(s->trigger_ns, &status->trigger_tstamp);
-    uint64_t when = s->update_ns ? s->update_ns : time_uptime_ns();
+    uint64_t when = s->update_ns && stream_running(s) ? s->update_ns : time_uptime_ns();
     if (s->tstamp_type == SNDRV_PCM_TSTAMP_TYPE_GETTIMEOFDAY)
         when = time_realtime_ns() - (time_uptime_ns() - when);
     ns_to_timespec(when, &status->tstamp);
@@ -2937,7 +2937,7 @@ int snd_register_card(const struct snd_backend *backend) {
     devfs_publish_sound((unsigned)index, backend->streams[SND_PLAYBACK] != NULL,
                         backend->streams[SND_CAPTURE] != NULL);
     sysfs_publish_sound((unsigned)index, backend->streams[SND_PLAYBACK] != NULL,
-                        backend->streams[SND_CAPTURE] != NULL);
+                        backend->streams[SND_CAPTURE] != NULL, card->id, backend->location);
     kprintf("SOUND: card %d \"%s\" (%s)%s%s, %u controls\n", index, backend->name,
             backend->mixer_name ? backend->mixer_name : "",
             backend->streams[SND_PLAYBACK] ? ", playback" : "",
@@ -2977,7 +2977,7 @@ void snd_unregister_card(const struct snd_backend *backend) {
     lock_release(&card->lock);
     lock_release(&cards_lock);
     devfs_remove_sound((unsigned)index);
-    sysfs_remove_sound((unsigned)index);
+    sysfs_remove_sound((unsigned)index, backend->location);
 }
 
 void snd_pcm_period_elapsed(const struct snd_backend *backend, int direction) {

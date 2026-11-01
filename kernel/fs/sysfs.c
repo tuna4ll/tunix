@@ -42,7 +42,7 @@ static void append_number(char *out, size_t limit, size_t *used, uint32_t value)
 }
 
 struct sysfs_device {
-    char devpath[64];
+    char devpath[96];
     char properties[256];
     size_t properties_length;
 };
@@ -928,48 +928,169 @@ static void announce(const char *name) {
     }
 }
 
-static void sound_device_name(char *out, size_t capacity, const char *prefix, unsigned card,
-                              const char *suffix) {
+static void sound_card_base(char *out, size_t capacity, unsigned card, uint32_t location) {
     size_t used = 0;
-    append_string(out, capacity, &used, prefix);
+    if (location & SOUND_ON_PCI) {
+        append_string(out, capacity, &used, "pci0000:00/0000:");
+        append_hex(out, capacity, &used, (location >> 16) & 0xFFU, 2);
+        append_string(out, capacity, &used, ":");
+        append_hex(out, capacity, &used, (location >> 8) & 0x1FU, 2);
+        append_string(out, capacity, &used, ".");
+        append_hex(out, capacity, &used, location & 0x7U, 1);
+        append_string(out, capacity, &used, "/sound/card");
+    } else {
+        append_string(out, capacity, &used, "virtual/sound/card");
+    }
     append_number(out, capacity, &used, card);
-    append_string(out, capacity, &used, suffix);
     out[used] = '\0';
 }
 
-void sysfs_publish_sound(unsigned card, int playback, int capture) {
+static void sound_attribute(const char *directory, const char *name, const char *value) {
+    char file[160];
+    size_t used = 0;
+    append_string(file, sizeof(file), &used, directory);
+    append_string(file, sizeof(file), &used, "/");
+    append_string(file, sizeof(file), &used, name);
+    file[used] = '\0';
+    (void)vfs_create_file(file, value, strlen(value), 0, 1);
+}
+
+static void publish_sound_card(const char *base, unsigned card, const char *id) {
+    char path[128];
+    size_t used = 0;
+    append_string(path, sizeof(path), &used, "/sys/devices/");
+    append_string(path, sizeof(path), &used, base);
+    path[used] = '\0';
+    if (!vfs_mkdir_p(path)) return;
+    char file[160];
+    used = 0;
+    append_string(file, sizeof(file), &used, path);
+    append_string(file, sizeof(file), &used, "/uevent");
+    file[used] = '\0';
+    char devpath[96];
+    size_t length = 0;
+    append_string(devpath, sizeof(devpath), &length, "/devices/");
+    append_string(devpath, sizeof(devpath), &length, base);
+    devpath[length] = '\0';
+    static const char uevent[] = "SUBSYSTEM=sound\n";
+    (void)register_uevent(devpath, file, uevent, sizeof(uevent) - 1U);
+    char number[16];
+    used = 0;
+    append_number(number, sizeof(number), &used, card);
+    append_string(number, sizeof(number), &used, "\n");
+    number[used] = '\0';
+    sound_attribute(path, "number", number);
+    char identity[32];
+    used = 0;
+    append_string(identity, sizeof(identity), &used, id);
+    append_string(identity, sizeof(identity), &used, "\n");
+    identity[used] = '\0';
+    sound_attribute(path, "id", identity);
+    used = 0;
+    append_string(file, sizeof(file), &used, path);
+    append_string(file, sizeof(file), &used, "/subsystem");
+    file[used] = '\0';
+    (void)vfs_mkdir_p("/sys/class/sound");
+    (void)vfs_create_symlink(file, "/sys/class/sound", 0);
+    if (strncmp(base, "pci", 3) == 0) {
+        used = 0;
+        append_string(file, sizeof(file), &used, path);
+        append_string(file, sizeof(file), &used, "/device");
+        file[used] = '\0';
+        (void)vfs_create_symlink(file, "../..", 0);
+    }
+    char link[64];
+    used = 0;
+    append_string(link, sizeof(link), &used, "/sys/class/sound/card");
+    append_number(link, sizeof(link), &used, card);
+    link[used] = '\0';
+    char target[128];
+    used = 0;
+    append_string(target, sizeof(target), &used, "../../devices/");
+    append_string(target, sizeof(target), &used, base);
+    target[used] = '\0';
+    (void)vfs_create_symlink(link, target, 0);
+}
+
+void sysfs_publish_sound(unsigned card, int playback, int capture, const char *id,
+                         uint32_t location) {
     VFS_GUARD;
-    static const char *const prefixes[] = {"controlC", "pcmC", "pcmC"};
+    char base[96];
+    sound_card_base(base, sizeof(base), card, location);
+    publish_sound_card(base, card, id);
+    char card_name[16];
+    size_t used = 0;
+    append_string(card_name, sizeof(card_name), &used, "card");
+    append_number(card_name, sizeof(card_name), &used, card);
+    card_name[used] = '\0';
+    static const char *const prefixes[] = {"/controlC", "/pcmC", "/pcmC"};
     static const char *const suffixes[] = {"", "D0p", "D0c"};
+    static const char *const devnames[] = {"snd/controlC", "snd/pcmC", "snd/pcmC"};
     const uint32_t minors[] = {card * 32U, card * 32U + 16U, card * 32U + 24U};
     const int present[] = {1, playback, capture};
+    announce(base);
     for (unsigned index = 0; index < 3U; index++) {
         if (!present[index]) continue;
-        char name[24];
+        char name[128];
+        used = 0;
+        append_string(name, sizeof(name), &used, base);
+        append_string(name, sizeof(name), &used, prefixes[index]);
+        append_number(name, sizeof(name), &used, card);
+        append_string(name, sizeof(name), &used, suffixes[index]);
+        name[used] = '\0';
         char devname[32];
-        sound_device_name(name, sizeof(name), prefixes[index], card, suffixes[index]);
-        sound_device_name(devname, sizeof(devname), index ? "snd/pcmC" : "snd/controlC", card,
-                          suffixes[index]);
+        used = 0;
+        append_string(devname, sizeof(devname), &used, devnames[index]);
+        append_number(devname, sizeof(devname), &used, card);
+        append_string(devname, sizeof(devname), &used, suffixes[index]);
+        devname[used] = '\0';
         publish_device(name, devname, "sound", NULL, DEV_MAJOR_SOUND, minors[index]);
+        char path[160];
+        used = 0;
+        append_string(path, sizeof(path), &used, "/sys/devices/");
+        append_string(path, sizeof(path), &used, name);
+        append_string(path, sizeof(path), &used, "/device");
+        path[used] = '\0';
+        char up[24];
+        used = 0;
+        append_string(up, sizeof(up), &used, "../../");
+        append_string(up, sizeof(up), &used, card_name);
+        up[used] = '\0';
+        (void)vfs_create_symlink(path, up, 0);
         announce(name);
     }
 }
 
-void sysfs_publish_sound_timer(void) {
+void sysfs_remove_sound(unsigned card, uint32_t location) {
     VFS_GUARD;
-    publish_device("timer", "snd/timer", "sound", NULL, DEV_MAJOR_SOUND, 33);
-    announce("timer");
-}
-
-void sysfs_remove_sound(unsigned card) {
-    VFS_GUARD;
-    static const char *const prefixes[] = {"controlC", "pcmC", "pcmC"};
+    char base[96];
+    sound_card_base(base, sizeof(base), card, location);
+    static const char *const prefixes[] = {"/controlC", "/pcmC", "/pcmC"};
     static const char *const suffixes[] = {"", "D0p", "D0c"};
     for (unsigned index = 0; index < 3U; index++) {
-        char name[24];
-        sound_device_name(name, sizeof(name), prefixes[index], card, suffixes[index]);
+        char name[128];
+        size_t used = 0;
+        append_string(name, sizeof(name), &used, base);
+        append_string(name, sizeof(name), &used, prefixes[index]);
+        append_number(name, sizeof(name), &used, card);
+        append_string(name, sizeof(name), &used, suffixes[index]);
+        name[used] = '\0';
         remove_published(name);
     }
+    char link[64];
+    size_t used = 0;
+    append_string(link, sizeof(link), &used, "/sys/class/sound/card");
+    append_number(link, sizeof(link), &used, card);
+    link[used] = '\0';
+    struct vfs_node *node = vfs_lookup_nofollow(link);
+    if (node && node->parent) (void)vfs_detach_child(node->parent, node);
+    remove_published(base);
+}
+
+void sysfs_publish_sound_timer(void) {
+    VFS_GUARD;
+    publish_device("virtual/sound/timer", "snd/timer", "sound", NULL, DEV_MAJOR_SOUND, 33);
+    announce("virtual/sound/timer");
 }
 
 static void publish_input_parent(const char *name, const char *label) {

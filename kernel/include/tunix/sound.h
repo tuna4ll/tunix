@@ -19,6 +19,7 @@ struct file;
 #define SND_TRIGGER_RELEASE 3
 
 #define SND_MAX_CARDS 4
+#define SOUND_ON_PCI  0x80000000U
 #define SND_MAX_RATES 16
 
 struct snd_hardware {
@@ -90,6 +91,7 @@ struct snd_backend {
     const char *longname;
     const char *mixer_name;
     const char *components;
+    uint32_t location;
     void *context;
     const struct snd_pcm_ops *streams[2];
     const struct snd_control *controls;

@@ -584,6 +584,16 @@ static void playback(void) {
            "/proc/asound shows the stream running");
     expect(read_text("/proc/asound/cards", text, sizeof(text)) == 0 && contains(text, "HDA-Intel"),
            "/proc/asound/cards lists the card");
+    char attribute[64];
+    expect(read_text("/sys/class/sound/card0/number", attribute, sizeof(attribute)) == 0 &&
+               streq(attribute, "0\n"),
+           "sysfs has the card with its number");
+    expect(read_text("/sys/class/sound/controlC0/device/id", attribute, sizeof(attribute)) == 0 &&
+               contains(attribute, "HDAIntel"),
+           "and the control device hangs below it");
+    expect(read_text("/sys/class/sound/card0/uevent", attribute, sizeof(attribute)) == 0 &&
+               contains(attribute, "SUBSYSTEM=sound") && !contains(attribute, "DEVNAME"),
+           "the card itself has no device node");
     static char codec[16384];
     expect(read_text("/proc/asound/card0/codec#0", codec, sizeof(codec)) == 0 &&
                contains(codec, "Vendor Id: 0x1af40012") && contains(codec, "Paths:"),
