@@ -1577,7 +1577,8 @@ static void apply_tmpfs_options(struct vfs_node *root, const char *options) {
 
 static int mount_is_pseudo(const char *type) {
     return strcmp(type, "proc") == 0 || strcmp(type, "sysfs") == 0 ||
-        strcmp(type, "devtmpfs") == 0 || strcmp(type, "devfs") == 0 || strcmp(type, "eventfs") == 0;
+        strcmp(type, "devtmpfs") == 0 || strcmp(type, "devfs") == 0 ||
+        strcmp(type, "eventfs") == 0 || strcmp(type, "debugfs") == 0;
 }
 
 static int canonical_target(const char *target, char *out) {

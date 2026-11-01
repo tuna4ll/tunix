@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
+#include <tunix/kcov.h>
 #include <tunix/build_config.h>
 #include <tunix/cred.h>
 #include <tunix/elf.h>
@@ -1306,6 +1307,7 @@ static void set_exe_path(struct process *process, struct vfs_node *file, const c
 }
 
 static void free_process_struct(struct process *process) {
+    kcov_task_exit(process);
     if (process->signal_queue) {
         SCHED_LOCKED;
         flush_signals(process, ~0ULL);
@@ -3027,6 +3029,7 @@ void process_exit_from_syscall(struct syscall_frame *frame, int status) {
         kprintf("TUNIX: init exited, status %d\n", status);
         panic("init exited");
     }
+    kcov_task_exit(exiting);
     eventfs_emit_process_exit(exiting->cred.euid, exiting->pid, status);
     exiting->exit_status = status;
     syscall_release_pins();

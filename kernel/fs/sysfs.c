@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
+#include <tunix/kcov.h>
 #include <tunix/backlight.h>
 #include <tunix/devnum.h>
 #include <tunix/drm.h>
@@ -1415,6 +1416,7 @@ void sysfs_init(void) {
     if (!vfs_mkdir_p("/sys/dev/char")) return;
     if (!vfs_mkdir_p("/sys/dev/block")) return;
     if (!vfs_mkdir_p("/sys/module")) return;
+    kcov_publish();
 
     publish_pci_bus();
     publish_console();

@@ -271,6 +271,10 @@ struct process {
     struct mutex *held_mutexes[PROCESS_HELD_MUTEXES];
     uint32_t held_mutex_count;
     const struct mutex *waiting_for;
+    struct kcov *kcov;
+    uint64_t *kcov_area;
+    uint64_t kcov_words;
+    uint32_t kcov_mode;
 };
 
 #define PROCESS_RESTARTED INT64_MIN

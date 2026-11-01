@@ -28,6 +28,21 @@ ifeq ($(FRAME_POINTERS),1)
   DEBUG_CFLAGS += -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer -DTUNIX_FRAME_POINTERS=1
 endif
 
+ifeq ($(KCOV),1)
+  DEBUG_CFLAGS += -DTUNIX_KCOV=1
+  SANITIZE_CFLAGS += -fsanitize-coverage=trace-pc,trace-cmp
+endif
+ifeq ($(KASAN),1)
+  DEBUG_CFLAGS += -DTUNIX_KASAN=1
+  SANITIZE_CFLAGS += -fsanitize=kernel-address --param asan-stack=0 --param asan-globals=0 \
+	--param asan-instrumentation-with-call-threshold=0
+endif
+
+SANITIZE_EXCLUDE := arch/% mm/heap.c mm/pmm.c mm/vmm.c mm/kasan.c mm/usercopy.c mm/dma.c \
+	lib/kstring.c lib/kprintf.c core/kcov.c core/oops.c core/kallsyms.c core/percpu.c \
+	init/stack_guard.c
+sanitize-flags = $(if $(filter $(SANITIZE_EXCLUDE),$(1)),,$(SANITIZE_CFLAGS))
+
 KERNEL_CFLAGS += $(DEBUG_CFLAGS)
 KERNEL_LDFLAGS := -nostdlib -no-pie -Wl,-T,arch/x86_64/linker.ld \
 	-Wl,--gc-sections -Wl,--build-id=none -Wl,-z,max-page-size=0x1000
@@ -68,7 +83,7 @@ $(KERNEL): $(KERNEL_OBJECTS) $(UACPI_OBJECTS) $(RUST_X86_LIB) arch/x86_64/linker
 
 $(BUILD)/kernel/%.c.o: %.c | $(LIMINE_HEADER) $(UACPI_STAMP)
 	@mkdir -p $(dir $@)
-	$(CC) $(KERNEL_CFLAGS) -MMD -MP -c $< -o $@
+	$(CC) $(KERNEL_CFLAGS) $(call sanitize-flags,$<) -MMD -MP -c $< -o $@
 
 $(BUILD)/kernel/%.S.o: %.S | $(LIMINE_HEADER) $(UACPI_STAMP)
 	@mkdir -p $(dir $@)
@@ -155,7 +170,7 @@ $(AARCH64_CORE_IMAGE): $(AARCH64_CORE_KERNEL)
 
 $(AARCH64_CORE_BUILD)/kernel/%.c.o: %.c
 	@mkdir -p $(dir $@)
-	$(AARCH64_CC) $(AARCH64_CORE_CFLAGS) -MMD -MP -c $< -o $@
+	$(AARCH64_CC) $(AARCH64_CORE_CFLAGS) $(call sanitize-flags,$<) -MMD -MP -c $< -o $@
 
 $(AARCH64_CORE_BUILD)/kernel/%.S.o: %.S
 	@mkdir -p $(dir $@)
