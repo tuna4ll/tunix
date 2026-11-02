@@ -211,6 +211,7 @@ struct socket_table {
     uint32_t count;
 };
 
+static int socket_is_inet(const struct inet_socket *socket);
 static struct inet_socket *all_sockets;
 static struct inet_socket *raw_sockets;
 static struct inet_socket *packet_sockets;
@@ -320,7 +321,7 @@ static void ports_leave(struct inet_socket *socket) {
 static int set_local_port(struct inet_socket *socket, uint16_t port) {
     ports_leave(socket);
     socket->local_port = port;
-    if (!port || socket->domain != TUNIX_AF_INET || socket->listener) return 0;
+    if (!port || !socket_is_inet(socket) || socket->listener) return 0;
     socket->port_key = port_key_of(port);
     if (table_insert(&ports, 0, socket) != 0) return -1;
     socket->in_ports = 1;
@@ -1106,10 +1107,84 @@ void inet_socket_receive_tcp(uint32_t source, uint16_t source_port, uint32_t des
     }
 }
 
+static int socket_is_inet(const struct inet_socket *socket) {
+    return socket->domain == TUNIX_AF_INET || socket->domain == TUNIX_AF_INET6;
+}
+
+static int in6_to_v4(const uint8_t address[16], uint32_t *out) {
+    int zero_prefix = 1;
+    for (unsigned i = 0; i < 10; i++)
+        if (address[i]) zero_prefix = 0;
+    if (zero_prefix && address[10] == 0 && address[11] == 0) {
+        if (address[12] == 0 && address[13] == 0 && address[14] == 0 && address[15] == 0) {
+            *out = 0;
+            return 0;
+        }
+        if (address[12] == 0 && address[13] == 0 && address[14] == 0 && address[15] == 1) {
+            *out = net_htonl(NET_LOOPBACK_ADDRESS);
+            return 0;
+        }
+    }
+    if (zero_prefix && address[10] == 0xFF && address[11] == 0xFF) {
+        memcpy(out, address + 12, 4);
+        return 0;
+    }
+    return -1;
+}
+
+static void v4_to_in6(uint32_t address, uint8_t out[16]) {
+    memset(out, 0, 16);
+    if (address == 0) return;
+    if (net_is_loopback(address)) {
+        out[15] = 1;
+        return;
+    }
+    out[10] = 0xFF;
+    out[11] = 0xFF;
+    memcpy(out + 12, &address, 4);
+}
+
+static int sockaddr_in_parse(const void *address, size_t length, int domain, uint32_t *v4,
+                             uint16_t *port) {
+    if (domain == TUNIX_AF_INET6) {
+        if (length < sizeof(struct tunix_sockaddr_in6)) return -EINVAL;
+        const struct tunix_sockaddr_in6 *in6 = (const struct tunix_sockaddr_in6 *)address;
+        if (in6->family != TUNIX_AF_INET6) return -EAFNOSUPPORT;
+        if (in6_to_v4(in6->address, v4) != 0) return -EADDRNOTAVAIL;
+        *port = net_htons(in6->port);
+        return 0;
+    }
+    if (length < sizeof(struct tunix_sockaddr_in)) return -EINVAL;
+    const struct tunix_sockaddr_in *in = (const struct tunix_sockaddr_in *)address;
+    if (in->family != TUNIX_AF_INET) return -EAFNOSUPPORT;
+    *v4 = in->address;
+    *port = net_htons(in->port);
+    return 0;
+}
+
+static size_t sockaddr_in_fill(void *out, int domain, uint32_t v4, uint16_t port) {
+    if (domain == TUNIX_AF_INET6) {
+        struct tunix_sockaddr_in6 in6;
+        memset(&in6, 0, sizeof(in6));
+        in6.family = TUNIX_AF_INET6;
+        in6.port = net_htons(port);
+        v4_to_in6(v4, in6.address);
+        memcpy(out, &in6, sizeof(in6));
+        return sizeof(in6);
+    }
+    struct tunix_sockaddr_in in;
+    memset(&in, 0, sizeof(in));
+    in.family = TUNIX_AF_INET;
+    in.port = net_htons(port);
+    in.address = v4;
+    memcpy(out, &in, sizeof(in));
+    return sizeof(in);
+}
+
 struct inet_socket *inet_socket_create(int domain, int type, int protocol) {
     NET_LOCKED;
     int base_type = type & 0xFU;
-    if (domain == TUNIX_AF_INET) {
+    if (domain == TUNIX_AF_INET || domain == TUNIX_AF_INET6) {
         if (base_type == TUNIX_SOCK_STREAM) {
             if (protocol != 0 && protocol != 6) return NULL;
         } else if (base_type == TUNIX_SOCK_DGRAM) {
@@ -1160,7 +1235,7 @@ void inet_socket_unref(struct inet_socket *socket) {
 
 static int local_port_conflict(struct inet_socket *socket, uint32_t address, uint16_t port) {
     for (struct inet_socket *other = port_bucket(port); other; other = other->port_next) {
-        if (other == socket || other->domain != TUNIX_AF_INET || other->type != socket->type ||
+        if (other == socket || !socket_is_inet(other) || other->type != socket->type ||
             other->local_port != port)
             continue;
         if (is_ping_socket(other) != is_ping_socket(socket)) continue;
@@ -1172,13 +1247,13 @@ static int local_port_conflict(struct inet_socket *socket, uint32_t address, uin
 int inet_socket_bind(struct inet_socket *socket, const void *address, size_t length) {
     NET_LOCKED;
     if (!socket || !address) return -EINVAL;
-    if (socket->domain == TUNIX_AF_INET) {
-        if (length < sizeof(struct tunix_sockaddr_in)) return -EINVAL;
-        const struct tunix_sockaddr_in *in = (const struct tunix_sockaddr_in *)address;
-        if (in->family != TUNIX_AF_INET) return -EAFNOSUPPORT;
-        uint16_t port = net_htons(in->port);
-        if (port && local_port_conflict(socket, in->address, port)) return -EADDRINUSE;
-        socket->local_address = in->address;
+    if (socket_is_inet(socket)) {
+        uint32_t v4;
+        uint16_t port;
+        int parsed = sockaddr_in_parse(address, length, socket->domain, &v4, &port);
+        if (parsed != 0) return parsed;
+        if (port && local_port_conflict(socket, v4, port)) return -EADDRINUSE;
+        socket->local_address = v4;
         if (!port && is_ping_socket(socket)) {
             if (bind_ephemeral(socket) != 0) return -EADDRINUSE;
         } else if (set_local_port(socket, port) != 0) {
@@ -1211,8 +1286,7 @@ int inet_socket_is_listener(struct inet_socket *socket) {
 
 int inet_socket_listen(struct inet_socket *socket, int backlog) {
     NET_LOCKED;
-    if (!socket || socket->domain != TUNIX_AF_INET || socket->type != TUNIX_SOCK_STREAM)
-        return -EOPNOTSUPP;
+    if (!socket || !socket_is_inet(socket) || socket->type != TUNIX_SOCK_STREAM) return -EOPNOTSUPP;
     if (socket->tcp) return -EINVAL;
     if (!socket->local_port && bind_ephemeral(socket) != 0) return -EADDRINUSE;
     unsigned wanted = backlog <= 0 ? 1U : (unsigned)backlog;
@@ -1240,18 +1314,17 @@ struct inet_socket *inet_socket_accept(struct inet_socket *listener) {
 int inet_socket_connect(struct inet_socket *socket, const void *address, size_t length,
                         uint64_t pid, uint32_t uid) {
     NET_LOCKED;
-    if (!socket || socket->domain != TUNIX_AF_INET || !address ||
-        length < sizeof(struct tunix_sockaddr_in))
-        return -EINVAL;
-    const struct tunix_sockaddr_in *in = (const struct tunix_sockaddr_in *)address;
-    if (in->family != TUNIX_AF_INET) return -EAFNOSUPPORT;
+    if (!socket || !socket_is_inet(socket) || !address) return -EINVAL;
+    uint32_t v4;
+    uint16_t cport;
+    int parsed = sockaddr_in_parse(address, length, socket->domain, &v4, &cport);
+    if (parsed != 0) return parsed;
     socket->event_pid = pid;
     socket->event_uid = uid;
-    if (socket->type == TUNIX_SOCK_STREAM)
-        return tcp_connect(socket, in->address, net_htons(in->port));
+    if (socket->type == TUNIX_SOCK_STREAM) return tcp_connect(socket, v4, cport);
     if (!socket->local_port && bind_ephemeral(socket) != 0) return -EADDRINUSE;
-    socket->peer_address = in->address;
-    socket->peer_port = net_htons(in->port);
+    socket->peer_address = v4;
+    socket->peer_port = cport;
     socket->connected = 1;
     report_connect(socket);
     return 0;
@@ -1301,15 +1374,13 @@ int64_t inet_socket_sendto(struct inet_socket *socket, const void *data, size_t 
     if (socket->write_shutdown) return -EPIPE;
     const struct net_config *config = net_get_config();
     int link = config->link_up && config->interface_up;
-    if (socket->domain == TUNIX_AF_INET) {
+    if (socket_is_inet(socket)) {
         uint32_t destination = socket->peer_address;
         uint16_t port = socket->peer_port;
         if (address) {
-            if (address_length < sizeof(struct tunix_sockaddr_in)) return -EINVAL;
-            const struct tunix_sockaddr_in *in = (const struct tunix_sockaddr_in *)address;
-            if (in->family != TUNIX_AF_INET) return -EAFNOSUPPORT;
-            destination = in->address;
-            port = net_htons(in->port);
+            int parsed =
+                sockaddr_in_parse(address, address_length, socket->domain, &destination, &port);
+            if (parsed != 0) return parsed;
         }
         if (!destination) return -EDESTADDRREQ;
         if (!link && !net_is_loopback(destination)) return -ENETDOWN;
@@ -1366,10 +1437,21 @@ int64_t inet_socket_recvfrom(struct inet_socket *socket, void *data, size_t leng
     size_t amount = length < item->length ? length : item->length;
     memcpy(data, item->data, amount);
     if (address && address_length) {
-        size_t copy =
-            *address_length < item->address_length ? *address_length : item->address_length;
-        memcpy(address, item->address, copy);
-        *address_length = item->address_length;
+        if (socket->domain == TUNIX_AF_INET6 &&
+            item->address_length >= sizeof(struct tunix_sockaddr_in)) {
+            const struct tunix_sockaddr_in *in = (const struct tunix_sockaddr_in *)item->address;
+            uint8_t buffer[sizeof(struct tunix_sockaddr_in6)];
+            size_t filled =
+                sockaddr_in_fill(buffer, TUNIX_AF_INET6, in->address, net_htons(in->port));
+            size_t copy = *address_length < filled ? *address_length : filled;
+            memcpy(address, buffer, copy);
+            *address_length = filled;
+        } else {
+            size_t copy =
+                *address_length < item->address_length ? *address_length : item->address_length;
+            memcpy(address, item->address, copy);
+            *address_length = item->address_length;
+        }
     }
     socket->last_ttl = item->ttl;
     if (!(flags & MSG_PEEK)) {
@@ -1394,29 +1476,23 @@ uint8_t inet_socket_last_ttl(struct inet_socket *socket) {
 int inet_socket_getsockname(struct inet_socket *socket, void *address, size_t *length) {
     NET_LOCKED;
     if (!socket || !address || !length) return -EINVAL;
-    if (socket->domain != TUNIX_AF_INET || *length < sizeof(struct tunix_sockaddr_in))
-        return -EINVAL;
-    struct tunix_sockaddr_in in;
-    memset(&in, 0, sizeof(in));
-    in.family = TUNIX_AF_INET;
-    in.port = net_htons(socket->local_port);
-    in.address = socket->local_address;
-    memcpy(address, &in, sizeof(in));
-    *length = sizeof(in);
+    if (!socket_is_inet(socket)) return -EINVAL;
+    size_t want = socket->domain == TUNIX_AF_INET6 ? sizeof(struct tunix_sockaddr_in6)
+                                                   : sizeof(struct tunix_sockaddr_in);
+    if (*length < want) return -EINVAL;
+    *length = sockaddr_in_fill(address, socket->domain, socket->local_address, socket->local_port);
     return 0;
 }
 
 int inet_socket_getpeername(struct inet_socket *socket, void *address, size_t *length) {
     NET_LOCKED;
     if (!socket || !socket->connected) return -ENOTCONN;
-    if (!address || !length || *length < sizeof(struct tunix_sockaddr_in)) return -EINVAL;
-    struct tunix_sockaddr_in in;
-    memset(&in, 0, sizeof(in));
-    in.family = TUNIX_AF_INET;
-    in.port = net_htons(socket->peer_port);
-    in.address = socket->peer_address;
-    memcpy(address, &in, sizeof(in));
-    *length = sizeof(in);
+    if (!address || !length) return -EINVAL;
+    if (!socket_is_inet(socket)) return -EINVAL;
+    size_t want = socket->domain == TUNIX_AF_INET6 ? sizeof(struct tunix_sockaddr_in6)
+                                                   : sizeof(struct tunix_sockaddr_in);
+    if (*length < want) return -EINVAL;
+    *length = sockaddr_in_fill(address, socket->domain, socket->peer_address, socket->peer_port);
     return 0;
 }
 
@@ -1734,7 +1810,7 @@ void inet_socket_receive_udp(const uint8_t *payload, size_t length, uint32_t sou
     for (struct inet_socket *socket = port_bucket(destination_port); socket;
          socket = socket->port_next) {
         if (socket->net_ns != ns) continue;
-        if (socket->domain != TUNIX_AF_INET || socket->type != TUNIX_SOCK_DGRAM) continue;
+        if (!socket_is_inet(socket) || socket->type != TUNIX_SOCK_DGRAM) continue;
         if (is_ping_socket(socket)) continue;
         if (socket->local_port != destination_port) continue;
         if (socket->local_address && socket->local_address != destination) continue;

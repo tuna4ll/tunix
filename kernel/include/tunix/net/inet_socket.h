@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #define TUNIX_AF_INET     2
+#define TUNIX_AF_INET6    10
 #define TUNIX_AF_PACKET   17
 #define TUNIX_SOCK_STREAM 1
 #define TUNIX_SOCK_DGRAM  2
@@ -24,6 +25,14 @@ struct tunix_sockaddr_in {
     uint16_t port;
     uint32_t address;
     uint8_t zero[8];
+};
+
+struct tunix_sockaddr_in6 {
+    uint16_t family;
+    uint16_t port;
+    uint32_t flowinfo;
+    uint8_t address[16];
+    uint32_t scope_id;
 };
 
 struct tunix_sockaddr_ll {

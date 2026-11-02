@@ -1679,7 +1679,7 @@ static int64_t sys_socket(int domain, int type, int protocol) {
         file->flags = (uint32_t)(type_flags & SOCK_NONBLOCK);
         return install_new_file(file, type_flags & SOCK_CLOEXEC);
     }
-    if (domain == TUNIX_AF_INET || domain == TUNIX_AF_PACKET) {
+    if (domain == TUNIX_AF_INET || domain == TUNIX_AF_INET6 || domain == TUNIX_AF_PACKET) {
         if ((domain == TUNIX_AF_PACKET || base_type == TUNIX_SOCK_RAW) && !cred_is_root())
             return -EPERM;
         struct inet_socket *socket = inet_socket_create(domain, base_type, protocol);
