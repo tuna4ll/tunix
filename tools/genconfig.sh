@@ -1,22 +1,3 @@
-#!/bin/sh
-# genconfig.sh -- turn Tunix's Kconfig into a .config and a C header.
-#
-# usage: genconfig.sh <Kconfig> <output-dir> --arch <x86_64|arm64>
-#
-# Supports the subset of Kconfig the kernel uses today: bool and int
-# symbols with constant defaults, and "depends on" clauses. The two *_ARCH
-# symbols form the architecture choice: --arch selects exactly one of them
-# (and turns the other off), so a stale or empty .config cannot
-# desynchronize a build. When <output-dir>/.config is missing it is created
-# from the Kconfig defaults; when it exists, its values are kept (and
-# validated), merged over the defaults, and re-canonicalized.
-#
-# Outputs (regenerated idempotently on every run):
-#   <output-dir>/.config          canonical .config (in Kconfig order)
-#   <output-dir>/kernel_config.h  CONFIG_* defines; the kernel makefiles
-#                                 force-include this file (-include ...)
-#                                 so every translation unit sees the
-#                                 configuration.
 set -u
 
 fail() {
@@ -39,12 +20,8 @@ CONFIG="$OUTDIR/.config"
 HEADER="$OUTDIR/kernel_config.h"
 mkdir -p "$OUTDIR" || fail "cannot create output directory '$OUTDIR'"
 
-# POSIX awk cannot open a missing file: use an empty placeholder instead.
 PREV="$OUTDIR/.config.prev"
 : >"$PREV"
-# Prefer an existing build-local .config, but let a newer top-level .config
-# (edited by `make menuconfig`) take precedence so configuration changes are
-# actually propagated to the build.
 ROOT_CONFIG="$(dirname "$KCONFIG")/.config"
 if [ -f "$CONFIG" ] && grep -q . "$CONFIG" 2>/dev/null; then
     if [ -f "$ROOT_CONFIG" ] && [ "$ROOT_CONFIG" -nt "$CONFIG" ]; then
