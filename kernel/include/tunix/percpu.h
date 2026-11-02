@@ -3,7 +3,18 @@
 
 #include <stdint.h>
 
+/* Maximum CPU count, from the kernel configuration (see ../Kconfig).
+   CONFIG_MAX_CORES is force-included by the build (-include ...); when the
+   configuration is unavailable (host-side builds of some drivers) fall
+   back to the historical value. cpu_mask addresses 64 CPUs per word, so
+   the count is rounded up to a multiple of 64 to keep
+   bits[SMP_MAX_CPUS / 64] well-formed: the extra slots are only capacity,
+   only cores that come online (percpu_mark_online) are actually used. */
+#ifdef CONFIG_MAX_CORES
+#define SMP_MAX_CPUS (((CONFIG_MAX_CORES) + 63) & ~63)
+#else
 #define SMP_MAX_CPUS 256
+#endif
 
 struct cpu_mask {
     uint64_t bits[SMP_MAX_CPUS / 64];

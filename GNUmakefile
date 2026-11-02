@@ -29,19 +29,61 @@ endif
 MODULE_SOURCES := $(wildcard kernel/modules/*.c) $(wildcard kernel/modules/x86_64/*.c)
 MODULES := $(patsubst kernel/modules/%.c,$(KERNEL_BUILD)/modules/%.ko,$(MODULE_SOURCES))
 
-KERNEL_TARGETS := kernel modules check aarch64-core modules-aarch64 acpi-test lint rust-test \
+KERNEL_TARGETS := modules check aarch64-core modules-aarch64 acpi-test lint rust-test \
 	rust-lint rust-format rust-format-check
 
 .PHONY: all clean distclean kernel-fetch FORCE $(KERNEL_TARGETS)
+X86_BUILD := $(shell grep -qx 'CONFIG_X86_64_ARCH=y' .config 2>/dev/null && echo 1 || echo 0)
+ARM64_BUILD := $(shell grep -qx 'CONFIG_ARM64_ARCH=y' .config 2>/dev/null && echo 1 || echo 0)
+ifeq ($(X86_BUILD),0)
+ARM64_ONLY := 1
+else
+ARM64_ONLY := 0
+endif
+
+ifeq ($(X86_BUILD),1)
+ifeq ($(ARM64_BUILD),1)
+all: image image-aarch64
+else
 all: image
+endif
+else ifeq ($(ARM64_BUILD),1)
+all: image-aarch64
+else
+all: image
+endif
+
+menuconfig:
+	menuconfig Kconfig
 
 kernel-fetch:
 	$(KERNEL_MAKE) fetch
 
+ifeq ($(X86_BUILD),1)
+ifeq ($(ARM64_BUILD),1)
+.PHONY: kernel
+kernel: | kernel-fetch
+	$(KERNEL_MAKE) kernel
+	$(KERNEL_MAKE) aarch64-core
+else
+.PHONY: kernel
+kernel: | kernel-fetch
+	$(KERNEL_MAKE) kernel
+endif
+else ifeq ($(ARM64_BUILD),1)
+.PHONY: kernel
+kernel: | kernel-fetch
+	$(KERNEL_MAKE) aarch64-core ARM64_ONLY=1
+else
+.PHONY: kernel
+kernel: | kernel-fetch
+	$(KERNEL_MAKE) kernel
+endif
+
 $(KERNEL_TARGETS): | kernel-fetch
 	$(KERNEL_MAKE) $@
 
-$(KERNEL) $(MODULES) &: FORCE | kernel-fetch
+$(KERNEL) $(MODULES) &: FORCE Kconfig $(wildcard .config) | kernel-fetch
 	$(KERNEL_MAKE) kernel modules
 
 $(LIMINE_HEADER): | kernel-fetch
@@ -133,7 +175,7 @@ IMAGE_TABLE ?= gpt
 
 IMAGE_SLACK_MIB ?= 4096
 
-$(IMAGE): $(KERNEL) $(MODULES) $(LIMINE_EXE) boot/limine.conf tools/image.sh $(SYSROOT_STAMP)
+$(IMAGE): $(KERNEL) $(MODULES) $(LIMINE_EXE) boot/limine.conf tools/image.sh $(SYSROOT_STAMP) Kconfig $(wildcard .config)
 	$(USERNS) env TABLE='$(IMAGE_TABLE)' ROOT_SLACK_MIB='$(IMAGE_SLACK_MIB)' \
 	MODULES='$(KERNEL_BUILD)/modules' RELEASE='$(KERNEL_RELEASE)' \
 		tools/image.sh $@ $(KERNEL) $(LIMINE_DIR) boot/limine.conf $(SYSROOT)
@@ -214,7 +256,7 @@ AARCH64_CORE_IMAGE := $(KERNEL_BUILD)/kernel-aarch64-core.img
 AARCH64_MODULES := $(patsubst kernel/modules/%.c,$(AARCH64_CORE_BUILD)/modules/%.ko,$(wildcard kernel/modules/*.c))
 
 $(AARCH64_CORE_IMAGE) $(AARCH64_MODULES) &: FORCE | kernel-fetch
-	$(KERNEL_MAKE) aarch64-core modules-aarch64
+	$(KERNEL_MAKE) aarch64-core modules-aarch64 ARM64_ONLY=$(ARM64_ONLY)
 
 QEMU_AARCH64_CORE_DISKS ?=
 
@@ -233,7 +275,7 @@ $(SYSROOT_AARCH64_STAMP): tools/sysroot.sh $(BASE_FILES) $(SYSROOT_RECIPE) | $(B
 
 image-aarch64: $(IMAGE_AARCH64)
 
-$(IMAGE_AARCH64): $(AARCH64_CORE_IMAGE) $(AARCH64_MODULES) $(LIMINE_EXE) boot/limine-aarch64.conf tools/image.sh $(SYSROOT_AARCH64_STAMP)
+$(IMAGE_AARCH64): $(AARCH64_CORE_IMAGE) $(AARCH64_MODULES) $(LIMINE_EXE) boot/limine-aarch64.conf tools/image.sh $(SYSROOT_AARCH64_STAMP) Kconfig $(wildcard .config)
 	$(USERNS) env ARCH=aarch64 TABLE='$(IMAGE_TABLE)' ROOT_SLACK_MIB='$(IMAGE_SLACK_MIB)' \
 	MODULES='$(AARCH64_CORE_BUILD)/modules' RELEASE='$(KERNEL_RELEASE)' \
 		tools/image.sh $@ $(AARCH64_CORE_IMAGE) $(LIMINE_DIR) boot/limine-aarch64.conf $(SYSROOT_AARCH64)

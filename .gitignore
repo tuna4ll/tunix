@@ -9,6 +9,8 @@ tunix-ports/
 *.img.gz
 *.log
 *.orig
+*.config
+*.cfg
 *.rej
 .DS_Store
 .vscode/

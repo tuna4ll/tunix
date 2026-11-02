@@ -177,6 +177,10 @@ void smp_init(void) {
     percpu_mark_online(0);
     percpu_slot(0)->apic_id = apic_local_id();
 
+#ifndef CONFIG_SMP
+    kprintf("SMP: disabled in the kernel configuration\n");
+    return;
+#endif
     if (boot_command_line_flag("nosmp")) {
         kprintf("SMP: one processor, nosmp\n");
         return;
