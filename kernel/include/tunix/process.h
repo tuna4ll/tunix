@@ -103,6 +103,7 @@ struct user_namespace;
 struct uts_namespace;
 struct net_namespace;
 struct pid_namespace;
+struct mount_namespace;
 
 struct signal_entry {
     struct signal_entry *next;
@@ -289,6 +290,7 @@ struct process {
     struct pid_namespace *pid_ns;
     uint64_t ns_pid;
     uint64_t ns_tgid;
+    struct mount_namespace *mnt_ns;
 };
 
 #define PROCESS_RESTARTED INT64_MIN

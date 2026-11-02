@@ -3698,7 +3698,7 @@ static int64_t sys_link_at(int old_dirfd, uint64_t user_old_path, int new_dirfd,
 static int64_t sys_mount(uint64_t user_source, uint64_t user_target, uint64_t user_type,
                          uint64_t flags, uint64_t user_data) {
     const struct credentials *cred = cred_current();
-    if (cred && cred->euid != 0) return -EPERM;
+    if (cred && cred->euid != 0 && !(mnt_ns_active() && user_ns_capable())) return -EPERM;
     if (flags > 0xFFFFFFFFULL) return -EINVAL;
 
     VFS_PATH_SCOPED source = vfs_path_buffer();
@@ -5545,7 +5545,8 @@ static int64_t sys_clone_fork_compat(struct syscall_frame *frame, uint64_t flags
         return give_pidfd(process_fork_from_syscall(frame, &request), pidfd_user);
     }
 
-    uint64_t fork_ns = flags & (CLONE_NEWUSER | CLONE_NEWUTS | CLONE_NEWNET | CLONE_NEWPID);
+    uint64_t fork_ns =
+        flags & (CLONE_NEWUSER | CLONE_NEWUTS | CLONE_NEWNET | CLONE_NEWPID | CLONE_NEWNS);
     uint64_t unsupported = flags & ~(0xFFULL | CLONE_FORK_METADATA_FLAGS | fork_ns);
     if (unsupported != 0 || (flags & CLONE_FORK_REJECT_FLAGS) != 0 ||
         (flags & CLONE_NAMESPACE_FLAGS & ~fork_ns) != 0) {

@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
+#include <tunix/namespace.h>
 #include <tunix/acl.h>
 #include <tunix/cgroup.h>
 #include <tunix/cred.h>
@@ -523,7 +524,19 @@ struct vfs_node *vfs_find_entry(struct vfs_node *directory, const char *name) {
 
 static struct vfs_node *cross_mounts(struct vfs_node *node) {
     unsigned depth = 0;
-    while (node && node->mounted && depth++ < VFS_MOUNT_MAX_DEPTH) node = node->mounted;
+    while (node && depth++ < VFS_MOUNT_MAX_DEPTH) {
+        struct vfs_node *over = mnt_ns_resolve(node);
+        if (over) {
+            if (over == node) break;
+            node = over;
+            continue;
+        }
+        if (node->mounted) {
+            node = node->mounted;
+            continue;
+        }
+        break;
+    }
     return node;
 }
 
@@ -1699,8 +1712,16 @@ int vfs_mount(const char *source, const char *target, const char *type, uint32_t
         root->parent = at->parent;
         (void)vfs_set_name(root, at->name);
     }
-    at->mounted = root;
-    at->flags |= VFS_MOUNTPOINT;
+    if (mnt_ns_active()) {
+        if (mnt_ns_add(at, root) != 0) {
+            if (owns_root) free_tree(root);
+            kfree(entry);
+            return -VFS_ENOMEM;
+        }
+    } else {
+        at->mounted = root;
+        at->flags |= VFS_MOUNTPOINT;
+    }
     mount_insert(entry);
     return 0;
 }
@@ -1730,8 +1751,12 @@ int vfs_umount(const char *target, int detach) {
         node = next;
     }
 
-    entry->mountpoint->mounted = NULL;
-    entry->mountpoint->flags &= ~VFS_MOUNTPOINT;
+    if (mnt_ns_active() && mnt_ns_resolve(entry->mountpoint)) {
+        mnt_ns_remove(entry->mountpoint);
+    } else {
+        entry->mountpoint->mounted = NULL;
+        entry->mountpoint->flags &= ~VFS_MOUNTPOINT;
+    }
     if (previous) previous->next = entry->next;
     else mount_table = entry->next;
     fatfs_unmount(entry->root);

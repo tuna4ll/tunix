@@ -12,6 +12,96 @@
 static struct user_namespace root_user_ns = {.refs = 1, .level = 0};
 static struct uts_namespace root_uts_ns = {.refs = 1};
 static struct pid_namespace root_pid_ns = {.refs = 1, .level = 0};
+static struct mount_namespace root_mnt_ns = {.refs = 1};
+
+static struct mount_namespace *mnt_ns_of(const struct process *process) {
+    return process && process->mnt_ns ? process->mnt_ns : &root_mnt_ns;
+}
+
+int mnt_ns_active(void) {
+    struct process *process = process_current();
+    return process && process->mnt_ns != NULL;
+}
+
+struct vfs_node *mnt_ns_resolve(struct vfs_node *at) {
+    struct process *process = process_current();
+    if (!process || !process->mnt_ns) return NULL;
+    for (struct mount_override *o = process->mnt_ns->overrides; o; o = o->next)
+        if (o->at == at) return o->masked ? at : o->root;
+    return NULL;
+}
+
+int mnt_ns_add(struct vfs_node *at, struct vfs_node *root) {
+    struct process *process = process_current();
+    if (!process || !process->mnt_ns) return -1;
+    struct mount_namespace *ns = process->mnt_ns;
+    for (struct mount_override *o = ns->overrides; o; o = o->next)
+        if (o->at == at) {
+            o->root = root;
+            o->masked = 0;
+            return 0;
+        }
+    struct mount_override *entry = kmalloc(sizeof(*entry));
+    if (!entry) return -1;
+    entry->at = at;
+    entry->root = root;
+    entry->masked = 0;
+    entry->next = ns->overrides;
+    ns->overrides = entry;
+    return 0;
+}
+
+int mnt_ns_remove(struct vfs_node *at) {
+    struct process *process = process_current();
+    if (!process || !process->mnt_ns) return -1;
+    for (struct mount_override *o = process->mnt_ns->overrides; o; o = o->next)
+        if (o->at == at) {
+            o->masked = 1;
+            o->root = NULL;
+            return 0;
+        }
+    struct mount_override *entry = kmalloc(sizeof(*entry));
+    if (!entry) return -1;
+    entry->at = at;
+    entry->root = NULL;
+    entry->masked = 1;
+    entry->next = process->mnt_ns->overrides;
+    process->mnt_ns->overrides = entry;
+    return 0;
+}
+
+static struct mount_namespace *new_mnt_ns(struct process *process) {
+    struct mount_namespace *parent = mnt_ns_of(process);
+    struct mount_namespace *ns = kmalloc(sizeof(*ns));
+    if (!ns) return NULL;
+    memset(ns, 0, sizeof(*ns));
+    ns->refs = 1;
+    ns->parent = parent;
+    for (struct mount_override *o = parent->overrides; o; o = o->next) {
+        struct mount_override *copy = kmalloc(sizeof(*copy));
+        if (!copy) continue;
+        *copy = *o;
+        copy->next = ns->overrides;
+        ns->overrides = copy;
+    }
+    __atomic_add_fetch(&parent->refs, 1, __ATOMIC_RELAXED);
+    return ns;
+}
+
+static void mnt_ns_put(struct mount_namespace *ns) {
+    while (ns && ns != &root_mnt_ns) {
+        if (__atomic_sub_fetch(&ns->refs, 1, __ATOMIC_ACQ_REL) != 0) return;
+        struct mount_override *o = ns->overrides;
+        while (o) {
+            struct mount_override *next = o->next;
+            kfree(o);
+            o = next;
+        }
+        struct mount_namespace *parent = ns->parent;
+        kfree(ns);
+        ns = parent;
+    }
+}
 
 void namespace_assign_pid(struct process *child, const struct process *parent, int is_thread) {
     if (!child->pid_ns) {
@@ -98,10 +188,12 @@ void namespace_inherit(struct process *child, const struct process *parent) {
     child->uts_ns = uts;
     child->net_ns = parent ? parent->net_ns : NULL;
     child->pid_ns = parent ? parent->pid_ns : NULL;
+    child->mnt_ns = parent ? parent->mnt_ns : NULL;
     __atomic_add_fetch(&user->refs, 1, __ATOMIC_RELAXED);
     __atomic_add_fetch(&uts->refs, 1, __ATOMIC_RELAXED);
     net_ns_get(child->net_ns);
     if (child->pid_ns) __atomic_add_fetch(&child->pid_ns->refs, 1, __ATOMIC_RELAXED);
+    if (child->mnt_ns) __atomic_add_fetch(&child->mnt_ns->refs, 1, __ATOMIC_RELAXED);
 }
 
 static void user_ns_put(struct user_namespace *ns) {
@@ -130,6 +222,8 @@ void namespace_release(struct process *process) {
     process->net_ns = NULL;
     pid_ns_put(process->pid_ns);
     process->pid_ns = NULL;
+    mnt_ns_put(process->mnt_ns);
+    process->mnt_ns = NULL;
     user_ns_put(user);
     uts_ns_put(uts);
 }
@@ -168,11 +262,12 @@ static struct uts_namespace *new_uts_ns(struct process *process) {
 }
 
 static int64_t apply_flags(struct process *process, uint64_t flags) {
-    uint64_t supported = CLONE_NEWUSER | CLONE_NEWUTS | CLONE_NEWNET | CLONE_NEWPID;
+    uint64_t supported = CLONE_NEWUSER | CLONE_NEWUTS | CLONE_NEWNET | CLONE_NEWPID | CLONE_NEWNS;
     if (flags & CLONE_NAMESPACE_FLAGS & ~supported) return -EINVAL;
 
     if (!(flags & CLONE_NEWUSER)) {
-        if ((flags & (CLONE_NEWUTS | CLONE_NEWNET | CLONE_NEWPID)) && !user_ns_capable())
+        if ((flags & (CLONE_NEWUTS | CLONE_NEWNET | CLONE_NEWPID | CLONE_NEWNS)) &&
+            !user_ns_capable())
             return -EPERM;
     }
 
@@ -208,6 +303,17 @@ static int64_t apply_flags(struct process *process, uint64_t flags) {
             return -ENOMEM;
         }
     }
+    struct mount_namespace *created_mnt = NULL;
+    if (flags & CLONE_NEWNS) {
+        created_mnt = new_mnt_ns(process);
+        if (!created_mnt) {
+            user_ns_put(created_user);
+            uts_ns_put(created_uts);
+            net_ns_put(created_net);
+            pid_ns_put(created_pid);
+            return -ENOMEM;
+        }
+    }
     if (created_user) {
         user_ns_put(process->user_ns);
         process->user_ns = created_user;
@@ -223,6 +329,10 @@ static int64_t apply_flags(struct process *process, uint64_t flags) {
     if (created_pid) {
         pid_ns_put(process->pid_ns);
         process->pid_ns = created_pid;
+    }
+    if (created_mnt) {
+        mnt_ns_put(process->mnt_ns);
+        process->mnt_ns = created_mnt;
     }
     return 0;
 }

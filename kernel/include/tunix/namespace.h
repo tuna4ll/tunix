@@ -57,10 +57,28 @@ struct pid_namespace {
     uint64_t last_pid;
 };
 
+struct vfs_node;
+struct mount_override {
+    struct vfs_node *at;
+    struct vfs_node *root;
+    struct mount_override *next;
+    int masked;
+};
+
+struct mount_namespace {
+    struct mount_namespace *parent;
+    uint32_t refs;
+    struct mount_override *overrides;
+};
+
 struct process;
 
 int uts_ns_is_root(const struct uts_namespace *ns);
 uint64_t pid_ns_alloc(struct pid_namespace *ns);
+struct vfs_node *mnt_ns_resolve(struct vfs_node *at);
+int mnt_ns_add(struct vfs_node *at, struct vfs_node *root);
+int mnt_ns_remove(struct vfs_node *at);
+int mnt_ns_active(void);
 void namespace_assign_pid(struct process *child, const struct process *parent, int is_thread);
 void namespace_inherit(struct process *child, const struct process *parent);
 void namespace_release(struct process *process);

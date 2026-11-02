@@ -107,8 +107,9 @@ static s64 uts_isolated(void) {
 }
 
 #define CLONE_NEWPID 0x20000000UL
+#define CLONE_NEWIPC 0x08000000UL
 static s64 unsupported_ns_rejected(void) {
-    return unshare(CLONE_NEWNS) == -EINVAL && unshare(CLONE_NEWPID) == -EINVAL ? 0 : 60;
+    return unshare(CLONE_NEWIPC) == -EINVAL && unshare(CLONE_NEWPID) == -EINVAL ? 0 : 60;
 }
 
 static s64 parent_hostname_unchanged(void) {
@@ -156,7 +157,7 @@ static void run(int argc, char **argv) {
     expect_eq(exited_with(child(double_map_fails)), 0, "the uid map cannot be written twice");
     expect_eq(exited_with(child(uts_isolated)), 0, "a UTS namespace has its own hostname");
     expect_eq(exited_with(child(unsupported_ns_rejected)), 0,
-              "mount and pid namespaces are refused, not faked");
+              "ipc and pid(unshare) namespaces are refused, not faked");
     expect_eq(exited_with(child(parent_hostname_unchanged)), 0,
               "the child's hostname does not leak to the parent");
     expect_eq(exited_with(child(netns_isolates)), 0,
