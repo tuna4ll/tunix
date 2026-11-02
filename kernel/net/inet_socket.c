@@ -139,6 +139,7 @@ struct datagram {
 
 struct inet_socket {
     int refs;
+    struct net_namespace *net_ns;
     int domain;
     int type;
     int protocol;
@@ -408,6 +409,7 @@ static void destroy_socket(struct inet_socket *socket) {
         kfree(socket->tcp->rx);
         kfree(socket->tcp);
     }
+    net_ns_put(socket->net_ns);
     kfree(socket);
 }
 
@@ -1027,6 +1029,8 @@ static struct inet_socket *tcp_open_child(struct inet_socket *listener, uint32_t
     if (!child) return NULL;
     memset(child, 0, sizeof(*child));
     child->refs = 1;
+    child->net_ns = listener->net_ns;
+    net_ns_get(child->net_ns);
     child->domain = TUNIX_AF_INET;
     child->type = TUNIX_SOCK_STREAM;
     child->protocol = listener->protocol;
@@ -1065,12 +1069,13 @@ static struct inet_socket *tcp_open_child(struct inet_socket *listener, uint32_t
 void inet_socket_receive_tcp(uint32_t source, uint16_t source_port, uint32_t destination,
                              uint16_t destination_port, uint32_t seq, uint32_t ack, uint8_t flags,
                              uint16_t window, const struct net_tcp_options *options,
-                             const uint8_t *payload, size_t length) {
+                             const uint8_t *payload, size_t length, struct net_namespace *ns) {
     NET_LOCKED;
     if (connections.buckets) {
         uint32_t key = connection_key_of(destination_port, source, source_port);
         for (struct inet_socket *s = connections.buckets[key & connections.mask]; s;
              s = s->connection_next) {
+            if (s->net_ns != ns) continue;
             if (!s->tcp || s->local_port != destination_port) continue;
             if (s->local_address && s->local_address != destination) continue;
             if (s->peer_port != source_port || s->peer_address != source) continue;
@@ -1081,6 +1086,7 @@ void inet_socket_receive_tcp(uint32_t source, uint16_t source_port, uint32_t des
 
     if ((flags & (TCP_SYN | TCP_ACK | TCP_RST)) == TCP_SYN) {
         for (struct inet_socket *s = port_bucket(destination_port); s; s = s->port_next) {
+            if (s->net_ns != ns) continue;
             if (!s->listening || s->type != TUNIX_SOCK_STREAM) continue;
             if (s->local_port != destination_port) continue;
             if (s->local_address && s->local_address != destination) continue;
@@ -1118,6 +1124,8 @@ struct inet_socket *inet_socket_create(int domain, int type, int protocol) {
     if (!socket) return NULL;
     memset(socket, 0, sizeof(*socket));
     socket->refs = 1;
+    socket->net_ns = net_ns_active();
+    net_ns_get(socket->net_ns);
     socket->domain = domain;
     socket->type = base_type;
     socket->protocol = protocol;
@@ -1715,8 +1723,8 @@ int64_t inet_socket_write(struct inet_socket *socket, size_t length, const void 
 }
 
 void inet_socket_receive_udp(const uint8_t *payload, size_t length, uint32_t source,
-                             uint16_t source_port, uint32_t destination,
-                             uint16_t destination_port) {
+                             uint16_t source_port, uint32_t destination, uint16_t destination_port,
+                             struct net_namespace *ns) {
     NET_LOCKED;
     struct tunix_sockaddr_in address;
     memset(&address, 0, sizeof(address));
@@ -1725,6 +1733,7 @@ void inet_socket_receive_udp(const uint8_t *payload, size_t length, uint32_t sou
     address.address = source;
     for (struct inet_socket *socket = port_bucket(destination_port); socket;
          socket = socket->port_next) {
+        if (socket->net_ns != ns) continue;
         if (socket->domain != TUNIX_AF_INET || socket->type != TUNIX_SOCK_DGRAM) continue;
         if (is_ping_socket(socket)) continue;
         if (socket->local_port != destination_port) continue;
@@ -1737,7 +1746,7 @@ void inet_socket_receive_udp(const uint8_t *payload, size_t length, uint32_t sou
 }
 
 void inet_socket_receive_ipv4(const uint8_t *packet, size_t length, uint8_t protocol,
-                              uint32_t source, uint32_t destination) {
+                              uint32_t source, uint32_t destination, struct net_namespace *ns) {
     NET_LOCKED;
     (void)destination;
     struct tunix_sockaddr_in address;
@@ -1752,6 +1761,7 @@ void inet_socket_receive_ipv4(const uint8_t *packet, size_t length, uint8_t prot
         icmp = (const struct icmp_message *)(packet + header_length);
 
     for (struct inet_socket *socket = raw_sockets; socket; socket = socket->class_next) {
+        if (socket->net_ns != ns) continue;
         if (icmp && (socket->icmp_filter & (1U << icmp->type))) continue;
         if (socket->type == TUNIX_SOCK_RAW) {
             if (socket->protocol && socket->protocol != protocol) continue;

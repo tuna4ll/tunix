@@ -5,6 +5,7 @@
 #include <tunix/heap.h>
 #include <tunix/kstring.h>
 #include <tunix/namespace.h>
+#include <tunix/net/net.h>
 #include <tunix/process.h>
 #include <tunix/uts.h>
 
@@ -53,8 +54,10 @@ void namespace_inherit(struct process *child, const struct process *parent) {
     struct uts_namespace *uts = parent && parent->uts_ns ? parent->uts_ns : &root_uts_ns;
     child->user_ns = user;
     child->uts_ns = uts;
+    child->net_ns = parent ? parent->net_ns : NULL;
     __atomic_add_fetch(&user->refs, 1, __ATOMIC_RELAXED);
     __atomic_add_fetch(&uts->refs, 1, __ATOMIC_RELAXED);
+    net_ns_get(child->net_ns);
 }
 
 static void user_ns_put(struct user_namespace *ns) {
@@ -79,6 +82,8 @@ void namespace_release(struct process *process) {
     struct uts_namespace *uts = process->uts_ns;
     process->user_ns = NULL;
     process->uts_ns = NULL;
+    net_ns_put(process->net_ns);
+    process->net_ns = NULL;
     user_ns_put(user);
     uts_ns_put(uts);
 }
@@ -117,11 +122,11 @@ static struct uts_namespace *new_uts_ns(struct process *process) {
 }
 
 static int64_t apply_flags(struct process *process, uint64_t flags) {
-    uint64_t supported = CLONE_NEWUSER | CLONE_NEWUTS;
+    uint64_t supported = CLONE_NEWUSER | CLONE_NEWUTS | CLONE_NEWNET;
     if (flags & CLONE_NAMESPACE_FLAGS & ~supported) return -EINVAL;
 
     if (!(flags & CLONE_NEWUSER)) {
-        if ((flags & CLONE_NEWUTS) && !user_ns_capable()) return -EPERM;
+        if ((flags & (CLONE_NEWUTS | CLONE_NEWNET)) && !user_ns_capable()) return -EPERM;
     }
 
     struct user_namespace *created_user = NULL;
@@ -137,6 +142,15 @@ static int64_t apply_flags(struct process *process, uint64_t flags) {
             return -ENOMEM;
         }
     }
+    struct net_namespace *created_net = NULL;
+    if (flags & CLONE_NEWNET) {
+        created_net = net_ns_create();
+        if (!created_net) {
+            user_ns_put(created_user);
+            uts_ns_put(created_uts);
+            return -ENOMEM;
+        }
+    }
     if (created_user) {
         user_ns_put(process->user_ns);
         process->user_ns = created_user;
@@ -144,6 +158,10 @@ static int64_t apply_flags(struct process *process, uint64_t flags) {
     if (created_uts) {
         uts_ns_put(process->uts_ns);
         process->uts_ns = created_uts;
+    }
+    if (created_net) {
+        net_ns_put(process->net_ns);
+        process->net_ns = created_net;
     }
     return 0;
 }

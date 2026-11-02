@@ -2733,6 +2733,8 @@ int process_fault_from_interrupt(struct interrupt_frame *frame, const struct pro
     return 1;
 }
 
+struct net_namespace *process_current_net_ns(void) { return current ? current->net_ns : NULL; }
+
 int process_signal_from_syscall(struct syscall_frame *frame, int signal_number, int code, int fatal,
                                 uint64_t address) {
     if (!frame || !current || current->state != PROCESS_RUNNING) return 0;

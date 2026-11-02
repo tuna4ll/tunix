@@ -5545,7 +5545,7 @@ static int64_t sys_clone_fork_compat(struct syscall_frame *frame, uint64_t flags
         return give_pidfd(process_fork_from_syscall(frame, &request), pidfd_user);
     }
 
-    uint64_t fork_ns = flags & (CLONE_NEWUSER | CLONE_NEWUTS);
+    uint64_t fork_ns = flags & (CLONE_NEWUSER | CLONE_NEWUTS | CLONE_NEWNET);
     uint64_t unsupported = flags & ~(0xFFULL | CLONE_FORK_METADATA_FLAGS | fork_ns);
     if (unsupported != 0 || (flags & CLONE_FORK_REJECT_FLAGS) != 0 ||
         (flags & CLONE_NAMESPACE_FLAGS & ~fork_ns) != 0) {

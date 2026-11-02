@@ -12,6 +12,7 @@
 #define TUNIX_SOCK_PACKET 10
 
 struct inet_socket;
+struct net_namespace;
 
 struct tunix_sockaddr {
     uint16_t family;
@@ -65,15 +66,16 @@ int inet_socket_shutdown(struct inet_socket *socket, int how);
 int64_t inet_socket_read(struct inet_socket *socket, size_t length, void *data);
 int64_t inet_socket_write(struct inet_socket *socket, size_t length, const void *data);
 void inet_socket_receive_ipv4(const uint8_t *packet, size_t length, uint8_t protocol,
-                              uint32_t source, uint32_t destination);
+                              uint32_t source, uint32_t destination, struct net_namespace *ns);
 void inet_socket_receive_udp(const uint8_t *payload, size_t length, uint32_t source,
-                             uint16_t source_port, uint32_t destination, uint16_t destination_port);
+                             uint16_t source_port, uint32_t destination, uint16_t destination_port,
+                             struct net_namespace *ns);
 void inet_socket_receive_ethernet(const uint8_t *frame, size_t length, uint16_t ethertype);
 struct net_tcp_options;
 void inet_socket_receive_tcp(uint32_t source, uint16_t source_port, uint32_t destination,
                              uint16_t destination_port, uint32_t seq, uint32_t ack, uint8_t flags,
                              uint16_t window, const struct net_tcp_options *options,
-                             const uint8_t *payload, size_t length);
+                             const uint8_t *payload, size_t length, struct net_namespace *ns);
 void inet_socket_tcp_timer_poll(void);
 int inet_socket_timers_armed(void);
 int inet_socket_peer_closed(struct inet_socket *socket);

@@ -29,6 +29,13 @@ struct net_tcp_options {
     uint8_t has_window_scale;
 };
 
+struct net_namespace;
+struct net_namespace *net_ns_root(void);
+struct net_namespace *net_ns_create(void);
+void net_ns_get(struct net_namespace *ns);
+void net_ns_put(struct net_namespace *ns);
+struct net_namespace *net_ns_active(void);
+
 struct net_config {
     uint8_t mac[6];
     uint32_t address;

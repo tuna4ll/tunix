@@ -101,6 +101,7 @@ struct posix_timer;
 struct seccomp_filter;
 struct user_namespace;
 struct uts_namespace;
+struct net_namespace;
 
 struct signal_entry {
     struct signal_entry *next;
@@ -283,6 +284,7 @@ struct process {
     struct seccomp_filter *seccomp_filters;
     struct user_namespace *user_ns;
     struct uts_namespace *uts_ns;
+    struct net_namespace *net_ns;
 };
 
 #define PROCESS_RESTARTED INT64_MIN
@@ -362,6 +364,7 @@ struct process_fault {
 int process_fault_from_interrupt(struct interrupt_frame *frame, const struct process_fault *fault);
 int process_signal_from_syscall(struct syscall_frame *frame, int signal_number, int code, int fatal,
                                 uint64_t address);
+struct net_namespace *process_current_net_ns(void);
 void process_run_child_first_from_syscall(struct syscall_frame *frame, uint64_t child_pid);
 void process_reap_deferred(void);
 void process_io_recheck(void);

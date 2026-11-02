@@ -10,6 +10,9 @@
 #define SYS_uname_nr    63
 #define SYS_openat_nr   257
 #define SYS_setuid_nr   105
+#define SYS_socket_nr_x 41
+#define SYS_bind_nr_x   49
+#define SYS_sendto_nr_x 44
 #else
 #define SYS_unshare_nr  97
 #define SYS_getuid_nr   174
@@ -19,6 +22,9 @@
 #define SYS_uname_nr    160
 #define SYS_openat_nr   56
 #define SYS_setuid_nr   146
+#define SYS_socket_nr_x 198
+#define SYS_bind_nr_x   200
+#define SYS_sendto_nr_x 206
 #endif
 
 #define CLONE_NEWNS   0x00020000UL
@@ -100,8 +106,9 @@ static s64 uts_isolated(void) {
     return streq(uts.nodename, "sandbox") ? 0 : 77;
 }
 
+#define CLONE_NEWPID 0x20000000UL
 static s64 unsupported_ns_rejected(void) {
-    return unshare(CLONE_NEWNET) == -EINVAL && unshare(CLONE_NEWNS) == -EINVAL ? 0 : 60;
+    return unshare(CLONE_NEWNS) == -EINVAL && unshare(CLONE_NEWPID) == -EINVAL ? 0 : 60;
 }
 
 static s64 parent_hostname_unchanged(void) {
@@ -111,6 +118,31 @@ static s64 parent_hostname_unchanged(void) {
     } uts;
     SYSCALL(SYS_uname_nr, &uts, 0, 0, 0, 0, 0);
     return streq(uts.nodename, "sandbox") ? 50 : 0;
+}
+
+struct sa_in {
+    u16 family;
+    u16 port;
+    u32 addr;
+    u8 zero[8];
+};
+
+static s64 netns_isolates(void) {
+    if (unshare(CLONE_NEWNET) != 0) return 40;
+    int fd = (int)SYSCALL(SYS_socket_nr_x, 2, 2, 0, 0, 0, 0);
+    if (fd < 0) return 41;
+    struct sa_in lo = {2, 0, 0x0100007f, {0}};
+    lo.port = (u16)((9999 >> 8) | (9999 << 8));
+    if (SYSCALL(SYS_bind_nr_x, fd, &lo, sizeof(lo), 0, 0, 0) != 0) return 42;
+    struct sa_in ext = {2, 0, 0x08080808, {0}};
+    ext.port = (u16)((53 >> 8) | (53 << 8));
+    s64 r = SYSCALL(SYS_sendto_nr_x, fd, "x", 1, 0, &ext, sizeof(ext));
+    if (r >= 0) return 43;
+    struct sa_in self = {2, 0, 0x0100007f, {0}};
+    self.port = (u16)((9999 >> 8) | (9999 << 8));
+    if (SYSCALL(SYS_sendto_nr_x, fd, "hi", 2, 0, &self, sizeof(self)) != 2) return 44;
+    close(fd);
+    return 0;
 }
 
 static void run(int argc, char **argv) {
@@ -124,7 +156,9 @@ static void run(int argc, char **argv) {
     expect_eq(exited_with(child(double_map_fails)), 0, "the uid map cannot be written twice");
     expect_eq(exited_with(child(uts_isolated)), 0, "a UTS namespace has its own hostname");
     expect_eq(exited_with(child(unsupported_ns_rejected)), 0,
-              "net and mount namespaces are refused, not faked");
+              "mount and pid namespaces are refused, not faked");
     expect_eq(exited_with(child(parent_hostname_unchanged)), 0,
               "the child's hostname does not leak to the parent");
+    expect_eq(exited_with(child(netns_isolates)), 0,
+              "a net namespace blocks external sends and keeps its own loopback");
 }
