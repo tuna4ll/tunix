@@ -35,6 +35,9 @@ KERNEL_TARGETS := kernel modules check aarch64-core modules-aarch64 acpi-test li
 .PHONY: all clean distclean kernel-fetch FORCE $(KERNEL_TARGETS)
 all: image
 
+menuconfig:
+	menuconfig
+
 kernel-fetch:
 	$(KERNEL_MAKE) fetch
 

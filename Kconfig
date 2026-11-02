@@ -1,0 +1,29 @@
+mainmenu "Tunix Kernel Configuration"
+
+menu "Architecture"
+
+config X86_64_ARCH
+    bool "x86_64"
+    default n
+    help
+        Compiles it for machines based on x86_64 (f.e PC's, Laptops etc.)
+
+config ARM64_ARCH
+    bool "ARM64"
+    default n
+    help
+        Compiles it for machines based on ARM64
+
+endmenu
+
+menu "Core Features"
+config SMP
+    bool "Multi-Core Support (SMP)"
+    default y
+
+config MAX_CORES
+    int "Maximum CPU Number"
+    depends on SMP
+    default 8
+
+endmenu 

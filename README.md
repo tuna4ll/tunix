@@ -6,9 +6,10 @@
 
 A Unix-like kernel for x86_64 and aarch64 that runs an unmodified Void Linux userland.
 
-## Build and run
+## Build, Configure and run
 
 ```sh
+make menuconfig # Configure your kernel before compiling.
 make        # kernel and disk image
 make run    # boot it in QEMU
 make test   # run the kernel tests
