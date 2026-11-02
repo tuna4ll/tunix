@@ -42,7 +42,19 @@ mkdir -p "$OUTDIR" || fail "cannot create output directory '$OUTDIR'"
 # POSIX awk cannot open a missing file: use an empty placeholder instead.
 PREV="$OUTDIR/.config.prev"
 : >"$PREV"
-[ -f "$CONFIG" ] && grep -q . "$CONFIG" 2>/dev/null && PREV="$CONFIG"
+# Prefer an existing build-local .config, but let a newer top-level .config
+# (edited by `make menuconfig`) take precedence so configuration changes are
+# actually propagated to the build.
+ROOT_CONFIG="$(dirname "$KCONFIG")/.config"
+if [ -f "$CONFIG" ] && grep -q . "$CONFIG" 2>/dev/null; then
+    if [ -f "$ROOT_CONFIG" ] && [ "$ROOT_CONFIG" -nt "$CONFIG" ]; then
+        PREV="$ROOT_CONFIG"
+    else
+        PREV="$CONFIG"
+    fi
+elif [ -f "$ROOT_CONFIG" ] && grep -q . "$ROOT_CONFIG" 2>/dev/null; then
+    PREV="$ROOT_CONFIG"
+fi
 
 awk -v arch="$ARCH" -v cfg_out="$CONFIG" -v hdr_out="$HEADER" '
 function bad(msg) { printf "genconfig: %s\n", msg > "/dev/stderr"; exit 1 }

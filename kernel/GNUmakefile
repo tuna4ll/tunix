@@ -27,10 +27,10 @@ CONFIG_FILE       := $(CONFIG_DIR)/.config
 CONFIG_GEN_H      := $(CONFIG_DIR)/kernel_config.h
 CONFIG_INCLUDE    ?= -include $(CONFIG_GEN_H)
 
-$(CONFIG_FILE): $(KCONFIG) $(GENCONFIG)
+$(CONFIG_FILE): $(KCONFIG) $(GENCONFIG) $(wildcard ../.config)
 	@sh $(GENCONFIG) $(KCONFIG) $(CONFIG_DIR) --arch x86_64
 
-$(CONFIG_GEN_H): $(CONFIG_FILE) $(KCONFIG) $(GENCONFIG)
+$(CONFIG_GEN_H): $(CONFIG_FILE) $(KCONFIG) $(GENCONFIG) $(wildcard ../.config)
 	@sh $(GENCONFIG) $(KCONFIG) $(CONFIG_DIR) --arch x86_64
 
 include subprojects/uacpi/RECIPE
@@ -124,6 +124,11 @@ AARCH64_OBJCOPY ?= aarch64-linux-gnu-objcopy
 AARCH64_NM      ?= aarch64-linux-gnu-nm
 
 AARCH64_CORE_BUILD := $(BUILD)/aarch64-core
+# The aarch64 build tree keeps its own configuration (ARCH choice = arm64).
+AARCH64_CONFIG_DIR     := $(AARCH64_CORE_BUILD)/config
+AARCH64_CONFIG_FILE    := $(AARCH64_CONFIG_DIR)/.config
+AARCH64_CONFIG_GEN_H   := $(AARCH64_CONFIG_DIR)/kernel_config.h
+AARCH64_CONFIG_INCLUDE ?= -include $(AARCH64_CONFIG_GEN_H)
 AARCH64_CORE_CFLAGS := -std=gnu11 -Wall -Wextra -Werror -ffreestanding \
 	-fstack-protector-strong -mstack-protector-guard=global -fno-pic -fno-pie -fno-builtin \
 	-fno-asynchronous-unwind-tables -fno-unwind-tables -mgeneral-regs-only \
@@ -138,17 +143,13 @@ AARCH64_CORE_OBJECTS := $(AARCH64_CORE_SOURCES:%=$(AARCH64_CORE_BUILD)/kernel/%.
 AARCH64_CORE_KERNEL := $(BUILD)/kernel-aarch64-core.elf
 AARCH64_CORE_IMAGE := $(BUILD)/kernel-aarch64-core.img
 
-# The aarch64 build tree keeps its own configuration (ARCH choice = arm64).
-AARCH64_CONFIG_DIR     := $(AARCH64_CORE_BUILD)/config
-AARCH64_CONFIG_FILE    := $(AARCH64_CONFIG_DIR)/.config
-AARCH64_CONFIG_GEN_H   := $(AARCH64_CONFIG_DIR)/kernel_config.h
-AARCH64_CONFIG_INCLUDE ?= -include $(AARCH64_CONFIG_GEN_H)
-
-$(AARCH64_CONFIG_FILE) $(AARCH64_CONFIG_GEN_H): $(KCONFIG) $(GENCONFIG)
+$(AARCH64_CONFIG_FILE) $(AARCH64_CONFIG_GEN_H): $(KCONFIG) $(GENCONFIG) $(wildcard ../.config)
 	@sh $(GENCONFIG) $(KCONFIG) $(AARCH64_CONFIG_DIR) --arch arm64
 
 .PHONY: aarch64-core
 aarch64-core: $(AARCH64_CORE_IMAGE)
+	@cp $(AARCH64_CORE_KERNEL) $(BUILD)/kernel-arm64.elf
+	@if [ "$(ARM64_ONLY)" = "1" ]; then cp $(AARCH64_CORE_KERNEL) $(BUILD)/kernel.elf; fi
 
 $(AARCH64_CORE_KERNEL): $(AARCH64_CORE_OBJECTS) $(RUST_ARM_LIB) arch/aarch64/linker.ld
 	$(AARCH64_CC) -nostdlib -static -Wl,-T,arch/aarch64/linker.ld \

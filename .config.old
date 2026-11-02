@@ -1,0 +1,11 @@
+#
+# Architecture
+#
+CONFIG_X86_64_ARCH=y
+# CONFIG_ARM64_ARCH is not set
+
+#
+# Core Features
+#
+CONFIG_SMP=y
+CONFIG_MAX_CORES=8
