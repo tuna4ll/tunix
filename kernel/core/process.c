@@ -1451,9 +1451,21 @@ struct process *process_create_kthread(const char *name, void (*body)(void *), v
 }
 
 struct process *process_current(void) { return current; }
-uint64_t process_current_pid(void) { return current ? current->tgid : 0; }
-uint64_t process_current_tid(void) { return current ? current->pid : 0; }
-uint64_t process_current_ppid(void) { return current ? current->ppid : 0; }
+uint64_t process_current_pid(void) {
+    if (!current) return 0;
+    return current->pid_ns ? current->ns_tgid : current->tgid;
+}
+uint64_t process_current_tid(void) {
+    if (!current) return 0;
+    return current->pid_ns ? current->ns_pid : current->pid;
+}
+uint64_t process_current_ppid(void) {
+    if (!current) return 0;
+    if (!current->pid_ns) return current->ppid;
+    struct process *parent = current->ppid ? process_find(current->ppid) : NULL;
+    if (parent && parent->pid_ns == current->pid_ns) return parent->ns_tgid;
+    return 0;
+}
 
 uint32_t process_get_umask(void) { return current ? current->umask : 022; }
 
@@ -2893,7 +2905,12 @@ static void wake_group_waiters(struct process *leader) {
 static int child_matches(const struct process *child, const struct process *parent,
                          int64_t requested) {
     if (!child || !parent || child->ppid != parent->pid) return 0;
-    if (requested > 0) return child->pid == (uint64_t)requested;
+    if (requested > 0) {
+        uint64_t seen = current && current->pid_ns && child->pid_ns == current->pid_ns
+            ? child->ns_tgid
+            : child->tgid;
+        return seen == (uint64_t)requested;
+    }
     if (requested == -1) return 1;
     if (requested == 0) return child->pgid == parent->pgid;
     return child->pgid == (uint64_t)(-requested);
@@ -3061,7 +3078,6 @@ void process_exit_from_syscall(struct syscall_frame *frame, int status) {
     }
     kcov_task_exit(exiting);
     seccomp_release(exiting);
-    namespace_release(exiting);
     eventfs_emit_process_exit(exiting->cred.euid, exiting->pid, status);
     exiting->exit_status = status;
     syscall_release_pins();
@@ -3206,6 +3222,7 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame, const struct fork
             return ns_status;
         }
     }
+    namespace_assign_pid(child, parent, 0);
 
     if (request) {
         if (request->child_stack) SYSCALL_USER_SP(&child->saved_frame) = request->child_stack;
@@ -3222,6 +3239,8 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame, const struct fork
                            sizeof(child->signal_actions[signal]));
         }
     }
+    int64_t reported_pid =
+        (int64_t)(parent->pid_ns && child->pid_ns == parent->pid_ns ? child->ns_tgid : child->tgid);
 
     {
         SCHED_LOCKED;
@@ -3232,7 +3251,7 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame, const struct fork
     procfs_register_process(child);
     eventfs_emit_process_fork(parent->cred.euid, parent->pid, child->pid);
     KDEBUG("process: fork parent=%u child=%u\n", (unsigned)parent->pid, (unsigned)child->pid);
-    return (int64_t)child->pid;
+    return reported_pid;
 }
 
 int64_t process_clone_thread_from_syscall(struct syscall_frame *frame, uint64_t child_stack,
@@ -3301,6 +3320,7 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame, uint64_t 
     memcpy(child->signal_actions, parent->signal_actions, sizeof(child->signal_actions));
     seccomp_inherit(child, parent);
     namespace_inherit(child, parent);
+    namespace_assign_pid(child, parent, 1);
 
     child->files = parent->files;
     file_table_ref(child->files);
@@ -3333,7 +3353,7 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame, uint64_t 
     }
     procfs_register_process(child);
     KDEBUG("process: clone thread tgid=%u tid=%u\n", (unsigned)child->tgid, (unsigned)child->pid);
-    return (int64_t)child->pid;
+    return (int64_t)(parent->pid_ns ? child->ns_pid : child->pid);
 }
 
 static uint64_t futex_shared_key(uint64_t address) {
@@ -3931,6 +3951,27 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
     return 0;
 }
 
+static uint64_t pid_seen_by(const struct process *item, const struct process *viewer) {
+    if (viewer && viewer->pid_ns && item->pid_ns == viewer->pid_ns) return item->ns_tgid;
+    return item->tgid;
+}
+
+static struct process *find_by_ns_pid(struct pid_namespace *ns, uint64_t ns_pid) {
+    if (!ns || !ns_pid) return NULL;
+    for (uint64_t bucket = 0; bucket < pid_bucket_count; bucket++)
+        for (struct process *item = pid_buckets[bucket]; item; item = item->pid_next)
+            if (item->pid_ns == ns && item->ns_tgid == ns_pid && !item->is_thread &&
+                item->state != PROCESS_DEAD)
+                return item;
+    return NULL;
+}
+
+int64_t process_pid_to_global(int64_t ns_pid) {
+    if (!current || !current->pid_ns || ns_pid <= 0) return ns_pid;
+    struct process *target = find_by_ns_pid(current->pid_ns, (uint64_t)ns_pid);
+    return target ? (int64_t)target->tgid : INT64_MIN;
+}
+
 int64_t process_waitpid_from_syscall(struct syscall_frame *frame, int64_t pid, uint64_t status_user,
                                      int options, uint64_t syscall_number) {
     options &= ~(WNOTHREAD | WALLCHILDREN | WCLONE);
@@ -3948,17 +3989,17 @@ int64_t process_waitpid_from_syscall(struct syscall_frame *frame, int64_t pid, u
             has_child = 1;
             if (item->state == PROCESS_ZOMBIE) {
                 status = exit_status_word(item);
-                found = (int64_t)item->pid;
+                found = (int64_t)pid_seen_by(item, caller);
                 mark_dead(item);
             } else if ((options & WUNTRACED) && item->state == PROCESS_STOPPED &&
                        !item->stop_reported) {
                 status = ((item->stop_signal & 0xFF) << 8) | 0x7F;
                 item->stop_reported = 1;
-                found = (int64_t)item->pid;
+                found = (int64_t)pid_seen_by(item, caller);
             } else if ((options & WCONTINUED) && item->continued_pending) {
                 status = 0xFFFF;
                 item->continued_pending = 0;
-                found = (int64_t)item->pid;
+                found = (int64_t)pid_seen_by(item, caller);
             }
         }
         if (!found) {

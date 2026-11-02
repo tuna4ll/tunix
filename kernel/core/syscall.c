@@ -5545,7 +5545,7 @@ static int64_t sys_clone_fork_compat(struct syscall_frame *frame, uint64_t flags
         return give_pidfd(process_fork_from_syscall(frame, &request), pidfd_user);
     }
 
-    uint64_t fork_ns = flags & (CLONE_NEWUSER | CLONE_NEWUTS | CLONE_NEWNET);
+    uint64_t fork_ns = flags & (CLONE_NEWUSER | CLONE_NEWUTS | CLONE_NEWNET | CLONE_NEWPID);
     uint64_t unsupported = flags & ~(0xFFULL | CLONE_FORK_METADATA_FLAGS | fork_ns);
     if (unsupported != 0 || (flags & CLONE_FORK_REJECT_FLAGS) != 0 ||
         (flags & CLONE_NAMESPACE_FLAGS & ~fork_ns) != 0) {
@@ -6902,22 +6902,28 @@ static void syscall_run(struct syscall_frame *frame) {
         }
         break;
     }
-    case SYS_KILL:
-        SYSCALL_RET(frame) = (uint64_t)process_send_signal_checked(SYSCALL_PID(SYSCALL_ARG0(frame)),
-                                                                   (int)SYSCALL_ARG1(frame));
+    case SYS_KILL: {
+        int64_t kpid = process_pid_to_global((int64_t)SYSCALL_PID(SYSCALL_ARG0(frame)));
+        SYSCALL_RET(frame) = kpid == INT64_MIN
+            ? (uint64_t)-(int64_t)ESRCH
+            : (uint64_t)process_send_signal_checked(kpid, (int)SYSCALL_ARG1(frame));
         break;
+    }
 
     case SYS_TKILL:
         SYSCALL_RET(frame) = (uint64_t)process_send_thread_signal(
             0, SYSCALL_PID(SYSCALL_ARG0(frame)), (int)SYSCALL_ARG1(frame));
         break;
-    case SYS_TGKILL:
-        SYSCALL_RET(frame) = SYSCALL_PID(SYSCALL_ARG0(frame)) <= 0
+    case SYS_TGKILL: {
+        int64_t tgpid = process_pid_to_global((int64_t)SYSCALL_PID(SYSCALL_ARG0(frame)));
+        SYSCALL_RET(frame) = (int64_t)SYSCALL_PID(SYSCALL_ARG0(frame)) <= 0
             ? (uint64_t)-(int64_t)EINVAL
-            : (uint64_t)process_send_thread_signal(SYSCALL_PID(SYSCALL_ARG0(frame)),
-                                                   SYSCALL_PID(SYSCALL_ARG1(frame)),
+            : tgpid == INT64_MIN
+            ? (uint64_t)-(int64_t)ESRCH
+            : (uint64_t)process_send_thread_signal(tgpid, SYSCALL_PID(SYSCALL_ARG1(frame)),
                                                    (int)SYSCALL_ARG2(frame));
         break;
+    }
     case SYS_UNAME: SYSCALL_RET(frame) = (uint64_t)sys_uname(SYSCALL_ARG0(frame)); break;
     case SYS_SYSLOG:
         SYSCALL_RET(frame) = (uint64_t)sys_syslog((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame),

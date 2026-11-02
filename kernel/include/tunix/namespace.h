@@ -50,9 +50,18 @@ struct uts_namespace {
     char domainname[UTS_FIELD_MAX];
 };
 
+struct pid_namespace {
+    struct pid_namespace *parent;
+    uint32_t refs;
+    uint32_t level;
+    uint64_t last_pid;
+};
+
 struct process;
 
 int uts_ns_is_root(const struct uts_namespace *ns);
+uint64_t pid_ns_alloc(struct pid_namespace *ns);
+void namespace_assign_pid(struct process *child, const struct process *parent, int is_thread);
 void namespace_inherit(struct process *child, const struct process *parent);
 void namespace_release(struct process *process);
 int64_t namespace_unshare(uint64_t flags);

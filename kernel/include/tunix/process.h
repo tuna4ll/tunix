@@ -102,6 +102,7 @@ struct seccomp_filter;
 struct user_namespace;
 struct uts_namespace;
 struct net_namespace;
+struct pid_namespace;
 
 struct signal_entry {
     struct signal_entry *next;
@@ -285,6 +286,9 @@ struct process {
     struct user_namespace *user_ns;
     struct uts_namespace *uts_ns;
     struct net_namespace *net_ns;
+    struct pid_namespace *pid_ns;
+    uint64_t ns_pid;
+    uint64_t ns_tgid;
 };
 
 #define PROCESS_RESTARTED INT64_MIN
@@ -365,6 +369,7 @@ int process_fault_from_interrupt(struct interrupt_frame *frame, const struct pro
 int process_signal_from_syscall(struct syscall_frame *frame, int signal_number, int code, int fatal,
                                 uint64_t address);
 struct net_namespace *process_current_net_ns(void);
+int64_t process_pid_to_global(int64_t ns_pid);
 void process_run_child_first_from_syscall(struct syscall_frame *frame, uint64_t child_pid);
 void process_reap_deferred(void);
 void process_io_recheck(void);

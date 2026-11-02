@@ -11,6 +11,48 @@
 
 static struct user_namespace root_user_ns = {.refs = 1, .level = 0};
 static struct uts_namespace root_uts_ns = {.refs = 1};
+static struct pid_namespace root_pid_ns = {.refs = 1, .level = 0};
+
+void namespace_assign_pid(struct process *child, const struct process *parent, int is_thread) {
+    if (!child->pid_ns) {
+        child->ns_pid = child->pid;
+        child->ns_tgid = child->tgid;
+        return;
+    }
+    child->ns_pid = pid_ns_alloc(child->pid_ns);
+    child->ns_tgid = is_thread && parent ? parent->ns_tgid : child->ns_pid;
+}
+
+uint64_t pid_ns_alloc(struct pid_namespace *ns) {
+    if (!ns || ns == &root_pid_ns) return 0;
+    return __atomic_add_fetch(&ns->last_pid, 1, __ATOMIC_RELAXED);
+}
+
+static struct pid_namespace *pid_ns_of(const struct process *process) {
+    return process && process->pid_ns ? process->pid_ns : &root_pid_ns;
+}
+
+static struct pid_namespace *new_pid_ns(struct process *process) {
+    struct pid_namespace *parent = pid_ns_of(process);
+    if (parent->level >= USER_NS_MAX_DEPTH) return NULL;
+    struct pid_namespace *ns = kmalloc(sizeof(*ns));
+    if (!ns) return NULL;
+    memset(ns, 0, sizeof(*ns));
+    ns->parent = parent;
+    ns->refs = 1;
+    ns->level = parent->level + 1U;
+    __atomic_add_fetch(&parent->refs, 1, __ATOMIC_RELAXED);
+    return ns;
+}
+
+static void pid_ns_put(struct pid_namespace *ns) {
+    while (ns && ns != &root_pid_ns) {
+        if (__atomic_sub_fetch(&ns->refs, 1, __ATOMIC_ACQ_REL) != 0) return;
+        struct pid_namespace *parent = ns->parent;
+        kfree(ns);
+        ns = parent;
+    }
+}
 
 int uts_ns_is_root(const struct uts_namespace *ns) { return !ns || ns == &root_uts_ns; }
 
@@ -55,9 +97,11 @@ void namespace_inherit(struct process *child, const struct process *parent) {
     child->user_ns = user;
     child->uts_ns = uts;
     child->net_ns = parent ? parent->net_ns : NULL;
+    child->pid_ns = parent ? parent->pid_ns : NULL;
     __atomic_add_fetch(&user->refs, 1, __ATOMIC_RELAXED);
     __atomic_add_fetch(&uts->refs, 1, __ATOMIC_RELAXED);
     net_ns_get(child->net_ns);
+    if (child->pid_ns) __atomic_add_fetch(&child->pid_ns->refs, 1, __ATOMIC_RELAXED);
 }
 
 static void user_ns_put(struct user_namespace *ns) {
@@ -84,6 +128,8 @@ void namespace_release(struct process *process) {
     process->uts_ns = NULL;
     net_ns_put(process->net_ns);
     process->net_ns = NULL;
+    pid_ns_put(process->pid_ns);
+    process->pid_ns = NULL;
     user_ns_put(user);
     uts_ns_put(uts);
 }
@@ -122,11 +168,12 @@ static struct uts_namespace *new_uts_ns(struct process *process) {
 }
 
 static int64_t apply_flags(struct process *process, uint64_t flags) {
-    uint64_t supported = CLONE_NEWUSER | CLONE_NEWUTS | CLONE_NEWNET;
+    uint64_t supported = CLONE_NEWUSER | CLONE_NEWUTS | CLONE_NEWNET | CLONE_NEWPID;
     if (flags & CLONE_NAMESPACE_FLAGS & ~supported) return -EINVAL;
 
     if (!(flags & CLONE_NEWUSER)) {
-        if ((flags & (CLONE_NEWUTS | CLONE_NEWNET)) && !user_ns_capable()) return -EPERM;
+        if ((flags & (CLONE_NEWUTS | CLONE_NEWNET | CLONE_NEWPID)) && !user_ns_capable())
+            return -EPERM;
     }
 
     struct user_namespace *created_user = NULL;
@@ -151,6 +198,16 @@ static int64_t apply_flags(struct process *process, uint64_t flags) {
             return -ENOMEM;
         }
     }
+    struct pid_namespace *created_pid = NULL;
+    if (flags & CLONE_NEWPID) {
+        created_pid = new_pid_ns(process);
+        if (!created_pid) {
+            user_ns_put(created_user);
+            uts_ns_put(created_uts);
+            net_ns_put(created_net);
+            return -ENOMEM;
+        }
+    }
     if (created_user) {
         user_ns_put(process->user_ns);
         process->user_ns = created_user;
@@ -163,6 +220,10 @@ static int64_t apply_flags(struct process *process, uint64_t flags) {
         net_ns_put(process->net_ns);
         process->net_ns = created_net;
     }
+    if (created_pid) {
+        pid_ns_put(process->pid_ns);
+        process->pid_ns = created_pid;
+    }
     return 0;
 }
 
@@ -173,7 +234,7 @@ int64_t namespace_apply_clone(struct process *child, uint64_t flags) {
 int64_t namespace_unshare(uint64_t flags) {
     struct process *process = process_current();
     if (!process) return -EINVAL;
-    uint64_t handled = CLONE_NAMESPACE_FLAGS;
+    uint64_t handled = CLONE_NAMESPACE_FLAGS & ~CLONE_NEWPID;
     if (flags & ~handled) return -EINVAL;
     return apply_flags(process, flags);
 }
