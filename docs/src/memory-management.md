@@ -1,9 +1,9 @@
 # Memory Management
 
 How user memory is tracked, reclaimed and swapped, and how the kernel keeps
-itself out of user pages. The code is in `kernel/mm/` (`vmm.c`, `swap.c`,
-`reclaim.c`), `kernel/core/process.c` (memory areas, faults, the OOM killer),
-`kernel/fs/vfs.c` (the page cache) and `kernel/drivers/storage/zram.c`.
+itself out of user pages. The code is in `mm/` (`vmm.c`, `swap.c`,
+`reclaim.c`), `core/process.c` (memory areas, faults, the OOM killer),
+`fs/vfs.c` (the page cache) and `drivers/storage/zram.c`.
 
 ## Memory areas
 
@@ -100,7 +100,7 @@ and the reclaim counters.
 
 `/dev/zram0` (block major 252) is a compressed RAM disk. Writing a size to
 `/sys/block/zram0/disksize` allocates it; `reset` frees it once nothing swaps
-to it. Pages are compressed with the LZ4 codec from `kernel/rust/lz4` (see
+to it. Pages are compressed with the LZ4 codec from `rust/lz4` (see
 [Rust](rust.md)); pages filled with one repeated 64-bit word are stored as
 that word, and pages that compress to more than three quarters are stored as
 they are. `mm_stat`, `io_stat`, `mem_limit`, `mem_used_max`, `comp_algorithm`
@@ -124,12 +124,18 @@ PXN on every arm64 user page. The kernel and modules are built with
 function returns. The boot log says which guards are active:
 `VMM: user pages guarded from the kernel (execute, access)`.
 
-## Tests
+## KASAN
 
-`make test` runs `memory` (areas, usage counters, `oom_score_adj`, the OOM
-killer), `swap` (a 768 MiB swap file made in the guest; more memory than RAM,
-`fork`, shared mappings, `mprotect`, `munmap` and `swapoff` on swapped pages,
-the swap-file guards) and `zram` (block I/O, same-filled pages, swap on
-zram0 with compression and discard checks). The `swap` and `zram` tests boot
-with 320 MiB of RAM; `MEMORY=` and `AARCH64_CPU=` choose the guest for any
-test (`AARCH64_CPU=max` exercises PAN).
+`make KASAN=1` builds the kernel with `-fsanitize=kernel-address` in outline
+mode: every heap access calls `__asan_load*`/`__asan_store*` in
+`mm/kasan.c`, which checks one shadow byte per eight bytes of heap. The
+shadow sits in its own window (`KASAN_SHADOW_BASE`) under the same top-level
+page-table entry as the kernel image, so every address space shares it.
+`kmalloc` leaves a poisoned redzone after each object and `kfree` poisons the
+object and parks it in a quarantine, so an overrun, a use after free and a
+double free each print a `BUG: KASAN:` report with a call trace. The allocator,
+the page tables and the string routines are built without the sanitiser
+(`SANITIZE_EXCLUDE`). Booting a KASAN kernel with `kasantest=1` runs
+`mm/kasan_test.c`, which trips all three on purpose and prints
+`KASAN-SELFTEST: 3/3 reported`. `FRAME_POINTERS=1` makes the trace walk saved
+frames instead of scanning the stack.

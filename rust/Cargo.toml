@@ -1,0 +1,16 @@
+[workspace]
+resolver = "3"
+members = ["elf", "elf-check", "lz4", "lz4-check", "kernel"]
+default-members = ["kernel"]
+
+[workspace.package]
+edition = "2024"
+license = "GPL-3.0-only"
+publish = false
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+codegen-units = 1
+lto = true
+debug = false

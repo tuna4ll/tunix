@@ -1,0 +1,1890 @@
+#include <tunix/cgroup.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <tunix/abi_gaps.h>
+#include <tunix/cpu.h>
+#include <tunix/ext4.h>
+#include <tunix/heap.h>
+#include <tunix/irq.h>
+#include <tunix/namespace.h>
+#include <tunix/file.h>
+#include <tunix/kstring.h>
+#include <tunix/pmm.h>
+#include <tunix/process.h>
+#include <tunix/boot.h>
+#include <tunix/block.h>
+#include <tunix/input.h>
+#include <tunix/kentry.h>
+#include <tunix/module.h>
+#include <tunix/procfs.h>
+#include <tunix/pty.h>
+#include <tunix/vt.h>
+#include <tunix/random.h>
+#include <tunix/uts.h>
+#include <tunix/smp.h>
+#include <tunix/syscall_abi.h>
+#include <tunix/time.h>
+#include <tunix/sound.h>
+#include <tunix/vfs.h>
+#include <tunix/vmm.h>
+#include <tunix/errno.h>
+#include <tunix/swap.h>
+#include <tunix/net/inet_socket.h>
+#include <tunix/net/net.h>
+#include <tunix/hwcap.h>
+
+#define PROC_BUFFER_SIZE 4096
+
+struct text_buffer {
+    char *data;
+    size_t length;
+    size_t capacity;
+};
+
+static void text_release(struct text_buffer *buffer) {
+    kfree(buffer->data);
+    buffer->data = NULL;
+    buffer->length = buffer->capacity = 0;
+}
+
+#define TEXT_BUFFER __attribute__((cleanup(text_release))) struct text_buffer
+
+static int text_reserve(struct text_buffer *buffer, size_t extra) {
+    size_t wanted = buffer->length + extra;
+    if (wanted <= buffer->capacity) return 0;
+    size_t capacity = buffer->capacity ? buffer->capacity * 2U : PROC_BUFFER_SIZE;
+    while (capacity < wanted) capacity *= 2U;
+    char *data = (char *)kmalloc(capacity);
+    if (!data) return -1;
+    if (buffer->length) memcpy(data, buffer->data, buffer->length);
+    kfree(buffer->data);
+    buffer->data = data;
+    buffer->capacity = capacity;
+    return 0;
+}
+
+static void text_char(struct text_buffer *buffer, char value) {
+    if (text_reserve(buffer, 1) == 0) buffer->data[buffer->length++] = value;
+}
+
+static void text_string(struct text_buffer *buffer, const char *value) {
+    if (!value) return;
+    while (*value) text_char(buffer, *value++);
+}
+
+static void text_unsigned(struct text_buffer *buffer, uint64_t value) {
+    char digits[32];
+    size_t count = 0;
+    do {
+        digits[count++] = (char)('0' + value % 10ULL);
+        value /= 10ULL;
+    } while (value && count < sizeof(digits));
+    while (count) text_char(buffer, digits[--count]);
+}
+
+static void text_signed(struct text_buffer *buffer, int64_t value) {
+    if (value < 0) {
+        text_char(buffer, '-');
+        text_unsigned(buffer, (uint64_t)(-(value + 1)) + 1ULL);
+    } else {
+        text_unsigned(buffer, (uint64_t)value);
+    }
+}
+
+static int64_t text_read(const struct text_buffer *text, uint64_t offset, size_t size,
+                         void *output) {
+    if (!output || offset >= text->length) return 0;
+    size_t available = text->length - (size_t)offset;
+    if (size > available) size = available;
+    memcpy(output, text->data + offset, size);
+    return (int64_t)size;
+}
+
+static int64_t proc_cpuinfo_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
+    (void)node;
+    TEXT_BUFFER text = {0};
+    struct cpu_identity identity;
+    cpu_identify(&identity);
+    const char *vendor = identity.vendor;
+    const char *model = identity.model[0] ? identity.model : "unknown processor";
+    uint64_t frequency = time_tsc_frequency();
+
+    unsigned cpus = smp_cpu_count();
+    for (unsigned index = 0; index < cpus; index++) {
+        text_string(&text, "processor\t: ");
+        text_unsigned(&text, index);
+        text_char(&text, '\n');
+        text_string(&text, "vendor_id\t: ");
+        text_string(&text, vendor);
+        text_char(&text, '\n');
+        text_string(&text, "model name\t: ");
+        text_string(&text, model);
+        text_char(&text, '\n');
+        text_string(&text, "cpu MHz\t\t: ");
+        text_unsigned(&text, frequency / 1000000ULL);
+        text_char(&text, '.');
+        uint64_t fraction = (frequency % 1000000ULL) / 1000ULL;
+        if (fraction < 100) text_char(&text, '0');
+        if (fraction < 10) text_char(&text, '0');
+        text_unsigned(&text, fraction);
+        text_char(&text, '\n');
+        text_string(&text, "cpu cores\t: ");
+        text_unsigned(&text, cpus);
+        text_char(&text, '\n');
+        text_string(&text, "address sizes\t: 48 bits virtual\n");
+#if defined(__x86_64__)
+        text_string(
+            &text,
+            "flags\t\t: fpu tsc msr pae apic mtrr cmov pat mmx fxsr sse sse2 syscall nx lm\n");
+#elif defined(__aarch64__)
+        char features[256];
+        (void)arch_hwcap_names(features, sizeof(features));
+        text_string(&text, "Features\t: ");
+        text_string(&text, features);
+        text_char(&text, '\n');
+#endif
+        text_char(&text, '\n');
+    }
+    return text_read(&text, offset, size, output);
+}
+
+static int64_t proc_meminfo_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
+    (void)node;
+    TEXT_BUFFER text = {0};
+    uint64_t total = pmm_usable_page_count() * 4ULL;
+    uint64_t free = pmm_free_page_count() * 4ULL;
+    uint64_t used = total >= free ? total - free : 0;
+    uint64_t cached = vfs_cached_bytes() / 1024ULL;
+    uint64_t dirty = vfs_dirty_pages() * 4ULL;
+    uint64_t available = free + (cached > dirty ? cached - dirty : 0);
+    if (available > total) available = total;
+
+    text_string(&text, "MemTotal:       ");
+    text_unsigned(&text, total);
+    text_string(&text, " kB\n");
+    text_string(&text, "MemFree:        ");
+    text_unsigned(&text, free);
+    text_string(&text, " kB\n");
+    text_string(&text, "MemAvailable:   ");
+    text_unsigned(&text, available);
+    text_string(&text, " kB\n");
+    text_string(&text, "MemUsed:        ");
+    text_unsigned(&text, used);
+    text_string(&text, " kB\n");
+    text_string(&text, "Buffers:        0 kB\nCached:         ");
+    text_unsigned(&text, cached);
+    text_string(&text, " kB\n");
+    text_string(&text, "SwapCached:     ");
+    text_unsigned(&text, swap_cached_pages() * 4ULL);
+    text_string(&text, " kB\nSwapTotal:      ");
+    text_unsigned(&text, swap_total_pages() * 4ULL);
+    text_string(&text, " kB\nSwapFree:       ");
+    text_unsigned(&text, swap_free_pages() * 4ULL);
+    text_string(&text, " kB\n");
+    text_string(&text, "Shmem:          0 kB\nSReclaimable:   0 kB\n");
+    text_string(&text, "Dirty:          ");
+    text_unsigned(&text, vfs_dirty_pages() * 4U);
+    text_string(&text, " kB\n");
+
+    uint64_t heap_reserved = 0;
+    uint64_t heap_allocated = 0;
+    uint64_t heap_limit = 0;
+    heap_stats(&heap_reserved, &heap_allocated, &heap_limit);
+    text_string(&text, "Slab:           ");
+    text_unsigned(&text, heap_allocated / 1024ULL);
+    text_string(&text, " kB\n");
+    text_string(&text, "SUnreclaim:     ");
+    text_unsigned(&text, heap_reserved / 1024ULL);
+    text_string(&text, " kB\n");
+    text_string(&text, "KernelHeapMax:  ");
+    text_unsigned(&text, heap_limit / 1024ULL);
+    text_string(&text, " kB\n");
+    return text_read(&text, offset, size, output);
+}
+
+static void pad_to(struct text_buffer *text, size_t start, size_t column) {
+    while (text->length < start + column) text_char(text, ' ');
+    text_char(text, '\t');
+}
+
+static void swaps_row(void *context, const char *path, int is_file, uint64_t size_kb,
+                      uint64_t used_kb, int priority) {
+    struct text_buffer *text = (struct text_buffer *)context;
+    size_t start = text->length;
+    text_string(text, path);
+    pad_to(text, start, 39);
+    text_string(text, is_file ? "file" : "partition");
+    text_char(text, '\t');
+    text_unsigned(text, size_kb);
+    text_char(text, '\t');
+    text_char(text, '\t');
+    text_unsigned(text, used_kb);
+    text_char(text, '\t');
+    text_char(text, '\t');
+    text_signed(text, priority);
+    text_char(text, '\n');
+}
+
+static int64_t proc_swaps_read(struct vfs_node *node, uint64_t offset, size_t size, void *output) {
+    (void)node;
+    TEXT_BUFFER text = {0};
+    text_string(&text, "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n");
+    swap_report(swaps_row, &text);
+    return text_read(&text, offset, size, output);
+}
+
+static int64_t proc_blockstat_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                   void *output) {
+    (void)node;
+    TEXT_BUFFER text = {0};
+    uint64_t reads = 0, sectors = 0, nanoseconds = 0, write_failures = 0;
+    block_statistics(&reads, &sectors, &nanoseconds, &write_failures);
+    text_string(&text, "reads ");
+    text_unsigned(&text, reads);
+    text_string(&text, "\nsectors ");
+    text_unsigned(&text, sectors);
+    text_string(&text, "\nwait_ns ");
+    text_unsigned(&text, nanoseconds);
+    text_string(&text, "\nwrite_failures ");
+    text_unsigned(&text, write_failures);
+    uint64_t writes = 0, written = 0, write_ns = 0;
+    block_write_statistics(&writes, &written, &write_ns);
+    text_string(&text, "\nwrites ");
+    text_unsigned(&text, writes);
+    text_string(&text, "\nsectors_written ");
+    text_unsigned(&text, written);
+    text_string(&text, "\nwrite_wait_ns ");
+    text_unsigned(&text, write_ns);
+    text_string(&text, "\ndirty_kb ");
+    text_unsigned(&text, vfs_dirty_pages() * 4U);
+    text_char(&text, '\n');
+    return text_read(&text, offset, size, output);
+}
+
+static int64_t proc_inputlog_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                  void *output) {
+    (void)node;
+    TEXT_BUFFER text = {0};
+    text_string(&text, "ms code value readers\n");
+    unsigned total = input_key_history_count();
+    unsigned first = total > INPUT_KEY_HISTORY ? total - INPUT_KEY_HISTORY : 0;
+    for (unsigned index = first; index < total; index++) {
+        struct input_key_event event;
+        if (input_key_history_at(index, &event) != 0) continue;
+        text_unsigned(&text, event.millisecond);
+        text_char(&text, ' ');
+        text_unsigned(&text, event.code);
+        text_char(&text, ' ');
+        text_unsigned(&text, event.value);
+        text_char(&text, ' ');
+        text_unsigned(&text, event.readers);
+        text_char(&text, '\n');
+    }
+    return text_read(&text, offset, size, output);
+}
+
+static void text_hex32(struct text_buffer *text, uint32_t value);
+static void text_hex64_lower(struct text_buffer *text, uint64_t value);
+
+static int64_t proc_overlap_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
+    (void)node;
+    TEXT_BUFFER text = {0};
+    text_string(&text, "peak ");
+    text_unsigned(&text, kernel_overlap_peak());
+    text_char(&text, '\n');
+    return text_read(&text, offset, size, output);
+}
+
+static int64_t proc_overlap_write(struct vfs_node *node, uint64_t offset, size_t size,
+                                  const void *input) {
+    (void)node;
+    (void)offset;
+    const char *text = (const char *)input;
+    if (size && text && text[0] == '0') kernel_overlap_stop();
+    else kernel_overlap_start();
+    return (int64_t)size;
+}
+
+static int64_t proc_abi_gaps_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                  void *output) {
+    (void)node;
+    TEXT_BUFFER text = {0};
+    int found = 0;
+    for (unsigned index = 0; index < ABI_GAP_SLOTS; index++) {
+        struct abi_gap gap;
+        if (abi_gaps_snapshot(index, &gap) != 0) continue;
+        found = 1;
+        text_string(&text, "syscall ");
+        text_unsigned(&text, gap.syscall_number);
+        text_string(&text, " count ");
+        text_unsigned(&text, gap.count);
+        text_string(&text, " last ");
+        text_string(&text, gap.last_name);
+        text_char(&text, '[');
+        text_unsigned(&text, gap.last_pid);
+        text_string(&text, "]\n");
+    }
+    uint64_t overflow = abi_gaps_overflow();
+    if (overflow) {
+        found = 1;
+        text_string(&text, "overflow ");
+        text_unsigned(&text, overflow);
+        text_char(&text, '\n');
+    }
+    if (!found) text_string(&text, "none\n");
+    return text_read(&text, offset, size, output);
+}
+
+static int64_t proc_abi_gaps_write(struct vfs_node *node, uint64_t offset, size_t size,
+                                   const void *input) {
+    (void)node;
+    (void)offset;
+    const char *text = (const char *)input;
+    if (size && text && text[0] == '0') abi_gaps_clear();
+    return (int64_t)size;
+}
+
+static int64_t proc_uptime_read(struct vfs_node *node, uint64_t offset, size_t size, void *output) {
+    (void)node;
+    TEXT_BUFFER text = {0};
+    uint64_t centiseconds = time_uptime_ns() / 10000000ULL;
+    text_unsigned(&text, centiseconds / 100ULL);
+    text_char(&text, '.');
+    uint64_t fraction = centiseconds % 100ULL;
+    if (fraction < 10) text_char(&text, '0');
+    text_unsigned(&text, fraction);
+    text_string(&text, " 0.00\n");
+    return text_read(&text, offset, size, output);
+}
+
+static int64_t proc_interrupts_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                    void *output) {
+    (void)node;
+    TEXT_BUFFER text = {0};
+    text_string(&text, "           CPU0\n");
+    for (unsigned slot = 0; slot < IRQ_VECTOR_COUNT; slot++) {
+        unsigned vector = 0;
+        uint64_t count = 0;
+        const char *name = NULL;
+        const char *kind = NULL;
+        if (irq_describe(slot, &vector, &count, &name, &kind) != 0) break;
+        if (!name) continue;
+        if (vector < 100U) text_char(&text, ' ');
+        text_unsigned(&text, vector);
+        text_string(&text, ": ");
+        text_unsigned(&text, count);
+        text_string(&text, "   ");
+        text_string(&text, kind);
+        text_string(&text, "   ");
+        text_string(&text, name);
+        text_char(&text, '\n');
+    }
+    return text_read(&text, offset, size, output);
+}
+
+static int64_t proc_cmdline_line_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                      void *output) {
+    (void)node;
+    TEXT_BUFFER text = {0};
+    text_string(&text, boot_info()->command_line);
+    text_char(&text, '\n');
+    return text_read(&text, offset, size, output);
+}
+
+static int64_t proc_hostname_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                  void *output) {
+    (void)node;
+    TEXT_BUFFER text = {0};
+    text_string(&text, uts_hostname());
+    text_char(&text, '\n');
+    return text_read(&text, offset, size, output);
+}
+
+static int64_t proc_hostname_write(struct vfs_node *node, uint64_t offset, size_t size,
+                                   const void *input) {
+    (void)node;
+    (void)offset;
+    uts_set_hostname((const char *)input, size);
+    return (int64_t)size;
+}
+
+static int64_t proc_knob_read(struct vfs_node *node, uint64_t offset, size_t size, void *output) {
+    TEXT_BUFFER text = {0};
+    text_unsigned(&text, (uint64_t)(uintptr_t)node->data);
+    text_char(&text, '\n');
+    return text_read(&text, offset, size, output);
+}
+
+static int64_t proc_knob_write(struct vfs_node *node, uint64_t offset, size_t size,
+                               const void *input) {
+    (void)offset;
+    const char *at = (const char *)input;
+    uint64_t value = 0;
+    for (size_t index = 0; index < size && at[index] >= '0' && at[index] <= '9'; index++)
+        value = value * 10U + (uint64_t)(at[index] - '0');
+    node->data = (void *)(uintptr_t)value;
+    return (int64_t)size;
+}
+
+static struct vfs_node *virtual_file(struct vfs_node *parent, const char *name, vfs_read_fn reader,
+                                     uint64_t pid);
+
+static void knob(struct vfs_node *parent, const char *name, uint64_t value) {
+    struct vfs_node *node = virtual_file(parent, name, proc_knob_read, value);
+    if (!node) return;
+    node->mode = 0644;
+    node->write = proc_knob_write;
+}
+
+static int64_t proc_ostype_read(struct vfs_node *node, uint64_t offset, size_t size, void *output) {
+    (void)node;
+    TEXT_BUFFER text = {0};
+    text_string(&text, UTS_SYSNAME "\n");
+    return text_read(&text, offset, size, output);
+}
+
+static int64_t proc_osrelease_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                   void *output) {
+    (void)node;
+    TEXT_BUFFER text = {0};
+    text_string(&text, UTS_RELEASE "\n");
+    return text_read(&text, offset, size, output);
+}
+
+static char boot_id[37];
+
+static void create_boot_id(void) {
+    static const char hex[] = "0123456789abcdef";
+    uint8_t bytes[16];
+    random_get_bytes(bytes, sizeof(bytes));
+    bytes[6] = (uint8_t)((bytes[6] & 0x0FU) | 0x40U);
+    bytes[8] = (uint8_t)((bytes[8] & 0x3FU) | 0x80U);
+
+    size_t at = 0;
+    for (size_t index = 0; index < sizeof(bytes); index++) {
+        if (index == 4 || index == 6 || index == 8 || index == 10) boot_id[at++] = '-';
+        boot_id[at++] = hex[bytes[index] >> 4];
+        boot_id[at++] = hex[bytes[index] & 0x0FU];
+    }
+    boot_id[at] = '\0';
+    memset(bytes, 0, sizeof(bytes));
+}
+
+static int64_t proc_boot_id_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
+    (void)node;
+    TEXT_BUFFER text = {0};
+    text_string(&text, boot_id);
+    text_char(&text, '\n');
+    return text_read(&text, offset, size, output);
+}
+
+static int64_t proc_version_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
+    (void)node;
+    TEXT_BUFFER text = {0};
+    text_string(&text, UTS_SYSNAME " version " UTS_RELEASE " #1 " SYSCALL_UTS_MACHINE "\n");
+    return text_read(&text, offset, size, output);
+}
+
+static void text_hex64(struct text_buffer *text, uint64_t value) {
+    static const char alphabet[] = "0123456789abcdef";
+    for (unsigned shift = 64; shift; shift -= 4)
+        text_char(text, alphabet[(value >> (shift - 4)) & 0xFULL]);
+}
+
+static int64_t proc_modules_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
+    (void)node;
+    TEXT_BUFFER text = {0};
+    module_lock_acquire();
+    for (struct module *module = module_list(); module; module = module->next) {
+        text_string(&text, module->name);
+        text_char(&text, ' ');
+        text_unsigned(&text, module->bytes);
+        text_char(&text, ' ');
+        text_unsigned(&text, module->refs);
+        text_char(&text, ' ');
+        int listed = 0;
+        for (struct module *user = module_list(); user; user = user->next)
+            for (unsigned index = 0; index < user->use_count; index++) {
+                if (user->uses[index] != module) continue;
+                text_string(&text, user->name);
+                text_char(&text, ',');
+                listed = 1;
+            }
+        if (!listed) text_char(&text, '-');
+        text_char(&text, ' ');
+        text_string(&text, module_state_name(module));
+        text_string(&text, " 0x");
+        text_hex64(&text, module->base);
+        text_char(&text, '\n');
+    }
+    module_lock_release();
+    return text_read(&text, offset, size, output);
+}
+
+static int64_t proc_mounts_read(struct vfs_node *node, uint64_t offset, size_t size, void *output) {
+    (void)node;
+    TEXT_BUFFER text = {0};
+    for (const struct vfs_mount *mount = vfs_mounts(); mount; mount = mount->next) {
+        text_string(&text, mount->source[0] ? mount->source : "none");
+        text_char(&text, ' ');
+        text_string(&text, mount->target);
+        text_char(&text, ' ');
+        text_string(&text, mount->type);
+        text_char(&text, ' ');
+        text_string(&text, (mount->flags & VFS_MS_RDONLY) ? "ro" : "rw");
+        if (mount->flags & VFS_MS_NOSUID) text_string(&text, ",nosuid");
+        if (mount->flags & VFS_MS_NODEV) text_string(&text, ",nodev");
+        if (mount->flags & VFS_MS_NOEXEC) text_string(&text, ",noexec");
+        text_string(&text, " 0 0\n");
+    }
+    return text_read(&text, offset, size, output);
+}
+
+static void text_mount_path(struct text_buffer *text, const char *path) {
+    for (; *path; path++) {
+        char c = *path;
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\\') {
+            text_char(text, '\\');
+            text_char(text, (char)('0' + ((c >> 6) & 7)));
+            text_char(text, (char)('0' + ((c >> 3) & 7)));
+            text_char(text, (char)('0' + (c & 7)));
+        } else {
+            text_char(text, c);
+        }
+    }
+}
+
+static int mount_contains(const char *outer, const char *inner) {
+    size_t length = strlen(outer);
+    if (length == 1 && outer[0] == '/') return inner[0] == '/' && inner[1] != '\0';
+    return strncmp(outer, inner, length) == 0 && inner[length] == '/';
+}
+
+static int64_t proc_mountinfo_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                   void *output) {
+    (void)node;
+    TEXT_BUFFER text = {0};
+    for (const struct vfs_mount *mount = vfs_mounts(); mount; mount = mount->next) {
+        unsigned parent = mount->id;
+        size_t best = 0;
+        for (const struct vfs_mount *outer = vfs_mounts(); outer; outer = outer->next) {
+            if (outer == mount || !mount_contains(outer->target, mount->target)) continue;
+            size_t length = strlen(outer->target);
+            if (length >= best) {
+                best = length;
+                parent = outer->id;
+            }
+        }
+        text_unsigned(&text, mount->id);
+        text_char(&text, ' ');
+        text_unsigned(&text, parent);
+        text_char(&text, ' ');
+        text_unsigned(&text, mount->dev_major);
+        text_char(&text, ':');
+        text_unsigned(&text, mount->dev_minor);
+        text_string(&text, " / ");
+        text_mount_path(&text, mount->target);
+        text_string(&text, (mount->flags & VFS_MS_RDONLY) ? " ro" : " rw");
+        if (mount->flags & VFS_MS_NOSUID) text_string(&text, ",nosuid");
+        if (mount->flags & VFS_MS_NODEV) text_string(&text, ",nodev");
+        if (mount->flags & VFS_MS_NOEXEC) text_string(&text, ",noexec");
+        text_string(&text, " - ");
+        text_string(&text, mount->type);
+        text_char(&text, ' ');
+        text_mount_path(&text, mount->source[0] ? mount->source : "none");
+        text_string(&text, (mount->flags & VFS_MS_RDONLY) ? " ro\n" : " rw\n");
+    }
+    return text_read(&text, offset, size, output);
+}
+
+static int64_t proc_stat_read(struct vfs_node *node, uint64_t offset, size_t size, void *output) {
+    (void)node;
+    TEXT_BUFFER text = {0};
+    uint64_t uptime_ticks = time_uptime_ns() / 10000000ULL;
+    uint64_t runtime_ticks = process_total_runtime_ns() / 10000000ULL;
+    uint64_t idle_ticks = uptime_ticks > runtime_ticks ? uptime_ticks - runtime_ticks : 0;
+    text_string(&text, "cpu  ");
+    text_unsigned(&text, runtime_ticks);
+    text_string(&text, " 0 0 ");
+    text_unsigned(&text, idle_ticks);
+    text_string(&text, " 0 0 0 0 0 0\n");
+    unsigned cpus = smp_cpu_count();
+    for (unsigned index = 0; index < cpus; index++) {
+        text_string(&text, "cpu");
+        text_unsigned(&text, index);
+        text_char(&text, ' ');
+        text_unsigned(&text, runtime_ticks / cpus);
+        text_string(&text, " 0 0 ");
+        text_unsigned(&text, idle_ticks / cpus);
+        text_string(&text, " 0 0 0 0 0 0\n");
+    }
+    uint64_t now = time_epoch_seconds();
+    uint64_t uptime_seconds = time_uptime_ns() / 1000000000ULL;
+    text_string(&text, "btime ");
+    text_unsigned(&text, now > uptime_seconds ? now - uptime_seconds : 0);
+    text_char(&text, '\n');
+    text_string(&text, "ctxt 0\n");
+    text_string(&text, "processes ");
+    text_unsigned(&text, process_created_count());
+    text_char(&text, '\n');
+    text_string(&text, "procs_running ");
+    text_unsigned(&text, process_runnable_count());
+    text_char(&text, '\n');
+    text_string(&text, "procs_blocked ");
+    text_unsigned(&text, process_blocked_count());
+    text_char(&text, '\n');
+    return text_read(&text, offset, size, output);
+}
+
+static int64_t proc_loadavg_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
+    (void)node;
+    TEXT_BUFFER text = {0};
+    uint64_t runnable = process_runnable_count();
+    uint64_t total = process_count();
+    text_unsigned(&text, runnable);
+    text_string(&text, ".00 ");
+    text_unsigned(&text, runnable);
+    text_string(&text, ".00 ");
+    text_unsigned(&text, runnable);
+    text_string(&text, ".00 ");
+    text_unsigned(&text, runnable);
+    text_char(&text, '/');
+    text_unsigned(&text, total);
+    text_char(&text, ' ');
+    text_unsigned(&text, process_created_count());
+    text_char(&text, '\n');
+    return text_read(&text, offset, size, output);
+}
+
+static int64_t proc_net_dev_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
+    (void)node;
+    TEXT_BUFFER text = {0};
+    text_string(&text,
+                "Inter-|   Receive                                                |  Transmit\n");
+    text_string(
+        &text,
+        " face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n");
+    text_string(&text, "  eth0: ");
+    text_unsigned(&text, net_rx_bytes());
+    text_string(&text, " ");
+    text_unsigned(&text, net_rx_packets());
+    text_string(&text, " 0 ");
+    text_unsigned(&text, net_rx_dropped());
+    text_string(&text, " 0 0 0 0 ");
+    text_unsigned(&text, net_tx_bytes());
+    text_string(&text, " ");
+    text_unsigned(&text, net_tx_packets());
+    text_string(&text, " 0 0 0 0 0 0\n");
+    return text_read(&text, offset, size, output);
+}
+
+static void text_hex32(struct text_buffer *text, uint32_t value) {
+    static const char digits[] = "0123456789ABCDEF";
+    for (int shift = 28; shift >= 0; shift -= 4) text_char(text, digits[(value >> shift) & 15U]);
+}
+
+static void text_hex8_lower(struct text_buffer *text, uint8_t value) {
+    static const char digits[] = "0123456789abcdef";
+    text_char(text, digits[value >> 4]);
+    text_char(text, digits[value & 15U]);
+}
+
+static void text_ipv4(struct text_buffer *text, uint32_t address) {
+    const uint8_t *bytes = (const uint8_t *)&address;
+    for (unsigned i = 0; i < 4; i++) {
+        if (i) text_char(text, '.');
+        text_unsigned(text, bytes[i]);
+    }
+}
+
+static int64_t proc_net_route_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                   void *output) {
+    (void)node;
+    const struct net_config *cfg = net_get_config();
+    TEXT_BUFFER text = {0};
+    text_string(
+        &text,
+        "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n");
+    text_string(&text, "eth0\t00000000\t");
+    text_hex32(&text, cfg->gateway);
+    text_string(&text, "\t0003\t0\t0\t0\t00000000\t0\t0\t0\n");
+    text_string(&text, "eth0\t");
+    text_hex32(&text, cfg->address & cfg->netmask);
+    text_string(&text, "\t00000000\t0001\t0\t0\t0\t");
+    text_hex32(&text, cfg->netmask);
+    text_string(&text, "\t0\t0\t0\n");
+    return text_read(&text, offset, size, output);
+}
+
+static int64_t proc_net_arp_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
+    (void)node;
+    TEXT_BUFFER text = {0};
+    text_string(&text,
+                "IP address       HW type     Flags       HW address            Mask     Device\n");
+    struct net_arp_record records[16];
+    size_t count = net_arp_snapshot(records, sizeof(records) / sizeof(records[0]));
+    if (count > sizeof(records) / sizeof(records[0])) count = sizeof(records) / sizeof(records[0]);
+    for (size_t i = 0; i < count; i++) {
+        text_ipv4(&text, records[i].address);
+        text_string(&text, "       0x1         0x2         ");
+        for (unsigned byte = 0; byte < 6; byte++) {
+            if (byte) text_char(&text, ':');
+            text_hex8_lower(&text, records[i].mac[byte]);
+        }
+        text_string(&text, "     *        eth0\n");
+    }
+    return text_read(&text, offset, size, output);
+}
+
+static int64_t proc_net_udp_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
+    (void)node;
+    TEXT_BUFFER text = {0};
+    if (text_reserve(&text, inet_socket_count() * 160U + 128U) == 0)
+        inet_socket_proc_udp(text.data, text.capacity, &text.length);
+    return text_read(&text, offset, size, output);
+}
+
+static int64_t proc_net_raw_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
+    (void)node;
+    TEXT_BUFFER text = {0};
+    if (text_reserve(&text, inet_socket_count() * 160U + 128U) == 0)
+        inet_socket_proc_raw(text.data, text.capacity, &text.length);
+    return text_read(&text, offset, size, output);
+}
+
+static int64_t proc_net_tcp_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
+    (void)node;
+    TEXT_BUFFER text = {0};
+    if (text_reserve(&text, inet_socket_count() * 160U + 128U) == 0)
+        inet_socket_proc_tcp(text.data, text.capacity, &text.length);
+    return text_read(&text, offset, size, output);
+}
+
+static uint64_t node_pid(struct vfs_node *node) { return (uint64_t)(uintptr_t)node->data; }
+
+static const char *state_name(const struct process *process) {
+    switch (process->state) {
+    case PROCESS_READY:   return "R (runnable)";
+    case PROCESS_RUNNING: return "R (running)";
+    case PROCESS_BLOCKED: return "S (sleeping)";
+    case PROCESS_ZOMBIE:  return "Z (zombie)";
+    default:              return "X (dead)";
+    }
+}
+
+static void put_process(struct process **process) { process_put(*process); }
+
+#define PROCESS_REF __attribute__((cleanup(put_process))) struct process *
+
+static void put_memory(struct process_memory **memory) { process_memory_put(*memory); }
+
+#define MEMORY_REF __attribute__((cleanup(put_memory))) struct process_memory *
+
+static char state_code(const struct process *process) {
+    if (process->state == PROCESS_BLOCKED) return 'S';
+    if (process->state == PROCESS_ZOMBIE) return 'Z';
+    if (process->state == PROCESS_DEAD) return 'X';
+    return 'R';
+}
+
+static int64_t proc_status_read(struct vfs_node *node, uint64_t offset, size_t size, void *output) {
+    PROCESS_REF process = process_get(node_pid(node));
+    if (!process) return 0;
+    TEXT_BUFFER text = {0};
+    uint64_t usage[VMM_USAGE_KINDS] = {0};
+    (void)vmm_usage(process->cr3, usage);
+    uint64_t resident_kb =
+        (usage[VMM_USAGE_ANON] + usage[VMM_USAGE_FILE] + usage[VMM_USAGE_SHMEM]) * 4ULL;
+    uint64_t virtual_kb = process_virtual_bytes(process) / 1024ULL;
+    if (virtual_kb < resident_kb) virtual_kb = resident_kb;
+
+    text_string(&text, "Name:\t");
+    text_string(&text, process->name);
+    text_char(&text, '\n');
+    text_string(&text, "State:\t");
+    text_string(&text, state_name(process));
+    text_char(&text, '\n');
+    text_string(&text, "Tgid:\t");
+    text_unsigned(&text, process->tgid);
+    text_char(&text, '\n');
+    text_string(&text, "Pid:\t");
+    text_unsigned(&text, process->pid);
+    text_char(&text, '\n');
+    text_string(&text, "PPid:\t");
+    text_unsigned(&text, process->ppid);
+    text_char(&text, '\n');
+    text_string(&text, "Uid:\t");
+    text_unsigned(&text, process->cred.uid);
+    text_char(&text, '\t');
+    text_unsigned(&text, process->cred.euid);
+    text_char(&text, '\t');
+    text_unsigned(&text, process->cred.suid);
+    text_char(&text, '\t');
+    text_unsigned(&text, process->cred.fsuid);
+    text_char(&text, '\n');
+    text_string(&text, "Gid:\t");
+    text_unsigned(&text, process->cred.gid);
+    text_char(&text, '\t');
+    text_unsigned(&text, process->cred.egid);
+    text_char(&text, '\t');
+    text_unsigned(&text, process->cred.sgid);
+    text_char(&text, '\t');
+    text_unsigned(&text, process->cred.fsgid);
+    text_char(&text, '\n');
+    text_string(&text, "Groups:\t");
+    for (uint32_t index = 0; index < process->cred.group_count; index++) {
+        text_unsigned(&text, process->cred.groups[index]);
+        text_char(&text, ' ');
+    }
+    text_char(&text, '\n');
+    text_string(&text, "Pgid:\t");
+    text_unsigned(&text, process->pgid);
+    text_char(&text, '\n');
+    text_string(&text, "Sid:\t");
+    text_unsigned(&text, process->sid);
+    text_char(&text, '\n');
+    text_string(&text, "VmSize:\t");
+    text_unsigned(&text, virtual_kb);
+    text_string(&text, " kB\n");
+    text_string(&text, "VmRSS:\t");
+    text_unsigned(&text, resident_kb);
+    text_string(&text, " kB\nRssAnon:\t");
+    text_unsigned(&text, usage[VMM_USAGE_ANON] * 4ULL);
+    text_string(&text, " kB\nRssFile:\t");
+    text_unsigned(&text, usage[VMM_USAGE_FILE] * 4ULL);
+    text_string(&text, " kB\nRssShmem:\t");
+    text_unsigned(&text, usage[VMM_USAGE_SHMEM] * 4ULL);
+    text_string(&text, " kB\nVmSwap:\t");
+    text_unsigned(&text, usage[VMM_USAGE_SWAP] * 4ULL);
+    text_string(&text, " kB\n");
+    text_string(&text, "Threads:\t1\n");
+    text_string(&text, "StartTicks:\t");
+    text_unsigned(&text, process->start_time_ns / 10000000ULL);
+    text_char(&text, '\n');
+    text_string(&text, "CpuTicks:\t");
+    text_unsigned(&text, process_runtime_ns(process) / 10000000ULL);
+    text_char(&text, '\n');
+    text_string(&text, "Command:\t");
+    text_string(&text, process->exe_path ? process->exe_path : "");
+    text_char(&text, '\n');
+    return text_read(&text, offset, size, output);
+}
+
+static int64_t proc_pid_stat_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                  void *output) {
+    PROCESS_REF process = process_get(node_pid(node));
+    if (!process) return 0;
+    TEXT_BUFFER text = {0};
+    uint64_t rss_pages = vmm_count_user_pages(process->cr3);
+    uint64_t virtual_bytes = process_virtual_bytes(process);
+    if (virtual_bytes < rss_pages * 4096ULL) virtual_bytes = rss_pages * 4096ULL;
+    uint64_t ticks = process_runtime_ns(process) / 10000000ULL;
+    uint64_t start = process->start_time_ns / 10000000ULL;
+
+    text_unsigned(&text, process->pid);
+    text_string(&text, " (");
+    text_string(&text, process->name);
+    text_string(&text, ") ");
+    text_char(&text, state_code(process));
+    text_char(&text, ' ');
+    text_unsigned(&text, process->ppid);
+    text_char(&text, ' ');
+    text_unsigned(&text, process->pgid);
+    text_char(&text, ' ');
+    text_unsigned(&text, process->sid);
+    text_char(&text, ' ');
+    uint32_t terminal = 0;
+    int foreground = -1;
+    if (!pty_terminal_of(process, &terminal, &foreground) &&
+        !vt_terminal_of_session(process->sid, &terminal, &foreground)) {
+        terminal = 0;
+        foreground = -1;
+    }
+    text_unsigned(&text, terminal);
+    text_char(&text, ' ');
+    text_signed(&text, foreground > 0 ? foreground : -1);
+    text_char(&text, ' ');
+    text_string(&text, "0 ");
+    text_string(&text, "0 0 0 0 ");
+    text_unsigned(&text, ticks);
+    text_char(&text, ' ');
+    text_string(&text, "0 ");
+    text_string(&text, "0 0 ");
+    text_string(&text, "20 ");
+    text_string(&text, "0 ");
+    text_string(&text, "1 ");
+    text_string(&text, "0 ");
+    text_unsigned(&text, start);
+    text_char(&text, ' ');
+    text_unsigned(&text, virtual_bytes);
+    text_char(&text, ' ');
+    text_unsigned(&text, rss_pages);
+    text_char(&text, ' ');
+    text_string(&text, "0 0 0 0 0 0 0 0 0 0 0 0 0 0 ");
+    text_string(&text, "0 ");
+    text_string(&text, "0 0 ");
+    text_string(&text, "0 0 0 ");
+    text_string(&text, "0 0 0 0 0 0 0 ");
+    text_string(&text, "0");
+    text_char(&text, '\n');
+    return text_read(&text, offset, size, output);
+}
+
+static int64_t proc_pid_statm_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                   void *output) {
+    PROCESS_REF process = process_get(node_pid(node));
+    if (!process) return 0;
+    TEXT_BUFFER text = {0};
+    uint64_t usage[VMM_USAGE_KINDS] = {0};
+    (void)vmm_usage(process->cr3, usage);
+    uint64_t resident = usage[VMM_USAGE_ANON] + usage[VMM_USAGE_FILE] + usage[VMM_USAGE_SHMEM];
+    uint64_t pages = process_virtual_bytes(process) / 4096ULL;
+    if (pages < resident) pages = resident;
+
+    text_unsigned(&text, pages);
+    text_char(&text, ' ');
+    text_unsigned(&text, resident);
+    text_char(&text, ' ');
+    text_unsigned(&text, usage[VMM_USAGE_FILE] + usage[VMM_USAGE_SHMEM]);
+    text_string(&text, " 0 0 ");
+    text_unsigned(&text, usage[VMM_USAGE_ANON]);
+    text_string(&text, " 0\n");
+    return text_read(&text, offset, size, output);
+}
+
+static void text_hex64_lower(struct text_buffer *text, uint64_t value) {
+    static const char digits[] = "0123456789abcdef";
+    int shift = 60;
+    while (shift > 0 && !((value >> shift) & 15ULL)) shift -= 4;
+    for (; shift >= 0; shift -= 4) text_char(text, digits[(value >> shift) & 15ULL]);
+}
+
+static void maps_line(struct text_buffer *text, uint64_t start, uint64_t end, uint64_t page_flags,
+                      uint64_t offset, const char *name) {
+    text_hex64_lower(text, start);
+    text_char(text, '-');
+    text_hex64_lower(text, end);
+    text_char(text, ' ');
+    text_char(text, 'r');
+    text_char(text, (page_flags & PAGE_WRITE) ? 'w' : '-');
+    text_char(text, (page_flags & PAGE_NX) ? '-' : 'x');
+    text_char(text, (page_flags & PAGE_SHARED) ? 's' : 'p');
+    text_char(text, ' ');
+    text_hex64_lower(text, offset);
+    text_string(text, " 00:00 0");
+    if (name) {
+        text_string(text, "                         ");
+        text_string(text, name);
+    }
+    text_char(text, '\n');
+}
+
+static int64_t proc_pid_maps_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                  void *output) {
+    PROCESS_REF process = process_get(node_pid(node));
+    MEMORY_REF memory = process_memory_get(process);
+    if (!memory) return 0;
+    mutex_lock(&memory->lock);
+
+    uint8_t *out = (uint8_t *)output;
+    size_t produced = 0;
+    uint64_t position = 0;
+
+    struct vm_area heap = {.start = memory->brk_start,
+                           .end = memory->brk_end,
+                           .page_flags = PAGE_WRITE | PAGE_NX,
+                           .kind = VM_ANONYMOUS};
+    struct vm_area stack = {.start = process_stack_floor(process),
+                            .end = USER_STACK_TOP,
+                            .page_flags = PAGE_WRITE | PAGE_NX,
+                            .kind = VM_ANONYMOUS};
+
+    VFS_PATH_SCOPED path = vfs_path_buffer();
+    for (int step = 0; step < 3 && produced < size; step++) {
+        struct vm_area *area = step == 0 ? (heap.end > heap.start ? &heap : NULL)
+            : step == 1                  ? memory->areas
+                                         : &stack;
+        for (; area && produced < size; area = step == 1 ? area->next : NULL) {
+            TEXT_BUFFER line = {0};
+            const char *name = step == 0 ? "[heap]" : step == 2 ? "[stack]" : NULL;
+            if (step == 1 && path && area->file && area->file->node &&
+                vfs_node_path(area->file->node, path, VFS_PATH_MAX) == 0)
+                name = path;
+            maps_line(&line, area->start, area->end, area->page_flags, area->offset, name);
+
+            if (position + line.length <= offset) {
+                position += line.length;
+                continue;
+            }
+            size_t from = offset > position ? (size_t)(offset - position) : 0;
+            size_t available = line.length - from;
+            if (available > size - produced) available = size - produced;
+            memcpy(out + produced, line.data + from, available);
+            produced += available;
+            position += line.length;
+        }
+    }
+    mutex_unlock(&memory->lock);
+    return (int64_t)produced;
+}
+
+static int64_t proc_pid_comm_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                  void *output) {
+    PROCESS_REF process = process_get(node_pid(node));
+    if (!process) return 0;
+    TEXT_BUFFER text = {0};
+    text_string(&text, process->name);
+    text_char(&text, '\n');
+    return text_read(&text, offset, size, output);
+}
+
+static int64_t proc_pid_mem_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
+    PROCESS_REF process = process_get(node_pid(node));
+    if (!process) return -3;
+    const struct credentials *reader = cred_current();
+    if (reader && reader->euid != 0 && reader->euid != process->cred.uid) return -13;
+    MEMORY_REF memory = process_memory_get(process);
+    if (!memory) return 0;
+    if (offset >= USER_ADDRESS_LIMIT) return -5;
+    if (size > USER_ADDRESS_LIMIT - offset) size = (size_t)(USER_ADDRESS_LIMIT - offset);
+    if (size > 65536) size = 65536;
+    mutex_lock(&memory->lock);
+    int status = vmm_copy_from_space(memory->cr3, output, offset, size);
+    mutex_unlock(&memory->lock);
+    return status == 0 ? (int64_t)size : -5;
+}
+
+static int64_t proc_pid_syscall_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                     void *output) {
+    PROCESS_REF process = process_get(node_pid(node));
+    if (!process) return 0;
+    TEXT_BUFFER text = {0};
+    if (process->state == PROCESS_RUNNING) {
+        text_string(&text, "running\n");
+    } else {
+        text_unsigned(&text, process->syscall_record[0]);
+        for (unsigned index = 1; index < 9; index++) {
+            text_string(&text, " 0x");
+            text_hex64_lower(&text, process->syscall_record[index]);
+        }
+        text_char(&text, '\n');
+    }
+    return text_read(&text, offset, size, output);
+}
+
+static int64_t proc_pid_cgroup_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                    void *output) {
+    PROCESS_REF process = process_get(node_pid(node));
+    if (!process) return 0;
+    char description[512];
+    size_t length = cgroup_describe(process, description, sizeof(description));
+    if (offset >= length) return 0;
+    if (size > length - offset) size = length - (size_t)offset;
+    memcpy(output, description + offset, size);
+    return (int64_t)size;
+}
+
+static int64_t proc_cmdline_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
+    PROCESS_REF process = process_get(node_pid(node));
+    MEMORY_REF memory = process_memory_get(process);
+    if (!memory || process->arg_end <= process->arg_start ||
+        offset >= process->arg_end - process->arg_start)
+        return 0;
+    uint64_t available = process->arg_end - process->arg_start - offset;
+    if (size > available) size = (size_t)available;
+    mutex_lock(&memory->lock);
+    int status = vmm_copy_from_space(memory->cr3, output, process->arg_start + offset, size);
+    mutex_unlock(&memory->lock);
+    return status == 0 ? (int64_t)size : 0;
+}
+
+static int64_t proc_environ_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
+    PROCESS_REF process = process_get(node_pid(node));
+    if (!process) return -3;
+    const struct credentials *reader = cred_current();
+    if (reader && reader->euid != 0 && reader->euid != process->cred.uid) return -13;
+    MEMORY_REF memory = process_memory_get(process);
+    if (!memory || process->env_end <= process->arg_end ||
+        offset >= process->env_end - process->arg_end)
+        return 0;
+    uint64_t available = process->env_end - process->arg_end - offset;
+    if (size > available) size = (size_t)available;
+    mutex_lock(&memory->lock);
+    int status = vmm_copy_from_space(memory->cr3, output, process->arg_end + offset, size);
+    mutex_unlock(&memory->lock);
+    return status == 0 ? (int64_t)size : 0;
+}
+
+static struct vfs_node *virtual_file(struct vfs_node *parent, const char *name, vfs_read_fn reader,
+                                     uint64_t pid) {
+    struct vfs_node *node = vfs_alloc_node(name, VFS_FILE | VFS_UNSIZED);
+    if (!node) return NULL;
+    node->mode = 0444;
+    node->length = PROC_BUFFER_SIZE;
+    node->read = reader;
+    node->data = (void *)(uintptr_t)pid;
+    if (vfs_attach(parent, node) != 0) return NULL;
+    return node;
+}
+
+#define PROC_PATH_MAX 96
+
+static size_t path_append_string(char *output, size_t at, const char *text) {
+    while (*text && at + 1 < PROC_PATH_MAX) output[at++] = *text++;
+    return at;
+}
+
+static size_t path_append_decimal(char *output, size_t at, uint64_t value) {
+    char digits[32];
+    size_t count = 0;
+    do {
+        digits[count++] = (char)('0' + value % 10ULL);
+        value /= 10ULL;
+    } while (value);
+    while (count && at + 1 < PROC_PATH_MAX) output[at++] = digits[--count];
+    return at;
+}
+
+static void decimal_path(uint64_t pid, const char *suffix, char output[PROC_PATH_MAX]) {
+    size_t at = path_append_string(output, 0, "/proc/");
+    at = path_append_decimal(output, at, pid);
+    if (suffix) at = path_append_string(output, at, suffix);
+    output[at] = '\0';
+}
+
+static void task_path(uint64_t pid, const char *suffix, char output[PROC_PATH_MAX]) {
+    size_t at = path_append_string(output, 0, "/proc/");
+    at = path_append_decimal(output, at, pid);
+    at = path_append_string(output, at, "/task/");
+    at = path_append_decimal(output, at, pid);
+    if (suffix) at = path_append_string(output, at, suffix);
+    output[at] = '\0';
+}
+
+static void describe_file(const struct file *file, char *output, size_t capacity) {
+    output[0] = '\0';
+    if (!file) return;
+    if (file->kind == FILE_KIND_VFS && file->node) {
+        if (vfs_node_path(file->node, output, capacity) != 0) output[0] = '\0';
+        return;
+    }
+    const char *kind = "anon_inode:[unknown]";
+    switch (file->kind) {
+    case FILE_KIND_PIPE_READ:
+    case FILE_KIND_PIPE_WRITE:
+    case FILE_KIND_PIPE_DUPLEX:    kind = "pipe:[0]"; break;
+    case FILE_KIND_SOCKET:
+    case FILE_KIND_INET_SOCKET:
+    case FILE_KIND_NETLINK_SOCKET: kind = "socket:[0]"; break;
+    case FILE_KIND_PTY_MASTER:     kind = "/dev/ptmx"; break;
+    case FILE_KIND_EVENTFD:        kind = "anon_inode:[eventfd]"; break;
+    case FILE_KIND_TIMERFD:        kind = "anon_inode:[timerfd]"; break;
+    case FILE_KIND_EPOLL:          kind = "anon_inode:[eventpoll]"; break;
+    case FILE_KIND_INOTIFY:        kind = "anon_inode:inotify"; break;
+    case FILE_KIND_SIGNALFD:       kind = "anon_inode:[signalfd]"; break;
+    case FILE_KIND_IO_URING:       kind = "anon_inode:[io_uring]"; break;
+    case FILE_KIND_PIDFD:          kind = "anon_inode:[pidfd]"; break;
+    case FILE_KIND_MEMFD:          kind = "/memfd:tunix"; break;
+    default:                       break;
+    }
+    size_t at = 0;
+    while (kind[at] && at + 1 < capacity) {
+        output[at] = kind[at];
+        at++;
+    }
+    output[at] = '\0';
+}
+
+static void proc_fd_refresh(struct vfs_node *directory) {
+    static int busy;
+    if (busy) return;
+    busy = 1;
+
+    while (directory->children) (void)vfs_detach_child(directory, directory->children);
+
+    PROCESS_REF process = process_get(node_pid(directory));
+    struct file_table *table = process_files_get(process);
+    if (table) {
+        VFS_PATH_SCOPED target = vfs_path_buffer();
+        for (int fd = 0; target && fd < table->capacity; fd++) {
+            struct file *file = file_table_get(table, fd);
+            if (!file) continue;
+            describe_file(file, target, VFS_PATH_MAX);
+            file_unref(file);
+            if (!target[0]) continue;
+            char name[16];
+            size_t at = path_append_decimal(name, 0, (uint64_t)fd);
+            name[at] = '\0';
+            (void)vfs_attach_symlink(directory, name, target);
+        }
+        file_table_unref(table);
+    }
+    busy = 0;
+}
+
+#define FDINFO_FD_BITS 24U
+
+static void text_octal(struct text_buffer *text, uint64_t value) {
+    char digits[24];
+    int count = 0;
+    do {
+        digits[count++] = (char)('0' + (value & 7U));
+        value >>= 3;
+    } while (value);
+    text_char(text, '0');
+    while (count) text_char(text, digits[--count]);
+}
+
+static int64_t proc_fdinfo_read(struct vfs_node *node, uint64_t offset, size_t size, void *output) {
+    uint64_t key = (uint64_t)(uintptr_t)node->data;
+    int fd = (int)(key & ((1U << FDINFO_FD_BITS) - 1U));
+    PROCESS_REF process = process_get(key >> FDINFO_FD_BITS);
+    struct file_table *table = process_files_get(process);
+    if (!table) return -1;
+    struct file *file = file_table_get(table, fd);
+    file_table_unref(table);
+    if (!file) return -1;
+    uint64_t flags = file->flags;
+    if (process_get_fd_flags(process, fd) & PROCESS_FD_CLOEXEC) flags |= 02000000U;
+    TEXT_BUFFER text = {0};
+    text_string(&text, "pos:\t");
+    text_unsigned(&text, file->offset);
+    text_string(&text, "\nflags:\t");
+    text_octal(&text, flags);
+    const struct vfs_mount *mount = file->node ? vfs_node_mount(file->node) : NULL;
+    text_string(&text, "\nmnt_id:\t");
+    text_unsigned(&text, mount ? mount->id : 0);
+    text_string(&text, "\nino:\t");
+    text_unsigned(&text, file->kind == FILE_KIND_VFS && file->node ? file->node->inode : 0);
+    text_string(&text, "\n");
+    if (file->kind == FILE_KIND_PIDFD) {
+        int64_t pid = process_pidfd_reaped(file->pidfd_pid, file->pidfd_start_ns)
+            ? -1
+            : (int64_t)file->pidfd_pid;
+        text_string(&text, "Pid:\t");
+        text_signed(&text, pid);
+        text_string(&text, "\nNSpid:\t");
+        text_signed(&text, pid);
+        text_string(&text, "\n");
+    }
+    file_unref(file);
+    return text_read(&text, offset, size, output);
+}
+
+static void proc_fdinfo_refresh(struct vfs_node *directory) {
+    static int busy;
+    if (busy) return;
+    busy = 1;
+
+    while (directory->children) (void)vfs_detach_child(directory, directory->children);
+
+    uint64_t pid = node_pid(directory);
+    PROCESS_REF process = process_get(pid);
+    struct file_table *table = process_files_get(process);
+    if (table) {
+        for (int fd = 0; fd < table->capacity && fd < (1 << FDINFO_FD_BITS); fd++) {
+            struct file *file = file_table_get(table, fd);
+            if (!file) continue;
+            file_unref(file);
+            char name[16];
+            size_t at = path_append_decimal(name, 0, (uint64_t)fd);
+            name[at] = '\0';
+            (void)virtual_file(directory, name, proc_fdinfo_read,
+                               (pid << FDINFO_FD_BITS) | (uint64_t)fd);
+        }
+        file_table_unref(table);
+    }
+    busy = 0;
+}
+
+static struct vfs_node *direct_child(struct vfs_node *directory, const char *name) {
+    for (struct vfs_node *child = directory->children; child; child = child->next)
+        if (strcmp(child->name, name) == 0) return child;
+    return NULL;
+}
+
+static int set_link_target(struct vfs_node *link, const char *target) {
+    if (!link || !target || !target[0]) return -1;
+    size_t length = strlen(target);
+    if (length + 1 > link->capacity) {
+        void *data = kmalloc(length + 1);
+        if (!data) return -1;
+        kfree(link->data);
+        link->data = data;
+        link->capacity = length + 1;
+    }
+    memcpy(link->data, target, length + 1);
+    link->length = length;
+    return 0;
+}
+
+static void follow_owner(struct vfs_node *node, const struct process *process) {
+    if (!node) return;
+    node->uid = process->cred.euid;
+    node->gid = process->cred.egid;
+}
+
+static void proc_process_refresh(struct vfs_node *directory) {
+    PROCESS_REF process = process_get(node_pid(directory));
+    if (!process) return;
+
+    follow_owner(directory, process);
+    follow_owner(direct_child(directory, "fd"), process);
+    follow_owner(direct_child(directory, "fdinfo"), process);
+
+    (void)set_link_target(direct_child(directory, "exe"),
+                          process->exe_path ? process->exe_path : "/");
+
+    VFS_PATH_SCOPED path = vfs_path_buffer();
+    if (path && vfs_node_path(process->cwd, path, VFS_PATH_MAX) == 0)
+        (void)set_link_target(direct_child(directory, "cwd"), path);
+}
+
+static struct vfs_node *self_link;
+static struct vfs_node *thread_self_link;
+
+static void point_at_caller(struct vfs_node *link, uint64_t pid) {
+    if (!link || !link->data || link->capacity < 21) return;
+    char *target = (char *)link->data;
+    size_t at = path_append_decimal(target, 0, pid);
+    target[at] = '\0';
+    link->length = at;
+}
+
+static void proc_root_refresh(struct vfs_node *directory) {
+    (void)directory;
+    point_at_caller(self_link, process_current_pid());
+    point_at_caller(thread_self_link, process_current_tid());
+}
+
+#define ASOUND_TEXT       2048U
+#define ASOUND_CODEC      32768U
+#define ASOUND_CODEC_FILE 9U
+
+static int64_t asound_reply(const char *text, size_t length, size_t capacity, uint64_t offset,
+                            size_t size, void *output) {
+    if (length >= capacity) length = capacity - 1U;
+    if (!output || offset >= length) return 0;
+    size_t available = length - (size_t)offset;
+    if (size > available) size = available;
+    memcpy(output, text + offset, size);
+    return (int64_t)size;
+}
+
+static int64_t proc_asound_global_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                       void *output) {
+    char *text = kmalloc(ASOUND_TEXT);
+    if (!text) return -ENOMEM;
+    size_t length = 0;
+    switch ((uintptr_t)node->data) {
+    case 0:  length = sound_proc_cards(text, ASOUND_TEXT); break;
+    case 1:  length = sound_proc_devices(text, ASOUND_TEXT); break;
+    case 2:  length = sound_proc_pcm(text, ASOUND_TEXT); break;
+    default: {
+        static const char version[] = "Advanced Linux Sound Architecture Driver Version k6.6.0.\n";
+        length = sizeof(version) - 1U;
+        memcpy(text, version, length);
+        break;
+    }
+    }
+    int64_t result = asound_reply(text, length, ASOUND_TEXT, offset, size, output);
+    kfree(text);
+    return result;
+}
+
+static const char *const asound_card_files[] = {"id",
+                                                "pcm0p/info",
+                                                "pcm0p/sub0/status",
+                                                "pcm0p/sub0/hw_params",
+                                                "pcm0p/sub0/sw_params",
+                                                "pcm0c/info",
+                                                "pcm0c/sub0/status",
+                                                "pcm0c/sub0/hw_params",
+                                                "pcm0c/sub0/sw_params",
+                                                "codec#0"};
+
+static int64_t proc_asound_card_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                     void *output) {
+    uintptr_t which = (uintptr_t)node->data;
+    unsigned card = (unsigned)(which >> 8);
+    unsigned file = (unsigned)(which & 0xFFU);
+    if (file >= sizeof(asound_card_files) / sizeof(asound_card_files[0])) return 0;
+    size_t capacity = file == ASOUND_CODEC_FILE ? ASOUND_CODEC : ASOUND_TEXT;
+    char *text = kmalloc(capacity);
+    if (!text) return -ENOMEM;
+    size_t length = sound_proc_card_file(card, asound_card_files[file], text, capacity);
+    int64_t result = asound_reply(text, length, capacity, offset, size, output);
+    kfree(text);
+    return result;
+}
+
+static void asound_stream_dir(struct vfs_node *card_dir, unsigned card, int capture) {
+    struct vfs_node *pcm = vfs_alloc_node(capture ? "pcm0c" : "pcm0p", VFS_DIRECTORY);
+    if (!pcm) return;
+    pcm->mode = 0555;
+    if (vfs_attach(card_dir, pcm) != 0) return;
+    unsigned base = capture ? 5U : 1U;
+    virtual_file(pcm, "info", proc_asound_card_read, ((uint64_t)card << 8) | base);
+    struct vfs_node *sub = vfs_alloc_node("sub0", VFS_DIRECTORY);
+    if (!sub) return;
+    sub->mode = 0555;
+    if (vfs_attach(pcm, sub) != 0) return;
+    virtual_file(sub, "status", proc_asound_card_read, ((uint64_t)card << 8) | (base + 1U));
+    virtual_file(sub, "hw_params", proc_asound_card_read, ((uint64_t)card << 8) | (base + 2U));
+    virtual_file(sub, "sw_params", proc_asound_card_read, ((uint64_t)card << 8) | (base + 3U));
+}
+
+static int asound_refreshing;
+
+static void proc_asound_refresh(struct vfs_node *directory) {
+    if (asound_refreshing) return;
+    asound_refreshing = 1;
+    for (unsigned card = 0; card < SND_MAX_CARDS; card++) {
+        char name[8] = "card0";
+        name[4] = (char)('0' + card);
+        int playback = 0;
+        int capture = 0;
+        int present = sound_card_info(card, &playback, &capture);
+        struct vfs_node *existing = vfs_find_child(directory, name);
+        if (existing && !present) (void)vfs_detach_child(directory, existing);
+        if (existing || !present) continue;
+        struct vfs_node *card_dir = vfs_alloc_node(name, VFS_DIRECTORY);
+        if (!card_dir) continue;
+        card_dir->mode = 0555;
+        if (vfs_attach(directory, card_dir) != 0) continue;
+        virtual_file(card_dir, "id", proc_asound_card_read, (uint64_t)card << 8);
+        virtual_file(card_dir, "codec#0", proc_asound_card_read,
+                     ((uint64_t)card << 8) | ASOUND_CODEC_FILE);
+        if (playback) asound_stream_dir(card_dir, card, 0);
+        if (capture) asound_stream_dir(card_dir, card, 1);
+    }
+    asound_refreshing = 0;
+}
+
+void procfs_init(void) {
+    struct vfs_node *root = vfs_mkdir_p("/proc");
+    if (!root) return;
+    root->mode = 0555;
+    vfs_mount_builtin("proc", "/proc", "proc", root);
+    self_link = vfs_attach_symlink(root, "self", "18446744073709551615");
+    thread_self_link = vfs_attach_symlink(root, "thread-self", "18446744073709551615");
+    root->refresh = proc_root_refresh;
+    virtual_file(root, "cpuinfo", proc_cpuinfo_read, 0);
+    virtual_file(root, "meminfo", proc_meminfo_read, 0);
+    virtual_file(root, "uptime", proc_uptime_read, 0);
+    virtual_file(root, "blockstat", proc_blockstat_read, 0);
+    virtual_file(root, "inputlog", proc_inputlog_read, 0);
+    struct vfs_node *abi_gaps = virtual_file(root, "abi_gaps", proc_abi_gaps_read, 0);
+    if (abi_gaps) {
+        abi_gaps->mode = 0644;
+        abi_gaps->write = proc_abi_gaps_write;
+    }
+    struct vfs_node *overlap = virtual_file(root, "overlap", proc_overlap_read, 0);
+    if (overlap) {
+        overlap->mode = 0644;
+        overlap->write = proc_overlap_write;
+    }
+    virtual_file(root, "version", proc_version_read, 0);
+    virtual_file(root, "mounts", proc_mounts_read, 0);
+    virtual_file(root, "swaps", proc_swaps_read, 0);
+    virtual_file(root, "modules", proc_modules_read, 0);
+    virtual_file(root, "stat", proc_stat_read, 0);
+    virtual_file(root, "loadavg", proc_loadavg_read, 0);
+    virtual_file(root, "cmdline", proc_cmdline_line_read, 0);
+    virtual_file(root, "interrupts", proc_interrupts_read, 0);
+    struct vfs_node *asound = vfs_mkdir_p("/proc/asound");
+    if (asound) {
+        asound->mode = 0555;
+        asound->refresh = proc_asound_refresh;
+        virtual_file(asound, "cards", proc_asound_global_read, 0);
+        virtual_file(asound, "devices", proc_asound_global_read, 1);
+        virtual_file(asound, "pcm", proc_asound_global_read, 2);
+        virtual_file(asound, "version", proc_asound_global_read, 3);
+    }
+
+    struct vfs_node *kernel = vfs_mkdir_p("/proc/sys/kernel");
+    if (kernel) {
+        kernel->mode = 0555;
+        struct vfs_node *host = virtual_file(kernel, "hostname", proc_hostname_read, 0);
+        if (host) {
+            host->mode = 0644;
+            host->write = proc_hostname_write;
+        }
+        virtual_file(kernel, "ostype", proc_ostype_read, 0);
+        virtual_file(kernel, "osrelease", proc_osrelease_read, 0);
+        knob(kernel, "dmesg_restrict", 0);
+        knob(kernel, "kptr_restrict", 0);
+        knob(kernel, "core_uses_pid", 0);
+        knob(kernel, "kexec_load_disabled", 0);
+        knob(kernel, "perf_event_paranoid", 3);
+        knob(kernel, "unprivileged_bpf_disabled", 1);
+        knob(kernel, "pid_max", 32768);
+        knob(kernel, "panic", 0);
+    }
+
+    struct vfs_node *yama = vfs_mkdir_p("/proc/sys/kernel/yama");
+    if (yama) {
+        yama->mode = 0555;
+        knob(yama, "ptrace_scope", 1);
+    }
+
+    struct vfs_node *random = vfs_mkdir_p("/proc/sys/kernel/random");
+    if (random) {
+        random->mode = 0555;
+        create_boot_id();
+        virtual_file(random, "boot_id", proc_boot_id_read, 0);
+        knob(random, "poolsize", 256);
+        knob(random, "entropy_avail", 256);
+    }
+
+    struct vfs_node *fs = vfs_mkdir_p("/proc/sys/fs");
+    if (fs) {
+        fs->mode = 0555;
+        knob(fs, "protected_hardlinks", 1);
+        knob(fs, "protected_symlinks", 1);
+        knob(fs, "file-max", 65536);
+    }
+
+    struct vfs_node *net = vfs_mkdir_p("/proc/net");
+    if (net) {
+        net->mode = 0555;
+        virtual_file(net, "dev", proc_net_dev_read, 0);
+        virtual_file(net, "route", proc_net_route_read, 0);
+        virtual_file(net, "arp", proc_net_arp_read, 0);
+        virtual_file(net, "udp", proc_net_udp_read, 0);
+        virtual_file(net, "raw", proc_net_raw_read, 0);
+        virtual_file(net, "tcp", proc_net_tcp_read, 0);
+        virtual_file(net, "udp6", proc_net_tcp_read, 0);
+        virtual_file(net, "raw6", proc_net_tcp_read, 0);
+        virtual_file(net, "tcp6", proc_net_tcp_read, 0);
+    }
+}
+
+static int64_t proc_oom_score_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                   void *output) {
+    PROCESS_REF process = process_get(node_pid(node));
+    if (!process) return 0;
+    TEXT_BUFFER text = {0};
+    text_unsigned(&text, process_oom_points(process));
+    text_char(&text, '\n');
+    return text_read(&text, offset, size, output);
+}
+
+static int oom_legacy(struct vfs_node *node) { return node->name && node->name[4] == 'a'; }
+
+static int64_t proc_oom_adj_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
+    PROCESS_REF process = process_get(node_pid(node));
+    if (!process) return 0;
+    TEXT_BUFFER text = {0};
+    int value = process->oom_score_adj;
+    if (oom_legacy(node)) value = value == OOM_SCORE_ADJ_MAX ? 15 : value * 17 / -OOM_SCORE_ADJ_MIN;
+    text_signed(&text, value);
+    text_char(&text, '\n');
+    return text_read(&text, offset, size, output);
+}
+
+static int64_t proc_oom_adj_write(struct vfs_node *node, uint64_t offset, size_t size,
+                                  const void *input) {
+    (void)offset;
+    const char *text = (const char *)input;
+    size_t at = 0;
+    while (at < size && (text[at] == ' ' || text[at] == '\t')) at++;
+    int negative = at < size && text[at] == '-';
+    if (negative || (at < size && text[at] == '+')) at++;
+    if (at >= size || text[at] < '0' || text[at] > '9') return -EINVAL;
+    int64_t value = 0;
+    while (at < size && text[at] >= '0' && text[at] <= '9' && value <= 100000)
+        value = value * 10 + (text[at++] - '0');
+    while (at < size && (text[at] == '\n' || text[at] == ' ')) at++;
+    if (at != size) return -EINVAL;
+    if (negative) value = -value;
+    if (oom_legacy(node)) {
+        if (value < -17 || value > 15) return -EINVAL;
+        value = value == 15 ? OOM_SCORE_ADJ_MAX : value * -OOM_SCORE_ADJ_MIN / 17;
+    }
+    if (value < OOM_SCORE_ADJ_MIN || value > OOM_SCORE_ADJ_MAX) return -EINVAL;
+    PROCESS_REF process = process_get(node_pid(node));
+    if (!process) return -ESRCH;
+    struct process *self = process_current();
+    if (!self ||
+        (self->cred.euid != 0 && self->cred.euid != process->cred.uid &&
+         self->cred.euid != process->cred.euid))
+        return -EACCES;
+    if (value < process->oom_score_adj && self->cred.euid != 0) return -EACCES;
+    process_set_oom_score_adj(process, (int)value);
+    return (int64_t)size;
+}
+
+static int64_t proc_uid_map_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
+    (void)node;
+    char text[256];
+    int64_t total = user_ns_read_uid_map(0, text, sizeof(text));
+    if (total <= 0 || (uint64_t)total <= offset) return 0;
+    size_t available = (size_t)total - (size_t)offset;
+    if (size > available) size = available;
+    memcpy(output, text + offset, size);
+    return (int64_t)size;
+}
+
+static int64_t proc_gid_map_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                 void *output) {
+    (void)node;
+    char text[256];
+    int64_t total = user_ns_read_uid_map(1, text, sizeof(text));
+    if (total <= 0 || (uint64_t)total <= offset) return 0;
+    size_t available = (size_t)total - (size_t)offset;
+    if (size > available) size = available;
+    memcpy(output, text + offset, size);
+    return (int64_t)size;
+}
+
+static int64_t proc_setgroups_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                   void *output) {
+    (void)node;
+    static const char text[] = "allow\n";
+    uint64_t length = sizeof(text) - 1U;
+    if (offset >= length) return 0;
+    size_t available = (size_t)(length - offset);
+    if (size > available) size = available;
+    memcpy(output, text + offset, size);
+    return (int64_t)size;
+}
+
+static int64_t proc_uid_map_write(struct vfs_node *node, uint64_t offset, size_t size,
+                                  const void *input) {
+    (void)node;
+    (void)offset;
+    return user_ns_write_uid_map(0, (const char *)input, size);
+}
+
+static int64_t proc_gid_map_write(struct vfs_node *node, uint64_t offset, size_t size,
+                                  const void *input) {
+    (void)node;
+    (void)offset;
+    return user_ns_write_uid_map(1, (const char *)input, size);
+}
+
+static int64_t proc_setgroups_write(struct vfs_node *node, uint64_t offset, size_t size,
+                                    const void *input) {
+    (void)node;
+    (void)offset;
+    return user_ns_write_setgroups((const char *)input, size);
+}
+
+static void add_map_file(struct vfs_node *directory, const char *name, vfs_read_fn reader,
+                         vfs_write_fn writer) {
+    if (vfs_find_child(directory, name)) return;
+    struct vfs_node *file = virtual_file(directory, name, reader, 0);
+    if (!file) return;
+    file->mode = 0666;
+    file->uid = directory->uid;
+    file->gid = directory->gid;
+    file->write = writer;
+}
+
+static void populate_process_files(struct vfs_node *directory, uint64_t pid) {
+    if (!vfs_find_child(directory, "status"))
+        virtual_file(directory, "status", proc_status_read, pid);
+    if (!vfs_find_child(directory, "stat"))
+        virtual_file(directory, "stat", proc_pid_stat_read, pid);
+    if (!vfs_find_child(directory, "cmdline"))
+        virtual_file(directory, "cmdline", proc_cmdline_read, pid);
+    if (!vfs_find_child(directory, "statm"))
+        virtual_file(directory, "statm", proc_pid_statm_read, pid);
+    if (!vfs_find_child(directory, "comm"))
+        virtual_file(directory, "comm", proc_pid_comm_read, pid);
+    if (!vfs_find_child(directory, "maps"))
+        virtual_file(directory, "maps", proc_pid_maps_read, pid);
+    if (!vfs_find_child(directory, "cgroup"))
+        virtual_file(directory, "cgroup", proc_pid_cgroup_read, pid);
+    if (!vfs_find_child(directory, "syscall"))
+        virtual_file(directory, "syscall", proc_pid_syscall_read, pid);
+    add_map_file(directory, "uid_map", proc_uid_map_read, proc_uid_map_write);
+    add_map_file(directory, "gid_map", proc_gid_map_read, proc_gid_map_write);
+    add_map_file(directory, "setgroups", proc_setgroups_read, proc_setgroups_write);
+    if (!vfs_find_child(directory, "mountinfo"))
+        virtual_file(directory, "mountinfo", proc_mountinfo_read, pid);
+    if (!vfs_find_child(directory, "mounts"))
+        virtual_file(directory, "mounts", proc_mounts_read, pid);
+    if (!vfs_find_child(directory, "environ")) {
+        struct vfs_node *environ = virtual_file(directory, "environ", proc_environ_read, pid);
+        if (environ) {
+            environ->mode = 0400;
+            environ->uid = directory->uid;
+            environ->gid = directory->gid;
+        }
+    }
+    if (!vfs_find_child(directory, "oom_score"))
+        virtual_file(directory, "oom_score", proc_oom_score_read, pid);
+    static const char *const oom_knobs[] = {"oom_score_adj", "oom_adj"};
+    for (unsigned index = 0; index < 2; index++) {
+        if (vfs_find_child(directory, oom_knobs[index])) continue;
+        struct vfs_node *knob = virtual_file(directory, oom_knobs[index], proc_oom_adj_read, pid);
+        if (!knob) continue;
+        knob->mode = 0644;
+        knob->uid = directory->uid;
+        knob->gid = directory->gid;
+        knob->write = proc_oom_adj_write;
+    }
+    if (!vfs_find_child(directory, "mem")) {
+        struct vfs_node *mem = virtual_file(directory, "mem", proc_pid_mem_read, pid);
+        if (mem) {
+            mem->mode = 0600;
+            mem->uid = directory->uid;
+            mem->gid = directory->gid;
+        }
+    }
+}
+
+void procfs_register_process(struct process *process) {
+    if (!process) return;
+    char path[PROC_PATH_MAX];
+    decimal_path(process->pid, NULL, path);
+    struct vfs_node *directory = vfs_mkdir_p(path);
+    if (!directory) return;
+    directory->mode = 0555;
+    directory->uid = process->cred.euid;
+    directory->gid = process->cred.egid;
+    directory->data = (void *)(uintptr_t)process->pid;
+    populate_process_files(directory, process->pid);
+
+    char cwd[256];
+    if (vfs_node_path(process->cwd, cwd, sizeof(cwd)) != 0) {
+        cwd[0] = '/';
+        cwd[1] = '\0';
+    }
+    (void)vfs_attach_symlink(directory, "exe", process->exe_path ? process->exe_path : "/");
+    (void)vfs_attach_symlink(directory, "cwd", cwd);
+    (void)vfs_attach_symlink(directory, "root", "/");
+
+    struct vfs_node *descriptors = vfs_find_child(directory, "fd");
+    if (!descriptors) {
+        decimal_path(process->pid, "/fd", path);
+        descriptors = vfs_mkdir_p(path);
+        if (descriptors) {
+            descriptors->mode = 0500;
+            descriptors->uid = process->cred.euid;
+            descriptors->gid = process->cred.egid;
+            descriptors->data = (void *)(uintptr_t)process->pid;
+            descriptors->refresh = proc_fd_refresh;
+        }
+    }
+    if (!vfs_find_child(directory, "fdinfo")) {
+        decimal_path(process->pid, "/fdinfo", path);
+        struct vfs_node *information = vfs_mkdir_p(path);
+        if (information) {
+            information->mode = 0500;
+            information->uid = process->cred.euid;
+            information->gid = process->cred.egid;
+            information->data = (void *)(uintptr_t)process->pid;
+            information->refresh = proc_fdinfo_refresh;
+        }
+    }
+    directory->refresh = proc_process_refresh;
+
+    task_path(process->pid, NULL, path);
+    struct vfs_node *task = vfs_mkdir_p(path);
+    if (!task) return;
+    task->mode = 0555;
+    task->uid = process->cred.euid;
+    task->gid = process->cred.egid;
+    populate_process_files(task, process->pid);
+}
+
+void procfs_unregister_process(uint64_t pid) {
+    char path[PROC_PATH_MAX];
+    decimal_path(pid, NULL, path);
+    struct vfs_node *directory = vfs_lookup(path);
+    if (directory) directory->refresh = NULL;
+    task_path(pid, "/status", path);
+    (void)vfs_remove(path, 0);
+    task_path(pid, "/stat", path);
+    (void)vfs_remove(path, 0);
+    task_path(pid, "/cmdline", path);
+    (void)vfs_remove(path, 0);
+    task_path(pid, "/statm", path);
+    (void)vfs_remove(path, 0);
+    task_path(pid, "/maps", path);
+    (void)vfs_remove(path, 0);
+    task_path(pid, "/comm", path);
+    (void)vfs_remove(path, 0);
+    task_path(pid, "/cgroup", path);
+    (void)vfs_remove(path, 0);
+    task_path(pid, "/syscall", path);
+    (void)vfs_remove(path, 0);
+    task_path(pid, "/mountinfo", path);
+    (void)vfs_remove(path, 0);
+    task_path(pid, "/mounts", path);
+    (void)vfs_remove(path, 0);
+    task_path(pid, "/mem", path);
+    (void)vfs_remove(path, 0);
+    task_path(pid, "/environ", path);
+    (void)vfs_remove(path, 0);
+    task_path(pid, NULL, path);
+    (void)vfs_remove(path, 1);
+    decimal_path(pid, "/task", path);
+    (void)vfs_remove(path, 1);
+    decimal_path(pid, "/status", path);
+    (void)vfs_remove(path, 0);
+    decimal_path(pid, "/stat", path);
+    (void)vfs_remove(path, 0);
+    decimal_path(pid, "/cmdline", path);
+    (void)vfs_remove(path, 0);
+    decimal_path(pid, "/statm", path);
+    (void)vfs_remove(path, 0);
+    decimal_path(pid, "/maps", path);
+    (void)vfs_remove(path, 0);
+    decimal_path(pid, "/comm", path);
+    (void)vfs_remove(path, 0);
+    decimal_path(pid, "/cgroup", path);
+    (void)vfs_remove(path, 0);
+    decimal_path(pid, "/syscall", path);
+    (void)vfs_remove(path, 0);
+    decimal_path(pid, "/mountinfo", path);
+    (void)vfs_remove(path, 0);
+    decimal_path(pid, "/mounts", path);
+    (void)vfs_remove(path, 0);
+    decimal_path(pid, "/mem", path);
+    (void)vfs_remove(path, 0);
+    decimal_path(pid, "/environ", path);
+    (void)vfs_remove(path, 0);
+    decimal_path(pid, "/exe", path);
+    (void)vfs_remove(path, 0);
+    decimal_path(pid, "/cwd", path);
+    (void)vfs_remove(path, 0);
+    decimal_path(pid, "/root", path);
+    (void)vfs_remove(path, 0);
+    decimal_path(pid, "/fdinfo", path);
+    struct vfs_node *information = vfs_lookup(path);
+    if (information) {
+        information->refresh = NULL;
+        while (information->children) (void)vfs_detach_child(information, information->children);
+        (void)vfs_remove(path, 1);
+    }
+    decimal_path(pid, "/fd", path);
+    struct vfs_node *descriptors = vfs_lookup(path);
+    if (descriptors) {
+        descriptors->refresh = NULL;
+        while (descriptors->children) (void)vfs_detach_child(descriptors, descriptors->children);
+        (void)vfs_remove(path, 1);
+    }
+    decimal_path(pid, NULL, path);
+    (void)vfs_remove(path, 1);
+}

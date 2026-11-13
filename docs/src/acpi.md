@@ -9,12 +9,12 @@ what each machine wants, one machine at a time. Tunix runs it.
 ## uACPI
 
 The interpreter is [uACPI](https://github.com/uACPI/uACPI), MIT licensed. Its
-recipe, `kernel/subprojects/uacpi/RECIPE`, pins `UACPI_VERSION` and lists the
-sources the kernel uses. The kernel's own makefile includes it, so `make` in
-`kernel/` clones uACPI into `kernel/build/uacpi` on the first build and compiles
+recipe, `subprojects/uacpi/RECIPE`, pins `UACPI_VERSION` and lists the
+sources the kernel uses. The kernel's own makefile includes it, so `make`
+clones uACPI into `build/uacpi` on the first build and compiles
 it with the kernel's flags minus `-Werror`. Nothing of uACPI is kept in this tree.
 
-uACPI needs a small host interface, `kernel/drivers/acpi/host.c`:
+uACPI needs a small host interface, `drivers/acpi/host.c`:
 
 - **Memory.** Usable RAM is reached through the direct map; anything else --
   ACPI NVS, chipset registers -- gets an uncached device mapping, remembered so
@@ -30,7 +30,7 @@ uACPI needs a small host interface, `kernel/drivers/acpi/host.c`:
 
 ## Bring-up
 
-`acpi_subsystem_init` (`kernel/drivers/acpi/bus.c`) runs once timers work:
+`acpi_subsystem_init` (`drivers/acpi/bus.c`) runs once timers work:
 
 1. `uacpi_initialize` maps the tables and switches the firmware into ACPI mode.
 2. `uacpi_namespace_load` builds the namespace from the DSDT and SSDTs.
@@ -81,18 +81,3 @@ firmware load the SSDTs holding `_PSS` and `_PPC`. `_PPC` is the highest state
 the firmware currently allows, and notification 0x80 means it changed: the
 embedded controller asks for a slower processor that way when it runs hot. The
 limit is applied by `cpufreq` on each core's next tick.
-
-## Testing without the hardware
-
-QEMU has no embedded controller, so `make acpi-test` builds the drivers on the
-host against uACPI and a model machine: I/O ports, an embedded controller that
-answers queries from a queue, and physical memory holding an RSDP, an XSDT, a
-FADT and a DSDT compiled by `iasl` from `testsuites/acpi-tests/machine.asl`. That
-DSDT is shaped like a real laptop's: brightness keys that arrive as one query
-with a code in controller RAM and are notified to two outputs, a throttle
-request that changes `_PPC`, a thermal zone that reads the controller, a lid.
-The test checks the whole path from a queued controller event to a key, a
-processor limit, a cooling decision or a power-off.
-
-The kernel threads are run one pass at a time, and `Sleep` advances a fake
-clock, so the test is deterministic and takes milliseconds.

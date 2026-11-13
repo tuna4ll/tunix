@@ -4,11 +4,11 @@ Two host controllers, one transport above them.
 
 | Driver | Controller | What it reaches |
 | --- | --- | --- |
-| `kernel/drivers/usb/xhci.c` | xHCI (USB 3.x), all of them | keyboards, mice, hubs, mass storage, hot-plug |
-| `kernel/drivers/usb/ehci.c` | EHCI (USB 2.0), all of them | keyboards, mice, mass storage, behind one hub |
+| `drivers/usb/xhci.c` | xHCI (USB 3.x), all of them | keyboards, mice, hubs, mass storage, hot-plug |
+| `drivers/usb/ehci.c` | EHCI (USB 2.0), all of them | keyboards, mice, mass storage, behind one hub |
 
-`kernel/drivers/usb/usb.c` is the seam between them and
-`kernel/drivers/usb/usb_storage.c`, which speaks the bulk-only transport and
+`drivers/usb/usb.c` is the seam between them and
+`drivers/usb/usb_storage.c`, which speaks the bulk-only transport and
 SCSI on top of it. A host offers two things -- how many mass-storage devices it
 found, and a synchronous bulk transfer to one of them -- and the transport
 numbers the devices of every registered controller in one flat list. Nothing
@@ -99,7 +99,7 @@ gives up on them. The storage reset the transport asks for is the Bulk-Only
 Mass Storage Reset with both bulk endpoints put back the same way.
 
 **Mice.** A mouse is read the way Linux reads one, in report protocol:
-`kernel/drivers/usb/hid.c` parses the interface's HID report descriptor and
+`drivers/usb/hid.c` parses the interface's HID report descriptor and
 finds the report ID, the buttons and the relative X, Y and wheel fields, of
 whatever size and position the device chose. Boot protocol is only the fallback
 for a boot mouse whose descriptor says nothing usable. Keyboards stay on boot
@@ -153,7 +153,7 @@ from absent.
   start split in micro-frame 0 and complete splits in 2 to 4 when it is behind a
   translator. Its reports are collected from the input poll, and the same
   report handling as xHCI turns them into key and pointer events
-  (`kernel/drivers/usb/hid_input.c`), mice through their HID report descriptor.
+  (`drivers/usb/hid_input.c`), mice through their HID report descriptor.
   A halted endpoint has its halt cleared and is queued again; sixteen failures
   in a row stop it.
 - **Hubs, but only one level of them.** See below.

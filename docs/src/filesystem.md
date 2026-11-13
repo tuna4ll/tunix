@@ -12,14 +12,14 @@ nothing to fix in it.
 
 ## Where it comes from
 
-`mkfs.ext4 -d` on the build host, from the Void sysroot. There is no initramfs
+`mkfs.ext4 -d` on the build host, from a root directory. There is no initramfs
 and there is no format code in the kernel; the group descriptors are read and
 believed, and what is checked is that each one points inside the filesystem
 and carries the right checksum.
 
 ## The driver
 
-`kernel/fs/ext4/` is one driver for ext2, ext3 and ext4, the way Linux has
+`fs/ext4/` is one driver for ext2, ext3 and ext4, the way Linux has
 one. `mount -t ext2`, `ext3` and `ext4` all reach it, and `/proc/mounts` names
 the root after the features it actually has.
 
@@ -36,7 +36,7 @@ the root after the features it actually has.
 | `mmp.c` | multi-mount protection |
 | `persist.c` | what the VFS asks for: create, unlink, rename, truncate, write-back, read and loading the tree |
 
-`kernel/fs/jbd2.c` is the journal and `kernel/lib/crc.c` the CRC32C, CRC32 and
+`fs/jbd2.c` is the journal and `lib/crc.c` the CRC32C, CRC32 and
 CRC16 everything is checksummed with.
 
 ## What the driver can mount
@@ -116,7 +116,7 @@ journal and marks the filesystem clean.
 
 ## The journal
 
-`kernel/fs/jbd2.c` is the journal. It writes the log that `mkfs` laid down,
+`fs/jbd2.c` is the journal. It writes the log that `mkfs` laid down,
 and it replays one it finds, whoever wrote it.
 
 The format is JBD2, the log ext3 and ext4 use on Linux, and every field in it
@@ -151,7 +151,7 @@ the log, file contents are written straight to where they belong, and they are
 written before the transaction that makes them reachable commits.
 
 Metadata lives in a buffer cache (`buf_get()`, `buf_zero()`, `buf_mark()` in
-`kernel/fs/ext4/super.c`): one entry per block, hashed, on an LRU list, eight
+`fs/ext4/super.c`): one entry per block, hashed, on an LRU list, eight
 megabytes per volume. A create, unlink or rename changes buffers and marks them
 dirty; nothing is written yet. The superblock and group descriptors are kept in
 memory and compared against the last copy written, so only a descriptor block
@@ -200,7 +200,7 @@ rule.
 ### Writing file contents
 
 `write()` copies into the page cache, marks the pages dirty and puts the file on
-a list. The `flush` kernel thread (`kernel/fs/vfs.c`) writes a file back once it
+a list. The `flush` kernel thread (`fs/vfs.c`) writes a file back once it
 has been dirty for five seconds, or sooner when the dirty pages pass five per
 cent of memory. Each batch of up to 32 pages is copied out under the VFS lock;
 its blocks are allocated and the inode updated under the ext4 lock, and the data
@@ -288,8 +288,8 @@ Thirty-seven blocks, most of them the contents of the file being written.
 
 ### Talking to Linux
 
-Both directions are tested. `testsuites/ext4-tests/run.sh` has `debugfs` write
-a checksummed 64-bit transaction into a second disk and leave it unreplayed;
+Both directions are checked against Linux. `debugfs` writes a checksummed
+64-bit transaction into a second disk and leaves it unreplayed;
 Tunix replays it at mount and the file it changed reads back changed. And after
 Tunix has run, the test rewinds the root's journal superblock to the last
 transaction Tunix wrote and has `e2fsck` replay it: a single wrong byte in a
@@ -303,7 +303,7 @@ The image is a plain ext4 filesystem, so Linux tools read it without
 mounting it:
 
 ```sh
-debugfs -R "ls -l /" "build/tunix.img?offset=$((133120*512))"
+debugfs -R "ls -l /" "tunix.img?offset=$((133120*512))"
 ```
 
 ## Volatile directories
@@ -314,8 +314,8 @@ the disk. Anywhere else a FIFO, a socket or a device node is an inode on the
 disk like on Linux: its name, owner and mode survive a reboot, its contents
 never had any.
 
-The sysroot's own `/dev`, `/proc`, `/sys`, `/run` and `/tmp` are emptied before
-the image is made. Anything left in them would sit underneath the kernel's own
+A root directory's own `/dev`, `/proc`, `/sys`, `/run` and `/tmp` must be empty
+when the image is made. Anything left in them would sit underneath the kernel's own
 and shadow it: an install script that redirected to `/dev/null` once left a
 twenty-byte regular file there, and every `>/dev/null` in the system then failed
 with `EACCES`.
@@ -323,7 +323,7 @@ with `EACCES`.
 ## Locks
 
 `flock` locks belong to the open file. `fcntl` record locks are kept per inode
-in `kernel/fs/posix_lock.c`, with Linux's two kinds of owner: a classic POSIX
+in `fs/posix_lock.c`, with Linux's two kinds of owner: a classic POSIX
 lock (`F_SETLK`, `F_SETLKW`, `F_GETLK`) belongs to the descriptor table, so
 closing any descriptor of the file drops every lock the process holds on it,
 and an open-file-description lock (`F_OFD_*`) belongs to the open file and goes
@@ -341,7 +341,7 @@ gone. Writes of up to `PIPE_BUF` bytes to any pipe are atomic.
 
 ## Partitions
 
-`kernel/fs/partition.c` reads GPT and MBR partition tables and registers what they
+`fs/partition.c` reads GPT and MBR partition tables and registers what they
 describe as block devices of their own -- `sda1`, `sda2` -- so the filesystem
 starts where its device does and `root=/dev/sda2` names it. Both schemes are
 read because both are used: the image carries a protective MBR in front of the
@@ -380,7 +380,7 @@ A file's contents are not one buffer any more. They are 4 KiB pages, each its
 own physical frame from the page allocator, held in a per-file array with a
 dirty bit each.
 
-That is what `kernel/fs/vfs.c` now does and it changes four things.
+That is what `fs/vfs.c` now does and it changes four things.
 
 **A file no longer has to fit in the heap.** It used to live in a single
 contiguous allocation, so the ceiling was the largest run the heap could hand
@@ -448,23 +448,3 @@ The ELF loader no longer reads through a flat pointer either. It reads the
 header and program headers into a small buffer and copies each segment through
 `vfs_read()`, which means starting a program touches the pages of the segments
 it actually loads.
-
-## Testing it
-
-`make ext4-test` (and `ext4-test-aarch64`) boots a test as init four times over
-the same three disks and runs `e2fsck -fn` on every filesystem after each boot:
-
-- the root, written with thousands of files in hashed directories, a file of
-  600 single-block extents written back to front, a 40 MiB file, FIFOs, device
-  nodes, long and short symlinks, hard links, extended attributes in the inode,
-  in a block and as an ACL, nanosecond times, 32-bit owners, truncation, a
-  directory moved between parents, and a file unlinked while still open;
-- a 1 KiB-block disk made by Linux with `inline_data`, hashed directories,
-  an unwritten extent, an orphan and a pending journal transaction, which
-  Tunix then grows into a two-level index and writes into;
-- eight partitions in the other formats: ext2 with 128-byte inodes, ext3,
-  an ext4 without journal or `64bit` and with `uninit_bg` and 2 KiB blocks, one
-  with `meta_bg`, `sparse_super2`, `mmp` and `large_dir`, one with an EA inode,
-  and `bigalloc`, `casefold` and `quota`, which must come up read-only;
-- the second boot checks everything the first wrote, the third is killed in the
-  middle of a write storm and the fourth must replay and come up clean.

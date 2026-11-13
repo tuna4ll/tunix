@@ -8,7 +8,7 @@ is the desktop; the second, third and fourth run a login prompt.
 A terminal looks like the Linux one: a black screen, the standard VGA palette
 with grey text, and an 8x16 bitmap font drawn edge to edge with no margin. The
 glyphs are `eurlatgr`'s, the 512-character console font from kbd, compiled into
-`kernel/tty/terminal_font.c` with its Unicode map, so Latin, Turkish, box
+`tty/terminal_font.c` with its Unicode map, so Latin, Turkish, box
 drawing and block characters all have a glyph and anything else falls back to
 `U+FFFD`. Bold turns the eight normal colours into their bright halves, as the
 Linux console does, rather than drawing a heavier glyph.
@@ -27,14 +27,14 @@ the display manager and the compositor had to be told to stop asking --
 
 Three things, kept apart deliberately:
 
-- **the screen** (`kernel/tty/terminal.c`), a grid of cells with a cursor and a
+- **the screen** (`tty/terminal.c`), a grid of cells with a cursor and a
   scroll region. A screen draws to the display only while it is the active one,
   so a terminal nobody is looking at goes on scrolling into its own cells and
   shows the result the moment it is switched to.
-- **the line discipline** (`kernel/tty/tty.c`), which is the termios flags, the
+- **the line discipline** (`tty/tty.c`), which is the termios flags, the
   input queue, the canonical line buffer, the foreground process group and the
   ANSI parser for what is written to it.
-- **the terminal itself** (`kernel/tty/vt.c`), which owns those two and the
+- **the terminal itself** (`tty/vt.c`), which owns those two and the
   state that only means anything when there is more than one of them: the KD
   mode, the VT mode, and which terminal the display belongs to.
 
@@ -222,20 +222,6 @@ which is what an idle processor is, and what a machine showing a still desktop
 usually has. And the console did not come back afterwards, because handing the
 scanout back does not return a virtio-gpu to the framebuffer underneath; see
 [virtio-gpu](virtio-gpu.md).
-
-## On the image
-
-`agetty` from util-linux is what makes a terminal a *login* terminal: it starts
-a session, opens the terminal, claims it with `TIOCSCTTY`, puts it on the
-standard descriptors and executes `login`. Three runit services, `agetty-tty2`
-to `agetty-tty4`, run one each and restart it when the session ends; which ones
-is `base-files/services`.
-
-Terminal 1 has none. Weston takes whichever terminal is active when it starts,
-which is the first, and a login prompt sharing it would draw into the same
-cells.
-
-`chvt`, from the kbd package, switches to a numbered terminal.
 
 ## What is not here
 

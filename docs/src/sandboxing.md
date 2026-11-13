@@ -9,7 +9,7 @@ sandbox is disabled and starts its content processes with one.
 
 `seccomp(2)` and `prctl(PR_SET_SECCOMP)` install a classic-BPF program that runs
 before every syscall. The interpreter and its verifier are in
-`kernel/core/seccomp.c`; the verifier rejects a program with a bad opcode, an
+`core/seccomp.c`; the verifier rejects a program with a bad opcode, an
 out-of-range jump or a stray memory slot before it ever runs, and the
 interpreter is bounded so a filter cannot read past the `seccomp_data` it is
 handed (`nr`, `arch`, the instruction pointer and six arguments).
@@ -35,8 +35,7 @@ number so the arch the filter was built for matches the arch field it reads.
 
 The interpreter takes untrusted input, so it is fuzzed on the host under
 ASan/UBSan — about 14 million random programs, including valid-opcode-weighted
-ones that pass the verifier, with no out-of-bounds access. `make test
-TESTS=seccomp` is the in-kernel check.
+ones that pass the verifier, with no out-of-bounds access.
 
 ## User namespaces
 
@@ -46,7 +45,7 @@ each, after `/proc/self/setgroups` is set to `deny` for the gid map). The maps
 are real: a process that ran as uid 1000 and maps `0 1000 1` reads back uid 0
 from `getuid`/`geteuid` inside the namespace, which is exactly how an
 unprivileged browser becomes "root" in its own sandbox without any real
-privilege on the host. `kernel/core/namespace.c` keeps the extents (up to five),
+privilege on the host. `core/namespace.c` keeps the extents (up to five),
 inverts them for the read-back, and refuses a second write or a map before the
 namespace exists.
 
@@ -68,5 +67,3 @@ PID, network, mount, IPC and cgroup namespaces are **refused, not faked**:
 Firefox falls back to fewer namespaces when they are missing and still sandboxes
 its content processes with seccomp and the user namespace; Chromium's zygote
 wants the others, so it needs `--no-sandbox` until they land.
-
-`make test TESTS=namespace` is the in-kernel check.

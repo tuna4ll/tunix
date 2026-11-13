@@ -9,9 +9,9 @@ SuperTuxKart -> OpenAL Soft -> alsa-lib "default":  plug -> softvol -> dmix
                                                                        |
             /dev/snd/pcmC0D0p, controlC0, timer  <---------------------+
                                   |
-            kernel/drivers/audio/sound.c   (PCM, control and timer devices)
+            drivers/audio/sound.c   (PCM, control and timer devices)
                                   |
-            kernel/modules/snd_hda.c       (Intel HD Audio controller and codec)
+            modules/snd_hda.c       (Intel HD Audio controller and codec)
 ```
 
 `default` is alsa-lib's stock configuration for an HD Audio card: dmix mixes
@@ -159,7 +159,7 @@ control per pin that can sense (a `Phantom Jack` for the ones that cannot).
   `arecord` work.
 - **dmix needs System V semaphores**, which the kernel now has (`semget`,
   `semop`, `semtimedop`, `semctl` with `SEM_UNDO`, timeouts, removal waking the
-  waiters with `EIDRM`); see `kernel/ipc/sysvsem.c`.
+  waiters with `EIDRM`); see `ipc/sysvsem.c`.
 - `/etc/openal/alsoft.conf` asks for four periods of 1024 frames, 85 ms. Under
   QEMU with the game rendering in software on four CPUs, 512 x 3 (32 ms)
   underran once in a 108 second race, 1024 x 4 never did. The old setting,
@@ -220,33 +220,3 @@ SuperTuxKart in the Weston desktop, three-lap race recorded through QEMU's
 `wav` backend: 122 seconds of recording for 122 seconds of wall time, no gap of
 digital silence as short as 5 ms inside the race, no clipping, `xruns: 0` in
 `/proc/asound/card0/pcm0p/sub0/status`, and no underrun in OpenAL's log.
-
-## Tests
-
-`make hda-test` runs the driver's codec parser on the host against simulated
-codecs: a laptop Realtek ALC269 (internal speaker and headphone jack on their
-own DACs, microphone jack and internal microphone behind a mixer), a desktop
-codec with a capture selector and front and rear microphones, QEMU's codec and
-an HDMI-only one. It checks the routes, the formats and rates, the controls and
-their dB scales, unplugged and plugged headphones (the speaker is muted and
-comes back), microphone switching and the codec dump: the parts of the driver
-QEMU's codecs, which have one pin and no jack sensing, cannot exercise.
-
-`make test` runs `sound`: QEMU gets two HD Audio controllers, one playing into a
-WAV file and one with a codec that has a line input, and the test loads
-`snd_hda.ko` itself. It checks card information, controls, dB scales, events,
-user controls, refinement (period and buffer times near what OpenAL asks for),
-a two-second blocking write at the hardware rate, status and `/proc/asound`,
-drain, underrun and recovery, pause and resume, rewind and forward,
-non-blocking writes and `poll`, mmap with `SYNC_PTR`, `O_APPEND` joining, the
-PCM timer ticking once per period, and a one-second blocking capture at the
-hardware rate on the second card. Afterwards `wavcheck.sh` reads the recording
-on the host and fails the test unless the reference tone's frame counter
-arrived in one unbroken run. `ipc` covers the semaphores.
-
-## Where the sound comes out
-
-`make run` looks for a PulseAudio socket, at `/mnt/wslg/PulseServer` under WSL
-or in `XDG_RUNTIME_DIR` on a Linux desktop, and plays there with a tenth of a
-second of latency, which WSL's RDP audio channel needs; without one the machine
-is silent (`-audiodev none`).

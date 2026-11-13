@@ -23,9 +23,6 @@ process: ok    and its status says SIGKILL
 process: PASS 15/15
 ```
 
-Every test in `testsuites/kernel-tests` builds for both architectures from one source, so
-the same checks run on either kernel.
-
 The userland above it is unmodified Void Linux for aarch64. From the published
 `void-aarch64-ROOTFS` tarball written to an ext3 disk, runit comes up as PID 1,
 stage 1 mounts the pseudo-filesystems, starts eudev, seeds the random number
@@ -68,7 +65,7 @@ translates every address through the bus ranges, takes the mini UART as a
 ext3 from it and starts all four processors:
 
 ```sh
-qemu-system-aarch64 -M raspi4b -kernel kernel/build/kernel-aarch64-core.img \
+qemu-system-aarch64 -M raspi4b -kernel build/kernel-aarch64-core.img \
     -dtb bcm2711-rpi-4-b.dtb -append root=LABEL=tunix-root \
     -nographic -serial null -serial stdio -drive file=sd.img,if=sd,format=raw
 ```
@@ -82,7 +79,7 @@ SMP: 4 of 4 processors running
 PROCTEST PASS
 ```
 
-The SDHCI driver (`kernel/drivers/storage/sdhci.c`) is portable: PIO transfers,
+The SDHCI driver (`drivers/storage/sdhci.c`) is portable: PIO transfers,
 standard- and high-capacity cards, 32-bit register access throughout, and a
 write delay for the BCM2835 controller that needs one.
 
@@ -98,9 +95,9 @@ firmware's Graphics Output Protocol framebuffer is used instead (see below).
 
 ### UEFI and ACPI
 
-The desktop image boots itself on any 64-bit ARM UEFI machine. Its EFI system
-partition carries Limine's `BOOTAA64.EFI` and `boot/limine/limine.conf`
-(`boot/limine-aarch64.conf`), which loads `boot/Image` with the Linux arm64
+A GPT disk with Limine on its EFI system partition boots itself on any 64-bit ARM UEFI machine. Its EFI
+system partition carries Limine's `BOOTAA64.EFI` and `boot/limine/limine.conf`,
+which loads `boot/Image` with the Linux arm64
 protocol. Limine exits boot services and passes a device tree whose `/chosen`
 names the UEFI system table and memory map; when the firmware has no device tree
 of its own, that tree holds nothing else.
@@ -115,63 +112,27 @@ from GTDT, the console from SPCR, PCIe ECAM from MCFG, MSI device IDs from IORT,
 and the PSCI conduit from FADT. The firmware has already placed PCI BARs, so the
 kernel keeps them.
 
-```sh
-make run-aarch64-image         # edk2 firmware, Limine, ACPI
-make run-aarch64-image-kernel  # QEMU loads the Image directly with its own device tree
-```
-
-Both boot to the desktop, as do `-M virt,acpi=off` (UEFI with a device tree) and
+It boots the same way under `-M virt,acpi=off` (UEFI with a device tree) and
 `-M virt,gic-version=2`. edk2's ramfb driver offers at most 1024x768, so the
 UEFI boot runs at that size on QEMU; the direct boot sets ramfb to 1280x720.
-
-### The desktop image
-
-`make image-aarch64` builds the same image the x86-64 build does — Void's base,
-the package list in `GNUmakefile` with Weston, Mesa and Firefox, and
-`base-files/` over it — from Void's aarch64 repository. It needs no root: the
-sysroot and the ext4 image are assembled inside a user namespace
-(`unshare --map-auto --map-root-user`), which is enough for `chown` and for
-`mke2fs -d` to record real ownership, and the packages' install scripts run
-through the host's `qemu-aarch64` binfmt handler.
-
-```sh
-make image-aarch64           # -> build/tunix-aarch64.img, GPT with an ESP and an ext4 root
-make run-aarch64-image       # virt, UEFI, ramfb, xHCI keyboard and mouse, virtio-net, NVMe
-```
-
-It boots to the Weston session: seatd hands over the display and the xHCI
-keyboard and mouse, Weston draws with pixman onto the DRM device backed by the
-framebuffer (llvmpipe when there is no GPU costs far more under emulation), the
-HD Audio codec is found on PCI, and DHCP and HTTPS work through virtio-net.
-Weston commits atomically and names the rectangles it changed through
-`FB_DAMAGE_CLIPS`, so a cursor move copies a few kilobytes instead of the whole
-screen. Firefox opens its window in about a minute under full emulation.
 
 ## Building and running
 
 ```sh
-make aarch64-core            # -> kernel/build/kernel-aarch64-core.img, an arm64 Image
+make aarch64-core            # -> build/kernel-aarch64-core.img, an arm64 Image
 make run-aarch64-core QEMU_AARCH64_CORE_DISKS="-drive file=disk.img,if=none,id=nv0,format=raw \
     -device nvme,drive=nv0,serial=tunix -append root=LABEL=tunix-root"
 ```
 
 The toolchain is `aarch64-linux-gnu-gcc`. A root disk is an ext4 image made
-with the same `mkfs` options `tools/image.sh` uses for x86-64:
+with these `mkfs` options, around any static `init`:
 
 ```sh
 mkdir -p root/sbin root/dev root/proc root/sys root/tmp
 aarch64-linux-gnu-gcc -static -nostdlib -nostartfiles -ffreestanding -O2 \
-    -fno-pie -no-pie -fno-builtin testsuites/kernel-tests/process.c -o root/sbin/init
+    -fno-pie -no-pie -fno-builtin init.c -o root/sbin/init
 truncate -s 64M disk.img
 mkfs.ext4 -q -b 4096 -I 256 -m 1 -L tunix-root -d root disk.img
-```
-
-The tests boot the same way on either architecture; `make test-aarch64`
-builds each one with the cross compiler and boots `virt` with the Image instead
-of Limine:
-
-```sh
-make test-aarch64
 ```
 
 ## How the port is put together
@@ -192,7 +153,7 @@ only renames an operation, x86-64 compiles to the same instructions.
 | `time.h` hooks | TSC calibration, CMOS | `CNTFRQ_EL0`, PL031 |
 | `random.h` hooks | RDSEED/RDRAND | RNDRRS/RNDR |
 
-**Paging.** `kernel/mm/vmm.c` is shared. AArch64 with a 4 KiB granule and 48-bit
+**Paging.** `mm/vmm.c` is shared. AArch64 with a 4 KiB granule and 48-bit
 virtual addresses walks four levels indexed exactly like x86-64, so copy-on-write,
 fork, pruning, translation and user copies are one implementation; only the entry
 encoding differs. Every address space has one root that is written to both

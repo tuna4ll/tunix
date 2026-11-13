@@ -18,8 +18,8 @@ rtl8139                12288  0
 ## What a module file is
 
 A `.ko` is an ordinary ELF relocatable object -- `cc -c` with the kernel's own
-flags, nothing linked, nothing stripped. `kernel/modules/*.c` are built for both
-architectures and `kernel/modules/x86_64/*.c` only for x86-64; the build walks
+flags, nothing linked, nothing stripped. `modules/*.c` are built for both
+architectures and `modules/x86_64/*.c` only for x86-64; the build walks
 neither directory when it links the kernel, which is the whole difference
 between a module and a driver.
 
@@ -52,7 +52,7 @@ whole module gets `PAGE_WRITE` while it is being relocated and then the text
 becomes read-execute, the rodata read-only and the data writable and
 non-executable.
 
-**Symbols.** Undefined symbols are looked up in `kernel/core/ksyms.c` -- a plain
+**Symbols.** Undefined symbols are looked up in `core/ksyms.c` -- a plain
 table of what the kernel offers a module, roughly sixty entries -- and then in
 the exports of every module already loaded. A module that resolves a symbol
 from another one takes a reference on it, which is what puts it in the second

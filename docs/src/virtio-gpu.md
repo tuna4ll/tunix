@@ -5,12 +5,12 @@ device copies a client's buffer into the scanout every frame, virtio-gpu scans
 that buffer out where it lies.
 
 ```sh
-make run-gpu
+qemu-system-x86_64 ... -vga none -device virtio-vga,xres=1280,yres=720
 ```
 
 ## Why it exists
 
-`/dev/dri/card0` has no GPU behind it (see `kernel/drivers/gpu/drm.c`). The display is
+`/dev/dri/card0` has no GPU behind it (see `drivers/gpu/drm.c`). The display is
 the region the bootloader set up over VBE, there is no CRTC to reprogram, and so
 presenting a framebuffer means blitting it: a full screen of `memcpy` on the
 CPU, per frame, in the kernel, with the giant lock held. At 1280x720 that is
@@ -25,16 +25,16 @@ screenful of copying goes away.
 
 | File | What it is |
 | --- | --- |
-| `kernel/drivers/virtio/virtio_pci.c` | The virtio 1.0 PCI transport |
-| `kernel/drivers/virtio/virtio_ring.c` | A split virtqueue |
-| `kernel/drivers/gpu/virtio_gpu.c` | The device: resources, scanout, flush |
-| `kernel/include/tunix/virtio.h`, `virtgpu.h` | The interfaces between them |
+| `drivers/virtio/virtio_pci.c` | The virtio 1.0 PCI transport |
+| `drivers/virtio/virtio_ring.c` | A split virtqueue |
+| `drivers/gpu/virtio_gpu.c` | The device: resources, scanout, flush |
+| `include/tunix/virtio.h`, `virtgpu.h` | The interfaces between them |
 
 A modern virtio device publishes no registers at a fixed offset. It chains
 vendor-specific PCI capabilities, each naming a BAR, an offset and a length, and
 the driver walks that chain to find the common configuration, the notification
 area and the device configuration. `virtio_pci.c` maps whichever BARs those name
-into the shared device window described in `kernel/include/tunix/vmm.h`.
+into the shared device window described in `include/tunix/vmm.h`.
 
 Requests are **posted and left**: each carries its own request, payload and
 response memory from a pool of slots, descriptors come from a free list, and a
@@ -79,7 +79,7 @@ times a second, and only while a text console is what the user is looking at.
 A screenful of transfer at that rate is what the display cost before virtio-gpu
 existed, and it is paid only while nothing else wants the screen.
 
-`run-gpu` uses `virtio-vga` rather than `virtio-gpu-pci` because the
+Use `virtio-vga` rather than `virtio-gpu-pci` because the
 VGA-compatible variant is the one that has a framebuffer for the bootloader to
 set a mode in and for the console to draw into.
 
@@ -100,14 +100,13 @@ what the bootloader set. Nothing here scans out at it, and the driver no longer
 prints it, because a boot log that reports the host's window as "the display" is
 worth an afternoon of chasing the wrong thing.
 
-`run-gpu` still passes `xres=1280,yres=720` (`QEMU_GPU_RESOLUTION`), which keeps
-that number coherent when there is no window to override it — a headless run.
+Passing `xres=1280,yres=720` keeps that number coherent when there is no window to override it — a headless run.
 
 **A small window is a host window, not a small desktop.** QEMU opens it at
 640x480 and does not reliably grow it when the bootloader sets 1280x720, so the
-desktop ends up letterboxed. `run-gpu` passes `-display gtk,zoom-to-fit=on`
-(`QEMU_GPU_DISPLAY`) so the guest fills whatever the window is and maximising it
-gives a full-size desktop; `QEMU_GPU_DISPLAY=gtk,full-screen=on` skips the step.
+desktop ends up letterboxed. `-display gtk,zoom-to-fit=on` makes the guest fill
+whatever the window is, so maximising it gives a full-size desktop;
+`-display gtk,full-screen=on` skips the step.
 The guest is unaffected either way — DRM reports one mode, the bootloader's, and
 nothing reads the host's ui_info.
 
@@ -115,7 +114,7 @@ nothing reads the host's ui_info.
 
 The driver negotiates `VIRTIO_GPU_F_VIRGL` where the host offers it, so mesa
 finds a real driver on `/dev/dri/renderD128` and the host renders on its own
-GPU. `make run-virgl` is the target that asks QEMU for it; without it the device
+GPU. `-device virtio-vga-gl -display sdl,gl=on` asks QEMU for it; without it the device
 is the same one in 2D mode and mesa rasterises with llvmpipe.
 
 The difference is the whole point: SuperTuxKart's own profiling lap runs at 49
@@ -218,7 +217,7 @@ failing about half the time has not failed since.
 
 ## Under GNOME
 
-`make DESKTOP=gnome run-virgl`, measured headless (`egl-headless`, VNC) on
+A GNOME session on `virtio-vga-gl`, measured headless (`egl-headless`, VNC) on
 three fresh boots of each kernel, the same image otherwise; launch times average
 a cold and a warm launch. "Before" already has the dma-buf poll fix, since
 without it no GL client gets a frame out.
@@ -251,7 +250,7 @@ nothing above this that could ask for one.
 
 ## Verified
 
-On `make run-gpu`, against QEMU 11.0.2 with `virtio-vga`:
+Against QEMU 11.0.2 with `virtio-vga`:
 
 - the device probes at `1af4:1050`, negotiates `VERSION_1` only, and
   `GET_DISPLAY_INFO` round-trips — `TUNIX: virtio-gpu ready` on the serial log

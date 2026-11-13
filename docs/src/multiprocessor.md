@@ -138,13 +138,13 @@ report and udev can read the same file at once.
 
 ## Finding the processors
 
-`acpi_describe_machine` (`kernel/drivers/acpi/acpi.c`) walks the MADT. A type 0 entry is
+`acpi_describe_machine` (`drivers/acpi/acpi.c`) walks the MADT. A type 0 entry is
 a processor: it carries an ACPI id, a local APIC id, and flags saying whether
 the socket is filled. The APIC id is what a startup message is addressed to and
 it is **not** the index — firmware numbers processors however it likes, and a
 machine with hyperthreading disabled in its BIOS leaves gaps.
 
-`SMP_MAX_CPUS` (256, `kernel/include/tunix/percpu.h`) is the ceiling: the xAPIC id
+`SMP_MAX_CPUS` (256, `include/tunix/percpu.h`) is the ceiling: the xAPIC id
 space. Only small per-processor scalars are sized by it; idle stacks and the
 GDT, TSS and fault stack are allocated for processors that exist, and affinity
 is a 256-bit `struct cpu_mask`. Idle processors skip the scheduler on their
@@ -153,7 +153,7 @@ idle tick behind the scheduler lock.
 
 ## Bringing one up
 
-`smp_init` (`kernel/arch/x86_64/smp.c`) runs at the end of `kmain`, after the APIC, the
+`smp_init` (`arch/x86_64/smp.c`) runs at the end of `kmain`, after the APIC, the
 timer and the syscall MSRs, and before the first process starts. For each
 processor other than the one running:
 
@@ -169,7 +169,7 @@ failure is easier to attribute that way.
 
 ### The trampoline
 
-`kernel/arch/x86_64/trampoline.S` is copied to physical `0x8000` and runs
+`arch/x86_64/trampoline.S` is copied to physical `0x8000` and runs
 from there, so nothing in it may use a link-time address; every reference is
 written as an offset into the blob plus the address it was copied to.
 
@@ -197,7 +197,7 @@ mistake in here is a triple fault and a silent reboot, not a message.
 
 ## What each processor owns
 
-`struct cpu` (`kernel/include/tunix/percpu.h`) is reached through `GS`. That is
+`struct cpu` (`include/tunix/percpu.h`) is reached through `GS`. That is
 the only way a piece of kernel code can find out which processor is running it:
 every other name in the kernel is shared.
 
@@ -285,11 +285,11 @@ own, and system calls and interrupts enter the kernel without taking anything.
 
 There are two kinds of lock.
 
-A **spinlock** (`struct lock`, `kernel/locking/lock.c`) is a fair ticket lock that the
+A **spinlock** (`struct lock`, `locking/lock.c`) is a fair ticket lock that the
 same processor may take again. It is held for a short stretch of code and never
 across anything that sleeps.
 
-A **mutex** (`struct mutex`, `kernel/locking/mutex.c`) is owned by a process. A process
+A **mutex** (`struct mutex`, `locking/mutex.c`) is owned by a process. A process
 that finds one taken sleeps and the processor runs something else; when the
 owner lets go, the mutex is handed to the process that has waited longest, so a
 thread that takes it in a loop cannot starve the others. It may be held across
@@ -312,7 +312,7 @@ and carries on. A processor that waits longer than twenty seconds for a
 spinlock prints who holds it and what else they hold. Returning to user mode or
 going idle with a lock still held is reported too.
 
-The ranks, outermost first (`kernel/include/tunix/lock.h`):
+The ranks, outermost first (`include/tunix/lock.h`):
 
 | Rank | Mutexes | Spinlocks |
 | --- | --- | --- |
@@ -347,7 +347,7 @@ A process can stop in the middle of a system call and continue later on any
 processor. `process_prepare_wait()` marks it blocked on a channel, the caller
 checks its condition once more, and `process_wait()` saves the callee-saved
 registers and the stack pointer (`arch_switch_stack()` in
-`kernel/arch/*/switch.S`) and switches to whatever is runnable next. A wake-up
+`arch/*/switch.S`) and switches to whatever is runnable next. A wake-up
 that lands between the check and the wait finds the process already blocked, so
 it is never lost. Signals do not interrupt such a wait; the call finishes and
 the signal is taken on the way back to user mode -- unless the wait was
@@ -368,7 +368,7 @@ stack that returns to user mode through the system call exit path.
 
 What belongs to a processor rather than a process moves with the switch: the
 file pins a system call holds are per process, and a process asleep in the
-kernel is counted as still inside it by `kernel/core/defer.c`, so nothing it read
+kernel is counted as still inside it by `core/defer.c`, so nothing it read
 under RCU-style protection is freed while it sleeps.
 
 Interrupts stay off while a processor is in the kernel, so a long system
@@ -385,7 +385,7 @@ path in process context instead, because both may need locks that sleep.
 
 ### Waiting for hardware
 
-A driver waiting for a disk calls `io_poll()` (`kernel/core/iowait.c`): it spins for
+A driver waiting for a disk calls `io_poll()` (`core/iowait.c`): it spins for
 half a millisecond, which covers most SSD commands, and after that sleeps and
 looks again every millisecond or on every tick. The disk drivers hold their
 mutex across a command; the USB host drivers drop their spinlock while they
@@ -459,7 +459,7 @@ The kernel reaches user memory by walking the page tables in software
 enough: a processor still holding a translation to a page that has just been
 freed would keep writing into memory handed to somebody else.
 
-`smp_flush_address_space` (`kernel/arch/x86_64/smp.c`) is called wherever a mapping is
+`smp_flush_address_space` (`arch/x86_64/smp.c`) is called wherever a mapping is
 removed or narrowed: `vmm_unmap_page_in`, `vmm_protect_page_in`, the copy path
 of `vmm_handle_cow_fault` (before the frame goes back to the allocator), and
 `vmm_clone_address_space`, which clears write permission on the *parent*'s
@@ -668,13 +668,6 @@ prints what this machine turned out to be and writes the same text to
 with no serial cable can still be asked, because the disk can be read anywhere
 else afterwards.
 
-The report does not need the desktop image. `make hwreport-image` builds
-`build/hwreport.img`, about 130 MiB, with only the kernel and a small init that
-waits after the report is written; writing it to a stick takes seconds rather
-than the minutes the full image takes. `make run-hwreport` boots it under QEMU,
-and `tools/hwreport/read.sh build/hwreport.img out/` copies the results off an
-image.
-
 Its `gpu` section lists the display controllers and saves every video BIOS it
 can find: the legacy shadow at `0xC0000`, each card's PCI ROM BAR and, on NVIDIA
 cards, the copy the display engine points at through the PRAMIN window. Each is
@@ -765,7 +758,7 @@ looks: `nproc` and every thread pool that sizes itself ask that first and only
 fall back to `/proc/cpuinfo`, so a kernel that returns `ENOSYS` there reports
 one processor however many it is running. `sched_setaffinity` narrows the mask
 for real — see the scheduler section above, and `allowed_on_this_cpu()` in
-`kernel/core/process.c`.
+`core/process.c`.
 
 The other proof was a desktop: a full Xfce session — Xorg, xfwm4, xfce4-panel,
 xfdesktop, Thunar, all of it heavily threaded — coming up and staying up on four
@@ -773,5 +766,5 @@ processors is what turned each of the bugs above from a theory into a log. That
 session was built by the ports tree and went with it; the bugs it found did not,
 and the userland that runs now is Void's threaded one.
 
-`make run` and `make headless` pass `-smp 4`. `QEMU_SMP=1` runs the machine as
-it was before there was more than one.
+The test boots pass `-smp 2`; `CPUS=1` runs the machine as it was before there
+was more than one.

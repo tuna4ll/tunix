@@ -11,7 +11,7 @@ plan or a buffer.
 ## Layout
 
 ```
-kernel/rust/
+rust/
   rust-toolchain.toml   the pinned compiler, its targets and components
   Cargo.toml            the workspace and the release profile
   .cargo/config.toml    code model flags for the x86-64 kernel
@@ -20,7 +20,7 @@ kernel/rust/
   elf-check/            host-only tests against the C loader it replaced
   lz4/                  tunix-lz4: the LZ4 block codec
   lz4-check/            host-only tests against the system liblz4
-kernel/subprojects/rust/RECIPE
+subprojects/rust/RECIPE
 ```
 
 `tunix-rust` builds as a static library for `x86_64-unknown-none` and
@@ -31,7 +31,7 @@ plain Rust libraries: two static libraries would each carry their own copy of
 
 ## The ELF parser
 
-`tunix-elf`'s C face is `kernel/include/tunix/elf_plan.h`:
+`tunix-elf`'s C face is `include/tunix/elf_plan.h`:
 
 - `tunix_elf_header_span()` checks the ELF header and says how many bytes of
   headers to read: the program header table, at most 64 KiB, inside the file.
@@ -41,14 +41,14 @@ plain Rust libraries: two static libraries would each carry their own copy of
   Called once with no segment array it reports how many there are.
 - `tunix_elf_interp_valid()` checks the interpreter path read from the file.
 
-`kernel/core/elf.c` reads the headers, asks for the plan, then maps, copies and
+`core/elf.c` reads the headers, asks for the plan, then maps, copies and
 protects exactly what the plan lists and builds the initial stack. It never
 reads a program header itself.
 
 ## The LZ4 codec
 
 `tunix-lz4` implements the LZ4 block format (no frame headers) for inputs up
-to 64 KiB. Its C face is `kernel/include/tunix/lz4.h`:
+to 64 KiB. Its C face is `include/tunix/lz4.h`:
 
 - `tunix_lz4_compress()` takes the caller's 4096-entry hash table, so the
   kernel stack never holds it, and returns the compressed size or 0 when the
@@ -62,7 +62,7 @@ to 64 KiB. Its C face is `kernel/include/tunix/lz4.h`:
 `make fetch` (and so any kernel build) downloads `rustup-init`, checks it
 against the SHA-256 in the recipe, and installs the version named in
 `rust-toolchain.toml` with both kernel targets, `rustfmt` and `clippy` into
-`kernel/build/rust`. Nothing outside the build tree is touched, the system
+`build/rust`. Nothing outside the build tree is touched, the system
 `rustc` is not used, and CI installs the same compiler the same way.
 `RUST_HOME=<dir>` points the build at an existing install, which is how
 `make check` shares one between its three configurations.
@@ -127,7 +127,7 @@ only passes its two aligned constants.
 
 ## Adding a crate
 
-Put it under `kernel/rust/` as an `rlib`, make it `no_std` on
+Put it under `rust/` as an `rlib`, make it `no_std` on
 `target_os = "none"`, give it the same lint list, and expose `extern "C"`
 functions with `#[repr(C)]` types mirrored in a header with `_Static_assert`ed
 sizes. Add it to `tunix-rust`'s dependencies and re-export its FFI module there.

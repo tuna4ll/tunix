@@ -1,4 +1,0 @@
-[D-BUS Service]
-Name=org.freedesktop.login1
-Exec=/usr/bin/sv start elogind
-User=root

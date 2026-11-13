@@ -10,7 +10,7 @@ There is no port that means "power down". The ports are named by the FADT, and
 the *value* to write to them lives in the DSDT as an AML object, so getting a
 machine to switch itself off needs both tables.
 
-`acpi_describe_machine` (`kernel/drivers/acpi/acpi.c`) walks the RSDP to the RSDT or
+`acpi_describe_machine` (`drivers/acpi/acpi.c`) walks the RSDP to the RSDT or
 XSDT and reads two tables from it:
 
 - the **MADT**, which describes the processors and the interrupt controllers.
@@ -72,7 +72,7 @@ The flush is `ext4fs_shutdown` and an ATA cache flush. File writes reach ext4 as
 they happen, so this is metadata and the drive's own cache rather than a
 writeback cache of file contents, and it finishes in milliseconds.
 
-`kernel/core/power.c` holds that sequence rather than the syscall, because the
+`core/power.c` holds that sequence rather than the syscall, because the
 power button's interrupt wants the same thing.
 
 ## The power button
@@ -144,11 +144,3 @@ Once a second each core also reads APERF and MPERF, whose ratio is the speed it
 actually ran at while it was busy. Both show up in
 `/sys/devices/system/cpu/cpuN/cpufreq/scaling_cur_freq`, in the `hwreport`
 boot's `frequency` section, and in `/tunix-thermal.log`.
-
-## Running it
-
-`make run` no longer passes `-no-reboot -no-shutdown`. Those flags made QEMU
-intercept the reset and the power-down, which from inside the guest looked like
-`reboot` exiting the emulator and `poweroff` hanging. Pass
-`QEMU_HALT_ON_RESET=1` to get them back while chasing a fault that resets the
-machine.

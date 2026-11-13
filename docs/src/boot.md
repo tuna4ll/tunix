@@ -9,14 +9,11 @@ that loader had written -- no ISO, no USB stick somebody else prepared, no
 firmware that only speaks EFI. Limine is a boot protocol rather than a program
 to maintain: the kernel declares what it needs and gets it.
 
-The menu is `boot/limine.conf`. Its wallpaper is the desktop's, copied off
-the sysroot onto the EFI system partition. `interface_resolution` is named as
-well as the entries' `resolution`: they are different modes, and left to itself
-the menu comes up at 1024x768 with a 16:9 wallpaper stretched into it.
+The menu is a `limine.conf` on the EFI system partition.
 
 ## The image
 
-`tools/image.sh` builds a GPT disk with two partitions:
+A bootable disk is GPT with two partitions:
 
 | Partition | Contents |
 | --- | --- |
@@ -36,7 +33,7 @@ enters it with the command line from the config.
 
 ## What the kernel asks for
 
-`kernel/arch/x86_64/limine_entry.c` holds the request block. Limine finds it by
+`arch/x86_64/limine_entry.c` holds the request block. Limine finds it by
 scanning the loaded image between two marker values, which is why the requests
 sit in a section of their own that the linker script keeps.
 
@@ -50,7 +47,7 @@ sit in a section of their own that the linker script keeps.
 | RSDP | Where the ACPI tables start |
 | Paging mode | Four levels, on a machine that could do five |
 
-All of it lands in one `struct boot_info` (`kernel/include/tunix/boot.h`) and nothing
+All of it lands in one `struct boot_info` (`include/tunix/boot.h`) and nothing
 below `kmain` knows which loader filled it in.
 
 Two of those need saying twice, because they are what the old bootloader let
@@ -79,7 +76,7 @@ root=/dev/sda2 init=/sbin/init
 
 - `root=` names the block device the filesystem is on, by the name the block
   layer gives it. Partitions are devices of their own here (see
-  `kernel/fs/partition.c`), so `sda2` is a device and the filesystem starts at its
+  `fs/partition.c`), so `sda2` is a device and the filesystem starts at its
   first sector. `root=LABEL=name` picks the ext2/ext3 volume with that label
   instead. When the named device is missing, the kernel rescans USB for ten
   seconds, so a slow stick can still arrive, and then stops with
@@ -87,12 +84,3 @@ root=/dev/sda2 init=/sbin/init
   kernel takes whatever registered first.
 - `init=` names the first program. It defaults to `/sbin/init`; pointing it at
   something else is how a machine that will not finish booting gets debugged.
-
-## Running it
-
-```sh
-make run        # BIOS
-make run-uefi   # UEFI, against OVMF fetched into build/
-```
-
-Both use the same `build/tunix.img`.

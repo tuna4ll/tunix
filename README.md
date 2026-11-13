@@ -1,41 +1,24 @@
 # Tunix
 
-[![ci](https://github.com/tuna4ll/tunix/actions/workflows/ci.yml/badge.svg)](https://github.com/tuna4ll/tunix/actions/workflows/ci.yml)
+A Unix-like kernel for x86_64 and aarch64 with a Linux-compatible system call
+interface, so it runs unmodified Linux userland binaries.
 
-![screenshot](./assets/screenshots/gnome.png)
-
-A Unix-like kernel for x86_64 and aarch64 that runs an unmodified Void Linux userland.
-
-## Build and run
+## Build
 
 ```sh
-make        # kernel and disk image
-make run    # boot it in QEMU
-make test   # run the kernel tests
-make ext4-test  # write ext4 filesystems and check them with e2fsck
-make rust-test  # unit and differential tests of the Rust code
+make               # x86_64 kernel and modules -> build/kernel.elf, build/modules/
+make aarch64-core  # aarch64 kernel -> build/kernel-aarch64-core.img
+make check         # the default, debug-log and boot-timing configurations
+make rust-test     # unit and differential tests of the Rust code
 ```
 
-The desktop is Weston by default. `make DESKTOP=gnome` builds a GNOME image
-instead, and `make DESKTOP=kde` a KDE Plasma one with the SDDM login screen.
+`KASAN=1` and `FRAME_POINTERS=1` build debugging kernels. The first build
+fetches Limine's header, uACPI and the pinned Rust toolchain into `build/`.
 
-`make -C kernel` builds only the kernel and its modules, into `kernel/build/`.
-
-Log in as `root` with the password `tunix`.
-
-## Layout
-
-```
-kernel/       the kernel, with its own GNUmakefile, subprojects/ and rust/
-base-files/   files added to the Void userland
-boot/         Limine boot menus for x86_64 and aarch64
-tools/        image and sysroot builders, hardware report
-testsuites/   kernel boot tests, the ext4 and ACPI tests and a C++ POSIX suite
-utils/        small programs for Tunix images, such as the CI boot init
-ci/           the scripts CI runs, each one runnable locally
-docs/         kernel documentation
-```
+The kernel boots through Limine on BIOS or UEFI and mounts its root from
+`root=` on the command line; see `docs/`.
 
 ## License
 
-MIT
+GPL-3.0. The console font glyphs in `tty/terminal_font.c` are from Terminus
+Font, under the SIL Open Font License 1.1 reproduced at the top of that file.

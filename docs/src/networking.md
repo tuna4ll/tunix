@@ -39,13 +39,13 @@ the used ring and enters the stack where it is safe to do so.
 
 RTL8139 remains the fallback for real hardware and for
 `QEMU_NET="-netdev user,id=net0 -device rtl8139,netdev=net0"`, and it is a
-module (`kernel/modules/x86_64/rtl8139.c`): udev loads it from the card's PCI
+module (`modules/x86_64/rtl8139.c`): udev loads it from the card's PCI
 modalias and it registers itself, so `eth0` exists from the moment a driver
 claims a card rather than from boot. Either driver registers a `struct
 net_adapter` and the stack above them never names one. Its receive path is the
 one below.
 
-`kernel/modules/atl1c.c` drives the Atheros AR8131/AR8132 gigabit controller,
+`modules/atl1c.c` drives the Atheros AR8131/AR8132 gigabit controller,
 which is the wired port on a lot of 2010-era laptops and the reason it exists
 here: it was the first card a Tunix hardware report found with no driver behind
 it. It is polled like the RTL8139 -- `net_poll()` drains it -- with 64 receive
