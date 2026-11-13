@@ -4498,6 +4498,27 @@ void process_prepare_user_return(struct syscall_frame *frame) {
     uint64_t siginfo_address = 0;
     uint64_t context_address = 0;
     if (action->flags & SA_SIGINFO) {
+        /* Linux's rt_sigframe order, which unwinders read from the handler's stack. */
+#if defined(__x86_64__)
+        uint8_t info[SIGNAL_SIGINFO_SIZE];
+        memset(info, 0, sizeof(info));
+        memcpy(info, &taken.info, sizeof(taken.info));
+        area -= SIGNAL_SIGINFO_SIZE;
+        siginfo_address = area;
+        if (copy_to_user(siginfo_address, info, SIGNAL_SIGINFO_SIZE) != 0) {
+            process_exit_from_signal(frame, SIGSEGV);
+            return;
+        }
+        uint8_t context[SIGNAL_CONTEXT_SIZE];
+        memset(context, 0, sizeof(context));
+        fill_user_context(context, frame, resume_mask, &taken);
+        area -= SIGNAL_CONTEXT_SIZE;
+        context_address = area;
+        if (copy_to_user(context_address, context, SIGNAL_CONTEXT_SIZE) != 0) {
+            process_exit_from_signal(frame, SIGSEGV);
+            return;
+        }
+#else
         uint8_t context[SIGNAL_CONTEXT_SIZE];
         memset(context, 0, sizeof(context));
         fill_user_context(context, frame, resume_mask, &taken);
@@ -4516,6 +4537,7 @@ void process_prepare_user_return(struct syscall_frame *frame) {
             process_exit_from_signal(frame, SIGSEGV);
             return;
         }
+#endif
         area &= ~15ULL;
     }
     uint64_t new_rsp;
