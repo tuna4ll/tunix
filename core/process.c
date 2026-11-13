@@ -2699,6 +2699,8 @@ int process_signal_has_handler(int signal_number) {
         !(current->signal_blocked & signal_bit(signal_number));
 }
 
+static void process_exit_from_signal(struct syscall_frame *frame, int signal_number);
+
 int process_fault_from_interrupt(struct interrupt_frame *frame, const struct process_fault *fault) {
     if (!frame || !fault || !arch_interrupt_from_user(frame) || !current ||
         current->state != PROCESS_RUNNING)
@@ -2715,6 +2717,10 @@ int process_fault_from_interrupt(struct interrupt_frame *frame, const struct pro
         : signal_number == SIGFPE               ? "fpe"
                                                 : "signal";
     eventfs_emit_process_fault(current->cred.euid, current->pid, type, current->name);
+
+    /* A fault the process cannot take would re-run forever; kill it, as Linux does. */
+    int fatal = current->in_signal || (current->signal_blocked & signal_bit(signal_number)) ||
+        current->signal_actions[signal_number - 1].handler == SIG_IGN;
 
     {
         SCHED_LOCKED;
@@ -2736,7 +2742,8 @@ int process_fault_from_interrupt(struct interrupt_frame *frame, const struct pro
             }
         }
     }
-    process_prepare_user_return(&resume);
+    if (fatal) process_exit_from_signal(&resume, signal_number);
+    else process_prepare_user_return(&resume);
     if (!current || current->state != PROCESS_RUNNING) return 1;
     current->saved_frame = resume;
     arch_frame_to_interrupt(frame, &resume);
