@@ -4490,6 +4490,10 @@ void process_prepare_user_return(struct syscall_frame *frame) {
     current->signal_waited = 0;
     uint64_t resume_mask = take_resume_mask();
     uint64_t stack_top = SYSCALL_USER_SP(frame);
+#if defined(__x86_64__)
+    /* Leaf functions keep locals in the 128-byte red zone below the interrupted rsp. */
+    stack_top -= 128;
+#endif
     if ((action->flags & SA_ONSTACK) && current->signal_stack_flags != SS_DISABLE &&
         !on_signal_stack(current, SYSCALL_USER_SP(frame))) {
         stack_top = current->signal_stack_pointer + current->signal_stack_size;
