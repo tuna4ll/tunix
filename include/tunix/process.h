@@ -217,7 +217,6 @@ struct process {
     uint64_t signal_queued;
     struct signal_entry signal_slots[SIGRTMIN - 1];
     uint64_t signal_blocked;
-    uint64_t signal_saved_mask;
     uint64_t signal_wait_mask_saved;
     int signal_wait_mask_active;
     uint64_t signal_waited;
@@ -226,9 +225,6 @@ struct process {
     uint8_t group_wait_pending;
     uint8_t syscall_force_restart;
     uint64_t io_recheck_epoch;
-    int in_signal;
-    struct syscall_frame signal_saved_frame;
-    uint64_t signal_context_address;
     struct tunix_sigaction signal_actions[TUNIX_NSIG];
 
     struct process *next;

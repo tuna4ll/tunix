@@ -2719,7 +2719,7 @@ int process_fault_from_interrupt(struct interrupt_frame *frame, const struct pro
     eventfs_emit_process_fault(current->cred.euid, current->pid, type, current->name);
 
     /* A fault the process cannot take would re-run forever; kill it, as Linux does. */
-    int fatal = current->in_signal || (current->signal_blocked & signal_bit(signal_number)) ||
+    int fatal = (current->signal_blocked & signal_bit(signal_number)) ||
         current->signal_actions[signal_number - 1].handler == SIG_IGN;
 
     {
@@ -2779,7 +2779,7 @@ int process_signal_from_syscall(struct syscall_frame *frame, int signal_number, 
 
 static int needs_user_work(struct process *process) {
     return process->group_exit_pending ||
-        (!process->in_signal && next_pending_signal(process) != 0);
+        next_pending_signal(process) != 0;
 }
 
 static void resume_from_idle(struct interrupt_frame *frame) {
@@ -3939,7 +3939,6 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
         if (current->signal_actions[sig].handler != SIG_IGN)
             memset(&current->signal_actions[sig], 0, sizeof(current->signal_actions[sig]));
     }
-    current->in_signal = 0;
     file_table_close_on_exec(current->files);
     posix_timers_release(current->tgid);
 
@@ -4314,20 +4313,22 @@ int64_t process_setsid(void) {
 static void read_user_context(struct syscall_frame *frame, const uint8_t *context);
 
 int process_sigreturn(struct syscall_frame *frame) {
-    if (!current || !frame || !current->in_signal) return -EINVAL;
-    *frame = current->signal_saved_frame;
-    if (current->signal_context_address) {
-        uint8_t context[SIGNAL_CONTEXT_SIZE];
-        if (copy_from_user(context, current->signal_context_address, SIGNAL_CONTEXT_SIZE) == 0) {
-            read_user_context(frame, context);
-            memcpy(&current->signal_saved_mask, context + UCONTEXT_SIGMASK_OFFSET,
-                   sizeof(current->signal_saved_mask));
-        }
+    if (!current || !frame) return -EINVAL;
+    /* The frame lives on the user stack, as on Linux, so handlers can nest. */
+#if defined(__x86_64__)
+    uint64_t context_address = SYSCALL_USER_SP(frame);
+#else
+    uint64_t context_address = SYSCALL_USER_SP(frame) + SIGNAL_SIGINFO_SIZE;
+#endif
+    uint8_t context[SIGNAL_CONTEXT_SIZE];
+    if (copy_from_user(context, context_address, SIGNAL_CONTEXT_SIZE) != 0) {
+        process_exit_from_signal(frame, SIGSEGV);
+        return 0;
     }
-    current->signal_context_address = 0;
-    current->signal_blocked =
-        current->signal_saved_mask & ~(signal_bit(SIGKILL) | signal_bit(SIGSTOP));
-    current->in_signal = 0;
+    read_user_context(frame, context);
+    uint64_t mask;
+    memcpy(&mask, context + UCONTEXT_SIGMASK_OFFSET, sizeof(mask));
+    current->signal_blocked = mask & ~(signal_bit(SIGKILL) | signal_bit(SIGSTOP));
     return 0;
 }
 
@@ -4371,7 +4372,7 @@ void process_swap_signal_mask(uint64_t mask) {
 
 void process_restore_signal_mask(void) {
     if (!current || !current->signal_wait_mask_active) return;
-    if (!current->in_signal && signal_would_act(current, next_pending_signal(current))) return;
+    if (signal_would_act(current, next_pending_signal(current))) return;
     current->signal_blocked = current->signal_wait_mask_saved;
     current->signal_wait_mask_active = 0;
 }
@@ -4393,7 +4394,7 @@ int process_take_signal(uint64_t set, struct signal_info *info) {
 }
 
 int process_signal_interrupts_wait(void) {
-    if (!current || current->in_signal) return 0;
+    if (!current) return 0;
     if (!current->group_exit_pending && !signal_would_act(current, next_pending_signal(current)))
         return 0;
     current->syscall_rewound = 0;
@@ -4434,7 +4435,7 @@ void process_prepare_user_return(struct syscall_frame *frame) {
         process_exit_from_syscall(frame, current->exit_status);
         return;
     }
-    if (current->in_signal || !next_pending_signal(current)) {
+    if (!next_pending_signal(current)) {
         if (current->signal_wait_mask_active && !current->syscall_rewound)
             process_restore_signal_mask();
         return;
@@ -4498,51 +4499,27 @@ void process_prepare_user_return(struct syscall_frame *frame) {
         !on_signal_stack(current, SYSCALL_USER_SP(frame))) {
         stack_top = current->signal_stack_pointer + current->signal_stack_size;
     }
-    uint64_t area = stack_top & ~15ULL;
-    uint64_t siginfo_address = 0;
-    uint64_t context_address = 0;
-    if (action->flags & SA_SIGINFO) {
-        /* Linux's rt_sigframe order, which unwinders read from the handler's stack. */
+    uint8_t info[SIGNAL_SIGINFO_SIZE];
+    memset(info, 0, sizeof(info));
+    memcpy(info, &taken.info, sizeof(taken.info));
+    uint8_t context[SIGNAL_CONTEXT_SIZE];
+    memset(context, 0, sizeof(context));
+    fill_user_context(context, frame, resume_mask, &taken);
+    /* Linux's rt_sigframe, which sigreturn and unwinders find from the stack pointer. */
 #if defined(__x86_64__)
-        uint8_t info[SIGNAL_SIGINFO_SIZE];
-        memset(info, 0, sizeof(info));
-        memcpy(info, &taken.info, sizeof(taken.info));
-        area -= SIGNAL_SIGINFO_SIZE;
-        siginfo_address = area;
-        if (copy_to_user(siginfo_address, info, SIGNAL_SIGINFO_SIZE) != 0) {
-            process_exit_from_signal(frame, SIGSEGV);
-            return;
-        }
-        uint8_t context[SIGNAL_CONTEXT_SIZE];
-        memset(context, 0, sizeof(context));
-        fill_user_context(context, frame, resume_mask, &taken);
-        area -= SIGNAL_CONTEXT_SIZE;
-        context_address = area;
-        if (copy_to_user(context_address, context, SIGNAL_CONTEXT_SIZE) != 0) {
-            process_exit_from_signal(frame, SIGSEGV);
-            return;
-        }
+    /* The restorer sits just below the ucontext, so the handler starts with rsp + 8 aligned. */
+    uint64_t area = (stack_top - 8 - SIGNAL_CONTEXT_SIZE - SIGNAL_SIGINFO_SIZE) & ~15ULL;
+    uint64_t context_address = area;
+    uint64_t siginfo_address = area + SIGNAL_CONTEXT_SIZE;
 #else
-        uint8_t context[SIGNAL_CONTEXT_SIZE];
-        memset(context, 0, sizeof(context));
-        fill_user_context(context, frame, resume_mask, &taken);
-        area -= SIGNAL_CONTEXT_SIZE;
-        context_address = area;
-        if (copy_to_user(context_address, context, SIGNAL_CONTEXT_SIZE) != 0) {
-            process_exit_from_signal(frame, SIGSEGV);
-            return;
-        }
-        uint8_t info[SIGNAL_SIGINFO_SIZE];
-        memset(info, 0, sizeof(info));
-        memcpy(info, &taken.info, sizeof(taken.info));
-        area -= SIGNAL_SIGINFO_SIZE;
-        siginfo_address = area;
-        if (copy_to_user(siginfo_address, info, SIGNAL_SIGINFO_SIZE) != 0) {
-            process_exit_from_signal(frame, SIGSEGV);
-            return;
-        }
+    uint64_t area = (stack_top & ~15ULL) - SIGNAL_CONTEXT_SIZE - SIGNAL_SIGINFO_SIZE;
+    uint64_t siginfo_address = area;
+    uint64_t context_address = area + SIGNAL_SIGINFO_SIZE;
 #endif
-        area &= ~15ULL;
+    if (copy_to_user(siginfo_address, info, SIGNAL_SIGINFO_SIZE) != 0 ||
+        copy_to_user(context_address, context, SIGNAL_CONTEXT_SIZE) != 0) {
+        process_exit_from_signal(frame, SIGSEGV);
+        return;
     }
     uint64_t new_rsp;
     process_memory_enter();
@@ -4552,11 +4529,7 @@ void process_prepare_user_return(struct syscall_frame *frame) {
         process_exit_from_signal(frame, SIGSEGV);
         return;
     }
-    current->signal_saved_frame = *frame;
-    current->signal_context_address = context_address;
-    current->signal_saved_mask = resume_mask;
     current->signal_blocked |= action->mask | bit;
-    current->in_signal = 1;
     arch_signal_enter_handler(frame, new_rsp, action->handler, action->restorer, signal_number,
                               siginfo_address, context_address);
 }
