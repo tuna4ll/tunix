@@ -50,6 +50,7 @@
 
 #define CLD_EXITED    1
 #define CLD_KILLED    2
+#define CLD_TRAPPED   4
 #define CLD_STOPPED   5
 #define CLD_CONTINUED 6
 
@@ -60,6 +61,7 @@
 #define FPE_INTDIV  1
 #define FPE_FLTINV  7
 #define TRAP_BRKPT  1
+#define TRAP_TRACE  2
 
 struct signal_info {
     int32_t signo;

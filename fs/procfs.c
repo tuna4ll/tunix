@@ -825,6 +825,9 @@ static int64_t proc_status_read(struct vfs_node *node, uint64_t offset, size_t s
     text_string(&text, "PPid:\t");
     text_unsigned(&text, process->ppid);
     text_char(&text, '\n');
+    text_string(&text, "TracerPid:\t");
+    text_unsigned(&text, process_ptrace_tracer_pid(process));
+    text_char(&text, '\n');
     text_string(&text, "Uid:\t");
     text_unsigned(&text, process->cred.uid);
     text_char(&text, '\t');

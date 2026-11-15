@@ -30,6 +30,7 @@
 #include <tunix/posix_timer.h>
 #include <tunix/power.h>
 #include <tunix/process.h>
+#include <tunix/ptrace.h>
 #include <tunix/seccomp.h>
 #include <tunix/namespace.h>
 #include <tunix/random.h>
@@ -269,6 +270,7 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136,
 #define SYS_ARCH_PRCTL             158
 #define SYS_PRCTL                  157
 #define SYS_SECCOMP                317
+#define SYS_PTRACE                 101
 #define SYS_UNSHARE                272
 #define SECCOMP_SI_CODE            1
 #define SYS_GETTID                 186
@@ -7838,6 +7840,11 @@ static void syscall_run(struct syscall_frame *frame) {
             (uint64_t)sys_seccomp(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame));
         break;
     case SYS_UNSHARE: SYSCALL_RET(frame) = (uint64_t)namespace_unshare(SYSCALL_ARG0(frame)); break;
+    case SYS_PTRACE:
+        SYSCALL_RET(frame) =
+            (uint64_t)sys_ptrace((int64_t)SYSCALL_ARG0(frame), SYSCALL_PID(SYSCALL_ARG1(frame)),
+                                 SYSCALL_ARG2(frame), SYSCALL_ARG3(frame));
+        break;
     default:
 
         KDEBUG("syscall: ENOSYS pid=%u nr=%u\n", (unsigned)process_current_pid(),

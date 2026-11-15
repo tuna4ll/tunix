@@ -881,6 +881,38 @@ int vmm_copy_to_space(uint64_t cr3_physical, uint64_t destination_user, const vo
     return 0;
 }
 
+int vmm_poke_space(uint64_t cr3_physical, uint64_t destination_user, const void *source,
+                   size_t length) {
+    if (destination_user >= USER_ADDRESS_LIMIT || length > USER_ADDRESS_LIMIT - destination_user)
+        return -1;
+    const uint8_t *in = (const uint8_t *)source;
+    while (length) {
+        size_t chunk = 4096 - (size_t)(destination_user & 0xFFF);
+        if (chunk > length) chunk = length;
+        uint64_t physical;
+        uint64_t flags;
+        if (user_page_translate(cr3_physical, destination_user, 0, &physical, &flags) != 0)
+            return -1;
+        if (flags & (PAGE_WRITE | PAGE_COW)) {
+            if (vmm_copy_to_space(cr3_physical, destination_user, in, chunk) != 0) return -1;
+        } else {
+            uint64_t page = destination_user & ~0xFFFULL;
+            if ((flags & (PAGE_DEVICE | PAGE_SHARED)) ||
+                vmm_protect_page_in(cr3_physical, page, flags | PAGE_COW) != 0 ||
+                vmm_handle_cow_fault(cr3_physical, page, NULL) != 0 ||
+                vmm_translate(cr3_physical, destination_user, &physical, &flags) != 0 ||
+                !physical_direct_range_valid(physical, chunk))
+                return -1;
+            memcpy((void *)(DIRECT_MAP_BASE + physical), in, chunk);
+            if (vmm_protect_page_in(cr3_physical, page, flags & ~PAGE_WRITE) != 0) return -1;
+        }
+        in += chunk;
+        destination_user += chunk;
+        length -= chunk;
+    }
+    return 0;
+}
+
 void vmm_map_page(uint64_t virtual_address, uint64_t physical_address, uint16_t flags) {
     int status = vmm_map_page_in(kernel_cr3_physical, virtual_address, physical_address, flags);
     if (status != 0) panic("VMM: kernel map failed");

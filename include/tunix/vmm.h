@@ -76,6 +76,8 @@ int vmm_copy_from_space(uint64_t cr3_physical, void *destination, uint64_t sourc
                         size_t length);
 int vmm_copy_to_space(uint64_t cr3_physical, uint64_t destination_user, const void *source,
                       size_t length);
+int vmm_poke_space(uint64_t cr3_physical, uint64_t destination_user, const void *source,
+                   size_t length);
 
 void vmm_map_page(uint64_t virtual_address, uint64_t physical_address, uint16_t flags);
 void vmm_unmap_page(uint64_t virtual_address);

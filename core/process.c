@@ -2537,20 +2537,20 @@ void process_set_oom_score_adj(struct process *process, int value) {
 
 #define COMMIT_AHEAD_PAGES 16ULL
 
-static int commit_zero(uint64_t page, uint64_t flags) {
-    if (vmm_translate(current->cr3, page, NULL, NULL) == 0) return 1;
+static int commit_zero(uint64_t cr3, uint64_t page, uint64_t flags) {
+    if (vmm_translate(cr3, page, NULL, NULL) == 0) return 1;
     uint64_t physical = alloc_user_page();
     if (!physical) return 0;
     memset(vmm_phys_to_virt(physical), 0, 4096);
-    if (vmm_map_page_in(current->cr3, page, physical, flags) != 0) {
+    if (vmm_map_page_in(cr3, page, physical, flags) != 0) {
         pmm_free_page((void *)physical);
         return 0;
     }
     return 1;
 }
 
-static int commit_one(struct vm_area *area, uint64_t page) {
-    return commit_zero(page, area->page_flags);
+static int commit_one(uint64_t cr3, struct vm_area *area, uint64_t page) {
+    return commit_zero(cr3, page, area->page_flags);
 }
 
 static uint64_t shared_page_flags(const struct vm_area *area) {
@@ -2560,23 +2560,23 @@ static uint64_t shared_page_flags(const struct vm_area *area) {
     return flags;
 }
 
-static int map_shared_page(uint64_t page, uint64_t physical, uint64_t flags) {
+static int map_shared_page(uint64_t cr3, uint64_t page, uint64_t physical, uint64_t flags) {
     if (pmm_page_ref(physical) != 0) return 0;
-    if (vmm_map_page_in(current->cr3, page, physical, flags) != 0) {
+    if (vmm_map_page_in(cr3, page, physical, flags) != 0) {
         pmm_free_page((void *)physical);
         return 0;
     }
     return 1;
 }
 
-static int commit_file(struct vm_area *area, uint64_t page) {
+static int commit_file(uint64_t cr3, struct vm_area *area, uint64_t page) {
     struct file *file = area->file;
     if (!file || file->kind != FILE_KIND_VFS || !file->node) return 0;
-    if (vmm_translate(current->cr3, page, NULL, NULL) == 0) return 1;
+    if (vmm_translate(cr3, page, NULL, NULL) == 0) return 1;
     struct vfs_node *node = file->node;
     uint64_t index = (page - area->start + area->offset) / 4096ULL;
     if (index >= (node->length + 4095ULL) / 4096ULL)
-        return commit_zero(page, area->page_flags | PAGE_USER | PAGE_PRESENT);
+        return commit_zero(cr3, page, area->page_flags | PAGE_USER | PAGE_PRESENT);
     uint64_t window = index & ~(VFS_READAHEAD_PAGES - 1ULL);
     vfs_prefetch(node, window * 4096ULL, VFS_READAHEAD_PAGES * 4096ULL);
     uint64_t physical = vfs_page_pin(node, index) & ~0xFFFULL;
@@ -2588,23 +2588,23 @@ static int commit_file(struct vm_area *area, uint64_t page) {
     }
     if (!physical) return 0;
     uint64_t flags = shared_page_flags(area);
-    if (vmm_map_page_in(current->cr3, page, physical, flags) != 0) {
+    if (vmm_map_page_in(cr3, page, physical, flags) != 0) {
         pmm_free_page((void *)physical);
         return 0;
     }
     return 1;
 }
 
-static int commit_memfd(struct vm_area *area, uint64_t page) {
+static int commit_memfd(uint64_t cr3, struct vm_area *area, uint64_t page) {
     if (!area->file ||
         (area->file->kind != FILE_KIND_MEMFD && area->file->kind != FILE_KIND_IO_URING))
         return 0;
-    if (vmm_translate(current->cr3, page, NULL, NULL) == 0) return 1;
+    if (vmm_translate(cr3, page, NULL, NULL) == 0) return 1;
     uint64_t index = (page - area->start + area->offset) / 4096ULL;
     if (index * 4096ULL >= memfd_size(area->file->memfd)) return 0;
     uint64_t physical = memfd_page_ensure(area->file->memfd, index);
     if (!physical) return 0;
-    return map_shared_page(page, physical, shared_page_flags(area));
+    return map_shared_page(cr3, page, physical, shared_page_flags(area));
 }
 
 int process_commit_area(uint64_t fault_address) {
@@ -2614,16 +2614,25 @@ int process_commit_area(uint64_t fault_address) {
     int swapped = swap_fault_in(current->cr3, page);
     if (swapped != 0) return swapped > 0;
     struct vm_area *area = process_find_area(page);
-    if (area && (area->kind & VM_MEMFD)) return commit_memfd(area, page);
-    if (area && (area->kind & VM_FILE_PAGES)) return commit_file(area, page);
+    if (area && (area->kind & VM_MEMFD)) return commit_memfd(current->cr3, area, page);
+    if (area && (area->kind & VM_FILE_PAGES)) return commit_file(current->cr3, area, page);
     if (!area || !(area->kind & VM_ANONYMOUS)) return 0;
-    if (!commit_one(area, page)) return 0;
+    if (!commit_one(current->cr3, area, page)) return 0;
 
     uint64_t ahead = page + 4096ULL;
     uint64_t limit = page + COMMIT_AHEAD_PAGES * 4096ULL;
     if (limit > area->end) limit = area->end;
-    while (ahead < limit && commit_one(area, ahead)) ahead += 4096ULL;
+    while (ahead < limit && commit_one(current->cr3, area, ahead)) ahead += 4096ULL;
     return 1;
+}
+
+static int commit_remote(struct process_memory *memory, uint64_t page) {
+    struct vm_area *area = area_at_or_before(memory, page);
+    if (!area || page >= area->end) return 0;
+    if (area->kind & VM_MEMFD) return commit_memfd(memory->cr3, area, page);
+    if (area->kind & VM_FILE_PAGES) return commit_file(memory->cr3, area, page);
+    if (!(area->kind & VM_ANONYMOUS)) return 0;
+    return commit_one(memory->cr3, area, page);
 }
 
 static void areas_free(struct process_memory *memory) {
@@ -2694,6 +2703,7 @@ int process_handle_cow_fault(uint64_t fault_address) {
 
 int process_signal_has_handler(int signal_number) {
     if (!current || signal_number < 1 || signal_number > TUNIX_NSIG) return 0;
+    if (current->ptrace_tracer) return 1;
     uint64_t handler = current->signal_actions[signal_number - 1].handler;
     return handler != SIG_DFL && handler != SIG_IGN &&
         !(current->signal_blocked & signal_bit(signal_number));
@@ -2719,8 +2729,9 @@ int process_fault_from_interrupt(struct interrupt_frame *frame, const struct pro
     eventfs_emit_process_fault(current->cred.euid, current->pid, type, current->name);
 
     /* A fault the process cannot take would re-run forever; kill it, as Linux does. */
-    int fatal = (current->signal_blocked & signal_bit(signal_number)) ||
-        current->signal_actions[signal_number - 1].handler == SIG_IGN;
+    int fatal = !current->ptrace_tracer &&
+        ((current->signal_blocked & signal_bit(signal_number)) ||
+         current->signal_actions[signal_number - 1].handler == SIG_IGN);
 
     {
         SCHED_LOCKED;
@@ -2953,7 +2964,8 @@ static void child_signal_info(struct signal_info *info, const struct process *ch
     info->fields.child.uid = child->cred.uid;
     if (code == CLD_EXITED) info->fields.child.status = child->exit_status & 0xFF;
     else if (code == CLD_KILLED) info->fields.child.status = child->termination_signal & 0x7F;
-    else if (code == CLD_STOPPED) info->fields.child.status = child->stop_signal & 0x7F;
+    else if (code == CLD_STOPPED || code == CLD_TRAPPED)
+        info->fields.child.status = child->stop_signal & 0x7F;
     else info->fields.child.status = SIGCONT;
     info->fields.child.utime = (int64_t)(process_runtime_ns(child) / USER_CLOCK_TICK_NS);
 }
@@ -3062,6 +3074,8 @@ static void notify_children_of_parent_death(struct process *parent) {
 }
 
 static void terminate_sibling_threads(int status);
+static void ptrace_release_tracees(struct process *tracer);
+static void ptrace_notify(struct process *tracee, int code);
 
 static void process_exit_from_signal(struct syscall_frame *frame, int signal_number) {
     if (current && current->pid == 1)
@@ -3117,9 +3131,16 @@ void process_exit_from_syscall(struct syscall_frame *frame, int status) {
         zombie_head = exiting;
         zombie_memory_pending = 1;
     }
+    if (!exiting->is_thread) ptrace_release_tracees(exiting);
     notify_children_of_parent_death(exiting);
-    if (exiting->is_thread) mark_dead(exiting);
-    else notify_parent_of_exit(exiting);
+    if (exiting->ptrace_tracer) {
+        exiting->ptrace_exit_pending = 1;
+        ptrace_notify(exiting, exiting->termination_signal ? CLD_KILLED : CLD_EXITED);
+    } else if (exiting->is_thread) {
+        mark_dead(exiting);
+    } else {
+        notify_parent_of_exit(exiting);
+    }
     KDEBUG("process: pid=%u exited status=%d\n", (unsigned)exiting->pid, status);
 
     if (switch_to_next(frame, exiting) != 0) go_idle();
@@ -3951,6 +3972,10 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
     else vmm_destroy_address_space(old_cr3);
     eventfs_emit_process_exec(current->cred.euid, current->pid, current->name);
     KDEBUG("process: pid=%u exec %s\n", (unsigned)current->pid, path);
+    if (current->ptrace_tracer) {
+        SCHED_LOCKED;
+        signal_one_process(current, SIGTRAP);
+    }
     return 0;
 }
 
@@ -3975,6 +4000,217 @@ int64_t process_pid_to_global(int64_t ns_pid) {
     return target ? (int64_t)target->tgid : INT64_MIN;
 }
 
+static uint64_t tid_seen_by(const struct process *item, const struct process *viewer) {
+    if (viewer && viewer->pid_ns && item->pid_ns == viewer->pid_ns) return item->ns_pid;
+    return item->pid;
+}
+
+static struct process *ptrace_find(uint64_t pid) {
+    if (!current || !current->pid_ns) return process_find(pid);
+    for (uint64_t bucket = 0; bucket < pid_bucket_count; bucket++)
+        for (struct process *item = pid_buckets[bucket]; item; item = item->pid_next)
+            if (item->pid_ns == current->pid_ns && item->ns_pid == pid &&
+                item->state != PROCESS_DEAD)
+                return item;
+    return NULL;
+}
+
+static int ptrace_traced_by(const struct process *item, const struct process *tracer) {
+    return tracer && item->ptrace_tracer && item->ptrace_tracer == tracer->pid;
+}
+
+static void ptrace_notify(struct process *tracee, int code) {
+    struct process *tracer = process_find(tracee->ptrace_tracer);
+    if (!tracer) return;
+    struct signal_info info;
+    child_signal_info(&info, tracee, code);
+    (void)queue_signal(tracer, &info);
+    wake_waiting_parent(tracer);
+}
+
+static void ptrace_wake_locked(struct process *tracee, int signal_number) {
+    if (tracee->state != PROCESS_STOPPED) return;
+    if (signal_number) {
+        struct signal_info info;
+        if (signal_number == tracee->ptrace_siginfo.signo) info = tracee->ptrace_siginfo;
+        else signal_info_init(&info, signal_number, SI_USER);
+        tracee->ptrace_pass_signal = signal_number;
+        (void)queue_signal(tracee, &info);
+    }
+    tracee->ptrace_stop_kind = 0;
+    wake_to_ready(tracee);
+}
+
+static void ptrace_unlink_locked(struct process *tracee) {
+    struct process *tracer = process_find(tracee->ptrace_tracer);
+    if (tracer && tracer->ptrace_tracees) tracer->ptrace_tracees--;
+    tracee->ptrace_tracer = 0;
+    tracee->ptrace_options = 0;
+    tracee->ptrace_pass_signal = 0;
+}
+
+static void ptrace_reap_locked(struct process *tracee, int parent_waits) {
+    ptrace_unlink_locked(tracee);
+    if (!tracee->ptrace_exit_pending) return;
+    tracee->ptrace_exit_pending = 0;
+    if (tracee->is_thread || !parent_waits) mark_dead(tracee);
+    else notify_parent_of_exit(tracee);
+}
+
+static void ptrace_detach_locked(struct process *tracee, int signal_number) {
+    if (tracee->state == PROCESS_ZOMBIE) {
+        ptrace_reap_locked(tracee, 1);
+        return;
+    }
+    int stopped_for_tracer = tracee->ptrace_stop_kind != 0;
+    ptrace_unlink_locked(tracee);
+    if (stopped_for_tracer) ptrace_wake_locked(tracee, signal_number);
+}
+
+static void ptrace_release_tracees(struct process *tracer) {
+    if (!tracer->ptrace_tracees || !queue) return;
+    struct process *item = queue;
+    do {
+        if (ptrace_traced_by(item, tracer) && item->state != PROCESS_DEAD)
+            ptrace_detach_locked(item, 0);
+        item = item->next;
+    } while (item != queue && tracer->ptrace_tracees);
+}
+
+static int tracee_matches(const struct process *item, const struct process *tracer,
+                          int64_t requested) {
+    if (!ptrace_traced_by(item, tracer) || item->state == PROCESS_DEAD) return 0;
+    if (requested > 0) return tid_seen_by(item, current) == (uint64_t)requested;
+    if (requested == -1) return 1;
+    if (requested == 0) return item->pgid == tracer->pgid;
+    return item->pgid == (uint64_t)(-requested);
+}
+
+static int hidden_from_parent(const struct process *item, const struct process *parent) {
+    return item->ptrace_tracer && (item->ptrace_tracer == parent->pid || item->ptrace_exit_pending);
+}
+
+static struct process *ptrace_wait_scan(struct process *tracer, int64_t requested, int *has_child) {
+    if (!tracer->ptrace_tracees || !queue) return NULL;
+    struct process *item = queue;
+    do {
+        if (tracee_matches(item, tracer, requested)) {
+            *has_child = 1;
+            if ((item->state == PROCESS_ZOMBIE && item->ptrace_exit_pending) ||
+                (item->state == PROCESS_STOPPED && !item->stop_reported))
+                return item;
+        }
+        item = item->next;
+    } while (item != queue);
+    return NULL;
+}
+
+static void ptrace_consume(struct process *tracer, struct process *item) {
+    if (item->state == PROCESS_ZOMBIE)
+        ptrace_reap_locked(item, item->is_thread || item->ppid != tracer->pid);
+    else item->stop_reported = 1;
+}
+
+static int ptrace_may_access(const struct process *target) {
+    const struct credentials *mine = &current->cred;
+    const struct credentials *theirs = &target->cred;
+    if (mine->euid == 0) return 1;
+    return target->dumpable && mine->uid == theirs->uid && mine->uid == theirs->euid &&
+        mine->uid == theirs->suid && mine->gid == theirs->gid && mine->gid == theirs->egid &&
+        mine->gid == theirs->sgid;
+}
+
+int process_ptrace_traceme(void) {
+    if (!current) return -ESRCH;
+    SCHED_LOCKED;
+    struct process *tracer = find_parent(group_leader(current));
+    if (current->ptrace_tracer || !tracer) return -EPERM;
+    current->ptrace_tracer = tracer->pid;
+    tracer->ptrace_tracees++;
+    return 0;
+}
+
+int process_ptrace_attach(uint64_t pid, int seize, uint32_t options) {
+    if (!current) return -ESRCH;
+    SCHED_LOCKED;
+    struct process *tracee = ptrace_find(pid);
+    struct process *tracer = group_leader(current);
+    if (!tracee || !process_is_live(tracee) || tracee->is_kthread) return -ESRCH;
+    if (tracee->tgid == current->tgid || tracee->ptrace_tracer || !ptrace_may_access(tracee))
+        return -EPERM;
+    wake_bump();
+    tracee->ptrace_tracer = tracer->pid;
+    tracee->ptrace_options = options;
+    tracer->ptrace_tracees++;
+    if (tracee->state == PROCESS_STOPPED) {
+        tracee->stop_reported = 0;
+        ptrace_notify(tracee, CLD_TRAPPED);
+    } else if (!seize) {
+        struct signal_info info;
+        signal_info_from_current(&info, SIGSTOP, SI_USER);
+        (void)deliver_signal(tracee, &info);
+    }
+    return 0;
+}
+
+struct process *process_ptrace_get(uint64_t pid, int stopped, int *error) {
+    SCHED_LOCKED;
+    struct process *tracee = current ? ptrace_find(pid) : NULL;
+    if (!tracee || !ptrace_traced_by(tracee, group_leader(current)) ||
+        !process_is_live(tracee) || (stopped && tracee->state != PROCESS_STOPPED)) {
+        *error = -ESRCH;
+        return NULL;
+    }
+    tracee->refs++;
+    return tracee;
+}
+
+int process_ptrace_resume(struct process *tracee, int signal_number, int mode) {
+    if (signal_number < 0 || signal_number > TUNIX_NSIG) return -EIO;
+    SCHED_LOCKED;
+    if (!ptrace_traced_by(tracee, group_leader(current)) || !process_is_live(tracee))
+        return -ESRCH;
+    wake_bump();
+    if (mode == 2) {
+        signal_one_process(tracee, SIGKILL);
+        return 0;
+    }
+    if (tracee->state != PROCESS_STOPPED) return -ESRCH;
+    if (mode == 1) ptrace_detach_locked(tracee, signal_number);
+    else ptrace_wake_locked(tracee, signal_number);
+    return 0;
+}
+
+int process_ptrace_access(struct process *tracee, uint64_t address, void *buffer, size_t length,
+                          int write) {
+    struct process_memory *memory = process_memory_get(tracee);
+    if (!memory) return -EIO;
+    int status = 0;
+    uint8_t *bytes = (uint8_t *)buffer;
+    mutex_lock(&memory->lock);
+    while (length && status == 0) {
+        size_t chunk = 4096 - (size_t)(address & 4095ULL);
+        if (chunk > length) chunk = length;
+        if (vmm_translate(memory->cr3, address, NULL, NULL) != 0)
+            (void)commit_remote(memory, address & ~4095ULL);
+        status = write ? vmm_poke_space(memory->cr3, address, bytes, chunk)
+                       : vmm_copy_from_space(memory->cr3, bytes, address, chunk);
+        address += chunk;
+        bytes += chunk;
+        length -= chunk;
+    }
+    mutex_unlock(&memory->lock);
+    process_memory_put(memory);
+    return status ? -EIO : 0;
+}
+
+uint64_t process_ptrace_tracer_pid(const struct process *process) {
+    SCHED_LOCKED;
+    struct process *tracer = process && process->ptrace_tracer
+        ? process_find(process->ptrace_tracer) : NULL;
+    return tracer ? tid_seen_by(tracer, current) : 0;
+}
+
 int64_t process_waitpid_from_syscall(struct syscall_frame *frame, int64_t pid, uint64_t status_user,
                                      int options, uint64_t syscall_number) {
     options &= ~(WNOTHREAD | WALLCHILDREN | WCLONE);
@@ -3990,12 +4226,13 @@ int64_t process_waitpid_from_syscall(struct syscall_frame *frame, int64_t pid, u
         for (struct process *item = parent->children; item && !found; item = item->sibling_next) {
             if (!child_matches(item, parent, pid)) continue;
             has_child = 1;
+            if (hidden_from_parent(item, parent)) continue;
             if (item->state == PROCESS_ZOMBIE) {
                 status = exit_status_word(item);
                 found = (int64_t)pid_seen_by(item, caller);
                 mark_dead(item);
             } else if ((options & WUNTRACED) && item->state == PROCESS_STOPPED &&
-                       !item->stop_reported) {
+                       !item->stop_reported && !item->ptrace_tracer) {
                 status = ((item->stop_signal & 0xFF) << 8) | 0x7F;
                 item->stop_reported = 1;
                 found = (int64_t)pid_seen_by(item, caller);
@@ -4004,6 +4241,13 @@ int64_t process_waitpid_from_syscall(struct syscall_frame *frame, int64_t pid, u
                 item->continued_pending = 0;
                 found = (int64_t)pid_seen_by(item, caller);
             }
+        }
+        struct process *tracee = found ? NULL : ptrace_wait_scan(parent, pid, &has_child);
+        if (tracee) {
+            status = tracee->state == PROCESS_ZOMBIE ? exit_status_word(tracee)
+                                                     : ((tracee->stop_signal & 0xFFFF) << 8) | 0x7F;
+            found = (int64_t)tid_seen_by(tracee, caller);
+            ptrace_consume(parent, tracee);
         }
         if (!found) {
             if (!has_child) return -ECHILD;
@@ -4060,6 +4304,7 @@ int64_t process_waitid_from_syscall(int64_t pid_spec, uint64_t info_user, int op
         for (struct process *item = parent->children; item && !found; item = item->sibling_next) {
             if (!child_matches(item, parent, pid_spec)) continue;
             has_child = 1;
+            if (hidden_from_parent(item, parent)) continue;
             if ((options & WEXITED) && item->state == PROCESS_ZOMBIE) {
                 info.si_signo = SIGCHLD;
                 info.si_pid = (int32_t)item->pid;
@@ -4073,7 +4318,7 @@ int64_t process_waitid_from_syscall(int64_t pid_spec, uint64_t info_user, int op
                 if (!(options & WNOWAIT)) mark_dead(item);
                 found = 1;
             } else if ((options & WSTOPPED) && item->state == PROCESS_STOPPED &&
-                       !item->stop_reported) {
+                       !item->stop_reported && !item->ptrace_tracer) {
                 info.si_signo = SIGCHLD;
                 info.si_pid = (int32_t)item->pid;
                 info.si_code = CLD_STOPPED;
@@ -4088,6 +4333,23 @@ int64_t process_waitid_from_syscall(int64_t pid_spec, uint64_t info_user, int op
                 if (!(options & WNOWAIT)) item->continued_pending = 0;
                 found = 1;
             }
+        }
+        struct process *tracee = found ? NULL : ptrace_wait_scan(parent, pid_spec, &has_child);
+        if (tracee && (tracee->state == PROCESS_ZOMBIE ? (options & WEXITED) : 1)) {
+            info.si_signo = SIGCHLD;
+            info.si_pid = (int32_t)tid_seen_by(tracee, current);
+            if (tracee->state != PROCESS_ZOMBIE) {
+                info.si_code = CLD_TRAPPED;
+                info.si_status = tracee->stop_signal & 0xFF;
+            } else if (tracee->termination_signal) {
+                info.si_code = CLD_KILLED;
+                info.si_status = tracee->termination_signal & 0x7F;
+            } else {
+                info.si_code = CLD_EXITED;
+                info.si_status = tracee->exit_status & 0xFF;
+            }
+            if (!(options & WNOWAIT)) ptrace_consume(parent, tracee);
+            found = 1;
         }
         if (!found) {
             if (!has_child) return -ECHILD;
@@ -4107,7 +4369,8 @@ static int deliver_signal_entry(struct process *target, const struct signal_info
     if (signal_number == 0) return 0;
     eventfs_emit_process_signal(target->cred.euid, target->pid, signal_number);
     if (signal_number == SIGKILL && target->state == PROCESS_STOPPED) wake_to_ready(target);
-    if (signal_number == SIGCONT && target->state == PROCESS_STOPPED) {
+    if (signal_number == SIGCONT && target->state == PROCESS_STOPPED &&
+        !target->ptrace_stop_kind) {
         wake_to_ready(target);
         target->continued_pending = 1;
         target->stop_reported = 0;
@@ -4428,6 +4691,19 @@ static int on_signal_stack(const struct process *process, uint64_t user_rsp) {
     return user_rsp >= base && user_rsp < limit;
 }
 
+static void ptrace_signal_stop(struct syscall_frame *frame, const struct signal_info *info) {
+    SCHED_LOCKED;
+    wake_bump();
+    current->ptrace_siginfo = *info;
+    current->stop_signal = info->signo;
+    current->stop_reported = 0;
+    current->ptrace_stop_kind = PTRACE_STOP_SIGNAL;
+    current->saved_frame = *frame;
+    set_process_state(current, PROCESS_STOPPED);
+    ptrace_notify(current, CLD_TRAPPED);
+    if (switch_to_next(frame, current) != 0) go_idle();
+}
+
 void process_prepare_user_return(struct syscall_frame *frame) {
     if (!current || !frame || current->state != PROCESS_RUNNING) return;
     if (current->group_exit_pending) {
@@ -4448,6 +4724,13 @@ void process_prepare_user_return(struct syscall_frame *frame) {
             dequeue_signal(current, ~current->signal_blocked | signal_bit(SIGKILL), &taken);
     }
     if (!signal_number) return;
+    if (current->ptrace_tracer && signal_number != SIGKILL) {
+        if (current->ptrace_pass_signal != signal_number) {
+            ptrace_signal_stop(frame, &taken.info);
+            return;
+        }
+        current->ptrace_pass_signal = 0;
+    }
     uint64_t bit = signal_bit(signal_number);
     struct tunix_sigaction *action = &current->signal_actions[signal_number - 1];
 

@@ -1,6 +1,7 @@
 #ifndef TUNIX_PROCESS_H
 #define TUNIX_PROCESS_H
 
+#include <stddef.h>
 #include <stdint.h>
 #include <tunix/lock.h>
 #include <tunix/defer.h>
@@ -283,6 +284,13 @@ struct process {
     uint64_t ns_pid;
     uint64_t ns_tgid;
     struct mount_namespace *mnt_ns;
+    uint64_t ptrace_tracer;
+    uint32_t ptrace_tracees;
+    uint32_t ptrace_options;
+    uint8_t ptrace_stop_kind;
+    uint8_t ptrace_exit_pending;
+    int ptrace_pass_signal;
+    struct signal_info ptrace_siginfo;
 };
 
 #define PROCESS_RESTARTED INT64_MIN
@@ -445,6 +453,16 @@ int64_t process_futex_unlock_pi(uint64_t address, int shared);
 int64_t process_futex_wake_op(uint64_t address, int wake, uint64_t second, int wake_second,
                               uint32_t encoded, int shared);
 int process_is_live(const struct process *process);
+
+#define PTRACE_STOP_SIGNAL 1
+
+int process_ptrace_traceme(void);
+int process_ptrace_attach(uint64_t pid, int seize, uint32_t options);
+struct process *process_ptrace_get(uint64_t pid, int stopped, int *error);
+int process_ptrace_resume(struct process *tracee, int signal_number, int mode);
+int process_ptrace_access(struct process *tracee, uint64_t address, void *buffer, size_t length,
+                          int write);
+uint64_t process_ptrace_tracer_pid(const struct process *process);
 void process_for_each(int (*visit)(struct process *process, void *context), void *context);
 void process_kernel_yield(void);
 #define OOM_SCORE_ADJ_MIN (-1000)
