@@ -2719,6 +2719,7 @@ int process_fault_from_interrupt(struct interrupt_frame *frame, const struct pro
     int signal_number = fault->signal;
 
     process_account_runtime();
+    current->ptrace_syscall_nr = -1;
     arch_frame_from_interrupt(&current->saved_frame, frame);
     struct syscall_frame resume = current->saved_frame;
 
@@ -2790,8 +2791,8 @@ int process_signal_from_syscall(struct syscall_frame *frame, int signal_number, 
 }
 
 static int needs_user_work(struct process *process) {
-    return process->group_exit_pending ||
-        next_pending_signal(process) != 0;
+    return process->group_exit_pending || next_pending_signal(process) != 0 ||
+        (process->ptrace_in_syscall && !process->syscall_rewound);
 }
 
 static void resume_from_idle(struct interrupt_frame *frame) {
@@ -4029,9 +4030,21 @@ static void ptrace_notify(struct process *tracee, int code) {
     wake_waiting_parent(tracer);
 }
 
+static struct syscall_frame *ptrace_frame_of(struct process *tracee) {
+    return tracee->ptrace_frame ? tracee->ptrace_frame : &tracee->saved_frame;
+}
+
+static void ptrace_set_step(struct process *tracee, int step) {
+    if (!step && !tracee->ptrace_step) return;
+    tracee->ptrace_step = (uint8_t)step;
+    arch_frame_single_step(ptrace_frame_of(tracee), step);
+}
+
 static void ptrace_wake_locked(struct process *tracee, int signal_number) {
     if (tracee->state != PROCESS_STOPPED) return;
-    if (signal_number) {
+    if (tracee->ptrace_stop_kind == PTRACE_STOP_KERNEL) {
+        tracee->ptrace_resume_signal = signal_number;
+    } else if (signal_number) {
         struct signal_info info;
         if (signal_number == tracee->ptrace_siginfo.signo) info = tracee->ptrace_siginfo;
         else signal_info_init(&info, signal_number, SI_USER);
@@ -4048,6 +4061,9 @@ static void ptrace_unlink_locked(struct process *tracee) {
     tracee->ptrace_tracer = 0;
     tracee->ptrace_options = 0;
     tracee->ptrace_pass_signal = 0;
+    tracee->ptrace_syscall_trace = 0;
+    tracee->ptrace_in_syscall = 0;
+    ptrace_set_step(tracee, 0);
 }
 
 static void ptrace_reap_locked(struct process *tracee, int parent_waits) {
@@ -4172,13 +4188,18 @@ int process_ptrace_resume(struct process *tracee, int signal_number, int mode) {
     if (!ptrace_traced_by(tracee, group_leader(current)) || !process_is_live(tracee))
         return -ESRCH;
     wake_bump();
-    if (mode == 2) {
+    if (mode == PTRACE_RESUME_KILL) {
         signal_one_process(tracee, SIGKILL);
         return 0;
     }
     if (tracee->state != PROCESS_STOPPED) return -ESRCH;
-    if (mode == 1) ptrace_detach_locked(tracee, signal_number);
-    else ptrace_wake_locked(tracee, signal_number);
+    if (mode == PTRACE_RESUME_DETACH) {
+        ptrace_detach_locked(tracee, signal_number);
+        return 0;
+    }
+    tracee->ptrace_syscall_trace = mode == PTRACE_RESUME_SYSCALL;
+    ptrace_set_step(tracee, mode == PTRACE_RESUME_STEP);
+    ptrace_wake_locked(tracee, signal_number);
     return 0;
 }
 
@@ -4211,7 +4232,7 @@ int process_ptrace_regs(struct process *tracee, unsigned type, void *buffer, siz
     size_t length = sizeof(full);
     SCHED_LOCKED;
     if (tracee->state != PROCESS_STOPPED) return -ESRCH;
-    struct syscall_frame *frame = &tracee->saved_frame;
+    struct syscall_frame *frame = ptrace_frame_of(tracee);
     int status = arch_ptrace_get_regs(tracee, frame, fpu_area(tracee), type, full, &length);
     if (status != 0) return status;
     if (*size > length) *size = length;
@@ -4229,6 +4250,56 @@ int process_ptrace_siginfo(struct process *tracee, struct signal_info *info, int
     if (write) tracee->ptrace_siginfo = *info;
     else *info = tracee->ptrace_siginfo;
     return 0;
+}
+
+int process_ptrace_syscall_status(const struct process *process) {
+    return SIGTRAP | ((process->ptrace_options & PTRACE_O_TRACESYSGOOD) ? 0x80 : 0);
+}
+
+static int ptrace_fatal_pending(const struct process *self) {
+    return self->group_exit_pending || (self->signal_pending & signal_bit(SIGKILL));
+}
+
+int process_ptrace_stop(struct syscall_frame *frame, int status) {
+    struct process *self = current;
+    if (!self || !self->ptrace_tracer || !process_may_sleep()) return 0;
+    {
+        SCHED_LOCKED;
+        if (ptrace_fatal_pending(self)) return -1;
+        wake_bump();
+        self->ptrace_frame = frame;
+        signal_info_init(&self->ptrace_siginfo, SIGTRAP, status);
+        self->ptrace_siginfo.fields.sender.pid = (int32_t)tid_seen_by(self, self);
+        self->stop_signal = status;
+        self->stop_reported = 0;
+        self->ptrace_stop_kind = PTRACE_STOP_KERNEL;
+        set_process_state(self, PROCESS_STOPPED);
+        ptrace_notify(self, CLD_TRAPPED);
+        switch_away(self, next_runnable(self));
+    }
+    after_switch();
+    SCHED_LOCKED;
+    self->ptrace_frame = NULL;
+    self->ptrace_stop_kind = 0;
+    int signal_number = self->ptrace_resume_signal;
+    self->ptrace_resume_signal = 0;
+    if (signal_number && self->ptrace_tracer) {
+        struct signal_info info;
+        signal_info_init(&info, signal_number, SI_USER);
+        self->ptrace_pass_signal = signal_number;
+        (void)queue_signal(self, &info);
+    }
+    return ptrace_fatal_pending(self) ? -1 : 0;
+}
+
+static void ptrace_syscall_exit(struct syscall_frame *frame) {
+    current->ptrace_in_syscall = 0;
+    if (!current->ptrace_tracer || !current->ptrace_syscall_trace) return;
+    int restarting = current->syscall_rewound;
+    uint64_t kept = SYSCALL_RET(frame);
+    if (restarting) SYSCALL_RET(frame) = (uint64_t)-(int64_t)ERESTARTSYS;
+    (void)process_ptrace_stop(frame, process_ptrace_syscall_status(current));
+    if (restarting) SYSCALL_RET(frame) = kept;
 }
 
 uint64_t process_ptrace_tracer_pid(const struct process *process) {
@@ -4733,6 +4804,9 @@ static void ptrace_signal_stop(struct syscall_frame *frame, const struct signal_
 
 void process_prepare_user_return(struct syscall_frame *frame) {
     if (!current || !frame || current->state != PROCESS_RUNNING) return;
+    if (current->ptrace_in_syscall &&
+        (!current->syscall_rewound || next_pending_signal(current) || current->group_exit_pending))
+        ptrace_syscall_exit(frame);
     if (current->group_exit_pending) {
         current->group_exit_pending = 0;
         process_exit_from_syscall(frame, current->exit_status);

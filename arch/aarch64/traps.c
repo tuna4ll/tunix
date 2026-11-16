@@ -21,6 +21,7 @@
 #define EC_DABT_LOW     0x24U
 #define EC_SP_ALIGN     0x26U
 #define EC_FP_EXCEPTION 0x2CU
+#define EC_SOFTSTEP_LOW 0x32U
 #define EC_BRK64        0x3CU
 
 #define FSC_TYPE_MASK   0x3CU
@@ -54,7 +55,8 @@ static int user_fault_signal(uint32_t class) {
     case EC_PC_ALIGN:
     case EC_SP_ALIGN:     return SIGBUS;
     case EC_FP_EXCEPTION: return SIGFPE;
-    case EC_BRK64:        return SIGTRAP;
+    case EC_BRK64:
+    case EC_SOFTSTEP_LOW: return SIGTRAP;
     case EC_UNKNOWN:
     case EC_SYS64:        return SIGILL;
     default:              return SIGSEGV;
@@ -96,6 +98,10 @@ static void user_fault(struct interrupt_frame *frame, uint64_t esr, uint64_t far
         fault.code = TRAP_BRKPT;
         fault.address = frame->elr;
         break;
+    case EC_SOFTSTEP_LOW:
+        fault.code = TRAP_TRACE;
+        fault.address = frame->elr;
+        break;
     case EC_UNKNOWN:
     case EC_SYS64:
         fault.code = ILL_ILLOPN;
@@ -104,8 +110,9 @@ static void user_fault(struct interrupt_frame *frame, uint64_t esr, uint64_t far
     default: break;
     }
     struct process *faulted = process_current();
-    kprintf("fault: %s[%d] class %x at %p addr %p (esr %p)\n", faulted ? faulted->name : "?",
-            (int)process_current_pid(), class, (void *)frame->elr, (void *)far, (void *)esr);
+    if (fault.signal != SIGTRAP)
+        kprintf("fault: %s[%d] class %x at %p addr %p (esr %p)\n", faulted ? faulted->name : "?",
+                (int)process_current_pid(), class, (void *)frame->elr, (void *)far, (void *)esr);
     if (process_fault_from_interrupt(frame, &fault)) return;
     panic("unhandled user exception");
 }

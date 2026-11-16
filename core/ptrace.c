@@ -96,9 +96,15 @@ static int64_t request_on(struct process *tracee, int64_t request, uint64_t addr
     case PTRACE_PEEKUSER:  return user_area(tracee, address, data, 0);
     case PTRACE_POKEUSER:  return user_area(tracee, address, data, 1);
 #endif
-    case PTRACE_CONT:     return process_ptrace_resume(tracee, (int)data, 0);
-    case PTRACE_DETACH:   return process_ptrace_resume(tracee, (int)data, 1);
-    case PTRACE_KILL:     return process_ptrace_resume(tracee, 0, 2);
+    case PTRACE_CONT:       return process_ptrace_resume(tracee, (int)data, PTRACE_RESUME_CONT);
+    case PTRACE_SYSCALL:    return process_ptrace_resume(tracee, (int)data, PTRACE_RESUME_SYSCALL);
+    case PTRACE_SINGLESTEP: return process_ptrace_resume(tracee, (int)data, PTRACE_RESUME_STEP);
+    case PTRACE_DETACH:     return process_ptrace_resume(tracee, (int)data, PTRACE_RESUME_DETACH);
+    case PTRACE_KILL:       return process_ptrace_resume(tracee, 0, PTRACE_RESUME_KILL);
+    case PTRACE_SETOPTIONS:
+        if (data & ~(uint64_t)PTRACE_O_MASK) return -EINVAL;
+        tracee->ptrace_options = (uint32_t)data;
+        return 0;
     default:              return -EIO;
     }
 }
@@ -107,7 +113,11 @@ int64_t sys_ptrace(int64_t request, int64_t pid, uint64_t address, uint64_t data
     if (request == PTRACE_TRACEME) return process_ptrace_traceme();
     if (pid <= 0) return -ESRCH;
     if (request == PTRACE_ATTACH) return process_ptrace_attach((uint64_t)pid, 0, 0);
-    if (request == PTRACE_SEIZE) return address ? -EIO : process_ptrace_attach((uint64_t)pid, 1, 0);
+    if (request == PTRACE_SEIZE) {
+        if (address) return -EIO;
+        if (data & ~(uint64_t)PTRACE_O_MASK) return -EINVAL;
+        return process_ptrace_attach((uint64_t)pid, 1, (uint32_t)data);
+    }
     int error = -ESRCH;
     struct process *tracee = process_ptrace_get((uint64_t)pid, request != PTRACE_KILL, &error);
     if (!tracee) return error;

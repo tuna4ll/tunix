@@ -3,6 +3,7 @@
 #include <tunix/defer.h>
 #include <tunix/kentry.h>
 #include <tunix/process.h>
+#include <tunix/process_arch.h>
 #include <tunix/syscall.h>
 #include <tunix/mutex.h>
 
@@ -36,8 +37,14 @@ void kernel_leave_from_isr(void) {
     defer_poll();
 }
 
+static void user_return_debug(void) {
+    struct process *self = process_current();
+    arch_user_single_step(self && self->ptrace_step);
+}
+
 void kernel_exit(void) {
     process_finish_switch();
+    user_return_debug();
     syscall_release_orphans();
     mutex_check_released("the kernel");
     process_io_recheck();
@@ -47,6 +54,7 @@ void kernel_exit(void) {
 
 void kernel_exit_from_isr(void) {
     process_finish_switch();
+    user_return_debug();
     syscall_release_orphans();
     kernel_leave_from_isr();
 }

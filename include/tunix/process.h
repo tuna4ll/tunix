@@ -289,7 +289,13 @@ struct process {
     uint32_t ptrace_options;
     uint8_t ptrace_stop_kind;
     uint8_t ptrace_exit_pending;
+    uint8_t ptrace_in_syscall;
+    uint8_t ptrace_syscall_trace;
+    uint8_t ptrace_step;
     int ptrace_pass_signal;
+    int ptrace_resume_signal;
+    int64_t ptrace_syscall_nr;
+    struct syscall_frame *ptrace_frame;
     struct signal_info ptrace_siginfo;
 };
 
@@ -455,6 +461,12 @@ int64_t process_futex_wake_op(uint64_t address, int wake, uint64_t second, int w
 int process_is_live(const struct process *process);
 
 #define PTRACE_STOP_SIGNAL 1
+#define PTRACE_STOP_KERNEL 2
+#define PTRACE_RESUME_CONT    0
+#define PTRACE_RESUME_DETACH  1
+#define PTRACE_RESUME_KILL    2
+#define PTRACE_RESUME_SYSCALL 3
+#define PTRACE_RESUME_STEP    4
 
 int process_ptrace_traceme(void);
 int process_ptrace_attach(uint64_t pid, int seize, uint32_t options);
@@ -466,6 +478,8 @@ uint64_t process_ptrace_tracer_pid(const struct process *process);
 int process_ptrace_regs(struct process *tracee, unsigned type, void *buffer, size_t *size,
                         int write);
 int process_ptrace_siginfo(struct process *tracee, struct signal_info *info, int write);
+int process_ptrace_stop(struct syscall_frame *frame, int status);
+int process_ptrace_syscall_status(const struct process *process);
 void process_for_each(int (*visit)(struct process *process, void *context), void *context);
 void process_kernel_yield(void);
 #define OOM_SCORE_ADJ_MIN (-1000)

@@ -65,7 +65,7 @@ static struct process_fault user_fault(const struct interrupt_frame *regs, uint6
     case 1:
     case 3:
         fault.signal = SIGTRAP;
-        fault.code = regs->int_no == 3 ? SI_KERNEL : TRAP_BRKPT;
+        fault.code = regs->int_no == 3 ? SI_KERNEL : TRAP_TRACE;
         break;
     case 6:
         fault.signal = SIGILL;

@@ -5,6 +5,7 @@
 
 #define SYSCALL_NR(frame)              ((frame)->rax)
 #define SYSCALL_NATIVE_NR(frame)       ((frame)->rax)
+#define SYSCALL_FROM_NATIVE(number)    (number)
 #define SYSCALL_RET(frame)             ((frame)->rax)
 #define SYSCALL_ARG0(frame)            ((frame)->rdi)
 #define SYSCALL_ARG1(frame)            ((frame)->rsi)
@@ -28,6 +29,8 @@
 
 #define SYSCALL_NR(frame)              ((frame)->reserved[0])
 #define SYSCALL_NATIVE_NR(frame)       ((frame)->x[8])
+#define SYSCALL_FROM_NATIVE(number)    aarch64_syscall_number(number)
+unsigned long aarch64_syscall_number(unsigned long generic);
 #define SYSCALL_RET(frame)             ((frame)->x[0])
 #define SYSCALL_ARG0(frame)            ((frame)->x[0])
 #define SYSCALL_ARG1(frame)            ((frame)->x[1])

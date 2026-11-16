@@ -90,6 +90,13 @@ static inline void arch_frame_to_interrupt(struct interrupt_frame *destination,
     destination->ss = 0x1b;
 }
 
+static inline void arch_frame_single_step(struct syscall_frame *frame, int step) {
+    if (step) frame->user_rflags |= 0x100ULL;
+    else frame->user_rflags &= ~0x100ULL;
+}
+
+static inline void arch_user_single_step(int step) { (void)step; }
+
 static inline void arch_load_thread_pointers(uint64_t fs_base, uint64_t gs_base) {
     arch_wrmsr(IA32_FS_BASE, fs_base);
     arch_wrmsr(IA32_KERNEL_GS_BASE, gs_base);
@@ -180,6 +187,7 @@ static inline void arch_signal_enter_handler(struct syscall_frame *frame, uint64
     frame->rsi = info;
     frame->rdx = context;
     frame->rax = 0;
+    frame->user_rflags &= ~(0x100ULL | 0x400ULL | 0x10000ULL);
 }
 
 #elif defined(__aarch64__)
@@ -193,6 +201,7 @@ static inline void arch_sanitize_sigaction(struct tunix_sigaction *action) {
     if (!(action->flags & SA_RESTORER)) action->restorer = 0;
 }
 #define ARCH_SPSR_USER_FLAGS   0xF0000000ULL
+#define ARCH_SPSR_SS           (1ULL << 21)
 
 #define SIGCONTEXT_REGS_OFFSET   8U
 #define SIGCONTEXT_SP_OFFSET     256U
@@ -222,8 +231,21 @@ static inline void arch_frame_to_interrupt(struct interrupt_frame *destination,
                                            const struct syscall_frame *source) {
     for (unsigned index = 0; index < 31U; index++) destination->x[index] = source->x[index];
     destination->elr = source->elr;
-    destination->spsr = source->spsr & ARCH_SPSR_USER_FLAGS;
+    destination->spsr = source->spsr & (ARCH_SPSR_USER_FLAGS | ARCH_SPSR_SS);
     destination->sp_el0 = source->sp_el0;
+}
+
+static inline void arch_frame_single_step(struct syscall_frame *frame, int step) {
+    if (step) frame->spsr |= ARCH_SPSR_SS;
+    else frame->spsr &= ~ARCH_SPSR_SS;
+}
+
+static inline void arch_user_single_step(int step) {
+    uint64_t mdscr;
+    __asm__ volatile("mrs %0, mdscr_el1" : "=r"(mdscr));
+    uint64_t wanted = step ? mdscr | 1ULL : mdscr & ~1ULL;
+    if (wanted == mdscr) return;
+    __asm__ volatile("msr mdscr_el1, %0\n isb" : : "r"(wanted));
 }
 
 static inline void arch_load_thread_pointers(uint64_t fs_base, uint64_t gs_base) {

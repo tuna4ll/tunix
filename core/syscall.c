@@ -842,7 +842,7 @@ void syscall_init(void) {
     wrmsr(0xC0000080, efer);
     wrmsr(0xC0000081, ((uint64_t)0x10 << 48) | ((uint64_t)0x08 << 32));
     wrmsr(0xC0000082, (uint64_t)syscall_entry);
-    wrmsr(0xC0000084, 0x200ULL | 0x400ULL | 0x40000ULL);
+    wrmsr(0xC0000084, 0x100ULL | 0x200ULL | 0x400ULL | 0x40000ULL);
 }
 
 #else
@@ -6224,6 +6224,18 @@ static int64_t sys_pidfd_send_signal(int fd, int signal_number, uint64_t user_in
     return process_send_signal_info((int64_t)file->pidfd_pid, &info);
 }
 
+static int ptrace_syscall_entry(struct process *caller, struct syscall_frame *frame,
+                                uint64_t *number) {
+#if defined(__x86_64__)
+    SYSCALL_RET(frame) = (uint64_t)-(int64_t)ENOSYS;
+#endif
+    if (process_ptrace_stop(frame, process_ptrace_syscall_status(caller)) != 0) return -1;
+    if (caller->ptrace_syscall_nr < 0) return -1;
+    *number = SYSCALL_FROM_NATIVE((uint64_t)caller->ptrace_syscall_nr);
+    SYSCALL_NR(frame) = *number;
+    return 0;
+}
+
 static void syscall_run(struct syscall_frame *frame) {
     if (!frame) return;
     process_reap_deferred();
@@ -6239,6 +6251,15 @@ static void syscall_run(struct syscall_frame *frame) {
     if (caller && caller->io_wait_active && caller->io_wait_syscall != syscall_number)
         clear_io_wait(caller);
     int skip_signal_delivery = 0;
+
+    if (caller && caller->ptrace_tracer) {
+        caller->ptrace_syscall_nr = (int64_t)SYSCALL_NATIVE_NR(frame);
+        if (caller->ptrace_syscall_trace && !caller->ptrace_in_syscall) {
+            caller->ptrace_in_syscall = 1;
+            if (ptrace_syscall_entry(caller, frame, &syscall_number) != 0) goto finished;
+            first_argument = SYSCALL_ARG0(frame);
+        }
+    }
 
     if (caller && seccomp_active(caller)) {
         uint32_t action = seccomp_decide(frame, SYSCALL_NATIVE_NR(frame));
@@ -7853,6 +7874,7 @@ static void syscall_run(struct syscall_frame *frame) {
         break;
     }
 
+finished:
     if (caller && caller == process_current() &&
         (int64_t)SYSCALL_RET(frame) == -(int64_t)ERESTARTSYS) {
         SYSCALL_RET(frame) = first_argument;

@@ -38,6 +38,12 @@ int arch_ptrace_get_regs(const struct process *tracee, const struct syscall_fram
         *size = 8;
         return 0;
     }
+    if (type == NT_ARM_SYSTEM_CALL) {
+        int32_t number = (int32_t)tracee->ptrace_syscall_nr;
+        memcpy(out, &number, sizeof(number));
+        *size = sizeof(number);
+        return 0;
+    }
     return -EINVAL;
 }
 
@@ -66,6 +72,12 @@ int arch_ptrace_set_regs(struct process *tracee, struct syscall_frame *frame, ui
     }
     if (type == NT_ARM_TLS) {
         memcpy(&tracee->fs_base, in, 8);
+        return 0;
+    }
+    if (type == NT_ARM_SYSTEM_CALL) {
+        int32_t number;
+        memcpy(&number, in, sizeof(number));
+        tracee->ptrace_syscall_nr = number;
         return 0;
     }
     return -EINVAL;

@@ -40,7 +40,7 @@ int arch_ptrace_get_regs(const struct process *tracee, const struct syscall_fram
     regs[REG_RDX] = frame->rdx;
     regs[REG_RSI] = frame->rsi;
     regs[REG_RDI] = frame->rdi;
-    regs[REG_ORIG_RAX] = UINT64_MAX;
+    regs[REG_ORIG_RAX] = (uint64_t)tracee->ptrace_syscall_nr;
     regs[REG_RIP] = frame->user_rip;
     regs[REG_CS] = 0x23;
     regs[REG_EFLAGS] = frame->user_rflags;
@@ -94,5 +94,6 @@ int arch_ptrace_set_regs(struct process *tracee, struct syscall_frame *frame, ui
     frame->user_rsp = regs[REG_RSP];
     tracee->fs_base = regs[REG_FS_BASE];
     tracee->gs_base = regs[REG_GS_BASE];
+    tracee->ptrace_syscall_nr = (int64_t)regs[REG_ORIG_RAX];
     return 0;
 }

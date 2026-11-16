@@ -13,7 +13,9 @@
 
 void arch_early_init(void) { serial_init(); }
 
-void arch_cpu_init(void) {}
+void arch_cpu_init(void) {
+    __asm__ volatile("msr oslar_el1, xzr\n msr osdlr_el1, xzr\n isb");
+}
 
 void arch_route_legacy_interrupts(void) {}
 

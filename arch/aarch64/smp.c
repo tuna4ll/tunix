@@ -3,6 +3,7 @@
 #include <tunix/boot.h>
 #include <tunix/cpu.h>
 #include <tunix/percpu.h>
+#include <tunix/platform.h>
 #include <tunix/process.h>
 #include <tunix/smp.h>
 #include <tunix/time.h>
@@ -94,6 +95,7 @@ void aarch64_secondary_start(uint64_t index) {
     unsigned cpu = (unsigned)index;
     percpu_activate(cpu);
     time_mark_processor(cpu);
+    arch_cpu_init();
     process_enable_extended_fpu();
     arch_note_cpu_features();
     aarch64_enable_pan();
