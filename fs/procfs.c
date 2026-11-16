@@ -1059,15 +1059,27 @@ static int64_t proc_pid_mem_read(struct vfs_node *node, uint64_t offset, size_t 
     if (!process) return -3;
     const struct credentials *reader = cred_current();
     if (reader && reader->euid != 0 && reader->euid != process->cred.uid) return -13;
-    MEMORY_REF memory = process_memory_get(process);
-    if (!memory) return 0;
     if (offset >= USER_ADDRESS_LIMIT) return -5;
     if (size > USER_ADDRESS_LIMIT - offset) size = (size_t)(USER_ADDRESS_LIMIT - offset);
     if (size > 65536) size = 65536;
-    mutex_lock(&memory->lock);
-    int status = vmm_copy_from_space(memory->cr3, output, offset, size);
-    mutex_unlock(&memory->lock);
-    return status == 0 ? (int64_t)size : -5;
+    /* Through ptrace's path, which faults in pages the process has not touched yet. */
+    return process_ptrace_access(process, offset, output, size, 0) == 0 ? (int64_t)size : -5;
+}
+
+/* Debuggers write breakpoints here; like PTRACE_POKEDATA it reaches read-only text, copy on write. */
+static int64_t proc_pid_mem_write(struct vfs_node *node, uint64_t offset, size_t size,
+                                  const void *input) {
+    PROCESS_REF process = process_get(node_pid(node));
+    if (!process) return -3;
+    const struct credentials *writer = cred_current();
+    struct process *self = process_current();
+    if (writer && writer->euid != 0 && !(self && process->ptrace_tracer == self->tgid))
+        return -13;
+    if (offset >= USER_ADDRESS_LIMIT) return -5;
+    if (size > USER_ADDRESS_LIMIT - offset) size = (size_t)(USER_ADDRESS_LIMIT - offset);
+    if (size > 65536) size = 65536;
+    return process_ptrace_access(process, offset, (void *)input, size, 1) == 0 ? (int64_t)size
+                                                                               : -5;
 }
 
 static int64_t proc_pid_syscall_read(struct vfs_node *node, uint64_t offset, size_t size,
@@ -1111,6 +1123,23 @@ static int64_t proc_cmdline_read(struct vfs_node *node, uint64_t offset, size_t 
     if (size > available) size = (size_t)available;
     mutex_lock(&memory->lock);
     int status = vmm_copy_from_space(memory->cr3, output, process->arg_start + offset, size);
+    mutex_unlock(&memory->lock);
+    return status == 0 ? (int64_t)size : 0;
+}
+
+static int64_t proc_auxv_read(struct vfs_node *node, uint64_t offset, size_t size, void *output) {
+    PROCESS_REF process = process_get(node_pid(node));
+    if (!process) return -3;
+    const struct credentials *reader = cred_current();
+    if (reader && reader->euid != 0 && reader->euid != process->cred.uid) return -13;
+    MEMORY_REF memory = process_memory_get(process);
+    if (!memory || process->auxv_end <= process->auxv_start ||
+        offset >= process->auxv_end - process->auxv_start)
+        return 0;
+    uint64_t available = process->auxv_end - process->auxv_start - offset;
+    if (size > available) size = (size_t)available;
+    mutex_lock(&memory->lock);
+    int status = vmm_copy_from_space(memory->cr3, output, process->auxv_start + offset, size);
     mutex_unlock(&memory->lock);
     return status == 0 ? (int64_t)size : 0;
 }
@@ -1726,6 +1755,14 @@ static void populate_process_files(struct vfs_node *directory, uint64_t pid) {
         virtual_file(directory, "mountinfo", proc_mountinfo_read, pid);
     if (!vfs_find_child(directory, "mounts"))
         virtual_file(directory, "mounts", proc_mounts_read, pid);
+    if (!vfs_find_child(directory, "auxv")) {
+        struct vfs_node *auxv = virtual_file(directory, "auxv", proc_auxv_read, pid);
+        if (auxv) {
+            auxv->mode = 0400;
+            auxv->uid = directory->uid;
+            auxv->gid = directory->gid;
+        }
+    }
     if (!vfs_find_child(directory, "environ")) {
         struct vfs_node *environ = virtual_file(directory, "environ", proc_environ_read, pid);
         if (environ) {
@@ -1749,6 +1786,7 @@ static void populate_process_files(struct vfs_node *directory, uint64_t pid) {
     if (!vfs_find_child(directory, "mem")) {
         struct vfs_node *mem = virtual_file(directory, "mem", proc_pid_mem_read, pid);
         if (mem) {
+            mem->write = proc_pid_mem_write;
             mem->mode = 0600;
             mem->uid = directory->uid;
             mem->gid = directory->gid;
@@ -1840,6 +1878,8 @@ void procfs_unregister_process(uint64_t pid) {
     (void)vfs_remove(path, 0);
     task_path(pid, "/environ", path);
     (void)vfs_remove(path, 0);
+    task_path(pid, "/auxv", path);
+    (void)vfs_remove(path, 0);
     task_path(pid, NULL, path);
     (void)vfs_remove(path, 1);
     decimal_path(pid, "/task", path);
@@ -1867,6 +1907,8 @@ void procfs_unregister_process(uint64_t pid) {
     decimal_path(pid, "/mem", path);
     (void)vfs_remove(path, 0);
     decimal_path(pid, "/environ", path);
+    (void)vfs_remove(path, 0);
+    decimal_path(pid, "/auxv", path);
     (void)vfs_remove(path, 0);
     decimal_path(pid, "/exe", path);
     (void)vfs_remove(path, 0);

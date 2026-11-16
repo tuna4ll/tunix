@@ -83,8 +83,9 @@ void idt_init(void) {
     idt_set_gate(0, (uint64_t)isr0, 0x08, 0x8E, 0);
     idt_set_gate(1, (uint64_t)isr1, 0x08, 0x8E, 0);
     idt_set_gate(2, (uint64_t)isr2, 0x08, 0x8E, 0);
-    idt_set_gate(3, (uint64_t)isr3, 0x08, 0x8E, 0);
-    idt_set_gate(4, (uint64_t)isr4, 0x08, 0x8E, 0);
+    /* User-callable, as on Linux: int3 is how debuggers stop a program at a breakpoint. */
+    idt_set_gate(3, (uint64_t)isr3, 0x08, 0xEE, 0);
+    idt_set_gate(4, (uint64_t)isr4, 0x08, 0xEE, 0);
     idt_set_gate(5, (uint64_t)isr5, 0x08, 0x8E, 0);
     idt_set_gate(6, (uint64_t)isr6, 0x08, 0x8E, 0);
     idt_set_gate(7, (uint64_t)isr7, 0x08, 0x8E, 0);

@@ -265,6 +265,8 @@ static int place_initial_stack(struct process *process, const struct loaded_elf 
         if (push_u64(process, &sp, auxv[i][1]) != 0 || push_u64(process, &sp, auxv[i][0]) != 0)
             return -1;
     }
+    process->auxv_start = sp;
+    process->auxv_end = sp + aux_count * 2 * sizeof(uint64_t);
 
     if (push_u64(process, &sp, 0) != 0) return -1;
     for (size_t i = envc; i > 0; i--)

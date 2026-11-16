@@ -179,6 +179,9 @@ struct process {
     uint64_t arg_start;
     uint64_t arg_end;
     uint64_t env_end;
+    uint64_t auxv_start;
+    uint64_t auxv_end;
+    uint32_t personality;
     struct vfs_node *cwd;
     struct vfs_node *root;
     struct pty_pair *controlling_pty;

@@ -269,6 +269,7 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136,
 #define SYS_TIMER_DELETE           226
 #define SYS_ARCH_PRCTL             158
 #define SYS_PRCTL                  157
+#define SYS_PERSONALITY            135
 #define SYS_SECCOMP                317
 #define SYS_PTRACE                 101
 #define SYS_UNSHARE                272
@@ -7395,6 +7396,15 @@ static void syscall_run(struct syscall_frame *frame) {
         SYSCALL_RET(frame) =
             (uint64_t)sys_sigaltstack(frame, SYSCALL_ARG0(frame), SYSCALL_ARG1(frame));
         break;
+    case SYS_PERSONALITY: {
+        /* Only the word is kept: there is no address randomisation or other persona to switch. */
+        struct process *self = process_current();
+        uint32_t previous = self ? self->personality : 0;
+        if (self && (uint32_t)SYSCALL_ARG0(frame) != 0xffffffffU)
+            self->personality = (uint32_t)SYSCALL_ARG0(frame);
+        SYSCALL_RET(frame) = previous;
+        break;
+    }
     case SYS_PRCTL:
         SYSCALL_RET(frame) =
             (uint64_t)sys_prctl((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame),

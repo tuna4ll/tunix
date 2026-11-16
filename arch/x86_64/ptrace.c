@@ -42,10 +42,11 @@ int arch_ptrace_get_regs(const struct process *tracee, const struct syscall_fram
     regs[REG_RDI] = frame->rdi;
     regs[REG_ORIG_RAX] = (uint64_t)tracee->ptrace_syscall_nr;
     regs[REG_RIP] = frame->user_rip;
-    regs[REG_CS] = 0x23;
+    /* Linux's 64-bit user selectors, which debuggers read to tell 64-bit from 32-bit code. */
+    regs[REG_CS] = 0x33;
     regs[REG_EFLAGS] = frame->user_rflags;
     regs[REG_RSP] = frame->user_rsp;
-    regs[REG_SS] = 0x1b;
+    regs[REG_SS] = 0x2b;
     regs[REG_FS_BASE] = tracee->fs_base;
     regs[REG_GS_BASE] = tracee->gs_base;
     memcpy(out, regs, sizeof(regs));

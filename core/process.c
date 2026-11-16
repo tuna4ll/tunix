@@ -540,7 +540,9 @@ static int queue_signal_entry(struct process *process, const struct signal_info 
     if (process->state == PROCESS_ZOMBIE || process->state == PROCESS_DEAD) return 0;
     if (signal_number == SIGCONT) flush_signals(process, STOP_SIGNALS);
     if (STOP_SIGNALS & bit) flush_signals(process, signal_bit(SIGCONT));
-    if (!(process->signal_blocked & bit) && signal_ignored(process, signal_number))
+    /* A tracer sees even ignored signals, as on Linux; they are dropped once it passes them on. */
+    if (!(process->signal_blocked & bit) && signal_ignored(process, signal_number) &&
+        !process->ptrace_tracer)
         return prepared ? 1 : 0;
     if (prepared) {
         if (signal_number < SIGRTMIN &&
@@ -3243,6 +3245,9 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame, const struct fork
     child->arg_start = parent->arg_start;
     child->arg_end = parent->arg_end;
     child->env_end = parent->env_end;
+    child->auxv_start = parent->auxv_start;
+    child->auxv_end = parent->auxv_end;
+    child->personality = parent->personality;
     if (allocate_kernel_stack(child) != 0) {
         memory_unref(child->memory);
         free_process_struct(child);
@@ -3359,6 +3364,9 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame, uint64_t 
     child->arg_start = parent->arg_start;
     child->arg_end = parent->arg_end;
     child->env_end = parent->env_end;
+    child->auxv_start = parent->auxv_start;
+    child->auxv_end = parent->auxv_end;
+    child->personality = parent->personality;
     if (allocate_kernel_stack(child) != 0) {
         memory_unref(child->memory);
         free_process_struct(child);
@@ -3972,6 +3980,8 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
     current->arg_start = image.arg_start;
     current->arg_end = image.arg_end;
     current->env_end = image.env_end;
+    current->auxv_start = image.auxv_start;
+    current->auxv_end = image.auxv_end;
     current->fs_base = 0;
     current->gs_base = 0;
     current->signal_stack_pointer = 0;
@@ -4361,9 +4371,17 @@ void process_ptrace_report_clone(struct syscall_frame *frame, int64_t child) {
     if (!self) return;
     int event = self->ptrace_clone_event;
     self->ptrace_clone_event = 0;
-    if (child <= 0 || !self->ptrace_tracer || !(self->ptrace_options & (1U << event))) return;
-    self->ptrace_event_message = (uint64_t)child;
-    (void)process_ptrace_stop(frame, SIGTRAP | (event << 8));
+    if (child <= 0 || !self->ptrace_tracer) return;
+    if (self->ptrace_options & (1U << event)) {
+        self->ptrace_event_message = (uint64_t)child;
+        if (process_ptrace_stop(frame, SIGTRAP | (event << 8)) != 0) return;
+    }
+    /* vfork copies the parent here rather than borrowing it, so the parent is free at once. */
+    if (event == PTRACE_EVENT_VFORK && self->ptrace_tracer &&
+        (self->ptrace_options & PTRACE_O_TRACEVFORKDONE)) {
+        self->ptrace_event_message = (uint64_t)child;
+        (void)process_ptrace_stop(frame, SIGTRAP | (PTRACE_EVENT_VFORK_DONE << 8));
+    }
 }
 
 uint64_t process_ptrace_tracer_pid(const struct process *process) {
