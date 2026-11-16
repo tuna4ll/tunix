@@ -292,6 +292,10 @@ struct process {
     uint8_t ptrace_in_syscall;
     uint8_t ptrace_syscall_trace;
     uint8_t ptrace_step;
+    uint8_t ptrace_seized;
+    uint8_t ptrace_interrupt;
+    uint8_t ptrace_clone_event;
+    uint64_t ptrace_event_message;
     int ptrace_pass_signal;
     int ptrace_resume_signal;
     int64_t ptrace_syscall_nr;
@@ -480,6 +484,8 @@ int process_ptrace_regs(struct process *tracee, unsigned type, void *buffer, siz
 int process_ptrace_siginfo(struct process *tracee, struct signal_info *info, int write);
 int process_ptrace_stop(struct syscall_frame *frame, int status);
 int process_ptrace_syscall_status(const struct process *process);
+int process_ptrace_interrupt(struct process *tracee);
+void process_ptrace_report_clone(struct syscall_frame *frame, int64_t child);
 void process_for_each(int (*visit)(struct process *process, void *context), void *context);
 void process_kernel_yield(void);
 #define OOM_SCORE_ADJ_MIN (-1000)

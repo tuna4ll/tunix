@@ -101,6 +101,10 @@ static int64_t request_on(struct process *tracee, int64_t request, uint64_t addr
     case PTRACE_SINGLESTEP: return process_ptrace_resume(tracee, (int)data, PTRACE_RESUME_STEP);
     case PTRACE_DETACH:     return process_ptrace_resume(tracee, (int)data, PTRACE_RESUME_DETACH);
     case PTRACE_KILL:       return process_ptrace_resume(tracee, 0, PTRACE_RESUME_KILL);
+    case PTRACE_INTERRUPT: return process_ptrace_interrupt(tracee);
+    case PTRACE_GETEVENTMSG:
+        return copy_to_user(data, &tracee->ptrace_event_message, sizeof(uint64_t)) != 0 ? -EFAULT
+                                                                                         : 0;
     case PTRACE_SETOPTIONS:
         if (data & ~(uint64_t)PTRACE_O_MASK) return -EINVAL;
         tracee->ptrace_options = (uint32_t)data;
@@ -119,7 +123,8 @@ int64_t sys_ptrace(int64_t request, int64_t pid, uint64_t address, uint64_t data
         return process_ptrace_attach((uint64_t)pid, 1, (uint32_t)data);
     }
     int error = -ESRCH;
-    struct process *tracee = process_ptrace_get((uint64_t)pid, request != PTRACE_KILL, &error);
+    int stopped = request != PTRACE_KILL && request != PTRACE_INTERRUPT;
+    struct process *tracee = process_ptrace_get((uint64_t)pid, stopped, &error);
     if (!tracee) return error;
     int64_t result = request_on(tracee, request, address, data);
     process_put(tracee);

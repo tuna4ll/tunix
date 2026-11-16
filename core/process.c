@@ -2792,7 +2792,7 @@ int process_signal_from_syscall(struct syscall_frame *frame, int signal_number, 
 
 static int needs_user_work(struct process *process) {
     return process->group_exit_pending || next_pending_signal(process) != 0 ||
-        (process->ptrace_in_syscall && !process->syscall_rewound);
+        (process->ptrace_in_syscall && !process->syscall_rewound) || process->ptrace_interrupt;
 }
 
 static void resume_from_idle(struct interrupt_frame *frame) {
@@ -3097,6 +3097,12 @@ void process_exit_from_syscall(struct syscall_frame *frame, int status) {
         kprintf("TUNIX: init exited, status %d\n", status);
         panic("init exited");
     }
+    if (exiting->ptrace_tracer && (exiting->ptrace_options & PTRACE_O_TRACEEXIT)) {
+        exiting->ptrace_event_message = exiting->termination_signal
+            ? (uint64_t)(exiting->termination_signal & 0x7F)
+            : (uint64_t)(status & 0xFF) << 8;
+        (void)process_ptrace_stop(frame, SIGTRAP | (PTRACE_EVENT_EXIT << 8));
+    }
     seccomp_release(exiting);
     eventfs_emit_process_exit(exiting->cred.euid, exiting->pid, status);
     exiting->exit_status = status;
@@ -3146,6 +3152,24 @@ void process_exit_from_syscall(struct syscall_frame *frame, int status) {
     KDEBUG("process: pid=%u exited status=%d\n", (unsigned)exiting->pid, status);
 
     if (switch_to_next(frame, exiting) != 0) go_idle();
+}
+
+static void ptrace_inherit_locked(struct process *child, struct process *parent) {
+    int event = parent->ptrace_clone_event;
+    if (!parent->ptrace_tracer || !event || !(parent->ptrace_options & (1U << event))) return;
+    struct process *tracer = process_find(parent->ptrace_tracer);
+    if (!tracer) return;
+    child->ptrace_tracer = tracer->pid;
+    child->ptrace_options = parent->ptrace_options;
+    child->ptrace_seized = parent->ptrace_seized;
+    tracer->ptrace_tracees++;
+    if (child->ptrace_seized) {
+        child->ptrace_interrupt = 1;
+        return;
+    }
+    struct signal_info info;
+    signal_info_init(&info, SIGSTOP, SI_USER);
+    (void)queue_signal(child, &info);
 }
 
 int64_t process_fork_from_syscall(struct syscall_frame *frame, const struct fork_request *request) {
@@ -3272,6 +3296,7 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame, const struct fork
     {
         SCHED_LOCKED;
         wake_bump();
+        ptrace_inherit_locked(child, parent);
         enqueue(child);
         ready_link(child);
     }
@@ -3375,6 +3400,7 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame, uint64_t 
     {
         SCHED_LOCKED;
         wake_bump();
+        ptrace_inherit_locked(child, parent);
         enqueue(child);
         ready_link(child);
     }
@@ -3974,7 +4000,10 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
     else vmm_destroy_address_space(old_cr3);
     eventfs_emit_process_exec(current->cred.euid, current->pid, current->name);
     KDEBUG("process: pid=%u exec %s\n", (unsigned)current->pid, path);
-    if (current->ptrace_tracer) {
+    if (current->ptrace_tracer && (current->ptrace_options & PTRACE_O_TRACEEXEC)) {
+        current->ptrace_event_message = current->pid;
+        (void)process_ptrace_stop(frame, SIGTRAP | (PTRACE_EVENT_EXEC << 8));
+    } else if (current->ptrace_tracer && !current->ptrace_seized) {
         SCHED_LOCKED;
         signal_one_process(current, SIGTRAP);
     }
@@ -4063,6 +4092,8 @@ static void ptrace_unlink_locked(struct process *tracee) {
     tracee->ptrace_pass_signal = 0;
     tracee->ptrace_syscall_trace = 0;
     tracee->ptrace_in_syscall = 0;
+    tracee->ptrace_seized = 0;
+    tracee->ptrace_interrupt = 0;
     ptrace_set_step(tracee, 0);
 }
 
@@ -4088,8 +4119,10 @@ static void ptrace_release_tracees(struct process *tracer) {
     if (!tracer->ptrace_tracees || !queue) return;
     struct process *item = queue;
     do {
-        if (ptrace_traced_by(item, tracer) && item->state != PROCESS_DEAD)
+        if (ptrace_traced_by(item, tracer) && item->state != PROCESS_DEAD) {
+            if (item->ptrace_options & PTRACE_O_EXITKILL) signal_one_process(item, SIGKILL);
             ptrace_detach_locked(item, 0);
+        }
         item = item->next;
     } while (item != queue && tracer->ptrace_tracees);
 }
@@ -4158,6 +4191,7 @@ int process_ptrace_attach(uint64_t pid, int seize, uint32_t options) {
     wake_bump();
     tracee->ptrace_tracer = tracer->pid;
     tracee->ptrace_options = options;
+    tracee->ptrace_seized = (uint8_t)seize;
     tracer->ptrace_tracees++;
     if (tracee->state == PROCESS_STOPPED) {
         tracee->stop_reported = 0;
@@ -4300,6 +4334,36 @@ static void ptrace_syscall_exit(struct syscall_frame *frame) {
     if (restarting) SYSCALL_RET(frame) = (uint64_t)-(int64_t)ERESTARTSYS;
     (void)process_ptrace_stop(frame, process_ptrace_syscall_status(current));
     if (restarting) SYSCALL_RET(frame) = kept;
+}
+
+int process_ptrace_interrupt(struct process *tracee) {
+    SCHED_LOCKED;
+    if (!tracee->ptrace_seized) return -EIO;
+    if (tracee->state == PROCESS_STOPPED || !process_is_live(tracee)) return 0;
+    tracee->ptrace_interrupt = 1;
+    if (tracee->state == PROCESS_BLOCKED && !tracee->kernel_waiting && tracee->syscall_rewound) {
+        tracee->futex_wait_active = 0;
+        tracee->futex_wait_address = 0;
+        tracee->futex_wait_key = 0;
+        tracee->futex_wait_deadline_ns = 0;
+        tracee->wait4_active = 0;
+        tracee->wait_channel = NULL;
+        tracee->wait_pid = 0;
+        tracee->wait_status_user = 0;
+        tracee->wait_options = 0;
+        wake_to_ready(tracee);
+    }
+    return 0;
+}
+
+void process_ptrace_report_clone(struct syscall_frame *frame, int64_t child) {
+    struct process *self = current;
+    if (!self) return;
+    int event = self->ptrace_clone_event;
+    self->ptrace_clone_event = 0;
+    if (child <= 0 || !self->ptrace_tracer || !(self->ptrace_options & (1U << event))) return;
+    self->ptrace_event_message = (uint64_t)child;
+    (void)process_ptrace_stop(frame, SIGTRAP | (event << 8));
 }
 
 uint64_t process_ptrace_tracer_pid(const struct process *process) {
@@ -4789,11 +4853,12 @@ static int on_signal_stack(const struct process *process, uint64_t user_rsp) {
     return user_rsp >= base && user_rsp < limit;
 }
 
-static void ptrace_signal_stop(struct syscall_frame *frame, const struct signal_info *info) {
+static void ptrace_signal_stop(struct syscall_frame *frame, const struct signal_info *info,
+                               int status) {
     SCHED_LOCKED;
     wake_bump();
     current->ptrace_siginfo = *info;
-    current->stop_signal = info->signo;
+    current->stop_signal = status;
     current->stop_reported = 0;
     current->ptrace_stop_kind = PTRACE_STOP_SIGNAL;
     current->saved_frame = *frame;
@@ -4812,6 +4877,16 @@ void process_prepare_user_return(struct syscall_frame *frame) {
         process_exit_from_syscall(frame, current->exit_status);
         return;
     }
+    if (current->ptrace_interrupt) {
+        current->ptrace_interrupt = 0;
+        if (current->ptrace_tracer) {
+            int status = SIGTRAP | (PTRACE_EVENT_STOP << 8);
+            struct signal_info info;
+            signal_info_init(&info, SIGTRAP, status);
+            ptrace_signal_stop(frame, &info, status);
+            return;
+        }
+    }
     if (!next_pending_signal(current)) {
         if (current->signal_wait_mask_active && !current->syscall_rewound)
             process_restore_signal_mask();
@@ -4827,7 +4902,7 @@ void process_prepare_user_return(struct syscall_frame *frame) {
     if (!signal_number) return;
     if (current->ptrace_tracer && signal_number != SIGKILL) {
         if (current->ptrace_pass_signal != signal_number) {
-            ptrace_signal_stop(frame, &taken.info);
+            ptrace_signal_stop(frame, &taken.info, signal_number);
             return;
         }
         current->ptrace_pass_signal = 0;

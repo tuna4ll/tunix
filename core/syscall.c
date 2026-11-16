@@ -5513,6 +5513,9 @@ static int64_t sys_clone_fork_compat(struct syscall_frame *frame, uint64_t flags
                                      uint64_t pidfd_user) {
     struct process *parent = process_current();
     if (!parent) return -EINVAL;
+    parent->ptrace_clone_event = (flags & CLONE_VFORK) ? PTRACE_EVENT_VFORK
+        : ((flags & 0xFFULL) == SIGCHLD && !(flags & CLONE_THREAD)) ? PTRACE_EVENT_FORK
+                                                                     : PTRACE_EVENT_CLONE;
     if (pidfd_user) {
         if (flags & (CLONE_THREAD | CLONE_DETACHED)) return -EINVAL;
         if (!vmm_user_range_valid(parent->cr3, pidfd_user, sizeof(int32_t), 1)) return -EFAULT;
@@ -6855,6 +6858,7 @@ static void syscall_run(struct syscall_frame *frame) {
                                         SYSCALL_CLONE_TLS(frame), 0,
                                         (flags & CLONE_PIDFD) ? SYSCALL_ARG2(frame) : 0);
         SYSCALL_RET(frame) = (uint64_t)pid;
+        process_ptrace_report_clone(frame, pid);
         if (pid > 0) process_run_child_first_from_syscall(frame, (uint64_t)pid);
         break;
     }
@@ -6862,13 +6866,18 @@ static void syscall_run(struct syscall_frame *frame) {
         int64_t pid =
             sys_clone3_fork_compat(frame, SYSCALL_ARG0(frame), (size_t)SYSCALL_ARG1(frame));
         SYSCALL_RET(frame) = (uint64_t)pid;
+        process_ptrace_report_clone(frame, pid);
         if (pid > 0) process_run_child_first_from_syscall(frame, (uint64_t)pid);
         break;
     }
     case SYS_FORK:
     case SYS_VFORK: {
+        if (caller)
+            caller->ptrace_clone_event =
+                syscall_number == SYS_FORK ? PTRACE_EVENT_FORK : PTRACE_EVENT_VFORK;
         int64_t pid = process_fork_from_syscall(frame, NULL);
         SYSCALL_RET(frame) = (uint64_t)pid;
+        process_ptrace_report_clone(frame, pid);
         if (pid > 0) process_run_child_first_from_syscall(frame, (uint64_t)pid);
         break;
     }
