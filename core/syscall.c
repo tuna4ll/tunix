@@ -96,6 +96,7 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136,
 #define SYS_MUNMAP                 11
 #define SYS_BRK                    12
 #define SYS_MSYNC                  26
+#define SYS_MINCORE                27
 #define SYS_MADVISE                28
 #define SYS_MLOCK                  149
 #define SYS_MUNLOCK                150
@@ -4287,6 +4288,26 @@ static int64_t sys_mlock(uint64_t address, uint64_t length, int flags) {
     return 0;
 }
 
+static int64_t sys_mincore(uint64_t address, uint64_t length, uint64_t user_vector) {
+    struct process *process = process_current();
+    if (!process || (address & 0xFFFULL)) return -EINVAL;
+    if (address >= USER_ADDRESS_LIMIT || length > USER_ADDRESS_LIMIT - address) return -ENOMEM;
+    uint64_t end = align_up(address + length, 4096);
+    unsigned char vector[256];
+    uint64_t filled = 0, written = 0;
+    for (uint64_t page = address; page < end; page += 4096) {
+        int resident = vmm_page_occupied(process->cr3, page);
+        if (!resident && !process_find_area(page)) return -ENOMEM;
+        vector[filled++] = resident ? 1 : 0;
+        if (filled == sizeof(vector) || page + 4096 >= end) {
+            if (copy_to_user(user_vector + written, vector, (size_t)filled) != 0) return -EFAULT;
+            written += filled;
+            filled = 0;
+        }
+    }
+    return 0;
+}
+
 static int64_t sys_munlock(uint64_t address, uint64_t length) {
     return sys_mlock(address, length, 0);
 }
@@ -5908,6 +5929,7 @@ MEMORY_SYSCALL(mmap, (uint64_t a, uint64_t b, int c, int d, int e, uint64_t f), 
 MEMORY_SYSCALL(mprotect, (uint64_t a, uint64_t b, int c), (a, b, c))
 MEMORY_SYSCALL(mremap, (uint64_t a, uint64_t b, uint64_t c, int d, uint64_t e), (a, b, c, d, e))
 MEMORY_SYSCALL(msync, (uint64_t a, uint64_t b, int c), (a, b, c))
+MEMORY_SYSCALL(mincore, (uint64_t a, uint64_t b, uint64_t c), (a, b, c))
 MEMORY_SYSCALL(munmap, (uint64_t a, uint64_t b), (a, b))
 MEMORY_SYSCALL(mlock, (uint64_t a, uint64_t b, int c), (a, b, c))
 MEMORY_SYSCALL(munlock, (uint64_t a, uint64_t b), (a, b))
@@ -6362,6 +6384,10 @@ static void syscall_run(struct syscall_frame *frame) {
         break;
 
     case SYS_MADVISE: SYSCALL_RET(frame) = 0; break;
+    case SYS_MINCORE:
+        SYSCALL_RET(frame) = (uint64_t)memory_call_mincore(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame),
+                                                           SYSCALL_ARG2(frame));
+        break;
     case SYS_MLOCK:
         SYSCALL_RET(frame) =
             (uint64_t)memory_call_mlock(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), 0);
