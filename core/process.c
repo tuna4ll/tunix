@@ -24,6 +24,7 @@ static int next_pending_signal(struct process *process);
 #include <tunix/posix_lock.h>
 #include <tunix/posix_timer.h>
 #include <tunix/process.h>
+#include <tunix/ptrace.h>
 #include <tunix/sysvsem.h>
 #include <tunix/workqueue.h>
 #include <tunix/process_arch.h>
@@ -4202,6 +4203,32 @@ int process_ptrace_access(struct process *tracee, uint64_t address, void *buffer
     mutex_unlock(&memory->lock);
     process_memory_put(memory);
     return status ? -EIO : 0;
+}
+
+int process_ptrace_regs(struct process *tracee, unsigned type, void *buffer, size_t *size,
+                        int write) {
+    uint8_t full[PTRACE_REGSET_MAX];
+    size_t length = sizeof(full);
+    SCHED_LOCKED;
+    if (tracee->state != PROCESS_STOPPED) return -ESRCH;
+    struct syscall_frame *frame = &tracee->saved_frame;
+    int status = arch_ptrace_get_regs(tracee, frame, fpu_area(tracee), type, full, &length);
+    if (status != 0) return status;
+    if (*size > length) *size = length;
+    if (!write) {
+        memcpy(buffer, full, *size);
+        return 0;
+    }
+    memcpy(full, buffer, *size);
+    return arch_ptrace_set_regs(tracee, frame, fpu_area(tracee), type, full);
+}
+
+int process_ptrace_siginfo(struct process *tracee, struct signal_info *info, int write) {
+    SCHED_LOCKED;
+    if (tracee->state != PROCESS_STOPPED) return -ESRCH;
+    if (write) tracee->ptrace_siginfo = *info;
+    else *info = tracee->ptrace_siginfo;
+    return 0;
 }
 
 uint64_t process_ptrace_tracer_pid(const struct process *process) {

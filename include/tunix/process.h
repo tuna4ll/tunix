@@ -463,6 +463,9 @@ int process_ptrace_resume(struct process *tracee, int signal_number, int mode);
 int process_ptrace_access(struct process *tracee, uint64_t address, void *buffer, size_t length,
                           int write);
 uint64_t process_ptrace_tracer_pid(const struct process *process);
+int process_ptrace_regs(struct process *tracee, unsigned type, void *buffer, size_t *size,
+                        int write);
+int process_ptrace_siginfo(struct process *tracee, struct signal_info *info, int write);
 void process_for_each(int (*visit)(struct process *process, void *context), void *context);
 void process_kernel_yield(void);
 #define OOM_SCORE_ADJ_MIN (-1000)
