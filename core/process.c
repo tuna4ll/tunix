@@ -1214,8 +1214,15 @@ static struct process_memory *take_zombie_memory(void) {
         item->zombie_next = NULL;
         item->on_zombie_list = 0;
         if (item->state == PROCESS_ZOMBIE && item->memory) {
-            item->memory->release_next = released;
-            released = item->memory;
+            struct process_memory *memory = item->memory;
+            /* Traced threads stay zombies and share one memory: list it once, drop the rest now. */
+            if (memory->release_queued) {
+                __atomic_sub_fetch(&memory->refs, 1, __ATOMIC_ACQ_REL);
+            } else {
+                memory->release_queued = 1;
+                memory->release_next = released;
+                released = memory;
+            }
             item->memory = NULL;
             item->cr3 = 0;
         }
@@ -1273,6 +1280,7 @@ void process_reap_deferred(void) {
     }
     while (memories) {
         struct process_memory *next = memories->release_next;
+        __atomic_store_n(&memories->release_queued, 0, __ATOMIC_RELEASE);
         memory_unref(memories);
         memories = next;
     }

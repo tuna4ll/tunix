@@ -79,6 +79,7 @@ struct process_memory {
     volatile int reclaim_parked;
     volatile int reclaim_scanners;
     struct process_memory *release_next;
+    uint8_t release_queued;
 };
 
 struct file_table {
