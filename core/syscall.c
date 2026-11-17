@@ -978,6 +978,33 @@ void syscall_release_orphans(void) {
     release_set(&spare_pins[cpu->index]);
 }
 
+/* A blocking write to a pipe or stream socket returns once everything is
+ * written, as on Linux, so programs that do not loop on short writes get all
+ * their data through; a signal ends it with what was written so far. */
+static int wait_to_write_rest(struct file *file) {
+    if (file->flags & O_NONBLOCK) return 0;
+    if (!file_pipe_writes(file) &&
+        !(file->kind == FILE_KIND_SOCKET && file->socket && !unix_socket_is_dgram(file->socket) &&
+          !unix_socket_is_seqpacket(file->socket)))
+        return 0;
+    /* Reading a unix socket wakes no one, so a socket writer checks again
+     * every millisecond. */
+    const void *channel = file_write_wait_channel(file);
+    int polling = !channel;
+    if (polling) channel = process_io_wait_channel();
+    for (;;) {
+        uint64_t deadline = polling ? time_uptime_ns() + 1000000ULL : 0;
+        if (process_prepare_wait_interruptible(channel, deadline) != 0) return 0;
+        if (file_poll_events(file, POLLOUT) & (POLLOUT | POLLERR | POLLHUP)) {
+            process_finish_wait();
+            return 1;
+        }
+        process_wait();
+        process_finish_wait();
+        if (process_wait_interrupted()) return 0;
+    }
+}
+
 static int64_t sys_write(int fd, uint64_t user_buffer, size_t length) {
     struct process *process = process_current();
     struct file *file = fd_file(fd);
@@ -1021,7 +1048,7 @@ static int64_t sys_write(int fd, uint64_t user_buffer, size_t length) {
             break;
         }
         completed += (size_t)written;
-        if ((size_t)written < chunk) break;
+        if ((size_t)written < chunk && !(completed < length && wait_to_write_rest(file))) break;
         if ((++rounds & 15U) == 0) process_preempt_point();
     }
 
