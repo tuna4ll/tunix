@@ -21,7 +21,7 @@ include subprojects/rust/RECIPE
 KERNEL_CFLAGS := -std=gnu11 -Wall -Wextra -Werror -ffreestanding \
 	-fstack-protector-strong -mstack-protector-guard=global -fno-pic -fno-pie -fno-builtin \
 	-fno-asynchronous-unwind-tables -fno-unwind-tables -mno-red-zone -m64 \
-	-Os -ffunction-sections -fdata-sections -mcmodel=kernel -mgeneral-regs-only \
+	-O2 -ffunction-sections -fdata-sections -mcmodel=kernel -mgeneral-regs-only \
 	-Iinclude -I$(LIMINE_DIR) -I$(UACPI_DIR)/include \
 	$(KERNEL_CFLAGS_EXTRA)
 ifeq ($(FRAME_POINTERS),1)
