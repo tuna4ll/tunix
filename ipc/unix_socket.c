@@ -79,6 +79,8 @@ struct unix_socket {
     struct unix_dgram *rx_tail;
     size_t rx_bytes;
     int rx_count;
+    /* Bumped by every datagram or connection that arrives, for edge-triggered epoll. */
+    uint32_t rx_generation;
     char last_from[108];
     struct unix_socket *dgram_peer;
     int listening;
@@ -569,6 +571,7 @@ static int dgram_deliver(struct unix_socket *from, struct unix_socket *target, s
     target->rx_tail = message;
     target->rx_count++;
     target->rx_bytes += size;
+    target->rx_generation++;
     return 0;
 }
 
@@ -667,6 +670,7 @@ int unix_socket_connect(struct unix_socket *socket, const struct tunix_sockaddr_
     else listener->pending_head = server;
     listener->pending_tail = server;
     listener->pending_count++;
+    listener->rx_generation++;
     return 0;
 }
 
@@ -780,6 +784,7 @@ static int64_t unix_socket_write_locked(struct unix_socket *socket, size_t size,
             pipe->write_pos = (pipe->write_pos + 1) % pipe->capacity;
         }
         pipe->count += size;
+        pipe->generation++;
         records->lengths[records->tail] = (uint32_t)size;
         struct unix_credentials *sender = &records->senders[records->tail];
         const struct credentials *self = cred_current();
@@ -798,6 +803,7 @@ static int64_t unix_socket_write_locked(struct unix_socket *socket, size_t size,
         pipe->write_pos = (pipe->write_pos + 1) % pipe->capacity;
     }
     pipe->count += amount;
+    pipe->generation++;
     return (int64_t)amount;
 }
 
@@ -923,6 +929,14 @@ int unix_socket_write_ready(struct unix_socket *socket) {
     if (!socket || !socket->connected || !socket->channel || !peer_open(socket)) return 0;
     if (own_write_shutdown(socket) || peer_read_shutdown(socket)) return 0;
     return outgoing(socket)->count < PIPE_CAPACITY;
+}
+
+uint32_t unix_socket_rx_generation(struct unix_socket *socket) {
+    UNIX_LOCKED;
+    if (!socket) return 0;
+    if (socket->dgram || socket->listening || !socket->connected || !socket->channel)
+        return socket->rx_generation;
+    return incoming(socket)->generation;
 }
 
 int unix_socket_peer_closed(struct unix_socket *socket) {

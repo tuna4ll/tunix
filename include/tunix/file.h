@@ -125,5 +125,6 @@ const void *file_read_wait_channel(struct file *file);
 const void *file_write_wait_channel(struct file *file);
 uint32_t file_poll_events(struct file *file, uint32_t requested);
 uint32_t file_poll_events_nested(struct file *file, uint32_t requested, unsigned depth);
+uint32_t file_data_generation(struct file *file);
 
 #endif

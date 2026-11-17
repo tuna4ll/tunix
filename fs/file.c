@@ -479,6 +479,17 @@ uint32_t file_poll_events(struct file *file, uint32_t requested) {
     return file_poll_events_nested(file, requested, 0);
 }
 
+/* A count that grows with every arrival of data to read from the file, which
+ * edge-triggered epoll reports as a new event even while older data is still
+ * unread, as Linux does. 0 for the kinds that do not keep one. */
+uint32_t file_data_generation(struct file *file) {
+    if (!file) return 0;
+    if (file_is_pipe(file)) return file_pipe_reads(file) && file->pipe ? file->pipe->generation : 0;
+    if (file->kind == FILE_KIND_SOCKET) return unix_socket_rx_generation(file->socket);
+    if (file->kind == FILE_KIND_EVENTFD) return eventfd_generation(file->eventfd);
+    return 0;
+}
+
 uint32_t file_poll_events_nested(struct file *file, uint32_t requested, unsigned depth) {
     const uint32_t pollin = 0x001U;
     const uint32_t pollout = 0x004U;

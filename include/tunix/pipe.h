@@ -18,6 +18,9 @@ struct pipe_buffer {
     size_t read_pos;
     size_t write_pos;
     size_t count;
+    /* Bumped by every write, which edge-triggered epoll reports as an event
+     * even while earlier data is still unread, as Linux does. */
+    uint32_t generation;
     int readers;
     int writers;
     uint32_t reader_opens;

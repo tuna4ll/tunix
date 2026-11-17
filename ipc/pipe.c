@@ -169,6 +169,7 @@ static int64_t pipe_write_locked(struct pipe_buffer *pipe, size_t size, const vo
     if (amount > first) memcpy(pipe->data, in + first, amount - first);
     pipe->write_pos = (pipe->write_pos + amount) & (pipe->capacity - 1U);
     pipe->count += amount;
+    pipe->generation++;
 
     process_wake_all(&pipe->data_wait);
     return (int64_t)amount;

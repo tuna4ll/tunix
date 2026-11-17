@@ -33,6 +33,7 @@ struct epoll_entry {
     uint32_t events;
     uint32_t edge_seen;
     uint32_t edge_generation;
+    uint32_t data_generation;
     uint64_t data;
 };
 
@@ -63,6 +64,7 @@ static void arm_entry(struct epoll_entry *entry, const struct tunix_epoll_event 
     entry->disarmed = 0;
     entry->edge_seen = 0;
     entry->edge_generation = entry->file->edge_generation;
+    entry->data_generation = file_data_generation(entry->file);
 }
 
 static uint32_t entry_occurred(const struct epoll_entry *entry, unsigned depth) {
@@ -70,11 +72,14 @@ static uint32_t entry_occurred(const struct epoll_entry *entry, unsigned depth) 
     return file_poll_events_nested(entry->file, reportable, depth + 1) & reportable;
 }
 
-static int entry_fresh(const struct epoll_entry *entry, uint32_t occurred) {
+/* generation is file_data_generation(entry->file), read before occurred so
+ * that data arriving in between is not counted as seen. */
+static int entry_fresh(const struct epoll_entry *entry, uint32_t occurred, uint32_t generation) {
     if (!occurred) return 0;
     if (!(entry->events & EPOLLET)) return 1;
     return (occurred & ~entry->edge_seen) != 0 ||
-        entry->file->edge_generation != entry->edge_generation;
+        entry->file->edge_generation != entry->edge_generation ||
+        generation != entry->data_generation;
 }
 
 struct epoll_context *epoll_create(void) {
@@ -179,11 +184,13 @@ int epoll_collect(struct epoll_context *context, struct tunix_epoll_event *event
         int index = (start + step) % context->capacity;
         struct epoll_entry *entry = &context->entries[index];
         if (!entry->active || !entry->file || entry->disarmed) continue;
+        uint32_t generation = file_data_generation(entry->file);
         uint32_t occurred = entry_occurred(entry, depth);
-        int fresh = entry_fresh(entry, occurred);
+        int fresh = entry_fresh(entry, occurred, generation);
         if (entry->events & EPOLLET) {
             entry->edge_seen = occurred;
             entry->edge_generation = entry->file->edge_generation;
+            entry->data_generation = generation;
         }
         if (!fresh) continue;
         events[ready].events = occurred;
@@ -202,7 +209,8 @@ int epoll_read_ready(struct epoll_context *context, unsigned depth) {
     for (int index = 0; index < context->capacity; index++) {
         struct epoll_entry *entry = &context->entries[index];
         if (!entry->active || !entry->file || entry->disarmed) continue;
-        if (entry_fresh(entry, entry_occurred(entry, depth))) return 1;
+        uint32_t generation = file_data_generation(entry->file);
+        if (entry_fresh(entry, entry_occurred(entry, depth), generation)) return 1;
     }
     return 0;
 }

@@ -69,6 +69,7 @@ int unix_socket_read_ready(struct unix_socket *socket);
 size_t unix_socket_read_available(struct unix_socket *socket);
 int unix_socket_write_ready(struct unix_socket *socket);
 int unix_socket_peer_closed(struct unix_socket *socket);
+uint32_t unix_socket_rx_generation(struct unix_socket *socket);
 int unix_socket_is_seqpacket(struct unix_socket *socket);
 int unix_socket_keeps_boundaries(struct unix_socket *socket);
 int unix_socket_is_listener(struct unix_socket *socket);

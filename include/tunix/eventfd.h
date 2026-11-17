@@ -12,5 +12,6 @@ int64_t eventfd_read(struct eventfd_context *context, size_t size, void *buffer)
 int64_t eventfd_write(struct eventfd_context *context, size_t size, const void *buffer);
 int eventfd_read_ready(struct eventfd_context *context);
 int eventfd_write_ready(struct eventfd_context *context);
+uint32_t eventfd_generation(struct eventfd_context *context);
 
 #endif
