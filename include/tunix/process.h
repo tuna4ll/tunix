@@ -64,6 +64,7 @@ struct vm_area {
     struct vm_area *right;
     struct vm_area *parent;
     uint32_t priority;
+    uint64_t commit_next;
 };
 
 struct process_memory {

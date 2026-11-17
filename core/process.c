@@ -2630,10 +2630,18 @@ int process_commit_area(uint64_t fault_address) {
     if (!area || !(area->kind & VM_ANONYMOUS)) return 0;
     if (!commit_one(current->cr3, area, page)) return 0;
 
+    // Commit ahead only when the fault follows the pages committed last, as
+    // memory used in order does: memory used sparsely would otherwise get 16
+    // pages for every page it touches.
     uint64_t ahead = page + 4096ULL;
+    if (page != area->commit_next) {
+        area->commit_next = ahead;
+        return 1;
+    }
     uint64_t limit = page + COMMIT_AHEAD_PAGES * 4096ULL;
     if (limit > area->end) limit = area->end;
     while (ahead < limit && commit_one(current->cr3, area, ahead)) ahead += 4096ULL;
+    area->commit_next = ahead;
     return 1;
 }
 
