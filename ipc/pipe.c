@@ -144,9 +144,13 @@ static int64_t pipe_read_locked(struct pipe_buffer *pipe, size_t size, void *buf
     memcpy(out, pipe->data + pipe->read_pos, first);
     if (amount > first) memcpy(out + first, pipe->data, amount - first);
     pipe->read_pos = (pipe->read_pos + amount) & (pipe->capacity - 1U);
+    size_t free_before = pipe->capacity - pipe->count;
     pipe->count -= amount;
 
-    process_wake_all(&pipe->space_wait);
+    /* A writer waits for room for a whole atomic write, as poll reports it, so
+     * waking writers for each byte read only has them go back to sleep. */
+    size_t room = pipe->capacity < PIPE_ATOMIC_WRITE ? pipe->capacity : PIPE_ATOMIC_WRITE;
+    if (free_before < room && free_before + amount >= room) process_wake_all(&pipe->space_wait);
     return (int64_t)amount;
 }
 
