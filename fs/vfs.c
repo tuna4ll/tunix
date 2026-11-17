@@ -831,7 +831,9 @@ static uint8_t *page_allocate(struct vfs_node *node, struct vfs_page_map *map, u
     return page;
 }
 
-void *vfs_page(struct vfs_node *node, uint64_t index, int for_write) {
+// fetch == 0 is for a page about to be overwritten whole, whose contents on
+// disk would only be thrown away.
+static void *page_get(struct vfs_node *node, uint64_t index, int for_write, int fetch) {
     VFS_LOCKED;
     if (!node) return NULL;
     if (!for_write) {
@@ -842,7 +844,7 @@ void *vfs_page(struct vfs_node *node, uint64_t index, int for_write) {
     if (!map) return NULL;
     if (!map->page[index]) {
         if (!page_allocate(node, map, index)) return NULL;
-        if (node->disk_inode && persist_ops && persist_ops->fetch_page &&
+        if (fetch && node->disk_inode && persist_ops && persist_ops->fetch_page &&
             index < pages_for(node->length)) {
             if (persist_ops->fetch_page(node, index, map->page[index]) != 0) {
                 page_free_one(node, map, index);
@@ -853,6 +855,10 @@ void *vfs_page(struct vfs_node *node, uint64_t index, int for_write) {
     if (for_write) mark_page_dirty(node, index);
     if (node->cache_listed && cache_tail != node) cache_touch(node);
     return map->page[index];
+}
+
+void *vfs_page(struct vfs_node *node, uint64_t index, int for_write) {
+    return page_get(node, index, for_write, 1);
 }
 
 void *vfs_page_peek(struct vfs_node *node, uint64_t index) {
@@ -985,8 +991,21 @@ static int64_t memory_read(struct vfs_node *node, uint64_t offset, size_t size, 
     return (int64_t)size;
 }
 
+// Pages a write covers only in part keep the rest of their contents, so they
+// are read from disk first, before the lock is taken.
+static void prefetch_partial_pages(struct vfs_node *node, uint64_t offset, size_t size) {
+    if (!node || !size || (uint64_t)size > UINT64_MAX - offset) return;
+    uint64_t end = offset + size;
+    uint64_t head = offset / VFS_PAGE_SIZE;
+    uint64_t tail = (end - 1ULL) / VFS_PAGE_SIZE;
+    if (offset % VFS_PAGE_SIZE || (head == tail && end % VFS_PAGE_SIZE))
+        vfs_prefetch(node, head * VFS_PAGE_SIZE, VFS_PAGE_SIZE);
+    if (tail != head && end % VFS_PAGE_SIZE) vfs_prefetch(node, tail * VFS_PAGE_SIZE, VFS_PAGE_SIZE);
+}
+
 static int64_t memory_write(struct vfs_node *node, uint64_t offset, size_t size,
                             const void *buffer) {
+    prefetch_partial_pages(node, offset, size);
     VFS_LOCKED;
     if (!node || !buffer || (node->flags & VFS_READONLY)) return -1;
     if ((uint64_t)size > UINT64_MAX - offset) return -1;
@@ -1000,7 +1019,8 @@ static int64_t memory_write(struct vfs_node *node, uint64_t offset, size_t size,
         uint64_t within = at % VFS_PAGE_SIZE;
         uint64_t chunk = VFS_PAGE_SIZE - within;
         if (chunk > left) chunk = left;
-        uint8_t *page = (uint8_t *)vfs_page(node, index, 1);
+        int whole = within == 0 && chunk == VFS_PAGE_SIZE;
+        uint8_t *page = (uint8_t *)page_get(node, index, 1, !whole);
         if (!page) {
             if (at > node->length) node->length = at;
             return at > offset ? (int64_t)(at - offset) : -1;
