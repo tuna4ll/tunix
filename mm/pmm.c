@@ -1,6 +1,7 @@
 #include <tunix/build_config.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <tunix/kstring.h>
 #include <tunix/lock.h>
 
 static struct lock pages_lock = LOCK_INITIALIZER("pages", LOCK_RANK_PAGES);
@@ -145,22 +146,39 @@ void *pmm_alloc_page(void) {
     return taken;
 }
 
+// The first free page in [begin, end), or end if there is none. Whole words of
+// 64 taken pages are skipped at once; bitmap bytes are little endian, so page n
+// is bit n % 64 of word n / 64.
+static uint64_t first_free(uint64_t begin, uint64_t end) {
+    uint64_t page = begin;
+    for (; page < end && (page & 63U); page++)
+        if (!bit_test(page)) return page;
+    for (; page + 64U <= end; page += 64U) {
+        uint64_t word;
+        memcpy(&word, bitmap + (page >> 3), sizeof(word));
+        uint64_t free_bits = ~word;
+        if (free_bits) return page + (uint64_t)__builtin_ctzll(free_bits);
+    }
+    for (; page < end; page++)
+        if (!bit_test(page)) return page;
+    return end;
+}
+
 static void *pmm_alloc_page_locked(void) {
     if (!free_pages) return NULL;
 
     for (uint64_t pass = 0; pass < 2; pass++) {
         uint64_t begin = pass == 0 ? next_hint : 0;
         uint64_t end = pass == 0 ? total_pages : next_hint;
-        for (uint64_t page = begin; page < end; page++) {
-            if (!bit_test(page)) {
-                bit_set(page);
-                refcounts[page] = 1;
-                free_pages--;
-                next_hint = page + 1;
-                if (next_hint >= total_pages) next_hint = 0;
-                return (void *)(page * PMM_PAGE_SIZE);
-            }
-        }
+        uint64_t page = first_free(begin, end);
+        if (page == end) continue;
+        if (bit_test(page)) panic("PMM: free-page search returned a taken page");
+        bit_set(page);
+        refcounts[page] = 1;
+        free_pages--;
+        next_hint = page + 1;
+        if (next_hint >= total_pages) next_hint = 0;
+        return (void *)(page * PMM_PAGE_SIZE);
     }
 
     panic("PMM: bitmap/free-page invariant broken");
