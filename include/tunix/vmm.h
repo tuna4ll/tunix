@@ -33,6 +33,7 @@
 #define PAGE_WRITE_THROUGH   (1ULL << 3)
 #define PAGE_UNCACHED        (1ULL << 4)
 #define PAGE_HUGE            (1ULL << 7)
+#define PAGE_GLOBAL          (1ULL << 8)
 #define PAGE_WRITE_COMBINING (1ULL << 7)
 #define PAGE_DEVICE          (1ULL << 9)
 #define PAGE_COW             (1ULL << 10)

@@ -28,6 +28,19 @@ static uint64_t map_device_locked(uint64_t physical, uint64_t bytes, uint64_t ca
 
 static int kernel_mapping(uint64_t virtual_address) { return virtual_address >= KERNEL_HALF_BASE; }
 
+// The kernel half is the same in every address space, so on x86 its entries are
+// global: they survive the CR3 writes of context switches.
+#if defined(__x86_64__)
+#define KERNEL_LEAF_GLOBAL PAGE_GLOBAL
+#else
+#define KERNEL_LEAF_GLOBAL 0ULL
+#endif
+
+static uint64_t leaf_flags_for(uint64_t virtual_address, uint64_t flags) {
+    return kernel_mapping(virtual_address) && !(flags & PAGE_USER) ? flags | KERNEL_LEAF_GLOBAL
+                                                                   : flags;
+}
+
 extern int process_commit_area(uint64_t fault_address);
 extern int process_grow_user_stack(uint64_t fault_address);
 extern int process_handle_cow_fault(uint64_t fault_address);
@@ -286,9 +299,39 @@ static inline void write_msr(uint32_t msr, uint64_t value) {
     __asm__ volatile("wrmsr" : : "c"(msr), "a"((uint32_t)value), "d"((uint32_t)(value >> 32)));
 }
 
+#define CR4_PGE (1ULL << 7)
+
+static void enable_global_pages(void) {
+    uint64_t cr4;
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    if (!(cr4 & CR4_PGE)) __asm__ volatile("mov %0, %%cr4" : : "r"(cr4 | CR4_PGE) : "memory");
+}
+
 void vmm_configure_processor(void) {
     configure_page_attributes();
     guard_user_pages();
+    enable_global_pages();
+}
+
+// Marks every leaf under a kernel-half table global, including what Limine
+// mapped before the kernel ran, such as the kernel image itself.
+static void mark_global(uint64_t *table, int level) {
+    for (unsigned index = 0; index < 512; index++) {
+        uint64_t entry = table[index];
+        if (!pte_present(entry)) continue;
+        if (level == 1 || pte_huge(entry)) {
+            table[index] = entry | PAGE_GLOBAL;
+            continue;
+        }
+        uint64_t *next = (uint64_t *)(DIRECT_MAP_BASE + pte_address(entry));
+        mark_global(next, level - 1);
+    }
+}
+
+static void globalize_kernel_half(uint64_t *pml4) {
+    for (unsigned index = 256; index < 512; index++)
+        if (pte_present(pml4[index]))
+            mark_global((uint64_t *)(DIRECT_MAP_BASE + pte_address(pml4[index])), 3);
 }
 
 static void configure_page_attributes(void) {
@@ -328,6 +371,10 @@ void vmm_close_user_access(void) {
 static int write_combining = 1;
 
 void vmm_configure_processor(void) {}
+
+static void enable_global_pages(void) {}
+
+static void globalize_kernel_half(uint64_t *pml4) { (void)pml4; }
 
 static void configure_page_attributes(void) {}
 
@@ -377,7 +424,7 @@ void vmm_init(void) {
         for (uint64_t i = 0; i < 512; i++) {
             uint64_t frame = base + i * 0x200000ULL;
             if (vmm_arch_direct_map_wanted(frame))
-                table[i] = pte_block(frame, PAGE_PRESENT | PAGE_WRITE);
+                table[i] = pte_block(frame, PAGE_PRESENT | PAGE_WRITE | KERNEL_LEAF_GLOBAL);
         }
         early(slots[slot])[gigabyte & 0x1FF] = pte_table(table_physical, PAGE_PRESENT | PAGE_WRITE);
     }
@@ -413,6 +460,8 @@ void vmm_init(void) {
         pml4[heap_pml4] = pte_table(heap_pdpt, PAGE_PRESENT | PAGE_WRITE);
     }
 
+    globalize_kernel_half(pml4);
+    enable_global_pages();
     vmm_arch_write_root(kernel_cr3_physical);
     KDEBUG("VMM: %u MiB direct map ready, %u MiB of room\n", (unsigned)(mapped / (1024 * 1024)),
            (unsigned)(DIRECT_MAP_BYTES / (1024 * 1024)));
@@ -523,6 +572,7 @@ static int vmm_map_page_in_locked(uint64_t cr3_physical, uint64_t virtual_addres
     uint64_t *pt = next_table(pd, i2, flags, 1);
     if (!pt) return -1;
     if (pt[i1]) return -2;
+    flags = leaf_flags_for(virtual_address, flags);
     pt[i1] = pte_page(physical_address & ADDRESS_MASK, flags | PAGE_PRESENT);
     account(space, 0, pt[i1]);
     if ((flags & PAGE_USER) && !(flags & (PAGE_NX | PAGE_DEVICE)))
@@ -708,7 +758,7 @@ static int protect_page_locked(uint64_t cr3_physical, uint64_t virtual_address, 
     if (!pte_present(pt[i1])) return -1;
     uint64_t physical = pte_address(pt[i1]);
     uint64_t old_entry = pt[i1];
-    pt[i1] = pte_page(physical, (flags & ~ADDRESS_MASK) | PAGE_PRESENT);
+    pt[i1] = pte_page(physical, leaf_flags_for(virtual_address, flags & ~ADDRESS_MASK) | PAGE_PRESENT);
     account(space, old_entry, pt[i1]);
     if ((flags & PAGE_USER) && !(flags & (PAGE_NX | PAGE_DEVICE)))
         vmm_arch_sync_executable(physical);

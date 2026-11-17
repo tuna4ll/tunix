@@ -45,10 +45,24 @@ static void reload_cr3(void) {
     __asm__ volatile("mov %0, %%cr3" : : "r"(value) : "memory");
 }
 
+#define FLUSH_ADDRESS_SPACE 1U
+#define FLUSH_KERNEL        2U
+
+// Kernel entries are global, which a CR3 write keeps: toggling CR4.PGE drops
+// them as well.
+static void flush_including_global(void) {
+    uint64_t cr4;
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    __asm__ volatile("mov %0, %%cr4" : : "r"(cr4 & ~(1ULL << 7)) : "memory");
+    __asm__ volatile("mov %0, %%cr4" : : "r"(cr4) : "memory");
+}
+
 void smp_service_flush(void) {
     struct cpu *self = cpu_current();
-    if (!__atomic_load_n(&self->flush_pending, __ATOMIC_ACQUIRE)) return;
-    reload_cr3();
+    uint32_t asked = __atomic_load_n(&self->flush_pending, __ATOMIC_ACQUIRE);
+    if (!asked) return;
+    if (asked & FLUSH_KERNEL) flush_including_global();
+    else reload_cr3();
     __atomic_store_n(&self->flush_pending, 0, __ATOMIC_RELEASE);
 }
 
@@ -74,7 +88,8 @@ static void flush_others(uint64_t cr3, int everywhere) {
         struct cpu *cpu = percpu_slot(index);
         if (index == self || !cpu->online) continue;
         if (!everywhere && __atomic_load_n(&cpu->address_space, __ATOMIC_SEQ_CST) != cr3) continue;
-        __atomic_store_n(&cpu->flush_pending, 1, __ATOMIC_RELEASE);
+        __atomic_fetch_or(&cpu->flush_pending, everywhere ? FLUSH_KERNEL : FLUSH_ADDRESS_SPACE,
+                          __ATOMIC_RELEASE);
         asked = 1;
     }
     if (!asked) return;
