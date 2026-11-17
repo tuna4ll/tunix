@@ -44,6 +44,17 @@ struct fat_volume {
     uint32_t root_cluster;
     int bits;
     struct vfs_node *root;
+    /* Where the search for a free cluster starts: past the last one taken. */
+    uint32_t next_free;
+    /* The two sectors of the first FAT that fat_entry_read and
+     * fat_entry_write touched last, valid when fat_cache_valid. */
+    int fat_cache_valid;
+    uint64_t fat_cache_sector;
+    uint8_t fat_cache[BLOCK_SECTOR_SIZE * 2];
+    /* FAT32's FSInfo sector, whose free cluster count is marked unknown on the
+     * first change to the FAT rather than kept up to date. */
+    uint32_t fsinfo_sector;
+    int fsinfo_forgotten;
 };
 
 struct fat_file {
@@ -96,7 +107,15 @@ static int fat_entry_read(struct fat_volume *volume, uint32_t cluster, uint32_t 
     uint64_t sector_index = offset / volume->bytes_per_sector;
     uint32_t within = (uint32_t)(offset % volume->bytes_per_sector);
 
-    if (read_sectors(volume, volume->fat_start + sector_index, 2, sector) != 0) return -1;
+    if (!volume->fat_cache_valid || volume->fat_cache_sector != sector_index) {
+        if (read_sectors(volume, volume->fat_start + sector_index, 2, volume->fat_cache) != 0) {
+            volume->fat_cache_valid = 0;
+            return -1;
+        }
+        volume->fat_cache_sector = sector_index;
+        volume->fat_cache_valid = 1;
+    }
+    memcpy(sector, volume->fat_cache, sizeof(sector));
 
     uint32_t value = 0;
     for (uint32_t index = 0; index < width; index++)
@@ -109,9 +128,25 @@ static int fat_entry_read(struct fat_volume *volume, uint32_t cluster, uint32_t 
     return 0;
 }
 
+static void fsinfo_forget(struct fat_volume *volume) {
+    if (volume->fsinfo_forgotten || volume->bits != 32 || !volume->fsinfo_sector ||
+        volume->fsinfo_sector == 0xFFFFU)
+        return;
+    volume->fsinfo_forgotten = 1;
+    uint8_t info[BLOCK_SECTOR_SIZE];
+    if (read_sectors(volume, volume->fsinfo_sector, 1, info) != 0) return;
+    if (info[0] != 0x52U || info[1] != 0x52U || info[2] != 0x61U || info[3] != 0x41U ||
+        info[484] != 0x72U || info[485] != 0x72U || info[486] != 0x41U || info[487] != 0x61U)
+        return;
+    memset(info + 488, 0xFF, 8);
+    (void)write_sectors(volume, volume->fsinfo_sector, 1, info);
+}
+
 static int fat_entry_write(struct fat_volume *volume, uint32_t cluster, uint32_t value) {
     uint8_t sector[BLOCK_SECTOR_SIZE * 2];
     uint64_t offset;
+
+    fsinfo_forget(volume);
 
     if (volume->bits == 12) offset = (uint64_t)cluster + cluster / 2U;
     else if (volume->bits == 16) offset = (uint64_t)cluster * 2U;
@@ -143,39 +178,68 @@ static int fat_entry_write(struct fat_volume *volume, uint32_t cluster, uint32_t
                 sector[within + index] = (uint8_t)(merged >> (index * 8U));
         }
 
-        if (write_sectors(volume, base + sector_index, 2, sector) != 0) return -1;
+        if (write_sectors(volume, base + sector_index, 2, sector) != 0) {
+            volume->fat_cache_valid = 0;
+            return -1;
+        }
+        if (copy == 0) {
+            /* What was just written is now what the first FAT holds there. */
+            memcpy(volume->fat_cache, sector, sizeof(sector));
+            volume->fat_cache_sector = sector_index;
+            volume->fat_cache_valid = 1;
+        }
     }
     return 0;
 }
 
 static uint32_t fat_allocate_cluster(struct fat_volume *volume) {
-    for (uint32_t cluster = 2U; cluster < volume->cluster_count + 2U; cluster++) {
+    uint32_t limit = volume->cluster_count + 2U;
+    uint32_t start = volume->next_free >= 2U && volume->next_free < limit ? volume->next_free : 2U;
+    for (uint32_t tried = 0; tried < volume->cluster_count; tried++) {
+        uint32_t cluster = start + tried;
+        if (cluster >= limit) cluster -= volume->cluster_count;
         uint32_t value = 0;
         if (fat_entry_read(volume, cluster, &value) != 0) return 0;
         if (value) continue;
         uint32_t end = volume->bits == 32 ? 0x0FFFFFFFU : (volume->bits == 16 ? 0xFFFFU : 0x0FFFU);
         if (fat_entry_write(volume, cluster, end) != 0) return 0;
+        volume->next_free = cluster + 1U;
         return cluster;
     }
     return 0;
+}
+
+/* The cluster after this one in its chain, which grow adds if there is none. */
+static uint32_t cluster_next(struct fat_volume *volume, uint32_t cluster, int grow) {
+    uint32_t next = 0;
+    if (fat_entry_read(volume, cluster, &next) != 0) return 0;
+    if (cluster_is_end(volume, next)) {
+        if (!grow) return 0;
+        next = fat_allocate_cluster(volume);
+        if (!next) return 0;
+        if (fat_entry_write(volume, cluster, next) != 0) return 0;
+    }
+    return next;
 }
 
 static uint32_t cluster_at(struct fat_volume *volume, uint32_t first, uint64_t offset, int grow) {
     if (first < 2U) return 0;
     uint32_t cluster = first;
     uint64_t steps = offset / volume->cluster_bytes;
-    while (steps--) {
-        uint32_t next = 0;
-        if (fat_entry_read(volume, cluster, &next) != 0) return 0;
-        if (cluster_is_end(volume, next)) {
-            if (!grow) return 0;
-            next = fat_allocate_cluster(volume);
-            if (!next) return 0;
-            if (fat_entry_write(volume, cluster, next) != 0) return 0;
-        }
-        cluster = next;
-    }
+    while (cluster && steps--) cluster = cluster_next(volume, cluster, grow);
     return cluster;
+}
+
+/* The cluster holding offset, found from the one holding the previous offset
+ * when it is the same or the next, rather than from the start of the chain. */
+static uint32_t cluster_follow(struct fat_volume *volume, uint32_t first, uint64_t offset,
+                               uint32_t *cluster, uint64_t *index, int grow) {
+    uint64_t wanted = offset / volume->cluster_bytes;
+    if (*cluster && wanted == *index) return *cluster;
+    if (*cluster && wanted == *index + 1U) *cluster = cluster_next(volume, *cluster, grow);
+    else *cluster = cluster_at(volume, first, offset, grow);
+    *index = wanted;
+    return *cluster;
 }
 
 static int64_t fat_node_read(struct vfs_node *node, uint64_t offset, size_t size, void *buffer) {
@@ -189,9 +253,12 @@ static int64_t fat_node_read(struct vfs_node *node, uint64_t offset, size_t size
     uint8_t *out = (uint8_t *)buffer;
     size_t moved = 0;
     uint8_t staging[BLOCK_SECTOR_SIZE];
+    uint32_t current = 0;
+    uint64_t current_index = 0;
 
     while (moved < size) {
-        uint32_t cluster = cluster_at(volume, file->first_cluster, offset, 0);
+        uint32_t cluster =
+            cluster_follow(volume, file->first_cluster, offset, &current, &current_index, 0);
         if (!cluster) break;
         uint32_t within = (uint32_t)(offset % volume->cluster_bytes);
         uint64_t sector = cluster_sector(volume, cluster) + within / volume->bytes_per_sector;
@@ -266,8 +333,11 @@ static int64_t fat_node_write(struct vfs_node *node, uint64_t offset, size_t siz
         file->first_cluster = cluster;
     }
 
+    uint32_t current = 0;
+    uint64_t current_index = 0;
     while (moved < size) {
-        uint32_t cluster = cluster_at(volume, file->first_cluster, offset, 1);
+        uint32_t cluster =
+            cluster_follow(volume, file->first_cluster, offset, &current, &current_index, 1);
         if (!cluster) break;
         uint32_t within = (uint32_t)(offset % volume->cluster_bytes);
         uint64_t sector = cluster_sector(volume, cluster) + within / volume->bytes_per_sector;
@@ -672,6 +742,7 @@ int fatfs_mount(const char *source, const char *mount_name, struct vfs_node **ro
     if (volume->bits == 32) {
         volume->root_cluster =
             (uint32_t)(boot[44] | (boot[45] << 8) | (boot[46] << 16) | (boot[47] << 24));
+        volume->fsinfo_sector = (uint32_t)(boot[48] | (boot[49] << 8));
         volume->root_sectors = 0;
         volume->root_start = 0;
         volume->data_start = reserved + volume->fat_count * volume->fat_sectors;
