@@ -3,6 +3,13 @@
 
 #include <stdint.h>
 
+#define DEV_MAJOR_MEM              1
+#define DEV_MINOR_MEM_NULL         3
+#define DEV_MINOR_MEM_ZERO         5
+#define DEV_MINOR_MEM_FULL         7
+#define DEV_MINOR_MEM_RANDOM       8
+#define DEV_MINOR_MEM_URANDOM      9
+#define DEV_MINOR_MEM_KMSG         11
 #define DEV_MAJOR_TTY              4
 #define DEV_MAJOR_TTYAUX           5
 #define DEV_MINOR_TTYAUX_CURRENT   0

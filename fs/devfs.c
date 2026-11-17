@@ -383,11 +383,21 @@ void devfs_init(void) {
         attach_device(dev, "full", VFS_CHARDEVICE, 0666, zero_read, full_write, always_ready);
     for (unsigned index = 0; index < 3U; index++)
         if (stateless[index]) stateless[index]->stateless = 1U;
-    (void)attach_device(dev, "random", VFS_CHARDEVICE, 0666, random_read, random_write,
-                        random_ready);
-    (void)attach_device(dev, "urandom", VFS_CHARDEVICE, 0666, random_read, random_write,
-                        random_ready);
-    (void)attach_device(dev, "kmsg", VFS_CHARDEVICE, 0600, kmsg_read, kmsg_write, kmsg_ready);
+    struct vfs_node *mem[6] = {stateless[0], stateless[1], stateless[2]};
+    mem[3] = attach_device(dev, "random", VFS_CHARDEVICE, 0666, random_read, random_write,
+                           random_ready);
+    mem[4] = attach_device(dev, "urandom", VFS_CHARDEVICE, 0666, random_read, random_write,
+                           random_ready);
+    mem[5] = attach_device(dev, "kmsg", VFS_CHARDEVICE, 0600, kmsg_read, kmsg_write, kmsg_ready);
+    /* glibc's daemon() refuses a /dev/null that is not 1:3. */
+    static const uint32_t mem_minor[6] = {DEV_MINOR_MEM_NULL,   DEV_MINOR_MEM_ZERO,
+                                          DEV_MINOR_MEM_FULL,   DEV_MINOR_MEM_RANDOM,
+                                          DEV_MINOR_MEM_URANDOM, DEV_MINOR_MEM_KMSG};
+    for (unsigned index = 0; index < 6U; index++) {
+        if (!mem[index]) continue;
+        mem[index]->dev_major = DEV_MAJOR_MEM;
+        mem[index]->dev_minor = mem_minor[index];
+    }
 
     struct vfs_node *rtc =
         attach_device(dev, "rtc", VFS_CHARDEVICE, 0660, rtc_read, NULL, always_ready);
