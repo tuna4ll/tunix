@@ -434,6 +434,7 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136,
 #define MAP_PRIVATE    0x02
 #define MAP_FIXED      0x10
 #define MREMAP_MAYMOVE 1
+#define MREMAP_FIXED   2
 #define MAP_ANONYMOUS  0x20
 #define MAP_NORESERVE  0x4000
 
@@ -1338,16 +1339,15 @@ static int64_t sys_select_once(int nfds, uint64_t user_read, uint64_t user_write
     return ready;
 }
 
+/* The path of the caller's root, or 0 when its root has no path any more:
+ * a directory removed after a chroot into it, as Chromium's sandbox does with
+ * /proc/self/fdinfo of a process that then exits. */
 static size_t process_root_prefix(char *buffer) {
     struct vfs_node *root = process_get_root();
     buffer[0] = '/';
     buffer[1] = '\0';
     if (!root || root == vfs_root) return 1;
-    if (vfs_node_path(root, buffer, VFS_PATH_MAX) != 0 || !buffer[0]) {
-        buffer[0] = '/';
-        buffer[1] = '\0';
-        return 1;
-    }
+    if (vfs_node_path(root, buffer, VFS_PATH_MAX) != 0 || !buffer[0]) return 0;
     size_t length = strlen(buffer);
     while (length > 1 && buffer[length - 1] == '/') buffer[--length] = '\0';
     return length;
@@ -1356,6 +1356,12 @@ static size_t process_root_prefix(char *buffer) {
 static int normalize_path(struct vfs_node *base, const char *input, char *output) {
     if (!input || !input[0]) return -ENOENT;
     size_t floor = process_root_prefix(output);
+    // A root that is gone holds nothing, so absolute paths lead nowhere; paths
+    // relative to a directory still open outside it work, as on Linux.
+    if (!floor) {
+        if (input[0] == '/' || !base) return -ENOENT;
+        floor = 1;
+    }
     VFS_PATH_SCOPED combined = (char *)kmalloc(2 * VFS_PATH_MAX);
     if (!combined) return -ENOMEM;
     size_t at = 0;
@@ -2450,7 +2456,8 @@ static int write_unix_control(struct linux_msghdr *message, struct unix_socket *
     }
     if (include_credentials) {
         struct linux_cmsghdr header = {credentials_length, SOL_SOCKET, SCM_CREDENTIALS};
-        struct linux_ucred credentials = {peer.pid, peer.uid, peer.gid};
+        // Kept as global pids, handed out as the receiver's namespace numbers them.
+        struct linux_ucred credentials = {process_pid_seen_by_current(peer.pid), peer.uid, peer.gid};
         if (copy_to_user(message->control + offset, &header, sizeof(header)) != 0 ||
             copy_to_user(message->control + offset + sizeof(header), &credentials,
                          sizeof(credentials)) != 0) {
@@ -2728,7 +2735,7 @@ static int64_t sys_getsockopt(int fd, int level, int option, uint64_t user_value
             struct unix_credentials peer;
             int status = unix_socket_get_peer_credentials(unix_value, &peer);
             if (status < 0) return status;
-            struct linux_ucred value = {peer.pid, peer.uid, peer.gid};
+            struct linux_ucred value = {process_pid_seen_by_current(peer.pid), peer.uid, peer.gid};
             if (copy_to_user(user_value, &value, sizeof(value)) != 0) return -EFAULT;
             uint32_t length = sizeof(value);
             return copy_to_user(user_length, &length, sizeof(length)) == 0 ? 0 : -EFAULT;
@@ -3064,6 +3071,10 @@ static int64_t sys_ioctl(int fd, unsigned long request, uint64_t user_argument) 
         if (copy_from_user(&ifconf, user_argument, sizeof(ifconf)) != 0) return -EFAULT;
         if (ifconf.length < 0) return -EINVAL;
 
+        if (!net_ns_has_device()) {
+            ifconf.length = 0;
+            return copy_to_user(user_argument, &ifconf, sizeof(ifconf)) == 0 ? 0 : -EFAULT;
+        }
         struct linux_ifreq ifreq;
         memset(&ifreq, 0, sizeof(ifreq));
         memcpy(ifreq.name, "eth0", 5);
@@ -3517,6 +3528,7 @@ static int64_t sys_getcwd(uint64_t user_buffer, size_t size) {
     if (!path || !prefix) return -ENOMEM;
     if (vfs_node_path(process->cwd, path, VFS_PATH_MAX) != 0) return -ENAMETOOLONG;
     size_t floor = process_root_prefix(prefix);
+    if (!floor) return -ENOENT;
     const char *visible = path;
     if (floor > 1 && strncmp(path, prefix, floor) == 0) visible = path[floor] ? path + floor : "/";
     size_t length = strlen(visible) + 1;
@@ -3595,7 +3607,7 @@ static int64_t xattr_descriptor(int fd, int op, uint64_t user_name, uint64_t use
 static int64_t sys_chroot(uint64_t user_path) {
     struct process *process = process_current();
     if (!process) return -EINVAL;
-    if (process->cred.euid != 0) return -EPERM;
+    if (!user_ns_has_cap(process, CAP_SYS_CHROOT)) return -EPERM;
     VFS_PATH_SCOPED path = NULL;
     int status = copy_path_at(AT_FDCWD, user_path, &path);
     if (status != 0) return status;
@@ -3609,6 +3621,7 @@ static int64_t sys_chroot(uint64_t user_path) {
     vfs_node_ref(node);
     process->cwd = node;
     vfs_node_unref(previous);
+    process_sync_fs();
     return 0;
 }
 
@@ -3617,6 +3630,7 @@ static void set_cwd(struct process *process, struct vfs_node *node) {
     vfs_node_ref(node);
     process->cwd = node;
     vfs_node_unref(previous);
+    if (process == process_current()) process_sync_fs();
 }
 
 static int64_t sys_chdir(uint64_t user_path) {
@@ -4487,66 +4501,29 @@ static int64_t sys_shmctl(int id, int command, uint64_t user_buffer) {
     }
 }
 
-static int64_t mremap_backed(struct process *process, uint64_t address, uint64_t old_length,
-                             uint64_t new_length, int flags, struct file *backing,
-                             uint64_t backing_offset, uint32_t kind, uint64_t area_flags) {
-    int lazy = backing && (kind & VM_FILE_PAGES);
-    if (new_length < old_length) {
-        unmap_pages(process, address + new_length, address + old_length);
-
-        if (backing)
-            (void)process_map_area(address, address + new_length, area_flags, kind, backing,
-                                   backing_offset);
-        return (int64_t)address;
+/* Moves [address, address + old_length) to destination, which is free, as
+ * new_length bytes: page entries move as they are, so nothing is copied and
+ * shared pages stay shared, and pages past the old end come as the mapping's
+ * area provides them, or as zeros where there is no area. */
+static void mremap_move(struct process *process, uint64_t address, uint64_t old_length,
+                        uint64_t new_length, uint64_t destination, const struct vm_area *area) {
+    uint64_t kept = old_length < new_length ? old_length : new_length;
+    if (area) {
+        struct file *file = area->file;
+        if (file) file_ref(file);
+        (void)process_map_area(destination, destination + new_length, area->page_flags,
+                               area->kind, file, area->offset + (address - area->start));
+        if (file) file_unref(file);
     }
-
-    uint64_t tail = address + old_length;
-    uint64_t extra = new_length - old_length;
-    if (mapping_range_free(process, tail, extra)) {
-        int ok;
-        if (lazy) {
-            ok = 1;
-        } else if (backing && backing->kind == FILE_KIND_MEMFD) {
-            ok = map_shared_object(process, tail, tail + extra, backing->memfd,
-                                   backing_offset + old_length, area_flags,
-                                   (kind & VM_PRIVATE) != 0) == 0;
-        } else if (!backing) {
-            ok = map_zero_pages(process, tail, tail + extra, PAGE_WRITE) == 0;
-        } else {
-            ok = 0;
-        }
-        if (ok) {
-            if (backing)
-                (void)process_map_area(address, address + new_length, area_flags, kind, backing,
-                                       backing_offset);
-            return (int64_t)address;
-        }
-        unmap_pages(process, tail, tail + extra);
-    }
-
-    if (!(flags & MREMAP_MAYMOVE)) return -ENOMEM;
-
-    int movable = backing && (backing->kind == FILE_KIND_MEMFD || (lazy && !(kind & VM_PRIVATE)));
-    if (!movable) return -ENOMEM;
-
-    uint64_t destination;
-    uint64_t search_start = process->memory ? process->memory->mmap_base : process->mmap_base;
-    if (find_mapping_range(process, search_start, new_length, &destination) != 0) return -ENOMEM;
-
-    if (!lazy &&
-        map_shared_object(process, destination, destination + new_length, backing->memfd,
-                          backing_offset, area_flags, (kind & VM_PRIVATE) != 0) != 0) {
-        unmap_pages(process, destination, destination + new_length);
-        return -ENOMEM;
-    }
-
+    vmm_flush_batch_begin();
+    for (uint64_t at = 0; at < kept; at += 4096)
+        if (vmm_page_occupied(process->cr3, address + at))
+            (void)vmm_move_page(process->cr3, address + at, destination + at);
+    vmm_flush_batch_end();
     unmap_pages(process, address, address + old_length);
-    (void)process_map_area(destination, destination + new_length, area_flags, kind, backing,
-                           backing_offset);
-
-    process->mmap_base = destination + new_length + 4096;
-    if (process->memory) process->memory->mmap_base = process->mmap_base;
-    return (int64_t)destination;
+    if (!area && new_length > old_length)
+        (void)map_zero_pages(process, destination + old_length, destination + new_length,
+                             PAGE_WRITE);
 }
 
 static int64_t sys_mremap(uint64_t address, uint64_t old_length, uint64_t new_length, int flags,
@@ -4555,27 +4532,62 @@ static int64_t sys_mremap(uint64_t address, uint64_t old_length, uint64_t new_le
     if (!process) return -EINVAL;
     if (address & 0xFFFULL) return -EINVAL;
     if (!new_length) return -EINVAL;
-
-    if (flags & ~MREMAP_MAYMOVE) return -EINVAL;
-    (void)new_address;
+    if (flags & ~(MREMAP_MAYMOVE | MREMAP_FIXED)) return -EINVAL;
+    if ((flags & MREMAP_FIXED) && (!(flags & MREMAP_MAYMOVE) || (new_address & 0xFFFULL)))
+        return -EINVAL;
 
     old_length = align_up(old_length, 4096);
     new_length = align_up(new_length, 4096);
-    if (address >= USER_ADDRESS_LIMIT || new_length > USER_ADDRESS_LIMIT - address) return -EINVAL;
+    if (address >= USER_ADDRESS_LIMIT || old_length > USER_ADDRESS_LIMIT - address ||
+        new_length > USER_ADDRESS_LIMIT - address)
+        return -EINVAL;
+    if ((flags & MREMAP_FIXED) &&
+        (new_address >= USER_ADDRESS_LIMIT || new_length > USER_ADDRESS_LIMIT - new_address ||
+         (new_address < address + old_length && address < new_address + new_length)))
+        return -EINVAL;
     if (!vmm_page_occupied(process->cr3, address) && !process_find_area(address)) return -EFAULT;
 
-    if (new_length == old_length) return (int64_t)address;
+    struct vm_area *found = process_find_area(address);
+    struct vm_area area = {0};
+    if (found) {
+        area = *found;
+        if (area.file) file_ref(area.file);
+    }
+    int64_t result;
 
-    struct vm_area *area = process_find_area(address);
-    struct file *backing = area ? area->file : NULL;
-    uint64_t backing_offset = area ? area->offset : 0;
-    uint32_t kind = area ? area->kind : 0;
-    uint64_t area_flags = area ? area->page_flags : PAGE_WRITE;
-
-    if (backing) file_ref(backing);
-    int64_t result = mremap_backed(process, address, old_length, new_length, flags, backing,
-                                   backing_offset, kind, area_flags);
-    if (backing) file_unref(backing);
+    if (flags & MREMAP_FIXED) {
+        unmap_pages(process, new_address, new_address + new_length);
+        mremap_move(process, address, old_length, new_length, new_address, found ? &area : NULL);
+        result = (int64_t)new_address;
+    } else if (new_length <= old_length) {
+        unmap_pages(process, address + new_length, address + old_length);
+        result = (int64_t)address;
+    } else if (mapping_range_free(process, address + old_length, new_length - old_length)) {
+        uint64_t tail = address + old_length;
+        int ok;
+        // An area fills its pages in on first touch; without one they are mapped now.
+        if (found)
+            ok = process_map_area(tail, address + new_length, area.page_flags, area.kind, area.file,
+                                  area.offset + (tail - area.start)) == 0;
+        else ok = map_zero_pages(process, tail, address + new_length, PAGE_WRITE) == 0;
+        if (!ok) unmap_pages(process, tail, address + new_length);
+        result = ok ? (int64_t)address : -ENOMEM;
+    } else if (!(flags & MREMAP_MAYMOVE)) {
+        result = -ENOMEM;
+    } else {
+        uint64_t destination;
+        uint64_t start = process->memory ? process->memory->mmap_base : process->mmap_base;
+        if (find_mapping_range(process, start, new_length, &destination) != 0) {
+            result = -ENOMEM;
+        } else {
+            mremap_move(process, address, old_length, new_length, destination,
+                        found ? &area : NULL);
+            process->mmap_base = destination + new_length + 4096;
+            if (process->memory) process->memory->mmap_base = process->mmap_base;
+            result = (int64_t)destination;
+        }
+    }
+    if (area.file) file_unref(area.file);
     return result;
 }
 
@@ -5384,21 +5396,21 @@ static int64_t sys_capget(uint64_t user_header, uint64_t user_data) {
     if (!user_data) return 0;
     if (header.pid < 0) return -EINVAL;
 
-    uint32_t target_euid = 0;
+    uint64_t held = 0;
     if (header.pid) {
         process_table_lock();
         struct process *target = process_find((uint64_t)header.pid);
-        if (target) target_euid = target->cred.euid;
+        if (target) held = process_capability_set(target);
         process_table_unlock();
         if (!target) return -ESRCH;
     } else {
-        target_euid = process_current()->cred.euid;
+        held = process_capability_set(process_current());
     }
 
-    uint32_t bits = target_euid == 0 ? 0xFFFFFFFFU : 0U;
     struct cap_user_data data[2];
-    data[0].effective = data[0].permitted = data[0].inheritable = bits;
-    data[1].effective = data[1].permitted = data[1].inheritable = bits;
+    data[0].effective = data[0].permitted = (uint32_t)held;
+    data[1].effective = data[1].permitted = (uint32_t)(held >> 32);
+    data[0].inheritable = data[1].inheritable = 0;
     return copy_to_user(user_data, data, sizeof(data)) == 0 ? 0 : -EFAULT;
 }
 
@@ -5415,13 +5427,16 @@ static int64_t sys_capset(uint64_t user_header, uint64_t user_data) {
     struct process *process = process_current();
     if (header.pid && (!process || (uint64_t)header.pid != process->pid)) return -EPERM;
     if (!user_data) return 0;
-    if (cred_is_root()) return 0;
 
     struct cap_user_data data[2];
     if (copy_from_user(data, user_data, sizeof(data)) != 0) return -EFAULT;
-    if (data[0].effective | data[0].permitted | data[0].inheritable | data[1].effective |
-        data[1].permitted | data[1].inheritable)
-        return -EPERM;
+    uint64_t permitted = data[0].permitted | ((uint64_t)data[1].permitted << 32);
+    uint64_t effective = data[0].effective | ((uint64_t)data[1].effective << 32);
+    uint64_t held = process_capability_set(process);
+    // Capabilities can only be given up: nothing beyond what is held, and
+    // nothing effective that is not permitted.
+    if ((permitted & ~held) || (effective & ~permitted)) return -EPERM;
+    process->cap_dropped |= CAP_ALL & ~effective;
     return 0;
 }
 
@@ -5629,14 +5644,14 @@ static int64_t sys_clone_fork_compat(struct syscall_frame *frame, uint64_t flags
             CLONE_SYSVSEM | CLONE_SETTLS | CLONE_FORK_METADATA_FLAGS;
         if (flags & ~(0xFFULL | vfork_allowed)) return -ENOSYS;
         if (exit_signal != 0 && exit_signal != SIGCHLD) return -EINVAL;
-        struct fork_request request = {child_stack, 0, 0, clear_handlers, 0};
+        struct fork_request request = {child_stack, 0, 0, clear_handlers, 0, (flags & CLONE_FS) != 0};
         return give_pidfd(process_fork_from_syscall(frame, &request), pidfd_user);
     }
 
     uint64_t fork_ns =
         flags & (CLONE_NEWUSER | CLONE_NEWUTS | CLONE_NEWNET | CLONE_NEWPID | CLONE_NEWNS);
-    uint64_t unsupported = flags & ~(0xFFULL | CLONE_FORK_METADATA_FLAGS | fork_ns);
-    if (unsupported != 0 || (flags & CLONE_FORK_REJECT_FLAGS) != 0 ||
+    uint64_t unsupported = flags & ~(0xFFULL | CLONE_FORK_METADATA_FLAGS | CLONE_FS | fork_ns);
+    if (unsupported != 0 || (flags & CLONE_FORK_REJECT_FLAGS & ~CLONE_FS) != 0 ||
         (flags & CLONE_NAMESPACE_FLAGS & ~fork_ns) != 0) {
         KDEBUG("syscall: clone unsupported flags=0x%llx stack=0x%llx\n", (unsigned long long)flags,
                (unsigned long long)child_stack);
@@ -5650,6 +5665,7 @@ static int64_t sys_clone_fork_compat(struct syscall_frame *frame, uint64_t flags
         (flags & CLONE_CHILD_CLEARTID) ? child_tid_user : 0,
         clear_handlers,
         fork_ns,
+        (flags & CLONE_FS) != 0,
     };
     int64_t pid = process_fork_from_syscall(frame, &request);
     if (pid <= 0) return pid;
@@ -6357,7 +6373,19 @@ static void syscall_run(struct syscall_frame *frame) {
                 if (code > 4095U) code = 4095U;
                 SYSCALL_RET(frame) = (uint64_t)(-(int64_t)code);
             } else if (full == SECCOMP_RET_TRAP) {
-                process_signal_from_syscall(frame, SIGSYS, SECCOMP_SI_CODE, 0, SYSCALL_IP(frame));
+                // Laid out as Linux's SIGSYS siginfo: the handler, as Chromium's
+                // does, answers for the syscall from these and the saved registers.
+                struct signal_info info;
+                memset(&info, 0, sizeof(info));
+                info.signo = SIGSYS;
+                info.code = SECCOMP_SI_CODE;
+                info.error = (int32_t)(action & SECCOMP_RET_DATA);
+                info.fields.fault.address = SYSCALL_IP(frame);
+                int32_t number = (int32_t)SYSCALL_NATIVE_NR(frame);
+                uint32_t arch = seccomp_audit_arch();
+                memcpy(&info.fields.bytes[8], &number, sizeof(number));
+                memcpy(&info.fields.bytes[12], &arch, sizeof(arch));
+                process_signal_info_from_syscall(frame, &info, 0);
                 return;
             } else if (full == SECCOMP_RET_TRACE || full == SECCOMP_RET_USER_NOTIF) {
                 SYSCALL_RET(frame) = (uint64_t)(-(int64_t)ENOSYS);

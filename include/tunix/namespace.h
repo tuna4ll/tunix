@@ -85,7 +85,19 @@ void namespace_release(struct process *process);
 int64_t namespace_unshare(uint64_t flags);
 int64_t namespace_apply_clone(struct process *child, uint64_t flags);
 
+#define CAP_NET_ADMIN  12
+#define CAP_SYS_CHROOT 18
+#define CAP_SYS_ADMIN  21
+#define CAP_LAST_CAP   40
+#define CAP_ALL        ((1ULL << (CAP_LAST_CAP + 1)) - 1)
+
+struct process;
 int user_ns_capable(void);
+int user_ns_is_root(const struct process *process);
+int user_ns_has_cap(const struct process *process, unsigned cap);
+int user_ns_initial_has_cap(unsigned cap);
+int namespace_object_is_initial(const void *ns);
+uint64_t process_capability_set(const struct process *process);
 uint32_t user_ns_map_uid(const struct user_namespace *ns, uint32_t kuid);
 uint32_t user_ns_map_gid(const struct user_namespace *ns, uint32_t kgid);
 

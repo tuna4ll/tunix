@@ -401,6 +401,10 @@ static unsigned collect_links(struct link_description *links, uint8_t loopback_m
     links[0].mtu = 65536U;
     links[0].mac = loopback_mac;
     links[0].mac_length = 0;
+    if (!net_ns_has_device()) {
+        links[0].flags = IFF_LOOPBACK;
+        return 1;
+    }
 
     const struct net_config *config = net_get_config();
     uint32_t flags = IFF_BROADCAST | IFF_MULTICAST;
@@ -477,6 +481,7 @@ static void emit_addr(struct nl_builder *b, uint32_t seq, uint32_t pid, int inde
 }
 
 static int dump_addrs(struct nl_builder *b, uint32_t seq, uint32_t pid) {
+    if (!net_ns_has_device()) return 1;
     uint32_t loopback = net_htonl(0x7F000001U);
     emit_addr(b, seq, pid, NETLINK_INDEX_LO, "lo", 8, 254, loopback);
 
@@ -510,6 +515,7 @@ static void emit_route(struct nl_builder *b, uint32_t seq, uint32_t pid, uint8_t
 }
 
 static int dump_routes(struct nl_builder *b, uint32_t seq, uint32_t pid) {
+    if (!net_ns_has_device()) return 1;
     const struct net_config *config = net_get_config();
     if (config->address && config->netmask) {
         uint32_t network = config->address & config->netmask;
@@ -541,6 +547,8 @@ static const void *request_attr(const struct nlmsghdr *request, size_t header_le
 }
 
 static int handle_addr_change(const struct nlmsghdr *request) {
+    if (!net_ns_has_device()) return -ENODEV;
+    if (!net_may_configure()) return -EPERM;
     if (request->nlmsg_len < sizeof(*request) + sizeof(struct ifaddrmsg)) return -EINVAL;
     const struct ifaddrmsg *address =
         (const struct ifaddrmsg *)((const uint8_t *)request + sizeof(*request));
@@ -564,6 +572,8 @@ static int handle_addr_change(const struct nlmsghdr *request) {
 }
 
 static int handle_route_change(const struct nlmsghdr *request) {
+    if (!net_ns_has_device()) return -ENETUNREACH;
+    if (!net_may_configure()) return -EPERM;
     if (request->nlmsg_len < sizeof(*request) + sizeof(struct rtmsg)) return -EINVAL;
     const struct rtmsg *route = (const struct rtmsg *)((const uint8_t *)request + sizeof(*request));
     if (route->rtm_family != NL_AF_INET) return -EINVAL;

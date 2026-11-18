@@ -1315,6 +1315,31 @@ int vmm_lookup(uint64_t cr3_physical, uint64_t virtual_address, uint64_t *physic
     return state;
 }
 
+/* Moves the entry of one user page, present or swapped out, to an empty slot
+ * at another address of the same space, as mremap does. */
+int vmm_move_page(uint64_t cr3_physical, uint64_t from, uint64_t to) {
+    lock_acquire(&tables_lock);
+    uint64_t cr3 = cr3_physical & ADDRESS_MASK;
+    int status = -1;
+    if (address_space_registered(cr3) && to < USER_ADDRESS_LIMIT) {
+        uint64_t *source = leaf_slot(cr3, from);
+        uint64_t *pml4 = page_table_pointer(cr3);
+        uint64_t *pdpt = source && *source ? next_table(pml4, (to >> 39) & 0x1FF, PAGE_USER, 1)
+                                           : NULL;
+        uint64_t *pd = next_table(pdpt, (to >> 30) & 0x1FF, PAGE_USER, 1);
+        uint64_t *pt = next_table(pd, (to >> 21) & 0x1FF, PAGE_USER, 1);
+        uint64_t *target = pt ? &pt[(to >> 12) & 0x1FF] : NULL;
+        if (target && !*target) {
+            *target = *source;
+            *source = 0;
+            invalidate_after_change(cr3, from);
+            status = 0;
+        }
+    }
+    lock_release(&tables_lock);
+    return status;
+}
+
 int vmm_page_occupied(uint64_t cr3_physical, uint64_t virtual_address) {
     return vmm_lookup(cr3_physical, virtual_address, NULL, NULL) >= 0;
 }

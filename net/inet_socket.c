@@ -1011,6 +1011,7 @@ void inet_socket_tcp_timer_poll(void) {
     struct inet_socket *s = timed_sockets;
     while (s) {
         timer_cursor = s->timer_next;
+        struct net_namespace *previous = net_ns_override(s->net_ns);
         struct tcp_control_block *tcp = s->tcp;
         if (tcp->state == TCP_TIME_WAIT && now >= tcp->time_wait_deadline_ns) {
             tcp->state = TCP_CLOSED;
@@ -1023,6 +1024,7 @@ void inet_socket_tcp_timer_poll(void) {
         } else if (!timer_pending(s)) {
             timer_unwatch(s);
         }
+        (void)net_ns_override(previous);
         s = timer_cursor;
     }
     timer_cursor = NULL;
@@ -1644,6 +1646,8 @@ int net_interface_ioctl(unsigned long request, void *argument) {
     uint8_t *arg = (uint8_t *)argument;
     const struct net_config *cfg = net_get_config();
     if (request == SIOCADDRT || request == SIOCDELRT) {
+        if (!net_ns_has_device()) return -ENETUNREACH;
+        if (!net_may_configure()) return -EPERM;
         if (request == SIOCADDRT) {
             uint32_t gateway;
             memcpy(&gateway, arg + 28, 4);
@@ -1655,9 +1659,9 @@ int net_interface_ioctl(unsigned long request, void *argument) {
     if (request == SIOCGIFNAME) {
         int index;
         memcpy(&index, arg + 16, sizeof(index));
-        const char *name = index == NET_IFINDEX_LO ? "lo"
-            : index == NET_IFINDEX_ETH0            ? "eth0"
-                                                   : NULL;
+        const char *name = index == NET_IFINDEX_LO                       ? "lo"
+            : index == NET_IFINDEX_ETH0 && net_ns_has_device() ? "eth0"
+                                                                : NULL;
         if (!name) return -ENODEV;
         memset(arg, 0, 16);
         memcpy(arg, name, strlen(name) + 1);
@@ -1672,6 +1676,10 @@ int net_interface_ioctl(unsigned long request, void *argument) {
         arg[4] = 0;
     }
     int loopback = ifname_loopback(arg);
+    if (!loopback && !net_ns_has_device()) return -ENODEV;
+    // Changing eth0 changes the machine's network; lo changes are no-ops.
+    int setting = request == SIOCSIFFLAGS || request == SIOCSIFADDR || request == SIOCSIFNETMASK;
+    if (setting && !loopback && !net_may_configure()) return -EPERM;
     switch (request) {
     case SIOCGIFFLAGS: {
         int16_t flags =

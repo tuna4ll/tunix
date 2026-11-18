@@ -35,6 +35,9 @@ struct net_namespace *net_ns_create(void);
 void net_ns_get(struct net_namespace *ns);
 void net_ns_put(struct net_namespace *ns);
 struct net_namespace *net_ns_active(void);
+struct net_namespace *net_ns_override(struct net_namespace *ns);
+int net_ns_has_device(void);
+int net_may_configure(void);
 
 struct net_config {
     uint8_t mac[6];

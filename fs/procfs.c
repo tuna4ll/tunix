@@ -852,6 +852,14 @@ static int64_t proc_status_read(struct vfs_node *node, uint64_t offset, size_t s
         text_char(&text, ' ');
     }
     text_char(&text, '\n');
+    text_string(&text, "NoNewPrivs:\t");
+    text_unsigned(&text, process->no_new_privs ? 1 : 0);
+    text_string(&text, "\nSeccomp:\t");
+    text_unsigned(&text, process->seccomp_mode);
+    text_string(&text, "\nCapEff:\t");
+    for (int shift = 60; shift >= 0; shift -= 4)
+        text_char(&text, "0123456789abcdef"[(process_capability_set(process) >> shift) & 0xFU]);
+    text_char(&text, '\n');
     text_string(&text, "Pgid:\t");
     text_unsigned(&text, process->pgid);
     text_char(&text, '\n');
@@ -1269,6 +1277,51 @@ static void proc_fd_refresh(struct vfs_node *directory) {
     busy = 0;
 }
 
+/* The inode number /proc/PID/ns/ shows for a namespace: Linux's numbers for
+ * the initial ones, and one derived from the object for the others. */
+static uint32_t ns_inode(const void *ns, uint32_t initial) {
+    if (namespace_object_is_initial(ns)) return initial;
+    return 0xF0000000U | (uint32_t)(((uintptr_t)ns >> 4) & 0x0FFFFFFFU);
+}
+
+static void ns_link(struct vfs_node *directory, const char *kind, uint32_t inode) {
+    char target[48];
+    size_t at = path_append_string(target, 0, kind);
+    at = path_append_string(target, at, ":[");
+    at = path_append_decimal(target, at, inode);
+    at = path_append_string(target, at, "]");
+    target[at] = '\0';
+    // The link names its namespace as on Linux; the entry it points at, next to
+    // it, is what lets access() and stat() on the link succeed.
+    struct vfs_node *object = vfs_alloc_node(target, VFS_FILE);
+    if (object) {
+        object->mode = 0444;
+        object->uid = directory->uid;
+        object->gid = directory->gid;
+        if (vfs_attach(directory, object) != 0) vfs_free_node(object);
+    }
+    (void)vfs_attach_symlink(directory, kind, target);
+}
+
+static void proc_ns_refresh(struct vfs_node *directory) {
+    static int busy;
+    if (busy) return;
+    busy = 1;
+    while (directory->children) (void)vfs_detach_child(directory, directory->children);
+    PROCESS_REF process = process_get(node_pid(directory));
+    if (process) {
+        ns_link(directory, "cgroup", 4026531835U);
+        ns_link(directory, "ipc", 4026531839U);
+        ns_link(directory, "mnt", ns_inode(process->mnt_ns, 4026531841U));
+        ns_link(directory, "net", ns_inode(process->net_ns, 4026531840U));
+        ns_link(directory, "pid", ns_inode(process->pid_ns, 4026531836U));
+        ns_link(directory, "pid_for_children", ns_inode(process->pid_ns, 4026531836U));
+        ns_link(directory, "user", ns_inode(process->user_ns, 4026531837U));
+        ns_link(directory, "uts", ns_inode(process->uts_ns, 4026531838U));
+    }
+    busy = 0;
+}
+
 #define FDINFO_FD_BITS 24U
 
 static void text_octal(struct text_buffer *text, uint64_t value) {
@@ -1400,8 +1453,12 @@ static void point_at_caller(struct vfs_node *link, uint64_t pid) {
 
 static void proc_root_refresh(struct vfs_node *directory) {
     (void)directory;
-    point_at_caller(self_link, process_current_pid());
-    point_at_caller(thread_self_link, process_current_tid());
+    // /proc lists the pids of the initial pid namespace, so self names the
+    // caller by those too, not by the pid it has in a namespace of its own.
+    struct process *caller = process_current();
+    if (!caller) return;
+    point_at_caller(self_link, caller->tgid);
+    point_at_caller(thread_self_link, caller->pid);
 }
 
 #define ASOUND_TEXT       2048U
@@ -1836,6 +1893,17 @@ void procfs_register_process(struct process *process) {
             information->gid = process->cred.egid;
             information->data = (void *)(uintptr_t)process->pid;
             information->refresh = proc_fdinfo_refresh;
+        }
+    }
+    if (!vfs_find_child(directory, "ns")) {
+        decimal_path(process->pid, "/ns", path);
+        struct vfs_node *namespaces = vfs_mkdir_p(path);
+        if (namespaces) {
+            namespaces->mode = 0511;
+            namespaces->uid = process->cred.euid;
+            namespaces->gid = process->cred.egid;
+            namespaces->data = (void *)(uintptr_t)process->pid;
+            namespaces->refresh = proc_ns_refresh;
         }
     }
     directory->refresh = proc_process_refresh;

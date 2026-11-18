@@ -92,6 +92,7 @@ int vmm_usage(uint64_t cr3_physical, uint64_t usage[VMM_USAGE_KINDS]);
 int vmm_lookup(uint64_t cr3_physical, uint64_t virtual_address, uint64_t *physical_out,
                uint64_t *flags_out);
 int vmm_page_occupied(uint64_t cr3_physical, uint64_t virtual_address);
+int vmm_move_page(uint64_t cr3_physical, uint64_t from, uint64_t to);
 int vmm_swap_lookup(uint64_t cr3_physical, uint64_t virtual_address, uint64_t *slot_out,
                     uint64_t *flags_out);
 int vmm_swap_install(uint64_t cr3_physical, uint64_t virtual_address, uint64_t slot,

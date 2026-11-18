@@ -24,7 +24,10 @@ uint32_t bpf_run(const struct sock_filter *program, uint16_t length,
         switch (op->code) {
         case BPF_LD | BPF_W | BPF_ABS:
             if (k > sizeof(*data) - 4U || (k & 3U)) return SECCOMP_RET_KILL_PROCESS;
-            a = *(const uint32_t *)(bytes + k);
+            // Through memcpy: read through a uint32_t pointer, the 64-bit fields
+            // were an alias GCC may assume is never read, and once this was
+            // inlined it dropped the stores of the arguments and the address.
+            __builtin_memcpy(&a, bytes + k, sizeof(a));
             break;
         case BPF_LD | BPF_W | BPF_LEN: a = (uint32_t)sizeof(*data); break;
         case BPF_LD | BPF_IMM:         a = k; break;
@@ -199,6 +202,10 @@ int64_t seccomp_set_mode_filter(uint32_t flags, uint64_t user_program) {
         ~(SECCOMP_FILTER_FLAG_TSYNC | SECCOMP_FILTER_FLAG_LOG | SECCOMP_FILTER_FLAG_SPEC_ALLOW |
           SECCOMP_FILTER_FLAG_TSYNC_ESRCH))
         return -EINVAL;
+    // As on Linux, an unreadable program is EFAULT before anything else: that
+    // is how Chromium learns that seccomp-bpf, and TSYNC with it, are there.
+    struct sock_fprog probe;
+    if (copy_from_user(&probe, user_program, sizeof(probe)) != 0) return -EFAULT;
     if (!process->no_new_privs && process->cred.euid != 0) return -EACCES;
     struct seccomp_filter *filter = filter_copy_from_user(user_program);
     if (!filter) return -EINVAL;
@@ -283,3 +290,5 @@ void seccomp_release(struct process *process) {
         filter = prev;
     }
 }
+
+uint32_t seccomp_audit_arch(void) { return SECCOMP_AUDIT_ARCH; }

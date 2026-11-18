@@ -1478,16 +1478,58 @@ uint64_t process_current_ppid(void) {
 
 uint32_t process_get_umask(void) { return current ? current->umask : 022; }
 
+static uint64_t fs_key(const struct process *process) {
+    return process->fs_group ? process->fs_group : process->tgid;
+}
+
+#define FS_SYNC_MAX 64
+
+/* Gives the processes that share the caller's filesystem context, threads and
+ * CLONE_FS children, its root and working directory, as one shared context
+ * would on Linux. */
+void process_sync_fs(void) {
+    if (!current) return;
+    uint64_t pids[FS_SYNC_MAX];
+    unsigned count = 0;
+    {
+        SCHED_LOCKED;
+        uint64_t key = fs_key(current);
+        struct process *item = queue;
+        if (item) {
+            do {
+                if (item != current && fs_key(item) == key && item->state != PROCESS_DEAD &&
+                    count < FS_SYNC_MAX)
+                    pids[count++] = item->pid;
+                item = item->next;
+            } while (item != queue);
+        }
+    }
+    for (unsigned index = 0; index < count; index++) {
+        struct process *other = process_get(pids[index]);
+        if (!other) continue;
+        if (other != current) {
+            struct vfs_node *old_root = other->root, *old_cwd = other->cwd;
+            vfs_node_ref(current->root);
+            vfs_node_ref(current->cwd);
+            other->root = current->root;
+            other->cwd = current->cwd;
+            vfs_node_unref(old_root);
+            vfs_node_unref(old_cwd);
+        }
+        process_put(other);
+    }
+}
+
 uint32_t process_set_umask(uint32_t mask) {
     if (!current) return 022;
     SCHED_LOCKED;
     uint32_t old = current->umask;
     uint32_t value = mask & 0777U;
-    uint64_t group = current->tgid;
+    uint64_t group = fs_key(current);
     struct process *item = queue;
     if (item) {
         do {
-            if (item->tgid == group && item->state != PROCESS_DEAD) item->umask = value;
+            if (fs_key(item) == group && item->state != PROCESS_DEAD) item->umask = value;
             item = item->next;
         } while (item != queue);
     }
@@ -2808,7 +2850,16 @@ struct net_namespace *process_current_net_ns(void) { return current ? current->n
 
 int process_signal_from_syscall(struct syscall_frame *frame, int signal_number, int code, int fatal,
                                 uint64_t address) {
-    if (!frame || !current || current->state != PROCESS_RUNNING) return 0;
+    struct signal_info info;
+    signal_info_init(&info, signal_number, code);
+    info.fields.fault.address = address;
+    return process_signal_info_from_syscall(frame, &info, fatal);
+}
+
+int process_signal_info_from_syscall(struct syscall_frame *frame, const struct signal_info *info,
+                                     int fatal) {
+    if (!frame || !info || !current || current->state != PROCESS_RUNNING) return 0;
+    int signal_number = info->signo;
     struct syscall_frame resume = *frame;
     {
         SCHED_LOCKED;
@@ -2819,10 +2870,8 @@ int process_signal_from_syscall(struct syscall_frame *frame, int signal_number, 
             action->handler = SIG_DFL;
             current->signal_blocked &= ~bit;
         }
-        struct signal_info info;
-        signal_info_init(&info, signal_number, code);
-        info.fields.fault.address = address;
-        (void)queue_signal(current, &info);
+        struct signal_info queued = *info;
+        (void)queue_signal(current, &queued);
     }
     process_prepare_user_return(&resume);
     if (!current || current->state != PROCESS_RUNNING) return 1;
@@ -3001,9 +3050,25 @@ static void wake_waiting_parent(struct process *parent) {
     }
 }
 
-static void child_signal_info(struct signal_info *info, const struct process *child, int code) {
+/* item's pid as viewer's pid namespace numbers it: its own number there, the
+ * global one for a viewer in the initial namespace, and 0 for one that cannot
+ * see it, as Linux translates pids handed across namespaces. */
+static uint64_t tgid_seen_by(const struct process *item, const struct process *viewer) {
+    if (!viewer || !viewer->pid_ns) return item->tgid;
+    return item->pid_ns == viewer->pid_ns ? item->ns_tgid : 0;
+}
+
+int32_t process_pid_seen_by_current(int32_t global_pid) {
+    if (!current || !current->pid_ns || global_pid <= 0) return global_pid;
+    SCHED_LOCKED;
+    struct process *item = process_find((uint64_t)global_pid);
+    return item ? (int32_t)tgid_seen_by(item, current) : 0;
+}
+
+static void child_signal_info(struct signal_info *info, const struct process *child, int code,
+                              const struct process *viewer) {
     signal_info_init(info, SIGCHLD, code);
-    info->fields.child.pid = (int32_t)child->pid;
+    info->fields.child.pid = (int32_t)tgid_seen_by(child, viewer);
     info->fields.child.uid = child->cred.uid;
     if (code == CLD_EXITED) info->fields.child.status = child->exit_status & 0xFF;
     else if (code == CLD_KILLED) info->fields.child.status = child->termination_signal & 0x7F;
@@ -3021,7 +3086,7 @@ static void notify_parent_of_exit(struct process *child) {
     }
     sibling_to_front(child);
     struct signal_info info;
-    child_signal_info(&info, child, child->termination_signal ? CLD_KILLED : CLD_EXITED);
+    child_signal_info(&info, child, child->termination_signal ? CLD_KILLED : CLD_EXITED, parent);
     (void)queue_signal(parent, &info);
     wake_waiting_parent(parent);
     __atomic_store_n(&io_recheck_pending, 1, __ATOMIC_RELEASE);
@@ -3032,7 +3097,7 @@ static void notify_parent_of_job_change(struct process *child, int code) {
     if (!parent) return;
     if (!(parent->signal_actions[SIGCHLD - 1].flags & SA_NOCLDSTOP)) {
         struct signal_info info;
-        child_signal_info(&info, child, code);
+        child_signal_info(&info, child, code, parent);
         (void)queue_signal(parent, &info);
     }
     wake_waiting_parent(parent);
@@ -3229,6 +3294,7 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame, const struct fork
     vfs_node_ref(child->cwd);
     child->root = parent->root;
     vfs_node_ref(child->root);
+    if (request && request->share_fs) child->fs_group = fs_key(parent);
     child->controlling_pty = parent->controlling_pty;
     child->umask = parent->umask;
     child->cred = parent->cred;
@@ -3243,6 +3309,7 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame, const struct fork
     child->signal_stack_flags = parent->signal_stack_flags;
     child->dumpable = parent->dumpable;
     child->no_new_privs = parent->no_new_privs;
+    child->cap_dropped = parent->cap_dropped;
     child->timerslack_ns = parent->timerslack_ns;
     child->thp_disable = parent->thp_disable;
     child->oom_score_adj = parent->oom_score_adj;
@@ -3367,6 +3434,7 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame, uint64_t 
     child->pgid = parent->pgid;
     child->sid = parent->sid;
     child->is_thread = 1;
+    child->fs_group = parent->fs_group;
     child->cwd = parent->cwd;
     vfs_node_ref(child->cwd);
     child->root = parent->root;
@@ -3383,6 +3451,7 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame, uint64_t 
     child->signal_stack_flags = SS_DISABLE;
     child->dumpable = parent->dumpable;
     child->no_new_privs = parent->no_new_privs;
+    child->cap_dropped = parent->cap_dropped;
     child->timerslack_ns = parent->timerslack_ns;
     child->thp_disable = parent->thp_disable;
     child->oom_score_adj = parent->oom_score_adj;
@@ -4029,6 +4098,9 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
     current->robust_list_head = 0;
     current->robust_list_length = 0;
     cred_apply_exec(&current->cred, credential_source, current->no_new_privs);
+    // As on Linux, a program run by root of its namespace, setuid ones too,
+    // starts with every capability and one run by anyone else with none.
+    current->cap_dropped = user_ns_is_root(current) ? 0 : CAP_ALL;
     current->dumpable =
         (current->cred.euid == current->cred.uid && current->cred.egid == current->cred.gid);
     strncpy(current->name, file->name, sizeof(current->name) - 1);
@@ -4103,7 +4175,7 @@ static void ptrace_notify(struct process *tracee, int code) {
     struct process *tracer = process_find(tracee->ptrace_tracer);
     if (!tracer) return;
     struct signal_info info;
-    child_signal_info(&info, tracee, code);
+    child_signal_info(&info, tracee, code, tracer);
     (void)queue_signal(tracer, &info);
     wake_waiting_parent(tracer);
 }

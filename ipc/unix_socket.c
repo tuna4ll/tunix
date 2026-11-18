@@ -561,7 +561,7 @@ static int dgram_deliver(struct unix_socket *from, struct unix_socket *target, s
     message->next = NULL;
     message->length = size;
     const struct credentials *self = cred_current();
-    message->sender.pid = (int32_t)process_current_pid();
+    message->sender.pid = (int32_t)process_current()->tgid;
     message->sender.uid = self ? self->euid : 0U;
     message->sender.gid = self ? self->egid : 0U;
     memcpy(message->from, from->path, sizeof(message->from));
@@ -788,7 +788,7 @@ static int64_t unix_socket_write_locked(struct unix_socket *socket, size_t size,
         records->lengths[records->tail] = (uint32_t)size;
         struct unix_credentials *sender = &records->senders[records->tail];
         const struct credentials *self = cred_current();
-        sender->pid = (int32_t)process_current_pid();
+        sender->pid = (int32_t)process_current()->tgid;
         sender->uid = self ? self->euid : 0U;
         sender->gid = self ? self->egid : 0U;
         records->tail = (records->tail + 1) % records->capacity;

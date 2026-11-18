@@ -2,12 +2,14 @@
 #include <stdint.h>
 #include <tunix/boot.h>
 #include <tunix/cpu.h>
+#include <tunix/percpu.h>
 #include <tunix/heap.h>
 #include <tunix/kstring.h>
 #include <tunix/time.h>
 #include <tunix/net/inet_socket.h>
 #include <tunix/net/net.h>
 #include <tunix/net/virtio_net.h>
+#include <tunix/namespace.h>
 #include <tunix/process.h>
 #include <tunix/workqueue.h>
 #include <tunix/kprintf.h>
@@ -131,9 +133,33 @@ static struct net_namespace root_net_ns = {1, 1, NULL};
 
 struct net_namespace *net_ns_root(void) { return &root_net_ns; }
 
+/* While the stack handles a packet, or a socket's timer, what it sends belongs
+ * to that packet's or socket's namespace, not to that of whichever process the
+ * work happens to run in. Set under the net lock, for this CPU only. */
+static struct net_namespace *ns_override;
+static int ns_override_cpu = -1;
+
+struct net_namespace *net_ns_override(struct net_namespace *ns) {
+    struct net_namespace *previous = ns_override_cpu == (int)cpu_current()->index ? ns_override : NULL;
+    ns_override = ns;
+    ns_override_cpu = ns ? (int)cpu_current()->index : -1;
+    return previous;
+}
+
 struct net_namespace *net_ns_active(void) {
+    if (ns_override && ns_override_cpu == (int)cpu_current()->index) return ns_override;
     struct net_namespace *ns = process_current_net_ns();
     return ns ? ns : &root_net_ns;
+}
+
+/* Only the initial network namespace has the machine's interface; others have
+ * just their own loopback, as a new namespace on Linux does. */
+int net_ns_has_device(void) { return net_ns_active()->has_network; }
+
+/* Configuring the machine's interface takes CAP_NET_ADMIN in the initial user
+ * namespace, which a sandbox that made namespaces of its own does not hold. */
+int net_may_configure(void) {
+    return net_ns_has_device() && user_ns_initial_has_cap(CAP_NET_ADMIN);
 }
 
 struct net_namespace *net_ns_create(void) {
@@ -686,7 +712,15 @@ static void reassemble(const struct ipv4_header *ip, size_t header_length, const
     kfree(packet);
 }
 
+static void handle_ipv4_in(const uint8_t *data, size_t length, struct net_namespace *ns);
+
 static void handle_ipv4(const uint8_t *data, size_t length, struct net_namespace *ns) {
+    struct net_namespace *previous = net_ns_override(ns);
+    handle_ipv4_in(data, length, ns);
+    (void)net_ns_override(previous);
+}
+
+static void handle_ipv4_in(const uint8_t *data, size_t length, struct net_namespace *ns) {
     if (length < sizeof(struct ipv4_header)) return;
     const struct ipv4_header *ip = (const struct ipv4_header *)data;
     size_t header_length = (size_t)(ip->version_ihl & 0x0FU) * 4U;

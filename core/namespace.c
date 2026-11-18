@@ -146,6 +146,11 @@ static void pid_ns_put(struct pid_namespace *ns) {
 
 int uts_ns_is_root(const struct uts_namespace *ns) { return !ns || ns == &root_uts_ns; }
 
+int namespace_object_is_initial(const void *ns) {
+    return !ns || ns == &root_user_ns || ns == &root_uts_ns || ns == &root_pid_ns ||
+        ns == &root_mnt_ns || ns == (const void *)net_ns_root();
+}
+
 static struct user_namespace *user_ns_of(const struct process *process) {
     return process && process->user_ns ? process->user_ns : &root_user_ns;
 }
@@ -174,11 +179,36 @@ uint32_t user_ns_map_gid(const struct user_namespace *ns, uint32_t kgid) {
     return map_up(&ns->gid, kgid);
 }
 
-int user_ns_capable(void) {
+int user_ns_is_root(const struct process *process) {
+    if (!process) return 1;
+    const struct user_namespace *ns = user_ns_of(process);
+    if (ns->level == 0) return process->cred.euid == 0;
+    return ns->uid_map_set && user_ns_map_uid(ns, process->cred.euid) == 0;
+}
+
+/* Whether the process holds capability cap: root of the initial namespace
+ * holds them all, as does a process in a namespace it made or entered,
+ * less any it gave up or lost on exec. */
+int user_ns_has_cap(const struct process *process, unsigned cap) {
+    if (!process) return 1;
+    if (process->cap_dropped & (1ULL << cap)) return 0;
+    if (user_ns_of(process)->level > 0) return 1;
+    return process->cred.euid == 0;
+}
+
+int user_ns_capable(void) { return user_ns_has_cap(process_current(), CAP_SYS_ADMIN); }
+
+uint64_t process_capability_set(const struct process *process) {
+    uint64_t held = 0;
+    for (unsigned cap = 0; cap <= CAP_LAST_CAP; cap++)
+        if (user_ns_has_cap(process, cap)) held |= 1ULL << cap;
+    return held;
+}
+
+int user_ns_initial_has_cap(unsigned cap) {
     struct process *process = process_current();
     if (!process) return 1;
-    if (process->cred.euid == 0 && user_ns_of(process)->level == 0) return 1;
-    return user_ns_of(process)->level > 0;
+    return user_ns_of(process)->level == 0 && user_ns_has_cap(process, cap);
 }
 
 void namespace_inherit(struct process *child, const struct process *parent) {
@@ -317,6 +347,8 @@ static int64_t apply_flags(struct process *process, uint64_t flags) {
     if (created_user) {
         user_ns_put(process->user_ns);
         process->user_ns = created_user;
+        // Whoever makes a user namespace holds every capability in it.
+        process->cap_dropped = 0;
     }
     if (created_uts) {
         uts_ns_put(process->uts_ns);

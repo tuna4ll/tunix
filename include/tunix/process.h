@@ -159,6 +159,12 @@ struct process {
     int pdeath_signal;
     int dumpable;
     int no_new_privs;
+    /* Capabilities given up with capset or lost on exec, from those the
+     * process holds by being root or by its user namespace. */
+    uint64_t cap_dropped;
+    /* Processes made with CLONE_FS share a root, working directory and
+     * umask; 0 means those of the thread group. */
+    uint64_t fs_group;
     int keep_capabilities;
     int child_subreaper;
     int thp_disable;
@@ -316,9 +322,11 @@ struct fork_request {
     uint64_t child_cleartid_user;
     int clear_signal_handlers;
     uint64_t ns_flags;
+    int share_fs;
 };
 
 void process_init(void);
+void process_sync_fs(void);
 struct process *process_create_from_path(const char *path);
 struct process *process_current(void);
 void process_dump_all(void);
@@ -384,10 +392,14 @@ struct process_fault {
 };
 
 int process_fault_from_interrupt(struct interrupt_frame *frame, const struct process_fault *fault);
+struct signal_info;
+int process_signal_info_from_syscall(struct syscall_frame *frame, const struct signal_info *info,
+                                     int fatal);
 int process_signal_from_syscall(struct syscall_frame *frame, int signal_number, int code, int fatal,
                                 uint64_t address);
 struct net_namespace *process_current_net_ns(void);
 int64_t process_pid_to_global(int64_t ns_pid);
+int32_t process_pid_seen_by_current(int32_t global_pid);
 void process_run_child_first_from_syscall(struct syscall_frame *frame, uint64_t child_pid);
 void process_reap_deferred(void);
 void process_io_recheck(void);
