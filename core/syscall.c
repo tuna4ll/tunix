@@ -4347,6 +4347,17 @@ static int64_t sys_mlockall(int flags) {
 
 static int64_t sys_munlockall(void) { return 0; }
 
+static int64_t sys_madvise(uint64_t address, uint64_t length, int advice) {
+    const int madv_dontneed = 4, madv_free = 8;
+    if (address & 0xFFFULL) return -EINVAL;
+    length = align_up(length, 4096);
+    if (address >= USER_ADDRESS_LIMIT || length > USER_ADDRESS_LIMIT - address) return -EINVAL;
+    // Other advice only tunes what the kernel does, so following none of it is correct.
+    if (advice == madv_dontneed || advice == madv_free)
+        process_discard_area_pages(address, address + length);
+    return 0;
+}
+
 static int64_t sys_munmap(uint64_t address, uint64_t length) {
     struct process *process = process_current();
     if (!process || (address & 0xFFFULL) || !length) return -EINVAL;
@@ -6410,7 +6421,10 @@ static void syscall_run(struct syscall_frame *frame) {
             SYSCALL_ARG4(frame));
         break;
 
-    case SYS_MADVISE: SYSCALL_RET(frame) = 0; break;
+    case SYS_MADVISE:
+        SYSCALL_RET(frame) = (uint64_t)sys_madvise(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame),
+                                                   (int)SYSCALL_ARG2(frame));
+        break;
     case SYS_MINCORE:
         SYSCALL_RET(frame) = (uint64_t)memory_call_mincore(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame),
                                                            SYSCALL_ARG2(frame));

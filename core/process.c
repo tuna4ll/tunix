@@ -2282,6 +2282,29 @@ void process_unmap_area(uint64_t start, uint64_t end) {
     }
 }
 
+/* MADV_DONTNEED: drop the pages a fault can bring back, so private memory reads
+ * as zeros or as its file again and shared memory as its object. Shared file
+ * mappings and memory outside the areas (the brk heap, the stack) are left as
+ * they are, as dropping them could lose data or leave nothing to fault in. */
+void process_discard_area_pages(uint64_t start, uint64_t end) {
+    MEMORY_LOCKED;
+    struct process_memory *memory = area_owner();
+    if (!memory || !current || !current->cr3 || start >= end) return;
+
+    vmm_flush_batch_begin();
+    for (struct vm_area *area = area_first_ending_after(memory, start); area && area->start < end;
+         area = area->next) {
+        int refillable = !(area->kind & VM_DEVICE) &&
+            ((area->kind & (VM_ANONYMOUS | VM_MEMFD)) ||
+             ((area->kind & VM_FILE_PAGES) && (area->kind & VM_PRIVATE)));
+        if (!refillable) continue;
+        uint64_t from = area->start > start ? area->start : start;
+        uint64_t to = area->end < end ? area->end : end;
+        vmm_unmap_range(current->cr3, from, to);
+    }
+    vmm_flush_batch_end();
+}
+
 void process_protect_area(uint64_t start, uint64_t end, uint64_t page_flags) {
     MEMORY_LOCKED;
     struct process_memory *memory = area_owner();
