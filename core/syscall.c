@@ -1435,7 +1435,8 @@ static uint32_t mode_after_umask(uint64_t mode) {
     return ((uint32_t)mode & 07777U) & ~process_get_umask();
 }
 
-static int64_t reopen_own_descriptor(const char *path, uint64_t flags) {
+/* The descriptor a /proc/self/fd/N style path of this process names, or -1. */
+static int own_descriptor_of_path(const char *path) {
     struct process *process = process_current();
     if (!process || !process->files) return -1;
 
@@ -1458,6 +1459,13 @@ static int64_t reopen_own_descriptor(const char *path, uint64_t flags) {
         fd = fd * 10 + (*at - '0');
         if (fd >= PROCESS_FD_CAPACITY(process)) return -1;
     }
+    return fd_file(fd) ? fd : -1;
+}
+
+static int64_t reopen_own_descriptor(const char *path, uint64_t flags) {
+    struct process *process = process_current();
+    int fd = own_descriptor_of_path(path);
+    if (fd < 0) return -1;
     struct file *source = fd_file(fd);
     if (!source || source->kind != FILE_KIND_MEMFD) return -1;
 
@@ -3165,13 +3173,21 @@ static void fill_stat(struct vfs_node *node, struct linux_stat *stat) {
     stat->st_ctim.tv_nsec = (int64_t)node->ctime_ns;
 }
 
+static int stat_from_file(struct file *file, struct linux_stat *stat);
+
 static int64_t stat_path(int dirfd, uint64_t user_path, uint64_t user_stat, int follow) {
     VFS_PATH_SCOPED path = NULL;
     int status = copy_path_at(dirfd, user_path, &path);
     if (status != 0) return status;
+    struct linux_stat stat;
+    // /proc/self/fd/N leads to the open file itself, whatever its link says.
+    int fd = follow ? own_descriptor_of_path(path) : -1;
+    if (fd >= 0) {
+        if (stat_from_file(fd_file(fd), &stat) != 0) return -EBADF;
+        return copy_to_user(user_stat, &stat, sizeof(stat)) == 0 ? 0 : -EFAULT;
+    }
     struct vfs_node *node = follow ? vfs_lookup(path) : vfs_lookup_nofollow(path);
     if (!node) return lookup_errno(path, follow);
-    struct linux_stat stat;
     fill_stat(node, &stat);
     return copy_to_user(user_stat, &stat, sizeof(stat)) == 0 ? 0 : -EFAULT;
 }
@@ -3289,7 +3305,8 @@ static int fill_stat_nodeless(struct file *file, struct linux_stat *stat) {
         type = 0100000U;
         size = memfd_size(file->memfd);
         break;
-    default: return -1;
+    // eventfd, timerfd, epoll and the like are anonymous inodes, with no type bits.
+    default: type = 0; break;
     }
     memset(stat, 0, sizeof(*stat));
     stat->st_mode = type | 0600U;
@@ -3388,9 +3405,15 @@ static int64_t sys_statx(int dirfd, uint64_t user_path, int flags, uint32_t mask
         VFS_PATH_SCOPED path = NULL;
         int status = copy_path_at(dirfd, user_path, &path);
         if (status != 0) return status;
-        node = (flags & AT_SYMLINK_NOFOLLOW) ? vfs_lookup_nofollow(path) : vfs_lookup(path);
-        if (!node) return lookup_errno(path, !(flags & AT_SYMLINK_NOFOLLOW));
-        fill_stat(node, &basic);
+        int fd = (flags & AT_SYMLINK_NOFOLLOW) ? -1 : own_descriptor_of_path(path);
+        if (fd >= 0) {
+            if (stat_from_file(fd_file(fd), &basic) != 0) return -EBADF;
+            node = fd_file(fd)->node;
+        } else {
+            node = (flags & AT_SYMLINK_NOFOLLOW) ? vfs_lookup_nofollow(path) : vfs_lookup(path);
+            if (!node) return lookup_errno(path, !(flags & AT_SYMLINK_NOFOLLOW));
+            fill_stat(node, &basic);
+        }
     }
 
     struct linux_statx out;
