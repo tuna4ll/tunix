@@ -486,6 +486,7 @@ uint32_t file_data_generation(struct file *file) {
     if (!file) return 0;
     if (file_is_pipe(file)) return file_pipe_reads(file) && file->pipe ? file->pipe->generation : 0;
     if (file->kind == FILE_KIND_SOCKET) return unix_socket_rx_generation(file->socket);
+    if (file->kind == FILE_KIND_INET_SOCKET) return inet_socket_rx_generation(file->inet_socket);
     if (file->kind == FILE_KIND_EVENTFD) return eventfd_generation(file->eventfd);
     return 0;
 }

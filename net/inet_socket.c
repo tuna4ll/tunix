@@ -139,6 +139,9 @@ struct datagram {
 
 struct inet_socket {
     int refs;
+    /* Bumped whenever something arrives to read, so edge-triggered epoll can
+     * report data that came in while the socket already looked readable. */
+    uint32_t rx_generation;
     struct net_namespace *net_ns;
     int domain;
     int type;
@@ -597,6 +600,7 @@ static void pending_append(struct inet_socket *listener, struct inet_socket *chi
     else listener->pending = child;
     listener->pending_last = child;
     listener->pending_total++;
+    listener->rx_generation++;
 }
 
 static void pending_detach(struct inet_socket *child) {
@@ -821,6 +825,8 @@ static void tcp_input(struct inet_socket *s, uint32_t seq, uint32_t ack, uint8_t
                       const uint8_t *payload, size_t length) {
     struct tcp_control_block *tcp = s->tcp;
     if (!tcp) return;
+    s->rx_generation++;
+    if (s->listener) s->listener->rx_generation++;
 
     if (flags & TCP_RST) {
         tcp->pending_error = (tcp->state == TCP_SYN_SENT) ? -ECONNREFUSED : -ECONNRESET;
@@ -962,6 +968,7 @@ static int64_t tcp_recv(struct inet_socket *s, void *data, size_t length, int fl
 static void tcp_retransmit(struct inet_socket *s) {
     struct tcp_control_block *tcp = s->tcp;
     if (++tcp->retransmit_count > TCP_MAX_RETRIES) {
+        s->rx_generation++;
         tcp->pending_error = -ETIMEDOUT;
         tcp->state = TCP_CLOSED;
         tcp->rto_deadline_ns = 0;
@@ -1357,6 +1364,7 @@ static int enqueue_with_ttl(struct inet_socket *socket, const void *data, size_t
     else socket->queue_first = item;
     socket->queue_last = item;
     socket->queue_bytes += length;
+    socket->rx_generation++;
     return 0;
 }
 
@@ -1767,6 +1775,10 @@ int inet_socket_write_ready(struct inet_socket *socket) {
         return tcp->state == TCP_CLOSED || tcp->pending_error != 0;
     }
     return !socket->write_shutdown && cfg->link_up && cfg->interface_up;
+}
+uint32_t inet_socket_rx_generation(struct inet_socket *socket) {
+    NET_LOCKED;
+    return socket ? socket->rx_generation : 0;
 }
 int inet_socket_peer_closed(struct inet_socket *socket) {
     NET_LOCKED;
