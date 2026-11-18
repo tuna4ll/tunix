@@ -3404,6 +3404,9 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame, const struct fork
     int64_t reported_pid =
         (int64_t)(parent->pid_ns && child->pid_ns == parent->pid_ns ? child->ns_tgid : child->tgid);
 
+    // Before it can run: a child scheduled on another CPU at once would
+    // otherwise find no /proc/self, as Chromium's sandbox does for a vfork child.
+    procfs_register_process(child);
     {
         SCHED_LOCKED;
         wake_bump();
@@ -3411,7 +3414,6 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame, const struct fork
         enqueue(child);
         ready_link(child);
     }
-    procfs_register_process(child);
     eventfs_emit_process_fork(parent->cred.euid, parent->pid, child->pid);
     KDEBUG("process: fork parent=%u child=%u\n", (unsigned)parent->pid, (unsigned)child->pid);
     return reported_pid;
@@ -3513,6 +3515,9 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame, uint64_t 
         if (flags & 0x00200000ULL) child->clear_child_tid_user = child_tid_user;
     }
 
+    // Before it can run: a child scheduled on another CPU at once would
+    // otherwise find no /proc/self, as Chromium's sandbox does for a vfork child.
+    procfs_register_process(child);
     {
         SCHED_LOCKED;
         wake_bump();
@@ -3520,7 +3525,6 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame, uint64_t 
         enqueue(child);
         ready_link(child);
     }
-    procfs_register_process(child);
     KDEBUG("process: clone thread tgid=%u tid=%u\n", (unsigned)child->tgid, (unsigned)child->pid);
     return (int64_t)(parent->pid_ns ? child->ns_pid : child->pid);
 }

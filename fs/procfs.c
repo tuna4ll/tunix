@@ -1432,8 +1432,17 @@ static void proc_process_refresh(struct vfs_node *directory) {
     follow_owner(direct_child(directory, "fd"), process);
     follow_owner(direct_child(directory, "fdinfo"), process);
 
-    (void)set_link_target(direct_child(directory, "exe"),
-                          process->exe_path ? process->exe_path : "/");
+    // A zombie has no executable on Linux; Chromium's single-instance lock
+    // reads /proc/PID/exe to tell a dead owner from a live one.
+    struct vfs_node *exe = direct_child(directory, "exe");
+    if (process->state == PROCESS_ZOMBIE) {
+        if (exe && exe->data && exe->capacity) {
+            ((char *)exe->data)[0] = '\0';
+            exe->length = 0;
+        }
+    } else {
+        (void)set_link_target(exe, process->exe_path ? process->exe_path : "/");
+    }
 
     VFS_PATH_SCOPED path = vfs_path_buffer();
     if (path && vfs_node_path(process->cwd, path, VFS_PATH_MAX) == 0)
@@ -1443,22 +1452,16 @@ static void proc_process_refresh(struct vfs_node *directory) {
 static struct vfs_node *self_link;
 static struct vfs_node *thread_self_link;
 
-static void point_at_caller(struct vfs_node *link, uint64_t pid) {
-    if (!link || !link->data || link->capacity < 21) return;
-    char *target = (char *)link->data;
-    size_t at = path_append_decimal(target, 0, pid);
-    target[at] = '\0';
-    link->length = at;
-}
+static void proc_root_refresh(struct vfs_node *directory) { (void)directory; }
 
-static void proc_root_refresh(struct vfs_node *directory) {
-    (void)directory;
-    // /proc lists the pids of the initial pid namespace, so self names the
-    // caller by those too, not by the pid it has in a namespace of its own.
+/* /proc/self and /proc/thread-self name whoever follows them, worked out at
+ * that moment: one shared target rewritten on each /proc access could point a
+ * process at another one's directory. /proc lists the pids of the initial pid
+ * namespace, so these name the caller by those too. */
+static size_t caller_pid_text(struct vfs_node *link, char *out, size_t capacity) {
     struct process *caller = process_current();
-    if (!caller) return;
-    point_at_caller(self_link, caller->tgid);
-    point_at_caller(thread_self_link, caller->pid);
+    if (!caller || capacity < 21) return 0;
+    return path_append_decimal(out, 0, link == self_link ? caller->tgid : caller->pid);
 }
 
 #define ASOUND_TEXT       2048U
@@ -1572,6 +1575,8 @@ void procfs_init(void) {
     vfs_mount_builtin("proc", "/proc", "proc", root);
     self_link = vfs_attach_symlink(root, "self", "18446744073709551615");
     thread_self_link = vfs_attach_symlink(root, "thread-self", "18446744073709551615");
+    if (self_link) self_link->link_text = caller_pid_text;
+    if (thread_self_link) thread_self_link->link_text = caller_pid_text;
     root->refresh = proc_root_refresh;
     virtual_file(root, "cpuinfo", proc_cpuinfo_read, 0);
     virtual_file(root, "meminfo", proc_meminfo_read, 0);

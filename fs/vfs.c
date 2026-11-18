@@ -659,7 +659,12 @@ static struct vfs_node *lookup_internal(const char *path, int follow_final, int 
         if (!next) return lookup_failed(error, LOOKUP_ENOENT);
         if ((next->flags & 0xFFU) == VFS_SYMLINK &&
             (follow_final || !final_component || directory_required)) {
+            char computed[32];
             const char *target = (const char *)next->data;
+            if (next->link_text) {
+                computed[next->link_text(next, computed, sizeof(computed) - 1)] = '\0';
+                target = computed;
+            }
             if (!target || !target[0]) return lookup_failed(error, LOOKUP_ENOENT);
             if (++followed > VFS_SYMLINK_MAX_DEPTH) return lookup_failed(error, LOOKUP_ELOOP);
             if (!spare && !(spare = vfs_path_buffer())) return lookup_failed(error, LOOKUP_ENOENT);
@@ -1301,6 +1306,13 @@ int vfs_link(struct vfs_node *target, const char *path) {
 int64_t vfs_readlink(struct vfs_node *node, void *buffer, size_t size) {
     VFS_LOCKED;
     if (!node || !buffer || (node->flags & 0xFFU) != VFS_SYMLINK || !node->data) return -1;
+    if (node->link_text) {
+        char computed[32];
+        size_t length = node->link_text(node, computed, sizeof(computed));
+        if (length > size) length = size;
+        memcpy(buffer, computed, length);
+        return (int64_t)length;
+    }
     size_t length = (size_t)node->length;
     if (length > size) length = size;
     memcpy(buffer, node->data, length);

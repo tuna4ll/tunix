@@ -1377,6 +1377,12 @@ static int normalize_path(struct vfs_node *base, const char *input, char *output
     size_t input_length = strlen(input);
     if (at + input_length + 1 > 2 * VFS_PATH_MAX) return -ENAMETOOLONG;
     memcpy(combined + at, input, input_length + 1);
+    // The root bounds only paths inside it: relative to a directory held open
+    // outside the root, as a chroot leaves Chromium's /proc, a path walks
+    // freely, as on Linux.
+    if (floor > 1 && (strncmp(combined, output, floor) != 0 ||
+                      (combined[floor] != '/' && combined[floor] != '\0')))
+        floor = 1;
 
     size_t out = 0;
     output[out++] = '/';
@@ -3684,8 +3690,15 @@ static int64_t sys_readlink_at(int dirfd, uint64_t user_path, uint64_t user_buff
     struct vfs_node *node = vfs_lookup_nofollow(path);
     if (!node) return lookup_errno(path, 0);
     if ((node->flags & 0xFFU) != VFS_SYMLINK) return -EINVAL;
+    if (node->link_text) {
+        char computed[32];
+        size_t length = node->link_text(node, computed, sizeof(computed));
+        if (length > size) length = size;
+        return copy_to_user(user_buffer, computed, length) == 0 ? (int64_t)length : -EFAULT;
+    }
     int64_t length = (int64_t)node->length;
     if (!node->data || length < 0) return -EINVAL;
+    if (length == 0) return -ENOENT;
     if ((size_t)length > size) length = (int64_t)size;
     return copy_to_user(user_buffer, node->data, (size_t)length) == 0 ? length : -EFAULT;
 }

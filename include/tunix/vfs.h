@@ -137,6 +137,9 @@ struct vfs_node {
     uint32_t index_buckets;
     uint32_t child_count;
     struct vfs_node *link_target;
+    /* For a link whose target depends on who follows it, as /proc/self does:
+     * writes the target for the calling process and returns its length. */
+    size_t (*link_text)(struct vfs_node *node, char *out, size_t capacity);
     uint32_t links;
     struct vfs_node *mounted;
     uint32_t refs;
