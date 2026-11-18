@@ -1382,7 +1382,7 @@ struct process *process_create_from_path(const char *path) {
                           "SHELL=/bin/bash",
                           "USER=root",
                           NULL};
-    if (elf_load_process(process, file, argv, envp) != 0) {
+    if (elf_load_process(process, file, argv, envp, NULL) != 0) {
         kprintf("process: invalid ELF64: %s\n", path);
         vmm_destroy_address_space(process->cr3);
         process_release_files(process);
@@ -4061,16 +4061,35 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
     image.cr3 = new_cr3;
     image.root = current->root;
     memcpy(image.rlimits, current->rlimits, sizeof(image.rlimits));
-    if (elf_load_process(&image, file, argv, envp) != 0) {
+    struct elf_image_areas *image_areas = (struct elf_image_areas *)kmalloc(sizeof(*image_areas));
+    if (!image_areas) {
+        vmm_destroy_address_space(new_cr3);
+        return -ENOMEM;
+    }
+    image_areas->count = 0;
+    if (elf_load_process(&image, file, argv, envp, image_areas) != 0) {
+        kfree(image_areas);
         vmm_destroy_address_space(new_cr3);
         return -1;
     }
 
     struct process_memory *new_memory =
         memory_create(new_cr3, image.brk_start, image.brk_end, image.mmap_base);
-    if (!new_memory) {
-        vmm_destroy_address_space(new_cr3);
-        return -EINVAL;
+    int areas_ok = new_memory != NULL;
+    for (unsigned i = 0; areas_ok && i < image_areas->count; i++) {
+        const struct elf_image_area *image_area = &image_areas->area[i];
+        struct vm_area *area =
+            area_alloc(image_area->start, image_area->end, image_area->page_flags,
+                       VM_FILE_PAGES | VM_PRIVATE, image_area->file, image_area->offset);
+        if (area) area_insert(new_memory, area);
+        else areas_ok = 0;
+    }
+    elf_image_areas_release(image_areas);
+    kfree(image_areas);
+    if (!areas_ok) {
+        if (new_memory) memory_unref(new_memory);
+        else vmm_destroy_address_space(new_cr3);
+        return -ENOMEM;
     }
     terminate_sibling_threads(0);
     struct process_memory *old_memory = current->memory;

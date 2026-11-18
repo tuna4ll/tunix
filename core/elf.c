@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <tunix/elf.h>
 #include <tunix/elf_plan.h>
+#include <tunix/file.h>
 #include <tunix/heap.h>
 #include <tunix/hwcap.h>
 #include <tunix/kstring.h>
@@ -63,8 +64,9 @@ static void release_image(struct loaded_elf *loaded) {
     loaded->segments = NULL;
 }
 
-static int map_segment_pages(struct process *process, const struct tunix_elf_segment *segment) {
-    for (uint64_t address = segment->page_start; address < segment->page_end; address += 4096) {
+static int map_segment_pages(struct process *process, const struct tunix_elf_segment *segment,
+                             uint64_t from) {
+    for (uint64_t address = from; address < segment->page_end; address += 4096) {
         uint64_t old_flags;
         if (vmm_translate(process->cr3, address, NULL, &old_flags) == 0) {
             if (!(old_flags & PAGE_WRITE) &&
@@ -86,10 +88,12 @@ static int map_segment_pages(struct process *process, const struct tunix_elf_seg
 }
 
 static int copy_segment(struct process *process, struct vfs_node *file,
-                        const struct tunix_elf_segment *segment) {
-    uint64_t remaining = segment->file_size;
-    uint64_t source_offset = segment->file_offset;
-    uint64_t destination = segment->address;
+                        const struct tunix_elf_segment *segment, uint64_t from) {
+    uint64_t skip = from > segment->address ? from - segment->address : 0;
+    if (skip >= segment->file_size) return 0;
+    uint64_t remaining = segment->file_size - skip;
+    uint64_t source_offset = segment->file_offset + skip;
+    uint64_t destination = segment->address + skip;
     while (remaining) {
         uint64_t physical;
         if (vmm_translate(process->cr3, destination, &physical, NULL) != 0) return -1;
@@ -124,7 +128,8 @@ static int protect_image_pages(struct process *process, const struct loaded_elf 
         int writable;
         if (!page_writable(loaded, page, &writable)) continue;
         uint64_t old_flags;
-        if (vmm_translate(process->cr3, page, NULL, &old_flags) != 0) return -1;
+        // Pages left to the page cache are not mapped yet; their area sets them.
+        if (vmm_translate(process->cr3, page, NULL, &old_flags) != 0) continue;
         uint64_t flags = PAGE_USER | PAGE_PRESENT | (old_flags & PAGE_DEVICE);
         if (writable) flags |= PAGE_WRITE;
         if (vmm_protect_page_in(process->cr3, page, flags) != 0) return -1;
@@ -168,20 +173,64 @@ static int plan_image(struct vfs_node *file, uint64_t preferred_base, struct loa
     return status;
 }
 
+// Where a segment's pages stop coming from the page cache: a last page that
+// holds both file data and zeroed memory is copied, as are the zeroed pages.
+static uint64_t shared_end(const struct tunix_elf_segment *segment) {
+    if (!segment->file_size || (segment->address & 0xFFFULL) != (segment->file_offset & 0xFFFULL))
+        return segment->page_start;
+    uint64_t data_end = segment->address + segment->file_size;
+    uint64_t end = segment->memory_size > segment->file_size ? data_end & ~0xFFFULL
+                                                              : align_up(data_end, 4096);
+    return end > segment->page_end ? segment->page_end : end;
+}
+
+static int segments_share_pages(const struct loaded_elf *loaded) {
+    for (uint16_t i = 0; i < loaded->plan.load_count; i++)
+        for (uint16_t j = i + 1; j < loaded->plan.load_count; j++) {
+            const struct tunix_elf_segment *a = &loaded->segments[i], *b = &loaded->segments[j];
+            if (a->page_start < b->page_end && b->page_start < a->page_end) return 1;
+        }
+    return 0;
+}
+
 static int load_image(struct process *process, struct vfs_node *file, uint64_t preferred_base,
-                      struct loaded_elf *loaded) {
+                      struct loaded_elf *loaded, struct elf_image_areas *areas) {
     if (!process || !file || !loaded || (file->flags & 0xFFU) != VFS_FILE) return -1;
     if (plan_image(file, preferred_base, loaded) != 0) return -1;
+    if (areas && (segments_share_pages(loaded) ||
+                  areas->count + loaded->plan.load_count > ELF_IMAGE_AREAS))
+        areas = NULL;
+    struct file *backing = areas ? file_open_node(file, 0 /* O_RDONLY */) : NULL;
+    if (!backing) areas = NULL;
     int status = 0;
-    for (uint16_t i = 0; status == 0 && i < loaded->plan.load_count; i++)
-        status = map_segment_pages(process, &loaded->segments[i]);
-    for (uint16_t i = 0; status == 0 && i < loaded->plan.load_count; i++)
-        status = copy_segment(process, file, &loaded->segments[i]);
-    if (status == 0 && vmm_translate(process->cr3, loaded->plan.entry, NULL, NULL) != 0)
+    for (uint16_t i = 0; status == 0 && i < loaded->plan.load_count; i++) {
+        const struct tunix_elf_segment *segment = &loaded->segments[i];
+        uint64_t from = areas ? shared_end(segment) : segment->page_start;
+        if (from > segment->page_start) {
+            struct elf_image_area *area = &areas->area[areas->count++];
+            area->start = segment->page_start;
+            area->end = from;
+            area->page_flags = segment->writable ? PAGE_WRITE : 0;
+            area->offset = segment->file_offset - (segment->address - segment->page_start);
+            area->file = backing;
+            file_ref(backing);
+        }
+        status = map_segment_pages(process, segment, from);
+        if (status == 0) status = copy_segment(process, file, segment, from);
+    }
+    if (backing) file_unref(backing);
+    if (status == 0 &&
+        (loaded->plan.entry < loaded->plan.image_start || loaded->plan.entry >= loaded->plan.image_end))
         status = -1;
     if (status == 0) status = protect_image_pages(process, loaded);
     if (status != 0) release_image(loaded);
     return status;
+}
+
+void elf_image_areas_release(struct elf_image_areas *areas) {
+    if (!areas) return;
+    for (unsigned i = 0; i < areas->count; i++) file_unref(areas->area[i].file);
+    areas->count = 0;
 }
 
 static int interpreter_path(struct vfs_node *file, const struct tunix_elf_plan *plan, char *path) {
@@ -310,7 +359,7 @@ static struct vfs_node *lookup_under_root(const struct process *process, const c
 }
 
 int elf_load_process(struct process *process, struct vfs_node *file, const char *const argv[],
-                     const char *const envp[]) {
+                     const char *const envp[], struct elf_image_areas *areas) {
     if (!process || !file || (file->flags & 0xFFU) != VFS_FILE) return -1;
 
     struct loaded_elf main_image;
@@ -318,7 +367,7 @@ int elf_load_process(struct process *process, struct vfs_node *file, const char 
     memset(&main_image, 0, sizeof(main_image));
     memset(&interpreter, 0, sizeof(interpreter));
     int status = -1;
-    if (load_image(process, file, MAIN_PIE_BASE, &main_image) != 0) return -1;
+    if (load_image(process, file, MAIN_PIE_BASE, &main_image, areas) != 0) return -1;
 
     VFS_PATH_SCOPED interp_path = vfs_path_buffer();
     if (!interp_path) goto done;
@@ -329,7 +378,7 @@ int elf_load_process(struct process *process, struct vfs_node *file, const char 
     uint64_t interpreter_base = 0;
     if (interp_status > 0) {
         struct vfs_node *interp_file = lookup_under_root(process, interp_path);
-        if (!interp_file || load_image(process, interp_file, INTERP_BASE, &interpreter) != 0 ||
+        if (!interp_file || load_image(process, interp_file, INTERP_BASE, &interpreter, areas) != 0 ||
             interpreter.plan.kind != ET_DYN || interpreter.plan.interp_size)
             goto done;
         initial_entry = interpreter.plan.entry;
@@ -364,5 +413,6 @@ int elf_load_process(struct process *process, struct vfs_node *file, const char 
 done:
     release_image(&main_image);
     release_image(&interpreter);
+    if (status != 0) elf_image_areas_release(areas);
     return status;
 }

@@ -213,6 +213,7 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136,
 #define SYS_RENAME                 82
 #define SYS_MKDIR                  83
 #define SYS_RMDIR                  84
+#define SYS_CREAT                  85
 #define SYS_MOUNT                  165
 #define SYS_UMOUNT2                166
 #define SYS_SWAPON                 167
@@ -6440,6 +6441,10 @@ static void syscall_run(struct syscall_frame *frame) {
         SYSCALL_RET(frame) =
             (uint64_t)open_at(AT_FDCWD, SYSCALL_ARG0(frame),
                               SYSCALL_OPEN_FLAGS_IN(SYSCALL_ARG1(frame)), SYSCALL_ARG2(frame));
+        break;
+    case SYS_CREAT:
+        SYSCALL_RET(frame) = (uint64_t)open_at(AT_FDCWD, SYSCALL_ARG0(frame),
+                                               O_CREAT | O_WRONLY | O_TRUNC, SYSCALL_ARG1(frame));
         break;
     case SYS_CLOSE: SYSCALL_RET(frame) = (uint64_t)sys_close((int)SYSCALL_ARG0(frame)); break;
     case SYS_POLL:  {

@@ -52,6 +52,12 @@ struct unix_channel {
     struct unix_record_queue records_to_b;
     struct unix_credentials a_credentials;
     struct unix_credentials b_credentials;
+    // Who last wrote stream data each way, for SCM_CREDENTIALS. shortcut: one
+    // sender per direction, so bytes queued by two senders before a read are
+    // all credited to the later one; keep a sender per run of bytes if a
+    // program needs both.
+    struct unix_credentials stream_sender_to_a;
+    struct unix_credentials stream_sender_to_b;
     char a_path[108];
     char b_path[108];
     int refs;
@@ -732,6 +738,9 @@ static int64_t unix_socket_read_data(struct unix_socket *socket, size_t size, vo
     }
 
     if (pipe->count == 0) return peer_write_open(socket) ? -EAGAIN : 0;
+    const struct unix_credentials *writer = socket->side == 0 ? &socket->channel->stream_sender_to_a
+                                                              : &socket->channel->stream_sender_to_b;
+    if (writer->pid) socket->last_sender = *writer;
     size_t amount = size < pipe->count ? size : pipe->count;
     for (size_t index = 0; index < amount; index++)
         out[index] = pipe->data[(pipe->read_pos + index) % pipe->capacity];
@@ -804,6 +813,12 @@ static int64_t unix_socket_write_locked(struct unix_socket *socket, size_t size,
     }
     pipe->count += amount;
     pipe->generation++;
+    struct unix_credentials *writer = socket->side == 0 ? &socket->channel->stream_sender_to_b
+                                                        : &socket->channel->stream_sender_to_a;
+    const struct credentials *self = cred_current();
+    writer->pid = (int32_t)process_current()->tgid;
+    writer->uid = self ? self->euid : 0U;
+    writer->gid = self ? self->egid : 0U;
     return (int64_t)amount;
 }
 
