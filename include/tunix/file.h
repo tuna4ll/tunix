@@ -47,6 +47,9 @@ struct file {
     struct mutex lock;
     int refs;
     int kind;
+    // A unix socket's generic SOL_SOCKET flags, one bit per option number.
+    uint32_t socket_flags;
+    int32_t socket_linger[2];
     uint32_t flags;
     uint64_t offset;
     struct vfs_node *node;

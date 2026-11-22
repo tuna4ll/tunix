@@ -85,6 +85,16 @@ struct tcp_control_block {
 #define SO_SNDTIMEO      21
 #define SO_BINDTODEVICE  25
 #define SO_ATTACH_FILTER 26
+#define SO_REUSEADDR     2
+#define SO_TYPE          3
+#define SO_DONTROUTE     5
+#define SO_KEEPALIVE     9
+#define SO_OOBINLINE     10
+#define SO_LINGER        13
+#define SO_REUSEPORT     15
+#define SO_ACCEPTCONN    30
+#define SO_PROTOCOL      38
+#define SO_DOMAIN        39
 #define PACKET_AUXDATA   8
 #define IPPROTO_IP       0
 #define IPPROTO_ICMP     1
@@ -171,6 +181,12 @@ struct inet_socket {
     int orphan;
     size_t receive_buffer;
     size_t send_buffer;
+    // Generic SOL_SOCKET flags, one bit per option number (SO_REUSEADDR...).
+    // shortcut: SO_KEEPALIVE sends no probes and SO_LINGER does not change
+    // close; add keepalive timers and a lingering close if a program needs them.
+    uint32_t socket_flags;
+    int32_t linger[2];
+    int no_delay;
 
     int listening;
     unsigned backlog;
@@ -1041,9 +1057,11 @@ static struct inet_socket *tcp_open_child(struct inet_socket *listener, uint32_t
     child->refs = 1;
     child->net_ns = listener->net_ns;
     net_ns_get(child->net_ns);
-    child->domain = TUNIX_AF_INET;
+    child->domain = listener->domain;
     child->type = TUNIX_SOCK_STREAM;
     child->protocol = listener->protocol;
+    child->socket_flags = listener->socket_flags;
+    child->no_delay = listener->no_delay;
     child->ttl = 64;
     child->receive_buffer = listener->receive_buffer;
     child->send_buffer = listener->send_buffer;
@@ -1248,6 +1266,11 @@ static int local_port_conflict(struct inet_socket *socket, uint32_t address, uin
             other->local_port != port)
             continue;
         if (is_ping_socket(other) != is_ping_socket(socket)) continue;
+        // As on Linux, SO_REUSEADDR on both lets a TCP socket share the port of
+        // one that is not listening, such as a connection a closed server left.
+        if (socket->type == TUNIX_SOCK_STREAM && !other->listening &&
+            (socket->socket_flags & other->socket_flags & (1U << SO_REUSEADDR)))
+            continue;
         if (!other->local_address || !address || other->local_address == address) return 1;
     }
     return 0;
@@ -1263,7 +1286,8 @@ int inet_socket_bind(struct inet_socket *socket, const void *address, size_t len
         if (parsed != 0) return parsed;
         if (port && local_port_conflict(socket, v4, port)) return -EADDRINUSE;
         socket->local_address = v4;
-        if (!port && is_ping_socket(socket)) {
+        // Port 0 gets a port now, as on Linux, so getsockname can report it.
+        if (!port && socket->type != TUNIX_SOCK_RAW) {
             if (bind_ephemeral(socket) != 0) return -EADDRINUSE;
         } else if (set_local_port(socket, port) != 0) {
             return -ENOMEM;
@@ -1540,9 +1564,26 @@ int inet_socket_setsockopt(struct inet_socket *socket, int level, int option, co
                 tcp_send_window_update(socket);
             return 0;
         }
+        if ((option == SO_REUSEADDR || option == SO_REUSEPORT || option == SO_KEEPALIVE ||
+             option == SO_OOBINLINE || option == SO_DONTROUTE) &&
+            value && length >= sizeof(int)) {
+            if (*(const int *)value) socket->socket_flags |= 1U << option;
+            else socket->socket_flags &= ~(1U << option);
+            return 0;
+        }
+        if (option == SO_LINGER) {
+            if (!value || length < sizeof(socket->linger)) return -EINVAL;
+            memcpy(socket->linger, value, sizeof(socket->linger));
+            return 0;
+        }
         if (option == SO_BINDTODEVICE || option == SO_ATTACH_FILTER || option == SO_RCVTIMEO ||
             option == SO_SNDTIMEO)
             return 0;
+        return 0;
+    }
+    if (level == IPPROTO_TCP && option == TCP_NODELAY && socket->type == TUNIX_SOCK_STREAM &&
+        value && length >= sizeof(int)) {
+        socket->no_delay = *(const int *)value != 0;
         return 0;
     }
     if (level == IPPROTO_IP) {
@@ -1572,9 +1613,8 @@ int inet_socket_setsockopt(struct inet_socket *socket, int level, int option, co
         if (option == IP_PKTINFO || option == IP_MTU_DISCOVER || option == IP_RECVTOS) return 0;
     }
 
-    if (level == IPPROTO_TCP &&
-        (option == TCP_NODELAY || option == TCP_KEEPIDLE || option == TCP_KEEPINTVL ||
-         option == TCP_KEEPCNT))
+    if (level == IPPROTO_TCP && socket->type == TUNIX_SOCK_STREAM &&
+        (option == TCP_KEEPIDLE || option == TCP_KEEPINTVL || option == TCP_KEEPCNT))
         return 0;
     if (level == SOL_RAW && option == ICMP_FILTER) {
         if (!value || length < sizeof(uint32_t)) return -EINVAL;
@@ -1606,7 +1646,26 @@ int inet_socket_getsockopt(struct inet_socket *socket, int level, int option, vo
     else if (level == IPPROTO_IP && option == IP_RECVTTL) result = socket->recv_ttl;
     else if (level == IPPROTO_IP && option == IP_RETOPTS) result = socket->return_options;
 
-    else if (level == IPPROTO_TCP && option == TCP_NODELAY) result = 1;
+    else if (level == SOL_SOCKET && option == SO_LINGER) {
+        if (*length < sizeof(socket->linger)) return -EINVAL;
+        memcpy(value, socket->linger, sizeof(socket->linger));
+        *length = sizeof(socket->linger);
+        return 0;
+    } else if (level == SOL_SOCKET &&
+               (option == SO_REUSEADDR || option == SO_REUSEPORT || option == SO_KEEPALIVE ||
+                option == SO_OOBINLINE || option == SO_DONTROUTE))
+        result = (socket->socket_flags >> option) & 1U;
+    else if (level == SOL_SOCKET && option == SO_TYPE) result = socket->type;
+    else if (level == SOL_SOCKET && option == SO_DOMAIN) result = socket->domain;
+    else if (level == SOL_SOCKET && option == SO_ACCEPTCONN) result = socket->listening != 0;
+    else if (level == SOL_SOCKET && option == SO_PROTOCOL)
+        result = socket->protocol ? socket->protocol
+            : socket->type == TUNIX_SOCK_STREAM ? 6
+            : socket->type == TUNIX_SOCK_DGRAM  ? 17
+                                                : 0;
+    // Tunix sends segments at once, without Nagle's algorithm, whatever this says.
+    else if (level == IPPROTO_TCP && option == TCP_NODELAY && socket->type == TUNIX_SOCK_STREAM)
+        result = socket->no_delay;
     else if (level == SOL_RAW && option == ICMP_FILTER) result = (int)socket->icmp_filter;
     else {
         report_refused_option("getsockopt", level, option);

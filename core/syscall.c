@@ -214,6 +214,8 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136,
 #define SYS_MKDIR                  83
 #define SYS_RMDIR                  84
 #define SYS_CREAT                  85
+#define SYS_SENDFILE               40
+#define SYS_COPY_FILE_RANGE        326
 #define SYS_MOUNT                  165
 #define SYS_UMOUNT2                166
 #define SYS_SWAPON                 167
@@ -405,6 +407,12 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136,
 #define SCM_RIGHTS              1
 #define SCM_CREDENTIALS         2
 #define SO_TYPE                 3
+#define SO_REUSEADDR            2
+#define SO_DONTROUTE            5
+#define SO_KEEPALIVE            9
+#define SO_OOBINLINE            10
+#define SO_LINGER               13
+#define SO_REUSEPORT            15
 #define SO_ERROR                4
 #define SO_PASSCRED             16
 #define SO_PEERCRED             17
@@ -1976,7 +1984,7 @@ static int64_t sys_accept(int fd, uint64_t user_address, uint64_t user_length, i
     if (!inet_socket_is_listener(inet_listener)) return -EINVAL;
     struct inet_socket *accepted = inet_socket_accept(inet_listener);
     if (!accepted) return -EAGAIN;
-    struct tunix_sockaddr_in peer;
+    struct tunix_sockaddr_in6 peer;  // large enough for either family
     size_t peer_length = sizeof(peer);
     if (inet_socket_getpeername(accepted, &peer, &peer_length) != 0) peer_length = 0;
     struct file *file = file_create_inet_socket(accepted);
@@ -2675,9 +2683,30 @@ static int64_t sys_socket_name(int fd, uint64_t user_address, uint64_t user_leng
     return copy_to_user(user_length, &output_length, sizeof(output_length)) == 0 ? 0 : -EFAULT;
 }
 
+// Options Linux keeps for every socket; unix sockets only remember them.
+static int unix_flag_option(int option) {
+    return option == SO_REUSEADDR || option == SO_REUSEPORT || option == SO_KEEPALIVE ||
+        option == SO_OOBINLINE || option == SO_DONTROUTE;
+}
+
 static int64_t sys_setsockopt(int fd, int level, int option, uint64_t user_value, size_t length) {
     struct unix_socket *unix_value = socket_from_fd(fd);
     if (unix_value) {
+        if (level == SOL_SOCKET && unix_flag_option(option)) {
+            if (length < sizeof(int32_t)) return -EINVAL;
+            int32_t enabled;
+            if (copy_from_user(&enabled, user_value, sizeof(enabled)) != 0) return -EFAULT;
+            if (enabled) fd_file(fd)->socket_flags |= 1U << option;
+            else fd_file(fd)->socket_flags &= ~(1U << option);
+            return 0;
+        }
+        if (level == SOL_SOCKET && option == SO_LINGER) {
+            if (length < sizeof(fd_file(fd)->socket_linger)) return -EINVAL;
+            return copy_from_user(fd_file(fd)->socket_linger, user_value,
+                                  sizeof(fd_file(fd)->socket_linger)) == 0
+                ? 0
+                : -EFAULT;
+        }
         if (level == SOL_SOCKET && length >= sizeof(int32_t) &&
             (option == SO_PRIORITY || option == SO_SNDBUF || option == SO_RCVBUF ||
              option == SO_SNDBUFFORCE || option == SO_RCVBUFFORCE || option == SO_PASSSEC))
@@ -2765,6 +2794,21 @@ static int64_t sys_getsockopt(int fd, int level, int option, uint64_t user_value
                 return -EFAULT;
             }
             return 0;
+        }
+        if (option == SO_LINGER) {
+            if (supplied < sizeof(fd_file(fd)->socket_linger)) return -EINVAL;
+            uint32_t length = sizeof(fd_file(fd)->socket_linger);
+            if (copy_to_user(user_value, fd_file(fd)->socket_linger, length) != 0) return -EFAULT;
+            return copy_to_user(user_length, &length, sizeof(length)) == 0 ? 0 : -EFAULT;
+        }
+        if (unix_flag_option(option) || option == SO_DOMAIN || option == SO_PROTOCOL) {
+            if (supplied < sizeof(int32_t)) return -EINVAL;
+            int32_t value = option == SO_DOMAIN ? TUNIX_AF_UNIX
+                : option == SO_PROTOCOL         ? 0
+                                                : (int32_t)((fd_file(fd)->socket_flags >> option) & 1U);
+            uint32_t length = sizeof(value);
+            if (copy_to_user(user_value, &value, sizeof(value)) != 0) return -EFAULT;
+            return copy_to_user(user_length, &length, sizeof(length)) == 0 ? 0 : -EFAULT;
         }
         if (option == SO_PASSCRED) {
             if (supplied < sizeof(int32_t)) return -EINVAL;
@@ -3032,12 +3076,135 @@ static int64_t sys_fsync(int fd) {
     return -EINVAL;
 }
 
+#define COPY_CHUNK (64U * 1024U)
+
+static int regular_vfs_file(const struct file *file) {
+    return file && file->kind == FILE_KIND_VFS && file->node &&
+        (file->node->flags & 0xFFU) == VFS_FILE;
+}
+
+// sendfile: from a file into any writable descriptor, through the same write
+// path as write(2), so a full socket or pipe blocks or reports EAGAIN alike.
+static int64_t sys_sendfile(int out_fd, int in_fd, uint64_t user_offset, size_t count) {
+    struct file *in = fd_file(in_fd);
+    struct file *out = fd_file(out_fd);
+    if (!in || !out) return -EBADF;
+    // Sockets and pipes carry no access mode; only files opened read-only refuse writes.
+    if ((in->flags & O_ACCMODE) == O_WRONLY ||
+        (out->kind == FILE_KIND_VFS && (out->flags & O_ACCMODE) == O_RDONLY))
+        return -EBADF;
+    if (!regular_vfs_file(in)) return -EINVAL;
+    if (regular_vfs_file(out) && (out->flags & O_APPEND)) return -EINVAL;
+    int64_t position = (int64_t)in->offset;
+    if (user_offset) {
+        if (copy_from_user(&position, user_offset, sizeof(position)) != 0) return -EFAULT;
+        if (position < 0) return -EINVAL;
+    }
+    if (count > 0x7FFFF000UL) count = 0x7FFFF000UL;
+    uint8_t *buffer = (uint8_t *)kmalloc(COPY_CHUNK);
+    if (!buffer) return -ENOMEM;
+    size_t completed = 0;
+    int64_t failure = 0;
+    while (completed < count) {
+        size_t chunk = count - completed < COPY_CHUNK ? count - completed : COPY_CHUNK;
+        int64_t got = vfs_read(in->node, (uint64_t)position, chunk, buffer);
+        if (got <= 0) {
+            failure = got;
+            break;
+        }
+        int64_t written = file_write(out, (size_t)got, buffer);
+        if (written == -EPIPE) (void)process_send_signal((int64_t)process_current()->pid, SIGPIPE);
+        if (written <= 0) {
+            failure = written;
+            break;
+        }
+        completed += (size_t)written;
+        position += written;
+        if (written < got) break;
+        process_preempt_point();
+    }
+    kfree(buffer);
+    if (!completed && failure < 0) return failure;
+    if (user_offset) {
+        if (copy_to_user(user_offset, &position, sizeof(position)) != 0) return -EFAULT;
+    } else {
+        in->offset = (uint64_t)position;
+    }
+    return (int64_t)completed;
+}
+
+static int64_t sys_copy_file_range(int in_fd, uint64_t user_in_offset, int out_fd,
+                                   uint64_t user_out_offset, size_t length, unsigned flags) {
+    if (flags) return -EINVAL;
+    struct file *in = fd_file(in_fd);
+    struct file *out = fd_file(out_fd);
+    if (!in || !out) return -EBADF;
+    if ((in->flags & O_ACCMODE) == O_WRONLY || (out->flags & O_ACCMODE) == O_RDONLY ||
+        (out->flags & O_APPEND))
+        return -EBADF;
+    if ((in->kind == FILE_KIND_VFS && in->node && (in->node->flags & 0xFFU) == VFS_DIRECTORY) ||
+        (out->kind == FILE_KIND_VFS && out->node && (out->node->flags & 0xFFU) == VFS_DIRECTORY))
+        return -EISDIR;
+    if (!regular_vfs_file(in) || !regular_vfs_file(out)) return -EINVAL;
+    if (vfs_node_is_swapfile(out->node)) return -ETXTBSY;
+    int64_t from = (int64_t)in->offset, to = (int64_t)out->offset;
+    if (user_in_offset && copy_from_user(&from, user_in_offset, sizeof(from)) != 0) return -EFAULT;
+    if (user_out_offset && copy_from_user(&to, user_out_offset, sizeof(to)) != 0) return -EFAULT;
+    if (from < 0 || to < 0) return -EINVAL;
+    if (length > 0x7FFFF000UL) length = 0x7FFFF000UL;
+    if (in->node == out->node && (uint64_t)from < (uint64_t)to + length &&
+        (uint64_t)to < (uint64_t)from + length)
+        return -EINVAL;
+    uint8_t *buffer = (uint8_t *)kmalloc(COPY_CHUNK);
+    if (!buffer) return -ENOMEM;
+    size_t completed = 0;
+    int64_t failure = 0;
+    while (completed < length) {
+        size_t chunk = length - completed < COPY_CHUNK ? length - completed : COPY_CHUNK;
+        int64_t got = vfs_read(in->node, (uint64_t)from, chunk, buffer);
+        if (got <= 0) {
+            failure = got;
+            break;
+        }
+        int64_t written = vfs_write(out->node, (uint64_t)to, (size_t)got, buffer);
+        if (written <= 0) {
+            failure = written ? written : -EIO;
+            break;
+        }
+        completed += (size_t)written;
+        from += written;
+        to += written;
+        if (written < got) break;
+        process_preempt_point();
+    }
+    kfree(buffer);
+    if (!completed && failure < 0) return failure;
+    if (user_in_offset) {
+        if (copy_to_user(user_in_offset, &from, sizeof(from)) != 0) return -EFAULT;
+    } else {
+        in->offset = (uint64_t)from;
+    }
+    if (user_out_offset) {
+        if (copy_to_user(user_out_offset, &to, sizeof(to)) != 0) return -EFAULT;
+    } else {
+        out->offset = (uint64_t)to;
+    }
+    return (int64_t)completed;
+}
+
 static int64_t sys_ioctl(int fd, unsigned long request, uint64_t user_argument) {
     struct process *process = process_current();
     if (!process || fd < 0 || fd >= PROCESS_FD_CAPACITY(process) || !fd_file(fd)) return -EBADF;
 
     request &= 0xFFFFFFFFUL;
     struct file *file = fd_file(fd);
+
+    // FICLONE and FICLONERANGE: no Tunix file system shares extents, which
+    // Linux reports for ext4 as EOPNOTSUPP, so cp and Python fall back to copying.
+    if (request == 0x40049409UL || request == 0x4020940DUL) {
+        if (file->kind != FILE_KIND_VFS || !file->node) return -EBADF;
+        return (file->node->flags & 0xFFU) == VFS_FILE ? -EOPNOTSUPP : -EINVAL;
+    }
 
     if (request == FIONBIO) {
         int32_t enabled;
@@ -3749,6 +3916,28 @@ static int64_t sys_rename_at(int old_dirfd, uint64_t user_old_path, int new_dirf
     permitted = existing ? cred_may_remove(new_path, existing) : cred_may_write_parent(new_path);
     if (permitted != 0) return permitted;
     if (vfs_node_is_swapfile(node) || (existing && vfs_node_is_swapfile(existing))) return -EPERM;
+    int moving_directory = (node->flags & 0xFFU) == VFS_DIRECTORY;
+    if (existing && existing != node) {
+        int replacing_directory = (existing->flags & 0xFFU) == VFS_DIRECTORY;
+        if (moving_directory && !replacing_directory) return -ENOTDIR;
+        if (!moving_directory && replacing_directory) return -EISDIR;
+        if (replacing_directory && existing->children) return -ENOTEMPTY;
+    }
+    if (moving_directory) {
+        // A directory moved into itself would cut its subtree off from the root.
+        char *slash = NULL;
+        for (char *at = new_path; *at; at++)
+            if (*at == '/') slash = at;
+        if (!slash) return -EINVAL;
+        char saved = slash == new_path ? slash[1] : slash[0];
+        if (slash == new_path) slash[1] = '\0';
+        else slash[0] = '\0';
+        struct vfs_node *target_parent = vfs_lookup(new_path);
+        if (slash == new_path) slash[1] = saved;
+        else slash[0] = saved;
+        for (struct vfs_node *at = target_parent; at; at = at->parent == at ? NULL : at->parent)
+            if (at == node) return -EINVAL;
+    }
     if (vfs_rename(old_path, new_path) != 0) return -EIO;
     struct process *process = process_current();
     eventfs_emit_file_rename(process->cred.euid, process->tgid, old_path, new_path);
@@ -5658,7 +5847,7 @@ static int64_t sys_clone_fork_compat(struct syscall_frame *frame, uint64_t flags
             CLONE_SYSVSEM | CLONE_SETTLS | CLONE_FORK_METADATA_FLAGS;
         if (flags & ~(0xFFULL | vfork_allowed)) return -ENOSYS;
         if (exit_signal != 0 && exit_signal != SIGCHLD) return -EINVAL;
-        struct fork_request request = {child_stack, 0, 0, clear_handlers, 0, (flags & CLONE_FS) != 0};
+        struct fork_request request = {child_stack, 0, 0, clear_handlers, 0, (flags & CLONE_FS) != 0, 1};
         return give_pidfd(process_fork_from_syscall(frame, &request), pidfd_user);
     }
 
@@ -5680,6 +5869,7 @@ static int64_t sys_clone_fork_compat(struct syscall_frame *frame, uint64_t flags
         clear_handlers,
         fork_ns,
         (flags & CLONE_FS) != 0,
+        0,
     };
     int64_t pid = process_fork_from_syscall(frame, &request);
     if (pid <= 0) return pid;
@@ -6441,6 +6631,22 @@ static void syscall_run(struct syscall_frame *frame) {
         SYSCALL_RET(frame) =
             (uint64_t)open_at(AT_FDCWD, SYSCALL_ARG0(frame),
                               SYSCALL_OPEN_FLAGS_IN(SYSCALL_ARG1(frame)), SYSCALL_ARG2(frame));
+        break;
+    case SYS_SENDFILE: {
+        int out_fd = (int)SYSCALL_ARG0(frame);
+        int64_t result = sys_sendfile(out_fd, (int)SYSCALL_ARG1(frame), SYSCALL_ARG2(frame),
+                                      (size_t)SYSCALL_ARG3(frame));
+        struct file *out = file_from_fd(out_fd);
+        if (result == -EAGAIN && out && !(out->flags & O_NONBLOCK))
+            block_and_retry(frame, SYS_SENDFILE, out, 1);
+        else
+            SYSCALL_RET(frame) = (uint64_t)result;
+        break;
+    }
+    case SYS_COPY_FILE_RANGE:
+        SYSCALL_RET(frame) = (uint64_t)sys_copy_file_range(
+            (int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), (int)SYSCALL_ARG2(frame),
+            SYSCALL_ARG3(frame), (size_t)SYSCALL_ARG4(frame), (unsigned)SYSCALL_ARG5(frame));
         break;
     case SYS_CREAT:
         SYSCALL_RET(frame) = (uint64_t)open_at(AT_FDCWD, SYSCALL_ARG0(frame),
@@ -8051,6 +8257,8 @@ static int syscall_writes_data(uint64_t number) {
     case SYS_WRITE:
     case SYS_WRITEV:
     case SYS_PWRITE64:
+    case SYS_SENDFILE:
+    case SYS_COPY_FILE_RANGE:
     case SYS_PWRITEV:  return 1;
     default:           return 0;
     }

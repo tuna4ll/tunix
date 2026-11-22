@@ -3196,6 +3196,18 @@ static void process_exit_from_signal(struct syscall_frame *frame, int signal_num
     process_exit_from_syscall(frame, 128 + signal_number);
 }
 
+// Lets a parent sharing its memory with a vfork child run again.
+static void vfork_release(struct process *child) {
+    uint64_t parent_pid = __atomic_exchange_n(&child->vfork_parent, 0, __ATOMIC_ACQ_REL);
+    if (!parent_pid) return;
+    SCHED_LOCKED;
+    wake_bump();
+    struct process *parent = process_find(parent_pid);
+    if (!parent) return;
+    __atomic_store_n(&parent->vfork_waiting, 0, __ATOMIC_RELEASE);
+    (void)process_wake_all_locked(&parent->vfork_waiting);
+}
+
 void process_exit_from_syscall(struct syscall_frame *frame, int status) {
     if (!current || !frame) panic("process: exit without current process");
     struct process *exiting = current;
@@ -3222,6 +3234,7 @@ void process_exit_from_syscall(struct syscall_frame *frame, int status) {
         (void)process_futex_wake(clear_address, 1, FUTEX_BITSET_MATCH_ANY, 1);
     }
     process_release_files(exiting);
+    vfork_release(exiting);
     cgroup_exit(exiting);
     if (!exiting->is_thread) {
         vt_process_exited(exiting->pid, exiting->sid == exiting->pid ? exiting->sid : 0);
@@ -3316,25 +3329,33 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame, const struct fork
     strncpy(child->name, parent->name, sizeof(child->name) - 1);
     child->exe_path = copy_text(parent->exe_path);
     memcpy(child->rlimits, parent->rlimits, sizeof(child->rlimits));
-    process_memory_enter();
-    child->cr3 = vmm_clone_address_space(parent->cr3);
-    if (!child->cr3) {
-        process_memory_leave();
-        free_process_struct(child);
-        return -EINVAL;
-    }
     uint64_t parent_brk_start = parent->memory ? parent->memory->brk_start : parent->brk_start;
     uint64_t parent_brk_end = parent->memory ? parent->memory->brk_end : parent->brk_end;
     uint64_t parent_mmap_base = parent->memory ? parent->memory->mmap_base : parent->mmap_base;
-    child->memory = memory_create(child->cr3, parent_brk_start, parent_brk_end, parent_mmap_base);
-    if (!child->memory) {
+    int share_vm = request && request->share_vm && parent->memory;
+    if (share_vm) {
+        memory_ref(parent->memory);
+        child->memory = parent->memory;
+        child->cr3 = parent->cr3;
+    } else {
+        process_memory_enter();
+        child->cr3 = vmm_clone_address_space(parent->cr3);
+        if (!child->cr3) {
+            process_memory_leave();
+            free_process_struct(child);
+            return -EINVAL;
+        }
+        child->memory =
+            memory_create(child->cr3, parent_brk_start, parent_brk_end, parent_mmap_base);
+        if (!child->memory) {
+            process_memory_leave();
+            vmm_destroy_address_space(child->cr3);
+            free_process_struct(child);
+            return -EINVAL;
+        }
+        memory_copy_mappings(child->memory, parent->memory);
         process_memory_leave();
-        vmm_destroy_address_space(child->cr3);
-        free_process_struct(child);
-        return -EINVAL;
     }
-    memory_copy_mappings(child->memory, parent->memory);
-    process_memory_leave();
     arch_save_thread_pointers(parent);
     fpu_save(parent);
     fpu_copy(child, parent);
@@ -3407,6 +3428,10 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame, const struct fork
     // Before it can run: a child scheduled on another CPU at once would
     // otherwise find no /proc/self, as Chromium's sandbox does for a vfork child.
     procfs_register_process(child);
+    if (share_vm) {
+        parent->vfork_waiting = 1;
+        child->vfork_parent = parent->pid;
+    }
     {
         SCHED_LOCKED;
         wake_bump();
@@ -3416,6 +3441,16 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame, const struct fork
     }
     eventfs_emit_process_fork(parent->cred.euid, parent->pid, child->pid);
     KDEBUG("process: fork parent=%u child=%u\n", (unsigned)parent->pid, (unsigned)child->pid);
+    // Not woken by signals: the parent may not run while the child uses its memory.
+    while (share_vm) {
+        process_prepare_wait(&parent->vfork_waiting, 0);
+        if (!__atomic_load_n(&parent->vfork_waiting, __ATOMIC_ACQUIRE)) {
+            process_finish_wait();
+            break;
+        }
+        process_wait();
+        process_finish_wait();
+    }
     return reported_pid;
 }
 
@@ -4142,6 +4177,7 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
     arch_load_thread_pointers(0, 0);
     if (old_memory) memory_unref(old_memory);
     else vmm_destroy_address_space(old_cr3);
+    vfork_release(current);
     eventfs_emit_process_exec(current->cred.euid, current->pid, current->name);
     KDEBUG("process: pid=%u exec %s\n", (unsigned)current->pid, path);
     if (current->ptrace_tracer && (current->ptrace_options & PTRACE_O_TRACEEXEC)) {

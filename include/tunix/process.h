@@ -151,6 +151,8 @@ struct process {
     uint64_t fs_base;
     uint64_t gs_base;
     uint64_t clear_child_tid_user;
+    uint64_t vfork_parent;  // the pid waiting for this child to exec or exit
+    int vfork_waiting;      // set while this process waits for such a child
     uint64_t robust_list_head;
     uint64_t robust_list_length;
     uint64_t signal_stack_pointer;
@@ -323,6 +325,9 @@ struct fork_request {
     int clear_signal_handlers;
     uint64_t ns_flags;
     int share_fs;
+    // CLONE_VM with CLONE_VFORK: the child runs in the parent's memory, which
+    // waits until the child has exec'd or exited.
+    int share_vm;
 };
 
 void process_init(void);

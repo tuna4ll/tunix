@@ -19,6 +19,10 @@
 #define TIOCGPTLCK 0x80045439UL
 #define TIOCSWINSZ 0x5414UL
 #define TIOCPKT    0x5420UL
+#define TCSBRK     0x5409UL
+#define TCXONC     0x540AUL
+#define TCFLSH     0x540BUL
+#define TCSBRKP    0x5425UL
 #define FIONREAD   0x541BUL
 
 #define TIOCPKT_DATA 0x00
@@ -63,6 +67,7 @@ struct pty_pair {
     struct pty_winsize winsize;
     struct pty_queue to_master;
     struct pty_queue to_slave;
+    int output_stopped[2];  // tcflow(TCOOFF) by the slave [0] or the master [1]
     uint8_t canonical[PTY_CANON_CAPACITY];
     size_t canonical_length;
     struct vfs_node *slave_node;
@@ -120,6 +125,7 @@ static void reset_pair(struct pty_pair *pty) {
     pty->session = 0;
     pty->eof_pending = 0;
     pty->canonical_length = 0;
+    pty->output_stopped[0] = pty->output_stopped[1] = 0;
     queue_reset(&pty->to_master);
     queue_reset(&pty->to_slave);
     initialize_termios(&pty->termios);
@@ -450,6 +456,7 @@ int64_t pty_write(struct pty_pair *pty, int master, size_t size, const void *buf
         (!master && pty->master_files == 0))
         return -EIO;
     const uint8_t *bytes = (const uint8_t *)buffer;
+    if (pty->output_stopped[master != 0]) return -EAGAIN;
     if (master) {
         size_t completed = master_feed_input(pty, bytes, size);
         return completed ? (int64_t)completed : -EAGAIN;
@@ -475,7 +482,7 @@ int pty_read_ready(struct pty_pair *pty, int master) {
 
 int pty_write_ready(struct pty_pair *pty, int master) {
     TTY_POLL_LOCKED;
-    if (!pty) return 0;
+    if (!pty || pty->output_stopped[master != 0]) return 0;
     if (master)
         return !(pty->slave_ever_opened && pty->slave_files == 0) &&
             pty->to_slave.count < PTY_QUEUE_CAPACITY && pty->canonical_length < PTY_CANON_CAPACITY;
@@ -580,6 +587,36 @@ int64_t pty_ioctl(struct pty_pair *pty, int master, unsigned long request, uint6
         int available = (int)(master ? pty->to_master.count : pty->to_slave.count);
         return copy_to_user(user_argument, &available, sizeof(available)) == 0 ? 0 : -EFAULT;
     }
+    // Each end's input is what the other end wrote, its output what it writes.
+    struct pty_queue *input = master ? &pty->to_master : &pty->to_slave;
+    struct pty_queue *output = master ? &pty->to_slave : &pty->to_master;
+    if (request == TCFLSH) {
+        unsigned long which = user_argument;  // passed by value
+        if (which > 2) return -EINVAL;
+        if (which != 1) {
+            queue_reset(input);
+            if (!master) {
+                pty->canonical_length = 0;
+                pty->eof_pending = 0;
+            }
+        }
+        if (which != 0) queue_reset(output);
+        return 0;
+    }
+    if (request == TCXONC) {
+        unsigned long action = user_argument;
+        if (action > 3) return -EINVAL;
+        if (action <= 1) {
+            pty->output_stopped[master != 0] = action == 0;  // TCOOFF, TCOON
+            return 0;
+        }
+        // TCIOFF and TCION send STOP or START to the other end.
+        uint8_t value = pty->termios.cc[action == 2 ? TTY_VSTOP : TTY_VSTART];
+        return queue_push(output, value) == 0 ? 0 : -EAGAIN;
+    }
+    // tcdrain and tcsendbreak: a pty has no line to drain or send a break on,
+    // so both finish at once, as on Linux.
+    if (request == TCSBRK || request == TCSBRKP) return 0;
     if (request == TIOCPKT && master) {
         int enable;
         if (copy_from_user(&enable, user_argument, sizeof(enable)) != 0) return -EFAULT;
