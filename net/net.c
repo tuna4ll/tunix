@@ -8,7 +8,6 @@
 #include <tunix/time.h>
 #include <tunix/net/inet_socket.h>
 #include <tunix/net/net.h>
-#include <tunix/net/virtio_net.h>
 #include <tunix/namespace.h>
 #include <tunix/process.h>
 #include <tunix/workqueue.h>
@@ -815,7 +814,6 @@ void net_init(void) {
     memset(&config, 0, sizeof(config));
     memset(arp_cache, 0, sizeof(arp_cache));
     adapter = NULL;
-    if (virtio_net_init() != 0) kprintf("NET: no built-in adapter found\n");
 }
 
 void net_enable_interrupts(void) {

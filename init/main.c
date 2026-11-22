@@ -22,7 +22,6 @@
 #include <tunix/procfs.h>
 #include <tunix/random.h>
 #include <tunix/reclaim.h>
-#include <tunix/zram.h>
 #include <tunix/syscall.h>
 #include <tunix/ext4.h>
 #include <tunix/time.h>
@@ -140,7 +139,6 @@ void kmain(const struct boot_info *boot) {
     net_init();
     (void)xhci_init();
     (void)ehci_init();
-    (void)virtgpu_init();
     display_late_init();
 #if TUNIX_BOOT_TIMINGS
     boot_log_stage("memory/framebuffer/network init", &stage_started);
@@ -200,7 +198,6 @@ void kmain(const struct boot_info *boot) {
     workqueue_init();
     vfs_start_writeback();
     reclaim_start();
-    zram_init();
     ext4fs_start();
     timer_init();
     arch_route_timer();

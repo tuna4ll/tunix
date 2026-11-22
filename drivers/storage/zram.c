@@ -11,7 +11,7 @@
 #include <tunix/pmm.h>
 #include <tunix/swap.h>
 #include <tunix/vfs.h>
-#include <tunix/zram.h>
+#include <tunix/module.h>
 
 #define ZRAM_PAGE    4096U
 #define ZRAM_SECTORS (ZRAM_PAGE / BLOCK_SECTOR_SIZE)
@@ -454,7 +454,7 @@ static void attribute(struct vfs_node *directory, const char *name, enum zram_at
     if (vfs_attach(directory, node) != 0) vfs_free_node(node);
 }
 
-void zram_init(void) {
+static int zram_start(void) {
     struct block_device device;
     memset(&device, 0, sizeof(device));
     strncpy(device.name, "zram", sizeof(device.name) - 1);
@@ -465,13 +465,13 @@ void zram_init(void) {
     device_index = block_register_named(&device, ZRAM_NAME, ZRAM_MAJOR, 0);
     if (device_index < 0) {
         kprintf("ZRAM: cannot register zram0\n");
-        return;
+        return -1;
     }
     devfs_add_block(device_index);
     device_node = vfs_lookup("/dev/" ZRAM_NAME);
 
     struct vfs_node *directory = vfs_mkdir_p(ZRAM_SYSFS);
-    if (!directory) return;
+    if (!directory) return 0;
     attribute(directory, "disksize", ATTR_DISKSIZE, 0644);
     attribute(directory, "initstate", ATTR_INITSTATE, 0444);
     attribute(directory, "reset", ATTR_RESET, 0200);
@@ -489,4 +489,9 @@ void zram_init(void) {
     (void)vfs_create_symlink("/sys/block/zram0", "../devices/virtual/block/zram0", 0);
     (void)vfs_mkdir_p("/sys/dev/block");
     (void)vfs_create_symlink("/sys/dev/block/252:0", "../../devices/virtual/block/zram0", 0);
+    return 0;
 }
+
+// No exit: the block layer cannot take a device back, so zram stays once loaded.
+MODULE_LICENSE("MIT");
+MODULE_MAIN(zram_start, NULL);

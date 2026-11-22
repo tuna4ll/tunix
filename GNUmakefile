@@ -43,10 +43,13 @@ KERNEL_CFLAGS += $(DEBUG_CFLAGS)
 KERNEL_LDFLAGS := -nostdlib -no-pie -Wl,-T,arch/x86_64/linker.ld \
 	-Wl,--gc-sections -Wl,--build-id=none -Wl,-z,max-page-size=0x1000
 
-SOURCE_PRUNE := -path ./modules -prune -o -path ./subprojects -prune -o -path ./build -prune -o \
+SOURCE_PRUNE := -path ./subprojects -prune -o -path ./build -prune -o \
 	-path ./rust -prune -o
 find-sources = $(patsubst ./%,%,$(shell find . $1 $(SOURCE_PRUNE) \( -name '*.c' -o -name '*.S' \) -print))
-KERNEL_SOURCES := $(call find-sources,-path ./arch/aarch64 -prune -o)
+# A driver is a module when its source says so with MODULE_MAIN(); the kernel image
+# leaves it out and it is built as a .ko instead.
+MODULE_SOURCES := $(shell grep -rl --include='*.c' '^MODULE_MAIN\b' drivers)
+KERNEL_SOURCES := $(filter-out $(MODULE_SOURCES),$(call find-sources,-path ./arch/aarch64 -prune -o))
 KERNEL_OBJECTS := $(KERNEL_SOURCES:%=$(BUILD)/kernel/%.o)
 KERNEL_DEPS    := $(KERNEL_OBJECTS:.o=.d)
 
@@ -75,15 +78,26 @@ $(BUILD)/kernel/%.S.o: %.S | $(LIMINE_HEADER) $(UACPI_STAMP)
 	@mkdir -p $(dir $@)
 	$(CC) $(KERNEL_CFLAGS) -MMD -MP -c $< -o $@
 
-MODULE_SOURCES := $(wildcard modules/*.c) $(wildcard modules/x86_64/*.c)
-MODULES := $(patsubst modules/%.c,$(BUILD)/modules/%.ko,$(MODULE_SOURCES))
+MODULES := $(patsubst drivers/%.c,$(BUILD)/modules/%.ko,$(MODULE_SOURCES))
 MODULE_CFLAGS = $(filter-out -ffunction-sections -fdata-sections,$(KERNEL_CFLAGS)) \
 	-DTUNIX_MODULE_NAME='"$(notdir $*)"'
 
-.PHONY: modules
-modules: $(MODULES)
+# Every symbol a module leaves undefined has to be in core/ksyms.c or exported by a
+# module; the loader would otherwise refuse it only when something loads it.
+check-module-symbols = export LC_ALL=C; known=$$(sed -n 's/^ *EXPORT(\([A-Za-z0-9_]*\)),.*/\1/p' core/ksyms.c; \
+	$(1) $(2) | sed -n 's/.* __ksymtab_\(.*\)/\1/p'); bad=0; \
+	for ko in $(2); do for symbol in $$($(1) -u $$ko | awk '{print $$2}'); do \
+	printf '%s\n' "$$known" | grep -qxF "$$symbol" || \
+	{ echo "$$ko: $$symbol is not exported to modules"; bad=1; }; done; done; [ $$bad = 0 ]
 
-$(BUILD)/modules/%.ko: modules/%.c | $(LIMINE_HEADER) $(UACPI_STAMP)
+.PHONY: modules
+modules: $(BUILD)/modules/symbols.ok
+
+$(BUILD)/modules/symbols.ok: $(MODULES) core/ksyms.c
+	@$(call check-module-symbols,$(NM),$(MODULES))
+	@touch $@
+
+$(BUILD)/modules/%.ko: drivers/%.c | $(LIMINE_HEADER) $(UACPI_STAMP)
 	@mkdir -p $(dir $@)
 	$(CC) $(MODULE_CFLAGS) -MMD -MP -c $< -o $@
 
@@ -115,8 +129,10 @@ AARCH64_CORE_CFLAGS := -std=gnu11 -Wall -Wextra -Werror -ffreestanding \
 	-mstrict-align -march=armv8-a -mno-outline-atomics -Os \
 	-ffunction-sections -fdata-sections \
 	-Iinclude $(KERNEL_CFLAGS_EXTRA) $(DEBUG_CFLAGS)
-AARCH64_CORE_EXCLUDE := drivers/storage/ata.c \
+# x86-only drivers: port I/O, or ACPI, which the aarch64 build does not have.
+AARCH64_SKIP := drivers/storage/ata.c drivers/net/rtl8139.c \
 	$(filter-out drivers/acpi/acpi.c,$(wildcard drivers/acpi/*.c))
+AARCH64_CORE_EXCLUDE := $(AARCH64_SKIP) $(MODULE_SOURCES)
 AARCH64_CORE_SOURCES := $(filter-out $(AARCH64_CORE_EXCLUDE),$(call find-sources,-path ./arch -prune -o)) \
 	$(shell find arch/aarch64 \( -name '*.c' -o -name '*.S' \) -print)
 AARCH64_CORE_OBJECTS := $(AARCH64_CORE_SOURCES:%=$(AARCH64_CORE_BUILD)/kernel/%.o)
@@ -148,14 +164,18 @@ $(AARCH64_CORE_OBJECTS): GNUmakefile
 
 -include $(AARCH64_CORE_OBJECTS:.o=.d)
 
-AARCH64_MODULE_SOURCES := $(wildcard modules/*.c)
-AARCH64_MODULES := $(patsubst modules/%.c,$(AARCH64_CORE_BUILD)/modules/%.ko,$(AARCH64_MODULE_SOURCES))
+AARCH64_MODULE_SOURCES := $(filter-out $(AARCH64_SKIP),$(MODULE_SOURCES))
+AARCH64_MODULES := $(patsubst drivers/%.c,$(AARCH64_CORE_BUILD)/modules/%.ko,$(AARCH64_MODULE_SOURCES))
 AARCH64_MODULE_CFLAGS = $(AARCH64_CORE_CFLAGS) -DTUNIX_MODULE_NAME='"$(notdir $*)"'
 
 .PHONY: modules-aarch64
-modules-aarch64: $(AARCH64_MODULES)
+modules-aarch64: $(AARCH64_CORE_BUILD)/modules/symbols.ok
 
-$(AARCH64_CORE_BUILD)/modules/%.ko: modules/%.c
+$(AARCH64_CORE_BUILD)/modules/symbols.ok: $(AARCH64_MODULES) core/ksyms.c
+	@$(call check-module-symbols,$(AARCH64_NM),$(AARCH64_MODULES))
+	@touch $@
+
+$(AARCH64_CORE_BUILD)/modules/%.ko: drivers/%.c
 	@mkdir -p $(dir $@)
 	$(AARCH64_CC) $(AARCH64_MODULE_CFLAGS) -MMD -MP -c $< -o $@
 

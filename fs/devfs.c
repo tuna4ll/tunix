@@ -348,6 +348,27 @@ void devfs_remove_sound(unsigned card) {
     }
 }
 
+void devfs_publish_render_node(int present) {
+    struct vfs_node *dri = vfs_lookup("/dev/dri");
+    if (!dri) return;
+    struct vfs_node *render = vfs_find_entry(dri, "renderD128");
+    if (!present) {
+        if (render) (void)vfs_detach_child(dri, render);
+        return;
+    }
+    if (render) return;
+    render = attach_device(dri, "renderD128", VFS_CHARDEVICE, 0666, drm_device_read, NULL,
+                           drm_device_read_ready);
+    if (!render) return;
+    render->dev_major = DEV_MAJOR_DRM;
+    render->dev_minor = DEV_MINOR_DRM_RENDER0;
+    render->gid = DEV_GROUP_VIDEO;
+    render->file_ioctl = drm_file_ioctl;
+    render->mmap = drm_device_mmap;
+    render->open = drm_device_open;
+    render->close = drm_device_close;
+}
+
 void devfs_init(void) {
     struct vfs_node *dev = vfs_mkdir_p("/dev");
     if (!dev) return;
@@ -437,20 +458,7 @@ void devfs_init(void) {
                 card->close = drm_device_close;
             }
 
-            if (virtgpu_virgl_available()) {
-                struct vfs_node *render =
-                    attach_device(dri, "renderD128", VFS_CHARDEVICE, 0666, drm_device_read, NULL,
-                                  drm_device_read_ready);
-                if (render) {
-                    render->dev_major = DEV_MAJOR_DRM;
-                    render->dev_minor = DEV_MINOR_DRM_RENDER0;
-                    render->gid = DEV_GROUP_VIDEO;
-                    render->file_ioctl = drm_file_ioctl;
-                    render->mmap = drm_device_mmap;
-                    render->open = drm_device_open;
-                    render->close = drm_device_close;
-                }
-            }
+            devfs_publish_render_node(virtgpu_virgl_available());
         }
     }
 

@@ -14,5 +14,7 @@ struct work {
 
 void workqueue_init(void);
 void work_queue(struct work *work);
+// Returns once WORK is neither queued nor running.
+void work_flush(struct work *work);
 
 #endif

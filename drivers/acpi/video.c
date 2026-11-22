@@ -1,7 +1,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <tunix/acpi.h>
 #include <tunix/backlight.h>
+#include <tunix/errno.h>
+#include <tunix/module.h>
 #include <tunix/input.h>
 #include <tunix/time.h>
 #include <uacpi/namespace.h>
@@ -19,7 +22,10 @@
 #define DOS_FIRMWARE_LEAVES    4U
 #define REPEAT_WINDOW_NS       20000000ULL
 
-static unsigned outputs;
+#define OUTPUTS_MAX 8U
+
+static uacpi_namespace_node *outputs[OUTPUTS_MAX];
+static unsigned output_count;
 static uint16_t last_key;
 static uint64_t last_key_ns;
 
@@ -54,6 +60,7 @@ static uacpi_iteration_decision find_output(void *user, uacpi_namespace_node *no
     (void)user;
     (void)depth;
     uacpi_namespace_node *method = NULL;
+    if (output_count == OUTPUTS_MAX) return UACPI_ITERATION_DECISION_BREAK;
     if (uacpi_namespace_node_find(node, "_BCM", &method) != UACPI_STATUS_OK)
         return UACPI_ITERATION_DECISION_CONTINUE;
     if (!acpi_device_present(node)) return UACPI_ITERATION_DECISION_CONTINUE;
@@ -64,14 +71,28 @@ static uacpi_iteration_decision find_output(void *user, uacpi_namespace_node *no
     }
     uacpi_namespace_node *bus = uacpi_namespace_node_parent(node);
     if (bus) claim_brightness(bus);
-    outputs++;
+    outputs[output_count++] = node;
+    __atomic_add_fetch(&acpi_video_output_count, 1U, __ATOMIC_RELAXED);
     kprintf("ACPI: video output %s\n", acpi_node_path(node, path, sizeof(path)));
     return UACPI_ITERATION_DECISION_CONTINUE;
 }
 
-void acpi_video_probe(void) {
+static int video_start(void) {
+    if (!acpi_subsystem_ready()) return -ENODEV;
     (void)uacpi_namespace_for_each_child(uacpi_namespace_root(), find_output, NULL,
                                          UACPI_OBJECT_DEVICE_BIT, UACPI_MAX_DEPTH_ANY, NULL);
+    return 0;
 }
 
-unsigned acpi_video_outputs(void) { return outputs; }
+static void video_stop(void) {
+    for (unsigned index = 0; index < output_count; index++)
+        (void)uacpi_uninstall_notify_handler(outputs[index], output_notify);
+    __atomic_sub_fetch(&acpi_video_output_count, output_count, __ATOMIC_RELAXED);
+    output_count = 0;
+}
+
+MODULE_MAIN(video_start, video_stop);
+MODULE_ALIAS("acpi*:LNXVIDEO:*");
+MODULE_LICENSE("MIT");
+MODULE_DESCRIPTION("ACPI display brightness keys");
+MODULE_AUTHOR("Tunix");

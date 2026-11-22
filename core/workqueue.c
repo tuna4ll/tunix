@@ -4,6 +4,7 @@
 #include <tunix/defer.h>
 #include <tunix/lock.h>
 #include <tunix/process.h>
+#include <tunix/time.h>
 #include <tunix/workqueue.h>
 #include <tunix/kprintf.h>
 
@@ -31,6 +32,19 @@ static struct work *take_all(void) {
     return list;
 }
 
+// There is one worker, so one work item runs at a time.
+static struct work *running;
+static const char flush_channel;
+
+void work_flush(struct work *work) {
+    while (__atomic_load_n(&work->queued, __ATOMIC_ACQUIRE) ||
+           __atomic_load_n(&running, __ATOMIC_ACQUIRE) == work) {
+        process_prepare_wait(&flush_channel, time_uptime_ns() + 1000000ULL);
+        process_wait();
+        process_finish_wait();
+    }
+}
+
 static void worker(void *unused) {
     (void)unused;
     for (;;) {
@@ -47,7 +61,9 @@ static void worker(void *unused) {
             struct work *work = list;
             list = work->next;
             __atomic_store_n(&work->queued, 0, __ATOMIC_RELEASE);
+            __atomic_store_n(&running, work, __ATOMIC_RELEASE);
             work->run(work->argument);
+            __atomic_store_n(&running, NULL, __ATOMIC_RELEASE);
         }
         defer_kernel_leave();
         defer_poll();

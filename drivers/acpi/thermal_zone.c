@@ -1,6 +1,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <tunix/acpi.h>
+#include <tunix/errno.h>
+#include <tunix/module.h>
 #include <tunix/power.h>
 #include <tunix/process.h>
 #include <tunix/sysfs.h>
@@ -137,15 +140,23 @@ static uacpi_iteration_decision add_zone(void *user, uacpi_namespace_node *node,
             zone->critical ? celsius_tenths(zone->critical) / 10 : -1);
     sysfs_publish_thermal_zone(zone_count, "acpitz", zone_millicelsius);
     zone_count++;
+    __atomic_add_fetch(&acpi_thermal_zone_count, 1U, __ATOMIC_RELAXED);
     return UACPI_ITERATION_DECISION_CONTINUE;
 }
 
-void acpi_thermal_probe(void) {
+static int thermal_start(void) {
+    if (!acpi_subsystem_ready()) return -ENODEV;
     (void)uacpi_namespace_for_each_child(uacpi_namespace_root(), add_zone, NULL,
                                          UACPI_OBJECT_THERMAL_ZONE_BIT, UACPI_MAX_DEPTH_ANY, NULL);
-    if (!zone_count) return;
+    if (!zone_count) return 0;
     if (!process_create_kthread("kacpi-thermal", watcher, NULL))
         kprintf("ACPI: cannot watch the thermal zones\n");
+    return 0;
 }
 
-unsigned acpi_thermal_zones(void) { return zone_count; }
+// No exit: the watcher is a kernel thread, and kernel threads cannot end yet.
+MODULE_MAIN(thermal_start, NULL);
+MODULE_ALIAS("acpi*:LNXTHERM:*");
+MODULE_LICENSE("MIT");
+MODULE_DESCRIPTION("ACPI thermal zones and critical temperature shutdown");
+MODULE_AUTHOR("Tunix");

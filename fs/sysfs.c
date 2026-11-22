@@ -220,6 +220,63 @@ static struct sysfs_device *register_uevent(const char *devpath, const char *fil
     return device;
 }
 
+static void publish_text(const char *directory, const char *name, const char *text) {
+    char file[160];
+    size_t used = 0;
+    append_string(file, sizeof(file), &used, directory);
+    append_string(file, sizeof(file), &used, "/");
+    append_string(file, sizeof(file), &used, name);
+    file[used] = '\0';
+    char contents[160];
+    size_t length = 0;
+    append_string(contents, sizeof(contents), &length, text);
+    append_string(contents, sizeof(contents), &length, "\n");
+    (void)vfs_create_file(file, contents, length, 0, 1);
+}
+
+void sysfs_publish_acpi_device(const char *name, const char *modalias, const char *path) {
+    VFS_GUARD;
+    char devpath[96];
+    size_t devpath_length = 0;
+    append_string(devpath, sizeof(devpath), &devpath_length, "/devices/LNXSYSTM:00/");
+    append_string(devpath, sizeof(devpath), &devpath_length, name);
+    devpath[devpath_length] = '\0';
+    char directory[104];
+    size_t used = 0;
+    append_string(directory, sizeof(directory), &used, "/sys");
+    append_string(directory, sizeof(directory), &used, devpath);
+    directory[used] = '\0';
+    if (!vfs_mkdir_p(directory)) return;
+
+    publish_text(directory, "modalias", modalias);
+    publish_text(directory, "path", path);
+
+    char properties[256];
+    size_t length = 0;
+    append_string(properties, sizeof(properties), &length, "SUBSYSTEM=acpi\nMODALIAS=");
+    append_string(properties, sizeof(properties), &length, modalias);
+    append_string(properties, sizeof(properties), &length, "\n");
+    char file[120];
+    size_t file_length = 0;
+    append_string(file, sizeof(file), &file_length, directory);
+    append_string(file, sizeof(file), &file_length, "/uevent");
+    file[file_length] = '\0';
+    (void)register_uevent(devpath, file, properties, length);
+
+    if (!vfs_mkdir_p("/sys/bus/acpi/devices")) return;
+    char link[96];
+    size_t link_length = 0;
+    append_string(link, sizeof(link), &link_length, "/sys/bus/acpi/devices/");
+    append_string(link, sizeof(link), &link_length, name);
+    link[link_length] = '\0';
+    char target[112];
+    size_t target_length = 0;
+    append_string(target, sizeof(target), &target_length, "../../../devices/LNXSYSTM:00/");
+    append_string(target, sizeof(target), &target_length, name);
+    target[target_length] = '\0';
+    (void)vfs_create_symlink(link, target, 0);
+}
+
 static void publish_pci_device(const struct pci_device *device, void *context) {
     (void)context;
     char directory[96];
@@ -605,6 +662,27 @@ static void publish_device(const char *name, const char *devname, const char *su
     append_number(devnum, sizeof(devnum), &used, minor);
     devnum[used] = '\0';
     (void)vfs_create_symlink(devnum, target, 0);
+}
+
+static void publish_drm(void) {
+    if (!drm_available()) return;
+    int rendering = virtgpu_virgl_available();
+    publish_device("card0", "dri/card0", "drm",
+                   rendering ? "DRIVER=virtio_gpu\nDEVTYPE=drm_minor\n"
+                             : "DRIVER=tunixdrm\nDEVTYPE=drm_minor\n",
+                   DEV_MAJOR_DRM, DEV_MINOR_DRM_CARD0);
+    if (rendering) {
+        publish_device("renderD128", "dri/renderD128", "drm",
+                       "DRIVER=virtio_gpu\nDEVTYPE=drm_render_minor\n", DEV_MAJOR_DRM,
+                       DEV_MINOR_DRM_RENDER0);
+        publish_drm_nodes("card0", 2);
+        publish_drm_nodes("renderD128", 2);
+        publish_pci_parent("card0");
+        publish_pci_parent("renderD128");
+    } else {
+        publish_drm_nodes("card0", 1);
+        publish_platform_parent("card0");
+    }
 }
 
 static int64_t module_section_read(struct vfs_node *node, uint64_t offset, size_t size,
@@ -1087,6 +1165,28 @@ void sysfs_remove_sound(unsigned card, uint32_t location) {
     remove_published(base);
 }
 
+static void detach_path(const char *path) {
+    struct vfs_node *node = vfs_lookup_nofollow(path);
+    if (node && node->parent) (void)vfs_detach_child(node->parent, node);
+}
+
+void sysfs_publish_drm(void) {
+    VFS_GUARD;
+    publish_drm();
+    announce("card0");
+    if (virtgpu_virgl_available()) announce("renderD128");
+}
+
+void sysfs_remove_drm(void) {
+    VFS_GUARD;
+    remove_published("card0");
+    remove_published("renderD128");
+    detach_path("/sys/class/drm/card0");
+    detach_path("/sys/class/drm/renderD128");
+    detach_path("/sys/dev/char/226:0");
+    detach_path("/sys/dev/char/226:128");
+}
+
 void sysfs_publish_sound_timer(void) {
     VFS_GUARD;
     publish_device("virtual/sound/timer", "snd/timer", "sound", NULL, DEV_MAJOR_SOUND, 33);
@@ -1419,25 +1519,7 @@ void sysfs_init(void) {
     publish_pci_bus();
     publish_console();
 
-    if (drm_available()) {
-        int rendering = virtgpu_virgl_available();
-        publish_device("card0", "dri/card0", "drm",
-                       rendering ? "DRIVER=virtio_gpu\nDEVTYPE=drm_minor\n"
-                                 : "DRIVER=tunixdrm\nDEVTYPE=drm_minor\n",
-                       DEV_MAJOR_DRM, DEV_MINOR_DRM_CARD0);
-        if (rendering) {
-            publish_device("renderD128", "dri/renderD128", "drm",
-                           "DRIVER=virtio_gpu\nDEVTYPE=drm_render_minor\n", DEV_MAJOR_DRM,
-                           DEV_MINOR_DRM_RENDER0);
-            publish_drm_nodes("card0", 2);
-            publish_drm_nodes("renderD128", 2);
-            publish_pci_parent("card0");
-            publish_pci_parent("renderD128");
-        } else {
-            publish_drm_nodes("card0", 1);
-            publish_platform_parent("card0");
-        }
-    }
+    publish_drm();
 
     static const char *const input_names[] = {"Tunix keyboard", "Tunix mouse", "Tunix USB Tablet",
                                               "Power Button"};

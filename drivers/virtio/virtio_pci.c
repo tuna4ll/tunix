@@ -141,11 +141,11 @@ static int negotiate(struct virtio_device *device, uint64_t wanted, uint64_t *ag
     return 0;
 }
 
-int virtio_pci_attach(struct virtio_device *device, uint16_t device_id, uint64_t features,
-                      uint64_t *features_out) {
-    if (!device) return -1;
+int virtio_pci_attach_device(struct virtio_device *device, const struct pci_device *pci,
+                             uint64_t features, uint64_t *features_out) {
+    if (!device || !pci) return -1;
     memset(device, 0, sizeof(*device));
-    if (pci_find_device(VIRTIO_VENDOR_ID, device_id, &device->pci) != 0) return -1;
+    device->pci = *pci;
     if (walk_capabilities(device) != 0) return -1;
     pci_enable_bus_mastering(&device->pci);
 
@@ -161,6 +161,25 @@ int virtio_pci_attach(struct virtio_device *device, uint16_t device_id, uint64_t
         return -1;
     }
     return 0;
+}
+
+int virtio_pci_attach(struct virtio_device *device, uint16_t device_id, uint64_t features,
+                      uint64_t *features_out) {
+    struct pci_device pci;
+    if (!device || pci_find_device(VIRTIO_VENDOR_ID, device_id, &pci) != 0) return -1;
+    return virtio_pci_attach_device(device, &pci, features, features_out);
+}
+
+void virtio_pci_reset(struct virtio_device *device) {
+    if (!device || !device->common) return;
+    write8(device->common, COMMON_DEVICE_STATUS, 0);
+    uint64_t deadline = time_uptime_ns() + RESET_TIMEOUT_NS;
+    while (read8(device->common, COMMON_DEVICE_STATUS) != 0 && time_uptime_ns() <= deadline) {
+    }
+    if (device->vector) {
+        irq_release(device->vector);
+        device->vector = 0;
+    }
 }
 
 int virtio_pci_setup_queue(struct virtio_device *device, struct virtio_queue *queue,

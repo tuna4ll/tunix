@@ -5,6 +5,7 @@ void devfs_init(void);
 void devfs_add_block(int index);
 void devfs_publish_sound(unsigned card, int playback, int capture);
 void devfs_remove_sound(unsigned card);
+void devfs_publish_render_node(int present);
 void devfs_publish_sound_timer(void);
 
 #endif

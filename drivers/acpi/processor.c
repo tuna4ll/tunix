@@ -1,7 +1,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <tunix/acpi.h>
 #include <tunix/cpufreq.h>
+#include <tunix/errno.h>
+#include <tunix/module.h>
 #include <uacpi/namespace.h>
 #include <uacpi/notify.h>
 #include <uacpi/types.h>
@@ -94,7 +97,8 @@ static uacpi_iteration_decision add_processor(void *user, uacpi_namespace_node *
     return UACPI_ITERATION_DECISION_CONTINUE;
 }
 
-void acpi_processor_probe(void) {
+static int processor_start(void) {
+    if (!acpi_subsystem_ready()) return -ENODEV;
     (void)uacpi_namespace_for_each_child(uacpi_namespace_root(), add_processor, NULL,
                                          UACPI_OBJECT_PROCESSOR_BIT, UACPI_MAX_DEPTH_ANY, NULL);
     (void)uacpi_find_devices("ACPI0007", add_processor, NULL);
@@ -105,9 +109,26 @@ void acpi_processor_probe(void) {
         uint64_t khz = 0;
         if (!performance_node && state_khz(node, 0, &khz) == 0) performance_node = node;
     }
-    if (!processor_count) return;
+    if (!processor_count) return 0;
     char path[64];
     kprintf("ACPI: %u processor(s), performance states %s\n", processor_count,
             performance_node ? acpi_node_path(performance_node, path, sizeof(path)) : "none");
     apply_performance_limit();
+    return 0;
 }
+
+static void processor_stop(void) {
+    for (unsigned index = 0; index < processor_count; index++)
+        (void)uacpi_uninstall_notify_handler(processors[index], processor_notify);
+    processor_count = 0;
+    performance_node = NULL;
+    if (applied_khz && applied_khz != UINT64_MAX) cpufreq_set_limit_khz(0);
+    applied_khz = UINT64_MAX;
+}
+
+MODULE_MAIN(processor_start, processor_stop);
+MODULE_ALIAS("acpi*:LNXCPU:*");
+MODULE_ALIAS("acpi*:ACPI0007:*");
+MODULE_LICENSE("MIT");
+MODULE_DESCRIPTION("ACPI processor capabilities and firmware performance limits");
+MODULE_AUTHOR("Tunix");

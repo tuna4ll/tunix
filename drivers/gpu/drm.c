@@ -2453,10 +2453,17 @@ int64_t drm_device_mmap(struct vfs_node *node, struct file *file, uint64_t cr3,
     return 0;
 }
 
+static int driver_held;
+
 void drm_device_open(struct vfs_node *node) {
     DRM_LOCKED;
     (void)node;
-    open_count++;
+    if (!open_count++) driver_held = virtgpu_hold() == 0;
+}
+
+int drm_is_open(void) {
+    DRM_LOCKED;
+    return open_count != 0;
 }
 
 void drm_device_close(struct vfs_node *node) {
@@ -2470,6 +2477,8 @@ void drm_device_close(struct vfs_node *node) {
         virtgpu_scanout_disable();
         scanout_current = 0;
         (void)framebuffer_release_graphics(&drm_display_owner, 0);
+        if (driver_held) virtgpu_release();
+        driver_held = 0;
     }
     drm_leave();
 }

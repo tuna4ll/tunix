@@ -11,7 +11,7 @@ SuperTuxKart -> OpenAL Soft -> alsa-lib "default":  plug -> softvol -> dmix
                                   |
             drivers/audio/sound.c   (PCM, control and timer devices)
                                   |
-            modules/snd_hda.c       (Intel HD Audio controller and codec)
+            drivers/audio/snd_hda.c (Intel HD Audio controller and codec)
 ```
 
 `default` is alsa-lib's stock configuration for an HD Audio card: dmix mixes

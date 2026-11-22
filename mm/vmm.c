@@ -86,6 +86,19 @@ void *vmm_phys_to_virt(uint64_t physical) {
     return (void *)(DIRECT_MAP_BASE + physical);
 }
 
+// A module is one physically contiguous run of pages mapped into the kernel's own tables,
+// so its static buffers can be handed to a device just as the kernel image's can.
+static uint64_t module_physical(uint64_t value, uint64_t length) {
+    if (value < MODULE_VIRTUAL_BASE || value - MODULE_VIRTUAL_BASE >= MODULE_VIRTUAL_BYTES) return 0;
+    uint64_t first = 0;
+    uint64_t last = 0;
+    if (vmm_translate(kernel_cr3_physical, value, &first, NULL) != 0) return 0;
+    if (length > 1 && (vmm_translate(kernel_cr3_physical, value + length - 1, &last, NULL) != 0 ||
+                       last != first + length - 1))
+        return 0;
+    return first;
+}
+
 uint64_t vmm_virt_to_phys_direct(const void *virtual_address) {
     const struct boot_info *boot = boot_info();
     uint64_t value = (uint64_t)virtual_address;
@@ -95,7 +108,7 @@ uint64_t vmm_virt_to_phys_direct(const void *virtual_address) {
     } else if (value >= boot->kernel_virtual_base &&
                value < boot->kernel_virtual_base + boot->kernel_size) {
         physical = value - boot->kernel_virtual_base + boot->kernel_physical_base;
-    } else {
+    } else if (!(physical = module_physical(value, 1))) {
         panic("VMM: address is not in direct map");
     }
     if (!pmm_physical_range_managed(physical, 1)) {
@@ -119,7 +132,7 @@ uint64_t vmm_dma_physical(const void *pointer, uint64_t length) {
         if (length > boot->kernel_size - offset) return 0;
         return boot->kernel_physical_base + offset;
     }
-    return 0;
+    return module_physical(value, length);
 }
 
 static uint64_t space_home(uint64_t cr3, uint64_t capacity) {

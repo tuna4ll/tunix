@@ -7,7 +7,16 @@
 #include <tunix/lock.h>
 #include <tunix/module.h>
 #if defined(__x86_64__)
+#include <tunix/acpi.h>
 #include <tunix/apic.h>
+#include <uacpi/event.h>
+#include <uacpi/namespace.h>
+#include <uacpi/notify.h>
+#include <uacpi/status.h>
+#include <uacpi/types.h>
+#include <uacpi/uacpi.h>
+#include <uacpi/utilities.h>
+#include "../drivers/acpi/priv.h"
 #endif
 #include <tunix/pci.h>
 #include <tunix/sound.h>
@@ -16,6 +25,22 @@
 #include <tunix/time.h>
 #include <tunix/vmm.h>
 #include <tunix/kprintf.h>
+#include <tunix/workqueue.h>
+#include <tunix/virtgpu.h>
+#include <tunix/sysfs.h>
+#include <tunix/process.h>
+#include <tunix/power.h>
+#include <tunix/input.h>
+#include <tunix/cpufreq.h>
+#include <tunix/thermal.h>
+#include <tunix/backlight.h>
+#include <tunix/virtio.h>
+#include <tunix/vfs.h>
+#include <tunix/lz4.h>
+#include <tunix/swap.h>
+#include <tunix/mutex.h>
+#include <tunix/devfs.h>
+#include <tunix/block.h>
 
 extern uint64_t __stack_chk_guard;
 extern void __stack_chk_fail(void);
@@ -81,8 +106,87 @@ const struct module_export kernel_symbols[] = {
     EXPORT(lock_init),
     EXPORT(lock_acquire),
     EXPORT(lock_release),
+    // zram
+    EXPORT(block_register_named),
+    EXPORT(block_set_sectors),
+    EXPORT(devfs_add_block),
+    EXPORT(memcmp),
+    EXPORT(mutex_lock),
+    EXPORT(mutex_unlock),
+    EXPORT(pmm_usable_page_count),
+    EXPORT(swap_block_in_use),
+    EXPORT(tunix_lz4_compress),
+    EXPORT(tunix_lz4_decompress),
+    EXPORT(vfs_alloc_node),
+    EXPORT(vfs_attach),
+    EXPORT(vfs_create_symlink),
+    EXPORT(vfs_free_node),
+    EXPORT(vfs_lookup),
+    EXPORT(vfs_mkdir_p),
+    // virtio transport, for virtio drivers
+    EXPORT(virtio_pci_attach),
+    EXPORT(virtio_pci_attach_device),
+    EXPORT(virtio_pci_reset),
+    EXPORT(virtio_pci_setup_queue),
+    EXPORT(virtio_pci_set_driver_ok),
+    EXPORT(virtio_pci_request_irq),
+    EXPORT(virtio_pci_set_failed),
+    EXPORT(virtio_config_read32),
+    EXPORT(virtio_queue_submit),
+    EXPORT(virtio_queue_post),
+    EXPORT(virtio_queue_reclaim),
+    EXPORT(virtio_queue_take_used),
+    EXPORT(virtio_queue_drain),
+    EXPORT(virtio_queue_outstanding),
+    EXPORT(virtio_ring_alloc),
+    EXPORT(virtio_ring_free),
+    // ACPI drivers' use of the rest of the kernel
+    EXPORT(backlight_step),
+    EXPORT(thermal_set_passive),
+    EXPORT(cpufreq_set_limit_khz),
+    EXPORT(input_report_hotkey),
+    EXPORT(power_critical),
+    EXPORT(power_button_pressed),
+    EXPORT(process_create_kthread),
+    EXPORT(process_prepare_wait),
+    EXPORT(process_wait),
+    EXPORT(process_finish_wait),
+    EXPORT(process_wake_all),
+    EXPORT(sysfs_publish_thermal_zone),
+    // virtio_gpu
+    EXPORT(process_io_recheck),
+    EXPORT(process_may_sleep),
+    EXPORT(process_wake_io),
+    EXPORT(virtgpu_register),
+    EXPORT(virtgpu_unregister),
+    EXPORT(work_flush),
+    EXPORT(work_queue),
 #if defined(__x86_64__)
     EXPORT(apic_route_global),
+    // ACPI, for the button, processor, thermal_zone and video modules
+    EXPORT(acpi_device_present),
+    EXPORT(acpi_node_path),
+    EXPORT(acpi_subsystem_ready),
+    EXPORT(acpi_thermal_zone_count),
+    EXPORT(acpi_video_output_count),
+    EXPORT(uacpi_eval_simple_integer),
+    EXPORT(uacpi_eval_simple_package),
+    EXPORT(uacpi_execute),
+    EXPORT(uacpi_find_devices),
+    EXPORT(uacpi_install_fixed_event_handler),
+    EXPORT(uacpi_install_notify_handler),
+    EXPORT(uacpi_namespace_for_each_child),
+    EXPORT(uacpi_namespace_node_find),
+    EXPORT(uacpi_namespace_node_parent),
+    EXPORT(uacpi_namespace_root),
+    EXPORT(uacpi_object_create_buffer),
+    EXPORT(uacpi_object_create_integer),
+    EXPORT(uacpi_object_get_integer),
+    EXPORT(uacpi_object_get_package),
+    EXPORT(uacpi_object_unref),
+    EXPORT(uacpi_status_to_string),
+    EXPORT(uacpi_uninstall_fixed_event_handler),
+    EXPORT(uacpi_uninstall_notify_handler),
 #endif
 };
 

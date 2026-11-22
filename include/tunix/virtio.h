@@ -77,6 +77,10 @@ struct virtio_device {
 
 int virtio_pci_attach(struct virtio_device *device, uint16_t device_id, uint64_t features,
                       uint64_t *features_out);
+int virtio_pci_attach_device(struct virtio_device *device, const struct pci_device *pci,
+                             uint64_t features, uint64_t *features_out);
+// Stops the device, so it no longer touches memory or interrupts, and frees its vector.
+void virtio_pci_reset(struct virtio_device *device);
 int virtio_pci_setup_queue(struct virtio_device *device, struct virtio_queue *queue,
                            uint16_t index);
 void virtio_pci_set_driver_ok(struct virtio_device *device);

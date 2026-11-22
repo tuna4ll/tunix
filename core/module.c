@@ -961,6 +961,8 @@ int module_unload(const char *name, unsigned flags) {
     struct module *module = module_find(name);
     if (!module) return -ENOENT;
     if (module->state != MODULE_STATE_LIVE) return -EBUSY;
+    // As in Linux, a module with no exit function cannot undo what its init did.
+    if (!module->exit) return -EBUSY;
     uint32_t idle = 0;
     if (!__atomic_compare_exchange_n(&module->refs, &idle, MODULE_DYING, 0, __ATOMIC_ACQ_REL,
                                      __ATOMIC_ACQUIRE))

@@ -49,6 +49,12 @@ brightness keys reach the operating system rather than a vendor tool.
 
 ## Drivers
 
+The embedded controller is part of the kernel, because AML reads and writes its
+registers from the moment the namespace is initialized. The other four drivers
+are modules -- `video`, `button`, `thermal_zone` and `processor` -- loaded for
+the ACPI devices the kernel publishes in `/sys/bus/acpi/devices`; see
+[Modules](modules.md).
+
 **Embedded controller** (`ec.c`). Found by its `PNP0C09` id; the data and
 command ports come from `_CRS`, the event's GPE from `_GPE`, and `_GLK` says
 whether the firmware's global lock must be held. Reads and writes to the

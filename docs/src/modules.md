@@ -18,10 +18,16 @@ rtl8139                12288  0
 ## What a module file is
 
 A `.ko` is an ordinary ELF relocatable object -- `cc -c` with the kernel's own
-flags, nothing linked, nothing stripped. `modules/*.c` are built for both
-architectures and `modules/x86_64/*.c` only for x86-64; the build walks
-neither directory when it links the kernel, which is the whole difference
-between a module and a driver.
+flags, nothing linked, nothing stripped. Modules live in `drivers/` beside the
+drivers that are built in, and what makes a source file a module is the
+`MODULE_MAIN()` line in it: the build leaves every such file out of the kernel
+image and compiles it on its own instead. The drivers the aarch64 build skips
+(port I/O, ACPI) are skipped as modules too.
+
+The loader resolves a module's undefined symbols only when something loads it,
+so the build checks them first: every symbol a `.ko` leaves undefined has to be
+in `core/ksyms.c` or exported by another module, or `make modules` fails and
+names the module and the symbol.
 
 Three sections make it a module rather than an object file:
 
@@ -53,7 +59,7 @@ becomes read-execute, the rodata read-only and the data writable and
 non-executable.
 
 **Symbols.** Undefined symbols are looked up in `core/ksyms.c` -- a plain
-table of what the kernel offers a module, roughly sixty entries -- and then in
+table of what the kernel offers a module -- and then in
 the exports of every module already loaded. A module that resolves a symbol
 from another one takes a reference on it, which is what puts it in the second
 module's `holders/` directory and in `lsmod`'s "Used by" column.
@@ -145,11 +151,56 @@ opinion.
 
 ## What is a module and what is not
 
-`snd_hda`, `rtl8139` and `atl1c` are modules. Everything the machine needs before there
-is a root filesystem is not: IDE, AHCI, NVMe, USB, the framebuffer, virtio-gpu
-and virtio-net are in the image. That is the same division a distribution
-kernel makes, for the same reason -- a driver that has to be loaded from the
-disk it drives cannot be.
+| Module | Loaded for |
+| --- | --- |
+| `virtio_net`, `rtl8139` (x86-64), `atl1c` | the network card, by its PCI id |
+| `virtio_gpu` | QEMU's virtio-gpu, by its PCI id |
+| `snd_hda` | any HD Audio controller, by its PCI class |
+| `button` | the power button and lid: `LNXPWRBN`, `PNP0C0C`, `PNP0C0D` |
+| `processor` | `LNXCPU`, `ACPI0007` |
+| `thermal_zone` | `LNXTHERM` |
+| `video` | `LNXVIDEO` |
+| `zram` | nothing: `modprobe zram` when swap on compressed memory is wanted |
+
+Everything the machine needs before there is a root filesystem is not a module:
+IDE, AHCI, NVMe, SDHCI, the USB host controllers and USB storage, because a
+driver that has to be loaded from the disk it drives cannot be. Nor is what the
+loader itself stands on -- PCI, interrupts, the ACPI interpreter and embedded
+controller, the framebuffer console -- or the layers drivers register with:
+virtio, input, sound, DRM. USB keyboards and mice are not modules either: the
+host controller drivers enumerate HID devices themselves, and there is no USB
+device model yet for a HID driver to bind to.
+
+The ACPI modules have no PCI id to be found by, so the kernel publishes ACPI
+devices the way Linux does: every present device with a `_HID` is
+`/sys/bus/acpi/devices/<HID>:NN`, its `modalias` is the `_HID` followed by each
+`_CID` (`acpi:PNP0A08:PNP0A03:`), and the objects Linux gives made-up ids get
+the same ones -- `LNXPWRBN` for the fixed power button, `LNXCPU` for each
+`Processor`, `LNXTHERM` for each thermal zone and `LNXVIDEO` for a display
+adapter whose outputs have `_BCM`. Tulpar's boot loads a module for every
+`/sys/bus/*/devices/*/modalias`.
+
+**Some modules stay.** A module with no exit function cannot be removed, as in
+Linux: `rmmod` answers `EBUSY` rather than unmapping code something still calls.
+`zram` is one, because the block layer cannot take a device back, and
+`thermal_zone` is the other, because its watcher is a kernel thread and kernel
+threads cannot end yet.
+
+**A module's static memory can be DMA'd.** A driver hands a device the address
+of a buffer, and a static one in a module lies in the module window rather than
+the direct map. `vmm_virt_to_phys_direct()` and `vmm_dma_physical()` translate
+module addresses through the kernel's page tables, as they translate the
+kernel image's; a module is one physically contiguous run, so a buffer in it is
+contiguous too.
+
+**virtio-gpu is reached through a table.** DRM, devfs and sysfs call
+`virtgpu_*()` as before; those are now in `drivers/gpu/virtgpu.c`, which calls
+the module through `struct virtgpu_ops` and answers as if there were no device
+when it is not loaded. Every call holds a reference on the module while it runs
+and an open `/dev/dri` holds one until it is closed, so `rmmod virtio_gpu` is
+refused while X runs. Loading it republishes `card0` as `virtio_gpu` and adds
+`renderD128` when the host has virgl; removing it puts `card0` back on the boot
+framebuffer.
 
 Making a driver a module is not free of consequences, and both of them are
 visible in this tree:
