@@ -374,6 +374,12 @@ void devfs_init(void) {
         (void)attach_terminal(dev, name, index, DEV_MAJOR_TTY, index);
     }
 
+    // What udev or the init scripts make on Linux, and Tulpar has neither.
+    (void)vfs_attach_symlink(dev, "fd", "/proc/self/fd");
+    (void)vfs_attach_symlink(dev, "stdin", "/proc/self/fd/0");
+    (void)vfs_attach_symlink(dev, "stdout", "/proc/self/fd/1");
+    (void)vfs_attach_symlink(dev, "stderr", "/proc/self/fd/2");
+
     struct vfs_node *stateless[3];
     stateless[0] =
         attach_device(dev, "null", VFS_CHARDEVICE, 0666, null_read, discard_write, always_ready);

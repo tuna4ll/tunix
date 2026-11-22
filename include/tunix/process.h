@@ -168,6 +168,11 @@ struct process {
      * umask; 0 means those of the thread group. */
     uint64_t fs_group;
     int keep_capabilities;
+    // Capabilities a process kept when it left root (PR_SET_KEEPCAPS, or
+    // while its real or saved uid is still 0), as Linux keeps them.
+    uint64_t cap_bounding_dropped;  // dropped from the bounding set: never held after exec
+    uint64_t cap_kept_permitted;
+    uint64_t cap_kept_effective;
     int child_subreaper;
     int thp_disable;
     int oom_score_adj;
@@ -344,6 +349,8 @@ int process_pidfd_target(uint64_t pid, uint64_t *start_ns);
 int process_pidfd_exited(uint64_t pid, uint64_t start_ns);
 int process_pidfd_reaped(uint64_t pid, uint64_t start_ns);
 void process_put(struct process *process);
+// Threads of the group, as /proc reports them.
+uint32_t process_thread_count(uint64_t tgid);
 int process_exists(uint64_t pid);
 void process_table_lock(void);
 void process_table_unlock(void);

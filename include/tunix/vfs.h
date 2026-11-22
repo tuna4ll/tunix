@@ -4,7 +4,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define VFS_PATH_MAX 4096
+// A path from a program is at most PATH_MAX, as on Linux; within the kernel a
+// path is longer when reached through directory descriptors, as deep trees
+// are. shortcut: Linux has no limit there; resolve paths from the descriptor's
+// node instead of a string if a tree ever goes deeper than this.
+#define USER_PATH_MAX 4096
+#define VFS_PATH_MAX  16384
 #define VFS_NAME_MAX 255
 
 #define VFS_FILE        0x01U
@@ -189,8 +194,8 @@ struct dirent {
 };
 
 struct vfs_mount {
-    char source[VFS_PATH_MAX];
-    char target[VFS_PATH_MAX];
+    char source[USER_PATH_MAX];
+    char target[USER_PATH_MAX];
     char type[16];
     uint32_t flags;
     uint32_t id;
@@ -317,6 +322,7 @@ struct vfs_node *vfs_create_device(const char *path, uint32_t mode, uint32_t kin
                                    uint32_t minor);
 struct vfs_node *vfs_create_symlink(const char *path, const char *target, uint32_t flags);
 struct vfs_node *vfs_attach_symlink(struct vfs_node *parent, const char *name, const char *target);
+int vfs_node_is_stored(const struct vfs_node *node);
 int vfs_detach_child(struct vfs_node *parent, struct vfs_node *node);
 int64_t vfs_readlink(struct vfs_node *node, void *buffer, size_t size);
 int vfs_remove(const char *path, int remove_directory);

@@ -853,6 +853,16 @@ static void tcp_input(struct inet_socket *s, uint32_t seq, uint32_t ack, uint8_t
         return;
     }
 
+    // As on Linux: data for a socket its program has closed can never be read,
+    // so the sender learns at once that the connection is gone.
+    if (s->orphan && length > 0) {
+        tcp_reset_peer(s);
+        tcp->state = TCP_CLOSED;
+        tcp->rto_deadline_ns = 0;
+        timer_watch(s);
+        return;
+    }
+
     uint32_t previous_window = tcp->snd_wnd;
     if (flags & TCP_SYN) tcp->snd_wnd = window;
     else tcp->snd_wnd = (uint32_t)window << (tcp->scaling ? tcp->snd_wscale : 0);

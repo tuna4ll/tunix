@@ -93,6 +93,18 @@ static int64_t slew_total_ns;
 static uint64_t slew_start_ns;
 static uint64_t realtime_generation;
 
+/* A frequency correction (adjtimex ADJ_FREQUENCY and ADJ_TICK) runs the wall
+ * clock faster or slower by rate_ppb since rate_start_ns; whenever it changes,
+ * what it added so far moves into the boot moment. shortcut: Linux steers
+ * CLOCK_MONOTONIC by it too; here only the wall clock follows NTP. */
+static int64_t rate_ppb;
+static uint64_t rate_start_ns;
+
+static int64_t rate_applied(uint64_t now) {
+    if (!rate_ppb || now <= rate_start_ns) return 0;
+    return (int64_t)(((__int128)(now - rate_start_ns) * rate_ppb) / 1000000000);
+}
+
 static int64_t slew_applied(uint64_t now) {
     if (!slew_total_ns) return 0;
     uint64_t moved = (now - slew_start_ns) / 2000ULL;
@@ -109,7 +121,8 @@ uint64_t time_realtime_ns(void) {
             continue;
         }
         uint64_t now = time_uptime_ns();
-        uint64_t value = boot_realtime_ns + now + (uint64_t)slew_applied(now);
+        uint64_t value =
+            boot_realtime_ns + now + (uint64_t)slew_applied(now) + (uint64_t)rate_applied(now);
         __atomic_thread_fence(__ATOMIC_ACQUIRE);
         if (__atomic_load_n(&realtime_seq, __ATOMIC_RELAXED) == seq) return value;
     }
@@ -130,20 +143,33 @@ static void realtime_write_end(void) {
     timer_note_deadline(time_uptime_ns() + 1U);
 }
 
-// Folds a slew in progress into the boot moment; called inside a write.
+// Folds a slew and a frequency correction in progress into the boot moment;
+// called inside a write.
 static void slew_fold(uint64_t now) {
     int64_t applied = slew_applied(now);
     boot_realtime_ns += (uint64_t)applied;
     slew_total_ns -= applied;
     slew_start_ns = now;
+    boot_realtime_ns += (uint64_t)rate_applied(now);
+    rate_start_ns = now;
 }
 
 void time_set_realtime_ns(uint64_t value) {
     realtime_write_begin();
     uint64_t now = time_uptime_ns();
     slew_total_ns = 0;
+    rate_start_ns = now;
     boot_realtime_ns = value - now;
     realtime_write_end();
+}
+
+void time_set_rate_ppb(int64_t ppb) {
+    realtime_write_begin();
+    slew_fold(time_uptime_ns());
+    rate_ppb = ppb;
+    // Not a set: the clock goes on without a jump, so timers keep their time.
+    __atomic_add_fetch(&realtime_seq, 1U, __ATOMIC_RELEASE);
+    __atomic_store_n(&realtime_writer, 0, __ATOMIC_RELEASE);
 }
 
 void time_step_realtime_ns(int64_t delta) {

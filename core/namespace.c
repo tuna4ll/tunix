@@ -195,7 +195,47 @@ int user_ns_has_cap(const struct process *process, unsigned cap) {
     if (!process) return 1;
     if (process->cap_dropped & (1ULL << cap)) return 0;
     if (user_ns_of(process)->level > 0) return 1;
-    return process->cred.euid == 0;
+    if (process->cred.euid == 0) return 1;
+    return (process->cap_kept_effective >> cap) & 1U;
+}
+
+void caps_after_setuid(struct process *process, uint32_t old_uid, uint32_t old_euid,
+                       uint32_t old_suid) {
+    if (!process || user_ns_of(process)->level > 0) return;
+    const struct credentials *cred = &process->cred;
+    int was_root = old_uid == 0 || old_euid == 0 || old_suid == 0;
+    int still_root = cred->uid == 0 || cred->euid == 0 || cred->suid == 0;
+    if (old_euid == 0 && cred->euid != 0) {
+        // Leaving root: nothing stays effective; what root held stays
+        // permitted if a uid is still 0 or the process asked to keep it.
+        uint64_t held = CAP_ALL & ~process->cap_dropped;
+        process->cap_kept_permitted = (still_root || process->keep_capabilities) ? held : 0;
+        process->cap_kept_effective = 0;
+    } else if (was_root && !still_root && !process->keep_capabilities) {
+        process->cap_kept_permitted = 0;
+        process->cap_kept_effective = 0;
+    }
+}
+
+void caps_get(const struct process *process, uint64_t *permitted, uint64_t *effective) {
+    *effective = process_capability_set(process);
+    *permitted = *effective;
+    if (process && user_ns_of(process)->level == 0 && process->cred.euid != 0)
+        *permitted = process->cap_kept_permitted & ~process->cap_dropped;
+}
+
+int caps_set(struct process *process, uint64_t permitted, uint64_t effective) {
+    uint64_t now_permitted, now_effective;
+    caps_get(process, &now_permitted, &now_effective);
+    // Only what is permitted can be kept or made effective, as on Linux.
+    if ((permitted & ~now_permitted) || (effective & ~permitted)) return -EPERM;
+    if (user_ns_of(process)->level == 0 && process->cred.euid != 0) {
+        process->cap_kept_permitted = permitted;
+        process->cap_kept_effective = effective;
+        return 0;
+    }
+    process->cap_dropped |= CAP_ALL & ~effective;
+    return 0;
 }
 
 int user_ns_capable(void) { return user_ns_has_cap(process_current(), CAP_SYS_ADMIN); }

@@ -1445,7 +1445,7 @@ static struct vfs_node *base_for_dirfd(int dirfd) {
 }
 
 static int copy_user_path(uint64_t user_path, char *output) {
-    int copied = copy_string_from_user(output, VFS_PATH_MAX, user_path);
+    int copied = copy_string_from_user(output, USER_PATH_MAX, user_path);
     if (copied == -2) return -ENAMETOOLONG;
     return copied < 0 ? -EFAULT : 0;
 }
@@ -1492,12 +1492,54 @@ static int own_descriptor_of_path(const char *path) {
     return fd_file(fd) ? fd : -1;
 }
 
+// The descriptor a path ends at through links such as /dev/stdin, if any.
+static int own_descriptor_through_links(const char *path) {
+    int fd = own_descriptor_of_path(path);
+    if (fd >= 0) return fd;
+    VFS_PATH_SCOPED at = vfs_path_buffer();
+    if (!at) return -1;
+    strncpy(at, path, VFS_PATH_MAX - 1);
+    at[VFS_PATH_MAX - 1] = '\0';
+    for (int hop = 0; hop < 8; hop++) {
+        struct vfs_node *node = vfs_lookup_nofollow(at);
+        if (!node || (node->flags & 0xFFU) != VFS_SYMLINK || node->link_text || !node->data ||
+            !node->length || node->length >= 256)
+            return -1;
+        char target[256];
+        memcpy(target, node->data, (size_t)node->length);
+        target[node->length] = '\0';
+        if (target[0] != '/') return -1;  // only the absolute links /dev has
+        strncpy(at, target, VFS_PATH_MAX - 1);
+        fd = own_descriptor_of_path(at);
+        if (fd >= 0) return fd;
+    }
+    return -1;
+}
+
 static int64_t reopen_own_descriptor(const char *path, uint64_t flags) {
     struct process *process = process_current();
-    int fd = own_descriptor_of_path(path);
+    int fd = own_descriptor_through_links(path);
     if (fd < 0) return -1;
     struct file *source = fd_file(fd);
-    if (!source || source->kind != FILE_KIND_MEMFD) return -1;
+    if (!source) return -1;
+    if ((source->kind == FILE_KIND_PIPE_READ || source->kind == FILE_KIND_PIPE_WRITE) &&
+        source->pipe) {
+        // As on Linux: a new end of the same pipe, the one the mode asks for.
+        uint64_t access = flags & O_ACCMODE;
+        if (access == O_RDWR) return -EINVAL;
+        if (access == O_WRONLY && !source->pipe->readers) return -ENXIO;
+        struct file *file = file_create_pipe_end(source->pipe, access == O_WRONLY);
+        if (!file) return -ENOMEM;
+        file->flags = (uint32_t)(flags & O_NONBLOCK);
+        int installed = process_install_file_flags(process, file, 0,
+                                                   (flags & O_CLOEXEC) ? PROCESS_FD_CLOEXEC : 0);
+        if (installed < 0) {
+            file_unref(file);
+            return -EMFILE;
+        }
+        return installed;
+    }
+    if (source->kind != FILE_KIND_MEMFD) return -1;
 
     memfd_ref(source->memfd);
     struct file *file = file_create_memfd(source->memfd, (uint32_t)(flags & ~O_CLOEXEC));
@@ -2008,6 +2050,19 @@ static int64_t sys_accept(int fd, uint64_t user_address, uint64_t user_length, i
         inet_socket_report_accept(accepted, process->tgid, process->cred.euid);
     }
     return accepted_fd;
+}
+
+// A blocking socket waits for room instead of reporting EAGAIN, as recvfrom
+// waits for data.
+static void send_or_block(struct syscall_frame *frame, uint64_t syscall_number, int fd, int flags,
+                          int64_t result) {
+    struct process *process = process_current();
+    struct file *file =
+        process && fd >= 0 && fd < PROCESS_FD_CAPACITY(process) ? fd_file(fd) : NULL;
+    if (result == -EAGAIN && file && !(file->flags & O_NONBLOCK) && !(flags & MSG_DONTWAIT))
+        block_and_retry(frame, syscall_number, file, 1);
+    else
+        SYSCALL_RET(frame) = (uint64_t)result;
 }
 
 static void accept_or_block(struct syscall_frame *frame, uint64_t syscall_number, int fd,
@@ -3402,6 +3457,10 @@ static uint32_t pseudo_magic(const struct vfs_node *root) {
         if (strcmp(entry->type, "proc") == 0) return PROC_SUPER_MAGIC;
         if (strcmp(entry->type, "sysfs") == 0) return SYSFS_MAGIC;
         if (strcmp(entry->type, "devpts") == 0) return DEVPTS_SUPER_MAGIC;
+        // A tmpfs mounted over a pseudo file system is still tmpfs, as
+        // /sys/fs/cgroup is, which elogind checks.
+        if (strcmp(entry->type, "tmpfs") == 0 || strcmp(entry->type, "devtmpfs") == 0)
+            return TMPFS_MAGIC;
         return 0;
     }
     return 0;
@@ -3409,6 +3468,10 @@ static uint32_t pseudo_magic(const struct vfs_node *root) {
 
 static void fill_statfs(struct vfs_node *node, struct linux_statfs *out) {
     memset(out, 0, sizeof(*out));
+    // A mount point reports the file system mounted on it, as a cgroup
+    // hierarchy on /sys/fs/cgroup/elogind is.
+    for (unsigned depth = 0; node && node->mounted && node->mounted != node && depth < 8; depth++)
+        node = node->mounted;
 
     out->f_namelen = VFS_NAME_MAX;
 
@@ -3426,6 +3489,11 @@ static void fill_statfs(struct vfs_node *node, struct linux_statfs *out) {
             out->f_type = pseudo;
             out->f_bsize = PMM_PAGE_SIZE;
             out->f_frsize = PMM_PAGE_SIZE;
+            if (pseudo == TMPFS_MAGIC) {
+                out->f_blocks = pmm_usable_page_count();
+                out->f_bfree = pmm_free_page_count();
+                out->f_bavail = out->f_bfree;
+            }
             return;
         }
         if (walk->flags & VFS_VOLATILE) volatile_root = walk;
@@ -3859,7 +3927,20 @@ static int64_t sys_mkdir_at(int dirfd, uint64_t user_path, uint64_t mode) {
     return vfs_create_directory(path, mode_after_umask(mode)) ? 0 : -ENOENT;
 }
 
+static int64_t symlink_text_to_user(struct vfs_node *node, uint64_t user_buffer, size_t size);
+
 static int64_t sys_readlink_at(int dirfd, uint64_t user_path, uint64_t user_buffer, size_t size) {
+    // An empty path names the file dirfd refers to, as on Linux: glibc's
+    // fchmodat asks this of an O_PATH descriptor to learn if it is a link.
+    char first = 0;
+    if (user_path && copy_from_user(&first, user_path, 1) != 0) return -EFAULT;
+    if (user_path && !first) {
+        if (dirfd == AT_FDCWD) return -ENOENT;
+        struct file *file = fd_file(dirfd);
+        if (!file) return -EBADF;
+        if (file->kind != FILE_KIND_VFS || !file->node) return -EINVAL;
+        return symlink_text_to_user(file->node, user_buffer, size);
+    }
     VFS_PATH_SCOPED path = NULL;
     int status = copy_path_at(dirfd, user_path, &path);
     if (status != 0) return status;
@@ -3876,6 +3957,10 @@ static int64_t sys_readlink_at(int dirfd, uint64_t user_path, uint64_t user_buff
 
     struct vfs_node *node = vfs_lookup_nofollow(path);
     if (!node) return lookup_errno(path, 0);
+    return symlink_text_to_user(node, user_buffer, size);
+}
+
+static int64_t symlink_text_to_user(struct vfs_node *node, uint64_t user_buffer, size_t size) {
     if ((node->flags & 0xFFU) != VFS_SYMLINK) return -EINVAL;
     if (node->link_text) {
         char computed[32];
@@ -4583,7 +4668,11 @@ static int64_t sys_msync(uint64_t address, uint64_t length, int flags) {
     if (!length) return 0;
     length = align_up(length, 4096);
     if (address >= USER_ADDRESS_LIMIT || length > USER_ADDRESS_LIMIT - address) return -ENOMEM;
-    if (!process_sync_file_areas(address, address + length)) return -ENOMEM;
+    // ENOMEM only for a range with holes, as on Linux: shared anonymous memory
+    // is mapped without an area, and has nothing to write back.
+    for (uint64_t page = address; page < address + length; page += 4096)
+        if (!vmm_page_occupied(process->cr3, page) && !process_find_area(page)) return -ENOMEM;
+    (void)process_sync_file_areas(address, address + length);
     if ((flags & MS_SYNC) && vfs_sync() != 0) return -EIO;
     return 0;
 }
@@ -5539,6 +5628,7 @@ _Static_assert(sizeof(struct linux_timex) == 208, "struct timex is 208 bytes");
 #define ADJ_TICK              0x4000
 #define ADJ_OFFSET_SINGLESHOT 0x8001
 #define ADJ_OFFSET_SS_READ    0xA001
+#define STA_PLL               0x0001
 #define STA_UNSYNC            0x0040
 #define STA_NANO              0x2000
 #define TIME_OK               0
@@ -5549,7 +5639,18 @@ static struct {
     int32_t status;
     int64_t maxerror, esterror, constant;
     int32_t tai;
-} ntp_state = {STA_UNSYNC, 16000000, 16000000, 2, 0};
+    int64_t freq;  // ppm with 16 fractional bits, as adjtimex reports it
+    int64_t tick;  // microseconds per 1/100 s
+} ntp_state = {STA_UNSYNC, 16000000, 16000000, 2, 0, 0, 10000};
+
+#define NTP_MAXFREQ_SCALED (500LL << 16)  // 500 ppm, Linux's limit
+
+// The wall clock's rate from the frequency and the tick, in parts per billion.
+static void apply_ntp_rate(void) {
+    int64_t from_tick = (ntp_state.tick - 10000) * 100000;
+    int64_t from_freq = (ntp_state.freq * 1000) / 65536;
+    time_set_rate_ppb(from_tick + from_freq);
+}
 
 static int may_set_time(void) { return user_ns_initial_has_cap(CAP_SYS_TIME); }
 
@@ -5585,12 +5686,16 @@ static int64_t sys_adjtimex(int clock_id, uint64_t user_timex) {
         nano = 0;  // adjtime() reads what is left in microseconds; 0xA001 is not ADJ_NANO
     } else if (modes) {
         if (!may_set_time()) return -EPERM;
-        // shortcut: no kernel PLL or frequency/tick discipline; ntpd-style
-        // ADJ_OFFSET, ADJ_FREQUENCY and ADJ_TICK are refused. Add them with an
-        // NTP client that needs them; steps, adjtime slews and the reported
-        // NTP state work.
-        if (modes != ADJ_OFFSET_SINGLESHOT &&
-            (modes & (ADJ_OFFSET | ADJ_FREQUENCY | ADJ_TICK)))
+        // As on Linux, an offset only steers the clock through the kernel PLL
+        // (STA_PLL); chrony sets 0 with the PLL off, which does nothing.
+        // shortcut: no PLL, so an offset for it is refused; add the PLL if
+        // ntpd or systemd-timesyncd come to Tulpar.
+        if (modes != ADJ_OFFSET_SINGLESHOT && (modes & ADJ_OFFSET)) {
+            int32_t status = (modes & ADJ_STATUS) ? value.status : ntp_state.status;
+            if ((status & STA_PLL) && value.offset != 0) return -EINVAL;
+        }
+        if (modes != ADJ_OFFSET_SINGLESHOT && (modes & ADJ_TICK) &&
+            (value.tick < 9000 || value.tick > 11000))
             return -EINVAL;
     }
     if (modes == ADJ_OFFSET_SINGLESHOT) {
@@ -5611,11 +5716,21 @@ static int64_t sys_adjtimex(int clock_id, uint64_t user_timex) {
         if (modes & ADJ_TIMECONST) ntp_state.constant = value.constant;
         if (modes & ADJ_TAI) ntp_state.tai = (int32_t)value.constant;
         if (modes & ADJ_STATUS) ntp_state.status = value.status;
+        if (modes & (ADJ_FREQUENCY | ADJ_TICK)) {
+            if (modes & ADJ_FREQUENCY) {
+                int64_t freq = value.freq;
+                if (freq > NTP_MAXFREQ_SCALED) freq = NTP_MAXFREQ_SCALED;
+                if (freq < -NTP_MAXFREQ_SCALED) freq = -NTP_MAXFREQ_SCALED;
+                ntp_state.freq = freq;
+            }
+            if (modes & ADJ_TICK) ntp_state.tick = value.tick;
+            apply_ntp_rate();
+        }
         if (modes & ADJ_NANO) ntp_state.status |= STA_NANO;
         if (modes & ADJ_MICRO) ntp_state.status &= ~STA_NANO;
     }
     uint64_t now = time_realtime_ns();
-    value.freq = 0;
+    value.freq = ntp_state.freq;
     value.maxerror = ntp_state.maxerror;
     value.esterror = ntp_state.esterror;
     value.status = ntp_state.status;
@@ -5625,7 +5740,7 @@ static int64_t sys_adjtimex(int clock_id, uint64_t user_timex) {
     value.time_sec = (int64_t)(now / 1000000000ULL);
     value.time_usec = (int64_t)(now % 1000000000ULL);
     if (!(ntp_state.status & STA_NANO)) value.time_usec /= 1000;
-    value.tick = 10000;
+    value.tick = ntp_state.tick;
     value.tai = ntp_state.tai;
     if (copy_to_user(user_timex, &value, sizeof(value)) != 0) return -EFAULT;
     return (ntp_state.status & STA_UNSYNC) ? TIME_ERROR : TIME_OK;
@@ -5812,20 +5927,22 @@ static int64_t sys_capget(uint64_t user_header, uint64_t user_data) {
     if (!user_data) return 0;
     if (header.pid < 0) return -EINVAL;
 
-    uint64_t held = 0;
+    uint64_t permitted = 0, effective = 0;
     if (header.pid) {
         process_table_lock();
         struct process *target = process_find((uint64_t)header.pid);
-        if (target) held = process_capability_set(target);
+        if (target) caps_get(target, &permitted, &effective);
         process_table_unlock();
         if (!target) return -ESRCH;
     } else {
-        held = process_capability_set(process_current());
+        caps_get(process_current(), &permitted, &effective);
     }
 
     struct cap_user_data data[2];
-    data[0].effective = data[0].permitted = (uint32_t)held;
-    data[1].effective = data[1].permitted = (uint32_t)(held >> 32);
+    data[0].effective = (uint32_t)effective;
+    data[0].permitted = (uint32_t)permitted;
+    data[1].effective = (uint32_t)(effective >> 32);
+    data[1].permitted = (uint32_t)(permitted >> 32);
     data[0].inheritable = data[1].inheritable = 0;
     return copy_to_user(user_data, data, sizeof(data)) == 0 ? 0 : -EFAULT;
 }
@@ -5848,12 +5965,7 @@ static int64_t sys_capset(uint64_t user_header, uint64_t user_data) {
     if (copy_from_user(data, user_data, sizeof(data)) != 0) return -EFAULT;
     uint64_t permitted = data[0].permitted | ((uint64_t)data[1].permitted << 32);
     uint64_t effective = data[0].effective | ((uint64_t)data[1].effective << 32);
-    uint64_t held = process_capability_set(process);
-    // Capabilities can only be given up: nothing beyond what is held, and
-    // nothing effective that is not permitted.
-    if ((permitted & ~held) || (effective & ~permitted)) return -EPERM;
-    process->cap_dropped |= CAP_ALL & ~effective;
-    return 0;
+    return caps_set(process, permitted, effective);
 }
 
 static int64_t sys_seccomp(uint64_t operation, uint64_t flags, uint64_t args) {
@@ -5935,8 +6047,14 @@ static int64_t sys_prctl(int option, uint64_t arg2, uint64_t arg3, uint64_t arg4
     case PR_SET_SECCOMP:    return seccomp_prctl_set(arg2, arg3);
     case PR_GET_SECUREBITS: return 0;
     case PR_SET_SECUREBITS: return arg2 == 0 ? 0 : -EINVAL;
-    case PR_CAPBSET_READ:   return 0;
+    case PR_CAPBSET_READ:
+        if (arg2 > CAP_LAST_CAP) return -EINVAL;
+        return !((process->cap_bounding_dropped >> arg2) & 1U);
     case PR_CAPBSET_DROP:
+        if (arg2 > CAP_LAST_CAP) return -EINVAL;
+        if (!user_ns_has_cap(process, 8 /* CAP_SETPCAP */)) return -EPERM;
+        process->cap_bounding_dropped |= 1ULL << arg2;
+        return 0;
     case PR_SET_PTRACER:    return 0;
     case PR_CAP_AMBIENT:
         if (arg2 == PR_CAP_AMBIENT_IS_SET) return 0;
@@ -6253,9 +6371,7 @@ static int64_t sys_epoll_ctl(int epoll_fd, int operation, int target_fd, uint64_
         // As on Linux: files and directories of a disk or tmpfs cannot be polled.
         struct vfs_node *node = target_file->node;
         uint32_t kind = node->flags & 0xFFU;
-        // Disk files carry their inode; tmpfs ones have no reader. procfs and
-        // sysfs files, which Linux lets epoll watch, have a reader instead.
-        if ((kind == VFS_FILE || kind == VFS_DIRECTORY) && (node->disk_inode || !node->read) &&
+        if ((kind == VFS_FILE || kind == VFS_DIRECTORY) && vfs_node_is_stored(node) &&
             !(node->file_ops && node->file_ops->poll))
             return -EPERM;
     }
@@ -7321,9 +7437,10 @@ static void syscall_run(struct syscall_frame *frame) {
                         SYSCALL_ARG2(frame), 0);
         break;
     case SYS_SENDTO:
-        SYSCALL_RET(frame) = (uint64_t)sys_sendto((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame),
-                                                  SYSCALL_ARG2(frame), (int)SYSCALL_ARG3(frame),
-                                                  SYSCALL_ARG4(frame), SYSCALL_ARG5(frame));
+        send_or_block(frame, SYS_SENDTO, (int)SYSCALL_ARG0(frame), (int)SYSCALL_ARG3(frame),
+                      sys_sendto((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame),
+                                 SYSCALL_ARG2(frame), (int)SYSCALL_ARG3(frame),
+                                 SYSCALL_ARG4(frame), SYSCALL_ARG5(frame)));
         break;
     case SYS_RECVFROM: {
         int fd = (int)SYSCALL_ARG0(frame);
@@ -7341,13 +7458,14 @@ static void syscall_run(struct syscall_frame *frame) {
         break;
     }
     case SYS_SENDMSG:
-        SYSCALL_RET(frame) = (uint64_t)sys_sendmsg((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame),
-                                                   (int)SYSCALL_ARG2(frame));
+        send_or_block(frame, SYS_SENDMSG, (int)SYSCALL_ARG0(frame), (int)SYSCALL_ARG2(frame),
+                      sys_sendmsg((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame),
+                                  (int)SYSCALL_ARG2(frame)));
         break;
     case SYS_SENDMMSG:
-        SYSCALL_RET(frame) =
-            (uint64_t)sys_sendmmsg((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame),
-                                   (unsigned)SYSCALL_ARG2(frame), (int)SYSCALL_ARG3(frame));
+        send_or_block(frame, SYS_SENDMMSG, (int)SYSCALL_ARG0(frame), (int)SYSCALL_ARG3(frame),
+                      sys_sendmmsg((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame),
+                                   (unsigned)SYSCALL_ARG2(frame), (int)SYSCALL_ARG3(frame)));
         break;
     case SYS_RECVMMSG: {
         int fd = (int)SYSCALL_ARG0(frame);

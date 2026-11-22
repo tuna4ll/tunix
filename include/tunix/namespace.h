@@ -111,6 +111,13 @@ int user_ns_capable(void);
 int user_ns_is_root(const struct process *process);
 int user_ns_has_cap(const struct process *process, unsigned cap);
 int user_ns_initial_has_cap(unsigned cap);
+// Called after a uid change: what Linux does to capabilities when root is left
+// or taken back, from the uids before it.
+void caps_after_setuid(struct process *process, uint32_t old_uid, uint32_t old_euid,
+                       uint32_t old_suid);
+// capget/capset for a process that is not root of the initial namespace.
+void caps_get(const struct process *process, uint64_t *permitted, uint64_t *effective);
+int caps_set(struct process *process, uint64_t permitted, uint64_t effective);
 int namespace_object_is_initial(const void *ns);
 uint64_t process_capability_set(const struct process *process);
 uint32_t user_ns_map_uid(const struct user_namespace *ns, uint32_t kuid);

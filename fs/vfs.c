@@ -384,6 +384,15 @@ static int valid_component(const char *name) {
     return name && name[0] && strcmp(name, ".") != 0 && strcmp(name, "..") != 0;
 }
 
+static int64_t memory_read(struct vfs_node *node, uint64_t offset, size_t size, void *buffer);
+
+// A file whose contents are kept, not made on each read as procfs and sysfs
+// files are; Linux lets epoll watch only the latter. shortcut: FAT files have
+// a reader of their own and count as made; check fat_node_read too if it matters.
+int vfs_node_is_stored(const struct vfs_node *node) {
+    return node && (node->disk_inode || !node->read || node->read == memory_read);
+}
+
 char *vfs_path_buffer(void) { return (char *)kmalloc(VFS_PATH_MAX); }
 
 void vfs_path_release(char **buffer) {
@@ -1772,7 +1781,9 @@ int vfs_umount(const char *target, int detach) {
         previous = before;
     }
     if (!entry) return -VFS_EINVAL;
-    if (!entry->mountpoint) return -VFS_EPERM;
+    // A mount Tunix made itself cannot come off; Linux calls that busy, and
+    // EPERM made umount -a at shutdown claim it needed root.
+    if (!entry->mountpoint) return -VFS_EBUSY;
     int busy = entry->owns_root && tree_busy(entry->root);
     if (busy && !detach) return -VFS_EBUSY;
     if (cgroupfs_magic(entry->root) && cgroupfs_unmount(entry->root) != 0) return -VFS_EBUSY;

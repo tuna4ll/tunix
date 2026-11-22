@@ -31,6 +31,8 @@ void time_step_realtime_ns(int64_t delta);
 int64_t time_slew_realtime_ns(int64_t delta, int set);
 // Bumped whenever the wall clock is set or stepped.
 uint64_t time_realtime_generation(void);
+// Runs the wall clock faster (positive) or slower by ppb parts per billion.
+void time_set_rate_ppb(int64_t ppb);
 uint64_t time_epoch_seconds(void);
 uint64_t time_tsc_frequency(void);
 int time_get_rtc(struct tunix_rtc_time *out);

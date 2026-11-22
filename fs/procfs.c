@@ -880,7 +880,9 @@ static int64_t proc_status_read(struct vfs_node *node, uint64_t offset, size_t s
     text_string(&text, " kB\nVmSwap:\t");
     text_unsigned(&text, usage[VMM_USAGE_SWAP] * 4ULL);
     text_string(&text, " kB\n");
-    text_string(&text, "Threads:\t1\n");
+    text_string(&text, "Threads:\t");
+    text_unsigned(&text, process_thread_count(process->tgid));
+    text_char(&text, '\n');
     text_string(&text, "StartTicks:\t");
     text_unsigned(&text, process->start_time_ns / 10000000ULL);
     text_char(&text, '\n');
@@ -935,7 +937,8 @@ static int64_t proc_pid_stat_read(struct vfs_node *node, uint64_t offset, size_t
     text_string(&text, "0 0 ");
     text_string(&text, "20 ");
     text_string(&text, "0 ");
-    text_string(&text, "1 ");
+    text_unsigned(&text, process_thread_count(process->tgid));
+    text_char(&text, ' ');
     text_string(&text, "0 ");
     text_unsigned(&text, start);
     text_char(&text, ' ');

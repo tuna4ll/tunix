@@ -280,7 +280,8 @@ size_t cgroup_describe(struct process *process, char *out, size_t capacity) {
         }
     }
     struct text text = {0};
-    char path[VFS_PATH_MAX];
+    VFS_PATH_SCOPED path = vfs_path_buffer();
+    if (!path) return 0;
     for (unsigned pass = 0; pass < CGROUP_HIERARCHIES; pass++) {
         unsigned index = (pass + 1U) % CGROUP_HIERARCHIES;
         if (!members[index]) continue;
@@ -292,7 +293,7 @@ size_t cgroup_describe(struct process *process, char *out, size_t capacity) {
         } else {
             text_string(&text, "0::");
         }
-        if (cgroup_path(members[index], path, sizeof(path)) < 0) text_string(&text, "/");
+        if (cgroup_path(members[index], path, VFS_PATH_MAX) < 0) text_string(&text, "/");
         else text_string(&text, path);
         text_string(&text, "\n");
         cgroup_put(members[index]);

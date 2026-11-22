@@ -2,6 +2,8 @@
 #include <stdint.h>
 #include <tunix/acl.h>
 #include <tunix/cred.h>
+#include <tunix/namespace.h>
+#include <tunix/process.h>
 #include <tunix/heap.h>
 #include <tunix/kstring.h>
 #include <tunix/process.h>
@@ -163,7 +165,7 @@ static int one_of(uint32_t value, uint32_t a, uint32_t b, uint32_t c) {
     return value == a || value == b || value == c;
 }
 
-int64_t cred_set_uid(uint32_t uid) {
+static int64_t set_ids_uid(uint32_t uid) {
     struct credentials *cred = cred_current();
     if (!cred) return -EPERM;
     if (uid == CRED_UNCHANGED) return -EINVAL;
@@ -174,6 +176,15 @@ int64_t cred_set_uid(uint32_t uid) {
     if (uid != cred->uid && uid != cred->suid) return -EPERM;
     cred->euid = cred->fsuid = uid;
     return 0;
+}
+
+int64_t cred_set_uid(uint32_t uid) {
+    struct credentials *cred = cred_current();
+    if (!cred) return -EPERM;
+    uint32_t old_uid = cred->uid, old_euid = cred->euid, old_suid = cred->suid;
+    int64_t status = set_ids_uid(uid);
+    if (status == 0) caps_after_setuid(process_current(), old_uid, old_euid, old_suid);
+    return status;
 }
 
 int64_t cred_set_gid(uint32_t gid) {
@@ -189,7 +200,7 @@ int64_t cred_set_gid(uint32_t gid) {
     return 0;
 }
 
-int64_t cred_set_reuid(uint32_t ruid, uint32_t euid) {
+static int64_t set_ids_reuid(uint32_t ruid, uint32_t euid) {
     struct credentials *cred = cred_current();
     if (!cred) return -EPERM;
     if (!privileged(cred)) {
@@ -204,6 +215,15 @@ int64_t cred_set_reuid(uint32_t ruid, uint32_t euid) {
         cred->suid = cred->euid;
     cred->fsuid = cred->euid;
     return 0;
+}
+
+int64_t cred_set_reuid(uint32_t ruid, uint32_t euid) {
+    struct credentials *cred = cred_current();
+    if (!cred) return -EPERM;
+    uint32_t old_uid = cred->uid, old_euid = cred->euid, old_suid = cred->suid;
+    int64_t status = set_ids_reuid(ruid, euid);
+    if (status == 0) caps_after_setuid(process_current(), old_uid, old_euid, old_suid);
+    return status;
 }
 
 int64_t cred_set_regid(uint32_t rgid, uint32_t egid) {
@@ -223,7 +243,7 @@ int64_t cred_set_regid(uint32_t rgid, uint32_t egid) {
     return 0;
 }
 
-int64_t cred_set_resuid(uint32_t ruid, uint32_t euid, uint32_t suid) {
+static int64_t set_ids_resuid(uint32_t ruid, uint32_t euid, uint32_t suid) {
     struct credentials *cred = cred_current();
     if (!cred) return -EPERM;
     if (!privileged(cred)) {
@@ -238,6 +258,15 @@ int64_t cred_set_resuid(uint32_t ruid, uint32_t euid, uint32_t suid) {
     if (suid != CRED_UNCHANGED) cred->suid = suid;
     cred->fsuid = cred->euid;
     return 0;
+}
+
+int64_t cred_set_resuid(uint32_t ruid, uint32_t euid, uint32_t suid) {
+    struct credentials *cred = cred_current();
+    if (!cred) return -EPERM;
+    uint32_t old_uid = cred->uid, old_euid = cred->euid, old_suid = cred->suid;
+    int64_t status = set_ids_resuid(ruid, euid, suid);
+    if (status == 0) caps_after_setuid(process_current(), old_uid, old_euid, old_suid);
+    return status;
 }
 
 int64_t cred_set_resgid(uint32_t rgid, uint32_t egid, uint32_t sgid) {

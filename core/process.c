@@ -3322,6 +3322,10 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame, const struct fork
     child->dumpable = parent->dumpable;
     child->no_new_privs = parent->no_new_privs;
     child->cap_dropped = parent->cap_dropped;
+    child->keep_capabilities = parent->keep_capabilities;
+    child->cap_kept_permitted = parent->cap_kept_permitted;
+    child->cap_bounding_dropped = parent->cap_bounding_dropped;
+    child->cap_kept_effective = parent->cap_kept_effective;
     child->timerslack_ns = parent->timerslack_ns;
     child->thp_disable = parent->thp_disable;
     child->oom_score_adj = parent->oom_score_adj;
@@ -3491,6 +3495,10 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame, uint64_t 
     child->dumpable = parent->dumpable;
     child->no_new_privs = parent->no_new_privs;
     child->cap_dropped = parent->cap_dropped;
+    child->keep_capabilities = parent->keep_capabilities;
+    child->cap_kept_permitted = parent->cap_kept_permitted;
+    child->cap_bounding_dropped = parent->cap_bounding_dropped;
+    child->cap_kept_effective = parent->cap_kept_effective;
     child->timerslack_ns = parent->timerslack_ns;
     child->thp_disable = parent->thp_disable;
     child->oom_score_adj = parent->oom_score_adj;
@@ -4078,6 +4086,19 @@ static void terminate_sibling_threads(int status) {
     } while (item != queue);
 }
 
+uint32_t process_thread_count(uint64_t tgid) {
+    SCHED_LOCKED;
+    if (!queue) return 1;
+    uint32_t count = 0;
+    struct process *item = queue;
+    do {
+        if (item->tgid == tgid && item->state != PROCESS_DEAD && item->state != PROCESS_ZOMBIE)
+            count++;
+        item = item->next;
+    } while (item != queue);
+    return count ? count : 1;
+}
+
 void process_exit_group_from_syscall(struct syscall_frame *frame, int status) {
     if (!current || !frame) panic("process: exit_group without current process");
     terminate_sibling_threads(status);
@@ -4160,7 +4181,12 @@ int64_t process_exec_from_syscall(struct syscall_frame *frame, const char *path,
     cred_apply_exec(&current->cred, credential_source, current->no_new_privs);
     // As on Linux, a program run by root of its namespace, setuid ones too,
     // starts with every capability and one run by anyone else with none.
-    current->cap_dropped = user_ns_is_root(current) ? 0 : CAP_ALL;
+    current->cap_dropped = (user_ns_is_root(current) ? 0 : CAP_ALL) | current->cap_bounding_dropped;
+    // As on Linux, without file capabilities a program run by someone other
+    // than root keeps none, and PR_SET_KEEPCAPS does not survive exec.
+    current->cap_kept_permitted = 0;
+    current->cap_kept_effective = 0;
+    current->keep_capabilities = 0;
     current->dumpable =
         (current->cred.euid == current->cred.uid && current->cred.egid == current->cred.gid);
     strncpy(current->name, file->name, sizeof(current->name) - 1);
