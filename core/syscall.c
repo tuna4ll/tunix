@@ -1578,6 +1578,29 @@ static int64_t open_at(int dirfd, uint64_t user_path, uint64_t flags, uint64_t m
 
     int created = 0;
     struct vfs_node *node = (flags & O_NOFOLLOW) ? vfs_lookup_nofollow(path) : vfs_lookup(path);
+    // As on Linux, O_CREAT through a link that points nowhere creates what it
+    // points to; with O_EXCL the link itself counts as existing.
+    for (int hop = 0; !node && (flags & O_CREAT) && hop < 8; hop++) {
+        struct vfs_node *link = vfs_lookup_nofollow(path);
+        if (!link || (link->flags & 0xFFU) != VFS_SYMLINK) break;
+        if (flags & (O_EXCL | O_NOFOLLOW)) return (flags & O_EXCL) ? -EEXIST : -ELOOP;
+        if (link->link_text || !link->data || !link->length || link->length >= USER_PATH_MAX) break;
+        VFS_PATH_SCOPED target = vfs_path_buffer();
+        if (!target) return -ENOMEM;
+        size_t at = 0;
+        if (((const char *)link->data)[0] != '/') {
+            // Relative to the directory the link is in.
+            size_t cut = strlen(path);
+            while (cut > 1 && path[cut - 1] != '/') cut--;
+            memcpy(target, path, cut);
+            at = cut;
+        }
+        if (at + link->length + 1 > VFS_PATH_MAX) return -ENAMETOOLONG;
+        memcpy(target + at, link->data, (size_t)link->length);
+        target[at + link->length] = '\0';
+        if (normalize_path(NULL, target, path) != 0) return -ENAMETOOLONG;
+        node = vfs_lookup(path);
+    }
     if (!node && (flags & O_CREAT)) {
         if (flags & O_DIRECTORY) return -EINVAL;
         int missing = vfs_lookup_error(path, !(flags & O_NOFOLLOW));

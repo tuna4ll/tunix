@@ -88,6 +88,8 @@ struct timerfd_context *timerfd_create(int clock_id) {
     struct timerfd_context *context = kmalloc(sizeof(*context));
     if (!context) return NULL;
     context->clock_id = clock_id;
+    context->cancel_on_set = 0;
+    context->realtime_generation = time_realtime_generation();
     context->interval_ns = 0;
     context->next_expiration_ns = 0;
     context->pending_expirations = 0;
