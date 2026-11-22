@@ -6,6 +6,7 @@
 
 #include <tunix/boot.h>
 #include <tunix/boot_framebuffer.h>
+#include <tunix/boot_stub.h>
 #include <tunix/kprintf.h>
 
 __attribute__((used, section(".limine_requests"))) static volatile LIMINE_BASE_REVISION(3);
@@ -81,6 +82,7 @@ static struct boot_framebuffer_info framebuffer_info;
 static struct boot_info info;
 
 void limine_start(void);
+void stub_start(const struct boot_stub_handoff *handoff);
 
 static uint32_t build_memory_map(void) {
     const struct limine_memmap_response *response = memmap_request.response;
@@ -151,6 +153,41 @@ __attribute__((no_stack_protector)) void limine_start(void) {
         ? cmdline_request.response->cmdline
         : "";
     info.rsdp = rsdp_request.response ? rsdp_request.response->address : 0;
+
+    kmain(&info);
+}
+
+// Booted through the Linux boot protocol or as an EFI application: the stub in
+// arch/x86_64/bzimage has done what Limine does, and says what it found here.
+__attribute__((no_stack_protector)) void stub_start(const struct boot_stub_handoff *handoff) {
+    static char command_line[BOOT_STUB_COMMAND_LINE];
+
+    stack_guard_init();
+    if (!handoff || handoff->magic != BOOT_STUB_MAGIC) panic("boot: no handoff from the stub");
+
+    info.hhdm_offset = handoff->hhdm_offset;
+    info.kernel_physical_base = handoff->kernel_physical_base;
+    info.kernel_virtual_base = (uint64_t)kernel_image_start;
+    info.kernel_size = (uint64_t)(kernel_reserve_end - kernel_image_start);
+
+    uint32_t count = handoff->memory_count;
+    if (count > BOOT_MEMORY_REGIONS) count = BOOT_MEMORY_REGIONS;
+    for (uint32_t index = 0; index < count; index++) memory_regions[index] = handoff->memory[index];
+    info.memory = memory_regions;
+    info.memory_count = count;
+
+    if (handoff->has_framebuffer) {
+        framebuffer_info = handoff->framebuffer;
+        info.framebuffer = &framebuffer_info;
+    } else {
+        info.framebuffer = NULL;
+    }
+
+    for (uint32_t index = 0; index + 1 < BOOT_STUB_COMMAND_LINE && handoff->command_line[index];
+         index++)
+        command_line[index] = handoff->command_line[index];
+    info.command_line = command_line;
+    info.rsdp = handoff->rsdp;
 
     kmain(&info);
 }

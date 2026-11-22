@@ -84,3 +84,42 @@ root=/dev/sda2 init=/sbin/init
   kernel takes whatever registered first.
 - `init=` names the first program. It defaults to `/sbin/init`; pointing it at
   something else is how a machine that will not finish booting gets debugged.
+
+## Without Limine: vmlinuz
+
+`make` also builds `build/vmlinuz`, the same kernel wrapped so that any loader
+that boots Linux can boot Tunix: GRUB on BIOS or UEFI, systemd-boot, rEFInd,
+syslinux, QEMU's `-kernel`, or UEFI firmware starting it directly as an
+application. It is one file with two headers, as Linux's bzImage is:
+
+- a **PE/COFF header**, so UEFI can load it as an EFI application (the EFI stub);
+- the **Linux x86 boot protocol's setup header**, version 2.15, with a real-mode
+  entry, a 32-bit entry at `code32_start` and a 64-bit entry 0x200 after it.
+
+| Started by | Entry | Where the memory map, framebuffer and RSDP come from |
+| --- | --- | --- |
+| UEFI, systemd-boot, rEFInd | `efi_main` | GetMemoryMap, the GOP, the configuration table; then ExitBootServices |
+| GRUB on UEFI | 64-bit | `boot_params`: e820, `screen_info`, the EFI system table GRUB names |
+| GRUB on BIOS | 32-bit | `boot_params`, filled in by GRUB |
+| QEMU `-kernel` on BIOS, syslinux | real mode | the setup asks the BIOS: e820, and a 32-bit VBE linear framebuffer mode |
+
+The code is in `arch/x86_64/bzimage`. Whichever way it was entered, the stub
+does what Limine does for `kernel.elf`: it maps physical memory identity and at
+`0xffff800000000000`, maps the kernel at its link address over the pages it was
+loaded into -- the kernel runs where it lies in the file, its `.bss` included in
+the size the header asks the loader for -- enables no-execute and write
+protection, loads a GDT with the kernel's selectors, and enters
+`stub_kernel_entry` with a `struct boot_stub_handoff`. The kernel copies the
+handoff into the same `boot_info` Limine's answers fill, and from `kmain` on
+nothing knows which loader it was.
+
+The console needs a 32-bit linear framebuffer. GRUB keeps text mode unless told
+otherwise, and may pick a 24-bit mode when only a size is given, so:
+
+```
+set gfxpayload=1280x800x32
+linux /boot/vmlinuz root=LABEL=tulpar-root init=/sbin/init
+```
+
+Without one, the stub says so on the serial port (and the EFI console, before
+it leaves boot services) rather than starting a kernel that would panic.

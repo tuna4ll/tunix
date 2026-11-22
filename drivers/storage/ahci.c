@@ -7,6 +7,7 @@
 #include <tunix/heap.h>
 #include <tunix/kstring.h>
 #include <tunix/pci.h>
+#include <tunix/time.h>
 #include <tunix/vmm.h>
 #include <tunix/iowait.h>
 #include <tunix/lock.h>
@@ -36,6 +37,7 @@
 #define PORT_TFD    0x20U
 #define PORT_SIG    0x24U
 #define PORT_SSTS   0x28U
+#define PORT_SCTL   0x2CU
 #define PORT_SERR   0x30U
 #define PORT_CI     0x38U
 
@@ -48,7 +50,8 @@
 #define TFD_DRQ 0x08U
 #define TFD_ERR 0x01U
 
-#define SIG_SATA 0x00000101U
+#define SIG_SATA    0x00000101U
+#define SIG_UNKNOWN 0xFFFFFFFFU
 
 #define FIS_TYPE_H2D    0x27U
 #define FIS_H2D_COMMAND 0x80U
@@ -283,6 +286,42 @@ static int ahci_flush(void *context) {
     return status;
 }
 
+static int link_up(uint64_t registers) {
+    uint32_t status = read32(registers + PORT_SSTS);
+    return (status & 0x0FU) == 3U && ((status >> 8) & 0x0FU) == 1U;
+}
+
+static uint32_t wait_for_signature(uint64_t registers, uint64_t milliseconds) {
+    uint64_t deadline = time_uptime_ns() + milliseconds * 1000000ULL;
+    uint32_t signature = read32(registers + PORT_SIG);
+    while (signature == SIG_UNKNOWN && time_uptime_ns() < deadline) {
+        pause_cpu();
+        signature = read32(registers + PORT_SIG);
+    }
+    return signature;
+}
+
+// The signature arrives in the device's first FIS after a link reset, and only lands
+// in PxSIG while FIS receive is on. Firmware that leaves the port with FIS receive
+// off (OVMF after ExitBootServices does) leaves PxSIG unset, so turn receive on and,
+// if nothing comes, reset the link so the device sends it again -- as Linux does.
+static uint32_t port_signature(struct ahci_port *port) {
+    uint64_t registers = port->registers;
+    write32(registers + PORT_CMD, read32(registers + PORT_CMD) | PORT_CMD_FRE);
+    uint32_t signature = wait_for_signature(registers, 50);
+    if (signature != SIG_UNKNOWN) return signature;
+
+    uint32_t control = read32(registers + PORT_SCTL) & ~0x0FU;
+    write32(registers + PORT_SCTL, control | 1U);
+    uint64_t until = time_uptime_ns() + 2000000ULL;
+    while (time_uptime_ns() < until) pause_cpu();
+    write32(registers + PORT_SCTL, control);
+    until = time_uptime_ns() + 1000000000ULL;
+    while (!link_up(registers) && time_uptime_ns() < until) pause_cpu();
+    write32(registers + PORT_SERR, 0xFFFFFFFFU);
+    return wait_for_signature(registers, 1000);
+}
+
 static uint64_t identify_sectors(struct ahci_port *port) {
     uint8_t *identify = port->page + 0x800U;
     memset(identify, 0, 512);
@@ -301,9 +340,9 @@ static uint64_t identify_sectors(struct ahci_port *port) {
 static void bring_up_port(uint64_t hba, unsigned index) {
     uint64_t registers = hba + PORT_BASE + (uint64_t)index * PORT_STRIDE;
 
-    uint32_t status = read32(registers + PORT_SSTS);
-    if ((status & 0x0FU) != 3U || ((status >> 8) & 0x0FU) != 1U) return;
-    if (read32(registers + PORT_SIG) != SIG_SATA) return;
+    if (!link_up(registers)) return;
+    uint32_t signature = read32(registers + PORT_SIG);
+    if (signature != SIG_SATA && signature != SIG_UNKNOWN) return;
 
     struct ahci_port *port = kmalloc(sizeof(*port));
     if (!port) return;
@@ -331,6 +370,13 @@ static void bring_up_port(uint64_t hba, unsigned index) {
     write32(registers + PORT_FBU, (uint32_t)(fis_physical >> 32));
     write32(registers + PORT_SERR, 0xFFFFFFFFU);
     write32(registers + PORT_IE, 0);
+
+    if (signature == SIG_UNKNOWN && port_signature(port) != SIG_SATA) {
+        stop_port(port);
+        dma_free(port->page, 4096);
+        kfree(port);
+        return;
+    }
 
     start_port(port);
 

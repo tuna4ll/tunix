@@ -44,6 +44,7 @@ KERNEL_LDFLAGS := -nostdlib -no-pie -Wl,-T,arch/x86_64/linker.ld \
 	-Wl,--gc-sections -Wl,--build-id=none -Wl,-z,max-page-size=0x1000
 
 SOURCE_PRUNE := -path ./subprojects -prune -o -path ./build -prune -o \
+	-path ./arch/x86_64/bzimage -prune -o \
 	-path ./rust -prune -o
 find-sources = $(patsubst ./%,%,$(shell find . $1 $(SOURCE_PRUNE) \( -name '*.c' -o -name '*.S' \) -print))
 # A driver is a module when its source says so with MODULE_MAIN(); the kernel image
@@ -54,14 +55,14 @@ KERNEL_OBJECTS := $(KERNEL_SOURCES:%=$(BUILD)/kernel/%.o)
 KERNEL_DEPS    := $(KERNEL_OBJECTS:.o=.d)
 
 .PHONY: all kernel fetch check clean distclean
-all: kernel modules
+all: kernel modules vmlinuz
 kernel: $(KERNEL)
 fetch: $(LIMINE_HEADER) $(UACPI_STAMP) $(RUST_STAMP)
 
 check:
-	$(MAKE) kernel modules BUILD=$(BUILD)/check/default LIMINE_DIR=$(LIMINE_DIR) UACPI_DIR=$(UACPI_DIR) RUST_HOME=$(RUST_HOME)
-	$(MAKE) kernel modules BUILD=$(BUILD)/check/debug LIMINE_DIR=$(LIMINE_DIR) UACPI_DIR=$(UACPI_DIR) RUST_HOME=$(RUST_HOME) KERNEL_CFLAGS_EXTRA=-DTUNIX_DEBUG_LOGS=1
-	$(MAKE) kernel modules BUILD=$(BUILD)/check/timings LIMINE_DIR=$(LIMINE_DIR) UACPI_DIR=$(UACPI_DIR) RUST_HOME=$(RUST_HOME) KERNEL_CFLAGS_EXTRA=-DTUNIX_BOOT_TIMINGS=1
+	$(MAKE) kernel modules vmlinuz BUILD=$(BUILD)/check/default LIMINE_DIR=$(LIMINE_DIR) UACPI_DIR=$(UACPI_DIR) RUST_HOME=$(RUST_HOME)
+	$(MAKE) kernel modules vmlinuz BUILD=$(BUILD)/check/debug LIMINE_DIR=$(LIMINE_DIR) UACPI_DIR=$(UACPI_DIR) RUST_HOME=$(RUST_HOME) KERNEL_CFLAGS_EXTRA=-DTUNIX_DEBUG_LOGS=1
+	$(MAKE) kernel modules vmlinuz BUILD=$(BUILD)/check/timings LIMINE_DIR=$(LIMINE_DIR) UACPI_DIR=$(UACPI_DIR) RUST_HOME=$(RUST_HOME) KERNEL_CFLAGS_EXTRA=-DTUNIX_BOOT_TIMINGS=1
 
 NM ?= nm
 
@@ -90,6 +91,53 @@ check-module-symbols = export LC_ALL=C; known=$$(sed -n 's/^ *EXPORT(\([A-Za-z0-
 	printf '%s\n' "$$known" | grep -qxF "$$symbol" || \
 	{ echo "$$ko: $$symbol is not exported to modules"; bad=1; }; done; done; [ $$bad = 0 ]
 
+# vmlinuz: the kernel wrapped for the Linux x86 boot protocol and as an EFI application,
+# so that loaders other than Limine can start it. See arch/x86_64/bzimage.
+OBJCOPY ?= objcopy
+BZIMAGE_DIR := arch/x86_64/bzimage
+BZIMAGE_BUILD := $(BUILD)/bzimage
+BZIMAGE_OBJECTS := $(addprefix $(BZIMAGE_BUILD)/,header.o head.o stub.o blob.o)
+BZIMAGE_CFLAGS := -std=gnu11 -Wall -Wextra -Werror -ffreestanding -fno-builtin -m64 -O2 \
+	-fpie -fno-stack-protector -fno-jump-tables -fno-tree-loop-distribute-patterns \
+	-mno-red-zone -mgeneral-regs-only -masm=intel -fno-asynchronous-unwind-tables \
+	-fno-unwind-tables -Iinclude
+
+.PHONY: vmlinuz
+vmlinuz: $(BUILD)/vmlinuz
+
+$(BUILD)/kernel.bin: $(KERNEL)
+	$(OBJCOPY) -O binary $< $@
+
+$(BZIMAGE_BUILD)/kernel-symbols.ld: $(KERNEL)
+	@mkdir -p $(dir $@)
+	$(NM) $< | awk '$$3 == "stub_kernel_entry" || $$3 == "kernel_image_start" || \
+		$$3 == "kernel_reserve_end" { print $$3 " = 0x" $$1 ";" }' > $@.tmp
+	@[ $$(wc -l < $@.tmp) -eq 3 ] || { echo "$(KERNEL) lacks the symbols vmlinuz needs"; exit 1; }
+	mv $@.tmp $@
+
+$(BZIMAGE_BUILD)/blob.o: $(BZIMAGE_DIR)/blob.S $(BUILD)/kernel.bin
+	@mkdir -p $(dir $@)
+	$(CC) -c -DKERNEL_BIN='"$(abspath $(BUILD)/kernel.bin)"' $< -o $@
+
+$(BZIMAGE_BUILD)/%.o: $(BZIMAGE_DIR)/%.S
+	@mkdir -p $(dir $@)
+	$(CC) -c $< -o $@
+
+$(BZIMAGE_BUILD)/%.o: $(BZIMAGE_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(BZIMAGE_CFLAGS) -MMD -MP -c $< -o $@
+
+$(BUILD)/vmlinuz.elf: $(BZIMAGE_OBJECTS) $(BZIMAGE_DIR)/bzimage.ld $(BZIMAGE_BUILD)/kernel-symbols.ld
+	$(CC) -nostdlib -static -no-pie -Wl,--build-id=none -Wl,-L,$(BZIMAGE_BUILD) \
+		-Wl,-T,$(BZIMAGE_DIR)/bzimage.ld -o $@ $(BZIMAGE_OBJECTS)
+
+$(BUILD)/vmlinuz: $(BUILD)/vmlinuz.elf
+	$(OBJCOPY) -O binary $< $@
+
+$(BZIMAGE_OBJECTS): GNUmakefile
+
+-include $(BZIMAGE_BUILD)/stub.d
+
 .PHONY: modules
 modules: $(BUILD)/modules/symbols.ok
 
@@ -112,7 +160,8 @@ $(LIMINE_HEADER):
 		https://github.com/limine-bootloader/limine.git $(LIMINE_DIR)
 
 clean:
-	rm -rf $(BUILD)/kernel $(BUILD)/modules $(BUILD)/uacpi-objects $(BUILD)/rust-target $(KERNEL)
+	rm -rf $(BUILD)/kernel $(BUILD)/modules $(BUILD)/uacpi-objects $(BUILD)/rust-target $(KERNEL) \
+		$(BUILD)/bzimage $(BUILD)/kernel.bin $(BUILD)/vmlinuz.elf $(BUILD)/vmlinuz
 
 distclean:
 	rm -rf $(BUILD)
