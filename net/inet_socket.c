@@ -1348,10 +1348,21 @@ int inet_socket_connect(struct inet_socket *socket, const void *address, size_t 
                         uint64_t pid, uint32_t uid) {
     NET_LOCKED;
     if (!socket || !socket_is_inet(socket) || !address) return -EINVAL;
+    // AF_UNSPEC dissolves a datagram socket's peer, as glibc's getaddrinfo
+    // does while it sorts addresses. shortcut: a TCP socket is not disconnected
+    // this way here; add it if a program reuses one so.
+    if (length >= 2 && *(const uint16_t *)address == 0 && socket->type != TUNIX_SOCK_STREAM) {
+        socket->peer_address = 0;
+        socket->peer_port = 0;
+        socket->connected = 0;
+        return 0;
+    }
     uint32_t v4;
     uint16_t cport;
     int parsed = sockaddr_in_parse(address, length, socket->domain, &v4, &cport);
     if (parsed != 0) return parsed;
+    // Connecting to the any address reaches this host, as on Linux.
+    if (!v4) v4 = net_htonl(0x7F000001U);
     socket->event_pid = pid;
     socket->event_uid = uid;
     if (socket->type == TUNIX_SOCK_STREAM) return tcp_connect(socket, v4, cport);
@@ -1810,6 +1821,14 @@ int net_interface_ioctl(unsigned long request, void *argument) {
     }
     default: return -ENOTTY;
     }
+}
+
+// FIONREAD: bytes queued on a stream, the next datagram's size otherwise.
+int inet_socket_read_available(struct inet_socket *socket) {
+    NET_LOCKED;
+    if (!socket) return 0;
+    if (socket->tcp) return (int)socket->tcp->rx_len;
+    return socket->queue_first ? (int)socket->queue_first->length : 0;
 }
 
 int inet_socket_read_ready(struct inet_socket *socket) {

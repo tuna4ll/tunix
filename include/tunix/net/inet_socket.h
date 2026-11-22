@@ -70,6 +70,7 @@ int inet_socket_getsockopt(struct inet_socket *socket, int level, int option, vo
                            size_t *length);
 int inet_socket_ioctl(struct inet_socket *socket, unsigned long request, void *argument);
 int inet_socket_read_ready(struct inet_socket *socket);
+int inet_socket_read_available(struct inet_socket *socket);
 int inet_socket_write_ready(struct inet_socket *socket);
 int inet_socket_shutdown(struct inet_socket *socket, int how);
 int64_t inet_socket_read(struct inet_socket *socket, size_t length, void *data);

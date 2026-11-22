@@ -10,6 +10,8 @@
 #include <tunix/lock.h>
 #include <tunix/syscall.h>
 #include <tunix/errno.h>
+#include <tunix/namespace.h>
+#include <tunix/sysvipc.h>
 
 static struct lock shm_lock = LOCK_INITIALIZER("sysv shm", LOCK_RANK_OBJECT);
 
@@ -34,6 +36,7 @@ struct shm_segment {
     uint32_t cpid, lpid;
     int64_t atime, dtime, ctime;
     struct file *file;
+    const void *ns;  // its IPC namespace
 };
 
 static struct shm_segment *segments;
@@ -45,14 +48,16 @@ static int64_t now_seconds(void) { return (int64_t)(time_realtime_ns() / 1000000
 static struct shm_segment *find_by_id(int id) {
     if (id <= 0) return NULL;
     for (int i = 0; i < segment_capacity; i++)
-        if (segments[i].used && segments[i].id == id) return &segments[i];
+        if (segments[i].used && segments[i].id == id && segments[i].ns == ipc_ns_current())
+            return &segments[i];
     return NULL;
 }
 
 static struct shm_segment *find_by_key(int32_t key) {
     if (key == IPC_PRIVATE) return NULL;
     for (int i = 0; i < segment_capacity; i++)
-        if (segments[i].used && !segments[i].destroyed && segments[i].key == key)
+        if (segments[i].used && !segments[i].destroyed && segments[i].key == key &&
+            segments[i].ns == ipc_ns_current())
             return &segments[i];
     return NULL;
 }
@@ -132,7 +137,19 @@ int sysvshm_get(int32_t key, uint64_t size, int flags, uint32_t pid) {
     }
     slot->ctime = now_seconds();
     slot->file = file;
+    slot->ns = ipc_ns_current();
     return slot->id;
+}
+
+void sysvshm_namespace_gone(const void *ns) {
+    SHM_LOCKED;
+    for (int i = 0; i < segment_capacity; i++) {
+        if (!segments[i].used || segments[i].ns != ns) continue;
+        // Mapped pages stay until detached; no one can find the segment again.
+        segments[i].destroyed = 1;
+        segments[i].ns = &segments[i];
+    }
+    sysvshm_reap();
 }
 
 struct file *sysvshm_acquire(int id, uint64_t *size_out) {

@@ -8,6 +8,8 @@
 #include <tunix/net/net.h>
 #include <tunix/process.h>
 #include <tunix/uts.h>
+#include <tunix/vfs.h>
+#include <tunix/sysvipc.h>
 
 static struct user_namespace root_user_ns = {.refs = 1, .level = 0};
 static struct uts_namespace root_uts_ns = {.refs = 1};
@@ -211,6 +213,23 @@ int user_ns_initial_has_cap(unsigned cap) {
     return user_ns_of(process)->level == 0 && user_ns_has_cap(process, cap);
 }
 
+const void *ipc_ns_current(void) {
+    struct process *process = process_current();
+    return process ? process->ipc_ns : NULL;
+}
+
+static void ipc_ns_get(struct ipc_namespace *ns) {
+    if (ns) __atomic_add_fetch(&ns->refs, 1, __ATOMIC_RELAXED);
+}
+
+static void ipc_ns_put(struct ipc_namespace *ns) {
+    if (!ns || __atomic_sub_fetch(&ns->refs, 1, __ATOMIC_ACQ_REL) != 0) return;
+    // As on Linux, the objects of a namespace go with it.
+    sysvshm_namespace_gone(ns);
+    sysvsem_namespace_gone(ns);
+    kfree(ns);
+}
+
 void namespace_inherit(struct process *child, const struct process *parent) {
     struct user_namespace *user = user_ns_of(parent);
     struct uts_namespace *uts = parent && parent->uts_ns ? parent->uts_ns : &root_uts_ns;
@@ -219,6 +238,8 @@ void namespace_inherit(struct process *child, const struct process *parent) {
     child->net_ns = parent ? parent->net_ns : NULL;
     child->pid_ns = parent ? parent->pid_ns : NULL;
     child->mnt_ns = parent ? parent->mnt_ns : NULL;
+    child->ipc_ns = parent ? parent->ipc_ns : NULL;
+    ipc_ns_get(child->ipc_ns);
     __atomic_add_fetch(&user->refs, 1, __ATOMIC_RELAXED);
     __atomic_add_fetch(&uts->refs, 1, __ATOMIC_RELAXED);
     net_ns_get(child->net_ns);
@@ -243,7 +264,92 @@ static void uts_ns_put(struct uts_namespace *ns) {
     uts_ns_put(parent);
 }
 
+void namespace_fork_pid(struct process *child, const struct process *parent) {
+    if (!parent || !parent->pid_ns_children) return;
+    pid_ns_put(child->pid_ns);
+    child->pid_ns = parent->pid_ns_children;
+    __atomic_add_fetch(&child->pid_ns->refs, 1, __ATOMIC_RELAXED);
+}
+
+const void *namespace_pid_children(const struct process *process) {
+    if (process && process->pid_ns_children) return process->pid_ns_children;
+    return process ? process->pid_ns : NULL;
+}
+
+static int pid_ns_within(const struct pid_namespace *inner, const struct pid_namespace *outer) {
+    for (const struct pid_namespace *at = inner; at; at = at->parent)
+        if (at == outer) return 1;
+    return 0;
+}
+
+int64_t namespace_join(struct process *target, uint64_t kinds, int children) {
+    struct process *self = process_current();
+    if (!self || !target) return -EINVAL;
+    uint64_t known = CLONE_NEWNET | CLONE_NEWUTS | CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWUSER |
+        CLONE_NEWIPC | CLONE_NEWCGROUP;
+    if (!kinds || (kinds & ~known)) return -EINVAL;
+    // Linux asks for CAP_SYS_ADMIN over the namespace's owner, which Tunix does
+    // not record, so only a process with it in the initial namespace may join.
+    if (!user_ns_initial_has_cap(CAP_SYS_ADMIN)) return -EPERM;
+
+    struct pid_namespace *pid = NULL;
+    if (kinds & CLONE_NEWPID) {
+        pid = (struct pid_namespace *)(children && target->pid_ns_children ? target->pid_ns_children
+                                                                             : target->pid_ns);
+        // Only the caller's own namespace or one inside it, as on Linux.
+        if (!pid_ns_within(pid ? pid : &root_pid_ns, pid_ns_of(self))) return -EINVAL;
+    }
+    struct user_namespace *user = user_ns_of(target);
+    if ((kinds & CLONE_NEWUSER) && user == user_ns_of(self)) return -EINVAL;
+
+    if (kinds & CLONE_NEWNET) {
+        net_ns_get(target->net_ns);
+        net_ns_put(self->net_ns);
+        self->net_ns = target->net_ns;
+    }
+    if (kinds & CLONE_NEWUTS) {
+        struct uts_namespace *uts = target->uts_ns ? target->uts_ns : &root_uts_ns;
+        __atomic_add_fetch(&uts->refs, 1, __ATOMIC_RELAXED);
+        uts_ns_put(self->uts_ns);
+        self->uts_ns = uts;
+    }
+    if (kinds & CLONE_NEWNS) {
+        if (target->mnt_ns) __atomic_add_fetch(&target->mnt_ns->refs, 1, __ATOMIC_RELAXED);
+        mnt_ns_put(self->mnt_ns);
+        self->mnt_ns = target->mnt_ns;
+        // Joining a mount namespace starts at its root, as on Linux.
+        vfs_node_unref(self->root);
+        self->root = NULL;
+        vfs_node_unref(self->cwd);
+        self->cwd = vfs_root;
+        vfs_node_ref(self->cwd);
+        process_sync_fs();
+    }
+    if (kinds & CLONE_NEWPID) {
+        if (pid) __atomic_add_fetch(&pid->refs, 1, __ATOMIC_RELAXED);
+        pid_ns_put(self->pid_ns_children);
+        self->pid_ns_children = pid;
+    }
+    if (kinds & CLONE_NEWUSER) {
+        __atomic_add_fetch(&user->refs, 1, __ATOMIC_RELAXED);
+        user_ns_put(self->user_ns);
+        self->user_ns = user;
+        self->cap_dropped = 0;  // a process that joins a user namespace holds its capabilities
+    }
+    if (kinds & CLONE_NEWIPC) {
+        ipc_ns_get(target->ipc_ns);
+        ipc_ns_put(self->ipc_ns);
+        self->ipc_ns = target->ipc_ns;
+    }
+    // Tunix has one cgroup namespace, which everyone is in already.
+    return 0;
+}
+
 void namespace_release(struct process *process) {
+    pid_ns_put(process->pid_ns_children);
+    process->pid_ns_children = NULL;
+    ipc_ns_put(process->ipc_ns);
+    process->ipc_ns = NULL;
     struct user_namespace *user = process->user_ns;
     struct uts_namespace *uts = process->uts_ns;
     process->user_ns = NULL;
@@ -292,25 +398,36 @@ static struct uts_namespace *new_uts_ns(struct process *process) {
 }
 
 static int64_t apply_flags(struct process *process, uint64_t flags) {
-    uint64_t supported = CLONE_NEWUSER | CLONE_NEWUTS | CLONE_NEWNET | CLONE_NEWPID | CLONE_NEWNS;
+    uint64_t supported =
+        CLONE_NEWUSER | CLONE_NEWUTS | CLONE_NEWNET | CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWIPC;
     if (flags & CLONE_NAMESPACE_FLAGS & ~supported) return -EINVAL;
 
     if (!(flags & CLONE_NEWUSER)) {
-        if ((flags & (CLONE_NEWUTS | CLONE_NEWNET | CLONE_NEWPID | CLONE_NEWNS)) &&
+        if ((flags & (CLONE_NEWUTS | CLONE_NEWNET | CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWIPC)) &&
             !user_ns_capable())
             return -EPERM;
+    }
+    struct ipc_namespace *created_ipc = NULL;
+    if (flags & CLONE_NEWIPC) {
+        created_ipc = kmalloc(sizeof(*created_ipc));
+        if (!created_ipc) return -ENOMEM;
+        created_ipc->refs = 1;
     }
 
     struct user_namespace *created_user = NULL;
     struct uts_namespace *created_uts = NULL;
     if (flags & CLONE_NEWUSER) {
         created_user = new_user_ns(process);
-        if (!created_user) return -ENOMEM;
+        if (!created_user) {
+            kfree(created_ipc);
+            return -ENOMEM;
+        }
     }
     if (flags & CLONE_NEWUTS) {
         created_uts = new_uts_ns(process);
         if (!created_uts) {
             user_ns_put(created_user);
+            kfree(created_ipc);
             return -ENOMEM;
         }
     }
@@ -319,6 +436,7 @@ static int64_t apply_flags(struct process *process, uint64_t flags) {
         created_net = net_ns_create();
         if (!created_net) {
             user_ns_put(created_user);
+            kfree(created_ipc);
             uts_ns_put(created_uts);
             return -ENOMEM;
         }
@@ -328,6 +446,7 @@ static int64_t apply_flags(struct process *process, uint64_t flags) {
         created_pid = new_pid_ns(process);
         if (!created_pid) {
             user_ns_put(created_user);
+            kfree(created_ipc);
             uts_ns_put(created_uts);
             net_ns_put(created_net);
             return -ENOMEM;
@@ -338,6 +457,7 @@ static int64_t apply_flags(struct process *process, uint64_t flags) {
         created_mnt = new_mnt_ns(process);
         if (!created_mnt) {
             user_ns_put(created_user);
+            kfree(created_ipc);
             uts_ns_put(created_uts);
             net_ns_put(created_net);
             pid_ns_put(created_pid);
@@ -366,6 +486,10 @@ static int64_t apply_flags(struct process *process, uint64_t flags) {
         mnt_ns_put(process->mnt_ns);
         process->mnt_ns = created_mnt;
     }
+    if (created_ipc) {
+        ipc_ns_put(process->ipc_ns);
+        process->ipc_ns = created_ipc;
+    }
     return 0;
 }
 
@@ -376,9 +500,17 @@ int64_t namespace_apply_clone(struct process *child, uint64_t flags) {
 int64_t namespace_unshare(uint64_t flags) {
     struct process *process = process_current();
     if (!process) return -EINVAL;
-    uint64_t handled = CLONE_NAMESPACE_FLAGS & ~CLONE_NEWPID;
-    if (flags & ~handled) return -EINVAL;
-    return apply_flags(process, flags);
+    if (flags & ~CLONE_NAMESPACE_FLAGS) return -EINVAL;
+    // A process cannot change its own pid namespace: CLONE_NEWPID makes the
+    // one its next child starts in, once, as on Linux.
+    if ((flags & CLONE_NEWPID) && process->pid_ns_children) return -EINVAL;
+    int64_t status = apply_flags(process, flags & ~CLONE_NEWPID);
+    if (status != 0 || !(flags & CLONE_NEWPID)) return status;
+    if (!user_ns_capable()) return -EPERM;
+    struct pid_namespace *created = new_pid_ns(process);
+    if (!created) return -ENOMEM;
+    process->pid_ns_children = created;
+    return 0;
 }
 
 static int parse_u32(const char **cursor, const char *end, uint32_t *out) {

@@ -25,6 +25,12 @@ int arch_rtc_read(struct tunix_rtc_time *out);
 void time_init(void);
 uint64_t time_uptime_ns(void);
 uint64_t time_realtime_ns(void);
+void time_set_realtime_ns(uint64_t value);
+void time_step_realtime_ns(int64_t delta);
+// Starts a gradual change of delta (with set) and returns what was left of the last.
+int64_t time_slew_realtime_ns(int64_t delta, int set);
+// Bumped whenever the wall clock is set or stepped.
+uint64_t time_realtime_generation(void);
 uint64_t time_epoch_seconds(void);
 uint64_t time_tsc_frequency(void);
 int time_get_rtc(struct tunix_rtc_time *out);

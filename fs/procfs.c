@@ -1284,6 +1284,27 @@ static uint32_t ns_inode(const void *ns, uint32_t initial) {
     return 0xF0000000U | (uint32_t)(((uintptr_t)ns >> 4) & 0x0FFFFFFFU);
 }
 
+static int64_t proc_ns_entry_read(struct vfs_node *node, uint64_t offset, size_t size,
+                                  void *output) {
+    (void)node;
+    (void)offset;
+    (void)size;
+    (void)output;
+    return 0;
+}
+
+int procfs_ns_entry(struct vfs_node *node, uint64_t *pid, char *kind, unsigned capacity) {
+    if (!node || node->read != proc_ns_entry_read || !node->name || !capacity) return -1;
+    unsigned at = 0;
+    while (node->name[at] && node->name[at] != ':' && at + 1 < capacity) {
+        kind[at] = node->name[at];
+        at++;
+    }
+    kind[at] = '\0';
+    *pid = node_pid(node);
+    return 0;
+}
+
 static void ns_link(struct vfs_node *directory, const char *kind, uint32_t inode) {
     char target[48];
     size_t at = path_append_string(target, 0, kind);
@@ -1293,12 +1314,14 @@ static void ns_link(struct vfs_node *directory, const char *kind, uint32_t inode
     target[at] = '\0';
     // The link names its namespace as on Linux; the entry it points at, next to
     // it, is what lets access() and stat() on the link succeed.
-    struct vfs_node *object = vfs_alloc_node(target, VFS_FILE);
+    // It also carries the pid, so setns can find the namespace from an open file.
+    struct vfs_node *object =
+        virtual_file(directory, target, proc_ns_entry_read, node_pid(directory));
     if (object) {
         object->mode = 0444;
+        object->length = 0;
         object->uid = directory->uid;
         object->gid = directory->gid;
-        if (vfs_attach(directory, object) != 0) vfs_free_node(object);
     }
     (void)vfs_attach_symlink(directory, kind, target);
 }
@@ -1311,11 +1334,12 @@ static void proc_ns_refresh(struct vfs_node *directory) {
     PROCESS_REF process = process_get(node_pid(directory));
     if (process) {
         ns_link(directory, "cgroup", 4026531835U);
-        ns_link(directory, "ipc", 4026531839U);
+        ns_link(directory, "ipc", ns_inode(process->ipc_ns, 4026531839U));
         ns_link(directory, "mnt", ns_inode(process->mnt_ns, 4026531841U));
         ns_link(directory, "net", ns_inode(process->net_ns, 4026531840U));
         ns_link(directory, "pid", ns_inode(process->pid_ns, 4026531836U));
-        ns_link(directory, "pid_for_children", ns_inode(process->pid_ns, 4026531836U));
+        ns_link(directory, "pid_for_children",
+                ns_inode(namespace_pid_children(process), 4026531836U));
         ns_link(directory, "user", ns_inode(process->user_ns, 4026531837U));
         ns_link(directory, "uts", ns_inode(process->uts_ns, 4026531838U));
     }
@@ -1652,6 +1676,15 @@ void procfs_init(void) {
         knob(fs, "protected_hardlinks", 1);
         knob(fs, "protected_symlinks", 1);
         knob(fs, "file-max", 65536);
+    }
+    struct vfs_node *inotify = vfs_mkdir_p("/proc/sys/fs/inotify");
+    if (inotify) {
+        inotify->mode = 0555;
+        // What fs/inotify.c enforces: no per-user cap on watches or instances,
+        // and a queue of 1 MiB, enough for 65536 events without a name.
+        virtual_file(inotify, "max_user_watches", proc_knob_read, 2147483647);
+        virtual_file(inotify, "max_user_instances", proc_knob_read, 2147483647);
+        virtual_file(inotify, "max_queued_events", proc_knob_read, 65536);
     }
 
     struct vfs_node *net = vfs_mkdir_p("/proc/net");

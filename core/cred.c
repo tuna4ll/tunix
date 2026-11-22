@@ -87,6 +87,8 @@ int cred_may_search(const char *path) {
         struct vfs_node *directory = vfs_lookup(prefix);
         prefix[index] = '/';
         if (!directory) return missing(prefix);
+        // A file in the middle of a path is ENOTDIR before any permission.
+        if ((directory->flags & 0xFFU) != VFS_DIRECTORY) return -ENOTDIR;
         int status = cred_may(directory, CRED_EXEC);
         if (status != 0) return status;
     }

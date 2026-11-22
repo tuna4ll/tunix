@@ -26,6 +26,8 @@ static void timerfd_guard_release(int *unused) {
 
 struct timerfd_context {
     int clock_id;
+    int cancel_on_set;              // TFD_TIMER_CANCEL_ON_SET
+    uint64_t realtime_generation;   // the clock it was armed against
     uint64_t interval_ns;
     uint64_t next_expiration_ns;
     uint64_t pending_expirations;
@@ -127,6 +129,8 @@ int timerfd_settime(struct timerfd_context *context, int flags,
         return -EINVAL;
     context->interval_ns = interval;
     context->pending_expirations = 0;
+    context->cancel_on_set = (flags & TFD_TIMER_CANCEL_ON_SET) != 0;
+    context->realtime_generation = time_realtime_generation();
     if (!initial) {
         context->next_expiration_ns = 0;
     } else if (flags & TFD_TIMER_ABSTIME) {
@@ -142,6 +146,12 @@ int timerfd_settime(struct timerfd_context *context, int flags,
 int64_t timerfd_read(struct timerfd_context *context, size_t size, void *buffer) {
     TIMERFD_LOCKED;
     if (!context || !buffer || size < sizeof(uint64_t)) return -EINVAL;
+    if (context->cancel_on_set &&
+        context->realtime_generation != time_realtime_generation()) {
+        // The wall clock was set: as on Linux, the read reports it once.
+        context->realtime_generation = time_realtime_generation();
+        return -ECANCELED;
+    }
     refresh(context);
     if (!context->pending_expirations) {
         arm(context);
@@ -154,6 +164,9 @@ int64_t timerfd_read(struct timerfd_context *context, size_t size, void *buffer)
 
 int timerfd_read_ready(struct timerfd_context *context) {
     TIMERFD_LOCKED;
+    if (context && context->cancel_on_set &&
+        context->realtime_generation != time_realtime_generation())
+        return 1;
     refresh(context);
     if (context) arm(context);
     return context && context->pending_expirations != 0;

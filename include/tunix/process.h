@@ -292,8 +292,11 @@ struct process {
     struct seccomp_filter *seccomp_filters;
     struct user_namespace *user_ns;
     struct uts_namespace *uts_ns;
+    struct ipc_namespace *ipc_ns;  // NULL: the initial one
     struct net_namespace *net_ns;
     struct pid_namespace *pid_ns;
+    // Set by unshare(CLONE_NEWPID) or setns: the namespace children start in.
+    struct pid_namespace *pid_ns_children;
     uint64_t ns_pid;
     uint64_t ns_tgid;
     struct mount_namespace *mnt_ns;

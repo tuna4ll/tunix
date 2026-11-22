@@ -1006,8 +1006,7 @@ int process_set_fd_flags(struct process *process, int fd, uint8_t flags) {
 
 void file_table_drop(struct file_table *table, struct file *file) {
     if (!file) return;
-    if (file->kind == FILE_KIND_VFS && file->node)
-        posix_lock_release_owner(file->node, (uint64_t)(uintptr_t)table);
+    if (file->node) posix_lock_release_owner(file->node, (uint64_t)(uintptr_t)table);
     file_unref(file);
 }
 
@@ -3387,6 +3386,7 @@ int64_t process_fork_from_syscall(struct syscall_frame *frame, const struct fork
     memcpy(child->signal_actions, parent->signal_actions, sizeof(child->signal_actions));
     seccomp_inherit(child, parent);
     namespace_inherit(child, parent);
+    namespace_fork_pid(child, parent);
 
     child->files = file_table_clone(parent->files);
     if (!child->files) {
@@ -3459,6 +3459,8 @@ int64_t process_clone_thread_from_syscall(struct syscall_frame *frame, uint64_t 
                                           uint64_t child_tid_user, uint64_t flags) {
     if (!current || !frame || !child_stack || child_stack >= USER_ADDRESS_LIMIT) return -EINVAL;
     if (!current->memory) return -EINVAL;
+    // As on Linux: after unshare(CLONE_NEWPID) only processes, not threads.
+    if (current->pid_ns_children) return -EINVAL;
 
     struct process *parent = current;
     struct process *child = (struct process *)kmalloc(sizeof(*child));

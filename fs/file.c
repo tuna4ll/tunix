@@ -280,7 +280,7 @@ void file_flock_release(struct file *file) {
 int file_flock(struct file *file, int operation) {
     if (!file) return -EBADF;
 
-    if (file->kind != FILE_KIND_VFS || !file->node) return -EINVAL;
+    if (!file->node) return -EINVAL;
 
     int mode = operation & ~FILE_LOCK_NB;
     struct vfs_node *node = file->node;
@@ -320,8 +320,7 @@ void file_unref(struct file *file) {
 
     file_flock_release(file);
 
-    if (file->kind == FILE_KIND_VFS && file->node)
-        posix_lock_release_owner(file->node, file_lock_owner(file));
+    if (file->node) posix_lock_release_owner(file->node, file_lock_owner(file));
     if (file->kind == FILE_KIND_PIPE_DUPLEX && file->pipe) pipe_release(file->pipe, 0);
     if (file_is_pipe(file) && file->pipe) pipe_release(file->pipe, file_pipe_writes(file));
 

@@ -50,6 +50,11 @@ struct uts_namespace {
     char domainname[UTS_FIELD_MAX];
 };
 
+// SysV shared memory and semaphores are only seen within their namespace.
+struct ipc_namespace {
+    uint32_t refs;
+};
+
 struct pid_namespace {
     struct pid_namespace *parent;
     uint32_t refs;
@@ -83,11 +88,21 @@ void namespace_assign_pid(struct process *child, const struct process *parent, i
 void namespace_inherit(struct process *child, const struct process *parent);
 void namespace_release(struct process *process);
 int64_t namespace_unshare(uint64_t flags);
+// The calling process's IPC namespace, which tags its SysV objects; NULL is the initial one.
+const void *ipc_ns_current(void);
+// A forked child starts in its parent's pid_ns_children, if one is set.
+void namespace_fork_pid(struct process *child, const struct process *parent);
+// setns(2): joins target's namespaces in kinds (CLONE_NEW* flags); with
+// children, pid means target's pid_for_children.
+int64_t namespace_join(struct process *target, uint64_t kinds, int children);
+// The namespace /proc/PID/ns shows for pid_for_children.
+const void *namespace_pid_children(const struct process *process);
 int64_t namespace_apply_clone(struct process *child, uint64_t flags);
 
 #define CAP_NET_ADMIN  12
 #define CAP_SYS_CHROOT 18
 #define CAP_SYS_ADMIN  21
+#define CAP_SYS_TIME   25
 #define CAP_LAST_CAP   40
 #define CAP_ALL        ((1ULL << (CAP_LAST_CAP + 1)) - 1)
 

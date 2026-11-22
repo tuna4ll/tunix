@@ -30,6 +30,7 @@
 #include <tunix/posix_timer.h>
 #include <tunix/power.h>
 #include <tunix/process.h>
+#include <tunix/procfs.h>
 #include <tunix/ptrace.h>
 #include <tunix/seccomp.h>
 #include <tunix/namespace.h>
@@ -228,6 +229,10 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136,
 #define SYS_FCHMOD                 91
 #define SYS_UMASK                  95
 #define SYS_GETTIMEOFDAY           96
+#define SYS_ADJTIMEX               159
+#define SYS_SETTIMEOFDAY           164
+#define SYS_CLOCK_SETTIME          227
+#define SYS_CLOCK_ADJTIME          305
 #define SYS_GETRLIMIT              97
 #define SYS_SETRLIMIT              160
 #define SYS_GETRUSAGE              98
@@ -277,6 +282,7 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136,
 #define SYS_SECCOMP                317
 #define SYS_PTRACE                 101
 #define SYS_UNSHARE                272
+#define SYS_SETNS                  308
 #define SECCOMP_SI_CODE            1
 #define SYS_GETTID                 186
 #define SYS_FUTEX                  202
@@ -308,6 +314,9 @@ _Static_assert(offsetof(struct syscall_frame, user_rsp) == 136,
 #define SYS_PSELECT6               270
 #define SYS_PPOLL                  271
 #define SYS_UTIMENSAT              280
+#define SYS_UTIME                  132
+#define SYS_UTIMES                 235
+#define SYS_FUTIMESAT              261
 #define SYS_EPOLL_PWAIT            281
 #define SYS_SIGNALFD               282
 #define SYS_TIMERFD_CREATE         283
@@ -3022,7 +3031,10 @@ static int64_t sys_fcntl_lock(int fd, int command, uint64_t user_lock) {
     struct process *process = process_current();
     struct file *file = fd_file(fd);
     if (!file) return -EBADF;
-    if (file->kind != FILE_KIND_VFS || !file->node) return -EINVAL;
+    // As on Linux, terminals and devices take locks as files do; they are kept
+    // on the node. shortcut: pipes and sockets have no node here and refuse;
+    // give them one if a program locks them.
+    if (!file->node) return -EINVAL;
 
     struct linux_flock lock;
     if (copy_from_user(&lock, user_lock, sizeof(lock)) != 0) return -EFAULT;
@@ -3206,6 +3218,10 @@ static int64_t sys_ioctl(int fd, unsigned long request, uint64_t user_argument) 
         return (file->node->flags & 0xFFU) == VFS_FILE ? -EOPNOTSUPP : -EINVAL;
     }
 
+    if (request == 0x5451UL || request == 0x5450UL) {  // FIOCLEX, FIONCLEX
+        process_set_fd_flags(process, fd, request == 0x5451UL ? PROCESS_FD_CLOEXEC : 0);
+        return 0;
+    }
     if (request == FIONBIO) {
         int32_t enabled;
         if (!user_argument || copy_from_user(&enabled, user_argument, sizeof(enabled)) != 0)
@@ -3219,6 +3235,9 @@ static int64_t sys_ioctl(int fd, unsigned long request, uint64_t user_argument) 
         int32_t available = 0;
         switch (file->kind) {
         case FILE_KIND_SOCKET: available = (int32_t)unix_socket_read_available(file->socket); break;
+        case FILE_KIND_INET_SOCKET:
+            available = (int32_t)inet_socket_read_available(file->inet_socket);
+            break;
         case FILE_KIND_NETLINK_SOCKET:
             available = (int32_t)netlink_socket_next_length(file->netlink_socket);
             break;
@@ -3900,7 +3919,9 @@ static int64_t sys_unlink_at(int dirfd, uint64_t user_path, int flags) {
 
 static int64_t sys_rename_at(int old_dirfd, uint64_t user_old_path, int new_dirfd,
                              uint64_t user_new_path, unsigned flags) {
-    if (flags != 0) return -EINVAL;
+    // RENAME_NOREPLACE only: exchange and whiteouts are not supported, which
+    // Linux also reports as EINVAL for file systems without them.
+    if (flags & ~1U) return -EINVAL;
     VFS_PATH_SCOPED old_path = NULL;
     VFS_PATH_SCOPED new_path = NULL;
     int status = copy_path_at(old_dirfd, user_old_path, &old_path);
@@ -3913,6 +3934,7 @@ static int64_t sys_rename_at(int old_dirfd, uint64_t user_old_path, int new_dirf
     int permitted = cred_may_remove(old_path, node);
     if (permitted != 0) return permitted;
     struct vfs_node *existing = vfs_lookup_nofollow(new_path);
+    if ((flags & 1U) && existing) return -EEXIST;
     permitted = existing ? cred_may_remove(new_path, existing) : cred_may_write_parent(new_path);
     if (permitted != 0) return permitted;
     if (vfs_node_is_swapfile(node) || (existing && vfs_node_is_swapfile(existing))) return -EPERM;
@@ -4172,7 +4194,36 @@ static int64_t sys_fchmod(int fd, uint32_t mode) {
 #define UTIME_NOW  0x3FFFFFFF
 #define UTIME_OMIT 0x3FFFFFFE
 
+static int64_t utimens_at(int dirfd, uint64_t user_path, const struct linux_timespec *given,
+                          int flags);
+
 static int64_t sys_utimens_at(int dirfd, uint64_t user_path, uint64_t user_times, int flags) {
+    struct linux_timespec times[2];
+    if (user_times && copy_from_user(times, user_times, sizeof(times)) != 0) return -EFAULT;
+    return utimens_at(dirfd, user_path, user_times ? times : NULL, flags);
+}
+
+// utimes and futimesat take microseconds, utime whole seconds; NULL means now.
+static int64_t sys_utimes_at(int dirfd, uint64_t user_path, uint64_t user_times, int seconds) {
+    if (!user_times) return utimens_at(dirfd, user_path, NULL, 0);
+    struct linux_timespec times[2];
+    if (seconds) {
+        int64_t value[2];
+        if (copy_from_user(value, user_times, sizeof(value)) != 0) return -EFAULT;
+        for (int index = 0; index < 2; index++) times[index] = (struct linux_timespec){value[index], 0};
+    } else {
+        struct linux_timeval value[2];
+        if (copy_from_user(value, user_times, sizeof(value)) != 0) return -EFAULT;
+        for (int index = 0; index < 2; index++) {
+            if (value[index].tv_usec < 0 || value[index].tv_usec >= 1000000) return -EINVAL;
+            times[index] = (struct linux_timespec){value[index].tv_sec, value[index].tv_usec * 1000};
+        }
+    }
+    return utimens_at(dirfd, user_path, times, 0);
+}
+
+static int64_t utimens_at(int dirfd, uint64_t user_path, const struct linux_timespec *given,
+                          int flags) {
     if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)) return -EINVAL;
 
     struct vfs_node *node = NULL;
@@ -4196,16 +4247,15 @@ static int64_t sys_utimens_at(int dirfd, uint64_t user_path, uint64_t user_times
     }
     if (node->flags & VFS_READONLY) return -EROFS;
 
-    if (!cred_owns(node) && (user_times || cred_may(node, CRED_WRITE) != 0)) return -EPERM;
+    if (!cred_owns(node) && (given || cred_may(node, CRED_WRITE) != 0)) return -EPERM;
 
-    if (!user_times) {
+    if (!given) {
         vfs_stamp_times(node, VFS_TIME_ATIME | VFS_TIME_MTIME | VFS_TIME_CTIME);
         vfs_notify_meta_changed(node);
         return 0;
     }
 
-    struct linux_timespec times[2];
-    if (copy_from_user(times, user_times, sizeof(times)) != 0) return -EFAULT;
+    const struct linux_timespec *times = given;
 
     uint64_t clock = time_realtime_ns();
     uint32_t now = (uint32_t)(clock / 1000000000ULL);
@@ -5459,6 +5509,169 @@ static int64_t sys_gettimeofday(uint64_t user_time) {
     return copy_to_user(user_time, &value, sizeof(value)) == 0 ? 0 : -EFAULT;
 }
 
+struct linux_timex {
+    uint32_t modes;
+    int32_t pad0;
+    int64_t offset, freq, maxerror, esterror;
+    int32_t status;
+    int32_t pad1;
+    int64_t constant, precision, tolerance;
+    int64_t time_sec, time_usec;
+    int64_t tick, ppsfreq, jitter;
+    int32_t shift;
+    int32_t pad2;
+    int64_t stabil, jitcnt, calcnt, errcnt, stbcnt;
+    int32_t tai;
+    int32_t reserved[11];
+};
+_Static_assert(sizeof(struct linux_timex) == 208, "struct timex is 208 bytes");
+
+#define ADJ_OFFSET            0x0001
+#define ADJ_FREQUENCY         0x0002
+#define ADJ_MAXERROR          0x0004
+#define ADJ_ESTERROR          0x0008
+#define ADJ_STATUS            0x0010
+#define ADJ_TIMECONST         0x0020
+#define ADJ_TAI               0x0080
+#define ADJ_SETOFFSET         0x0100
+#define ADJ_MICRO             0x1000
+#define ADJ_NANO              0x2000
+#define ADJ_TICK              0x4000
+#define ADJ_OFFSET_SINGLESHOT 0x8001
+#define ADJ_OFFSET_SS_READ    0xA001
+#define STA_UNSYNC            0x0040
+#define STA_NANO              0x2000
+#define TIME_OK               0
+#define TIME_ERROR            5
+
+// NTP bookkeeping that adjtimex keeps and reports; it does not steer the clock.
+static struct {
+    int32_t status;
+    int64_t maxerror, esterror, constant;
+    int32_t tai;
+} ntp_state = {STA_UNSYNC, 16000000, 16000000, 2, 0};
+
+static int may_set_time(void) { return user_ns_initial_has_cap(CAP_SYS_TIME); }
+
+static int64_t sys_clock_settime(int clock_id, uint64_t user_time) {
+    if (clock_id != 0 /* CLOCK_REALTIME */) return -EINVAL;
+    struct linux_timespec value;
+    if (copy_from_user(&value, user_time, sizeof(value)) != 0) return -EFAULT;
+    if (value.tv_sec < 0 || value.tv_nsec < 0 || value.tv_nsec >= 1000000000LL) return -EINVAL;
+    if (!may_set_time()) return -EPERM;
+    time_set_realtime_ns((uint64_t)value.tv_sec * 1000000000ULL + (uint64_t)value.tv_nsec);
+    return 0;
+}
+
+static int64_t sys_settimeofday(uint64_t user_time, uint64_t user_zone) {
+    (void)user_zone;  // the time zone kernels kept is obsolete and unused here
+    if (!user_time) return user_zone && !may_set_time() ? -EPERM : 0;
+    struct linux_timeval value;
+    if (copy_from_user(&value, user_time, sizeof(value)) != 0) return -EFAULT;
+    if (value.tv_sec < 0 || value.tv_usec < 0 || value.tv_usec >= 1000000LL) return -EINVAL;
+    if (!may_set_time()) return -EPERM;
+    time_set_realtime_ns((uint64_t)value.tv_sec * 1000000000ULL + (uint64_t)value.tv_usec * 1000ULL);
+    return 0;
+}
+
+static int64_t sys_adjtimex(int clock_id, uint64_t user_timex) {
+    if (clock_id != 0) return -EINVAL;
+    struct linux_timex value;
+    if (copy_from_user(&value, user_timex, sizeof(value)) != 0) return -EFAULT;
+    uint32_t modes = value.modes;
+    int nano = (modes & ADJ_NANO) || (!(modes & ADJ_MICRO) && (ntp_state.status & STA_NANO));
+    if (modes == ADJ_OFFSET_SS_READ) {
+        modes = 0;
+        nano = 0;  // adjtime() reads what is left in microseconds; 0xA001 is not ADJ_NANO
+    } else if (modes) {
+        if (!may_set_time()) return -EPERM;
+        // shortcut: no kernel PLL or frequency/tick discipline; ntpd-style
+        // ADJ_OFFSET, ADJ_FREQUENCY and ADJ_TICK are refused. Add them with an
+        // NTP client that needs them; steps, adjtime slews and the reported
+        // NTP state work.
+        if (modes != ADJ_OFFSET_SINGLESHOT &&
+            (modes & (ADJ_OFFSET | ADJ_FREQUENCY | ADJ_TICK)))
+            return -EINVAL;
+    }
+    if (modes == ADJ_OFFSET_SINGLESHOT) {
+        // adjtime(): offset in microseconds, slewed gradually.
+        if (value.offset < -512000000LL || value.offset > 512000000LL) return -EINVAL;
+        int64_t left = time_slew_realtime_ns(value.offset * 1000LL, 1);
+        value.offset = left / 1000LL;
+    } else {
+        int64_t left = time_slew_realtime_ns(0, 0);
+        value.offset = nano ? left : left / 1000LL;
+        if (modes & ADJ_SETOFFSET) {
+            int64_t sub = value.time_usec;
+            if (sub < 0 || sub >= (nano ? 1000000000LL : 1000000LL)) return -EINVAL;
+            time_step_realtime_ns(value.time_sec * 1000000000LL + (nano ? sub : sub * 1000LL));
+        }
+        if (modes & ADJ_MAXERROR) ntp_state.maxerror = value.maxerror;
+        if (modes & ADJ_ESTERROR) ntp_state.esterror = value.esterror;
+        if (modes & ADJ_TIMECONST) ntp_state.constant = value.constant;
+        if (modes & ADJ_TAI) ntp_state.tai = (int32_t)value.constant;
+        if (modes & ADJ_STATUS) ntp_state.status = value.status;
+        if (modes & ADJ_NANO) ntp_state.status |= STA_NANO;
+        if (modes & ADJ_MICRO) ntp_state.status &= ~STA_NANO;
+    }
+    uint64_t now = time_realtime_ns();
+    value.freq = 0;
+    value.maxerror = ntp_state.maxerror;
+    value.esterror = ntp_state.esterror;
+    value.status = ntp_state.status;
+    value.constant = ntp_state.constant;
+    value.precision = 1;
+    value.tolerance = 32768000;  // 500 ppm, scaled by 2^16 as Linux reports it
+    value.time_sec = (int64_t)(now / 1000000000ULL);
+    value.time_usec = (int64_t)(now % 1000000000ULL);
+    if (!(ntp_state.status & STA_NANO)) value.time_usec /= 1000;
+    value.tick = 10000;
+    value.tai = ntp_state.tai;
+    if (copy_to_user(user_timex, &value, sizeof(value)) != 0) return -EFAULT;
+    return (ntp_state.status & STA_UNSYNC) ? TIME_ERROR : TIME_OK;
+}
+
+static uint64_t ns_kind_flag(const char *kind) {
+    if (!strcmp(kind, "net")) return CLONE_NEWNET;
+    if (!strcmp(kind, "uts")) return CLONE_NEWUTS;
+    if (!strcmp(kind, "mnt")) return CLONE_NEWNS;
+    if (!strcmp(kind, "pid") || !strcmp(kind, "pid_for_children")) return CLONE_NEWPID;
+    if (!strcmp(kind, "user")) return CLONE_NEWUSER;
+    if (!strcmp(kind, "ipc")) return CLONE_NEWIPC;
+    if (!strcmp(kind, "cgroup")) return CLONE_NEWCGROUP;
+    return 0;
+}
+
+// setns: from an open /proc/PID/ns entry, or from a pidfd with a set of kinds.
+static int64_t sys_setns(int fd, uint64_t nstype) {
+    struct file *file = fd_file(fd);
+    if (!file) return -EBADF;
+    uint64_t pid;
+    char kind[24];
+    uint64_t kinds = nstype;
+    int children = 0;
+    if (file->kind == FILE_KIND_PIDFD) {
+        pid = file->pidfd_pid;
+    } else {
+        if (file->kind != FILE_KIND_VFS ||
+            procfs_ns_entry(file->node, &pid, kind, sizeof(kind)) != 0)
+            return -EINVAL;
+        uint64_t flag = ns_kind_flag(kind);
+        if (!flag || (nstype && nstype != flag)) return -EINVAL;
+        kinds = flag;
+        children = !strcmp(kind, "pid_for_children");
+    }
+    // shortcut: an entry names a process, not the namespace, so setns fails
+    // once that process is gone; give entries a reference to the namespace
+    // itself if a program keeps them open to rejoin later.
+    struct process *target = process_get(pid);
+    int64_t status = -ESRCH;
+    if (target && target->state != PROCESS_ZOMBIE && target->state != PROCESS_DEAD)
+        status = namespace_join(target, kinds, children);
+    if (target) process_put(target);
+    return status;
+}
+
 static int64_t sys_getrandom(uint64_t user_buffer, size_t length, unsigned flags) {
     if (flags & ~(GRND_NONBLOCK | GRND_RANDOM | GRND_INSECURE)) return -EINVAL;
     uint8_t bytes[64];
@@ -5852,7 +6065,8 @@ static int64_t sys_clone_fork_compat(struct syscall_frame *frame, uint64_t flags
     }
 
     uint64_t fork_ns =
-        flags & (CLONE_NEWUSER | CLONE_NEWUTS | CLONE_NEWNET | CLONE_NEWPID | CLONE_NEWNS);
+        flags & (CLONE_NEWUSER | CLONE_NEWUTS | CLONE_NEWNET | CLONE_NEWPID | CLONE_NEWNS |
+                 CLONE_NEWIPC);
     uint64_t unsupported = flags & ~(0xFFULL | CLONE_FORK_METADATA_FLAGS | CLONE_FS | fork_ns);
     if (unsupported != 0 || (flags & CLONE_FORK_REJECT_FLAGS & ~CLONE_FS) != 0 ||
         (flags & CLONE_NAMESPACE_FLAGS & ~fork_ns) != 0) {
@@ -6034,6 +6248,16 @@ static int64_t sys_epoll_ctl(int epoll_fd, int operation, int target_fd, uint64_
         if (!user_event || copy_from_user(&event, user_event, sizeof(event)) != 0) return -EFAULT;
     } else {
         memset(&event, 0, sizeof(event));
+    }
+    if (operation == EPOLL_CTL_ADD && target_file->kind == FILE_KIND_VFS && target_file->node) {
+        // As on Linux: files and directories of a disk or tmpfs cannot be polled.
+        struct vfs_node *node = target_file->node;
+        uint32_t kind = node->flags & 0xFFU;
+        // Disk files carry their inode; tmpfs ones have no reader. procfs and
+        // sysfs files, which Linux lets epoll watch, have a reader instead.
+        if ((kind == VFS_FILE || kind == VFS_DIRECTORY) && (node->disk_inode || !node->read) &&
+            !(node->file_ops && node->file_ops->poll))
+            return -EPERM;
     }
     if (operation == EPOLL_CTL_ADD)
         return epoll_ctl_add(epoll_file->epoll, target_fd, target_file, &event);
@@ -7522,6 +7746,16 @@ static void syscall_run(struct syscall_frame *frame) {
     case SYS_GETTIMEOFDAY:
         SYSCALL_RET(frame) = (uint64_t)sys_gettimeofday(SYSCALL_ARG0(frame));
         break;
+    case SYS_SETTIMEOFDAY:
+        SYSCALL_RET(frame) = (uint64_t)sys_settimeofday(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame));
+        break;
+    case SYS_CLOCK_SETTIME:
+        SYSCALL_RET(frame) = (uint64_t)sys_clock_settime((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame));
+        break;
+    case SYS_ADJTIMEX: SYSCALL_RET(frame) = (uint64_t)sys_adjtimex(0, SYSCALL_ARG0(frame)); break;
+    case SYS_CLOCK_ADJTIME:
+        SYSCALL_RET(frame) = (uint64_t)sys_adjtimex((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame));
+        break;
     case SYS_GETRLIMIT:
         SYSCALL_RET(frame) = (uint64_t)sys_prlimit(0, SYSCALL_ARG0(frame), 0, SYSCALL_ARG1(frame));
         break;
@@ -7593,17 +7827,17 @@ static void syscall_run(struct syscall_frame *frame) {
     }
 
     case SYS_SCHED_GET_PRIORITY_MAX:
-        SYSCALL_RET(frame) =
-            (SYSCALL_ARG0(frame) == PROCESS_SCHED_FIFO || SYSCALL_ARG0(frame) == PROCESS_SCHED_RR)
-            ? PROCESS_RT_PRIORITY_MAX
-            : 0;
+    case SYS_SCHED_GET_PRIORITY_MIN: {
+        uint64_t policy = SYSCALL_ARG0(frame);
+        int realtime = policy == PROCESS_SCHED_FIFO || policy == PROCESS_SCHED_RR;
+        int known = realtime || policy == PROCESS_SCHED_OTHER || policy == PROCESS_SCHED_BATCH ||
+            policy == PROCESS_SCHED_IDLE;
+        SYSCALL_RET(frame) = !known ? (uint64_t)-(int64_t)EINVAL
+            : !realtime             ? 0
+            : syscall_number == SYS_SCHED_GET_PRIORITY_MAX ? PROCESS_RT_PRIORITY_MAX
+                                                           : 1;
         break;
-    case SYS_SCHED_GET_PRIORITY_MIN:
-        SYSCALL_RET(frame) =
-            (SYSCALL_ARG0(frame) == PROCESS_SCHED_FIFO || SYSCALL_ARG0(frame) == PROCESS_SCHED_RR)
-            ? 1
-            : 0;
-        break;
+    }
     case SYS_SCHED_RR_GET_INTERVAL: {
         struct {
             int64_t seconds;
@@ -8048,6 +8282,18 @@ static void syscall_run(struct syscall_frame *frame) {
             (uint64_t)sys_utimens_at((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame),
                                      SYSCALL_ARG2(frame), (int)SYSCALL_ARG3(frame));
         break;
+    case SYS_UTIME:
+        SYSCALL_RET(frame) =
+            (uint64_t)sys_utimes_at(AT_FDCWD, SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), 1);
+        break;
+    case SYS_UTIMES:
+        SYSCALL_RET(frame) =
+            (uint64_t)sys_utimes_at(AT_FDCWD, SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), 0);
+        break;
+    case SYS_FUTIMESAT:
+        SYSCALL_RET(frame) = (uint64_t)sys_utimes_at((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame),
+                                                     SYSCALL_ARG2(frame), 0);
+        break;
     case SYS_SET_ROBUST_LIST:
         SYSCALL_RET(frame) =
             (uint64_t)sys_set_robust_list(SYSCALL_ARG0(frame), (size_t)SYSCALL_ARG1(frame));
@@ -8222,6 +8468,9 @@ static void syscall_run(struct syscall_frame *frame) {
             (uint64_t)sys_seccomp(SYSCALL_ARG0(frame), SYSCALL_ARG1(frame), SYSCALL_ARG2(frame));
         break;
     case SYS_UNSHARE: SYSCALL_RET(frame) = (uint64_t)namespace_unshare(SYSCALL_ARG0(frame)); break;
+    case SYS_SETNS:
+        SYSCALL_RET(frame) = (uint64_t)sys_setns((int)SYSCALL_ARG0(frame), SYSCALL_ARG1(frame));
+        break;
     case SYS_PTRACE:
         SYSCALL_RET(frame) =
             (uint64_t)sys_ptrace((int64_t)SYSCALL_ARG0(frame), SYSCALL_PID(SYSCALL_ARG1(frame)),

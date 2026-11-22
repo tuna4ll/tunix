@@ -2,6 +2,8 @@
 #include <stdint.h>
 #include <tunix/cred.h>
 #include <tunix/errno.h>
+#include <tunix/namespace.h>
+#include <tunix/sysvipc.h>
 #include <tunix/heap.h>
 #include <tunix/kstring.h>
 #include <tunix/lock.h>
@@ -51,6 +53,7 @@ struct sem_set {
     uint32_t generation;
     uint32_t sleepers;
     struct sem *sems;
+    const void *ns;  // its IPC namespace
 };
 
 struct sem_undo {
@@ -81,7 +84,8 @@ static int64_t current_tgid(void) {
 
 static int make_id(int slot, uint32_t seq) { return (int)(seq % 32768U) * SEM_SETS_MAX + slot; }
 
-static struct sem_set *find_by_id(int id) {
+// Any namespace: undo at exit applies to sets the process left behind.
+static struct sem_set *find_by_id_anywhere(int id) {
     if (id < 0) return NULL;
     int slot = id % SEM_SETS_MAX;
     struct sem_set *set = sets[slot];
@@ -89,10 +93,17 @@ static struct sem_set *find_by_id(int id) {
     return set;
 }
 
+static struct sem_set *find_by_id(int id) {
+    struct sem_set *set = find_by_id_anywhere(id);
+    return set && set->ns == ipc_ns_current() ? set : NULL;
+}
+
 static struct sem_set *find_by_key(int32_t key) {
     if (key == IPC_PRIVATE) return NULL;
     for (int slot = 0; slot < SEM_SETS_MAX; slot++)
-        if (sets[slot] && !sets[slot]->removed && sets[slot]->key == key) return sets[slot];
+        if (sets[slot] && !sets[slot]->removed && sets[slot]->key == key &&
+            sets[slot]->ns == ipc_ns_current())
+            return sets[slot];
     return NULL;
 }
 
@@ -195,6 +206,7 @@ int sysvsem_get(int32_t key, int count, int flags) {
     set->count = (uint32_t)count;
     set->ctime = now_seconds();
     set->sems = sems;
+    set->ns = ipc_ns_current();
     sets[slot] = set;
     int id = set->id;
     lock_release(&sem_lock);
@@ -550,7 +562,7 @@ void sysvsem_exit(int64_t tgid) {
             continue;
         }
         *link = undo->next;
-        struct sem_set *set = find_by_id(undo->id);
+        struct sem_set *set = find_by_id_anywhere(undo->id);
         if (set) {
             int changed = 0;
             for (uint32_t index = 0; index < undo->count && index < set->count; index++) {
@@ -570,5 +582,12 @@ void sysvsem_exit(int64_t tgid) {
         kfree(undo->adjust);
         kfree(undo);
     }
+    lock_release(&sem_lock);
+}
+
+void sysvsem_namespace_gone(const void *ns) {
+    lock_acquire(&sem_lock);
+    for (int slot = 0; slot < SEM_SETS_MAX; slot++)
+        if (sets[slot] && !sets[slot]->removed && sets[slot]->ns == ns) destroy(sets[slot]);
     lock_release(&sem_lock);
 }
