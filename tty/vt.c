@@ -1,3 +1,4 @@
+#define TIOCSWINSZ 0x5414UL
 #include <stddef.h>
 #include <stdint.h>
 #include <tunix/workqueue.h>
@@ -443,6 +444,15 @@ int64_t vt_node_ioctl(struct vfs_node *node, unsigned long request, uint64_t use
         memset(&winsize, 0, sizeof(winsize));
         terminal_get_dimensions(&winsize.rows, &winsize.columns);
         return copy_to_user(user_argument, &winsize, sizeof(winsize)) == 0 ? 0 : -EFAULT;
+    }
+    case TIOCSWINSZ: {
+        // The console's size is the framebuffer's; setting the size it already has is
+        // allowed, as programs that restore a saved size do, and any other refused.
+        struct linux_winsize wanted, current;
+        if (copy_from_user(&wanted, user_argument, sizeof(wanted)) != 0) return -EFAULT;
+        memset(&current, 0, sizeof(current));
+        terminal_get_dimensions(&current.rows, &current.columns);
+        return wanted.rows == current.rows && wanted.columns == current.columns ? 0 : -EINVAL;
     }
     case TUNIX_KDGKBMAP: {
         struct tunix_keymap map;

@@ -7,9 +7,29 @@ Two host controllers, one transport above them.
 | `drivers/usb/xhci.c` | xHCI (USB 3.x), all of them | keyboards, mice, hubs, mass storage, hot-plug |
 | `drivers/usb/ehci.c` | EHCI (USB 2.0), all of them | keyboards, mice, mass storage, behind one hub |
 
-`drivers/usb/usb.c` is the seam between them and
-`drivers/usb/usb_storage.c`, which speaks the bulk-only transport and
-SCSI on top of it. A host offers two things -- how many mass-storage devices it
+`drivers/usb/usb.c` is the seam between them and what runs on devices: class
+drivers, and `drivers/usb/usb_storage.c`, which speaks the bulk-only transport
+and SCSI on top of it.
+
+## The device model
+
+Once a controller has configured a device it hands it to the core with
+`usb_device_added()`: its device descriptor, its interfaces (class, subclass,
+protocol, the first interrupt IN endpoint, the HID report descriptor length),
+and a `usb_host_ops` table -- a control transfer, opening and closing an
+interrupt IN pipe whose reports go to a callback, and the host's lock. The core
+names it (`x0-3`, `e1-2.4` for controller and port), publishes it in sysfs with
+a `modalias`, and offers each interface to every registered `usb_driver` whose
+id table matches. `usb_device_removed()` on unplug calls each bound driver's
+`disconnect` before the controller frees the slot; unloading a driver
+disconnects it from every device it holds.
+
+HID is such a driver, `drivers/usb/usbhid.c`, a module. It parses the report
+descriptor to tell a relative mouse from an absolute tablet, falls back to the
+boot protocol when it cannot, opens the interrupt pipe and turns reports into
+input events. Neither host controller knows anything about HID any more.
+
+For mass storage the old seam stays: A host offers two things -- how many mass-storage devices it
 found, and a synchronous bulk transfer to one of them -- and the transport
 numbers the devices of every registered controller in one flat list. Nothing
 above a controller learns which kind it is.

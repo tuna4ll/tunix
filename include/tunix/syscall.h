@@ -77,4 +77,11 @@ void syscall_orphan_pins(struct process *process);
 void syscall_release_orphans(void);
 void syscall_unref_later(struct file *file);
 
+struct vfs_node;
+#define MAX_SHEBANG_LINE 256
+// 1 and the interpreter (and its one optional argument) for a "#!" script, 0 for
+// anything else, a negative errno for a malformed line.
+int exec_parse_shebang(struct vfs_node *file, char interpreter[MAX_SHEBANG_LINE],
+                       char optional_argument[MAX_SHEBANG_LINE]);
+
 #endif

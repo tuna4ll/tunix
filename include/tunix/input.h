@@ -21,6 +21,7 @@ void input_external_tablet(int32_t x, int32_t y, int32_t x_max, int32_t y_max, i
                            uint8_t buttons);
 void input_irq(void);
 int input_mouse_available(void);
+void input_usb_pointer(int delta);
 int input_get_device_info(unsigned device_id, struct tunix_input_device_info *info);
 
 void input_scancode_open(void);

@@ -586,7 +586,6 @@ struct linux_clone_args {
 
 #define MAX_ARG_STRLEN (128U * 1024U)
 
-#define MAX_SHEBANG_LINE 256
 
 struct linux_timespec {
     int64_t tv_sec;
@@ -1416,6 +1415,24 @@ static int normalize_path(struct vfs_node *base, const char *input, char *output
         }
         if (length == 1 && component[0] == '.') continue;
         if (length == 2 && component[0] == '.' && component[1] == '.') {
+            // ".." after a symlink is the parent of what the link points to, not of the
+            // directory the link is in: POSIX resolves the link first.
+            output[out] = '\0';
+            if (out > floor) {
+                // What ".." goes up from has to exist and be a directory, as on Linux:
+                // "missing/.." is ENOENT, not ".".
+                struct vfs_node *link = vfs_lookup_nofollow(output);
+                if (!link) return -ENOENT;
+                if ((link->flags & 0xFFU) != VFS_SYMLINK && (link->flags & 0xFFU) != VFS_DIRECTORY)
+                    return -ENOTDIR;
+                if ((link->flags & 0xFFU) == VFS_SYMLINK) {
+                    struct vfs_node *target = vfs_lookup(output);
+                    if (!target) return -ENOENT;
+                    if ((target->flags & 0xFFU) != VFS_DIRECTORY) return -ENOTDIR;
+                    if (vfs_node_path(target, output, VFS_PATH_MAX) != 0) return -ENAMETOOLONG;
+                    out = strlen(output);
+                }
+            }
             if (out > floor) {
                 if (output[out - 1] == '/') out--;
                 while (out > floor && output[out - 1] != '/') out--;
@@ -1561,6 +1578,15 @@ static int64_t lookup_errno(const char *path, int follow) {
     return error ? -error : -ENOENT;
 }
 
+// Whether the path as the caller wrote it ends in '/', which normalizing drops: it
+// demands a directory.
+static int user_path_ends_in_slash(uint64_t user_path) {
+    VFS_PATH_SCOPED raw = vfs_path_buffer();
+    if (!raw || copy_user_path(user_path, raw) != 0) return 0;
+    size_t length = strlen(raw);
+    return length > 1 && raw[length - 1] == '/';
+}
+
 static int64_t open_at(int dirfd, uint64_t user_path, uint64_t flags, uint64_t mode) {
     uint64_t supported = O_ACCMODE | O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC | O_APPEND | O_NONBLOCK |
         O_DSYNC | O_ASYNC | O_DIRECT | O_LARGEFILE | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC |
@@ -1605,8 +1631,7 @@ static int64_t open_at(int dirfd, uint64_t user_path, uint64_t flags, uint64_t m
         if (flags & O_DIRECTORY) return -EINVAL;
         int missing = vfs_lookup_error(path, !(flags & O_NOFOLLOW));
         if (missing && missing != ENOENT) return -missing;
-        size_t path_length = strlen(path);
-        if (path_length > 1 && path[path_length - 1] == '/') return -EISDIR;
+        if (user_path_ends_in_slash(user_path)) return -EISDIR;
         int permitted = cred_may_write_parent(path);
         if (permitted != 0) return permitted;
         node = vfs_create_file_node(path, mode_after_umask(mode));
@@ -1629,6 +1654,7 @@ static int64_t open_at(int dirfd, uint64_t user_path, uint64_t flags, uint64_t m
     uint32_t kind = node->flags & 0xFFU;
     if ((flags & O_NOFOLLOW) && kind == VFS_SYMLINK && !(flags & O_PATH)) return -ELOOP;
     if ((flags & O_DIRECTORY) && kind != VFS_DIRECTORY) return -ENOTDIR;
+    if (kind != VFS_DIRECTORY && !created && user_path_ends_in_slash(user_path)) return -ENOTDIR;
     if (!(flags & O_PATH) && kind == VFS_DIRECTORY && (flags & O_ACCMODE) != O_RDONLY)
         return -EISDIR;
     if (!(flags & O_PATH) && (node->flags & VFS_READONLY) &&
@@ -2132,18 +2158,9 @@ static uint32_t unix_source_address(struct unix_socket *socket, struct tunix_soc
     address->family = TUNIX_AF_UNIX;
     uint32_t actual = sizeof(address->family);
     if (!unix_socket_is_dgram(socket)) return actual;
-    char path[108];
+    char path[UNIX_NAME_BYTES];
     unix_socket_last_source(socket, path);
-    if (path[0] == '\x01') {
-        size_t name = strlen(path + 1);
-        memcpy(address->path + 1, path + 1, name);
-        actual += 1U + (uint32_t)name;
-    } else if (path[0]) {
-        size_t name = strlen(path);
-        memcpy(address->path, path, name + 1);
-        actual += (uint32_t)name + 1U;
-    }
-    return actual;
+    return actual + (uint32_t)unix_socket_name_to_address(path, address->path);
 }
 
 static int64_t unix_report_source(struct unix_socket *socket, uint64_t user_address,
@@ -2264,7 +2281,8 @@ static int64_t sys_recvfrom(int fd, uint64_t user_data, size_t length, int flags
     int64_t result =
         inet_socket_recvfrom(socket, data, length, flags, user_address ? address : NULL,
                              user_address ? &address_length : NULL);
-    if (result > 0 && copy_to_user(user_data, data, (size_t)result) != 0) result = -EFAULT;
+    size_t copied = result > 0 && (size_t)result > length ? length : (size_t)(result > 0 ? result : 0);
+    if (copied && copy_to_user(user_data, data, copied) != 0) result = -EFAULT;
     kfree(data);
     if (result < 0) return result;
     if (user_address) {
@@ -2700,18 +2718,22 @@ static int64_t sys_recvmsg(int fd, uint64_t user_message, int flags) {
     uint8_t address[32];
     size_t address_length =
         message.name_length < sizeof(address) ? message.name_length : sizeof(address);
-    int64_t result =
-        inet_socket_recvfrom(socket, data, capacity, flags, message.name ? address : NULL,
-                             message.name ? &address_length : NULL);
-    if (result < 0) return result;
-    if (scatter_message_data(&message, data, (size_t)result) != 0) return -EFAULT;
+    // Datagrams are asked for their whole length, so a truncated one can be flagged.
+    int boundaries = inet_socket_keeps_boundaries(socket);
+    int64_t whole =
+        inet_socket_recvfrom(socket, data, capacity, boundaries ? flags | MSG_TRUNC : flags,
+                             message.name ? address : NULL, message.name ? &address_length : NULL);
+    if (whole < 0) return whole;
+    size_t copied = (size_t)whole > capacity ? capacity : (size_t)whole;
+    int64_t result = (boundaries && (flags & MSG_TRUNC)) ? whole : (int64_t)copied;
+    if (scatter_message_data(&message, data, copied) != 0) return -EFAULT;
     if (message.name) {
         if (copy_to_user(message.name, address, address_length) != 0) return -EFAULT;
         message.name_length = (uint32_t)address_length;
     }
     size_t control_room = message.control_length;
     message.control_length = 0;
-    message.flags = 0;
+    message.flags = boundaries && (size_t)whole > capacity ? MSG_TRUNC : 0;
     if (inet_socket_wants_ttl(socket)) {
         size_t hop_length = sizeof(struct linux_cmsghdr) + sizeof(int);
         if (message.control && control_room >= cmsg_align(hop_length)) {
@@ -3619,7 +3641,10 @@ static int stat_from_file(struct file *file, struct linux_stat *stat) {
     if (file->node &&
         (file->kind == FILE_KIND_VFS || file->kind == FILE_KIND_PTY_MASTER ||
          file->kind == FILE_KIND_PTY_SLAVE || file->kind == FILE_KIND_INPUT ||
-         file->kind == FILE_KIND_FRAMEBUFFER || file->kind == FILE_KIND_EVENTFS)) {
+         file->kind == FILE_KIND_FRAMEBUFFER || file->kind == FILE_KIND_EVENTFS ||
+         // A FIFO opened by name is that node, as lstat of the name says.
+         file->kind == FILE_KIND_PIPE_READ || file->kind == FILE_KIND_PIPE_WRITE ||
+         file->kind == FILE_KIND_PIPE_DUPLEX)) {
         fill_stat(file->node, stat);
         return 0;
     }
@@ -3944,7 +3969,8 @@ static int64_t sys_mkdir_at(int dirfd, uint64_t user_path, uint64_t mode) {
     VFS_PATH_SCOPED path = NULL;
     int status = copy_path_at(dirfd, user_path, &path);
     if (status != 0) return status;
-    if (vfs_lookup(path)) return -EEXIST;
+    // Anything by that name, a dangling symlink too, is in the way: mkdir does not follow.
+    if (vfs_lookup_nofollow(path)) return -EEXIST;
     int permitted = cred_may_write_parent(path);
     if (permitted != 0) return permitted;
     return vfs_create_directory(path, mode_after_umask(mode)) ? 0 : -ENOENT;
@@ -5058,8 +5084,8 @@ static int copy_exec_vector(struct exec_arguments *arguments, uint64_t user_vect
     }
 }
 
-static int parse_shebang(struct vfs_node *file, char interpreter[MAX_SHEBANG_LINE],
-                         char optional_argument[MAX_SHEBANG_LINE]) {
+int exec_parse_shebang(struct vfs_node *file, char interpreter[MAX_SHEBANG_LINE],
+                       char optional_argument[MAX_SHEBANG_LINE]) {
     unsigned char header[MAX_SHEBANG_LINE];
     if (!file || (file->flags & 0xFFU) != VFS_FILE || file->length < 2) return 0;
     size_t amount = file->length < sizeof(header) - 1 ? (size_t)file->length : sizeof(header) - 1;
@@ -5145,7 +5171,7 @@ static int64_t sys_execve(struct syscall_frame *frame, uint64_t user_path, uint6
 
     char interpreter[MAX_SHEBANG_LINE];
     char optional_argument[MAX_SHEBANG_LINE];
-    int script = parse_shebang(file, interpreter, optional_argument);
+    int script = exec_parse_shebang(file, interpreter, optional_argument);
     if (script < 0) return script;
     if (script > 0) {
         VFS_PATH_SCOPED interpreter_path = vfs_path_buffer();
@@ -5337,13 +5363,33 @@ static int64_t sys_sysinfo(uint64_t user_buffer) {
     return copy_to_user(user_buffer, &value, sizeof(value)) == 0 ? 0 : -EFAULT;
 }
 
+// The clock an itimer counts on, and where its deadline and interval live.
+static void itimer_clock(struct process *process, int which, uint64_t **deadline,
+                         uint64_t **interval, uint64_t *now) {
+    if (which == 1) {
+        *deadline = &process->itimer_virtual_deadline_ns;
+        *interval = &process->itimer_virtual_interval_ns;
+        *now = process_user_runtime_ns(process);
+    } else if (which == 2) {
+        *deadline = &process->itimer_prof_deadline_ns;
+        *interval = &process->itimer_prof_interval_ns;
+        *now = process_runtime_ns(process);
+    } else {
+        *deadline = &process->itimer_real_deadline_ns;
+        *interval = &process->itimer_real_interval_ns;
+        *now = time_uptime_ns();
+    }
+}
+
 static int64_t sys_times(uint64_t user_buffer) {
     if (user_buffer) {
         struct linux_tms value;
         memset(&value, 0, sizeof(value));
         struct process *process = process_current();
-        if (process)
-            value.tms_utime = (int64_t)(process_runtime_ns(process) / NANOSECONDS_PER_TICK);
+        if (process) {
+            value.tms_utime = (int64_t)(process_user_runtime_ns(process) / NANOSECONDS_PER_TICK);
+            value.tms_stime = (int64_t)(process->system_runtime_ns / NANOSECONDS_PER_TICK);
+        }
         if (copy_to_user(user_buffer, &value, sizeof(value)) != 0) return -EFAULT;
     }
     return (int64_t)(time_uptime_ns() / NANOSECONDS_PER_TICK);
@@ -5359,11 +5405,19 @@ static int64_t sys_getrusage(uint64_t user_buffer) {
 
     struct process *process = process_current();
     if (process) {
-        uint64_t nanoseconds = process_runtime_ns(process);
+        uint64_t nanoseconds = process_user_runtime_ns(process);
         utime.seconds = (int64_t)(nanoseconds / 1000000000ULL);
         utime.microseconds = (int64_t)((nanoseconds % 1000000000ULL) / 1000ULL);
     }
     memcpy(value, &utime, sizeof(utime));
+    if (process) {
+        struct {
+            int64_t seconds;
+            int64_t microseconds;
+        } stime = {(int64_t)(process->system_runtime_ns / 1000000000ULL),
+                   (int64_t)((process->system_runtime_ns % 1000000000ULL) / 1000ULL)};
+        memcpy(value + sizeof(utime), &stime, sizeof(stime));
+    }
     if (process) {
         memcpy(value + 128, &process->voluntary_switches, sizeof(uint64_t));
         memcpy(value + 136, &process->involuntary_switches, sizeof(uint64_t));
@@ -6883,15 +6937,20 @@ static int64_t sys_pidfd_send_signal(int fd, int signal_number, uint64_t user_in
                                      uint32_t flags) {
     if (flags) return -EINVAL;
     struct file *file = file_from_fd(fd);
-    if (!file || file->kind != FILE_KIND_PIDFD) return -EBADF;
-    if (process_pidfd_reaped(file->pidfd_pid, file->pidfd_start_ns)) return -ESRCH;
-    if (!user_info) return process_send_signal_checked((int64_t)file->pidfd_pid, signal_number);
+    if (!file) return -EBADF;
+    uint64_t pid = 0;
+    if (file->kind == FILE_KIND_PIDFD) {
+        if (process_pidfd_reaped(file->pidfd_pid, file->pidfd_start_ns)) return -ESRCH;
+        pid = file->pidfd_pid;
+    } else if (file->kind != FILE_KIND_VFS || procfs_process_directory(file->node, &pid) != 0) {
+        return -EBADF;
+    }
+    if (!user_info) return process_send_signal_checked((int64_t)pid, signal_number);
     if (signal_number < 0 || signal_number > TUNIX_NSIG) return -EINVAL;
     struct signal_info info;
-    int status = copy_queued_info(user_info, signal_number,
-                                  file->pidfd_pid == process_current()->tgid, 0, &info);
+    int status = copy_queued_info(user_info, signal_number, pid == process_current()->tgid, 0, &info);
     if (status != 0) return status;
-    return process_send_signal_info((int64_t)file->pidfd_pid, &info);
+    return process_send_signal_info((int64_t)pid, &info);
 }
 
 static int ptrace_syscall_entry(struct process *caller, struct syscall_frame *frame,
@@ -6918,6 +6977,7 @@ static void syscall_run(struct syscall_frame *frame) {
         caller->syscall_rewound = 0;
         caller->io_watch_armed = 0;
     }
+    uint64_t cpu_before = caller ? process_runtime_ns(caller) : 0;
     if (caller && caller->io_wait_active && caller->io_wait_syscall != syscall_number)
         clear_io_wait(caller);
     int skip_signal_delivery = 0;
@@ -7323,21 +7383,17 @@ static void syscall_run(struct syscall_frame *frame) {
     }
     case SYS_GETITIMER: {
         struct process *process = process_current();
-        if ((int)SYSCALL_ARG0(frame) != 0) {
+        int which = (int)SYSCALL_ARG0(frame);
+        if (which < 0 || which > 2 || !process) {
             SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINVAL;
             break;
         }
-        if (!process) {
-            SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINVAL;
-            break;
-        }
-        uint64_t now = time_uptime_ns();
-        uint64_t remaining_ns =
-            process->itimer_real_deadline_ns > now ? process->itimer_real_deadline_ns - now : 0;
+        uint64_t *deadline, *interval, now;
+        itimer_clock(process, which, &deadline, &interval, &now);
+        uint64_t remaining_ns = *deadline > now ? *deadline - now : 0;
         struct linux_timeval current_value[2];
-        current_value[0].tv_sec = (int64_t)(process->itimer_real_interval_ns / 1000000000ULL);
-        current_value[0].tv_usec =
-            (int64_t)((process->itimer_real_interval_ns / 1000ULL) % 1000000ULL);
+        current_value[0].tv_sec = (int64_t)(*interval / 1000000000ULL);
+        current_value[0].tv_usec = (int64_t)((*interval / 1000ULL) % 1000000ULL);
         current_value[1].tv_sec = (int64_t)(remaining_ns / 1000000000ULL);
         current_value[1].tv_usec = (int64_t)((remaining_ns / 1000ULL) % 1000000ULL);
         if (SYSCALL_ARG1(frame) &&
@@ -7350,7 +7406,8 @@ static void syscall_run(struct syscall_frame *frame) {
     }
     case SYS_SETITIMER: {
         struct process *process = process_current();
-        if ((int)SYSCALL_ARG0(frame) != 0) {
+        int which = (int)SYSCALL_ARG0(frame);
+        if (which < 0 || which > 2) {
             SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINVAL;
             break;
         }
@@ -7369,14 +7426,13 @@ static void syscall_run(struct syscall_frame *frame) {
             SYSCALL_RET(frame) = (uint64_t)-(int64_t)EINVAL;
             break;
         }
-        uint64_t now = time_uptime_ns();
+        uint64_t *deadline, *interval, now;
+        itimer_clock(process, which, &deadline, &interval, &now);
         if (SYSCALL_ARG2(frame)) {
-            uint64_t remaining_ns =
-                process->itimer_real_deadline_ns > now ? process->itimer_real_deadline_ns - now : 0;
+            uint64_t remaining_ns = *deadline > now ? *deadline - now : 0;
             struct linux_timeval old_value[2];
-            old_value[0].tv_sec = (int64_t)(process->itimer_real_interval_ns / 1000000000ULL);
-            old_value[0].tv_usec =
-                (int64_t)((process->itimer_real_interval_ns / 1000ULL) % 1000000ULL);
+            old_value[0].tv_sec = (int64_t)(*interval / 1000000000ULL);
+            old_value[0].tv_usec = (int64_t)((*interval / 1000ULL) % 1000000ULL);
             old_value[1].tv_sec = (int64_t)(remaining_ns / 1000000000ULL);
             old_value[1].tv_usec = (int64_t)((remaining_ns / 1000ULL) % 1000000ULL);
             if (copy_to_user(SYSCALL_ARG2(frame), old_value, sizeof(old_value)) != 0) {
@@ -7388,9 +7444,9 @@ static void syscall_run(struct syscall_frame *frame) {
             (uint64_t)new_value[0].tv_usec * 1000ULL;
         uint64_t value_ns = (uint64_t)new_value[1].tv_sec * 1000000000ULL +
             (uint64_t)new_value[1].tv_usec * 1000ULL;
-        process->itimer_real_interval_ns = interval_ns;
-        process->itimer_real_deadline_ns = value_ns ? now + value_ns : 0;
-        process_note_deadline(process->itimer_real_deadline_ns);
+        *interval = interval_ns;
+        *deadline = value_ns ? now + value_ns : 0;
+        if (which == 0) process_note_deadline(process->itimer_real_deadline_ns);
         SYSCALL_RET(frame) = 0;
         break;
     }
@@ -8626,6 +8682,10 @@ static void syscall_run(struct syscall_frame *frame) {
     }
 
 finished:
+    if (caller && caller == process_current()) {
+        uint64_t cpu_after = process_runtime_ns(caller);
+        if (cpu_after > cpu_before) caller->system_runtime_ns += cpu_after - cpu_before;
+    }
     if (caller && caller == process_current() &&
         (int64_t)SYSCALL_RET(frame) == -(int64_t)ERESTARTSYS) {
         SYSCALL_RET(frame) = first_argument;

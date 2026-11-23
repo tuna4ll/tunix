@@ -24,6 +24,12 @@ KERNEL_CFLAGS := -std=gnu11 -Wall -Wextra -Werror -ffreestanding \
 	-O2 -ffunction-sections -fdata-sections -mcmodel=kernel -mgeneral-regs-only \
 	-Iinclude -I$(LIMINE_DIR) -I$(UACPI_DIR)/include \
 	$(KERNEL_CFLAGS_EXTRA)
+# The commit, for uname -v and /proc/version.
+TUNIX_COMMIT := $(shell git rev-parse --short=12 HEAD 2>/dev/null)
+ifneq ($(TUNIX_COMMIT),)
+  VERSION_CFLAGS := -DTUNIX_COMMIT='"$(TUNIX_COMMIT)"'
+endif
+
 ifeq ($(FRAME_POINTERS),1)
   DEBUG_CFLAGS += -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer -DTUNIX_FRAME_POINTERS=1
 endif
@@ -204,6 +210,11 @@ $(AARCH64_CORE_IMAGE): $(AARCH64_CORE_KERNEL)
 $(AARCH64_CORE_BUILD)/kernel/%.c.o: %.c
 	@mkdir -p $(dir $@)
 	$(AARCH64_CC) $(AARCH64_CORE_CFLAGS) $(call sanitize-flags,$<) -MMD -MP -c $< -o $@
+
+# Only the files that print the version are rebuilt when the commit changes.
+VERSIONED_OBJECTS := kernel/core/syscall.c.o kernel/fs/procfs.c.o
+$(addprefix $(BUILD)/,$(VERSIONED_OBJECTS)): KERNEL_CFLAGS += $(VERSION_CFLAGS)
+$(addprefix $(AARCH64_CORE_BUILD)/,$(VERSIONED_OBJECTS)): AARCH64_CORE_CFLAGS += $(VERSION_CFLAGS)
 
 $(AARCH64_CORE_BUILD)/kernel/%.S.o: %.S
 	@mkdir -p $(dir $@)

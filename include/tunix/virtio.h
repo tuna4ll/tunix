@@ -73,6 +73,11 @@ struct virtio_device {
     uint32_t notify_multiplier;
     volatile uint8_t *bars[6];
     unsigned vector;
+    // A shared memory region the device exposes (VIRTIO_PCI_CAP_SHARED_MEMORY_CFG): for
+    // virtio-gpu, the host-visible memory blobs are mapped into. Not mapped here.
+    uint8_t shm_id;
+    uint64_t shm_physical;
+    uint64_t shm_length;
 };
 
 int virtio_pci_attach(struct virtio_device *device, uint16_t device_id, uint64_t features,

@@ -58,6 +58,7 @@ struct inet_socket *inet_socket_accept(struct inet_socket *listener);
 void inet_socket_report_accept(struct inet_socket *socket, uint64_t pid, uint32_t uid);
 int64_t inet_socket_sendto(struct inet_socket *socket, const void *data, size_t length, int flags,
                            const void *address, size_t address_length);
+int inet_socket_keeps_boundaries(struct inet_socket *socket);
 int64_t inet_socket_recvfrom(struct inet_socket *socket, void *data, size_t length, int flags,
                              void *address, size_t *address_length);
 int inet_socket_wants_ttl(struct inet_socket *socket);

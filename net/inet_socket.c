@@ -74,6 +74,7 @@ struct tcp_control_block {
 };
 
 #define MSG_PEEK         0x02
+#define MSG_TRUNC_FLAG   0x20
 #define MSG_DONTWAIT     0x40
 #define SOL_SOCKET       1
 #define SOL_PACKET       263
@@ -1490,6 +1491,7 @@ int64_t inet_socket_recvfrom(struct inet_socket *socket, void *data, size_t leng
     struct datagram *item = socket->queue_first;
     if (!item) return -EAGAIN;
     size_t amount = length < item->length ? length : item->length;
+    size_t whole = item->length;
     memcpy(data, item->data, amount);
     if (address && address_length) {
         if (socket->domain == TUNIX_AF_INET6 &&
@@ -1515,7 +1517,12 @@ int64_t inet_socket_recvfrom(struct inet_socket *socket, void *data, size_t leng
         socket->queue_bytes -= item->length;
         kfree(item);
     }
-    return (int64_t)amount;
+    // MSG_TRUNC asks for the datagram's real length, as Linux answers for UDP.
+    return (int64_t)((flags & MSG_TRUNC_FLAG) ? whole : amount);
+}
+
+int inet_socket_keeps_boundaries(struct inet_socket *socket) {
+    return socket && socket->type != TUNIX_SOCK_STREAM;
 }
 
 int inet_socket_wants_ttl(struct inet_socket *socket) {

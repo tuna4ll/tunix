@@ -15,6 +15,7 @@
 #define VIRTIO_PCI_CAP_NOTIFY_CFG 2U
 #define VIRTIO_PCI_CAP_ISR_CFG    3U
 #define VIRTIO_PCI_CAP_DEVICE_CFG 4U
+#define VIRTIO_PCI_CAP_SHARED_MEMORY_CFG 8U
 
 #define COMMON_DEVICE_FEATURE_SELECT 0x00U
 #define COMMON_DEVICE_FEATURE        0x04U
@@ -103,6 +104,23 @@ static int walk_capabilities(struct virtio_device *device) {
             uint8_t type = config_read8(pci, (uint8_t)(offset + 3U));
             uint8_t bar = config_read8(pci, (uint8_t)(offset + 4U));
             uint32_t within = config_read32_at(pci, (uint8_t)(offset + 8U));
+            if (type == VIRTIO_PCI_CAP_SHARED_MEMORY_CFG) {
+                // 64-bit offset and length; the region can be gigabytes, so only remember it.
+                if (config_read8(pci, (uint8_t)(offset + 2U)) >= 24U && !device->shm_length) {
+                    uint64_t start = within |
+                        ((uint64_t)config_read32_at(pci, (uint8_t)(offset + 16U)) << 32);
+                    uint64_t length = config_read32_at(pci, (uint8_t)(offset + 12U)) |
+                        ((uint64_t)config_read32_at(pci, (uint8_t)(offset + 20U)) << 32);
+                    uint64_t physical = pci_bar_address(pci, bar);
+                    if (physical && length) {
+                        device->shm_id = config_read8(pci, (uint8_t)(offset + 5U));
+                        device->shm_physical = physical + start;
+                        device->shm_length = length;
+                    }
+                }
+                offset = config_read8(pci, (uint8_t)(offset + 1U)) & 0xFCU;
+                continue;
+            }
             volatile uint8_t *base = map_bar(device, bar);
             if (base && within < VIRTIO_MMIO_BAR_BYTES) {
                 switch (type) {

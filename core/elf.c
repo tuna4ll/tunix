@@ -10,6 +10,7 @@
 #include <tunix/process_arch.h>
 #include <tunix/process.h>
 #include <tunix/random.h>
+#include <tunix/signal.h>
 #include <tunix/vfs.h>
 #include <tunix/vmm.h>
 
@@ -49,6 +50,7 @@
 #define AT_RANDOM   25
 #define AT_HWCAP2   26
 #define AT_EXECFN   31
+#define AT_MINSIGSTKSZ 51
 
 struct loaded_elf {
     struct tunix_elf_plan plan;
@@ -286,7 +288,14 @@ static int place_initial_stack(struct process *process, const struct loaded_elf 
 
     sp &= ~15ULL;
     uint64_t execfn = argc ? argv_addresses[0] : 0;
+    // The stack a signal frame needs, FPU state included, for sigaltstack sizes.
+#if defined(__x86_64__)
+    uint64_t signal_frame = arch_fpu_signal_size() + 64U + SIGNAL_CONTEXT_SIZE + SIGNAL_SIGINFO_SIZE + 32U;
+#else
+    uint64_t signal_frame = SIGNAL_CONTEXT_SIZE + SIGNAL_SIGINFO_SIZE + 32U;
+#endif
     const uint64_t auxv[][2] = {{AT_NULL, 0},
+                                {AT_MINSIGSTKSZ, signal_frame},
                                 {AT_EXECFN, execfn},
                                 {AT_HWCAP2, 0},
                                 {AT_RANDOM, random_address},

@@ -120,6 +120,26 @@ is the same one in 2D mode and mesa rasterises with llvmpipe.
 The difference is the whole point: SuperTuxKart's own profiling lap runs at 49
 frames a second on llvmpipe and 110 through virgl.
 
+## Venus: Vulkan on the host's GPU
+
+With `-device virtio-vga-gl,blob=true,venus=true,hostmem=4G` QEMU offers
+`RESOURCE_BLOB`, `CONTEXT_INIT` and the Venus capset, and mesa's `virtio`
+Vulkan driver uses them:
+
+- `CONTEXT_INIT` creates a per-file context for the capset mesa asks for;
+  `GET_CAPS` and `GETPARAM` answer for any capset the host lists.
+- `RESOURCE_CREATE_BLOB` creates host-visible blobs, and mapping one maps the
+  host memory itself: the device's shared memory region (PCI capability type 8)
+  is carved up by a small allocator and `MAP_BLOB` places the blob in it.
+- Execbuffer takes `RING_IDX`, `FENCE_FD_IN` and `FENCE_FD_OUT`; a fence comes
+  back as a sync file that polls readable when the host signals it.
+
+Commands complete out of order now: each queued command has a slot that is
+marked done when its answer arrives, and a synchronous command waits only for
+its own. `vulkaninfo` reports `Virtio-GPU Venus (NVIDIA GeForce RTX 3060)` on
+an RTX 3060 host, and DXVK's D3D11 runs through it at 382 frames a second where
+lavapipe manages 233.
+
 ## Where a frame's time goes
 
 Asked, before anything was changed, with counters around each part of a
@@ -241,9 +261,6 @@ fall into a convoy that lasted the whole boot. A released mutex now goes to
 whoever is running, with a hand-off only for a waiter that has lost four times.
 
 ## What is deliberately not here
-
-**Sync files.** Execbuffer answers `fence_fd = -1`; nothing here exports a
-fence as a file. mesa falls back to `WAIT`, which is now per buffer.
 
 **A second scanout.** DRM reports one CRTC and one connector, so there is
 nothing above this that could ask for one.

@@ -42,6 +42,8 @@ struct io_uring_context;
 #define FILE_KIND_IO_URING       19
 #define FILE_KIND_PIDFD          20
 #define FILE_KIND_PIPE_DUPLEX    21
+// A GPU fence (Linux's sync_file): readable once the work it stands for is done.
+#define FILE_KIND_SYNC_FILE      22
 
 struct file {
     struct mutex lock;
@@ -68,6 +70,7 @@ struct file {
     struct eventfs_subscriber *eventfs;
     struct io_uring_context *io_uring;
     uint64_t pidfd_pid;
+    uint64_t fence_sequence;
     uint64_t pidfd_start_ns;
     uint32_t dmabuf_handle;
     int flock_type;
@@ -108,6 +111,7 @@ struct file *file_create_epoll(struct epoll_context *context, uint32_t flags);
 struct file *file_create_memfd(struct memfd_object *object, uint32_t flags);
 struct file *file_create_signalfd(struct signalfd_context *context, uint32_t flags);
 struct file *file_create_dmabuf(uint32_t handle, uint32_t flags);
+struct file *file_create_sync_file(uint64_t sequence, uint32_t flags);
 struct file *file_create_inotify(struct inotify_context *context, uint32_t flags);
 struct file *file_create_io_uring(struct io_uring_context *context);
 struct file *file_create_pidfd(uint64_t pid, uint64_t start_ns, uint32_t flags);

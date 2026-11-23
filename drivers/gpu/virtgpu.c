@@ -292,3 +292,77 @@ int virtgpu_console_present(uint64_t physical, uint32_t stride_pixels, uint32_t 
     leave();
     return result;
 }
+
+int virtgpu_features(void) {
+    const struct virtgpu_ops *driver = enter();
+    if (!driver) return 0;
+    int result = driver->features();
+    leave();
+    return result;
+}
+
+uint32_t virtgpu_capset_mask(void) {
+    const struct virtgpu_ops *driver = enter();
+    if (!driver) return 0;
+    uint32_t result = driver->capset_mask();
+    leave();
+    return result;
+}
+
+int virtgpu_capset_info(uint32_t id, uint32_t *version, uint32_t *size) {
+    const struct virtgpu_ops *driver = enter();
+    if (!driver) return -1;
+    int result = driver->capset_info(id, version, size);
+    leave();
+    return result;
+}
+
+int virtgpu_context_create_init(uint32_t context, const char *name, uint32_t capset) {
+    const struct virtgpu_ops *driver = enter();
+    if (!driver) return -1;
+    int result = driver->context_create_init(context, name, capset);
+    leave();
+    return result;
+}
+
+uint32_t virtgpu_resource_create_blob(uint32_t context, uint32_t blob_mem, uint32_t blob_flags,
+                                      uint64_t blob_id, uint64_t size, const uint64_t *pages,
+                                      uint64_t page_count) {
+    const struct virtgpu_ops *driver = enter();
+    if (!driver) return 0;
+    uint32_t result =
+        driver->resource_create_blob(context, blob_mem, blob_flags, blob_id, size, pages, page_count);
+    leave();
+    return result;
+}
+
+int virtgpu_map_blob(uint32_t resource, uint64_t size, uint64_t *physical, uint32_t *map_info) {
+    const struct virtgpu_ops *driver = enter();
+    if (!driver) return -1;
+    int result = driver->map_blob(resource, size, physical, map_info);
+    leave();
+    return result;
+}
+
+void virtgpu_unmap_blob(uint32_t resource) {
+    const struct virtgpu_ops *driver = enter();
+    if (!driver) return;
+    driver->unmap_blob(resource);
+    leave();
+}
+
+uint64_t virtgpu_submit_fenced(uint32_t context, uint32_t ring, const void *buffer, uint32_t bytes) {
+    const struct virtgpu_ops *driver = enter();
+    if (!driver) return 0;
+    uint64_t result = driver->submit_fenced(context, ring, buffer, bytes);
+    leave();
+    return result;
+}
+
+int virtgpu_fence_signaled(uint64_t sequence) {
+    const struct virtgpu_ops *driver = enter();
+    if (!driver) return 1;
+    int result = driver->fence_signaled(sequence);
+    leave();
+    return result;
+}

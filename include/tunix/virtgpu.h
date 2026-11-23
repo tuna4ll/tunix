@@ -80,6 +80,23 @@ void virtgpu_scanout_disable(void);
 int virtgpu_console_present(uint64_t physical, uint32_t stride_pixels, uint32_t width,
                             uint32_t height);
 
+#define VIRTGPU_FEATURE_BLOB         1
+#define VIRTGPU_FEATURE_CONTEXT_INIT 2
+#define VIRTGPU_FEATURE_HOST_VISIBLE 4
+#define VIRTGPU_CAPSET_VENUS         4
+
+int virtgpu_features(void);
+uint32_t virtgpu_capset_mask(void);
+int virtgpu_capset_info(uint32_t id, uint32_t *version, uint32_t *size);
+int virtgpu_context_create_init(uint32_t context, const char *name, uint32_t capset);
+uint32_t virtgpu_resource_create_blob(uint32_t context, uint32_t blob_mem, uint32_t blob_flags,
+                                      uint64_t blob_id, uint64_t size, const uint64_t *pages,
+                                      uint64_t page_count);
+int virtgpu_map_blob(uint32_t resource, uint64_t size, uint64_t *physical, uint32_t *map_info);
+void virtgpu_unmap_blob(uint32_t resource);
+uint64_t virtgpu_submit_fenced(uint32_t context, uint32_t ring, const void *buffer, uint32_t bytes);
+int virtgpu_fence_signaled(uint64_t sequence);
+
 // The virtio_gpu module provides these; until it is loaded, or after it is removed,
 // the virtgpu_*() calls above answer as if there were no device.
 struct virtgpu_ops {
@@ -113,6 +130,17 @@ struct virtgpu_ops {
     int (*present)(uint32_t resource, uint32_t stride_pixels, uint32_t width, uint32_t height, const struct virtgpu_rect *damage, int upload);
     void (*scanout_disable)(void);
     int (*console_present)(uint64_t physical, uint32_t stride_pixels, uint32_t width, uint32_t height);
+    int (*features)(void);
+    uint32_t (*capset_mask)(void);
+    int (*capset_info)(uint32_t id, uint32_t *version, uint32_t *size);
+    int (*context_create_init)(uint32_t context, const char *name, uint32_t capset);
+    uint32_t (*resource_create_blob)(uint32_t context, uint32_t blob_mem, uint32_t blob_flags,
+                                     uint64_t blob_id, uint64_t size, const uint64_t *pages,
+                                     uint64_t page_count);
+    int (*map_blob)(uint32_t resource, uint64_t size, uint64_t *physical, uint32_t *map_info);
+    void (*unmap_blob)(uint32_t resource);
+    uint64_t (*submit_fenced)(uint32_t context, uint32_t ring, const void *buffer, uint32_t bytes);
+    int (*fence_signaled)(uint64_t sequence);
 };
 
 int virtgpu_register(const struct virtgpu_ops *ops);

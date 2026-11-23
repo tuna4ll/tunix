@@ -2,8 +2,6 @@
 #include <stddef.h>
 
 #include <tunix/cpu.h>
-#include <tunix/hid.h>
-#include <tunix/hid_input.h>
 #include <tunix/irq.h>
 #include <tunix/pci.h>
 #include <tunix/pmm.h>
@@ -274,13 +272,9 @@ struct endpoint_result {
     uint32_t residual;
 };
 
-struct hid_function {
-    uint8_t protocol;
-    uint8_t subclass;
-    uint8_t interface_protocol;
-    uint16_t descriptor_length;
-    int report_mode;
-    struct hid_mouse_layout layout;
+// An interrupt IN endpoint a class driver opened: each report goes to its callback.
+struct interrupt_pipe {
+    int used;
     uint8_t interface;
     uint8_t address;
     uint8_t interval;
@@ -289,7 +283,8 @@ struct hid_function {
     struct ring ring;
     uint8_t *report;
     uint64_t report_physical;
-    uint8_t previous[HID_KEYBOARD_REPORT_BYTES];
+    usb_report_fn report_fn;
+    void *context;
     int needs_recovery;
     int stalled;
     unsigned recoveries;
@@ -321,10 +316,12 @@ struct usb_device {
     uint8_t configuration;
     uint8_t device_class;
 
-    struct hid_function hid[MAX_HID];
-    unsigned hid_count;
-    uint8_t interfaces[8][3];
+    struct interrupt_pipe pipes[MAX_HID];
+    struct usb_interface_info interfaces[USB_INTERFACES_MAX];
     unsigned interface_count;
+    uint8_t descriptor[18];
+    uint32_t entries;
+    struct usb_dev *usb;
 
     int storage;
     uint8_t storage_interface;
@@ -392,6 +389,8 @@ struct storage_entry {
     struct xhci_host *host;
     struct usb_device *device;
 };
+
+static const struct usb_host_ops xhci_usb_ops;
 
 static struct xhci_host **hosts;
 static unsigned host_count;
@@ -523,16 +522,16 @@ static uint64_t port_register(struct xhci_host *host, uint32_t port) {
 
 static void check_health(struct xhci_host *host);
 
-static struct hid_function *hid_for(struct usb_device *device, uint32_t dci) {
-    for (unsigned index = 0; index < device->hid_count; index++)
-        if (device->hid[index].dci == dci) return &device->hid[index];
+static struct interrupt_pipe *pipe_for(struct usb_device *device, uint32_t dci) {
+    for (unsigned index = 0; index < MAX_HID; index++)
+        if (device->pipes[index].used && device->pipes[index].dci == dci) return &device->pipes[index];
     return NULL;
 }
 
-static void hid_arm(struct usb_device *device, struct hid_function *function) {
-    enqueue(&function->ring, function->report_physical, function->packet, TRB_TYPE_NORMAL,
+static void pipe_arm(struct usb_device *device, struct interrupt_pipe *pipe) {
+    enqueue(&pipe->ring, pipe->report_physical, pipe->packet, TRB_TYPE_NORMAL,
             TRB_INTERRUPT_ON_COMPLETION | TRB_INTERRUPT_ON_SHORT);
-    ring_doorbell(device->host, device->slot, function->dci);
+    ring_doorbell(device->host, device->slot, pipe->dci);
 }
 
 static void hub_arm(struct usb_device *device) {
@@ -576,20 +575,16 @@ static void transfer_event(struct xhci_host *host, const struct trb *event) {
         return;
     }
 
-    struct hid_function *function = hid_for(device, dci);
-    if (function) {
+    struct interrupt_pipe *pipe = pipe_for(device, dci);
+    if (pipe) {
         if (!completed(code)) {
-            function->needs_recovery = 1;
-            function->stalled = code == CODE_STALL;
+            pipe->needs_recovery = 1;
+            pipe->stalled = code == CODE_STALL;
             return;
         }
-        uint32_t length = residual < function->packet ? function->packet - residual : 0;
-        if (function->protocol == HID_KEYBOARD)
-            hid_keyboard_report(function->previous, function->report, length);
-        else
-            hid_mouse_report(function->report_mode ? &function->layout : NULL, function->report,
-                             length);
-        hid_arm(device, function);
+        uint32_t length = residual < pipe->packet ? pipe->packet - residual : 0;
+        pipe->report_fn(pipe->context, pipe->report, length);
+        pipe_arm(device, pipe);
         return;
     }
     if (device->hub && dci == device->hub_dci) {
@@ -836,9 +831,12 @@ static int configure(struct usb_device *device, uint32_t added, uint32_t entries
     uint32_t *control_context =
         context_at(device->host, device->input_context, INPUT_CONTROL_INDEX);
     control_context[1] = ADD_SLOT | added;
+    if (entries < device->entries) entries = device->entries;
     write_slot_context(device, entries);
-    return command(device->host, TRB_TYPE_CONFIGURE_ENDPOINT, device->input_physical,
-                   device->slot << EVENT_SLOT_SHIFT, NULL);
+    int status = command(device->host, TRB_TYPE_CONFIGURE_ENDPOINT, device->input_physical,
+                         device->slot << EVENT_SLOT_SHIFT, NULL);
+    if (status == 0) device->entries = entries;
+    return status;
 }
 
 static void name_device(struct usb_device *device) {
@@ -873,9 +871,11 @@ static struct usb_device *allocate_device(struct xhci_host *host) {
 }
 
 static void release_device_memory(struct usb_device *device) {
-    for (unsigned index = 0; index < device->hid_count; index++) {
-        ring_release(&device->hid[index].ring);
-        page_release(device->hid[index].report_physical);
+    for (unsigned index = 0; index < MAX_HID; index++) {
+        if (!device->pipes[index].used) continue;
+        ring_release(&device->pipes[index].ring);
+        page_release(device->pipes[index].report_physical);
+        device->pipes[index].used = 0;
     }
     ring_release(&device->bulk_in);
     ring_release(&device->bulk_out);
@@ -894,11 +894,8 @@ static void remove_device(struct usb_device *device) {
         struct usb_device *child = &host->devices[index];
         if (child->used && child->parent == device) remove_device(child);
     }
-    for (unsigned index = 0; index < device->hid_count; index++) {
-        struct hid_function *function = &device->hid[index];
-        if (function->protocol != HID_KEYBOARD) continue;
-        hid_keyboard_release(function->previous);
-    }
+    if (device->usb) usb_device_removed(device->usb);
+    device->usb = NULL;
     if (device->storage >= 0) storage_table[device->storage].device = NULL;
     if (device->started)
         kprintf("XHCI: %s slot %u removed\n", device->name, (unsigned)device->slot);
@@ -934,7 +931,7 @@ static void parse_configuration(struct usb_device *device, uint16_t total) {
     const uint8_t *buffer = device->buffer;
     device->configuration = buffer[5];
     uint8_t class_code = 0, subclass = 0, protocol = 0, interface = 0;
-    struct hid_function *function = NULL;
+    struct usb_interface_info *current = NULL;
     for (uint16_t offset = 0; offset + 2U <= total;) {
         uint8_t length = buffer[offset];
         uint8_t type = buffer[offset + 1U];
@@ -944,30 +941,23 @@ static void parse_configuration(struct usb_device *device, uint16_t total) {
             class_code = buffer[offset + 5U];
             subclass = buffer[offset + 6U];
             protocol = buffer[offset + 7U];
-            function = NULL;
-            if (device->interface_count < 8U) {
-                device->interfaces[device->interface_count][0] = class_code;
-                device->interfaces[device->interface_count][1] = subclass;
-                device->interfaces[device->interface_count][2] = protocol;
-                device->interface_count++;
-            }
-            if (class_code == CLASS_HID && device->hid_count < MAX_HID) {
-                function = &device->hid[device->hid_count];
-                memset(function, 0, sizeof(*function));
-                function->protocol = subclass == HID_SUBCLASS_BOOT && protocol == HID_KEYBOARD
-                    ? HID_KEYBOARD
-                    : HID_MOUSE;
-                function->subclass = subclass;
-                function->interface_protocol = protocol;
-                function->interface = interface;
+            current = NULL;
+            // An alternate setting describes the same interface again; keep the first.
+            if (buffer[offset + 3U] == 0 && device->interface_count < USB_INTERFACES_MAX) {
+                current = &device->interfaces[device->interface_count++];
+                memset(current, 0, sizeof(*current));
+                current->number = interface;
+                current->class_code = class_code;
+                current->subclass = subclass;
+                current->protocol = protocol;
             }
             if (class_code == CLASS_HUB) device->hub = 1;
             if (class_code == CLASS_STORAGE && subclass == STORAGE_SUBCLASS_SCSI &&
                 protocol == STORAGE_BULK_ONLY && !device->storage_interface &&
                 !device->bulk_in_address)
                 device->storage_interface = (uint8_t)(interface | 0x80U);
-        } else if (type == DESCRIPTOR_HID && length >= 9U && function) {
-            function->descriptor_length =
+        } else if (type == DESCRIPTOR_HID && length >= 9U && current) {
+            current->hid_report_length =
                 (uint16_t)(buffer[offset + 7U] | (buffer[offset + 8U] << 8));
         } else if (type == DESCRIPTOR_ENDPOINT && length >= 7U) {
             uint8_t address = buffer[offset + 2U];
@@ -976,15 +966,13 @@ static void parse_configuration(struct usb_device *device, uint16_t total) {
                 (uint16_t)((buffer[offset + 4U] | (buffer[offset + 5U] << 8)) & 0x7FFU);
             uint8_t interval = buffer[offset + 6U];
             uint8_t kind = attributes & ENDPOINT_TYPE_MASK;
-            if (function && !function->address && kind == ENDPOINT_TYPE_INTERRUPT &&
+            if (current && !current->interrupt_in && kind == ENDPOINT_TYPE_INTERRUPT &&
                 (address & ENDPOINT_DIRECTION_IN)) {
-                function->address = address;
-                function->packet = packet;
-                function->interval = interval;
-                function->dci = (uint32_t)(address & ENDPOINT_NUMBER_MASK) * 2U + 1U;
-                device->hid_count++;
-                function = NULL;
-            } else if (class_code == CLASS_HUB && kind == ENDPOINT_TYPE_INTERRUPT &&
+                current->interrupt_in = address;
+                current->interrupt_packet = packet;
+                current->interrupt_interval = interval;
+            }
+            if (class_code == CLASS_HUB && kind == ENDPOINT_TYPE_INTERRUPT &&
                        (address & ENDPOINT_DIRECTION_IN) && !device->hub_address) {
                 device->hub_address = address;
                 device->hub_packet = packet;
@@ -1006,58 +994,6 @@ static void parse_configuration(struct usb_device *device, uint16_t total) {
         offset = (uint16_t)(offset + length);
     }
     if (device->device_class == CLASS_HUB) device->hub = 1;
-}
-
-static int classify_hid(struct usb_device *device, struct hid_function *function) {
-    if (function->protocol == HID_KEYBOARD) return 0;
-    uint16_t length = function->descriptor_length;
-    if (!length || length > RING_BYTES) length = RING_BYTES;
-    memset(device->buffer, 0, RING_BYTES);
-    if (control(device, REQUEST_TYPE_STANDARD_INTERFACE_IN, REQUEST_GET_DESCRIPTOR,
-                DESCRIPTOR_HID_REPORT << 8, function->interface, length) == 0 &&
-        hid_parse_mouse(device->buffer, length, &function->layout) == 0) {
-        function->report_mode = 1;
-        return 0;
-    }
-    if (function->subclass == HID_SUBCLASS_BOOT && function->interface_protocol == HID_MOUSE)
-        return 0;
-    kprintf("XHCI: %s interface %u is HID but not a keyboard or a relative mouse\n", device->name,
-            (unsigned)function->interface);
-    return -1;
-}
-
-static int start_hid(struct usb_device *device) {
-    uint32_t added = 0, entries = 1;
-    unsigned kept = 0;
-    for (unsigned index = 0; index < device->hid_count; index++) {
-        if (classify_hid(device, &device->hid[index]) != 0) continue;
-        if (kept != index) device->hid[kept] = device->hid[index];
-        kept++;
-    }
-    device->hid_count = kept;
-    if (!kept) return -1;
-    clear_input(device);
-    for (unsigned index = 0; index < device->hid_count; index++) {
-        struct hid_function *function = &device->hid[index];
-        if (ring_create(device->host, &function->ring) != 0) return -1;
-        function->report = page_for(device->host, &function->report_physical);
-        if (!function->report) return -1;
-        write_interrupt_endpoint(device, function->dci, &function->ring, function->packet,
-                                 function->interval);
-        added |= 1U << function->dci;
-        if (function->dci > entries) entries = function->dci;
-    }
-    if (configure(device, added, entries) != 0) return -1;
-    for (unsigned index = 0; index < device->hid_count; index++) {
-        struct hid_function *function = &device->hid[index];
-        if (!function->report_mode || function->subclass == HID_SUBCLASS_BOOT)
-            (void)control(device, REQUEST_TYPE_CLASS_INTERFACE, REQUEST_HID_SET_PROTOCOL,
-                          function->report_mode ? HID_PROTOCOL_REPORT : 0, function->interface, 0);
-        (void)control(device, REQUEST_TYPE_CLASS_INTERFACE, REQUEST_HID_SET_IDLE, 0,
-                      function->interface, 0);
-        hid_arm(device, function);
-    }
-    return 0;
 }
 
 static int start_storage(struct usb_device *device) {
@@ -1196,6 +1132,7 @@ static struct usb_device *attach(struct xhci_host *host, struct usb_device *pare
         goto fail;
     }
     device->device_class = device->buffer[4];
+    memcpy(device->descriptor, device->buffer, sizeof(device->descriptor));
     if (control(device, USB_DIRECTION_IN, REQUEST_GET_DESCRIPTOR, DESCRIPTOR_CONFIGURATION << 8, 0,
                 9) != 0)
         goto fail;
@@ -1218,43 +1155,23 @@ static struct usb_device *attach(struct xhci_host *host, struct usb_device *pare
         }
         kprintf("XHCI: hub at %s slot %u, %u ports\n", device->name, (unsigned)slot,
                 (unsigned)device->hub_ports);
-        device->started = 1;
-        return device;
-    }
-    if (device->hid_count && start_hid(device) == 0) {
-        for (unsigned index = 0; index < device->hid_count; index++) {
-            struct hid_function *function = &device->hid[index];
-            if (function->report_mode)
-                kprintf(
-                    "XHCI: mouse at %s slot %u, endpoint %x, report %u, %u buttons, %u-bit motion\n",
-                    device->name, (unsigned)slot, (unsigned)function->address,
-                    (unsigned)function->layout.report_id, (unsigned)function->layout.buttons,
-                    (unsigned)function->layout.x.size);
-            else
-                kprintf("XHCI: %s at %s slot %u, endpoint %x reporting\n",
-                        function->protocol == HID_KEYBOARD ? "keyboard" : "boot mouse",
-                        device->name, (unsigned)slot, (unsigned)function->address);
-        }
-        device->started = 1;
-        return device;
-    }
-    if (device->bulk_in_address && device->bulk_out_address) {
+    } else if (device->bulk_in_address && device->bulk_out_address) {
         if (start_storage(device) != 0) {
             kprintf("XHCI: %s storage did not start\n", device->name);
             goto fail;
         }
         kprintf("XHCI: mass storage at %s slot %u\n", device->name, (unsigned)slot);
         if (booted) usb_host_storage_added(&xhci_usb_host, device->storage);
-        device->started = 1;
-        return device;
+    } else {
+        kprintf("XHCI: %s slot %u, %x:%x, %u interface(s)\n", device->name, (unsigned)slot,
+                (unsigned)(device->descriptor[8] | (device->descriptor[9] << 8)),
+                (unsigned)(device->descriptor[10] | (device->descriptor[11] << 8)),
+                device->interface_count);
     }
-    kprintf("XHCI: %s slot %u is not a device this driver knows (class %u)\n", device->name,
-            (unsigned)slot, (unsigned)device->device_class);
-    for (unsigned index = 0; index < device->interface_count; index++)
-        kprintf("XHCI: %s interface %u: class %u subclass %u protocol %u\n", device->name, index,
-                (unsigned)device->interfaces[index][0], (unsigned)device->interfaces[index][1],
-                (unsigned)device->interfaces[index][2]);
     device->started = 1;
+    // Class drivers -- HID, from the usbhid module -- bind to the interfaces from here.
+    device->usb = usb_device_added(&xhci_usb_ops, device, device->name, device->descriptor,
+                                   device->interfaces, device->interface_count);
     return device;
 
 fail:
@@ -1396,19 +1313,19 @@ static void service_hub_port(struct usb_device *hub, uint32_t port) {
     (void)attach(host, hub, port, speed);
 }
 
-static void recover_hid(struct usb_device *device, struct hid_function *function) {
-    function->needs_recovery = 0;
-    if (++function->recoveries > RECOVERY_LIMIT) {
-        if (function->recoveries == RECOVERY_LIMIT + 1U)
+static void recover_pipe(struct usb_device *device, struct interrupt_pipe *pipe) {
+    pipe->needs_recovery = 0;
+    if (++pipe->recoveries > RECOVERY_LIMIT) {
+        if (pipe->recoveries == RECOVERY_LIMIT + 1U)
             kprintf("XHCI: %s endpoint %x keeps failing; left stopped\n", device->name,
-                    (unsigned)function->address);
+                    (unsigned)pipe->address);
         return;
     }
-    if (realign_endpoint(device, function->dci, &function->ring) != 0) return;
-    if (function->stalled)
+    if (realign_endpoint(device, pipe->dci, &pipe->ring) != 0) return;
+    if (pipe->stalled)
         (void)control(device, REQUEST_TYPE_STANDARD_ENDPOINT, REQUEST_CLEAR_FEATURE,
-                      FEATURE_ENDPOINT_HALT, function->address, 0);
-    hid_arm(device, function);
+                      FEATURE_ENDPOINT_HALT, pipe->address, 0);
+    pipe_arm(device, pipe);
 }
 
 static void recover_hub(struct usb_device *device) {
@@ -1426,8 +1343,9 @@ static void service(struct xhci_host *host) {
     for (unsigned index = 0; index < host->max_slots; index++) {
         struct usb_device *device = &host->devices[index];
         if (!device->used) continue;
-        for (unsigned function = 0; function < device->hid_count; function++)
-            if (device->hid[function].needs_recovery) recover_hid(device, &device->hid[function]);
+        for (unsigned index = 0; index < MAX_HID; index++)
+            if (device->pipes[index].used && device->pipes[index].needs_recovery)
+                recover_pipe(device, &device->pipes[index]);
         if (device->hub && device->hub_needs_recovery) recover_hub(device);
     }
     for (uint32_t port = 1; port <= host->max_ports && port < MAX_PORTS; port++) {
@@ -1453,8 +1371,8 @@ static int any_work(struct xhci_host *host) {
         struct usb_device *device = &host->devices[index];
         if (!device->used) continue;
         if (device->hub && (device->hub_changed || device->hub_needs_recovery)) return 1;
-        for (unsigned function = 0; function < device->hid_count; function++)
-            if (device->hid[function].needs_recovery) return 1;
+        for (unsigned index = 0; index < MAX_HID; index++)
+            if (device->pipes[index].used && device->pipes[index].needs_recovery) return 1;
     }
     return 0;
 }
@@ -1514,21 +1432,93 @@ static void interrupt(void *context) {
     lock_release(&xhci_lock);
 }
 
-static int hid_present(uint8_t protocol) {
-    for (unsigned number = 0; number < host_count; number++) {
-        struct xhci_host *host = hosts[number];
-        for (unsigned index = 0; index < host->max_slots; index++) {
-            struct usb_device *device = &host->devices[index];
-            if (!device->used) continue;
-            for (unsigned function = 0; function < device->hid_count; function++)
-                if (device->hid[function].protocol == protocol) return 1;
-        }
-    }
+// ---- What class drivers call, with the host locked ----
+
+static int ops_control(void *handle, uint8_t request_type, uint8_t request, uint16_t value,
+                       uint16_t index, void *data, uint16_t length) {
+    struct usb_device *device = handle;
+    if (!device || length > RING_BYTES) return -1;
+    if (!(request_type & USB_DIRECTION_IN) && length && data) memcpy(device->buffer, data, length);
+    if (control(device, request_type, request, value, index, length) != 0) return -1;
+    if ((request_type & USB_DIRECTION_IN) && length && data) memcpy(data, device->buffer, length);
     return 0;
 }
 
-int xhci_keyboard_present(void) { return hid_present(HID_KEYBOARD); }
-int xhci_pointer_present(void) { return hid_present(HID_MOUSE); }
+static int ops_interrupt_open(void *handle, const struct usb_interface_info *interface,
+                              usb_report_fn report, void *context) {
+    struct usb_device *device = handle;
+    if (!device || !device->used || device->disconnected || !interface->interrupt_in || !report)
+        return -1;
+    struct interrupt_pipe *pipe = NULL;
+    for (unsigned index = 0; index < MAX_HID && !pipe; index++)
+        if (!device->pipes[index].used) pipe = &device->pipes[index];
+    if (!pipe) return -1;
+    memset(pipe, 0, sizeof(*pipe));
+    pipe->interface = interface->number;
+    pipe->address = interface->interrupt_in;
+    pipe->packet = interface->interrupt_packet;
+    pipe->interval = interface->interrupt_interval;
+    pipe->dci = (uint32_t)(pipe->address & ENDPOINT_NUMBER_MASK) * 2U + 1U;
+    if (ring_create(device->host, &pipe->ring) != 0) return -1;
+    pipe->report = page_for(device->host, &pipe->report_physical);
+    if (!pipe->report) {
+        ring_release(&pipe->ring);
+        return -1;
+    }
+    clear_input(device);
+    write_interrupt_endpoint(device, pipe->dci, &pipe->ring, pipe->packet, pipe->interval);
+    if (configure(device, 1U << pipe->dci, pipe->dci) != 0) {
+        ring_release(&pipe->ring);
+        page_release(pipe->report_physical);
+        return -1;
+    }
+    pipe->report_fn = report;
+    pipe->context = context;
+    pipe->used = 1;
+    pipe_arm(device, pipe);
+    return 0;
+}
+
+static void ops_interrupt_close(void *handle, const struct usb_interface_info *interface) {
+    struct usb_device *device = handle;
+    if (!device) return;
+    for (unsigned index = 0; index < MAX_HID; index++) {
+        struct interrupt_pipe *pipe = &device->pipes[index];
+        if (!pipe->used || pipe->interface != interface->number) continue;
+        pipe->used = 0;
+        if (device->used && !device->disconnected) {
+            // Drop the endpoint, so the controller stops using its ring.
+            clear_input(device);
+            uint32_t *control_context =
+                context_at(device->host, device->input_context, INPUT_CONTROL_INDEX);
+            control_context[0] = 1U << pipe->dci;
+            control_context[1] = ADD_SLOT;
+            write_slot_context(device, device->entries);
+            (void)command(device->host, TRB_TYPE_CONFIGURE_ENDPOINT, device->input_physical,
+                          device->slot << EVENT_SLOT_SHIFT, NULL);
+        }
+        ring_release(&pipe->ring);
+        page_release(pipe->report_physical);
+    }
+}
+
+static void ops_lock(void) {
+    mutex_lock(&xhci_ops);
+    lock_acquire(&xhci_lock);
+}
+
+static void ops_unlock(void) {
+    lock_release(&xhci_lock);
+    mutex_unlock(&xhci_ops);
+}
+
+static const struct usb_host_ops xhci_usb_ops = {
+    .control = ops_control,
+    .interrupt_open = ops_interrupt_open,
+    .interrupt_close = ops_interrupt_close,
+    .lock = ops_lock,
+    .unlock = ops_unlock,
+};
 
 static int storage_count_unlocked(void) { return storage_entries; }
 

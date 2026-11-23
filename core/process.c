@@ -365,6 +365,7 @@ void process_table_lock(void) { lock_acquire(&sched_lock); }
 void process_table_unlock(void) { lock_release(&sched_lock); }
 
 static void signal_one_process(struct process *target, int signal_number);
+static void check_cpu_timers(struct process *process);
 static int deliver_signal(struct process *target, const struct signal_info *info);
 static int send_signal(int64_t pid, const struct signal_info *info, int checked);
 
@@ -1374,7 +1375,20 @@ struct process *process_create_from_path(const char *path) {
     }
     process->start_time_ns = time_uptime_ns();
 
-    const char *argv[] = {path, NULL};
+    // init= may name a script, as on Linux: its interpreter runs with the script.
+    static char interpreter[MAX_SHEBANG_LINE], optional[MAX_SHEBANG_LINE];
+    const char *argv[4] = {path, NULL, NULL, NULL};
+    if (exec_parse_shebang(file, interpreter, optional) == 1) {
+        struct vfs_node *program = vfs_lookup(interpreter);
+        if (program) {
+            unsigned count = 0;
+            argv[count++] = interpreter;
+            if (optional[0]) argv[count++] = optional;
+            argv[count++] = path;
+            argv[count] = NULL;
+            file = program;
+        }
+    }
     const char *envp[] = {"PATH=/usr/bin:/usr/sbin:/bin:/sbin",
                           "HOME=/",
                           "TERM=tunix",
@@ -2941,6 +2955,11 @@ static void preempt_from_interrupt(struct interrupt_frame *frame, int tick) {
 void process_timer_interrupt(struct interrupt_frame *frame) {
     thermal_tick();
     cpufreq_tick();
+    if (current && arch_interrupt_from_user(frame)) {
+        lock_acquire(&sched_lock);
+        check_cpu_timers(current);
+        lock_release(&sched_lock);
+    }
     preempt_from_interrupt(frame, 1);
 }
 
@@ -4967,6 +4986,42 @@ int process_sigreturn(struct syscall_frame *frame) {
         return 0;
     }
     read_user_context(frame, context);
+#if defined(__x86_64__)
+    // The vector registers the interrupted code had, saved with the frame.
+    uint64_t fpregs = arch_mcontext_get(context, MCONTEXT_REGISTERS);
+    if (fpregs) {
+        uint32_t size = arch_fpu_signal_size();
+        uint8_t *buffer = kmalloc(size + 64U);
+        if (!buffer) {
+            process_exit_from_signal(frame, SIGSEGV);
+            return 0;
+        }
+        uint8_t *area = (uint8_t *)(((uintptr_t)buffer + 63U) & ~(uintptr_t)63U);
+        if (copy_from_user(area, fpregs, size) != 0) {
+            kfree(buffer);
+            process_exit_from_signal(frame, SIGSEGV);
+            return 0;
+        }
+        arch_fpu_signal_load(area);
+        kfree(buffer);
+    }
+#elif defined(__aarch64__)
+    // fpsimd_context, the first record in sigcontext.__reserved: put the vector
+    // registers back as the interrupted code had them.
+    const uint8_t *record = context + UCONTEXT_MCONTEXT_OFFSET + SIGCONTEXT_RESERVED_OFFSET;
+    uint32_t head[2];
+    memcpy(head, record, sizeof(head));
+    if (head[0] == FPSIMD_MAGIC && head[1] == FPSIMD_RECORD_BYTES) {
+        uint64_t fp[66] __attribute__((aligned(16)));
+        uint32_t fpsr, fpcr;
+        memcpy(&fpsr, record + 8, 4);
+        memcpy(&fpcr, record + 12, 4);
+        memcpy(fp, record + 16, 512);
+        fp[64] = fpsr;
+        fp[65] = fpcr;
+        arch_fpu_restore((uint8_t *)fp);
+    }
+#endif
     uint64_t mask;
     memcpy(&mask, context + UCONTEXT_SIGMASK_OFFSET, sizeof(mask));
     current->signal_blocked = mask & ~(signal_bit(SIGKILL) | signal_bit(SIGSTOP));
@@ -5124,9 +5179,17 @@ void process_prepare_user_return(struct syscall_frame *frame) {
         current->ptrace_pass_signal = 0;
     }
     uint64_t bit = signal_bit(signal_number);
-    struct tunix_sigaction *action = &current->signal_actions[signal_number - 1];
+    // Another thread's sigaction rewrites this one's table under the scheduler lock; take
+    // the action once, under it, rather than read a handler that may change mid-delivery.
+    struct tunix_sigaction action_now;
+    {
+        SCHED_LOCKED;
+        action_now = current->signal_actions[signal_number - 1];
+    }
+    const struct tunix_sigaction *action = &action_now;
 
     if (!signal_would_act(current, signal_number)) return;
+    if (action->handler == SIG_IGN && signal_number != SIGKILL && signal_number != SIGSTOP) return;
     if (signal_number == SIGSTOP ||
         (action->handler == SIG_DFL &&
          (signal_number == SIGTSTP || signal_number == SIGTTIN || signal_number == SIGTTOU))) {
@@ -5174,12 +5237,47 @@ void process_prepare_user_return(struct syscall_frame *frame) {
         !on_signal_stack(current, SYSCALL_USER_SP(frame))) {
         stack_top = current->signal_stack_pointer + current->signal_stack_size;
     }
+#if defined(__x86_64__)
+    // The interrupted code's FPU and vector registers, above the frame, where
+    // uc_mcontext.fpregs points: the handler is free to use them.
+    uint32_t fp_size = arch_fpu_signal_size();
+    uint8_t *fp_buffer = kmalloc(fp_size + 64U);
+    if (!fp_buffer) {
+        process_exit_from_signal(frame, SIGSEGV);
+        return;
+    }
+    uint8_t *fp_area = (uint8_t *)(((uintptr_t)fp_buffer + 63U) & ~(uintptr_t)63U);
+    arch_fpu_signal_save(fp_area);
+    uint64_t fp_address = (stack_top - fp_size) & ~63ULL;
+    stack_top = fp_address;
+    int fp_copied = copy_to_user(fp_address, fp_area, fp_size) == 0;
+    kfree(fp_buffer);
+    if (!fp_copied) {
+        process_exit_from_signal(frame, SIGSEGV);
+        return;
+    }
+#endif
     uint8_t info[SIGNAL_SIGINFO_SIZE];
     memset(info, 0, sizeof(info));
     memcpy(info, &taken.info, sizeof(taken.info));
     uint8_t context[SIGNAL_CONTEXT_SIZE];
     memset(context, 0, sizeof(context));
     fill_user_context(context, frame, resume_mask, &taken);
+#if defined(__x86_64__)
+    arch_mcontext_put(context, MCONTEXT_REGISTERS, fp_address);
+#elif defined(__aarch64__)
+    {
+        uint64_t fp[66] __attribute__((aligned(16)));
+        arch_fpu_save((uint8_t *)fp);
+        uint8_t *record = context + UCONTEXT_MCONTEXT_OFFSET + SIGCONTEXT_RESERVED_OFFSET;
+        uint32_t head[2] = {FPSIMD_MAGIC, FPSIMD_RECORD_BYTES};
+        uint32_t fpsr = (uint32_t)fp[64], fpcr = (uint32_t)fp[65];
+        memcpy(record, head, sizeof(head));
+        memcpy(record + 8, &fpsr, 4);
+        memcpy(record + 12, &fpcr, 4);
+        memcpy(record + 16, fp, 512);
+    }
+#endif
     /* Linux's rt_sigframe, which sigreturn and unwinders find from the stack pointer. */
 #if defined(__x86_64__)
     /* The restorer sits just below the ucontext, so the handler starts with rsp + 8 aligned. */
@@ -5249,6 +5347,34 @@ uint64_t process_runtime_ns(const struct process *process) {
         if (now >= process->last_scheduled_ns) runtime += now - process->last_scheduled_ns;
     }
     return runtime;
+}
+
+uint64_t process_user_runtime_ns(const struct process *process) {
+    uint64_t all = process_runtime_ns(process);
+    return all > process->system_runtime_ns ? all - process->system_runtime_ns : 0;
+}
+
+// An expired CPU-time itimer: rearmed by its interval, its signal queued.
+static void cpu_timer_expire(struct process *process, uint64_t *deadline, uint64_t interval,
+                             uint64_t clock, int signal_number) {
+    if (!*deadline || clock < *deadline) return;
+    if (interval) {
+        uint64_t periods = 1 + (clock - *deadline) / interval;
+        *deadline += periods * interval;
+    } else {
+        *deadline = 0;
+    }
+    signal_one_process(process, signal_number);
+}
+
+static void check_cpu_timers(struct process *process) {
+    if (!process || process->is_kthread) return;
+    if (!process->itimer_virtual_deadline_ns && !process->itimer_prof_deadline_ns) return;
+    cpu_timer_expire(process, &process->itimer_virtual_deadline_ns,
+                     process->itimer_virtual_interval_ns, process_user_runtime_ns(process),
+                     SIGVTALRM);
+    cpu_timer_expire(process, &process->itimer_prof_deadline_ns, process->itimer_prof_interval_ns,
+                     process_runtime_ns(process), SIGPROF);
 }
 
 uint64_t process_count(void) {

@@ -228,6 +228,14 @@ struct process {
     uint64_t futex_wait_deadline_ns;
 
     uint64_t itimer_real_interval_ns;
+    // CPU time spent in system calls; the rest of runtime_ns is user time.
+    uint64_t system_runtime_ns;
+    // ITIMER_VIRTUAL counts user time and ITIMER_PROF all CPU time; the deadlines are
+    // points on those clocks.
+    uint64_t itimer_virtual_deadline_ns;
+    uint64_t itimer_virtual_interval_ns;
+    uint64_t itimer_prof_deadline_ns;
+    uint64_t itimer_prof_interval_ns;
     uint64_t itimer_real_deadline_ns;
 
     uint64_t signal_pending;
@@ -554,6 +562,7 @@ void process_set_gs_base(uint64_t value);
 uint64_t process_get_gs_base(void);
 void process_account_runtime(void);
 uint64_t process_runtime_ns(const struct process *process);
+uint64_t process_user_runtime_ns(const struct process *process);
 uint64_t process_count(void);
 uint64_t process_created_count(void);
 uint64_t process_runnable_count(void);

@@ -12,6 +12,12 @@
 
 void arch_fpu_save(uint8_t *area);
 void arch_fpu_restore(uint8_t *area);
+#if defined(__x86_64__)
+// The FPU state as a signal frame carries it: its size, and saving or loading the live one.
+uint32_t arch_fpu_signal_size(void);
+void arch_fpu_signal_save(uint8_t *area);
+void arch_fpu_signal_load(uint8_t *area);
+#endif
 void arch_fpu_init(uint8_t *area);
 
 #if defined(__x86_64__)
@@ -166,8 +172,10 @@ static inline void arch_read_mcontext(struct syscall_frame *frame, const uint8_t
     uint64_t rip = arch_mcontext_get(context, MCONTEXT_RIP);
     if (rsp && rsp < USER_ADDRESS_LIMIT) frame->user_rsp = rsp;
     if (rip && rip < USER_ADDRESS_LIMIT) frame->user_rip = rip;
+    // What a program may set in its own flags, as Linux's FIX_EFLAGS: the arithmetic ones,
+    // trap, direction, overflow and alignment check. Interrupts stay on, IOPL at 0.
     uint64_t flags = arch_mcontext_get(context, MCONTEXT_EFLAGS);
-    frame->user_rflags = (flags & ~(uint64_t)0x200D5UL & 0x3F7FD5UL) | 0x202UL;
+    frame->user_rflags = (flags & 0x40DD5UL) | 0x202UL;
 }
 
 static inline int arch_signal_push_restorer(uint64_t cr3, uint64_t area, const uint64_t *restorer,
@@ -207,6 +215,10 @@ static inline void arch_sanitize_sigaction(struct tunix_sigaction *action) {
 #define SIGCONTEXT_SP_OFFSET     256U
 #define SIGCONTEXT_PC_OFFSET     264U
 #define SIGCONTEXT_PSTATE_OFFSET 272U
+// sigcontext.__reserved, where Linux puts fpsimd_context and the records after it.
+#define SIGCONTEXT_RESERVED_OFFSET 288U
+#define FPSIMD_MAGIC               0x46508001U
+#define FPSIMD_RECORD_BYTES        528U
 
 static inline void arch_frame_enter_user(struct syscall_frame *frame, uint64_t entry,
                                          uint64_t stack) {

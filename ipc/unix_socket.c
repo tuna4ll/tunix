@@ -58,8 +58,8 @@ struct unix_channel {
     // program needs both.
     struct unix_credentials stream_sender_to_a;
     struct unix_credentials stream_sender_to_b;
-    char a_path[108];
-    char b_path[108];
+    char a_path[UNIX_NAME_BYTES];
+    char b_path[UNIX_NAME_BYTES];
     int refs;
     int a_open;
     int b_open;
@@ -73,7 +73,7 @@ struct unix_dgram {
     struct unix_dgram *next;
     size_t length;
     struct unix_credentials sender;
-    char from[108];
+    char from[UNIX_NAME_BYTES];
     uint8_t data[];
 };
 
@@ -87,7 +87,7 @@ struct unix_socket {
     int rx_count;
     /* Bumped by every datagram or connection that arrives, for edge-triggered epoll. */
     uint32_t rx_generation;
-    char last_from[108];
+    char last_from[UNIX_NAME_BYTES];
     struct unix_socket *dgram_peer;
     int listening;
     int connected;
@@ -97,7 +97,7 @@ struct unix_socket {
     int passcred;
     struct unix_credentials credentials;
     struct unix_credentials last_sender;
-    char path[108];
+    char path[UNIX_NAME_BYTES];
     char *key;
     struct unix_channel *channel;
     struct unix_socket *pending_head;
@@ -345,18 +345,7 @@ int unix_socket_get_name(struct unix_socket *socket, int peer, struct tunix_sock
     }
     memset(address, 0, sizeof(*address));
     address->family = TUNIX_AF_UNIX;
-    if (path && path[0] == '\x01') {
-        size_t name_length = strlen(path + 1);
-        if (name_length > sizeof(address->path) - 1) name_length = sizeof(address->path) - 1;
-        address->path[0] = '\0';
-        memcpy(address->path + 1, path + 1, name_length);
-        *length = sizeof(address->family) + 1U + name_length;
-        return 0;
-    }
-    size_t path_length = path && path[0] ? strlen(path) + 1U : 0U;
-    if (path_length > sizeof(address->path)) path_length = sizeof(address->path);
-    if (path_length) memcpy(address->path, path, path_length);
-    *length = sizeof(address->family) + path_length;
+    *length = sizeof(address->family) + unix_socket_name_to_address(path, address->path);
     return 0;
 }
 
@@ -481,35 +470,87 @@ void unix_socket_unref(struct unix_socket *socket) {
     kfree(socket);
 }
 
-static int copy_path(char destination[108], const struct tunix_sockaddr_un *address,
+// Names are kept as C strings so they can be compared and copied as such: a path as it
+// is, an abstract name as '\x01' and its bytes, a NUL in it escaped as ESCAPE 1 and
+// ESCAPE itself as ESCAPE ESCAPE.
+#define NAME_ESCAPE '\x03'
+
+static int copy_path(char destination[UNIX_NAME_BYTES], const struct tunix_sockaddr_un *address,
                      size_t length) {
     if (!address || length < sizeof(address->family) + 2 || address->family != TUNIX_AF_UNIX)
-        return -EAFNOSUPPORT;
+        return length == sizeof(address->family) ? -EINVAL : -EAFNOSUPPORT;
     size_t maximum = length - sizeof(address->family);
     if (maximum > sizeof(address->path)) maximum = sizeof(address->path);
-    int abstract = (address->path[0] == '\0');
-    size_t start = abstract ? 1 : 0;
-    size_t path_length = start;
-    while (path_length < maximum && address->path[path_length]) path_length++;
-    if (path_length == start) return -EINVAL;
-    if (path_length >= sizeof(address->path)) return -ENAMETOOLONG;
-    if (abstract) {
-        destination[0] = '\x01';
-        memcpy(destination + 1, address->path + 1, path_length - 1);
-        destination[path_length] = '\0';
-    } else {
-        memcpy(destination, address->path, path_length);
-        destination[path_length] = '\0';
+    if (address->path[0] == '\0') {
+        // An abstract name is every byte the length covers, as Linux has it.
+        size_t out = 0;
+        destination[out++] = '\x01';
+        for (size_t at = 1; at < maximum; at++) {
+            char byte = address->path[at];
+            if (byte == '\0' || byte == NAME_ESCAPE) {
+                destination[out++] = NAME_ESCAPE;
+                destination[out++] = byte ? NAME_ESCAPE : '\x01';
+            } else {
+                destination[out++] = byte;
+            }
+        }
+        destination[out] = '\0';
+        return 0;
     }
+    size_t path_length = 0;
+    while (path_length < maximum && address->path[path_length]) path_length++;
+    memcpy(destination, address->path, path_length);
+    destination[path_length] = '\0';
     return 0;
+}
+
+size_t unix_socket_name_to_address(const char *name, char path[108]) {
+    if (!name || !name[0]) return 0;
+    if (name[0] != '\x01') {
+        size_t length = strlen(name);
+        if (length > 108) length = 108;
+        memcpy(path, name, length);
+        if (length < 108) path[length++] = '\0';
+        return length;
+    }
+    size_t out = 0;
+    path[out++] = '\0';
+    for (const char *at = name + 1; *at && out < 108; at++) {
+        if (*at == NAME_ESCAPE && at[1]) {
+            at++;
+            path[out++] = *at == NAME_ESCAPE ? NAME_ESCAPE : '\0';
+        } else {
+            path[out++] = *at;
+        }
+    }
+    return out;
 }
 
 int unix_socket_bind(struct unix_socket *socket, const struct tunix_sockaddr_un *address,
                      size_t length, const char *key) {
     UNIX_LOCKED;
     if (!socket || socket->connected || socket->listening || socket->path[0]) return -EINVAL;
-    char path[108];
-    int status = copy_path(path, address, length);
+    char path[UNIX_NAME_BYTES];
+    int status = 0;
+    if (length == sizeof(address->family)) {
+        // Autobind: an abstract name of five hex digits nobody holds, as Linux picks.
+        static uint32_t next_name;
+        int found = 0;
+        for (uint32_t tries = 0; tries < 0x100000U && !found; tries++) {
+            uint32_t number = next_name++ & 0xFFFFFU;
+            path[0] = '\x01';
+            for (int digit = 0; digit < 5; digit++)
+                path[1 + digit] = "0123456789abcdef"[(number >> (16 - 4 * digit)) & 0xFU];
+            path[6] = '\0';
+            found = 1;
+            for (struct unix_socket *bound = listener_list; bound; bound = bound->next_listener)
+                if (bound->key && strcmp(bound->key, path) == 0) found = 0;
+        }
+        if (!found) return -EADDRINUSE;
+        key = NULL;
+    } else {
+        status = copy_path(path, address, length);
+    }
     if (status < 0) return status;
     const char *bound_key = path[0] == '\x01' || !key ? path : key;
     for (struct unix_socket *bound = listener_list; bound; bound = bound->next_listener) {
@@ -587,7 +628,7 @@ int64_t unix_socket_sendto(struct unix_socket *socket, size_t size, const void *
     UNIX_LOCKED;
     if (!socket) return -EINVAL;
     if (!socket->dgram) return socket->connected ? -EISCONN : -EOPNOTSUPP;
-    char path[108];
+    char path[UNIX_NAME_BYTES];
     int status = copy_path(path, address, length);
     if (status < 0) return status;
     struct unix_socket *target = find_dgram(path[0] == '\x01' || !key ? path : key);
@@ -601,13 +642,13 @@ int unix_socket_is_dgram(struct unix_socket *socket) {
     return socket && socket->dgram;
 }
 
-void unix_socket_last_source(struct unix_socket *socket, char path[108]) {
+void unix_socket_last_source(struct unix_socket *socket, char path[UNIX_NAME_BYTES]) {
     UNIX_LOCKED;
     if (!socket) {
         path[0] = '\0';
         return;
     }
-    memcpy(path, socket->last_from, 108);
+    memcpy(path, socket->last_from, UNIX_NAME_BYTES);
 }
 
 static struct unix_socket *find_listener(const char *key) {
@@ -622,7 +663,7 @@ int unix_socket_connect(struct unix_socket *socket, const struct tunix_sockaddr_
     UNIX_LOCKED;
     if (!socket) return -EINVAL;
     if (socket->connected && !socket->dgram) return -EALREADY;
-    char path[108];
+    char path[UNIX_NAME_BYTES];
     int status = copy_path(path, address, length);
     if (status < 0) return status;
     if (socket->dgram) {

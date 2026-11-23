@@ -25,6 +25,7 @@
 #include <tunix/time.h>
 #include <tunix/vmm.h>
 #include <tunix/kprintf.h>
+#include <tunix/usb.h>
 #include <tunix/workqueue.h>
 #include <tunix/virtgpu.h>
 #include <tunix/sysfs.h>
@@ -161,6 +162,13 @@ const struct module_export kernel_symbols[] = {
     EXPORT(virtgpu_unregister),
     EXPORT(work_flush),
     EXPORT(work_queue),
+    // usbhid
+    EXPORT(input_external_key),
+    EXPORT(input_external_mouse),
+    EXPORT(input_external_tablet),
+    EXPORT(input_usb_pointer),
+    EXPORT(usb_register_driver),
+    EXPORT(usb_unregister_driver),
 #if defined(__x86_64__)
     EXPORT(apic_route_global),
     // ACPI, for the button, processor, thermal_zone and video modules

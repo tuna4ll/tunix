@@ -63,7 +63,21 @@ static void virtgpu_guard_release(int *unused) {
 
 #define VIRTIO_GPU_RESP_ERR_BASE 0x1200U
 
-#define VIRTIO_GPU_F_VIRGL 0U
+#define VIRTIO_GPU_F_VIRGL         0U
+#define VIRTIO_GPU_F_RESOURCE_BLOB 3U
+#define VIRTIO_GPU_F_CONTEXT_INIT  4U
+
+#define VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB 0x010cU
+#define VIRTIO_GPU_CMD_RESOURCE_MAP_BLOB    0x0208U
+#define VIRTIO_GPU_CMD_RESOURCE_UNMAP_BLOB  0x0209U
+#define VIRTIO_GPU_RESP_OK_MAP_INFO         0x1106U
+
+#define VIRTIO_GPU_FLAG_FENCE         1U
+#define VIRTIO_GPU_FLAG_INFO_RING_IDX 2U
+
+#define VIRTIO_GPU_SHM_ID_HOST_VISIBLE 1U
+#define CAPSETS_MAX                    8U
+#define HOST_MAPPINGS_MAX              4096U
 
 #define VIRTIO_GPU_CAPSET_VIRGL  1U
 #define VIRTIO_GPU_CAPSET_VIRGL2 2U
@@ -85,7 +99,8 @@ struct virtio_gpu_ctrl_hdr {
     uint32_t flags;
     uint64_t fence_id;
     uint32_t ctx_id;
-    uint32_t padding;
+    uint8_t ring_idx;
+    uint8_t padding[3];
 };
 
 struct virtio_gpu_rect {
@@ -224,7 +239,32 @@ struct virtio_gpu_resp_capset {
     uint8_t capset_data[MAX_CAPSET_BYTES];
 };
 
+struct virtio_gpu_resource_create_blob {
+    struct virtio_gpu_ctrl_hdr hdr;
+    uint32_t resource_id;
+    uint32_t blob_mem;
+    uint32_t blob_flags;
+    uint32_t nr_entries;
+    uint64_t blob_id;
+    uint64_t size;
+};
+
+struct virtio_gpu_resource_map_blob {
+    struct virtio_gpu_ctrl_hdr hdr;
+    uint32_t resource_id;
+    uint32_t padding;
+    uint64_t offset;
+};
+
+struct virtio_gpu_resp_map_info {
+    struct virtio_gpu_ctrl_hdr hdr;
+    uint32_t map_info;
+    uint32_t padding;
+};
+
 static union {
+    struct virtio_gpu_resource_create_blob create_blob;
+    struct virtio_gpu_resource_map_blob map_blob;
     struct virtio_gpu_resource_create_2d create;
     struct virtio_gpu_resource_unref unref;
     struct virtio_gpu_attach_backing attach;
@@ -242,6 +282,7 @@ static union {
 } request;
 
 static union {
+    struct virtio_gpu_resp_map_info map_info;
     struct virtio_gpu_resp_display_info display;
     struct virtio_gpu_resp_capset_info capset_info;
     struct virtio_gpu_resp_capset capset;
@@ -277,9 +318,23 @@ static uint32_t display_height;
 static int ready;
 
 static int virgl;
+static int blobs;
+static int context_init;
 static uint32_t capset_id;
 static uint32_t capset_version;
 static uint32_t capset_size;
+
+// Every capset the host offers -- virgl's, and Venus's for Vulkan.
+static struct {
+    uint32_t id, version, size;
+} capsets[CAPSETS_MAX];
+static unsigned capset_count;
+
+// Ranges of the host-visible region that blobs are mapped at.
+static struct {
+    uint32_t resource;
+    uint64_t offset, size;
+} host_mappings[HOST_MAPPINGS_MAX];
 
 #define ASYNC_SLOTS          32U
 #define ASYNC_REQUEST_BYTES  128U
@@ -287,12 +342,23 @@ static uint32_t capset_size;
 #define ASYNC_RESPONSE_BYTES 64U
 #define ASYNC_SLOT_BYTES     (ASYNC_REQUEST_BYTES + ASYNC_PAYLOAD_BYTES + ASYNC_RESPONSE_BYTES)
 
+// Commands can complete out of order: the host answers a fenced command only when its
+// fence signals, and the ones after it meanwhile. So each command is known by where its
+// request lies, and is done when its own answer has come back.
 struct async_slot {
     uint8_t *base;
     uint64_t physical;
 
     uint64_t sequence;
+    int done;
+    void *extra;            // a payload too large for the slot, freed when it is done
+    uint64_t extra_bytes;
 };
+
+static uint64_t completed_seen;
+static uint64_t request_physical;
+static int sync_done;
+static void reclaim_control(void);
 
 static struct async_slot async_slots[ASYNC_SLOTS];
 static uint8_t *async_arena;
@@ -302,10 +368,10 @@ static unsigned async_errors_reported;
 static int async_ready(void) { return async_arena != NULL; }
 
 static struct async_slot *async_take_slot(void) {
-    virtio_queue_reclaim(&control);
+    reclaim_control();
     for (unsigned index = 0; index < ASYNC_SLOTS; index++) {
         struct async_slot *slot = &async_slots[index];
-        if (slot->sequence > control.completed) continue;
+        if (slot->sequence && !slot->done) continue;
         if (slot->sequence) {
             const struct virtio_gpu_ctrl_hdr *answer =
                 (const struct virtio_gpu_ctrl_hdr *)(slot->base + ASYNC_REQUEST_BYTES +
@@ -321,15 +387,19 @@ static struct async_slot *async_take_slot(void) {
     return NULL;
 }
 
-static int submit_async(uint32_t request_bytes, const void *payload, uint32_t payload_bytes) {
+// EXTRA, when not NULL, is a DMA buffer already holding a payload too large for a slot;
+// the slot owns it from here on.
+static int submit_async_extra(uint32_t request_bytes, const void *payload, uint32_t payload_bytes,
+                              void *extra, uint64_t extra_physical, uint64_t extra_bytes) {
     if (!async_ready() || request_bytes > ASYNC_REQUEST_BYTES) return -1;
-    if (payload_bytes > ASYNC_PAYLOAD_BYTES) return -1;
+    if (!extra && payload_bytes > ASYNC_PAYLOAD_BYTES) return -1;
 
     struct async_slot *slot = async_take_slot();
     if (!slot) return -1;
 
     memcpy(slot->base, &request, request_bytes);
-    if (payload && payload_bytes) memcpy(slot->base + ASYNC_REQUEST_BYTES, payload, payload_bytes);
+    if (!extra && payload && payload_bytes)
+        memcpy(slot->base + ASYNC_REQUEST_BYTES, payload, payload_bytes);
     memset(slot->base + ASYNC_REQUEST_BYTES + ASYNC_PAYLOAD_BYTES, 0, ASYNC_RESPONSE_BYTES);
 
     struct virtio_buffer buffers[3];
@@ -337,7 +407,11 @@ static int submit_async(uint32_t request_bytes, const void *payload, uint32_t pa
     buffers[count].physical = slot->physical;
     buffers[count].length = request_bytes;
     count++;
-    if (payload && payload_bytes) {
+    if (extra) {
+        buffers[count].physical = extra_physical;
+        buffers[count].length = payload_bytes;
+        count++;
+    } else if (payload && payload_bytes) {
         buffers[count].physical = slot->physical + ASYNC_REQUEST_BYTES;
         buffers[count].length = payload_bytes;
         count++;
@@ -349,7 +423,14 @@ static int submit_async(uint32_t request_bytes, const void *payload, uint32_t pa
 
     if (virtio_queue_post(&control, buffers, count, write_from) != 0) return -1;
     slot->sequence = control.posted;
+    slot->done = 0;
+    slot->extra = extra;
+    slot->extra_bytes = extra_bytes;
     return 0;
+}
+
+static int submit_async(uint32_t request_bytes, const void *payload, uint32_t payload_bytes) {
+    return submit_async_extra(request_bytes, payload, payload_bytes, NULL, 0, 0);
 }
 
 #define COMPLETION_POLL_NS    2000000ULL
@@ -359,17 +440,47 @@ static const char completion_channel;
 
 static int may_sleep_here(void) { return process_may_sleep(); }
 
-static uint64_t completed_seen;
-
+// Takes the answers the host has given, marks their commands done, and moves
+// completed_seen to the last sequence everything up to which is done.
 static void reclaim_control(void) {
-    virtio_queue_reclaim(&control);
-    __atomic_store_n(&completed_seen, control.completed, __ATOMIC_RELEASE);
+    uint64_t address = 0;
+    uint32_t length = 0;
+    while (virtio_queue_take_used(&control, &address, &length)) {
+        if (address == request_physical) {
+            sync_done = 1;
+            continue;
+        }
+        for (unsigned index = 0; index < ASYNC_SLOTS; index++) {
+            struct async_slot *slot = &async_slots[index];
+            if (!slot->sequence || slot->done || slot->physical != address) continue;
+            slot->done = 1;
+            if (slot->extra) dma_free(slot->extra, slot->extra_bytes);
+            slot->extra = NULL;
+            break;
+        }
+    }
+    uint64_t lowest = 0;
+    for (unsigned index = 0; index < ASYNC_SLOTS; index++) {
+        const struct async_slot *slot = &async_slots[index];
+        if (slot->sequence && !slot->done && (!lowest || slot->sequence < lowest))
+            lowest = slot->sequence;
+    }
+    __atomic_store_n(&completed_seen, lowest ? lowest - 1 : control.posted, __ATOMIC_RELEASE);
 }
 
 static int completed_through(uint64_t target) {
     VIRTGPU_LOCKED;
     reclaim_control();
-    return control.completed >= target;
+    return completed_seen >= target;
+}
+
+// Whether the one command posted as SEQUENCE is done, whatever came before it.
+static int signaled(uint64_t sequence) {
+    VIRTGPU_LOCKED;
+    reclaim_control();
+    for (unsigned index = 0; index < ASYNC_SLOTS; index++)
+        if (async_slots[index].sequence == sequence) return async_slots[index].done;
+    return 1;
 }
 
 static int wait_completed(uint64_t target) {
@@ -397,11 +508,11 @@ static void wait_for_room(unsigned needed) {
     {
         VIRTGPU_LOCKED;
         if (!ready || !async_ready()) return;
-        virtio_queue_reclaim(&control);
+        reclaim_control();
         unsigned busy = 0;
         uint64_t sequences[ASYNC_SLOTS];
         for (unsigned index = 0; index < ASYNC_SLOTS; index++)
-            if (async_slots[index].sequence > control.completed)
+            if (async_slots[index].sequence && !async_slots[index].done)
                 sequences[busy++] = async_slots[index].sequence;
         if (ASYNC_SLOTS - busy >= needed) return;
         unsigned release = needed - (ASYNC_SLOTS - busy);
@@ -509,7 +620,23 @@ static int submit(uint32_t request_bytes, const void *payload, uint32_t payload_
     count++;
 
     memset(&response, 0, response_bytes);
-    if (virtio_queue_submit(&control, buffers, count, write_from) != 0) return -1;
+    request_physical = buffers[0].physical;
+    sync_done = 0;
+    uint64_t deadline = time_uptime_ns() + COMPLETION_TIMEOUT_NS;
+    while (virtio_queue_post(&control, buffers, count, write_from) != 0) {
+        reclaim_control();
+        if (time_uptime_ns() > deadline) return -1;
+        cpu_relax();
+    }
+    while (!sync_done) {
+        reclaim_control();
+        if (sync_done) break;
+        if (time_uptime_ns() > deadline) {
+            kprintf("virtio-gpu: no answer to command %x\n", (unsigned)request.hdr.type);
+            return -1;
+        }
+        cpu_relax();
+    }
     if (response.hdr.type >= VIRTIO_GPU_RESP_ERR_BASE) return -1;
     return 0;
 }
@@ -582,6 +709,12 @@ static void query_capsets(void) {
             continue;
 
         uint32_t id = response.capset_info.capset_id;
+        if (capset_count < CAPSETS_MAX && response.capset_info.capset_max_size <= MAX_CAPSET_BYTES) {
+            capsets[capset_count].id = id;
+            capsets[capset_count].version = response.capset_info.capset_max_version;
+            capsets[capset_count].size = response.capset_info.capset_max_size;
+            capset_count++;
+        }
         if (id != VIRTIO_GPU_CAPSET_VIRGL && id != VIRTIO_GPU_CAPSET_VIRGL2) continue;
 
         if (response.capset_info.capset_max_size > MAX_CAPSET_BYTES) continue;
@@ -608,6 +741,8 @@ static int vg_virgl_available(void) { return virgl && capset_id != 0; }
 static uint32_t vg_capset_id(void) { return capset_id; }
 static uint32_t vg_capset_version(void) { return capset_version; }
 static uint32_t vg_capset_size(void) { return capset_size; }
+
+static int vg_features(void);
 
 static int vg_get_capset(uint32_t id, uint32_t version, void *out, uint32_t bytes) {
     VIRTGPU_LOCKED;
@@ -643,6 +778,169 @@ static int vg_context_create(uint32_t context, const char *name) {
     request.ctx_create.nlen = length;
     return submit(sizeof(request.ctx_create), NULL, 0, sizeof(struct virtio_gpu_ctrl_hdr));
 }
+
+static int vg_features(void) {
+    return (blobs ? VIRTGPU_FEATURE_BLOB : 0) | (context_init ? VIRTGPU_FEATURE_CONTEXT_INIT : 0) |
+        (blobs && device.shm_length && device.shm_id == VIRTIO_GPU_SHM_ID_HOST_VISIBLE
+             ? VIRTGPU_FEATURE_HOST_VISIBLE
+             : 0);
+}
+
+static uint32_t vg_capset_mask(void) {
+    uint32_t mask = 0;
+    for (unsigned index = 0; index < capset_count; index++)
+        if (capsets[index].id < 32) mask |= 1U << capsets[index].id;
+    return mask;
+}
+
+static int vg_capset_info(uint32_t id, uint32_t *version, uint32_t *size) {
+    for (unsigned index = 0; index < capset_count; index++) {
+        if (capsets[index].id != id) continue;
+        if (version) *version = capsets[index].version;
+        if (size) *size = capsets[index].size;
+        return 0;
+    }
+    return -1;
+}
+
+static int vg_context_create_init(uint32_t context, const char *name, uint32_t capset) {
+    VIRTGPU_LOCKED;
+    if (!vg_virgl_available() || !context || !context_init || capset > 0xFFU) return -1;
+    begin(VIRTIO_GPU_CMD_CTX_CREATE);
+    request.ctx_create.hdr.ctx_id = context;
+    request.ctx_create.context_init = capset;
+    uint32_t length = 0;
+    if (name) {
+        while (name[length] && length < (uint32_t)sizeof(request.ctx_create.debug_name) - 1U) {
+            request.ctx_create.debug_name[length] = name[length];
+            length++;
+        }
+    }
+    request.ctx_create.nlen = length;
+    return submit(sizeof(request.ctx_create), NULL, 0, sizeof(struct virtio_gpu_ctrl_hdr));
+}
+
+// A blob resource: memory the host allocates (HOST3D), or guest pages (GUEST).
+static uint32_t vg_resource_create_blob(uint32_t context, uint32_t blob_mem, uint32_t blob_flags,
+                                        uint64_t blob_id, uint64_t size, const uint64_t *pages,
+                                        uint64_t page_count) {
+    VIRTGPU_LOCKED;
+    if (!ready || !blobs || !size) return 0;
+    uint32_t used = 0;
+    if (pages && page_count) {
+        if (page_count > BACKING_ENTRIES) return 0;
+        for (uint64_t index = 0; index < page_count; index++) {
+            if (used && backing[used - 1].address + backing[used - 1].length == pages[index]) {
+                backing[used - 1].length += 4096U;
+                continue;
+            }
+            backing[used].address = pages[index];
+            backing[used].length = 4096U;
+            backing[used].padding = 0;
+            used++;
+        }
+    }
+    uint32_t resource = next_resource_id;
+    begin(VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB);
+    request.create_blob.hdr.ctx_id = context;
+    request.create_blob.resource_id = resource;
+    request.create_blob.blob_mem = blob_mem;
+    request.create_blob.blob_flags = blob_flags;
+    request.create_blob.nr_entries = used;
+    request.create_blob.blob_id = blob_id;
+    request.create_blob.size = size;
+    if (submit(sizeof(request.create_blob), used ? backing : NULL,
+               used * (uint32_t)sizeof(backing[0]), sizeof(struct virtio_gpu_ctrl_hdr)) != 0)
+        return 0;
+    next_resource_id++;
+    return resource;
+}
+
+// Maps a host blob into the host-visible region, at a range found here; says where
+// that is physically and how the host wants it cached.
+static int vg_map_blob(uint32_t resource, uint64_t size, uint64_t *physical, uint32_t *map_info) {
+    VIRTGPU_LOCKED;
+    if (!ready || !resource || !size || !(vg_features() & VIRTGPU_FEATURE_HOST_VISIBLE)) return -1;
+    size = (size + 4095ULL) & ~4095ULL;
+    unsigned free_slot = HOST_MAPPINGS_MAX;
+    uint64_t offset = 0;
+    for (int moved = 1; moved;) {
+        moved = 0;
+        for (unsigned index = 0; index < HOST_MAPPINGS_MAX; index++) {
+            if (!host_mappings[index].resource) {
+                if (free_slot == HOST_MAPPINGS_MAX) free_slot = index;
+                continue;
+            }
+            uint64_t start = host_mappings[index].offset;
+            uint64_t end = start + host_mappings[index].size;
+            if (offset < end && offset + size > start) {
+                offset = end;
+                moved = 1;
+            }
+        }
+    }
+    if (free_slot == HOST_MAPPINGS_MAX || offset + size > device.shm_length) return -1;
+
+    begin(VIRTIO_GPU_CMD_RESOURCE_MAP_BLOB);
+    request.map_blob.resource_id = resource;
+    request.map_blob.offset = offset;
+    if (submit(sizeof(request.map_blob), NULL, 0, sizeof(response.map_info)) != 0 ||
+        response.hdr.type != VIRTIO_GPU_RESP_OK_MAP_INFO)
+        return -1;
+    host_mappings[free_slot].resource = resource;
+    host_mappings[free_slot].offset = offset;
+    host_mappings[free_slot].size = size;
+    if (physical) *physical = device.shm_physical + offset;
+    if (map_info) *map_info = response.map_info.map_info;
+    return 0;
+}
+
+static void vg_unmap_blob(uint32_t resource) {
+    VIRTGPU_LOCKED;
+    if (!ready || !resource) return;
+    for (unsigned index = 0; index < HOST_MAPPINGS_MAX; index++) {
+        if (host_mappings[index].resource != resource) continue;
+        begin(VIRTIO_GPU_CMD_RESOURCE_UNMAP_BLOB);
+        request.unref.resource_id = resource;
+        (void)submit(sizeof(request.unref), NULL, 0, sizeof(struct virtio_gpu_ctrl_hdr));
+        host_mappings[index].resource = 0;
+        return;
+    }
+}
+
+// A command buffer for CONTEXT's ring RING, fenced: the host answers it when the work it
+// starts is done. Returns the sequence that says when, or 0.
+static uint64_t vg_submit_fenced(uint32_t context, uint32_t ring, const void *buffer,
+                                 uint32_t bytes) {
+    if (!buffer || !bytes || bytes % 4U || bytes > MAX_COMMAND_BYTES || ring > 63U) return 0;
+    void *extra = NULL;
+    uint64_t extra_physical = 0;
+    if (bytes > ASYNC_PAYLOAD_BYTES) {
+        extra = dma_alloc(bytes, 0, &extra_physical);
+        if (!extra) return 0;
+        memcpy(extra, buffer, bytes);
+    }
+    wait_for_room(1);
+    VIRTGPU_LOCKED;
+    if (!vg_virgl_available() || !context) {
+        if (extra) dma_free(extra, bytes);
+        return 0;
+    }
+    begin(VIRTIO_GPU_CMD_SUBMIT_3D);
+    request.submit_3d.hdr.ctx_id = context;
+    request.submit_3d.hdr.flags = VIRTIO_GPU_FLAG_FENCE | VIRTIO_GPU_FLAG_INFO_RING_IDX;
+    request.submit_3d.hdr.fence_id = control.posted + 1;
+    request.submit_3d.hdr.ring_idx = (uint8_t)ring;
+    request.submit_3d.size = bytes;
+    if (submit_async_extra(sizeof(request.submit_3d), buffer, bytes, extra, extra_physical,
+                           extra ? bytes : 0) != 0) {
+        if (extra) dma_free(extra, bytes);
+        return 0;
+    }
+    return control.posted;
+}
+
+static int vg_fence_signaled(uint64_t sequence) { return sequence ? signaled(sequence) : 1; }
 
 static void vg_context_destroy(uint32_t context) {
     VIRTGPU_LOCKED;
@@ -758,8 +1056,9 @@ static uint64_t vg_interrupt_count(void) { return completions; }
 static int vg_init(const struct pci_device *pci) {
     VIRTGPU_LOCKED;
     uint64_t granted = 0;
-    if (virtio_pci_attach_device(&device, pci, 1ULL << VIRTIO_GPU_F_VIRGL, &granted) != 0)
-        return -1;
+    uint64_t wanted = (1ULL << VIRTIO_GPU_F_VIRGL) | (1ULL << VIRTIO_GPU_F_RESOURCE_BLOB) |
+        (1ULL << VIRTIO_GPU_F_CONTEXT_INIT);
+    if (virtio_pci_attach_device(&device, pci, wanted, &granted) != 0) return -1;
 
     uint64_t discarded = 0;
     backing =
@@ -782,6 +1081,8 @@ static int vg_init(const struct pci_device *pci) {
         return -1;
     }
     virgl = (granted & (1ULL << VIRTIO_GPU_F_VIRGL)) != 0;
+    blobs = (granted & (1ULL << VIRTIO_GPU_F_RESOURCE_BLOB)) != 0;
+    context_init = (granted & (1ULL << VIRTIO_GPU_F_CONTEXT_INIT)) != 0;
 
     virtio_pci_request_irq(&device, "virtio-gpu", control_queue_interrupt, NULL);
     if (virtio_pci_setup_queue(&device, &control, VIRTIO_GPU_CONTROL_QUEUE) != 0) {
@@ -804,6 +1105,10 @@ static int vg_init(const struct pci_device *pci) {
         kprintf("TUNIX: virtio-gpu ready, virgl capset %u version %u, %u bytes\n", capset_id,
                 capset_version, capset_size);
     else kprintf("TUNIX: virtio-gpu ready, 2D only\n");
+    if (vg_features() & VIRTGPU_FEATURE_HOST_VISIBLE)
+        kprintf("TUNIX: virtio-gpu blobs, %u MiB host-visible at %p%s\n",
+                (unsigned)(device.shm_length >> 20), (void *)device.shm_physical,
+                (vg_capset_mask() & (1U << VIRTGPU_CAPSET_VENUS)) ? ", Venus" : "");
     if (device.vector) kprintf("TUNIX: virtio-gpu interrupts on vector %u\n", device.vector);
     return 0;
 }
@@ -988,6 +1293,15 @@ static const struct virtgpu_ops virtio_gpu_ops = {
     .present = vg_present,
     .scanout_disable = vg_scanout_disable,
     .console_present = vg_console_present,
+    .features = vg_features,
+    .capset_mask = vg_capset_mask,
+    .capset_info = vg_capset_info,
+    .context_create_init = vg_context_create_init,
+    .resource_create_blob = vg_resource_create_blob,
+    .map_blob = vg_map_blob,
+    .unmap_blob = vg_unmap_blob,
+    .submit_fenced = vg_submit_fenced,
+    .fence_signaled = vg_fence_signaled,
 };
 
 static void release_device(void) {
@@ -997,6 +1311,15 @@ static void release_device(void) {
     }
     virtio_pci_reset(&device);
     work_flush(&completion_work);
+    for (unsigned index = 0; index < ASYNC_SLOTS; index++) {
+        if (async_slots[index].extra) dma_free(async_slots[index].extra, async_slots[index].extra_bytes);
+        async_slots[index].extra = NULL;
+        async_slots[index].sequence = 0;
+        async_slots[index].done = 0;
+    }
+    memset(host_mappings, 0, sizeof(host_mappings));
+    capset_count = 0;
+    capset_id = 0;
     virtio_ring_free(&control);
     virtio_ring_free(&cursorq);
     if (backing) dma_free(backing, sizeof(*backing) * BACKING_ENTRIES);

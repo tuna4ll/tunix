@@ -104,6 +104,49 @@ static void drm_guard_release(int *unused) {
 #define VIRTGPU_PARAM_CONTEXT_INIT         6
 #define VIRTGPU_PARAM_SUPPORTED_CAPSET_IDS 7
 
+#define DRM_MAX_COMMAND_BYTES (1024U * 1024U)
+
+#define VIRTGPU_EXECBUF_FENCE_FD_IN  0x01U
+#define VIRTGPU_EXECBUF_FENCE_FD_OUT 0x02U
+#define VIRTGPU_EXECBUF_RING_IDX     0x04U
+
+#define VIRTGPU_BLOB_MEM_GUEST       1U
+#define VIRTGPU_BLOB_MEM_HOST3D      2U
+#define VIRTGPU_BLOB_MEM_HOST3D_GUEST 3U
+#define VIRTGPU_BLOB_FLAG_USE_MAPPABLE 1U
+
+#define VIRTGPU_CONTEXT_PARAM_CAPSET_ID       1U
+#define VIRTGPU_CONTEXT_PARAM_NUM_RINGS       2U
+#define VIRTGPU_CONTEXT_PARAM_POLL_RINGS_MASK 3U
+#define VIRTGPU_CONTEXT_PARAM_DEBUG_NAME      4U
+
+#define VIRTIO_GPU_MAP_CACHE_MASK     0x0fU
+#define VIRTIO_GPU_MAP_CACHE_UNCACHED 2U
+#define VIRTIO_GPU_MAP_CACHE_WC       3U
+
+struct drm_virtgpu_resource_create_blob {
+    uint32_t blob_mem;
+    uint32_t blob_flags;
+    uint32_t bo_handle;
+    uint32_t res_handle;
+    uint64_t size;
+    uint32_t pad;
+    uint32_t cmd_size;
+    uint64_t cmd;
+    uint64_t blob_id;
+};
+
+struct drm_virtgpu_context_set_param {
+    uint64_t param;
+    uint64_t value;
+};
+
+struct drm_virtgpu_context_init {
+    uint32_t num_params;
+    uint32_t pad;
+    uint64_t ctx_set_params;
+};
+
 struct drm_virtgpu_map {
     uint64_t offset;
     uint32_t handle;
@@ -492,6 +535,12 @@ struct drm_dumb_buffer {
     uint8_t owner_closed;
     uint32_t refs;
     uint64_t busy_until;
+    // A blob the host allocated: no guest pages, mapped (if at all) from the device's
+    // host-visible region.
+    uint8_t host_blob;
+    uint32_t blob_mem;
+    uint64_t host_physical;
+    uint32_t map_info;
 };
 
 struct drm_import {
@@ -604,6 +653,7 @@ static int grow_int_table(void **table, size_t element, int *capacity) {
 static uint32_t next_render_context = 1;
 static void render_contexts_release(void);
 static uint32_t render_context(void);
+static uint32_t client_context(const struct file *client);
 static uint32_t next_fb_id = 1;
 static uint32_t active_fb_id;
 static int drm_ready;
@@ -1008,6 +1058,7 @@ static void buffer_release(struct drm_dumb_buffer *buffer) {
         buffer->refs--;
         return;
     }
+    if (buffer->host_blob && buffer->host_physical) virtgpu_unmap_blob(buffer->virtio_resource);
     uint64_t sequence =
         buffer->virtio_resource ? virtgpu_resource_release(buffer->virtio_resource) : 0;
     pages_retire(buffer->pages, buffer->page_count, sequence);
@@ -1315,12 +1366,51 @@ static int64_t ioctl_prime_fd_to_handle(const struct file *client, uint64_t user
     }
 
     if (buffer->rendered && buffer->virtio_resource) {
-        uint32_t context = render_context();
+        uint32_t context = client_context(client);
         if (context) (void)virtgpu_context_attach(context, buffer->virtio_resource, 1);
     }
 
     request.handle = file->dmabuf_handle;
     return copy_to_user(user_argument, &request, sizeof(request)) == 0 ? 0 : -EFAULT;
+}
+
+// Maps LENGTH bytes of BUFFER from OFFSET at VIRTUAL_ADDRESS.
+static int64_t map_buffer(struct drm_dumb_buffer *buffer, uint64_t cr3, uint64_t virtual_address,
+                          uint64_t length, uint64_t offset, uint64_t page_flags) {
+    uint64_t flags = page_flags | PAGE_USER | PAGE_PRESENT | PAGE_NX;
+    uint64_t mapped = 0;
+    if (buffer->host_blob) {
+        if (!buffer->host_physical) return -EINVAL;
+        uint32_t cache = buffer->map_info & VIRTIO_GPU_MAP_CACHE_MASK;
+        flags |= PAGE_DEVICE;
+        if (cache == VIRTIO_GPU_MAP_CACHE_UNCACHED) flags |= PAGE_UNCACHED;
+        if (cache == VIRTIO_GPU_MAP_CACHE_WC)
+            flags |= vmm_write_combining_available() ? PAGE_WRITE_COMBINING : PAGE_UNCACHED;
+        for (; mapped < length; mapped += 4096ULL) {
+            if (vmm_map_page_in(cr3, virtual_address + mapped,
+                                buffer->host_physical + offset + mapped, flags) != 0) {
+                while (mapped) {
+                    mapped -= 4096ULL;
+                    (void)vmm_unmap_page_in(cr3, virtual_address + mapped);
+                }
+                return -EINVAL;
+            }
+        }
+        return 0;
+    }
+    for (; mapped < length; mapped += 4096ULL) {
+        uint64_t physical = buffer->pages[(offset + mapped) / 4096ULL];
+        if (pmm_page_ref(physical) != 0 ||
+            vmm_map_page_in(cr3, virtual_address + mapped, physical, flags) != 0) {
+            while (mapped) {
+                mapped -= 4096ULL;
+                (void)vmm_unmap_page_in(cr3, virtual_address + mapped);
+                pmm_free_page((void *)buffer->pages[(offset + mapped) / 4096ULL]);
+            }
+            return -EINVAL;
+        }
+    }
+    return 0;
 }
 
 int64_t drm_dmabuf_size(const struct file *file) {
@@ -1336,22 +1426,7 @@ int64_t drm_dmabuf_mmap(struct file *file, uint64_t cr3, uint64_t virtual_addres
     struct drm_dumb_buffer *buffer = buffer_find(file->dmabuf_handle);
     if (!buffer) return -ENOENT;
     if (offset >= buffer->size || length > buffer->size - offset) return -EINVAL;
-
-    uint64_t flags = page_flags | PAGE_USER | PAGE_PRESENT | PAGE_NX;
-    uint64_t mapped = 0;
-    for (; mapped < length; mapped += 4096ULL) {
-        uint64_t physical = buffer->pages[(offset + mapped) / 4096ULL];
-        if (pmm_page_ref(physical) != 0 ||
-            vmm_map_page_in(cr3, virtual_address + mapped, physical, flags) != 0) {
-            while (mapped) {
-                mapped -= 4096ULL;
-                (void)vmm_unmap_page_in(cr3, virtual_address + mapped);
-                pmm_free_page((void *)buffer->pages[(offset + mapped) / 4096ULL]);
-            }
-            return -EINVAL;
-        }
-    }
-    return 0;
+    return map_buffer(buffer, cr3, virtual_address, length, offset, page_flags);
 }
 
 static int64_t ioctl_get_plane_resources(uint64_t user_argument) {
@@ -1987,6 +2062,36 @@ static int64_t ioctl_gem_close(const struct file *client, uint64_t user_argument
     return handle_close(client, request.handle);
 }
 
+// A context a client made for itself with CONTEXT_INIT -- Venus's, for Vulkan --
+// rather than the per-process virgl one render_context() gives the others.
+#define FILE_CONTEXTS 64U
+
+static struct {
+    const struct file *file;
+    uint32_t context;
+    uint32_t rings;
+} file_contexts[FILE_CONTEXTS];
+
+static int file_context_index(const struct file *client) {
+    for (unsigned index = 0; index < FILE_CONTEXTS; index++)
+        if (file_contexts[index].context && file_contexts[index].file == client) return (int)index;
+    return -1;
+}
+
+static uint32_t render_context(void);
+
+static uint32_t client_context(const struct file *client) {
+    int index = file_context_index(client);
+    return index >= 0 ? file_contexts[index].context : render_context();
+}
+
+static void file_context_release(const struct file *client) {
+    int index = file_context_index(client);
+    if (index < 0) return;
+    virtgpu_context_destroy(file_contexts[index].context);
+    memset(&file_contexts[index], 0, sizeof(file_contexts[index]));
+}
+
 static uint32_t render_context(void) {
     if (!virtgpu_virgl_available()) return 0;
     struct process *process = process_current();
@@ -2069,13 +2174,17 @@ static int64_t ioctl_virtgpu_getparam(uint64_t user_argument) {
     case VIRTGPU_PARAM_3D_FEATURES:
     case VIRTGPU_PARAM_CAPSET_QUERY_FIX: answer = 1; break;
     case VIRTGPU_PARAM_RESOURCE_BLOB:
-    case VIRTGPU_PARAM_HOST_VISIBLE:
-    case VIRTGPU_PARAM_CROSS_DEVICE:
-    case VIRTGPU_PARAM_CONTEXT_INIT:     answer = 0; break;
-    case VIRTGPU_PARAM_SUPPORTED_CAPSET_IDS:
-        answer = virtgpu_capset_id() ? (1U << virtgpu_capset_id()) : 0;
+        answer = (virtgpu_features() & VIRTGPU_FEATURE_BLOB) != 0;
         break;
-    default: answer = 0; break;
+    case VIRTGPU_PARAM_HOST_VISIBLE:
+        answer = (virtgpu_features() & VIRTGPU_FEATURE_HOST_VISIBLE) != 0;
+        break;
+    case VIRTGPU_PARAM_CONTEXT_INIT:
+        answer = (virtgpu_features() & VIRTGPU_FEATURE_CONTEXT_INIT) != 0;
+        break;
+    case VIRTGPU_PARAM_CROSS_DEVICE: answer = 0; break;
+    case VIRTGPU_PARAM_SUPPORTED_CAPSET_IDS: answer = virtgpu_capset_mask(); break;
+    default: return -EINVAL;
     }
     return copy_to_user(query.value, &answer, sizeof(answer)) == 0 ? 0 : -EFAULT;
 }
@@ -2084,9 +2193,8 @@ static int64_t ioctl_virtgpu_get_caps(uint64_t user_argument) {
     struct drm_virtgpu_get_caps query;
     if (copy_from_user(&query, user_argument, sizeof(query)) != 0) return -EFAULT;
     if (!query.addr || !query.size) return -EINVAL;
-    if (query.cap_set_id != virtgpu_capset_id()) return -EINVAL;
-
-    uint32_t size = virtgpu_capset_size();
+    uint32_t size = 0;
+    if (virtgpu_capset_info(query.cap_set_id, NULL, &size) != 0) return -EINVAL;
     if (query.size < size) size = query.size;
     if (!size) return -ENODEV;
 
@@ -2148,6 +2256,114 @@ static int64_t ioctl_virtgpu_resource_create(const struct file *client, uint64_t
     return copy_to_user(user_argument, &query, sizeof(query)) == 0 ? 0 : -EFAULT;
 }
 
+static int64_t ioctl_virtgpu_context_init(const struct file *client, uint64_t user_argument) {
+    struct drm_virtgpu_context_init query;
+    if (copy_from_user(&query, user_argument, sizeof(query)) != 0) return -EFAULT;
+    if (!(virtgpu_features() & VIRTGPU_FEATURE_CONTEXT_INIT)) return -EINVAL;
+    if (!query.num_params || query.num_params > 8) return -EINVAL;
+    if (file_context_index(client) >= 0) return -EEXIST;
+
+    uint32_t capset = 0, rings = 0;
+    char name[64] = "tunix";
+    for (uint32_t index = 0; index < query.num_params; index++) {
+        struct drm_virtgpu_context_set_param param;
+        if (copy_from_user(&param, query.ctx_set_params + index * sizeof(param), sizeof(param)) != 0)
+            return -EFAULT;
+        switch (param.param) {
+        case VIRTGPU_CONTEXT_PARAM_CAPSET_ID:
+            if (param.value >= 32 || !(virtgpu_capset_mask() & (1U << param.value))) return -EINVAL;
+            capset = (uint32_t)param.value;
+            break;
+        case VIRTGPU_CONTEXT_PARAM_NUM_RINGS:
+            if (param.value > 64) return -EINVAL;
+            rings = (uint32_t)param.value;
+            break;
+        case VIRTGPU_CONTEXT_PARAM_POLL_RINGS_MASK: break;
+        case VIRTGPU_CONTEXT_PARAM_DEBUG_NAME:
+            if (copy_from_user(name, param.value, sizeof(name) - 1) != 0) return -EFAULT;
+            name[sizeof(name) - 1] = '\0';
+            break;
+        default: return -EINVAL;
+        }
+    }
+    if (!capset) return -EINVAL;
+
+    for (unsigned index = 0; index < FILE_CONTEXTS; index++) {
+        if (file_contexts[index].context) continue;
+        uint32_t context = next_render_context;
+        if (virtgpu_context_create_init(context, name, capset) != 0) return -EIO;
+        next_render_context++;
+        file_contexts[index].file = client;
+        file_contexts[index].context = context;
+        file_contexts[index].rings = rings;
+        return 0;
+    }
+    return -ENOMEM;
+}
+
+static int64_t ioctl_virtgpu_resource_create_blob(const struct file *client,
+                                                  uint64_t user_argument) {
+    struct drm_virtgpu_resource_create_blob query;
+    if (copy_from_user(&query, user_argument, sizeof(query)) != 0) return -EFAULT;
+    if (!(virtgpu_features() & VIRTGPU_FEATURE_BLOB) || !query.size) return -EINVAL;
+    if (query.blob_mem < VIRTGPU_BLOB_MEM_GUEST || query.blob_mem > VIRTGPU_BLOB_MEM_HOST3D_GUEST)
+        return -EINVAL;
+    uint64_t size = (query.size + 4095ULL) & ~4095ULL;
+    uint32_t context = client_context(client);
+    if (query.blob_mem != VIRTGPU_BLOB_MEM_GUEST && !context) return -EINVAL;
+
+    // Commands that make the host object the blob names, ahead of it.
+    if (query.cmd_size) {
+        if (query.cmd_size > DRM_MAX_COMMAND_BYTES) return -EINVAL;
+        void *staging = kmalloc(query.cmd_size);
+        if (!staging) return -ENOMEM;
+        if (copy_from_user(staging, query.cmd, query.cmd_size) != 0) {
+            kfree(staging);
+            return -EFAULT;
+        }
+        int submitted = virtgpu_submit_3d(context, staging, query.cmd_size);
+        kfree(staging);
+        if (submitted != 0) return -EIO;
+    }
+
+    struct drm_dumb_buffer *buffer = NULL;
+    if (query.blob_mem == VIRTGPU_BLOB_MEM_HOST3D) {
+        uint32_t handle = 0;
+        buffer = buffer_slot(&handle);
+        if (!buffer) return -ENOMEM;
+        buffer->handle = handle;
+        buffer->owner = client;
+        buffer->refs = 1;
+        buffer->size = size;
+        buffer->host_blob = 1;
+    } else {
+        buffer = buffer_new(client, size);
+        if (!buffer) return -ENOMEM;
+    }
+    buffer->blob_mem = query.blob_mem;
+
+    uint32_t resource = virtgpu_resource_create_blob(context, query.blob_mem, query.blob_flags,
+                                                     query.blob_id, size, buffer->pages,
+                                                     buffer->page_count);
+    if (!resource) {
+        buffer_release(buffer);
+        return -EIO;
+    }
+    buffer->virtio_resource = resource;
+    buffer->rendered = 1;
+    if (context) (void)virtgpu_context_attach(context, resource, 1);
+
+    if (buffer->host_blob && (query.blob_flags & VIRTGPU_BLOB_FLAG_USE_MAPPABLE) &&
+        virtgpu_map_blob(resource, size, &buffer->host_physical, &buffer->map_info) != 0) {
+        buffer_release(buffer);
+        return -ENOMEM;
+    }
+
+    query.bo_handle = buffer->handle;
+    query.res_handle = resource;
+    return copy_to_user(user_argument, &query, sizeof(query)) == 0 ? 0 : -EFAULT;
+}
+
 static int64_t ioctl_virtgpu_resource_info(const struct file *client, uint64_t user_argument) {
     struct drm_virtgpu_resource_info query;
     if (copy_from_user(&query, user_argument, sizeof(query)) != 0) return -EFAULT;
@@ -2156,7 +2372,7 @@ static int64_t ioctl_virtgpu_resource_info(const struct file *client, uint64_t u
 
     query.res_handle = buffer->virtio_resource;
     query.size = (uint32_t)buffer->size;
-    query.blob_mem = 0;
+    query.blob_mem = buffer->blob_mem;
     return copy_to_user(user_argument, &query, sizeof(query)) == 0 ? 0 : -EFAULT;
 }
 
@@ -2190,7 +2406,6 @@ static int64_t ioctl_virtgpu_transfer(const struct file *client, uint64_t user_a
     return 0;
 }
 
-#define DRM_MAX_COMMAND_BYTES (1024U * 1024U)
 #define VIRTGPU_WAIT_NOWAIT   0x1U
 
 static void mark_busy(const struct file *client, uint64_t user_handles, uint32_t count,
@@ -2221,8 +2436,33 @@ static int64_t ioctl_virtgpu_execbuffer(const struct file *client, uint64_t user
     if (!query.command || !query.size) return -EINVAL;
     if (query.size > DRM_MAX_COMMAND_BYTES) return -EINVAL;
 
-    uint32_t context = render_context();
+    if (query.flags & ~(VIRTGPU_EXECBUF_FENCE_FD_IN | VIRTGPU_EXECBUF_FENCE_FD_OUT |
+                        VIRTGPU_EXECBUF_RING_IDX))
+        return -EINVAL;
+    if (query.num_in_syncobjs || query.num_out_syncobjs) return -EINVAL;
+
+    uint32_t context = client_context(client);
     if (!context) return -ENODEV;
+    int slot = file_context_index(client);
+    if ((query.flags & VIRTGPU_EXECBUF_RING_IDX) &&
+        (slot < 0 || query.ring_idx >= file_contexts[slot].rings))
+        return -EINVAL;
+
+    // A fence to wait for first: one of ours, from an earlier submission.
+    if (query.flags & VIRTGPU_EXECBUF_FENCE_FD_IN) {
+        struct file *fence = process_file_get(process_current(), query.fence_fd);
+        if (!fence) return -EBADF;
+        uint64_t sequence = fence->kind == FILE_KIND_SYNC_FILE ? fence->fence_sequence : 0;
+        int kind = fence->kind;
+        file_unref(fence);
+        if (kind != FILE_KIND_SYNC_FILE) return -EINVAL;
+        if (!virtgpu_fence_signaled(sequence)) {
+            drm_leave();
+            int waited = virtgpu_wait_sequence(sequence);
+            drm_enter();
+            if (waited != 0) return -EBUSY;
+        }
+    }
 
     void *staging = kmalloc(query.size);
     if (!staging) return -ENOMEM;
@@ -2230,12 +2470,33 @@ static int64_t ioctl_virtgpu_execbuffer(const struct file *client, uint64_t user
         kfree(staging);
         return -EFAULT;
     }
-    int submitted = virtgpu_submit_3d(context, staging, query.size);
-    kfree(staging);
-    if (submitted != 0) return -EIO;
-    mark_busy(client, query.bo_handles, query.num_bo_handles, virtgpu_posted());
+    uint64_t sequence = 0;
+    int fenced = (query.flags & (VIRTGPU_EXECBUF_RING_IDX | VIRTGPU_EXECBUF_FENCE_FD_OUT)) != 0;
+    if (fenced) {
+        sequence = virtgpu_submit_fenced(context, (query.flags & VIRTGPU_EXECBUF_RING_IDX)
+                                                      ? query.ring_idx : 0,
+                                         staging, query.size);
+        kfree(staging);
+        if (!sequence) return -EIO;
+    } else {
+        int submitted = virtgpu_submit_3d(context, staging, query.size);
+        kfree(staging);
+        if (submitted != 0) return -EIO;
+        sequence = virtgpu_posted();
+    }
+    mark_busy(client, query.bo_handles, query.num_bo_handles, sequence);
 
     query.fence_fd = -1;
+    if (query.flags & VIRTGPU_EXECBUF_FENCE_FD_OUT) {
+        struct file *fence = file_create_sync_file(sequence, 0);
+        if (!fence) return -ENOMEM;
+        int fd = process_install_file_flags(process_current(), fence, 0, PROCESS_FD_CLOEXEC);
+        if (fd < 0) {
+            file_unref(fence);
+            return fd;
+        }
+        query.fence_fd = fd;
+    }
     return copy_to_user(user_argument, &query, sizeof(query)) == 0 ? 0 : -EFAULT;
 }
 
@@ -2418,7 +2679,11 @@ static int64_t drm_dispatch_ioctl(struct file *file, unsigned long request,
         default:                              return ioctl_virtgpu_wait(file, user_argument);
         }
     case DRM_NR_VIRTGPU_RESOURCE_CREATE_BLOB:
-    case DRM_NR_VIRTGPU_CONTEXT_INIT:         return -EINVAL;
+        if (!virtgpu_virgl_available()) return -ENOTTY;
+        return ioctl_virtgpu_resource_create_blob(file, user_argument);
+    case DRM_NR_VIRTGPU_CONTEXT_INIT:
+        if (!virtgpu_virgl_available()) return -ENOTTY;
+        return ioctl_virtgpu_context_init(file, user_argument);
     default:                                  return -ENOTTY;
     }
 }
@@ -2435,22 +2700,7 @@ int64_t drm_device_mmap(struct vfs_node *node, struct file *file, uint64_t cr3,
     struct drm_dumb_buffer *buffer = buffer_of(file, handle);
     if (!buffer) return -ENOENT;
     if (length > buffer->size) return -EINVAL;
-
-    uint64_t flags = page_flags | PAGE_USER | PAGE_PRESENT | PAGE_NX;
-    uint64_t mapped = 0;
-    for (; mapped < length; mapped += 4096ULL) {
-        uint64_t physical = buffer->pages[mapped / 4096ULL];
-        if (pmm_page_ref(physical) != 0 ||
-            vmm_map_page_in(cr3, virtual_address + mapped, physical, flags) != 0) {
-            while (mapped) {
-                mapped -= 4096ULL;
-                (void)vmm_unmap_page_in(cr3, virtual_address + mapped);
-                pmm_free_page((void *)buffer->pages[mapped / 4096ULL]);
-            }
-            return -EINVAL;
-        }
-    }
-    return 0;
+    return map_buffer(buffer, cr3, virtual_address, length, 0, page_flags);
 }
 
 static int driver_held;
@@ -2499,6 +2749,7 @@ void drm_file_close(struct file *file) {
         if (blobs[index].id && blobs[index].owner == file) blob_release(&blobs[index]);
     struct drm_event_queue *queue = event_queue_of(file, 0);
     if (queue) memset(queue, 0, sizeof(*queue));
+    file_context_release(file);
     retired_reap();
     for (int index = 0; index < import_capacity; index++) {
         if (imports[index].file != file) continue;

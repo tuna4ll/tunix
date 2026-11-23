@@ -661,9 +661,14 @@ void input_irq(void) {
     lock_release(&input_lock);
 }
 
+// USB pointers the usbhid module has bound.
+static int usb_pointers;
+
+void input_usb_pointer(int delta) { __atomic_add_fetch(&usb_pointers, delta, __ATOMIC_RELAXED); }
+
 int input_mouse_available(void) {
     INPUT_LOCKED;
-    return mouse_present != 0 || xhci_pointer_present();
+    return mouse_present != 0 || __atomic_load_n(&usb_pointers, __ATOMIC_RELAXED) > 0;
 }
 
 int input_get_device_info(unsigned device_id, struct tunix_input_device_info *info) {

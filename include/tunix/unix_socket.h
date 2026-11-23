@@ -35,7 +35,11 @@ struct unix_socket *unix_socket_create(int kind);
 int64_t unix_socket_sendto(struct unix_socket *socket, size_t size, const void *buffer,
                            const struct tunix_sockaddr_un *address, size_t length, const char *key);
 int unix_socket_is_dgram(struct unix_socket *socket);
-void unix_socket_last_source(struct unix_socket *socket, char path[108]);
+// A name as kept internally: an abstract one escaped so it is a C string.
+#define UNIX_NAME_BYTES 224
+void unix_socket_last_source(struct unix_socket *socket, char path[UNIX_NAME_BYTES]);
+// Writes a kept name as sun_path bytes and returns how many.
+size_t unix_socket_name_to_address(const char *name, char path[108]);
 void unix_socket_set_credentials(struct unix_socket *socket, int32_t pid, uint32_t uid,
                                  uint32_t gid);
 int unix_socket_get_peer_credentials(struct unix_socket *socket,

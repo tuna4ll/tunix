@@ -2,8 +2,6 @@
 #include <stddef.h>
 
 #include <tunix/cpu.h>
-#include <tunix/hid.h>
-#include <tunix/hid_input.h>
 #include <tunix/pci.h>
 #include <tunix/pmm.h>
 #include <tunix/vmm.h>
@@ -160,10 +158,17 @@ struct ehci_qh {
     uint32_t reserved[4];
 };
 
+struct ehci;
+
 struct ehci_device {
     int used;
     int is_storage;
-    int is_hid;
+    struct ehci *host;
+    char name[24];
+    uint8_t descriptor[18];
+    struct usb_interface_info interfaces[USB_INTERFACES_MAX];
+    unsigned interface_count;
+    struct usb_dev *usb;
     uint8_t speed;
     uint8_t hub_address;
     uint8_t hub_port;
@@ -206,20 +211,20 @@ struct ehci {
 #define PIPE_FAILURE_LIMIT      16U
 #define REPORT_DESCRIPTOR_BYTES 1024U
 
+// An interrupt IN endpoint a class driver opened: each report goes to its callback.
 struct ehci_pipe {
     int used;
     struct ehci *host;
     struct ehci_device *device;
-    int keyboard;
-    int report_mode;
-    struct hid_mouse_layout layout;
+    uint8_t interface;
+    usb_report_fn report_fn;
+    void *context;
     uint8_t endpoint;
     uint16_t packet;
     struct ehci_qh *qh;
     struct ehci_qtd *qtd;
     uint8_t *buffer;
     uint64_t physical;
-    uint8_t previous[HID_KEYBOARD_REPORT_BYTES];
     unsigned failures;
 };
 
@@ -787,154 +792,79 @@ static int read_configuration(struct ehci *host, struct ehci_device *device, uns
     return 0;
 }
 
-struct hid_interface {
-    uint8_t number;
-    uint8_t subclass;
-    uint8_t protocol;
-    uint8_t endpoint;
-    uint16_t packet;
-    uint16_t descriptor_length;
-};
+static unsigned controller_index(const struct ehci *host);
+static const struct usb_host_ops ehci_usb_ops;
 
-static unsigned find_hid_interfaces(const uint8_t *buffer, uint16_t total,
-                                    struct hid_interface *out, unsigned room) {
-    unsigned found = 0;
-    struct hid_interface current;
-    int in_hid = 0;
-    memset(&current, 0, sizeof(current));
+// Each interface (its first alternate setting), with its first interrupt IN endpoint.
+static void parse_interfaces(struct ehci_device *device, const uint8_t *buffer, uint16_t total) {
+    struct usb_interface_info *current = NULL;
+    device->interface_count = 0;
     for (uint16_t offset = 0; offset + 2U <= total;) {
         uint8_t length = buffer[offset];
         uint8_t type = buffer[offset + 1U];
         if (length < 2U || offset + length > total) break;
         if (type == 0x04U && length >= 9U) {
-            in_hid = buffer[offset + 5U] == 0x03U;
-            memset(&current, 0, sizeof(current));
-            current.number = buffer[offset + 2U];
-            current.subclass = buffer[offset + 6U];
-            current.protocol = buffer[offset + 7U];
-        } else if (type == 0x21U && length >= 9U && in_hid) {
-            current.descriptor_length =
-                (uint16_t)(buffer[offset + 7U] | (buffer[offset + 8U] << 8));
-        } else if (type == 0x05U && length >= 7U && in_hid && !current.endpoint &&
+            current = NULL;
+            if (buffer[offset + 3U] == 0 && device->interface_count < USB_INTERFACES_MAX) {
+                current = &device->interfaces[device->interface_count++];
+                memset(current, 0, sizeof(*current));
+                current->number = buffer[offset + 2U];
+                current->class_code = buffer[offset + 5U];
+                current->subclass = buffer[offset + 6U];
+                current->protocol = buffer[offset + 7U];
+            }
+        } else if (type == 0x21U && length >= 9U && current) {
+            current->hid_report_length = (uint16_t)(buffer[offset + 7U] | (buffer[offset + 8U] << 8));
+        } else if (type == 0x05U && length >= 7U && current && !current->interrupt_in &&
                    (buffer[offset + 2U] & 0x80U) && (buffer[offset + 3U] & 0x03U) == 0x03U) {
-            current.endpoint = buffer[offset + 2U];
-            current.packet =
+            current->interrupt_in = buffer[offset + 2U];
+            current->interrupt_packet =
                 (uint16_t)((buffer[offset + 4U] | (buffer[offset + 5U] << 8)) & 0x7FFU);
-            if (found < room) out[found++] = current;
-            in_hid = 0;
+            current->interrupt_interval = buffer[offset + 6U];
         }
         offset = (uint16_t)(offset + length);
     }
-    return found;
-}
-
-static void list_interfaces(const uint8_t *buffer, uint16_t total, unsigned where) {
-    for (uint16_t offset = 0; offset + 2U <= total;) {
-        uint8_t length = buffer[offset];
-        if (length < 2U || offset + length > total) break;
-        if (buffer[offset + 1U] == 0x04U && length >= 9U)
-            kprintf("EHCI: port %s interface %u: class %u subclass %u protocol %u\n",
-                    port_name(where), (unsigned)buffer[offset + 2U], (unsigned)buffer[offset + 5U],
-                    (unsigned)buffer[offset + 6U], (unsigned)buffer[offset + 7U]);
-        offset = (uint16_t)(offset + length);
-    }
-}
-
-static int start_hid(struct ehci *host, struct ehci_device *device, unsigned where,
-                     const uint8_t *configuration, uint16_t total) {
-    struct hid_interface interfaces[4];
-    unsigned count = find_hid_interfaces(configuration, total, interfaces, 4U);
-    if (!count) return -1;
-    static uint8_t report_descriptor[REPORT_DESCRIPTOR_BYTES];
-    struct hid_mouse_layout layouts[4];
-    int kinds[4];
-    unsigned usable = 0;
-    for (unsigned index = 0; index < count; index++) {
-        struct hid_interface *interface = &interfaces[index];
-        kinds[index] = 0;
-        if (interface->subclass == 1U && interface->protocol == 1U) {
-            kinds[index] = 1;
-            usable++;
-            continue;
-        }
-        uint16_t length = interface->descriptor_length;
-        if (!length || length > REPORT_DESCRIPTOR_BYTES) length = REPORT_DESCRIPTOR_BYTES;
-        memset(report_descriptor, 0, sizeof(report_descriptor));
-        if (control_transfer(host, device, 0x81U, USB_REQUEST_GET_DESCRIPTOR, 0x2200U,
-                             interface->number, length, report_descriptor) == 0 &&
-            hid_parse_mouse(report_descriptor, length, &layouts[index]) == 0) {
-            kinds[index] = 2;
-            usable++;
-        } else if (interface->subclass == 1U && interface->protocol == 2U) {
-            kinds[index] = 3;
-            usable++;
-        } else {
-            kprintf("EHCI: port %s interface %u is HID but not a keyboard or a relative mouse\n",
-                    port_name(where), (unsigned)interface->number);
-        }
-    }
-    if (!usable) return -1;
-    if (control_transfer(host, device, 0x00U, USB_REQUEST_SET_CONFIGURATION, device->configuration,
-                         0, 0, NULL) != 0) {
-        kprintf("EHCI: port %s refused SET_CONFIGURATION\n", port_name(where));
-        return -1;
-    }
-    int opened = 0;
-    for (unsigned index = 0; index < count; index++) {
-        struct hid_interface *interface = &interfaces[index];
-        if (!kinds[index]) continue;
-        if (kinds[index] != 2 || interface->subclass == 1U)
-            (void)control_transfer(host, device, 0x21U, 0x0BU, kinds[index] == 2 ? 1U : 0U,
-                                   interface->number, 0, NULL);
-        (void)control_transfer(host, device, 0x21U, 0x0AU, 0, interface->number, 0, NULL);
-        struct ehci_pipe *pipe = open_pipe(host, device, interface->endpoint, interface->packet);
-        if (!pipe) {
-            kprintf("EHCI: port %s has no room for another report pipe\n", port_name(where));
-            continue;
-        }
-        pipe->keyboard = kinds[index] == 1;
-        pipe->report_mode = kinds[index] == 2;
-        if (pipe->report_mode) pipe->layout = layouts[index];
-        opened++;
-        if (kinds[index] == 2)
-            kprintf(
-                "EHCI: port %s: mouse at address %u, %s speed, endpoint %x, report %u, %u buttons, %u-bit motion\n",
-                port_name(where), (unsigned)device->address, speed_name(device->speed),
-                (unsigned)interface->endpoint, (unsigned)layouts[index].report_id,
-                (unsigned)layouts[index].buttons, (unsigned)layouts[index].x.size);
-        else
-            kprintf("EHCI: port %s: %s at address %u, %s speed, endpoint %x\n", port_name(where),
-                    kinds[index] == 1 ? "keyboard" : "boot mouse", (unsigned)device->address,
-                    speed_name(device->speed), (unsigned)interface->endpoint);
-    }
-    if (!opened) return -1;
-    device->used = 1;
-    device->is_hid = 1;
-    start_periodic(host);
-    return 0;
 }
 
 static int enumerate_device(struct ehci *host, struct ehci_device *device, unsigned where) {
     static uint8_t configuration[CONFIGURATION_BYTES];
     uint16_t total = 0;
-    if (read_configuration(host, device, where, configuration, &total) != 0) return -1;
-    if (start_hid(host, device, where, configuration, total) == 0) return 0;
-    if (find_storage_interface(device, configuration, total) != 0) {
-        kprintf("EHCI: port %s (%s speed) is not a device this driver knows\n", port_name(where),
-                speed_name(device->speed));
-        list_interfaces(configuration, total, where);
+    if (control_transfer(host, device, 0x80U, USB_REQUEST_GET_DESCRIPTOR,
+                         (uint16_t)(USB_DESCRIPTOR_DEVICE << 8), 0, 18, device->descriptor) != 0) {
+        kprintf("EHCI: port %s would not describe itself\n", port_name(where));
         return -1;
     }
+    if (read_configuration(host, device, where, configuration, &total) != 0) return -1;
+    int storage = find_storage_interface(device, configuration, total) == 0;
     if (control_transfer(host, device, 0x00U, USB_REQUEST_SET_CONFIGURATION, device->configuration,
                          0, 0, NULL) != 0) {
         kprintf("EHCI: port %s refused SET_CONFIGURATION\n", port_name(where));
         return -1;
     }
+    parse_interfaces(device, configuration, total);
     device->used = 1;
-    device->is_storage = 1;
-    kprintf("EHCI: port %s: mass storage at address %u, %s speed, bulk in %u out %u\n",
-            port_name(where), (unsigned)device->address, speed_name(device->speed),
-            (unsigned)device->bulk_in_endpoint, (unsigned)device->bulk_out_endpoint);
+    device->host = host;
+    unsigned used = 0;
+    device->name[used++] = 'e';
+    device->name[used++] = (char)('0' + controller_index(host) % 10U);
+    device->name[used++] = '-';
+    for (const char *at = port_name(where); *at && used + 1 < sizeof(device->name); at++)
+        device->name[used++] = *at;
+    device->name[used] = '\0';
+    if (storage) {
+        device->is_storage = 1;
+        kprintf("EHCI: port %s: mass storage at address %u, %s speed, bulk in %u out %u\n",
+                port_name(where), (unsigned)device->address, speed_name(device->speed),
+                (unsigned)device->bulk_in_endpoint, (unsigned)device->bulk_out_endpoint);
+    } else {
+        kprintf("EHCI: port %s: %x:%x at address %u, %s speed, %u interface(s)\n",
+                port_name(where), (unsigned)(device->descriptor[8] | (device->descriptor[9] << 8)),
+                (unsigned)(device->descriptor[10] | (device->descriptor[11] << 8)),
+                (unsigned)device->address, speed_name(device->speed), device->interface_count);
+    }
+    // Class drivers -- HID, from the usbhid module -- bind to the interfaces from here.
+    device->usb = usb_device_added(&ehci_usb_ops, device, device->name, device->descriptor,
+                                   device->interfaces, device->interface_count);
     return 0;
 }
 
@@ -1127,10 +1057,8 @@ static void service_pipe(struct ehci_pipe *pipe) {
     uint32_t remaining = (token >> QTD_LENGTH_SHIFT) & 0x7FFFU;
     uint32_t length = pipe->packet > remaining ? pipe->packet - remaining : 0;
     pipe->failures = 0;
-    if (length && !(token & QTD_STATUS_ERROR_MASK)) {
-        if (pipe->keyboard) hid_keyboard_report(pipe->previous, pipe->buffer, length);
-        else hid_mouse_report(pipe->report_mode ? &pipe->layout : NULL, pipe->buffer, length);
-    }
+    if (length && !(token & QTD_STATUS_ERROR_MASK) && pipe->report_fn)
+        pipe->report_fn(pipe->context, pipe->buffer, length);
     queue_report(pipe);
 }
 
@@ -1351,6 +1279,80 @@ static int ehci_init_unlocked(void) {
     if (ehci_storage_count()) usb_register_host(&ehci_host);
     return 0;
 }
+
+static unsigned controller_index(const struct ehci *host) {
+    for (unsigned index = 0; index < controller_count; index++)
+        if (controllers[index] == host) return index;
+    return controller_count;
+}
+
+// ---- What class drivers call, with the host locked ----
+
+static int ops_control(void *handle, uint8_t request_type, uint8_t request, uint16_t value,
+                       uint16_t index, void *data, uint16_t length) {
+    struct ehci_device *device = handle;
+    if (!device || !device->used) return -1;
+    return control_transfer(device->host, device, request_type, request, value, index, length, data);
+}
+
+static int ops_interrupt_open(void *handle, const struct usb_interface_info *interface,
+                              usb_report_fn report, void *context) {
+    struct ehci_device *device = handle;
+    if (!device || !device->used || !interface->interrupt_in || !report) return -1;
+    struct ehci_pipe *pipe =
+        open_pipe(device->host, device, interface->interrupt_in, interface->interrupt_packet);
+    if (!pipe) return -1;
+    pipe->interface = interface->number;
+    pipe->context = context;
+    __atomic_store_n(&pipe->report_fn, report, __ATOMIC_RELEASE);
+    start_periodic(device->host);
+    return 0;
+}
+
+// Takes the pipe off the periodic schedule, waits until the controller can no longer be
+// walking its queue head, and frees it.
+static void ops_interrupt_close(void *handle, const struct usb_interface_info *interface) {
+    struct ehci_device *device = handle;
+    if (!device) return;
+    for (unsigned slot = 0; slot < pipe_capacity; slot++) {
+        struct ehci_pipe *pipe = pipes[slot];
+        if (!pipe || !pipe->used || pipe->device != device || pipe->interface != interface->number)
+            continue;
+        pipe->used = 0;
+        pipe->report_fn = NULL;
+        struct ehci *host = pipe->host;
+        uint32_t head = LINK_TERMINATE;
+        for (unsigned other = 0; other < pipe_capacity; other++) {
+            struct ehci_pipe *kept = pipes[other];
+            if (!kept || !kept->used || kept->host != host) continue;
+            dma_store32(&kept->qh->horizontal, head);
+            head = (uint32_t)kept->physical | LINK_TYPE_QH;
+        }
+        host->periodic_head = head;
+        for (unsigned frame = 0; frame < FRAME_LIST_ENTRIES; frame++)
+            dma_store32(&host->frame_list[frame], head);
+        delay_ns(3000000ULL);
+        pmm_free_page((void *)pipe->physical);
+    }
+}
+
+static void ops_lock(void) {
+    mutex_lock(&ehci_ops);
+    lock_acquire(&ehci_lock);
+}
+
+static void ops_unlock(void) {
+    lock_release(&ehci_lock);
+    mutex_unlock(&ehci_ops);
+}
+
+static const struct usb_host_ops ehci_usb_ops = {
+    .control = ops_control,
+    .interrupt_open = ops_interrupt_open,
+    .interrupt_close = ops_interrupt_close,
+    .lock = ops_lock,
+    .unlock = ops_unlock,
+};
 
 int ehci_init(void) {
     mutex_lock(&ehci_ops);

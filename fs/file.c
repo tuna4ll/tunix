@@ -11,6 +11,7 @@ extern uint64_t process_current_pid(void);
 extern int process_pidfd_exited(uint64_t pid, uint64_t start_ns);
 #include <tunix/kstring.h>
 #include <tunix/drm.h>
+#include <tunix/virtgpu.h>
 #include <tunix/framebuffer.h>
 #include <tunix/eventfd.h>
 #include <tunix/eventfs.h>
@@ -203,6 +204,12 @@ struct file *file_create_signalfd(struct signalfd_context *context, uint32_t fla
 struct file *file_create_dmabuf(uint32_t handle, uint32_t flags) {
     struct file *file = file_create_special(FILE_KIND_DMABUF, flags);
     if (file) file->dmabuf_handle = handle;
+    return file;
+}
+
+struct file *file_create_sync_file(uint64_t sequence, uint32_t flags) {
+    struct file *file = file_create_special(FILE_KIND_SYNC_FILE, flags);
+    if (file) file->fence_sequence = sequence;
     return file;
 }
 
@@ -545,6 +552,8 @@ uint32_t file_poll_events_nested(struct file *file, uint32_t requested, unsigned
         events |= io_uring_poll(file->io_uring, pollin | pollout);
     } else if (file->kind == FILE_KIND_PIDFD) {
         if (process_pidfd_exited(file->pidfd_pid, file->pidfd_start_ns)) events |= pollin;
+    } else if (file->kind == FILE_KIND_SYNC_FILE) {
+        if (virtgpu_fence_signaled(file->fence_sequence)) events |= pollin;
     } else if (file->kind == FILE_KIND_VFS && file->node) {
         if (__atomic_load_n(&file->node->notify_generation, __ATOMIC_ACQUIRE) != file->notify_seen)
             events |= pollerr | 0x002U;

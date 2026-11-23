@@ -160,6 +160,7 @@ opinion.
 | `processor` | `LNXCPU`, `ACPI0007` |
 | `thermal_zone` | `LNXTHERM` |
 | `video` | `LNXVIDEO` |
+| `usbhid` | USB keyboards, mice and tablets: any interface of class 3 |
 | `zram` | nothing: `modprobe zram` when swap on compressed memory is wanted |
 
 Everything the machine needs before there is a root filesystem is not a module:
@@ -167,9 +168,15 @@ IDE, AHCI, NVMe, SDHCI, the USB host controllers and USB storage, because a
 driver that has to be loaded from the disk it drives cannot be. Nor is what the
 loader itself stands on -- PCI, interrupts, the ACPI interpreter and embedded
 controller, the framebuffer console -- or the layers drivers register with:
-virtio, input, sound, DRM. USB keyboards and mice are not modules either: the
-host controller drivers enumerate HID devices themselves, and there is no USB
-device model yet for a HID driver to bind to.
+virtio, input, sound, DRM, and the USB core class drivers bind through.
+
+USB devices are published as `/sys/bus/usb/devices/<name>` with a Linux-style
+`modalias` (`usb:vVVVVpPPPPd...ic03isc01ip01in00`). `usbhid`'s alias matches
+any HID interface, so the boot loop and Tulpar's `hotplug` service, which runs
+`modprobe` for every device the kernel announces over netlink, load it for a
+keyboard present at boot and one plugged in later. The emergency boot entry
+starts `/usr/libexec/tulpar-rescue`, which loads modules the same way before
+the shell, so a USB keyboard works there too.
 
 The ACPI modules have no PCI id to be found by, so the kernel publishes ACPI
 devices the way Linux does: every present device with a `_HID` is

@@ -20,6 +20,8 @@
 #define SIGSEGV  11
 #define SIGPIPE  13
 #define SIGALRM  14
+#define SIGVTALRM 26
+#define SIGPROF   27
 #define SIGTERM  15
 #define SIGCHLD  17
 #define SIGCONT  18

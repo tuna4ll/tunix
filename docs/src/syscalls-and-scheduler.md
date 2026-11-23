@@ -346,7 +346,16 @@ setting a signal to be ignored drops what is pending. Delivery takes the
 synchronous fault signals first and then the lowest number, and a signal still
 pending when a handler returns is delivered on the way out of `rt_sigreturn`.
 Process-directed signals go to the thread group leader; stop, continue and kill
-reach every thread of the group.
+reach every thread of the group. Delivery copies the action once, under the
+scheduler lock, because another thread's `sigaction` may change it meanwhile; an
+action that became `SIG_IGN` drops the signal rather than jump to address 1.
+
+The handler gets the interrupted code's FPU and vector state above its frame, in
+Linux's layout (an XSAVE image with `FP_XSTATE_MAGIC1`/`2` on x86_64, an
+`fpsimd_context` record on arm64), and `rt_sigreturn` loads it back after
+clearing what would fault the restore. `rt_sigreturn` keeps the arithmetic
+flags from the saved `eflags` -- they are the interrupted code's condition
+codes, and dropping them sent it down the wrong branch at random.
 
 ## How the pieces fit together
 

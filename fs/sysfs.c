@@ -1170,6 +1170,73 @@ static void detach_path(const char *path) {
     if (node && node->parent) (void)vfs_detach_child(node->parent, node);
 }
 
+void sysfs_publish_usb(const char *name, const char *modalias, const char *properties) {
+    VFS_GUARD;
+    char relative[48];
+    size_t used = 0;
+    append_string(relative, sizeof(relative), &used, "usb/");
+    append_string(relative, sizeof(relative), &used, name);
+    relative[used] = '\0';
+    char directory[64];
+    used = 0;
+    append_string(directory, sizeof(directory), &used, "/sys/devices/");
+    append_string(directory, sizeof(directory), &used, relative);
+    directory[used] = '\0';
+    if (!vfs_mkdir_p(directory)) return;
+    if (modalias[0]) publish_text(directory, "modalias", modalias);
+
+    char uevent[320];
+    size_t length = 0;
+    append_string(uevent, sizeof(uevent), &length, "SUBSYSTEM=usb\n");
+    append_string(uevent, sizeof(uevent), &length, properties);
+    if (modalias[0]) {
+        append_string(uevent, sizeof(uevent), &length, "MODALIAS=");
+        append_string(uevent, sizeof(uevent), &length, modalias);
+        append_string(uevent, sizeof(uevent), &length, "\n");
+    }
+    char file[80];
+    used = 0;
+    append_string(file, sizeof(file), &used, directory);
+    append_string(file, sizeof(file), &used, "/uevent");
+    file[used] = '\0';
+    char devpath[64];
+    used = 0;
+    append_string(devpath, sizeof(devpath), &used, "/devices/");
+    append_string(devpath, sizeof(devpath), &used, relative);
+    devpath[used] = '\0';
+    (void)register_uevent(devpath, file, uevent, length);
+
+    if (vfs_mkdir_p("/sys/bus/usb/devices")) {
+        char link[64], target[64];
+        used = 0;
+        append_string(link, sizeof(link), &used, "/sys/bus/usb/devices/");
+        append_string(link, sizeof(link), &used, name);
+        link[used] = '\0';
+        used = 0;
+        append_string(target, sizeof(target), &used, "../../../devices/usb/");
+        append_string(target, sizeof(target), &used, name);
+        target[used] = '\0';
+        (void)vfs_create_symlink(link, target, 0);
+    }
+    announce(relative);
+}
+
+void sysfs_remove_usb(const char *name) {
+    VFS_GUARD;
+    char relative[48];
+    size_t used = 0;
+    append_string(relative, sizeof(relative), &used, "usb/");
+    append_string(relative, sizeof(relative), &used, name);
+    relative[used] = '\0';
+    remove_published(relative);
+    char link[64];
+    used = 0;
+    append_string(link, sizeof(link), &used, "/sys/bus/usb/devices/");
+    append_string(link, sizeof(link), &used, name);
+    link[used] = '\0';
+    detach_path(link);
+}
+
 void sysfs_publish_drm(void) {
     VFS_GUARD;
     publish_drm();

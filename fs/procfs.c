@@ -486,7 +486,7 @@ static int64_t proc_version_read(struct vfs_node *node, uint64_t offset, size_t 
                                  void *output) {
     (void)node;
     TEXT_BUFFER text = {0};
-    text_string(&text, UTS_SYSNAME " version " UTS_RELEASE " #1 " SYSCALL_UTS_MACHINE "\n");
+    text_string(&text, UTS_SYSNAME " version " UTS_RELEASE " #1 " UTS_BUILD " " SYSCALL_UTS_MACHINE "\n");
     return text_read(&text, offset, size, output);
 }
 
@@ -1242,6 +1242,7 @@ static void describe_file(const struct file *file, char *output, size_t capacity
     case FILE_KIND_SIGNALFD:       kind = "anon_inode:[signalfd]"; break;
     case FILE_KIND_IO_URING:       kind = "anon_inode:[io_uring]"; break;
     case FILE_KIND_PIDFD:          kind = "anon_inode:[pidfd]"; break;
+    case FILE_KIND_SYNC_FILE:      kind = "anon_inode:sync_file"; break;
     case FILE_KIND_MEMFD:          kind = "/memfd:tunix"; break;
     default:                       break;
     }
@@ -1294,6 +1295,17 @@ static int64_t proc_ns_entry_read(struct vfs_node *node, uint64_t offset, size_t
     (void)size;
     (void)output;
     return 0;
+}
+
+static void proc_root_refresh(struct vfs_node *directory);
+
+int procfs_process_directory(struct vfs_node *node, uint64_t *pid) {
+    if (!node || (node->flags & 0xFFU) != VFS_DIRECTORY || !node->parent || !node->name) return -1;
+    if (node->parent->refresh != proc_root_refresh) return -1;
+    for (const char *at = node->name; *at; at++)
+        if (*at < '0' || *at > '9') return -1;
+    *pid = node_pid(node);
+    return *pid ? 0 : -1;
 }
 
 int procfs_ns_entry(struct vfs_node *node, uint64_t *pid, char *kind, unsigned capacity) {
