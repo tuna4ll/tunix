@@ -31,6 +31,9 @@
 #define VFS_EVENTSTREAM 0x40000U
 #define VFS_UNSIZED     0x80000U
 #define VFS_SWAPFILE    0x100000U
+/* A file of a live root: read from a disk that is never written, and moved
+ * into memory the first time it is changed. */
+#define VFS_LIVE        0x200000U
 
 #define VFS_MS_RDONLY  0x0001U
 #define VFS_MS_NOSUID  0x0002U
@@ -279,7 +282,7 @@ void vfs_node_unref(struct vfs_node *node);
 void vfs_map_ref(struct vfs_node *node);
 void vfs_map_unref(struct vfs_node *node);
 
-void vfs_map_write_ref(struct vfs_node *node, uint64_t offset, uint64_t length);
+int vfs_map_write_ref(struct vfs_node *node, uint64_t offset, uint64_t length);
 void vfs_map_write_unref(struct vfs_node *node);
 void vfs_flush_mapped(struct vfs_node *node);
 

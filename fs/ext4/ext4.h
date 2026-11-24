@@ -384,6 +384,9 @@ struct ext4_volume {
     struct vfs_node *root;
     int loading;
     int read_only;
+    // Nothing is written to the disk, but its files can still be changed: a
+    // file moves into memory the first time it is (a live system's root).
+    int live;
 
     struct ext4_super_block sb;
     struct ext4_super_block sb_written;

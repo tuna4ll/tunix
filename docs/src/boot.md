@@ -82,6 +82,9 @@ root=/dev/sda2 init=/sbin/init
   seconds, so a slow stick can still arrive, and then stops with
   `root device not found` rather than mounting another disk. Without `root=` the
   kernel takes whatever registered first.
+- `live` mounts the root without ever writing to its disk, as a live CD's is:
+  changes are kept in memory and gone at the next boot (see
+  [the root filesystem](filesystem.md#a-live-root)).
 - `init=` names the first program. It defaults to `/sbin/init`; pointing it at
   something else is how a machine that will not finish booting gets debugged.
 

@@ -1016,7 +1016,8 @@ static int load_entry(struct vfs_node *dir_node, const struct ext4_dir_entry *en
     if (!node) return 0;
     ext4_restore_owner(node, &child);
     adopt(node, child_ino);
-    if (fs->read_only) node->flags |= VFS_READONLY;
+    if (fs->live) node->flags |= VFS_LIVE;
+    else if (fs->read_only) node->flags |= VFS_READONLY;
     load_xattrs(child_ino, &child, node);
     if (child.i_links_count > 1U && format != EXT4_S_IFDIR) links_seen_add(child_ino, node);
     return 1;

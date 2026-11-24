@@ -19,7 +19,7 @@ struct ext4_fs_stats {
 
 int ext4fs_stats(const struct vfs_node *node, struct ext4_fs_stats *out);
 int ext4fs_find_label(const char *label);
-int ext4fs_mount_root(int read_only);
+int ext4fs_mount_root(int live);
 int ext4fs_mount(const char *source, const char *mount_name, int read_only,
                  struct vfs_node **root_out);
 void ext4fs_unmount(struct vfs_node *root);

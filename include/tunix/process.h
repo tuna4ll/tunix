@@ -395,7 +395,7 @@ int process_map_area(uint64_t start, uint64_t end, uint64_t page_flags, uint32_t
                      struct file *file, uint64_t offset);
 void process_unmap_area(uint64_t start, uint64_t end);
 void process_discard_area_pages(uint64_t start, uint64_t end);
-void process_protect_area(uint64_t start, uint64_t end, uint64_t page_flags);
+int process_protect_area(uint64_t start, uint64_t end, uint64_t page_flags);
 int process_area_range_free(uint64_t start, uint64_t end);
 int process_find_free_range(uint64_t start, uint64_t length, uint64_t *base_out);
 int process_commit_area(uint64_t fault_address);

@@ -2192,11 +2192,13 @@ static struct vm_area *area_alloc(uint64_t start, uint64_t end, uint64_t page_fl
     area->file = file;
     area->offset = offset;
     area->priority = (uint32_t)(((uint64_t)(uintptr_t)area >> 4) * 0x9E3779B97F4A7C15ULL >> 32);
-    if (file) file_ref(file);
-    if ((kind & VM_FILE_PAGES) && file) {
-        vfs_map_ref(file->node);
-        if (area_writes_file(area)) vfs_map_write_ref(file->node, offset, end - start);
+    if ((kind & VM_FILE_PAGES) && file && area_writes_file(area) &&
+        vfs_map_write_ref(file->node, offset, end - start) != 0) {
+        kfree(area);
+        return NULL;
     }
+    if (file) file_ref(file);
+    if ((kind & VM_FILE_PAGES) && file) vfs_map_ref(file->node);
     return area;
 }
 
@@ -2360,10 +2362,10 @@ void process_discard_area_pages(uint64_t start, uint64_t end) {
     vmm_flush_batch_end();
 }
 
-void process_protect_area(uint64_t start, uint64_t end, uint64_t page_flags) {
+int process_protect_area(uint64_t start, uint64_t end, uint64_t page_flags) {
     MEMORY_LOCKED;
     struct process_memory *memory = area_owner();
-    if (!memory || start >= end) return;
+    if (!memory || start >= end) return 0;
 
     struct vm_area *area = area_first_ending_after(memory, start);
     while (area && area->start < end) {
@@ -2379,9 +2381,23 @@ void process_protect_area(uint64_t start, uint64_t end, uint64_t page_flags) {
                 continue;
             }
         }
+        // A shared file mapping that becomes writable, or stops being, is
+        // counted as area_alloc and area_free count it.
+        int was = area_writes_file(area);
+        uint64_t old_flags = area->page_flags;
         area->page_flags = page_flags;
+        if ((area->kind & VM_FILE_PAGES) && area->file) {
+            int now = area_writes_file(area);
+            if (now && !was &&
+                vfs_map_write_ref(area->file->node, area->offset, area->end - area->start) != 0) {
+                area->page_flags = old_flags;
+                return -1;
+            }
+            if (was && !now) vfs_map_write_unref(area->file->node);
+        }
         area = area->next;
     }
+    return 0;
 }
 
 int process_area_range_free(uint64_t start, uint64_t end) {

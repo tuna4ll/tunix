@@ -996,14 +996,15 @@ static void volume_unlist(struct ext4_volume *volume) {
 }
 
 static int mount_volume(const struct block_device *device, struct vfs_node *root, int read_only,
-                        struct ext4_volume **out) {
+                        int live, struct ext4_volume **out) {
     struct ext4_volume *volume = (struct ext4_volume *)kmalloc(sizeof(*volume));
     if (!volume) return -ENOMEM;
     memset(volume, 0, sizeof(*volume));
     volume->device = device;
     volume->root = root;
     volume->loading = 1;
-    volume->read_only = read_only || !device->write;
+    volume->read_only = read_only || live || !device->write;
+    volume->live = live;
 
     mutex_lock(&ext4_io_lock);
     struct ext4_volume *saved = ext4_op_enter(volume);
@@ -1015,7 +1016,7 @@ static int mount_volume(const struct block_device *device, struct vfs_node *root
         root->fs_private = volume;
         struct ext4_inode inode;
         if (inode_read(EXT4_ROOT_INO, &inode) == 0) ext4_restore_owner(root, &inode);
-        if (volume->read_only) root->flags |= VFS_READONLY;
+        if (volume->read_only && !live) root->flags |= VFS_READONLY;
         int restored = ext4_load_tree(EXT4_ROOT_INO, root);
         ext4_links_reset();
         if (restored < 0) {
@@ -1081,13 +1082,13 @@ int ext4fs_find_label(const char *label) {
     return -1;
 }
 
-int ext4fs_mount_root(int read_only) {
+int ext4fs_mount_root(int live) {
     VFS_GUARD;
     const struct block_device *device = block_root();
     if (!vfs_root || !device || ext4_volume_of(vfs_root)) return -1;
     struct ext4_volume *volume;
-    if (mount_volume(device, vfs_root, read_only, &volume) != 0) return -1;
-    if (!volume->read_only) mark_volatile_dirs();
+    if (mount_volume(device, vfs_root, 0, live, &volume) != 0) return -1;
+    if (!volume->read_only || live) mark_volatile_dirs();
     volume->loading = 0;
     return 0;
 }
@@ -1113,7 +1114,7 @@ int ext4fs_mount(const char *source, const char *mount_name, int read_only,
     if (!root) return -ENOMEM;
     *root_out = root;
     struct ext4_volume *volume;
-    int status = mount_volume(device, root, read_only, &volume);
+    int status = mount_volume(device, root, read_only, 0, &volume);
     if (status != 0) return status;
     volume->loading = 0;
     return 0;
@@ -1181,7 +1182,7 @@ int ext4fs_stats(const struct vfs_node *node, struct ext4_fs_stats *out) {
     out->inodes = volume->sb.s_inodes_count;
     out->free_inodes = volume->sb.s_free_inodes_count;
     out->name_max = EXT4_NAME_LEN;
-    out->read_only = volume->read_only;
+    out->read_only = volume->read_only && !volume->live;
     memcpy(out->uuid, volume->sb.s_uuid, sizeof(out->uuid));
     fs = saved;
     return 0;

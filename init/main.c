@@ -156,7 +156,8 @@ void kmain(const struct boot_info *boot) {
     block_select_root(root_index);
 
     vfs_init();
-    if (ext4fs_mount_root(0) != 0) {
+    // "live": a root that is never written, whose changes stay in memory (a live ISO).
+    if (ext4fs_mount_root(boot_command_line_flag("live")) != 0) {
         print_block_devices();
         panic("root filesystem mount failed");
     }

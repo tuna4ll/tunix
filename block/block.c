@@ -170,7 +170,7 @@ int block_register_partition(int parent, int number, uint64_t start, uint64_t se
         kfree(context);
         return -1;
     }
-    if (number < (int)BLOCK_SD_MINORS) {
+    if (number < (int)BLOCK_SD_MINORS && disk->major == BLOCK_MAJOR_SD) {
         entry->major = disk->major;
         entry->minor = disk->minor + (uint32_t)number;
     } else {
@@ -180,6 +180,9 @@ int block_register_partition(int parent, int number, uint64_t start, uint64_t se
     memcpy(entry->name, disk->name, sizeof entry->name);
     memcpy(entry->dev_name, disk->dev_name, sizeof entry->dev_name);
     size_t length = strlen(entry->dev_name);
+    // As Linux names them: sda1, but sr0p1.
+    if (length && entry->dev_name[length - 1] >= '0' && entry->dev_name[length - 1] <= '9')
+        entry->dev_name[length++] = 'p';
     char digits[8];
     int count = 0;
     do {

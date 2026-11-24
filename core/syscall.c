@@ -4990,7 +4990,7 @@ static int64_t sys_mprotect(uint64_t address, uint64_t length, int prot) {
     if (prot & PROT_WRITE) flags |= PAGE_WRITE;
     if (nx_enabled && !(prot & PROT_EXEC)) flags |= PAGE_NX;
 
-    process_protect_area(address, address + length, flags | PAGE_PRESENT);
+    if (process_protect_area(address, address + length, flags | PAGE_PRESENT) != 0) return -ENOMEM;
     int reserved = !process_area_range_free(address, address + length);
     int failed = 0;
     vmm_flush_batch_begin();

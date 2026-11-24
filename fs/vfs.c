@@ -218,6 +218,29 @@ int vfs_fault_in(struct vfs_node *node) {
     return 0;
 }
 
+static void *page_get(struct vfs_node *node, uint64_t index, int for_write, int fetch);
+
+// The first change to a file of a live root reads the part of it that is kept
+// and makes it a file in memory, as a file of tmpfs is.
+static int live_copy_up(struct vfs_node *node, uint64_t keep) {
+    if (!(node->flags & VFS_LIVE)) return 0;
+    if ((node->flags & 0xFFU) == VFS_FILE && node->disk_inode) {
+        if (keep > node->length) keep = node->length;
+        for (uint64_t index = 0; index < pages_for(keep); index++)
+            if (!page_get(node, index, 0, 1)) return -1;
+        if (node->pages) {
+            for (uint64_t index = pages_for(keep); index < node->pages->count; index++) {
+                if (!node->pages->page[index]) continue;
+                page_free_one(node, node->pages, index);
+                cached_bytes -= cached_bytes >= VFS_PAGE_SIZE ? VFS_PAGE_SIZE : cached_bytes;
+            }
+        }
+        vfs_forget_backing(node);
+    }
+    node->flags &= ~(VFS_LIVE | VFS_LAZY_DATA);
+    return 0;
+}
+
 void vfs_forget_backing(struct vfs_node *node) {
     VFS_LOCKED;
     if (!node || !node->disk_inode) return;
@@ -244,19 +267,21 @@ void vfs_map_unref(struct vfs_node *node) {
     if (node && node->mapped_refs) node->mapped_refs--;
 }
 
-void vfs_map_write_ref(struct vfs_node *node, uint64_t offset, uint64_t length) {
+int vfs_map_write_ref(struct vfs_node *node, uint64_t offset, uint64_t length) {
     VFS_LOCKED;
-    if (!node) return;
+    if (!node) return 0;
+    if (live_copy_up(node, node->length) != 0) return -1;
     node->shared_writers++;
     uint64_t end = offset + length;
     if (end < offset) end = UINT64_MAX;
     if (!node->map_dirty_end) {
         node->map_dirty_start = offset;
         node->map_dirty_end = end;
-        return;
+        return 0;
     }
     if (offset < node->map_dirty_start) node->map_dirty_start = offset;
     if (end > node->map_dirty_end) node->map_dirty_end = end;
+    return 0;
 }
 
 void vfs_flush_mapped(struct vfs_node *node) {
@@ -854,6 +879,7 @@ static void *page_get(struct vfs_node *node, uint64_t index, int for_write, int 
         uint64_t span = pages_for(node->length);
         if (index >= span) return NULL;
     }
+    if (for_write && live_copy_up(node, node->length) != 0) return NULL;
     struct vfs_page_map *map = page_map_grow(node, index + 1ULL);
     if (!map) return NULL;
     if (!map->page[index]) {
@@ -1811,6 +1837,7 @@ int vfs_umount(const char *target, int detach) {
 int vfs_truncate(struct vfs_node *node, uint64_t length) {
     VFS_LOCKED;
     if (!node || (node->flags & 0xFFU) != VFS_FILE || (node->flags & VFS_READONLY)) return -1;
+    if (live_copy_up(node, length) != 0) return -1;
     if (node->truncate) {
         if (node->truncate(node, length) != 0) return -1;
         node->length = length;

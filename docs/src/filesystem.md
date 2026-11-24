@@ -320,6 +320,21 @@ and shadow it: an install script that redirected to `/dev/null` once left a
 twenty-byte regular file there, and every `>/dev/null` in the system then failed
 with `EACCES`.
 
+## A live root
+
+With `live` on the command line, the root is mounted as a read-only volume
+whose files can still be changed, which is how Tulpar's ISO runs from a disc
+or a USB stick it never writes to. The tree is loaded as for any mount, and
+nothing is written to the disk: creating, removing, renaming files and changing
+their owners and modes all happen in the tree in memory, as on tmpfs. A file's
+contents stay on the disk until the first write, truncation or writable shared
+mapping, which reads in the part of it that is kept and turns it into a file
+in memory (`VFS_LIVE`, cleared by `live_copy_up` in `fs/vfs.c`). Until then its
+pages are a cache like any other, dropped under memory pressure and read again.
+
+`/tmp`, `/var/tmp` and `/run` are tmpfs as on a writable root, and `statfs`
+reports the root as writable, since writes to it succeed.
+
 ## Locks
 
 `flock` locks belong to the open file. `fcntl` record locks are kept per inode
@@ -345,7 +360,15 @@ gone. Writes of up to `PIPE_BUF` bytes to any pipe are atomic.
 describe as block devices of their own -- `sda1`, `sda2` -- so the filesystem
 starts where its device does and `root=/dev/sda2` names it. Both schemes are
 read because both are used: the image carries a protective MBR in front of the
-GPT so that one disk boots either firmware.
+GPT so that one disk boots either firmware, and Tulpar's ISO has an MBR alone.
+
+A disc is read the same way. An optical drive on AHCI (`sr0`) answers SCSI
+commands through ATAPI and has 2048-byte blocks, which the driver turns into
+the 512-byte sectors the block layer counts, so the partition table of a
+hybrid ISO is found on a CD just as on a USB stick: `sr0p3` is the ISO's third
+partition. Partitions of a device whose name ends in a digit get a `p`, as on
+Linux. The drive is read-only, and the disc in it at boot is the only one it
+sees.
 
 ## What is not here
 
