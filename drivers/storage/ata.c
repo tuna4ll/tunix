@@ -2,6 +2,10 @@
 #include <stdint.h>
 #include <tunix/ata.h>
 #include <tunix/block.h>
+#include <tunix/cdrom.h>
+#include <tunix/heap.h>
+#include <tunix/kprintf.h>
+#include <tunix/time.h>
 #include <tunix/cpu.h>
 #include <tunix/io.h>
 #include <tunix/kstring.h>
@@ -417,7 +421,275 @@ static int ata_block_flush(void *context) {
     return ata_flush_cache();
 }
 
+// Optical drives on either IDE channel, master or slave, spoken to by PIO
+// PACKET commands (ATA/ATAPI-6, 8.23).
+
+#define IDE_FEATURES      1U
+#define IDE_BYTES_LOW     4U
+#define IDE_BYTES_HIGH    5U
+#define IDE_SELECT        6U
+#define IDE_COMMAND       7U
+#define IDE_CMD_PACKET    0xA0U
+#define IDE_CMD_IDENTIFY_PACKET 0xA1U
+#define IDE_CONTROL_SRST  0x04U
+#define IDE_CONTROL_NIEN  0x02U
+// The most a drive is asked to hand over per DRQ, an even number below 64 KiB.
+#define IDE_PACKET_BYTES  0xF800U
+#define IDE_PACKET_MAX    (32U * 2048U)
+
+struct ide_channel {
+    uint16_t base;
+    uint16_t control;
+    // The channel's bus master registers, for DMA; 0 when it has none.
+    uint16_t bus_master;
+};
+
+struct ide_atapi {
+    struct ide_channel channel;
+    uint8_t select;
+};
+
+static void ide_delay(const struct ide_channel *channel) {
+    // Reading the alternate status four times is the 400 ns a new status needs.
+    for (int index = 0; index < 4; index++) (void)inb(channel->control);
+}
+
+static int ide_not_busy(void *context) {
+    const struct ide_channel *channel = context;
+    return !(inb(channel->base + IDE_COMMAND) & ATA_SR_BSY);
+}
+
+static int ide_wait(const struct ide_channel *channel) {
+    if (io_poll(ide_not_busy, (void *)channel, IO_TIMEOUT_NS) != 0) return -1;
+    return inb(channel->base + IDE_COMMAND);
+}
+
+static int ide_select(const struct ide_atapi *drive) {
+    if (ide_wait(&drive->channel) < 0) return -1;
+    outb(drive->channel.base + IDE_SELECT, drive->select);
+    ide_delay(&drive->channel);
+    return ide_wait(&drive->channel);
+}
+
+// After a refused command the error register's high nibble is the sense key.
+static int ide_refused(const struct ide_channel *channel) {
+    int key = inb(channel->base + IDE_FEATURES) >> 4;
+    return key ? key : -1;
+}
+
+static void ide_read_data(const struct ide_channel *channel, uint8_t *out, uint32_t *done,
+                          uint32_t wanted, uint32_t offered) {
+    uint32_t words = (offered + 1U) / 2U;
+    uint32_t room = (wanted - *done) / 2U;
+    uint32_t take = words < room ? words : room;
+    uint16_t port = channel->base;
+    uint16_t *destination = (uint16_t *)(void *)(out + *done);
+    size_t count = take;
+    __asm__ volatile("cld; rep insw" : "+D"(destination), "+c"(count) : "d"(port) : "memory");
+    *done += take * 2U;
+    // More than was asked for is read and dropped, or the drive would wait for it.
+    for (uint32_t extra = take; extra < words; extra++) (void)inw(port);
+}
+
+static int ide_packet_unlocked(struct ide_atapi *drive, const uint8_t *packet, void *buffer,
+                               uint32_t bytes) {
+    const struct ide_channel *channel = &drive->channel;
+    if (ide_select(drive) < 0) return -1;
+    outb(channel->base + IDE_FEATURES, 0);
+    outb(channel->base + IDE_BYTES_LOW, (uint8_t)IDE_PACKET_BYTES);
+    outb(channel->base + IDE_BYTES_HIGH, (uint8_t)(IDE_PACKET_BYTES >> 8));
+    outb(channel->base + IDE_COMMAND, IDE_CMD_PACKET);
+    ide_delay(channel);
+    int status = ide_wait(channel);
+    if (status < 0) return -1;
+    if (status & (ATA_SR_ERR | ATA_SR_DF)) return ide_refused(channel);
+    if (!(status & ATA_SR_DRQ)) return -1;
+    const uint16_t *words = (const uint16_t *)(const void *)packet;
+    for (int index = 0; index < 6; index++) outw(channel->base, words[index]);
+
+    uint32_t done = 0;
+    for (;;) {
+        ide_delay(channel);
+        status = ide_wait(channel);
+        if (status < 0) return -1;
+        if (status & (ATA_SR_ERR | ATA_SR_DF)) return ide_refused(channel);
+        if (!(status & ATA_SR_DRQ)) break;
+        uint32_t offered = (uint32_t)inb(channel->base + IDE_BYTES_LOW) |
+            (uint32_t)inb(channel->base + IDE_BYTES_HIGH) << 8;
+        if (!buffer || !offered) return -1;
+        ide_read_data(channel, (uint8_t *)buffer, &done, bytes, offered);
+    }
+    return done == bytes ? 0 : -1;
+}
+
+// A PRD a page: the buffer need not be contiguous, as the block layer's are not.
+static struct ata_prd atapi_prdt[IDE_PACKET_MAX / 4096U + 1U] __attribute__((aligned(16)));
+
+static int ide_build_prdt(const void *buffer, uint32_t bytes) {
+    uint64_t address = (uint64_t)(uintptr_t)buffer;
+    uint64_t cr3 = vmm_kernel_cr3();
+    unsigned used = 0;
+    if ((bytes & 1U) || (address & 1U)) return -1;
+    while (bytes) {
+        uint64_t physical = 0;
+        if (used == sizeof atapi_prdt / sizeof atapi_prdt[0] || !cr3 ||
+            vmm_translate(cr3, address, &physical, NULL) != 0 || !physical)
+            return -1;
+        uint32_t chunk = 4096U - (uint32_t)(address & 0xFFFULL);
+        if (chunk > bytes) chunk = bytes;
+        if (physical + chunk > 0x100000000ULL) return -1;
+        atapi_prdt[used].physical_address = (uint32_t)physical;
+        atapi_prdt[used].byte_count = (uint16_t)chunk;
+        atapi_prdt[used].flags = 0;
+        used++;
+        address += chunk;
+        bytes -= chunk;
+    }
+    if (!used) return -1;
+    atapi_prdt[used - 1U].flags = ATA_PRD_END;
+    return 0;
+}
+
+static int ide_bus_master_settled(void *context) {
+    const struct ide_channel *channel = context;
+    uint8_t bus = inb((uint16_t)(channel->bus_master + 2U));
+    uint8_t status = inb(channel->base + IDE_COMMAND);
+    if ((bus & BM_STATUS_ERROR) || (status & (ATA_SR_ERR | ATA_SR_DF))) return 1;
+    return !(bus & BM_STATUS_ACTIVE) && !(status & ATA_SR_BSY);
+}
+
+// The data of a read by bus master DMA, which moves it many times faster than
+// PIO: 0, the sense key, -1 when it failed, or 1 when DMA cannot be used here.
+static int ide_packet_dma(struct ide_atapi *drive, const uint8_t *packet, void *buffer,
+                          uint32_t bytes) {
+    const struct ide_channel *channel = &drive->channel;
+    uint64_t table = ata_pointer_physical(atapi_prdt, sizeof atapi_prdt);
+    if (!channel->bus_master || !table || table > 0xFFFFFFFFULL ||
+        ide_build_prdt(buffer, bytes) != 0)
+        return 1;
+    uint16_t command = channel->bus_master;
+    uint16_t bus_status = (uint16_t)(channel->bus_master + 2U);
+    if (ide_select(drive) < 0) return -1;
+    outb(command, 0);
+    outb(bus_status, BM_STATUS_ERROR | BM_STATUS_IRQ);
+    outl((uint16_t)(channel->bus_master + 4U), (uint32_t)table);
+    outb(command, BM_COMMAND_READ);
+    outb(channel->base + IDE_FEATURES, 1);
+    outb(channel->base + IDE_BYTES_LOW, 0);
+    outb(channel->base + IDE_BYTES_HIGH, 0);
+    outb(channel->base + IDE_COMMAND, IDE_CMD_PACKET);
+    ide_delay(channel);
+    int status = ide_wait(channel);
+    if (status < 0) return -1;
+    if (status & (ATA_SR_ERR | ATA_SR_DF)) return ide_refused(channel);
+    if (!(status & ATA_SR_DRQ)) return -1;
+    const uint16_t *words = (const uint16_t *)(const void *)packet;
+    for (int index = 0; index < 6; index++) outw(channel->base, words[index]);
+    __asm__ volatile("" : : : "memory");
+    outb(command, BM_COMMAND_READ | BM_COMMAND_START);
+    int result = io_poll(ide_bus_master_settled, (void *)channel, IO_TIMEOUT_NS) == 0 ? 0 : -1;
+    outb(command, BM_COMMAND_READ);
+    uint8_t bus = inb(bus_status);
+    outb(bus_status, BM_STATUS_ERROR | BM_STATUS_IRQ);
+    __asm__ volatile("" : : : "memory");
+    status = ide_wait(channel);
+    if (status < 0) return -1;
+    if (status & (ATA_SR_ERR | ATA_SR_DF)) return ide_refused(channel);
+    return result == 0 && !(bus & BM_STATUS_ERROR) ? 0 : -1;
+}
+
+static int ide_packet(void *context, const uint8_t *packet, void *buffer, uint32_t bytes) {
+    struct ide_atapi *drive = (struct ide_atapi *)context;
+    mutex_lock(&ata_lock);
+    // Whole blocks by DMA, short replies (and what DMA cannot reach) by PIO.
+    int status = bytes >= 2048U ? ide_packet_dma(drive, packet, buffer, bytes) : 1;
+    if (status == 1) status = ide_packet_unlocked(drive, packet, buffer, bytes);
+    mutex_unlock(&ata_lock);
+    return status;
+}
+
+static void ide_reset(const struct ide_channel *channel) {
+    outb(channel->control, IDE_CONTROL_SRST | IDE_CONTROL_NIEN);
+    uint64_t until = time_uptime_ns() + 10000ULL;
+    while (time_uptime_ns() < until) cpu_relax();
+    outb(channel->control, IDE_CONTROL_NIEN);
+    until = time_uptime_ns() + 2000000ULL;
+    while (time_uptime_ns() < until) cpu_relax();
+    (void)ide_wait(channel);
+}
+
+// IDENTIFY PACKET DEVICE: a packet device whose type is CD/DVD (5).
+static int ide_is_optical(struct ide_atapi *drive) {
+    const struct ide_channel *channel = &drive->channel;
+    if (ide_select(drive) < 0) return 0;
+    outb(channel->base + IDE_COMMAND, IDE_CMD_IDENTIFY_PACKET);
+    ide_delay(channel);
+    int status = ide_wait(channel);
+    if (status < 0 || (status & (ATA_SR_ERR | ATA_SR_DF)) || !(status & ATA_SR_DRQ)) return 0;
+    uint16_t identify[256];
+    uint32_t done = 0;
+    ide_read_data(channel, (uint8_t *)identify, &done, sizeof identify, sizeof identify);
+    return (identify[0] >> 14) == 2U && ((identify[0] >> 8) & 0x1FU) == 5U;
+}
+
+static void ide_probe_channel(struct ide_channel channel, unsigned number) {
+    // No drive pulls the bus down: it floats to 0xFF.
+    if (inb(channel.base + IDE_COMMAND) == 0xFFU) return;
+    ide_reset(&channel);
+    for (unsigned slave = 0; slave < 2U; slave++) {
+        struct ide_atapi probe = {channel, (uint8_t)(0xA0U | slave << 4)};
+        outb(channel.base + IDE_SELECT, probe.select);
+        ide_delay(&channel);
+        // The signature a packet device leaves after the reset (ATA/ATAPI-6, 9.12).
+        if (inb(channel.base + IDE_BYTES_LOW) != 0x14U ||
+            inb(channel.base + IDE_BYTES_HIGH) != 0xEBU)
+            continue;
+        if (!ide_is_optical(&probe)) continue;
+        struct ide_atapi *drive = kmalloc(sizeof(*drive));
+        if (!drive) return;
+        *drive = probe;
+        kprintf("IDE: %s %s is an optical drive\n", number ? "secondary" : "primary",
+                slave ? "slave" : "master");
+        if (cdrom_add("ide-cd", ide_packet, drive, IDE_PACKET_MAX) != 0) kfree(drive);
+    }
+}
+
+// The channels: a controller in native mode says where in its BARs (PCI IDE
+// 1.0, 2), one in compatibility mode, or none at all, has them at the ISA ports.
+static void ide_probe_optical(void) {
+    static const struct ide_channel legacy[2] = {{0x1F0U, 0x3F6U, 0}, {0x170U, 0x376U, 0}};
+    int legacy_done = 0;
+    struct pci_device controller;
+    for (unsigned nth = 0; pci_find_nth_class(0x01U, 0x01U, nth, &controller) == 0; nth++) {
+        pci_enable_bus_mastering(&controller);
+        // BAR4: eight bus master registers a channel, if the controller can DMA.
+        uint32_t bar4 = controller.bar[4];
+        uint32_t bus_master = (bar4 & 0x01U) && (bar4 & ~0x03U) <= 0xFFF0U ? bar4 & ~0x03U : 0;
+        for (unsigned number = 0; number < 2U; number++) {
+            uint16_t master = bus_master ? (uint16_t)(bus_master + number * 8U) : 0;
+            if (controller.prog_if & (1U << (number * 2U))) {
+                uint32_t base = controller.bar[number * 2U] & ~0x03U;
+                uint32_t control = controller.bar[number * 2U + 1U] & ~0x03U;
+                if (!base || !control || base > 0xFFF8U || control > 0xFFF8U) continue;
+                ide_probe_channel(
+                    (struct ide_channel){(uint16_t)base, (uint16_t)(control + 2U), master}, number);
+            } else if (!(legacy_done & (1 << number))) {
+                legacy_done |= 1 << number;
+                struct ide_channel channel = legacy[number];
+                channel.bus_master = master;
+                ide_probe_channel(channel, number);
+            }
+        }
+    }
+    if (!legacy_done) {
+        ide_probe_channel(legacy[0], 0);
+        ide_probe_channel(legacy[1], 1);
+    }
+}
+
 void ata_register_block_device(void) {
+    // First, as it resets the channels: the disk is identified after.
+    ide_probe_optical();
     uint32_t sectors = ata_disk_sectors();
     if (!sectors) return;
     struct block_device device;

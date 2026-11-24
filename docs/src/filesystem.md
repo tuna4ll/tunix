@@ -362,13 +362,23 @@ starts where its device does and `root=/dev/sda2` names it. Both schemes are
 read because both are used: the image carries a protective MBR in front of the
 GPT so that one disk boots either firmware, and Tulpar's ISO has an MBR alone.
 
-A disc is read the same way. An optical drive on AHCI (`sr0`) answers SCSI
-commands through ATAPI and has 2048-byte blocks, which the driver turns into
-the 512-byte sectors the block layer counts, so the partition table of a
-hybrid ISO is found on a CD just as on a USB stick: `sr0p3` is the ISO's third
-partition. Partitions of a device whose name ends in a digit get a `p`, as on
-Linux. The drive is read-only, and the disc in it at boot is the only one it
-sees.
+A disc is read the same way. An optical drive (`sr0`), on AHCI or on either
+IDE channel, master or slave, answers SCSI commands through ATAPI and has
+2048-byte blocks, which `drivers/storage/cdrom.c` turns into the 512-byte
+sectors the block layer counts, so the partition table of a hybrid ISO is found
+on a CD just as on a USB stick: `sr0p3` is the ISO's third partition.
+Partitions of a device whose name ends in a digit get a `p`, as on Linux. The
+drive is read-only.
+
+Discs come and go. A drive is registered with or without one, and a thread
+asks every drive whether it is ready every two seconds (as Linux polls one).
+When the drive reports that the disc may have changed, through its unit
+attention, reads fail until the block layer has caught up: `sr0`'s size
+becomes the new disc's, or 0 with none, the old disc's partitions die -- a file
+open or a file system mounted on one gets errors from then on, and never the
+new disc's data -- and the new disc's partitions are registered, by the same
+names, which resolve to the newest. `/dev` and the device events follow. The
+drive with the root on it has its tray locked, as Linux locks a mounted disc's.
 
 ## What is not here
 

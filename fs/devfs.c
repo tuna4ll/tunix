@@ -278,7 +278,13 @@ static struct vfs_node *attach_device(struct vfs_node *dev, const char *name, ui
 void devfs_add_block(int index) {
     const struct block_device *device = block_device_at(index);
     struct vfs_node *dev = vfs_lookup("/dev");
-    if (!device || !dev || vfs_find_entry(dev, device->dev_name)) return;
+    if (!device || !dev) return;
+    // Already there: a disc changed, and the node resolves to its new size.
+    struct vfs_node *existing = vfs_find_entry(dev, device->dev_name);
+    if (existing) {
+        existing->length = device->sectors * BLOCK_SECTOR_SIZE;
+        return;
+    }
     struct vfs_node *disk = attach_device(dev, device->dev_name, VFS_BLOCKDEVICE, 0660, disk_read,
                                           device->write ? disk_write : NULL, NULL);
     if (!disk) return;

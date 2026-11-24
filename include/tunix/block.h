@@ -37,6 +37,9 @@ int block_register_named(const struct block_device *device, const char *name, ui
 void block_set_sectors(int index, uint64_t sectors);
 
 int block_register_partition(int parent, int number, uint64_t start, uint64_t sectors);
+// Disk DISK's medium is gone: its partitions fail from now on, for whatever has
+// them open or mounted, and a new medium's are registered anew.
+void block_drop_partitions(int disk);
 int block_device_count(void);
 const struct block_device *block_device_at(int index);
 

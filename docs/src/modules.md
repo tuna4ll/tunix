@@ -165,7 +165,7 @@ opinion.
 | `kvm` (x86-64) | a processor with SVM, by the CPU's modalias (see [KVM](kvm.md)) |
 
 Everything the machine needs before there is a root filesystem is not a module:
-IDE, AHCI (disks and optical drives), NVMe, SDHCI, the USB host controllers and USB storage, because a
+IDE and AHCI (disks and optical drives), NVMe, SDHCI, the USB host controllers and USB storage, because a
 driver that has to be loaded from the disk it drives cannot be. Nor is what the
 loader itself stands on -- PCI, interrupts, the ACPI interpreter and embedded
 controller, the framebuffer console -- or the layers drivers register with:

@@ -6,6 +6,7 @@
 #include <tunix/block.h>
 #include <tunix/cpu.h>
 #include <tunix/kstring.h>
+#include <tunix/cdrom.h>
 #include <tunix/devfs.h>
 #include <tunix/sysfs.h>
 #include <tunix/framebuffer.h>
@@ -81,6 +82,7 @@ static int root_device_index(void) {
         while (time_uptime_ns() < next) cpu_relax();
         xhci_rescan();
         usb_storage_attach();
+        cdrom_poll();
         index = find_root(name);
     }
     if (index < 0) kprintf("TUNIX: root=%s names no device\n", name);
@@ -200,6 +202,7 @@ void kmain(const struct boot_info *boot) {
     vfs_start_writeback();
     reclaim_start();
     ext4fs_start();
+    cdrom_start();
     timer_init();
     arch_route_timer();
     acpi_subsystem_init();

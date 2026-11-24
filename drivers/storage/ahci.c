@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <tunix/ahci.h>
 #include <tunix/block.h>
+#include <tunix/cdrom.h>
 #include <tunix/cpu.h>
 #include <tunix/dma.h>
 #include <tunix/heap.h>
@@ -63,15 +64,6 @@
 #define ATA_IDENTIFY        0xECU
 #define ATA_PACKET          0xA0U
 
-#define SCSI_TEST_UNIT_READY 0x00U
-#define SCSI_READ_CAPACITY   0x25U
-#define SCSI_READ_10         0x28U
-
-// The largest optical block, which the free half of the port's page bounces.
-#define ATAPI_MAX_BLOCK 2048U
-#define PORT_PAGE_BOUNCE 0x800U
-#define BLOCK_MAJOR_SR   11U
-
 #define AHCI_PRDT_ENTRIES 32U
 #define AHCI_MAX_SECTORS  ((AHCI_PRDT_ENTRIES - 1U) * 4096U / BLOCK_SECTOR_SIZE)
 #define AHCI_WAIT_SPINS   40000000U
@@ -119,9 +111,6 @@ struct ahci_port {
     uint64_t page_physical;
     uint8_t *page;
     uint64_t sectors;
-    // An optical drive: its block in bytes, and its block in 512-byte sectors.
-    uint32_t block_bytes;
-    uint32_t block_sectors;
     char name[16];
     struct mutex lock;
 };
@@ -251,6 +240,11 @@ static int issue_packet(struct ahci_port *port, uint8_t command, uint64_t lba, u
     (void)io_poll(device_idle, port, IO_TIMEOUT_NS);
     write32(port->registers + PORT_CI, 1U);
     int status = wait_for_completion(port);
+    // A refused packet command leaves its sense key in the error register's
+    // high nibble (PxTFD bits 15:12).
+    uint32_t task_file = read32(port->registers + PORT_TFD);
+    if (status != 0 && packet && (task_file & TFD_ERR) && (task_file >> 12) & 0x0FU)
+        status = (int)((task_file >> 12) & 0x0FU);
     // A failed command stops the port (AHCI 1.3, 6.2.2); restart it, so that
     // an optical drive's expected "unit attention" does not hang the next one.
     if (status != 0 && stop_port(port) == 0) {
@@ -266,80 +260,12 @@ static int issue(struct ahci_port *port, uint8_t command, uint64_t lba, uint32_t
     return issue_packet(port, command, lba, sectors, NULL, buffer, bytes, write);
 }
 
-static int scsi(struct ahci_port *port, const uint8_t *packet, void *buffer, uint32_t bytes) {
-    return issue_packet(port, ATA_PACKET, 0, 0, packet, buffer, bytes, 0);
-}
-
-static int read_blocks(struct ahci_port *port, uint32_t block, uint32_t count, void *out) {
-    uint8_t packet[12] = {SCSI_READ_10, 0, (uint8_t)(block >> 24), (uint8_t)(block >> 16),
-                          (uint8_t)(block >> 8), (uint8_t)block, 0, (uint8_t)(count >> 8),
-                          (uint8_t)count, 0, 0, 0};
-    return scsi(port, packet, out, count * port->block_bytes);
-}
-
-// The block layer counts 512-byte sectors; a disc has 2048-byte blocks. Whole
-// blocks go straight to the caller, the ends of an unaligned request through
-// the bounce buffer.
-static int atapi_read_unlocked(struct ahci_port *port, uint64_t lba, uint32_t count,
-                               uint8_t *out) {
-    uint32_t per = port->block_sectors;
-    while (count) {
-        uint64_t block = lba / per;
-        uint32_t skip = (uint32_t)(lba % per);
-        if (block > 0xFFFFFFFFULL) return -1;
-        if (skip || count < per) {
-            uint8_t *bounce = port->page + PORT_PAGE_BOUNCE;
-            if (read_blocks(port, (uint32_t)block, 1, bounce) != 0) return -1;
-            uint32_t take = per - skip < count ? per - skip : count;
-            memcpy(out, bounce + skip * BLOCK_SECTOR_SIZE, take * BLOCK_SECTOR_SIZE);
-            out += take * BLOCK_SECTOR_SIZE;
-            lba += take;
-            count -= take;
-            continue;
-        }
-        uint32_t blocks = count / per;
-        uint32_t most = AHCI_MAX_SECTORS / per;
-        if (blocks > most) blocks = most;
-        if (read_blocks(port, (uint32_t)block, blocks, out) != 0) return -1;
-        out += blocks * per * BLOCK_SECTOR_SIZE;
-        lba += (uint64_t)blocks * per;
-        count -= blocks * per;
-    }
-    return 0;
-}
-
-static int atapi_read(void *context, uint64_t lba, uint32_t count, void *destination) {
+static int atapi_packet(void *context, const uint8_t *packet, void *buffer, uint32_t bytes) {
     struct ahci_port *port = (struct ahci_port *)context;
     mutex_lock(&port->lock);
-    int status = atapi_read_unlocked(port, lba, count, (uint8_t *)destination);
+    int status = issue_packet(port, ATA_PACKET, 0, 0, packet, buffer, bytes, 0);
     mutex_unlock(&port->lock);
     return status;
-}
-
-// A drive answers its first commands after a reset, or a disc change, with a
-// unit attention, and a spinning-up disc with "not ready"; both clear by asking
-// again.
-static int atapi_capacity(struct ahci_port *port) {
-    static const uint8_t ready[12] = {SCSI_TEST_UNIT_READY};
-    static const uint8_t capacity[12] = {SCSI_READ_CAPACITY};
-    uint8_t *reply = port->page + PORT_PAGE_BOUNCE;
-    uint64_t deadline = time_uptime_ns() + 5000000000ULL;
-    while (scsi(port, ready, NULL, 0) != 0) {
-        if (time_uptime_ns() >= deadline) return -1;
-        uint64_t until = time_uptime_ns() + 50000000ULL;
-        while (time_uptime_ns() < until) pause_cpu();
-    }
-    if (scsi(port, capacity, reply, 8) != 0) return -1;
-    uint32_t last = (uint32_t)reply[0] << 24 | (uint32_t)reply[1] << 16 |
-        (uint32_t)reply[2] << 8 | reply[3];
-    uint32_t bytes = (uint32_t)reply[4] << 24 | (uint32_t)reply[5] << 16 |
-        (uint32_t)reply[6] << 8 | reply[7];
-    // Some drives report 0, or 2340 for an audio CD; data discs are read in 2048.
-    if (!bytes || bytes > ATAPI_MAX_BLOCK || bytes % BLOCK_SECTOR_SIZE) bytes = ATAPI_MAX_BLOCK;
-    port->block_bytes = bytes;
-    port->block_sectors = bytes / BLOCK_SECTOR_SIZE;
-    port->sectors = ((uint64_t)last + 1U) * port->block_sectors;
-    return 0;
 }
 
 static int ahci_read_unlocked(void *context, uint64_t lba, uint32_t count, void *destination) {
@@ -495,24 +421,7 @@ static void bring_up_port(uint64_t hba, unsigned index) {
     start_port(port);
 
     if (signature == SIG_ATAPI) {
-        // shortcut: the disc in the drive at boot is the one there is; a disc
-        // changed later is not noticed. Media change events would fix that.
-        if (atapi_capacity(port) != 0) {
-            kprintf("AHCI: port %u is an optical drive with no disc\n", index);
-            stop_port(port);
-            dma_free(port->page, 4096);
-            kfree(port);
-            return;
-        }
-        struct block_device device;
-        memset(&device, 0, sizeof(device));
-        memcpy(device.name, "ahci-cd", 8);
-        device.sectors = port->sectors;
-        device.read = atapi_read;
-        device.context = port;
-        char name[8] = "sr0";
-        name[2] = (char)('0' + optical_count % 10U);
-        if (block_register_named(&device, name, BLOCK_MAJOR_SR, optical_count) < 0) {
+        if (cdrom_add("ahci-cd", atapi_packet, port, AHCI_MAX_SECTORS * BLOCK_SECTOR_SIZE) != 0) {
             stop_port(port);
             dma_free(port->page, 4096);
             kfree(port);

@@ -350,6 +350,11 @@ void eventfs_emit_device_attach(const char *type, const char *name) {
     emit_device("attach", type, name);
 }
 
+void eventfs_emit_device_change(const char *type, const char *name) {
+    EVENTFS_LOCKED;
+    emit_device("change", type, name);
+}
+
 void eventfs_emit_device_remove(const char *type, const char *name) {
     EVENTFS_LOCKED;
     emit_device("remove", type, name);

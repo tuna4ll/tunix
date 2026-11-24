@@ -38,6 +38,7 @@ void eventfs_emit_file_rename(uint32_t uid, uint64_t pid, const char *old_path,
 void eventfs_emit_file_remove(uint32_t uid, uint64_t pid, const char *path);
 
 void eventfs_emit_device_attach(const char *type, const char *name);
+void eventfs_emit_device_change(const char *type, const char *name);
 void eventfs_emit_device_remove(const char *type, const char *name);
 
 void eventfs_emit_network_connect(uint32_t uid, uint64_t pid, const char *proto,

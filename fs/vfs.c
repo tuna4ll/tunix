@@ -13,6 +13,7 @@
 #include <tunix/inotify.h>
 #include <tunix/kstring.h>
 #include <tunix/time.h>
+#include <tunix/errno.h>
 #include <tunix/ext4.h>
 #include <tunix/fatfs.h>
 #include <tunix/pipe.h>
@@ -1021,7 +1022,8 @@ static int64_t memory_read(struct vfs_node *node, uint64_t offset, size_t size, 
         uint64_t chunk = VFS_PAGE_SIZE - within;
         if (chunk > left) chunk = left;
         const uint8_t *page = (const uint8_t *)vfs_page(node, index, 0);
-        if (!page) return (int64_t)(size - left);
+        // A page that cannot be read is an error, not the end of the file.
+        if (!page) return left == size ? -EIO : (int64_t)(size - left);
         memcpy(out, page + within, (size_t)chunk);
         out += chunk;
         at += chunk;

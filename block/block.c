@@ -36,33 +36,35 @@ static void registry_guard_release(int *unused) {
 struct partition_context {
     int parent;
     uint64_t start;
+    // Its disc is gone (block_drop_partitions); it reads nothing, ever again.
+    int dead;
 };
 
 static int partition_read(void *context, uint64_t lba, uint32_t count, void *destination) {
     const struct partition_context *part = context;
     const struct block_device *disk = block_device_at(part->parent);
-    if (!disk) return -1;
+    if (!disk || part->dead) return -1;
     return disk->read(disk->context, part->start + lba, count, destination);
 }
 
 static int partition_write(void *context, uint64_t lba, uint32_t count, const void *source) {
     const struct partition_context *part = context;
     const struct block_device *disk = block_device_at(part->parent);
-    if (!disk || !disk->write) return -1;
+    if (!disk || !disk->write || part->dead) return -1;
     return disk->write(disk->context, part->start + lba, count, source);
 }
 
 static int partition_flush(void *context) {
     const struct partition_context *part = context;
     const struct block_device *disk = block_device_at(part->parent);
-    if (!disk) return -1;
+    if (!disk || part->dead) return -1;
     return disk->flush ? disk->flush(disk->context) : 0;
 }
 
 static int partition_discard(void *context, uint64_t lba, uint32_t count) {
     const struct partition_context *part = context;
     const struct block_device *disk = block_device_at(part->parent);
-    if (!disk || !disk->discard) return -1;
+    if (!disk || !disk->discard || part->dead) return -1;
     return disk->discard(disk->context, part->start + lba, count);
 }
 
@@ -153,6 +155,21 @@ void block_set_sectors(int index, uint64_t sectors) {
     if (index >= 0 && index < device_count) devices[index]->sectors = sectors;
 }
 
+void block_drop_partitions(int disk) {
+    int count = block_device_count();
+    for (int index = 0; index < count; index++) {
+        lock_acquire(&registry_lock);
+        struct block_device *entry = devices[index];
+        int drop = entry->parent == disk && disk >= 0 && entry->sectors;
+        if (drop) {
+            ((struct partition_context *)entry->context)->dead = 1;
+            entry->sectors = 0;
+        }
+        lock_release(&registry_lock);
+        if (drop) eventfs_emit_device_remove("block", entry->dev_name);
+    }
+}
+
 int block_register_partition(int parent, int number, uint64_t start, uint64_t sectors) {
     const struct block_device *disk = block_device_at(parent);
     if (!disk || disk->parent != -1 || number < 1 || number > 99999) return -1;
@@ -162,6 +179,7 @@ int block_register_partition(int parent, int number, uint64_t start, uint64_t se
     if (!context) return -1;
     context->parent = parent;
     context->start = start;
+    context->dead = 0;
 
     lock_acquire(&registry_lock);
     struct block_device *entry = new_entry();
@@ -215,7 +233,8 @@ int block_device_index_by_name(const char *name) {
         name += sizeof prefix - 1;
     }
     REGISTRY_LOCKED;
-    for (int index = 0; index < device_count; index++)
+    // The newest first: a new disc's sr0p1, not the dead one of the disc before.
+    for (int index = device_count - 1; index >= 0; index--)
         if (strcmp(devices[index]->dev_name, name) == 0) return index;
     return -1;
 }
