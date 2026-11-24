@@ -12,6 +12,7 @@
 #include <tunix/net/netlink.h>
 #include <tunix/sound.h>
 #include <tunix/sysfs.h>
+#include <tunix/cpu.h>
 #include <tunix/cpufreq.h>
 #include <tunix/thermal.h>
 #include <tunix/vt.h>
@@ -871,8 +872,91 @@ static int64_t smi_count_read(struct vfs_node *node, uint64_t offset, size_t siz
     return attribute_reply(text, length, offset, size, output);
 }
 
+#if defined(__x86_64__)
+static void append_upper_hex(char *out, size_t limit, size_t *used, uint32_t value) {
+    static const char alphabet[] = "0123456789ABCDEF";
+    for (int digit = 3; digit >= 0; digit--)
+        if (*used + 1 < limit) out[(*used)++] = alphabet[(value >> (digit * 4)) & 0xFU];
+}
+
+// The modalias Linux gives an x86 processor: its vendor, family and model, then every
+// feature it has by Linux's number for it, 32 to a CPUID word. A module needing a feature
+// (kvm needs SVM, feature 00C2) is loaded at boot from it like one for a device.
+static size_t cpu_modalias(char *out, size_t limit) {
+    uint32_t a, b, c, d;
+    cpu_cpuid(0, 0, &a, &b, &c, &d);
+    uint32_t vendor = b == 0x756E6547U ? 0 : b == 0x68747541U ? 2 : b == 0x6F677948U ? 9 : 0xFF;
+    cpu_cpuid(1, 0, &a, &b, &c, &d);
+    uint32_t family = (a >> 8) & 0xFU, model = (a >> 4) & 0xFU;
+    if (family == 0xF) family += (a >> 20) & 0xFFU;
+    if (family >= 6) model |= ((a >> 16) & 0xFU) << 4;
+    // Linux's capability words: 0 is CPUID 1 EDX, 1 is 0x80000001 EDX, 4 is CPUID 1 ECX,
+    // 6 is 0x80000001 ECX and 9 is CPUID 7 EBX.
+    uint32_t words[10] = {0};
+    words[0] = d;
+    words[4] = c;
+    cpu_cpuid(0x80000000U, 0, &a, &b, &c, &d);
+    if (a >= 0x80000001U) {
+        cpu_cpuid(0x80000001U, 0, &a, &b, &c, &d);
+        words[1] = d;
+        words[6] = c;
+    }
+    cpu_cpuid(0, 0, &a, &b, &c, &d);
+    if (a >= 7) {
+        cpu_cpuid(7, 0, &a, &b, &c, &d);
+        words[9] = b;
+    }
+    size_t used = 0;
+    append_string(out, limit, &used, "cpu:type:x86,ven");
+    append_upper_hex(out, limit, &used, vendor);
+    append_string(out, limit, &used, "fam");
+    append_upper_hex(out, limit, &used, family);
+    append_string(out, limit, &used, "mod");
+    append_upper_hex(out, limit, &used, model);
+    append_string(out, limit, &used, ":feature:");
+    for (uint32_t word = 0; word < 10; word++) {
+        for (uint32_t bit = 0; bit < 32; bit++) {
+            if (!(words[word] & (1U << bit))) continue;
+            append_string(out, limit, &used, ",");
+            append_upper_hex(out, limit, &used, word * 32U + bit);
+        }
+    }
+    append_string(out, limit, &used, "\n");
+    return used;
+}
+
+static void publish_cpu_devices(unsigned cpus) {
+    static char alias[1024];
+    size_t length = cpu_modalias(alias, sizeof(alias));
+    if (!vfs_mkdir_p("/sys/bus/cpu/devices")) return;
+    for (unsigned cpu = 0; cpu < cpus; cpu++) {
+        char path[80];
+        size_t used = 0;
+        append_string(path, sizeof(path), &used, "/sys/devices/system/cpu/cpu");
+        append_number(path, sizeof(path), &used, cpu);
+        path[used] = '\0';
+        if (!vfs_mkdir_p(path)) return;
+        append_string(path, sizeof(path), &used, "/modalias");
+        path[used] = '\0';
+        (void)vfs_create_file(path, alias, length, 0, 1);
+        char link[64], target[64];
+        size_t link_length = 0, target_length = 0;
+        append_string(link, sizeof(link), &link_length, "/sys/bus/cpu/devices/cpu");
+        append_number(link, sizeof(link), &link_length, cpu);
+        link[link_length] = '\0';
+        append_string(target, sizeof(target), &target_length, "../../../devices/system/cpu/cpu");
+        append_number(target, sizeof(target), &target_length, cpu);
+        target[target_length] = '\0';
+        (void)vfs_create_symlink(link, target, 0);
+    }
+}
+#endif
+
 void sysfs_publish_cpus(unsigned cpus) {
     if (!cpus || !vfs_mkdir_p("/sys/devices/system/cpu")) return;
+#if defined(__x86_64__)
+    publish_cpu_devices(cpus);
+#endif
     publish_cpu_list("online", cpus);
     publish_cpu_list("possible", cpus);
     publish_cpu_list("present", cpus);

@@ -16,6 +16,7 @@
 - [Networking](networking.md)
 - [USB](usb.md)
 - [virtio-gpu](virtio-gpu.md)
+- [KVM](kvm.md)
 - [Sound](sound.md)
 - [Sandboxing](sandboxing.md)
 - [ACPI](acpi.md)

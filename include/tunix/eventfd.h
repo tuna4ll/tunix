@@ -13,5 +13,9 @@ int64_t eventfd_write(struct eventfd_context *context, size_t size, const void *
 int eventfd_read_ready(struct eventfd_context *context);
 int eventfd_write_ready(struct eventfd_context *context);
 uint32_t eventfd_generation(struct eventfd_context *context);
+// A consumer takes every write in the kernel instead of the counter: KVM's irqfd, which
+// turns a write into an interrupt. Clearing it waits for a call already under way.
+void eventfd_set_consumer(struct eventfd_context *context, void (*consume)(void *argument),
+                          void *argument);
 
 #endif

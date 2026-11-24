@@ -184,8 +184,8 @@ AARCH64_CORE_CFLAGS := -std=gnu11 -Wall -Wextra -Werror -ffreestanding \
 	-mstrict-align -march=armv8-a -mno-outline-atomics -Os \
 	-ffunction-sections -fdata-sections \
 	-Iinclude $(KERNEL_CFLAGS_EXTRA) $(DEBUG_CFLAGS)
-# x86-only drivers: port I/O, or ACPI, which the aarch64 build does not have.
-AARCH64_SKIP := drivers/storage/ata.c drivers/net/rtl8139.c \
+# x86-only drivers: port I/O, AMD SVM, or ACPI, which the aarch64 build does not have.
+AARCH64_SKIP := drivers/storage/ata.c drivers/net/rtl8139.c drivers/virt/kvm.c \
 	$(filter-out drivers/acpi/acpi.c,$(wildcard drivers/acpi/*.c))
 AARCH64_CORE_EXCLUDE := $(AARCH64_SKIP) $(MODULE_SOURCES)
 AARCH64_CORE_SOURCES := $(filter-out $(AARCH64_CORE_EXCLUDE),$(call find-sources,-path ./arch -prune -o)) \

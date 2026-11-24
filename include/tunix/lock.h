@@ -4,6 +4,8 @@
 #include <stdint.h>
 
 enum lock_rank {
+    LOCK_RANK_KVM_VCPU = 2,
+    LOCK_RANK_KVM_VM = 3,
     LOCK_RANK_RING = 4,
     LOCK_RANK_TTY = 6,
     LOCK_RANK_SWAPON = 7,
@@ -17,6 +19,7 @@ enum lock_rank {
     LOCK_RANK_OBJECT = 30,
     LOCK_RANK_NET = 35,
     LOCK_RANK_DEVICE = 40,
+    LOCK_RANK_KVM_IRQ = 41,
     LOCK_RANK_BLOCK = 44,
     LOCK_RANK_BUS = 45,
     LOCK_RANK_INPUT = 48,

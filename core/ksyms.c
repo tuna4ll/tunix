@@ -25,6 +25,12 @@
 #include <tunix/time.h>
 #include <tunix/vmm.h>
 #include <tunix/kprintf.h>
+#include <tunix/timer.h>
+#include <tunix/eventfd.h>
+#include <tunix/process_arch.h>
+#include <tunix/smp.h>
+#include <tunix/file.h>
+#include <tunix/usercopy.h>
 #include <tunix/usb.h>
 #include <tunix/workqueue.h>
 #include <tunix/virtgpu.h>
@@ -169,8 +175,33 @@ const struct module_export kernel_symbols[] = {
     EXPORT(input_usb_pointer),
     EXPORT(usb_register_driver),
     EXPORT(usb_unregister_driver),
+    // KVM: user memory, files, vCPU threads and interrupts
+    EXPORT(copy_from_user),
+    EXPORT(copy_to_user),
+    EXPORT(pmm_page_ref),
+    EXPORT(file_open_node),
+    EXPORT(file_ref),
+    EXPORT(file_unref),
+    EXPORT(file_write),
+    EXPORT(process_current),
+    EXPORT(process_install_file_flags),
+    EXPORT(process_file_get),
+    EXPORT(process_preempt_point),
+    EXPORT(process_signal_interrupts_wait),
+    EXPORT(process_kernel_yield),
+    EXPORT(process_pin_user_page),
+    EXPORT(mutex_init),
+    EXPORT(smp_cpu_count),
+    EXPORT(vmm_unmap_page_in),
+    EXPORT(eventfd_set_consumer),
+    EXPORT(timer_note_deadline),
+    EXPORT(smp_send_reschedule_to),
+    EXPORT(process_prepare_wait_interruptible),
 #if defined(__x86_64__)
     EXPORT(apic_route_global),
+    EXPORT(arch_fpu_save),
+    EXPORT(arch_fpu_restore),
+    EXPORT(arch_fpu_init),
     // ACPI, for the button, processor, thermal_zone and video modules
     EXPORT(acpi_device_present),
     EXPORT(acpi_node_path),

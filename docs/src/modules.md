@@ -162,6 +162,7 @@ opinion.
 | `video` | `LNXVIDEO` |
 | `usbhid` | USB keyboards, mice and tablets: any interface of class 3 |
 | `zram` | nothing: `modprobe zram` when swap on compressed memory is wanted |
+| `kvm` (x86-64) | a processor with SVM, by the CPU's modalias (see [KVM](kvm.md)) |
 
 Everything the machine needs before there is a root filesystem is not a module:
 IDE, AHCI, NVMe, SDHCI, the USB host controllers and USB storage, because a

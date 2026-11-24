@@ -3658,6 +3658,17 @@ static volatile uint32_t *user_futex_word(uint64_t address, uint64_t *pinned) {
     return (volatile uint32_t *)vmm_phys_to_virt(physical);
 }
 
+// The physical page behind a writable user address, with a reference that keeps it: copy
+// on write is broken first, so the page stays the one the process writes. Device memory
+// is refused. The caller drops the reference with pmm_free_page().
+int process_pin_user_page(uint64_t address, uint64_t *physical_out) {
+    uint64_t pinned;
+    volatile uint32_t *word = user_futex_word(address & ~0xFFFULL, &pinned);
+    if (!word) return -EFAULT;
+    *physical_out = pinned;
+    return 0;
+}
+
 static void futex_word_unpin(uint64_t *pinned) {
     if (*pinned) pmm_free_page((void *)*pinned);
     *pinned = 0;
@@ -4760,6 +4771,20 @@ int64_t process_waitid_from_syscall(int64_t pid_spec, uint64_t info_user, int op
     return 0;
 }
 
+// A thread running on another processor sees a new signal when it next enters the
+// kernel; an interrupt there makes that now rather than at its next tick, for user code
+// and for a vCPU in a guest alike.
+static void kick_running(const struct process *target) {
+    struct cpu *self = cpu_current();
+    unsigned cpus = smp_cpu_count();
+    for (unsigned index = 0; index < cpus && index < SMP_MAX_CPUS; index++) {
+        struct cpu *cpu = percpu_slot(index);
+        if (!cpu || cpu == self || !cpu->online || cpu_running(cpu) != target) continue;
+        smp_send_reschedule_to(index);
+        return;
+    }
+}
+
 static int deliver_signal_entry(struct process *target, const struct signal_info *info,
                                 struct signal_entry *prepared) {
     int signal_number = info->signo;
@@ -4775,6 +4800,7 @@ static int deliver_signal_entry(struct process *target, const struct signal_info
     }
     int queued = queue_signal_entry(target, info, prepared);
     if (queued != 0) return queued;
+    if (target->state == PROCESS_RUNNING) kick_running(target);
     if (signal_number == SIGCHLD && target->state == PROCESS_BLOCKED &&
         target->wait_channel == &io_wait_token && !(target->signal_waited & signal_bit(SIGCHLD)) &&
         !signal_reaches_waiter(target, SIGCHLD)) {
