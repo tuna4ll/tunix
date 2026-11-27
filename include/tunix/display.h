@@ -18,6 +18,8 @@ struct display_flipper {
     int (*console_in_front)(void);
     int (*idle)(int may_service);
     int (*vblank)(uint64_t *sequence, uint64_t *time_ns);
+    // The 128-byte EDID of the monitor in front, or NULL when none was read.
+    const uint8_t *(*edid)(void);
 };
 
 int display_early_init(const struct boot_framebuffer_info *boot, struct boot_framebuffer_info *out);

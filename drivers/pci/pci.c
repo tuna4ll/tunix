@@ -9,6 +9,7 @@
 #include <tunix/irq.h>
 #endif
 #include <tunix/heap.h>
+#include <tunix/kprintf.h>
 #include <tunix/kstring.h>
 #include <tunix/pci.h>
 #include <tunix/sysfs.h>
@@ -666,9 +667,48 @@ int pci_find_nth_class(uint8_t class_code, uint8_t subclass, unsigned nth, struc
     return -1;
 }
 
+// The bridge whose secondary bus is BUS, as Linux's pci_upstream_bridge finds it.
+static int upstream_bridge(uint8_t bus, uint8_t *out_bus, uint8_t *out_slot, uint8_t *out_function) {
+    for (unsigned parent = 0; parent < bus; parent++) {
+        for (unsigned slot = 0; slot < 32U; slot++) {
+            for (unsigned function = 0; function < 8U; function++) {
+                uint32_t id = pci_config_read32((uint8_t)parent, (uint8_t)slot, (uint8_t)function, 0);
+                if ((uint16_t)id == 0xFFFFU) {
+                    if (!function) break;
+                    continue;
+                }
+                uint32_t header = pci_config_read32((uint8_t)parent, (uint8_t)slot,
+                                                    (uint8_t)function, 0x0CU);
+                if (((header >> 16) & 0x7FU) == 1U &&
+                    pci_config_read8((uint8_t)parent, (uint8_t)slot, (uint8_t)function, 0x19U) ==
+                        bus) {
+                    *out_bus = (uint8_t)parent;
+                    *out_slot = (uint8_t)slot;
+                    *out_function = (uint8_t)function;
+                    return 0;
+                }
+                if (!function && !(header & 0x00800000U)) break;
+            }
+        }
+    }
+    return -1;
+}
+
+// A bridge forwards its devices' writes upstream -- DMA and MSI alike -- only
+// while it is a bus master itself, so every bridge above is made one too.
 void pci_enable_bus_mastering(const struct pci_device *device) {
     if (!device) return;
     uint32_t value = pci_config_read32(device->bus, device->slot, device->function, 0x04);
     value |= 0x00000007U;
     pci_config_write32(device->bus, device->slot, device->function, 0x04, value);
+    uint8_t bus = device->bus, parent, slot, function;
+    for (unsigned depth = 0; bus && depth < 8U && upstream_bridge(bus, &parent, &slot, &function) == 0;
+         depth++, bus = parent) {
+        uint32_t command = pci_config_read32(parent, slot, function, 0x04);
+        if (!(command & 0x4U)) {
+            pci_config_write16(parent, slot, function, 0x04, (uint16_t)(command | 0x4U));
+            kprintf("PCI: %u:%u.%u is now a bus master for %u:%u.%u\n", parent, slot, function,
+                    device->bus, device->slot, device->function);
+        }
+    }
 }

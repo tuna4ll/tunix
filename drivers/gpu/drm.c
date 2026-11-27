@@ -295,6 +295,10 @@ typedef char drm_virtgpu_get_caps_size_check[(sizeof(struct drm_virtgpu_get_caps
 #define DRM_MODE_CONNECTOR_VIRTUAL 15
 #define DRM_MODE_ENCODER_VIRTUAL   5
 #define DRM_MODE_TYPE_PREFERRED    (1 << 3)
+#define DRM_MODE_FLAG_PHSYNC 0x1U
+#define DRM_MODE_FLAG_NHSYNC 0x2U
+#define DRM_MODE_FLAG_PVSYNC 0x4U
+#define DRM_MODE_FLAG_NVSYNC 0x8U
 #define DRM_MODE_TYPE_DRIVER       (1 << 6)
 
 #define DRM_DISPLAY_MODE_LEN 32
@@ -1065,6 +1069,42 @@ static void buffer_release(struct drm_dumb_buffer *buffer) {
     memset(buffer, 0, sizeof(*buffer));
 }
 
+// The monitor's preferred timing (its EDID's first detailed descriptor), when
+// it is the mode on screen.
+static const uint8_t *edid_timing(void) {
+    const struct display_flipper *flipper = display_flipper();
+    const uint8_t *edid = flipper && flipper->edid ? flipper->edid() : NULL;
+    if (!edid) return NULL;
+    const uint8_t *d = edid + 54;
+    uint32_t width = d[2] | ((d[4] & 0xF0U) << 4), height = d[5] | ((d[7] & 0xF0U) << 4);
+    if (!(d[0] | d[1]) || width != framebuffer_width() || height != framebuffer_height())
+        return NULL;
+    return d;
+}
+
+static int fill_edid_mode(struct drm_mode_modeinfo *mode) {
+    const uint8_t *d = edid_timing();
+    if (!d) return 0;
+    uint32_t hblank = d[3] | ((d[4] & 0x0FU) << 8), vblank = d[6] | ((d[7] & 0x0FU) << 8);
+    uint32_t hfront = d[8] | ((d[11] & 0xC0U) << 2), hsync = d[9] | ((d[11] & 0x30U) << 4);
+    uint32_t vfront = (d[10] >> 4) | ((d[11] & 0x0CU) << 2);
+    uint32_t vsync = (d[10] & 0x0FU) | ((d[11] & 0x03U) << 4);
+    mode->clock = (uint32_t)(d[0] | (d[1] << 8)) * 10U;
+    mode->hsync_start = (uint16_t)(mode->hdisplay + hfront);
+    mode->hsync_end = (uint16_t)(mode->hsync_start + hsync);
+    mode->htotal = (uint16_t)(mode->hdisplay + hblank);
+    mode->vsync_start = (uint16_t)(mode->vdisplay + vfront);
+    mode->vsync_end = (uint16_t)(mode->vsync_start + vsync);
+    mode->vtotal = (uint16_t)(mode->vdisplay + vblank);
+    uint64_t pixels = (uint64_t)mode->htotal * mode->vtotal;
+    mode->vrefresh = (uint32_t)(((uint64_t)mode->clock * 1000ULL + pixels / 2U) / pixels);
+    // Digital separate sync gives each polarity a bit; anything else is negative.
+    int separate = (d[17] & 0x18U) == 0x18U;
+    mode->flags = (separate && (d[17] & 2U) ? DRM_MODE_FLAG_PHSYNC : DRM_MODE_FLAG_NHSYNC) |
+        (separate && (d[17] & 4U) ? DRM_MODE_FLAG_PVSYNC : DRM_MODE_FLAG_NVSYNC);
+    return 1;
+}
+
 static void fill_mode(struct drm_mode_modeinfo *mode) {
     uint32_t width = framebuffer_width();
     uint32_t height = framebuffer_height();
@@ -1081,6 +1121,7 @@ static void fill_mode(struct drm_mode_modeinfo *mode) {
     mode->vrefresh = 60;
     mode->clock = (uint32_t)(((uint64_t)width * height * 60ULL) / 1000ULL);
     mode->type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED;
+    (void)fill_edid_mode(mode);
 
     char *out = mode->name;
     size_t limit = sizeof(mode->name) - 1;
@@ -1275,8 +1316,9 @@ static int64_t ioctl_get_connector(uint64_t user_argument) {
     connector.connector_type = DRM_MODE_CONNECTOR_VIRTUAL;
     connector.connector_type_id = 1;
     connector.connection = DRM_MODE_CONNECTED;
-    connector.mm_width = 0;
-    connector.mm_height = 0;
+    const uint8_t *timing = edid_timing();
+    connector.mm_width = timing ? timing[12] | ((timing[14] & 0xF0U) << 4) : 0;
+    connector.mm_height = timing ? timing[13] | ((timing[14] & 0x0FU) << 8) : 0;
     connector.subpixel = DRM_MODE_SUBPIXEL_UNKNOWN;
     return copy_to_user(user_argument, &connector, sizeof(connector)) == 0 ? 0 : -EFAULT;
 }
@@ -1857,7 +1899,13 @@ static int flip_head_ready(const struct drm_event_queue *queue, int reclaim) {
     uint64_t due = queue->due_ns[queue->head];
     if (now < due) return 0;
     const struct display_flipper *flipper = display_flipper();
-    if (flipper && !flipper->idle(reclaim)) return now - due > FLIP_FENCE_PATIENCE_NS;
+    if (flipper && !flipper->idle(reclaim)) {
+        if (now - due > FLIP_FENCE_PATIENCE_NS) return 1;
+        // A vblank interrupt may be late or missing, so the waiter looks
+        // again a millisecond later rather than trusting it to wake it.
+        timer_note_deadline(now + 1000000ULL);
+        return 0;
+    }
     uint64_t fence = queue->fences[queue->head];
     if (fence <= virtgpu_completed()) return 1;
     if (reclaim && virtgpu_sequence_done(fence)) return 1;

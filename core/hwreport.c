@@ -21,6 +21,7 @@
 #include <tunix/thermal.h>
 #include <tunix/time.h>
 #include <tunix/vfs.h>
+#include <tunix/display.h>
 #include <tunix/kprintf.h>
 
 #define REPORT_PATH "/tunix-hwreport.txt"
@@ -782,6 +783,14 @@ static void put_nvidia(const struct pci_device *device, uint8_t *buffer) {
     put("  vram        ");
     put_number(vram_bytes / (1024ULL * 1024ULL));
     put(" MiB\n");
+    // The nv50 driver moves the PRAMIN window and runs the display channel
+    // through it, and a register dump reads ones that stall the bus while the
+    // card times them out: neither is done under a driver that is using it.
+    if (display_flipper()) {
+        put("  pramin      skipped, a display driver is using the card\n");
+        put("  registers   skipped, a display driver is using the card\n");
+        return;
+    }
     put_nv_pramin(bar0, buffer);
     put_nv_registers(bar0, GPU_REGS_PATH);
 }

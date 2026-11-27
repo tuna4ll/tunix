@@ -17,6 +17,53 @@
 #define VRAM_CHECK          0x00820000U
 #define VRAM_SURFACE        0x01000000U
 
+// DCB output types and the connectors scripts and probing care about.
+#define NV50_OUTPUT_CRT  0U
+#define NV50_OUTPUT_TV   1U
+#define NV50_OUTPUT_TMDS 2U
+#define NV50_OUTPUT_LVDS 3U
+#define NV50_OUTPUT_DP   6U
+
+#define NV50_CONNECTOR_VGA    0x00U
+#define NV50_CONNECTOR_LVDS   0x40U
+#define NV50_CONNECTOR_DP     0x46U
+#define NV50_CONNECTOR_EDP    0x47U
+#define NV50_CONNECTOR_HDMI   0x61U
+
+#define NV50_OUTPUTS   16U
+#define NV50_I2C_PORTS 16U
+#define NV50_UNUSED    0xFFU
+
+// An output of the DCB: a DAC or SOR wired to a connector, and the i2c port
+// its monitor answers on.
+struct nv50_output {
+    uint8_t type;
+    uint8_t i2c;
+    uint8_t heads;
+    uint8_t connector;
+    uint8_t location;
+    uint8_t or_mask;
+    uint8_t or_index;
+    uint8_t link;
+    uint8_t connector_type;
+    uint8_t hpd;
+    uint16_t hash_type;
+    uint16_t hash_mask;
+    int edid_ok;
+    uint8_t edid[128];
+};
+
+// An i2c port of the DCB: a bit-banged bus ('drive') and, for one whose pins
+// it shares with a DisplayPort aux channel, the pad to switch ('share').
+struct nv50_i2c_port {
+    uint8_t type;
+    uint8_t drive;
+    uint8_t share;
+};
+
+#define NV50_INTR_VBLANK     1
+#define NV50_INTR_SUPERVISOR 2
+
 struct nv50_lvds {
     uint16_t hash_type;
     uint16_t hash_mask;
@@ -46,6 +93,15 @@ struct nv50_device {
     uint32_t front;
     int flip_pending;
     int warned;
+    uint16_t init_table;
+    uint16_t init_table_bytes;
+    struct nv50_output outputs[NV50_OUTPUTS];
+    unsigned output_count;
+    struct nv50_i2c_port i2c[NV50_I2C_PORTS];
+    unsigned i2c_count;
+    int lvds_output;
+    volatile int supervisor_interrupt;
+    unsigned channel_errors;
 };
 
 static inline uint32_t nv50_rd32(const struct nv50_device *gpu, uint32_t offset) {
@@ -64,8 +120,25 @@ static inline void nv50_mask(const struct nv50_device *gpu, uint32_t offset, uin
 int nv50_wait_clear(const struct nv50_device *gpu, uint32_t offset, uint32_t mask);
 
 int nv50_bios_read(struct nv50_device *gpu, uint8_t *image, uint32_t capacity);
+uint16_t nv50_bit_entry(const struct nv50_device *gpu, uint8_t id, uint8_t *version,
+                        uint16_t *length);
+uint8_t nv50_bios8(const struct nv50_device *gpu, uint32_t at);
+uint16_t nv50_bios16(const struct nv50_device *gpu, uint32_t at);
+uint32_t nv50_bios32(const struct nv50_device *gpu, uint32_t at);
 int nv50_bios_find_lvds(struct nv50_device *gpu, uint32_t khz);
 int nv50_bios_run(struct nv50_device *gpu, uint16_t script);
+
+int nv50_dcb_parse(struct nv50_device *gpu);
+const char *nv50_output_name(const struct nv50_output *outp);
+
+int nv50_init_run(struct nv50_device *gpu, uint16_t script, const struct nv50_output *outp,
+                  unsigned head);
+int nv50_init_check(struct nv50_device *gpu, uint16_t script, const struct nv50_output *outp);
+void nv50_check_scripts(struct nv50_device *gpu);
+
+int nv50_i2c_read(struct nv50_device *gpu, unsigned port, uint8_t address, uint8_t offset,
+                  uint8_t *data, unsigned bytes);
+void nv50_probe_outputs(struct nv50_device *gpu);
 
 int nv50_disp_init(struct nv50_device *gpu);
 int nv50_disp_modeset(struct nv50_device *gpu);
@@ -73,7 +146,10 @@ int nv50_disp_flip(struct nv50_device *gpu, uint32_t vram);
 int nv50_disp_flip_idle(struct nv50_device *gpu, int may_service);
 void nv50_disp_vblank_start(struct nv50_device *gpu);
 void nv50_disp_vblank_stop(struct nv50_device *gpu);
-int nv50_disp_interrupt(struct nv50_device *gpu);
+int nv50_disp_interrupt(struct nv50_device *gpu, uint32_t *supervisor);
+void nv50_disp_supervise(struct nv50_device *gpu, uint32_t pending);
+void nv50_disp_msi_rearm(struct nv50_device *gpu);
+
 int nv50_disp_backlight_present(const struct nv50_device *gpu);
 uint32_t nv50_disp_backlight_get(const struct nv50_device *gpu, uint32_t scale);
 int nv50_disp_backlight_set(const struct nv50_device *gpu, uint32_t level, uint32_t scale);

@@ -97,6 +97,7 @@ static int nv50_setup(const struct boot_framebuffer_info *boot, struct boot_fram
         kprintf("NV50: no video bios image\n");
         return -1;
     }
+    if (nv50_dcb_parse(&gpu) == 0) nv50_check_scripts(&gpu);
     if (nv50_disp_init(&gpu) != 0 || nv50_disp_modeset(&gpu) != 0) return -1;
 
     *out = *boot;
@@ -134,11 +135,24 @@ static int console_in_front(void) { return gpu.front == VRAM_SURFACE; }
 
 static int idle(int may_service) { return nv50_disp_flip_idle(&gpu, may_service); }
 
+
+// Tunix takes interrupts only while a processor is in user mode or idle, so a
+// vblank's may land long after it: vblank is the hardware's while the last one
+// is recent, and DRM paces by its own clock while it is not.
+#define VBLANK_STALE_NS 100000000ULL
+
 static int vblank(uint64_t *sequence, uint64_t *time_ns) {
     if (!__atomic_load_n(&vblank_live, __ATOMIC_ACQUIRE)) return -1;
+    uint64_t at = __atomic_load_n(&vblank_ns, __ATOMIC_ACQUIRE);
+    if (!at || time_uptime_ns() - at > VBLANK_STALE_NS) return -1;
     *sequence = __atomic_load_n(&vblank_count, __ATOMIC_ACQUIRE);
-    *time_ns = __atomic_load_n(&vblank_ns, __ATOMIC_ACQUIRE);
+    *time_ns = at;
     return 0;
+}
+
+static const uint8_t *edid(void) {
+    if (gpu.lvds_output < 0 || !gpu.outputs[gpu.lvds_output].edid_ok) return NULL;
+    return gpu.outputs[gpu.lvds_output].edid;
 }
 
 static const struct display_flipper flipper = {
@@ -148,6 +162,7 @@ static const struct display_flipper flipper = {
     .console_in_front = console_in_front,
     .idle = idle,
     .vblank = vblank,
+    .edid = edid,
 };
 
 static int pci_probe(const struct pci_device *device) {
@@ -177,17 +192,38 @@ static void vblank_wake(void *unused) {
 
 static struct work vblank_work = WORK_INITIALIZER(vblank_wake, NULL);
 
+// The supervisor's steps, answered in process context as the display raises
+// them (a flip through the core channel raises all three), and whoever waits
+// for the flip woken once the last is answered.
+static uint32_t supervisor_steps;
+
+static void supervise(void *unused) {
+    (void)unused;
+    uint32_t steps = __atomic_exchange_n(&supervisor_steps, 0, __ATOMIC_ACQ_REL);
+    for (uint32_t step = 0x10U; step <= 0x40U; step <<= 1)
+        if (steps & step) nv50_disp_supervise(&gpu, step);
+    vblank_wake(NULL);
+}
+
+static struct work supervisor_work = WORK_INITIALIZER(supervise, NULL);
+
 static void interrupt(void *context) {
     (void)context;
+    // Always answered and re-armed: an MSI left unanswered is the last one.
     if (!__atomic_load_n(&vblank_live, __ATOMIC_ACQUIRE)) return;
-    int status = nv50_disp_interrupt(&gpu);
+    uint32_t steps = 0;
+    int status = nv50_disp_interrupt(&gpu, &steps);
     if (status < 0) {
         nv50_disp_vblank_stop(&gpu);
         __atomic_store_n(&vblank_live, 0, __ATOMIC_RELEASE);
         kprintf("NV50: an unexpected interrupt, vblank goes back to the timer\n");
         return;
     }
-    if (!status) return;
+    if (status & NV50_INTR_SUPERVISOR) {
+        __atomic_or_fetch(&supervisor_steps, steps, __ATOMIC_ACQ_REL);
+        work_queue(&supervisor_work);
+    }
+    if (!(status & NV50_INTR_VBLANK)) return;
     __atomic_store_n(&vblank_ns, time_uptime_ns(), __ATOMIC_RELEASE);
     __atomic_add_fetch(&vblank_count, 1, __ATOMIC_ACQ_REL);
     if (gpu.flip_pending) work_queue(&vblank_work);
@@ -205,6 +241,9 @@ static void start_vblank_interrupt(void) {
     }
     __atomic_store_n(&vblank_live, 1, __ATOMIC_RELEASE);
     nv50_disp_vblank_start(&gpu);
+    // MSI is sent again only once rearmed: an interrupt already pending as it
+    // was bound would otherwise be the last (nouveau rearms here too).
+    nv50_disp_msi_rearm(&gpu);
     kprintf("NV50: vblank interrupt on vector %u\n", vector);
 }
 
@@ -246,6 +285,7 @@ static void nv50_late(void) {
     }
     start_vblank_interrupt();
     start_backlight();
+    nv50_probe_outputs(&gpu);
     display_register_flipper(&flipper);
     kprintf("NV50: page flipping between two buffers\n");
 }

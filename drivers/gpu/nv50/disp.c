@@ -29,6 +29,7 @@
 #define PMC_INTR_ENABLE  0x000140U
 #define PMC_INTR_DISP    0x04000000U
 #define INTR_1_VBLANK_0  0x00000004U
+#define INTR_1_SUPERVISOR 0x00000070U
 #define PCI_MSI_REARM    0x088068U
 #define SOR_PWM_DIVIDER  0x61C080U
 #define SOR_PWM_CONTROL  0x61C084U
@@ -301,8 +302,36 @@ static void report_error(const struct nv50_device *gpu) {
             nv50_rd32(gpu, PDISP_ERROR_ADDR), nv50_rd32(gpu, PDISP_ERROR_DATA));
 }
 
-static int service_supervisors(struct nv50_device *gpu) {
+// One step of the supervisor that a core channel update raises, as nouveau's
+// nv50_disp_super runs it: PENDING is the step (0x10, 0x20 or 0x40) and SUPER
+// says which heads change (0x20 << head: updated, 0x80 << head: its mode and
+// output, 0x200 << head: its clock). The display waits for the step to be
+// answered at 0x610030.
+void nv50_disp_supervise(struct nv50_device *gpu, uint32_t pending) {
     const struct nv50_lvds *lvds = &gpu->lvds;
+    uint32_t super = nv50_rd32(gpu, PDISP_SUPERVISOR);
+    if (pending & 0x10U) {
+        if ((super & 0xA0U) == 0xA0U) (void)nv50_bios_run(gpu, lvds->off_int1);
+    } else if (pending & 0x20U) {
+        if (super & 0x80U) (void)nv50_bios_run(gpu, lvds->off_int2);
+        if (super & 0x200U) {
+            nv50_wr32(gpu, VPLL_COEFFICIENTS, gpu->vpll_coefficients);
+            nv50_wr32(gpu, VPLL_FRACTION, gpu->vpll_fraction);
+        }
+        if (super & 0x80U) {
+            (void)nv50_bios_run(gpu, lvds->on_int2);
+            nv50_mask(gpu, HEAD_RG_CLOCK, 0x0000000FU, 0);
+            nv50_mask(gpu, SOR_CLOCK + lvds->or_index * 0x800U, 0x00000707U, 0);
+        }
+    } else if (pending & 0x40U) {
+        if (super & 0x80U) (void)nv50_bios_run(gpu, lvds->on_int3);
+    }
+    nv50_wr32(gpu, PDISP_SUPERVISOR, 0x80000000U);
+}
+
+// Polls the supervisor through until the update's notifier is written, for
+// the modeset at boot, before there are interrupts to answer it from.
+static int service_supervisors(struct nv50_device *gpu) {
     uint64_t deadline = time_uptime_ns() + SUPERVISOR_TIMEOUT_NS;
     while (time_uptime_ns() < deadline) {
         if (vram_rd32(gpu, VRAM_SYNC) & 1U) return 0;
@@ -311,25 +340,8 @@ static int service_supervisors(struct nv50_device *gpu) {
             cpu_relax();
             continue;
         }
-        uint32_t super = nv50_rd32(gpu, PDISP_SUPERVISOR);
         nv50_wr32(gpu, PDISP_INTR_1, pending);
-        if (pending & 0x20U) {
-            if (super & 0x80U) (void)nv50_bios_run(gpu, lvds->off_int2);
-            if (super & 0x200U) {
-                nv50_wr32(gpu, VPLL_COEFFICIENTS, gpu->vpll_coefficients);
-                nv50_wr32(gpu, VPLL_FRACTION, gpu->vpll_fraction);
-            }
-            if (super & 0x80U) {
-                (void)nv50_bios_run(gpu, lvds->on_int2);
-                nv50_mask(gpu, HEAD_RG_CLOCK, 0x0000000FU, 0);
-                nv50_mask(gpu, SOR_CLOCK + lvds->or_index * 0x800U, 0x00000707U, 0);
-            }
-        } else if (pending & 0x40U) {
-            if (super & 0x80U) (void)nv50_bios_run(gpu, lvds->on_int3);
-        } else if (super & 0xA0U) {
-            (void)nv50_bios_run(gpu, lvds->off_int1);
-        }
-        nv50_wr32(gpu, PDISP_SUPERVISOR, 0x80000000U);
+        nv50_disp_supervise(gpu, pending);
     }
     return -1;
 }
@@ -403,7 +415,9 @@ int nv50_disp_flip_idle(struct nv50_device *gpu, int may_service) {
         gpu->flip_pending = 0;
         return 1;
     }
-    if (!may_service) return 0;
+    // The interrupt answers the supervisor once it is on; polling it here as
+    // well would answer a step twice.
+    if (!may_service || gpu->supervisor_interrupt) return 0;
     if (nv50_rd32(gpu, PDISP_INTR_0) & 0x001F0000U) {
         if (!gpu->warned++) report_error(gpu);
         gpu->flip_pending = 0;
@@ -418,26 +432,55 @@ int nv50_disp_flip_idle(struct nv50_device *gpu, int may_service) {
     return 0;
 }
 
+// Vblank on head 0, and the supervisor's steps, interrupt; channel errors are
+// reported and cleared as they come.
 void nv50_disp_vblank_start(struct nv50_device *gpu) {
     nv50_wr32(gpu, PDISP_INTR_EN_0, 0);
-    nv50_wr32(gpu, PDISP_INTR_1, INTR_1_VBLANK_0);
-    nv50_wr32(gpu, PDISP_INTR_EN_1, INTR_1_VBLANK_0);
+    nv50_wr32(gpu, PDISP_INTR_1, INTR_1_VBLANK_0 | INTR_1_SUPERVISOR);
+    nv50_wr32(gpu, PDISP_INTR_EN_1, INTR_1_VBLANK_0 | INTR_1_SUPERVISOR);
+    gpu->supervisor_interrupt = 1;
     nv50_wr32(gpu, PMC_INTR_ENABLE, 1);
 }
 
 void nv50_disp_vblank_stop(struct nv50_device *gpu) {
     nv50_wr32(gpu, PMC_INTR_ENABLE, 0);
     nv50_wr32(gpu, PDISP_INTR_EN_1, 0);
+    gpu->supervisor_interrupt = 0;
 }
 
-int nv50_disp_interrupt(struct nv50_device *gpu) {
+// What the interrupt was: NV50_INTR_VBLANK and NV50_INTR_SUPERVISOR (whose
+// steps are added to *SUPERVISOR for process context to answer), 0 for
+// nothing of the display's, -1 for an interrupt of another engine.
+int nv50_disp_interrupt(struct nv50_device *gpu, uint32_t *supervisor) {
     uint32_t pending = nv50_rd32(gpu, PMC_INTR);
     if (!pending) return 0;
     if (pending & ~PMC_INTR_DISP) return -1;
-    if (!(nv50_rd32(gpu, PDISP_INTR_1) & INTR_1_VBLANK_0)) return -1;
-    nv50_wr32(gpu, PDISP_INTR_1, INTR_1_VBLANK_0);
+    int result = 0;
+    uint32_t intr0 = nv50_rd32(gpu, PDISP_INTR_0);
+    uint32_t intr1 = nv50_rd32(gpu, PDISP_INTR_1);
+    if (intr0 & 0x001F0000U) {
+        if (gpu->channel_errors++ < 4U) report_error(gpu);
+        for (uint32_t chid = 0; chid < 5U; chid++)
+            if (intr0 & (0x00010000U << chid))
+                nv50_wr32(gpu, PDISP_ERROR_ADDR + chid * 8U, 0x90000000U);
+        nv50_wr32(gpu, PDISP_INTR_0, intr0 & 0x001F0000U);
+    }
+    if (intr0 & 0x0000001FU) nv50_wr32(gpu, PDISP_INTR_0, intr0 & 0x0000001FU);
+    if (intr1 & INTR_1_VBLANK_0) {
+        nv50_wr32(gpu, PDISP_INTR_1, INTR_1_VBLANK_0);
+        result |= NV50_INTR_VBLANK;
+    }
+    if (intr1 & INTR_1_SUPERVISOR) {
+        *supervisor |= intr1 & INTR_1_SUPERVISOR;
+        nv50_wr32(gpu, PDISP_INTR_1, intr1 & INTR_1_SUPERVISOR);
+        result |= NV50_INTR_SUPERVISOR;
+    }
+    nv50_disp_msi_rearm(gpu);
+    return result;
+}
+
+void nv50_disp_msi_rearm(struct nv50_device *gpu) {
     *(volatile uint8_t *)(gpu->bar0 + PCI_MSI_REARM) = 0xFFU;
-    return 1;
 }
 
 static uint32_t pwm_register(const struct nv50_device *gpu, uint32_t base) {
