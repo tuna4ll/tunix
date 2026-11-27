@@ -77,6 +77,31 @@ struct nv50_lvds {
     uint16_t on_int3;
 };
 
+#define NV50_VRAM_RANGES 32U
+
+struct nv50_vram_range {
+    uint32_t start;
+    uint32_t end;
+};
+
+struct nv50_vram {
+    struct nv50_vram_range ranges[NV50_VRAM_RANGES];
+    unsigned count;
+};
+
+struct nv50_fifo {
+    uint32_t inst;
+    uint32_t runlist;
+    uint32_t ring;
+    uint32_t sema;
+    uint32_t pt[2];
+    volatile uint32_t *ring_map;
+    volatile uint32_t *sema_map;
+    uint32_t put;
+    uint32_t ib_put;
+    uint32_t sequence;
+};
+
 struct nv50_device {
     uint64_t bar0;
     uint64_t bar1;
@@ -104,6 +129,8 @@ struct nv50_device {
     int lvds_output;
     volatile int supervisor_interrupt;
     unsigned channel_errors;
+    struct nv50_vram vram;
+    struct nv50_fifo fifo;
 };
 
 static inline uint32_t nv50_rd32(const struct nv50_device *gpu, uint32_t offset) {
@@ -120,6 +147,16 @@ static inline void nv50_mask(const struct nv50_device *gpu, uint32_t offset, uin
 }
 
 int nv50_wait_clear(const struct nv50_device *gpu, uint32_t offset, uint32_t mask);
+
+int nv50_vram_init(struct nv50_vram *vram, uint32_t start, uint32_t end);
+uint32_t nv50_vram_alloc(struct nv50_vram *vram, uint32_t bytes, uint32_t align);
+void nv50_vram_free(struct nv50_vram *vram, uint32_t at, uint32_t bytes);
+uint32_t nv50_vram_free_bytes(const struct nv50_vram *vram);
+int nv50_fifo_start(struct nv50_device *gpu);
+uint32_t nv50_fifo_fence(struct nv50_device *gpu);
+int nv50_fifo_wait(struct nv50_device *gpu, uint32_t sequence, uint64_t timeout_ns);
+void nv50_fifo_selftest(struct nv50_device *gpu);
+int nv50_copy(struct nv50_device *gpu, uint32_t dst, uint32_t src, uint32_t bytes);
 
 int nv50_bios_read(struct nv50_device *gpu, uint8_t *image, uint32_t capacity);
 uint16_t nv50_bit_entry(const struct nv50_device *gpu, uint8_t id, uint8_t *version,

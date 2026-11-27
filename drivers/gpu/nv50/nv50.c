@@ -336,6 +336,13 @@ static void nv50_late(void) {
             return;
         }
     }
+    // The driver's VRAM: what lies above the flip buffers, short of the
+    // last MiB, where the firmware keeps its own.
+    if (nv50_vram_init(&gpu.vram, VRAM_SURFACE + stride * (DRM_BUFFERS + 1U),
+                       gpu.vram_bytes - 0x100000U) != 0)
+        kprintf("NV50: no vram above the flip buffers\n");
+    else if (boot_command_line_flag("nv50fifo"))
+        nv50_fifo_selftest(&gpu);
     cursor_map = (volatile uint32_t *)vmm_map_device_write_combining(gpu.bar1 + VRAM_CURSOR,
                                                                      CURSOR_PIXELS * 4U);
     lut_map = (volatile uint16_t *)vmm_map_device_write_combining(gpu.bar1 + VRAM_LUT,
