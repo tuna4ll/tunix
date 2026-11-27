@@ -15,6 +15,8 @@
 #define VRAM_PUSH           0x00810000U
 #define VRAM_SYNC           0x00811000U
 #define VRAM_CHECK          0x00820000U
+#define VRAM_CURSOR         0x00830000U
+#define VRAM_LUT            0x00834000U
 #define VRAM_SURFACE        0x01000000U
 
 // DCB output types and the connectors scripts and probing care about.
@@ -149,6 +151,10 @@ void nv50_disp_vblank_stop(struct nv50_device *gpu);
 int nv50_disp_interrupt(struct nv50_device *gpu, uint32_t *supervisor);
 void nv50_disp_supervise(struct nv50_device *gpu, uint32_t pending);
 void nv50_disp_msi_rearm(struct nv50_device *gpu);
+int nv50_disp_cursor_start(struct nv50_device *gpu);
+int nv50_disp_cursor_show(struct nv50_device *gpu, uint32_t vram);
+int nv50_disp_cursor_move(struct nv50_device *gpu, int32_t x, int32_t y);
+int nv50_disp_gamma(struct nv50_device *gpu, uint32_t vram);
 
 int nv50_disp_backlight_present(const struct nv50_device *gpu);
 uint32_t nv50_disp_backlight_get(const struct nv50_device *gpu, uint32_t scale);

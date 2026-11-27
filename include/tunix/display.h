@@ -20,6 +20,12 @@ struct display_flipper {
     int (*vblank)(uint64_t *sequence, uint64_t *time_ns);
     // The 128-byte EDID of the monitor in front, or NULL when none was read.
     const uint8_t *(*edid)(void);
+    // A 64x64 A8R8G8B8 cursor IMAGE shown over the screen, NULL to hide it,
+    // and where its top left corner is; NULL when there is no cursor.
+    int (*cursor_set)(const uint32_t *image);
+    int (*cursor_move)(int32_t x, int32_t y);
+    // A 256-entry gamma ramp, NULLs for none; NULL when there is no LUT.
+    int (*gamma_set)(const uint16_t *red, const uint16_t *green, const uint16_t *blue);
 };
 
 int display_early_init(const struct boot_framebuffer_info *boot, struct boot_framebuffer_info *out);

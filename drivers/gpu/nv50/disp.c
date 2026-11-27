@@ -62,6 +62,15 @@
 #define HEAD_SET_VIEWPORT_SIZE_IN   0x08C8U
 #define HEAD_SET_VIEWPORT_SIZE_OUT  0x08D8U
 #define HEAD_SET_VIEWPORT_OUT_MIN   0x08DCU
+#define HEAD_SET_BASE_LUT_LO        0x0840U
+#define HEAD_SET_BASE_LUT_HI        0x0844U
+#define HEAD_SET_CONTEXT_DMA_LUT    0x085CU
+#define HEAD_SET_CONTROL_CURSOR     0x0880U
+#define HEAD_SET_OFFSET_CURSOR      0x0884U
+#define HEAD_SET_CONTEXT_DMA_CURSOR 0x089CU
+#define CURSOR_ON_64_A8R8G8B8       0x85000000U
+#define CURSOR_OFF_64_A8R8G8B8      0x05000000U
+#define LUT_ON_HIRES                0xC0000000U
 #define HEAD_ARMED_PIXEL_CLOCK      0x610AD4U
 #define HEAD_ARMED_SIZE_OUT         0x610B4CU
 #define NOTIFY_ENABLE               0x80000000U
@@ -389,12 +398,17 @@ int nv50_disp_modeset(struct nv50_device *gpu) {
     return 0;
 }
 
+// Room for BYTES of methods, going back to the start of the push buffer when
+// its end is near.
+static void push_room(struct nv50_device *gpu, uint32_t bytes) {
+    if (gpu->push_at + bytes + 4U <= PUSH_USABLE_BYTES) return;
+    vram_wr32(gpu, VRAM_PUSH + gpu->push_at, PUSH_JUMP_TO_START);
+    gpu->push_at = 0;
+}
+
 int nv50_disp_flip(struct nv50_device *gpu, uint32_t vram) {
     if (gpu->flip_pending) return -1;
-    if (gpu->push_at + FLIP_BATCH_BYTES + 4U > PUSH_USABLE_BYTES) {
-        vram_wr32(gpu, VRAM_PUSH + gpu->push_at, PUSH_JUMP_TO_START);
-        gpu->push_at = 0;
-    }
+    push_room(gpu, FLIP_BATCH_BYTES);
     vram_wr32(gpu, VRAM_SYNC, 0);
     push(gpu, HEAD_SET_OFFSET, vram >> 8);
     push(gpu, CORE_SET_NOTIFIER_CONTROL, NOTIFY_ENABLE);
@@ -407,6 +421,58 @@ int nv50_disp_flip(struct nv50_device *gpu, uint32_t vram) {
     gpu->front = vram;
     gpu->flip_pending = 1;
     return 0;
+}
+
+// The cursor, as nouveau's head827d_curs_set and curs507a draw it: a 64x64
+// A8R8G8B8 image the core channel points head 0 at, and a channel of its
+// own (PIO channel 7) that only moves it, needing no update of the core.
+#define CURSOR_CTRL  0x610270U
+#define CURSOR_USER  0x647000U
+#define CURSOR_FREE  0x0008U
+#define CURSOR_POINT 0x0084U
+#define CURSOR_GO    0x0080U
+
+int nv50_disp_cursor_start(struct nv50_device *gpu) {
+    nv50_wr32(gpu, CURSOR_CTRL, 0x00002000U);
+    if (nv50_wait_clear(gpu, CURSOR_CTRL, 0x00030000U) != 0) return -1;
+    nv50_wr32(gpu, CURSOR_CTRL, 0x00000001U);
+    uint64_t deadline = time_uptime_ns() + TIMEOUT_NS;
+    while ((nv50_rd32(gpu, CURSOR_CTRL) & 0x00030000U) != 0x00010000U) {
+        if (time_uptime_ns() > deadline) return -1;
+        cpu_relax();
+    }
+    return 0;
+}
+
+int nv50_disp_cursor_show(struct nv50_device *gpu, uint32_t vram) {
+    push_room(gpu, 32U);
+    push(gpu, HEAD_SET_CONTROL_CURSOR, vram ? CURSOR_ON_64_A8R8G8B8 : CURSOR_OFF_64_A8R8G8B8);
+    if (vram) push(gpu, HEAD_SET_OFFSET_CURSOR, vram >> 8);
+    push(gpu, HEAD_SET_CONTEXT_DMA_CURSOR, vram ? HANDLE_VRAM : 0);
+    push(gpu, CORE_UPDATE, 0);
+    return kick(gpu);
+}
+
+int nv50_disp_cursor_move(struct nv50_device *gpu, int32_t x, int32_t y) {
+    uint64_t deadline = time_uptime_ns() + 100000000ULL;
+    while ((nv50_rd32(gpu, CURSOR_USER + CURSOR_FREE) & 0x3FU) < 4U) {
+        if (time_uptime_ns() > deadline) return -1;
+        cpu_relax();
+    }
+    nv50_wr32(gpu, CURSOR_USER + CURSOR_POINT, ((uint32_t)y << 16) | ((uint32_t)x & 0xFFFFU));
+    nv50_wr32(gpu, CURSOR_USER + CURSOR_GO, 0);
+    return 0;
+}
+
+// The output LUT (gamma), as head827d_olut_set loads it: 257 entries of
+// 11-bit red, green and blue, in HIRES mode for 32-bit pixels.
+int nv50_disp_gamma(struct nv50_device *gpu, uint32_t vram) {
+    push_room(gpu, 32U);
+    push(gpu, HEAD_SET_BASE_LUT_LO, vram ? LUT_ON_HIRES : 0);
+    if (vram) push(gpu, HEAD_SET_BASE_LUT_HI, vram >> 8);
+    push(gpu, HEAD_SET_CONTEXT_DMA_LUT, vram ? HANDLE_VRAM : 0);
+    push(gpu, CORE_UPDATE, 0);
+    return kick(gpu);
 }
 
 int nv50_disp_flip_idle(struct nv50_device *gpu, int may_service) {

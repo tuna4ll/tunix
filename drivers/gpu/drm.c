@@ -60,6 +60,8 @@ static void drm_guard_release(int *unused) {
 #define DRM_NR_MODE_CLOSEFB           0xd0
 #define DRM_NR_MODE_PAGE_FLIP         0xb0
 #define DRM_NR_MODE_CURSOR            0xa3
+#define DRM_NR_MODE_GETGAMMA          0xa4
+#define DRM_NR_MODE_SETGAMMA          0xa5
 #define DRM_NR_MODE_CURSOR2           0xbb
 #define DRM_NR_MODE_ATOMIC            0xbc
 #define DRM_NR_MODE_CREATEPROPBLOB    0xbd
@@ -247,6 +249,7 @@ typedef char drm_virtgpu_get_caps_size_check[(sizeof(struct drm_virtgpu_get_caps
 #define DRM_CONNECTOR_ID 2
 #define DRM_ENCODER_ID   3
 #define DRM_PLANE_ID     4
+#define DRM_CURSOR_ID    5
 
 #define DRM_PROP_TYPE_ID               10
 #define DRM_PROP_CRTC_ACTIVE           11
@@ -289,6 +292,7 @@ typedef char drm_virtgpu_get_caps_size_check[(sizeof(struct drm_virtgpu_get_caps
 #define DRM_PROP_NAME_LEN 32
 
 #define DRM_FORMAT_XRGB8888 0x34325258
+#define DRM_FORMAT_ARGB8888 0x34325241
 
 #define DRM_MODE_CONNECTED         1
 #define DRM_MODE_SUBPIXEL_UNKNOWN  1
@@ -820,6 +824,64 @@ static int64_t ioctl_getfb(const struct file *client, uint64_t user_argument) {
 
 static int32_t cursor_x;
 static int32_t cursor_y;
+static uint32_t cursor_fb;
+
+// The cursor, a 64x64 ARGB8888 image over the screen: virtio-gpu's, or the
+// display driver's when it has one.
+static const struct display_flipper *cursor_flipper(void) {
+    const struct display_flipper *flipper = display_flipper();
+    return flipper && flipper->cursor_set && flipper->cursor_move ? flipper : NULL;
+}
+
+static int cursor_available(void) { return virtgpu_cursor_available() || cursor_flipper(); }
+
+// Shows BUFFER (NULL hides the cursor) with its top left at X, Y.
+static int cursor_show(struct drm_dumb_buffer *buffer, int32_t x, int32_t y, uint32_t hot_x,
+                       uint32_t hot_y) {
+    cursor_x = x;
+    cursor_y = y;
+    if (buffer && (buffer->pitch / 4U < DRM_CURSOR_SIZE || buffer->height < DRM_CURSOR_SIZE))
+        return -EINVAL;
+    if (virtgpu_cursor_available()) {
+        if (!buffer) return virtgpu_cursor_set(0, 0, 0, x, y, 0, 0) == 0 ? 0 : -EIO;
+        if (!buffer->virtio_resource) {
+            buffer->virtio_resource = virtgpu_resource_create(buffer->pitch / 4U, buffer->height,
+                                                              buffer->pages, buffer->page_count);
+            if (!buffer->virtio_resource) return -ENOMEM;
+        }
+        return virtgpu_cursor_set(buffer->virtio_resource, buffer->pitch / 4U, !buffer->rendered,
+                                  x, y, hot_x, hot_y) == 0
+            ? 0
+            : -EIO;
+    }
+    const struct display_flipper *flipper = cursor_flipper();
+    if (!flipper) return -ENXIO;
+    if (!buffer) return flipper->cursor_set(NULL) == 0 ? 0 : -EIO;
+    if (!buffer->pages) return -EINVAL;
+    static uint32_t image[DRM_CURSOR_SIZE * DRM_CURSOR_SIZE];
+    for (uint32_t row = 0; row < DRM_CURSOR_SIZE; row++) {
+        uint64_t offset = (uint64_t)row * buffer->pitch;
+        for (uint32_t done = 0; done < DRM_CURSOR_SIZE * 4U;) {
+            uint64_t page = (offset + done) / 4096ULL, within = (offset + done) % 4096ULL;
+            if (page >= buffer->page_count) return -EINVAL;
+            uint32_t chunk = (uint32_t)(4096ULL - within);
+            if (chunk > DRM_CURSOR_SIZE * 4U - done) chunk = DRM_CURSOR_SIZE * 4U - done;
+            memcpy((uint8_t *)&image[row * DRM_CURSOR_SIZE] + done,
+                   (uint8_t *)vmm_phys_to_virt(buffer->pages[page]) + within, chunk);
+            done += chunk;
+        }
+    }
+    if (flipper->cursor_set(image) != 0) return -EIO;
+    return flipper->cursor_move(x, y) == 0 ? 0 : -EIO;
+}
+
+static int cursor_move_to(int32_t x, int32_t y) {
+    cursor_x = x;
+    cursor_y = y;
+    if (virtgpu_cursor_available()) return virtgpu_cursor_move(x, y) == 0 ? 0 : -EIO;
+    const struct display_flipper *flipper = cursor_flipper();
+    return flipper && flipper->cursor_move(x, y) == 0 ? 0 : -EIO;
+}
 
 static int64_t ioctl_cursor(const struct file *client, uint64_t user_argument, int cursor2) {
     struct {
@@ -832,34 +894,67 @@ static int64_t ioctl_cursor(const struct file *client, uint64_t user_argument, i
         0)
         return -EFAULT;
     if (request.base.crtc_id != DRM_CRTC_ID) return -ENOENT;
-    if (!virtgpu_cursor_available()) return -ENXIO;
-    if (request.base.flags & DRM_MODE_CURSOR_MOVE) {
-        cursor_x = request.base.x;
-        cursor_y = request.base.y;
-    }
+    if (!cursor_available()) return -ENXIO;
+    int32_t x = request.base.flags & DRM_MODE_CURSOR_MOVE ? request.base.x : cursor_x;
+    int32_t y = request.base.flags & DRM_MODE_CURSOR_MOVE ? request.base.y : cursor_y;
     if (request.base.flags & DRM_MODE_CURSOR_BO) {
-        if (!request.base.handle)
-            return virtgpu_cursor_set(0, 0, 0, cursor_x, cursor_y, 0, 0) == 0 ? 0 : -EIO;
+        cursor_fb = 0;
+        if (!request.base.handle) return cursor_show(NULL, x, y, 0, 0);
         struct drm_dumb_buffer *buffer = buffer_of(client, request.base.handle);
         if (!buffer) return -ENOENT;
-        if (request.base.width != DRM_CURSOR_SIZE || request.base.height != DRM_CURSOR_SIZE ||
-            buffer->pitch / 4U < DRM_CURSOR_SIZE || buffer->height < DRM_CURSOR_SIZE)
+        if (request.base.width != DRM_CURSOR_SIZE || request.base.height != DRM_CURSOR_SIZE)
             return -EINVAL;
-        if (!buffer->virtio_resource) {
-            buffer->virtio_resource = virtgpu_resource_create(buffer->pitch / 4U, buffer->height,
-                                                              buffer->pages, buffer->page_count);
-            if (!buffer->virtio_resource) return -ENOMEM;
-        }
-        uint32_t hot_x = request.hot_x > 0 ? (uint32_t)request.hot_x : 0;
-        uint32_t hot_y = request.hot_y > 0 ? (uint32_t)request.hot_y : 0;
-        return virtgpu_cursor_set(buffer->virtio_resource, buffer->pitch / 4U, !buffer->rendered,
-                                  cursor_x, cursor_y, hot_x, hot_y) == 0
-            ? 0
-            : -EIO;
+        return cursor_show(buffer, x, y, request.hot_x > 0 ? (uint32_t)request.hot_x : 0,
+                           request.hot_y > 0 ? (uint32_t)request.hot_y : 0);
     }
-    if (request.base.flags & DRM_MODE_CURSOR_MOVE)
-        return virtgpu_cursor_move(cursor_x, cursor_y) == 0 ? 0 : -EIO;
+    if (request.base.flags & DRM_MODE_CURSOR_MOVE) return cursor_move_to(x, y);
     return 0;
+}
+
+// The gamma ramp, 256 entries a channel, when the display driver has a LUT.
+#define DRM_GAMMA_SIZE 256U
+
+struct drm_mode_crtc_lut {
+    uint32_t crtc_id;
+    uint32_t gamma_size;
+    uint64_t red;
+    uint64_t green;
+    uint64_t blue;
+};
+
+static uint16_t gamma_ramp[3][DRM_GAMMA_SIZE];
+static int gamma_loaded;
+
+static const struct display_flipper *gamma_flipper(void) {
+    const struct display_flipper *flipper = display_flipper();
+    return flipper && flipper->gamma_set ? flipper : NULL;
+}
+
+static void gamma_identity(void) {
+    for (unsigned channel = 0; channel < 3U; channel++)
+        for (unsigned index = 0; index < DRM_GAMMA_SIZE; index++)
+            gamma_ramp[channel][index] = (uint16_t)(index * 0x101U);
+}
+
+static int64_t ioctl_gamma(uint64_t user_argument, int set) {
+    struct drm_mode_crtc_lut request;
+    if (copy_from_user(&request, user_argument, sizeof(request)) != 0) return -EFAULT;
+    if (request.crtc_id != DRM_CRTC_ID) return -ENOENT;
+    const struct display_flipper *flipper = gamma_flipper();
+    if (!flipper) return -ENOSYS;
+    if (request.gamma_size != DRM_GAMMA_SIZE) return -EINVAL;
+    if (!gamma_loaded) gamma_identity();
+    uint64_t pointers[3] = {request.red, request.green, request.blue};
+    for (unsigned channel = 0; channel < 3U; channel++) {
+        int status = set ? copy_from_user(gamma_ramp[channel], pointers[channel],
+                                          sizeof(gamma_ramp[channel]))
+                         : copy_to_user(pointers[channel], gamma_ramp[channel],
+                                        sizeof(gamma_ramp[channel]));
+        if (status != 0) return -EFAULT;
+    }
+    if (!set) return 0;
+    gamma_loaded = 1;
+    return flipper->gamma_set(gamma_ramp[0], gamma_ramp[1], gamma_ramp[2]) == 0 ? 0 : -EIO;
 }
 
 #define DRM_MODE_PAGE_FLIP_EVENT      0x01U
@@ -948,6 +1043,12 @@ static int64_t ioctl_atomic(const struct file *client, uint64_t user_argument) {
         return -EFAULT;
 
     uint32_t new_fb = active_fb_id;
+    int primary_touched = 0;
+    struct {
+        int touched;
+        uint32_t fb, crtc;
+        int32_t x, y;
+    } cursor = {0, cursor_fb, cursor_fb ? DRM_CRTC_ID : 0, cursor_x, cursor_y};
     const struct drm_property_blob *damage_blob = NULL;
     int new_active = active_fb_id != 0;
     int mode_cleared = 0;
@@ -956,6 +1057,36 @@ static int64_t ioctl_atomic(const struct file *client, uint64_t user_argument) {
         for (uint32_t index = 0; index < counts[object]; index++, taken++) {
             uint32_t id = props[taken];
             uint64_t value = values[taken];
+            if (objects[object] == DRM_PLANE_ID) primary_touched = 1;
+            if (objects[object] == DRM_CURSOR_ID) {
+                if (!cursor_available()) return -EINVAL;
+                cursor.touched = 1;
+                if (id == DRM_PROP_PLANE_FB_ID) {
+                    const struct drm_framebuffer *fb =
+                        value > UINT32_MAX ? NULL : framebuffer_of(client, (uint32_t)value);
+                    if (value && (!fb || fb->width != DRM_CURSOR_SIZE ||
+                                  fb->height != DRM_CURSOR_SIZE))
+                        return -EINVAL;
+                    cursor.fb = (uint32_t)value;
+                } else if (id == DRM_PROP_PLANE_CRTC_ID) {
+                    if (value != 0 && value != DRM_CRTC_ID) return -EINVAL;
+                    cursor.crtc = (uint32_t)value;
+                } else if (id == DRM_PROP_PLANE_CRTC_X || id == DRM_PROP_PLANE_CRTC_Y) {
+                    int64_t at = (int64_t)value;
+                    if (at < INT16_MIN || at > INT16_MAX) return -EINVAL;
+                    if (id == DRM_PROP_PLANE_CRTC_X) cursor.x = (int32_t)at;
+                    else cursor.y = (int32_t)at;
+                } else if (id == DRM_PROP_PLANE_CRTC_W || id == DRM_PROP_PLANE_CRTC_H) {
+                    if (value != DRM_CURSOR_SIZE) return -EINVAL;
+                } else if (id == DRM_PROP_PLANE_SRC_X || id == DRM_PROP_PLANE_SRC_Y) {
+                    if (value != 0) return -EINVAL;
+                } else if (id == DRM_PROP_PLANE_SRC_W || id == DRM_PROP_PLANE_SRC_H) {
+                    if (value != (uint64_t)DRM_CURSOR_SIZE << 16) return -EINVAL;
+                } else if (id != DRM_PROP_PLANE_FB_DAMAGE_CLIPS) {
+                    return -EINVAL;
+                }
+                continue;
+            }
             if (objects[object] == DRM_CRTC_ID && id == DRM_PROP_CRTC_ACTIVE) {
                 if (value > 1) return -EINVAL;
                 new_active = (int)value;
@@ -997,6 +1128,22 @@ static int64_t ioctl_atomic(const struct file *client, uint64_t user_argument) {
     }
     if (mode_cleared) new_active = 0;
     if (request.flags & DRM_MODE_ATOMIC_TEST_ONLY) return 0;
+
+    if (cursor.touched) {
+        const struct drm_framebuffer *fb = cursor.fb ? framebuffer_of(client, cursor.fb) : NULL;
+        struct drm_dumb_buffer *buffer = fb ? buffer_of(client, fb->handle) : NULL;
+        int status;
+        if (!buffer || !cursor.crtc) status = cursor_show(NULL, cursor.x, cursor.y, 0, 0);
+        else if (cursor.fb == cursor_fb) status = cursor_move_to(cursor.x, cursor.y);
+        else status = cursor_show(buffer, cursor.x, cursor.y, 0, 0);
+        if (status != 0) return status;
+        cursor_fb = buffer && cursor.crtc ? cursor.fb : 0;
+    }
+    // A commit of the cursor alone leaves the screen as it is.
+    if (!primary_touched && new_active == (active_fb_id != 0) && new_fb == active_fb_id) {
+        if (request.flags & DRM_MODE_PAGE_FLIP_EVENT) queue_flip_event(client, request.user_data);
+        return 0;
+    }
 
     if (!new_active || !new_fb) {
         active_fb_id = 0;
@@ -1212,7 +1359,8 @@ static uint32_t object_type_of(uint32_t type, uint32_t id) {
     case DRM_CRTC_ID:      return DRM_MODE_OBJECT_CRTC;
     case DRM_CONNECTOR_ID: return DRM_MODE_OBJECT_CONNECTOR;
     case DRM_ENCODER_ID:   return DRM_MODE_OBJECT_ENCODER;
-    case DRM_PLANE_ID:     return DRM_MODE_OBJECT_PLANE;
+    case DRM_PLANE_ID:
+    case DRM_CURSOR_ID:    return DRM_MODE_OBJECT_PLANE;
     default:               return DRM_MODE_OBJECT_ANY;
     }
 }
@@ -1341,7 +1489,7 @@ static int64_t ioctl_get_crtc(uint64_t user_argument) {
     crtc.fb_id = active_fb_id;
     crtc.x = 0;
     crtc.y = 0;
-    crtc.gamma_size = 0;
+    crtc.gamma_size = gamma_flipper() ? DRM_GAMMA_SIZE : 0;
     crtc.mode_valid = active_fb_id ? 1 : 0;
     fill_mode(&crtc.mode);
     crtc.count_connectors = 0;
@@ -1475,25 +1623,28 @@ static int64_t ioctl_get_plane_resources(uint64_t user_argument) {
     struct drm_mode_get_plane_res res;
     if (copy_from_user(&res, user_argument, sizeof(res)) != 0) return -EFAULT;
 
-    uint32_t plane = DRM_PLANE_ID;
-    if (copy_array_out(res.plane_id_ptr, res.count_planes, &plane, sizeof(plane), 1) != 0)
+    uint32_t planes[2] = {DRM_PLANE_ID, DRM_CURSOR_ID};
+    uint32_t count = cursor_available() ? 2U : 1U;
+    if (copy_array_out(res.plane_id_ptr, res.count_planes, planes, sizeof(planes[0]), count) != 0)
         return -EFAULT;
-    res.count_planes = 1;
+    res.count_planes = count;
     return copy_to_user(user_argument, &res, sizeof(res)) == 0 ? 0 : -EFAULT;
 }
 
 static int64_t ioctl_get_plane(uint64_t user_argument) {
     struct drm_mode_get_plane plane;
     if (copy_from_user(&plane, user_argument, sizeof(plane)) != 0) return -EFAULT;
-    if (plane.plane_id != DRM_PLANE_ID) return -ENOENT;
+    int is_cursor = plane.plane_id == DRM_CURSOR_ID && cursor_available();
+    if (plane.plane_id != DRM_PLANE_ID && !is_cursor) return -ENOENT;
 
-    uint32_t format = DRM_FORMAT_XRGB8888;
+    uint32_t format = is_cursor ? DRM_FORMAT_ARGB8888 : DRM_FORMAT_XRGB8888;
     if (copy_array_out(plane.format_type_ptr, plane.count_format_types, &format, sizeof(format),
                        1) != 0)
         return -EFAULT;
 
-    plane.crtc_id = active_fb_id ? DRM_CRTC_ID : 0;
-    plane.fb_id = active_fb_id;
+    uint32_t fb_id = is_cursor ? cursor_fb : active_fb_id;
+    plane.crtc_id = fb_id ? DRM_CRTC_ID : 0;
+    plane.fb_id = fb_id;
     plane.possible_crtcs = 1U;
     plane.gamma_size = 0;
     plane.count_format_types = 1;
@@ -1612,7 +1763,23 @@ static int64_t ioctl_obj_get_properties(uint64_t user_argument) {
     uint32_t count = 0;
     uint32_t ids[16];
     uint64_t values[16];
-    if (type == DRM_MODE_OBJECT_PLANE) {
+    if (type == DRM_MODE_OBJECT_PLANE && request.obj_id == DRM_CURSOR_ID && cursor_available()) {
+        static const uint32_t cursor_ids[] = {
+            DRM_PROP_TYPE_ID,     DRM_PROP_PLANE_CRTC_ID, DRM_PROP_PLANE_FB_ID,
+            DRM_PROP_PLANE_SRC_X, DRM_PROP_PLANE_SRC_Y,   DRM_PROP_PLANE_SRC_W,
+            DRM_PROP_PLANE_SRC_H, DRM_PROP_PLANE_CRTC_X,  DRM_PROP_PLANE_CRTC_Y,
+            DRM_PROP_PLANE_CRTC_W, DRM_PROP_PLANE_CRTC_H,
+        };
+        uint64_t cursor_values[] = {
+            DRM_PLANE_TYPE_CURSOR, cursor_fb ? DRM_CRTC_ID : 0, cursor_fb, 0, 0,
+            (uint64_t)DRM_CURSOR_SIZE << 16, (uint64_t)DRM_CURSOR_SIZE << 16,
+            (uint64_t)(int64_t)cursor_x, (uint64_t)(int64_t)cursor_y, DRM_CURSOR_SIZE,
+            DRM_CURSOR_SIZE,
+        };
+        count = sizeof(cursor_ids) / sizeof(cursor_ids[0]);
+        memcpy(ids, cursor_ids, sizeof(cursor_ids));
+        memcpy(values, cursor_values, sizeof(cursor_values));
+    } else if (type == DRM_MODE_OBJECT_PLANE) {
         if (request.obj_id != DRM_PLANE_ID) return -ENOENT;
         ids[0] = DRM_PROP_TYPE_ID;
         values[0] = DRM_PLANE_TYPE_PRIMARY;
@@ -2618,7 +2785,10 @@ static int64_t ioctl_drop_master(const struct file *file) {
     if (master_file != file) return -EINVAL;
     master_file = NULL;
     note_dropped_master(file);
-    if (virtgpu_cursor_available()) (void)virtgpu_cursor_set(0, 0, 0, 0, 0, 0, 0);
+    if (cursor_available()) (void)cursor_show(NULL, 0, 0, 0, 0);
+    cursor_fb = 0;
+    if (gamma_loaded && gamma_flipper()) (void)gamma_flipper()->gamma_set(NULL, NULL, NULL);
+    gamma_loaded = 0;
     active_fb_id = 0;
     virtgpu_scanout_disable();
     scanout_current = 0;
@@ -2643,6 +2813,7 @@ static int modesetting_request(unsigned nr) {
     case DRM_NR_MODE_SETCRTC:
     case DRM_NR_MODE_CURSOR:
     case DRM_NR_MODE_CURSOR2:
+    case DRM_NR_MODE_SETGAMMA:
     case DRM_NR_MODE_ATOMIC:
     case DRM_NR_MODE_PAGE_FLIP:
     case DRM_NR_MODE_DIRTYFB:
@@ -2684,6 +2855,8 @@ static int64_t drm_dispatch_ioctl(struct file *file, unsigned long request,
     case DRM_NR_MODE_GETFB:             return ioctl_getfb(file, user_argument);
     case DRM_NR_MODE_CURSOR:            return ioctl_cursor(file, user_argument, 0);
     case DRM_NR_MODE_CURSOR2:           return ioctl_cursor(file, user_argument, 1);
+    case DRM_NR_MODE_GETGAMMA:          return ioctl_gamma(user_argument, 0);
+    case DRM_NR_MODE_SETGAMMA:          return ioctl_gamma(user_argument, 1);
     case DRM_NR_MODE_ATOMIC:            return ioctl_atomic(file, user_argument);
     case DRM_NR_MODE_CREATEPROPBLOB:    return ioctl_create_blob(file, user_argument);
     case DRM_NR_MODE_DESTROYPROPBLOB:   return ioctl_destroy_blob(file, user_argument);

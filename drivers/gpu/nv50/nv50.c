@@ -135,6 +135,56 @@ static int console_in_front(void) { return gpu.front == VRAM_SURFACE; }
 
 static int idle(int may_service) { return nv50_disp_flip_idle(&gpu, may_service); }
 
+// The cursor image and the gamma ramp, written through BAR1 into VRAM the
+// display reads them from.
+#define CURSOR_PIXELS (64U * 64U)
+#define LUT_ENTRIES   257U
+static volatile uint32_t *cursor_map;
+static volatile uint16_t *lut_map;
+static int cursor_channel = -1;
+static int cursor_on;
+
+static int cursor_set(const uint32_t *image) {
+    if (!cursor_map) return -1;
+    if (cursor_channel < 0) {
+        cursor_channel = nv50_disp_cursor_start(&gpu) == 0;
+        if (!cursor_channel) kprintf("NV50: the cursor channel did not start\n");
+    }
+    if (!cursor_channel) return -1;
+    if (!image) {
+        if (!cursor_on) return 0;
+        cursor_on = 0;
+        return nv50_disp_cursor_show(&gpu, 0);
+    }
+    for (uint32_t index = 0; index < CURSOR_PIXELS; index++) cursor_map[index] = image[index];
+    (void)cursor_map[CURSOR_PIXELS - 1U];
+    if (cursor_on) return 0;
+    cursor_on = 1;
+    return nv50_disp_cursor_show(&gpu, VRAM_CURSOR);
+}
+
+static int cursor_move(int32_t x, int32_t y) {
+    return cursor_channel > 0 ? nv50_disp_cursor_move(&gpu, x, y) : -1;
+}
+
+// 16-bit DRM gamma to the LUT's 11 bits, rounded, in its top bits.
+static uint16_t lut_value(uint16_t value) {
+    return (uint16_t)((((uint32_t)value * 0x7FFU + 0x7FFFU) / 0xFFFFU) << 3);
+}
+
+static int gamma_set(const uint16_t *red, const uint16_t *green, const uint16_t *blue) {
+    if (!lut_map) return -1;
+    if (!red) return nv50_disp_gamma(&gpu, 0);
+    for (uint32_t index = 0; index < LUT_ENTRIES; index++) {
+        uint32_t from = index < 256U ? index : 255U;
+        lut_map[index * 4U + 0U] = lut_value(red[from]);
+        lut_map[index * 4U + 1U] = lut_value(green[from]);
+        lut_map[index * 4U + 2U] = lut_value(blue[from]);
+    }
+    (void)lut_map[0];
+    return nv50_disp_gamma(&gpu, VRAM_LUT);
+}
+
 
 // Tunix takes interrupts only while a processor is in user mode or idle, so a
 // vblank's may land long after it: vblank is the hardware's while the last one
@@ -163,6 +213,9 @@ static const struct display_flipper flipper = {
     .idle = idle,
     .vblank = vblank,
     .edid = edid,
+    .cursor_set = cursor_set,
+    .cursor_move = cursor_move,
+    .gamma_set = gamma_set,
 };
 
 static int pci_probe(const struct pci_device *device) {
@@ -283,6 +336,10 @@ static void nv50_late(void) {
             return;
         }
     }
+    cursor_map = (volatile uint32_t *)vmm_map_device_write_combining(gpu.bar1 + VRAM_CURSOR,
+                                                                     CURSOR_PIXELS * 4U);
+    lut_map = (volatile uint16_t *)vmm_map_device_write_combining(gpu.bar1 + VRAM_LUT,
+                                                                  LUT_ENTRIES * 8U);
     start_vblank_interrupt();
     start_backlight();
     nv50_probe_outputs(&gpu);
