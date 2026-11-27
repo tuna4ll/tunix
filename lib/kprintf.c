@@ -8,7 +8,8 @@
 #include <tunix/smp.h>
 #include <tunix/kstring.h>
 
-#define KLOG_CAPACITY 16384U
+// A whole boot: what the first drivers printed is what a real machine needs read.
+#define KLOG_CAPACITY 262144U
 
 void serial_write_char(char c);
 
