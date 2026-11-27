@@ -1209,6 +1209,8 @@ static void buffer_release(struct drm_dumb_buffer *buffer) {
         buffer->refs--;
         return;
     }
+    const struct display_flipper *flipper = display_flipper();
+    if (flipper && flipper->forget_pages && buffer->pages) flipper->forget_pages(buffer->pages);
     if (buffer->host_blob && buffer->host_physical) virtgpu_unmap_blob(buffer->virtio_resource);
     uint64_t sequence =
         buffer->virtio_resource ? virtgpu_resource_release(buffer->virtio_resource) : 0;
@@ -1906,12 +1908,17 @@ static int present_via_flipper(const struct display_flipper *flipper,
         if (time_uptime_ns() > deadline) return -EBUSY;
         cpu_relax();
     }
-    uint8_t *back = flipper->back_buffer();
-    if (!back) return -EPERM;
     uint32_t screen_height = framebuffer_height();
     uint32_t screen_pitch = framebuffer_pitch();
     uint32_t rows = fb->height < screen_height ? fb->height : screen_height;
     uint32_t row_bytes = fb->pitch < screen_pitch ? fb->pitch : screen_pitch;
+    if (flipper->present_pages && buffer->pages &&
+        flipper->present_pages(buffer->pages, buffer->page_count, fb->pitch, row_bytes, rows) == 0) {
+        scanout_current = 1;
+        return 0;
+    }
+    uint8_t *back = flipper->back_buffer();
+    if (!back) return -EPERM;
     for (uint32_t row = 0; row < rows; row++) {
         copy_row_span(fb, buffer, back + (uint64_t)row * screen_pitch, row, 0, row_bytes);
         smp_service_flush();

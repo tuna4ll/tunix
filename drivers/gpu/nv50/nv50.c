@@ -4,8 +4,10 @@
 #include <tunix/backlight.h>
 #include <tunix/boot.h>
 #include <tunix/boot_framebuffer.h>
+#include <tunix/cpu.h>
 #include <tunix/display.h>
 #include <tunix/irq.h>
+#include <tunix/lock.h>
 #include <tunix/nv50.h>
 #include <tunix/pci.h>
 #include <tunix/process.h>
@@ -119,21 +121,115 @@ static int nv50_setup(const struct boot_framebuffer_info *boot, struct boot_fram
 
 static uint8_t *back_buffer(void) { return buffer_map[back_index]; }
 
+// Whatever pushes to the core channel -- flips, the cursor's image, gamma --
+// goes one at a time: DRM's ioctls, its polls and the vblank work all may.
+static struct lock display_lock = LOCK_INITIALIZER("nv50 display", LOCK_RANK_DEVICE);
+
+// A present the copy engine is still copying into the back buffer: once its
+// fence signals, the next look at idle() flips to it.
+static uint32_t copy_fence;
+static uint32_t copy_target;
+
+static void finish_copy_locked(void) {
+    if (!copy_fence || !nv50_fifo_done(&gpu, copy_fence)) return;
+    copy_fence = 0;
+    (void)nv50_disp_flip(&gpu, copy_target);
+}
+
 static int flip_to_back(void) {
-    if (nv50_disp_flip(&gpu, buffer_vram[back_index]) != 0) return -1;
-    back_index = (back_index + 1U) % DRM_BUFFERS;
-    return 0;
+    lock_acquire(&display_lock);
+    int status = nv50_disp_flip(&gpu, buffer_vram[back_index]);
+    if (!status) back_index = (back_index + 1U) % DRM_BUFFERS;
+    lock_release(&display_lock);
+    return status ? -1 : 0;
 }
 
 static int flip_to_console(void) {
-    if (gpu.front == VRAM_SURFACE) return 0;
-    if (!nv50_disp_flip_idle(&gpu, 1)) return -1;
-    return nv50_disp_flip(&gpu, VRAM_SURFACE);
+    lock_acquire(&display_lock);
+    int status = 0;
+    if (gpu.front != VRAM_SURFACE) {
+        finish_copy_locked();
+        status = copy_fence || !nv50_disp_flip_idle(&gpu, 1) ? -1 : nv50_disp_flip(&gpu, VRAM_SURFACE);
+    }
+    lock_release(&display_lock);
+    return status ? -1 : 0;
 }
 
 static int console_in_front(void) { return gpu.front == VRAM_SURFACE; }
 
-static int idle(int may_service) { return nv50_disp_flip_idle(&gpu, may_service); }
+static int idle(int may_service) {
+    lock_acquire(&display_lock);
+    finish_copy_locked();
+    int done = !copy_fence && nv50_disp_flip_idle(&gpu, may_service);
+    lock_release(&display_lock);
+    return done;
+}
+
+// The pages of DRM's buffers the copy engine has been given, kept until
+// DRM lets a buffer go.
+#define MAPPINGS 8U
+static struct {
+    const uint64_t *pages;
+    uint64_t count;
+    uint64_t address;
+} mappings[MAPPINGS];
+static unsigned next_mapping;
+static int accelerated;
+
+static uint64_t mapping_for(const uint64_t *pages, uint64_t count) {
+    for (unsigned index = 0; index < MAPPINGS; index++)
+        if (mappings[index].pages == pages && mappings[index].count == count)
+            return mappings[index].address;
+    // No copy is in flight here (present waits for idle), so any can go.
+    unsigned slot = next_mapping++ % MAPPINGS;
+    if (mappings[slot].pages)
+        nv50_gart_unmap(&gpu, mappings[slot].address, (uint32_t)mappings[slot].count);
+    mappings[slot].pages = NULL;
+    uint64_t address = nv50_gart_map(&gpu, pages, (uint32_t)count);
+    if (!address) return 0;
+    mappings[slot].pages = pages;
+    mappings[slot].count = count;
+    mappings[slot].address = address;
+    return address;
+}
+
+// The copy engine copies ROWS of ROW_BYTES from the pages into the back
+// buffer, and idle() flips once it is done; -1 leaves the copy to DRM.
+static int present_pages(const uint64_t *pages, uint64_t page_count, uint32_t pitch,
+                         uint32_t row_bytes, uint32_t rows) {
+    if (!accelerated || !pages || !page_count || !rows || page_count > 0x20000U) return -1;
+    if ((uint64_t)pitch * (rows - 1U) + row_bytes > page_count * 4096ULL) return -1;
+    lock_acquire(&display_lock);
+    int status = -1;
+    uint64_t source = copy_fence ? 0 : mapping_for(pages, page_count);
+    if (source) {
+        uint32_t target = buffer_vram[back_index];
+        uint32_t fence = nv50_copy_rect(&gpu, target, gpu.pitch, source, pitch, row_bytes, rows);
+        if (fence) {
+            copy_fence = fence;
+            copy_target = target;
+            back_index = (back_index + 1U) % DRM_BUFFERS;
+            status = 0;
+        }
+    }
+    lock_release(&display_lock);
+    return status;
+}
+
+static void forget_pages(const uint64_t *pages) {
+    lock_acquire(&display_lock);
+    for (unsigned index = 0; index < MAPPINGS; index++) {
+        if (mappings[index].pages != pages) continue;
+        // The engine may still be reading them for the last present.
+        uint64_t deadline = time_uptime_ns() + 100000000ULL;
+        while (copy_fence && !nv50_fifo_done(&gpu, copy_fence) && time_uptime_ns() < deadline)
+            cpu_relax();
+        finish_copy_locked();
+        nv50_gart_unmap(&gpu, mappings[index].address, (uint32_t)mappings[index].count);
+        mappings[index].pages = NULL;
+    }
+    lock_release(&display_lock);
+}
 
 // The cursor image and the gamma ramp, written through BAR1 into VRAM the
 // display reads them from.
@@ -144,12 +240,9 @@ static volatile uint16_t *lut_map;
 static int cursor_channel = -1;
 static int cursor_on;
 
-static int cursor_set(const uint32_t *image) {
+static int cursor_set_locked(const uint32_t *image) {
     if (!cursor_map) return -1;
-    if (cursor_channel < 0) {
-        cursor_channel = nv50_disp_cursor_start(&gpu) == 0;
-        if (!cursor_channel) kprintf("NV50: the cursor channel did not start\n");
-    }
+    if (cursor_channel < 0) cursor_channel = nv50_disp_cursor_start(&gpu) == 0;
     if (!cursor_channel) return -1;
     if (!image) {
         if (!cursor_on) return 0;
@@ -163,6 +256,15 @@ static int cursor_set(const uint32_t *image) {
     return nv50_disp_cursor_show(&gpu, VRAM_CURSOR);
 }
 
+static int cursor_set(const uint32_t *image) {
+    lock_acquire(&display_lock);
+    int first = cursor_channel < 0;
+    int status = cursor_set_locked(image);
+    lock_release(&display_lock);
+    if (first && !cursor_channel) kprintf("NV50: the cursor channel did not start\n");
+    return status;
+}
+
 static int cursor_move(int32_t x, int32_t y) {
     return cursor_channel > 0 ? nv50_disp_cursor_move(&gpu, x, y) : -1;
 }
@@ -172,7 +274,7 @@ static uint16_t lut_value(uint16_t value) {
     return (uint16_t)((((uint32_t)value * 0x7FFU + 0x7FFFU) / 0xFFFFU) << 3);
 }
 
-static int gamma_set(const uint16_t *red, const uint16_t *green, const uint16_t *blue) {
+static int gamma_set_locked(const uint16_t *red, const uint16_t *green, const uint16_t *blue) {
     if (!lut_map) return -1;
     if (!red) return nv50_disp_gamma(&gpu, 0);
     for (uint32_t index = 0; index < LUT_ENTRIES; index++) {
@@ -200,6 +302,13 @@ static int vblank(uint64_t *sequence, uint64_t *time_ns) {
     return 0;
 }
 
+static int gamma_set(const uint16_t *red, const uint16_t *green, const uint16_t *blue) {
+    lock_acquire(&display_lock);
+    int status = gamma_set_locked(red, green, blue);
+    lock_release(&display_lock);
+    return status;
+}
+
 static const uint8_t *edid(void) {
     if (gpu.lvds_output < 0 || !gpu.outputs[gpu.lvds_output].edid_ok) return NULL;
     return gpu.outputs[gpu.lvds_output].edid;
@@ -216,6 +325,8 @@ static const struct display_flipper flipper = {
     .cursor_set = cursor_set,
     .cursor_move = cursor_move,
     .gamma_set = gamma_set,
+    .present_pages = present_pages,
+    .forget_pages = forget_pages,
 };
 
 static int pci_probe(const struct pci_device *device) {
@@ -279,7 +390,7 @@ static void interrupt(void *context) {
     if (!(status & NV50_INTR_VBLANK)) return;
     __atomic_store_n(&vblank_ns, time_uptime_ns(), __ATOMIC_RELEASE);
     __atomic_add_fetch(&vblank_count, 1, __ATOMIC_ACQ_REL);
-    if (gpu.flip_pending) work_queue(&vblank_work);
+    if (gpu.flip_pending || copy_fence) work_queue(&vblank_work);
 }
 
 static void start_vblank_interrupt(void) {
@@ -323,6 +434,20 @@ static void start_backlight(void) {
     kprintf("NV50: backlight at %u of %u\n", backlight_get(), BACKLIGHT_SCALE);
 }
 
+// The GT215 family's copy engine takes DRM's present copies; nv50fifo first
+// runs the channel's and the engine's selftest.
+static void start_acceleration(void) {
+    uint32_t chipset = (nv50_rd32(&gpu, 0) >> 20) & 0x1FFU;
+    if (chipset != 0xA3U && chipset != 0xA5U && chipset != 0xA8U) return;
+    if (nv50_fifo_start(&gpu) != 0 || nv50_copy_start(&gpu) != 0) {
+        kprintf("NV50: the copy engine did not start; DRM copies with the cpu\n");
+        return;
+    }
+    if (boot_command_line_flag("nv50fifo")) nv50_fifo_selftest(&gpu);
+    accelerated = 1;
+    kprintf("NV50: the copy engine takes DRM's present copies\n");
+}
+
 static void nv50_late(void) {
     (void)pci_register_driver(&pci_driver);
     uint32_t bytes = gpu.pitch * gpu.height;
@@ -341,8 +466,8 @@ static void nv50_late(void) {
     if (nv50_vram_init(&gpu.vram, VRAM_SURFACE + stride * (DRM_BUFFERS + 1U),
                        gpu.vram_bytes - 0x100000U) != 0)
         kprintf("NV50: no vram above the flip buffers\n");
-    else if (boot_command_line_flag("nv50fifo"))
-        nv50_fifo_selftest(&gpu);
+    else
+        start_acceleration();
     cursor_map = (volatile uint32_t *)vmm_map_device_write_combining(gpu.bar1 + VRAM_CURSOR,
                                                                      CURSOR_PIXELS * 4U);
     lut_map = (volatile uint16_t *)vmm_map_device_write_combining(gpu.bar1 + VRAM_LUT,

@@ -26,6 +26,13 @@ struct display_flipper {
     int (*cursor_move)(int32_t x, int32_t y);
     // A 256-entry gamma ramp, NULLs for none; NULL when there is no LUT.
     int (*gamma_set)(const uint16_t *red, const uint16_t *green, const uint16_t *blue);
+    // Copies ROWS of ROW_BYTES, PITCH apart, from system PAGES into the back
+    // buffer and flips to it once copied (idle() says when); -1 when the
+    // caller is to copy and flip itself. forget_pages is told when the
+    // pages go. NULL when the driver has no engine to copy with.
+    int (*present_pages)(const uint64_t *pages, uint64_t page_count, uint32_t pitch,
+                         uint32_t row_bytes, uint32_t rows);
+    void (*forget_pages)(const uint64_t *pages);
 };
 
 int display_early_init(const struct boot_framebuffer_info *boot, struct boot_framebuffer_info *out);
