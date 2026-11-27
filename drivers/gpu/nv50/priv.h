@@ -97,6 +97,7 @@ struct nv50_fifo {
     uint32_t pt[2];
     volatile uint32_t *ring_map;
     volatile uint32_t *sema_map;
+    volatile uint32_t *inst_map;
     uint32_t gart_pt;
     volatile uint32_t *gart_map;
     struct nv50_vram gart;
@@ -167,6 +168,15 @@ uint32_t nv50_copy_rect(struct nv50_device *gpu, uint64_t dst, uint32_t dst_pitc
 int nv50_fifo_done(const struct nv50_device *gpu, uint32_t sequence);
 uint64_t nv50_gart_map(struct nv50_device *gpu, const uint64_t *pages, uint32_t count);
 void nv50_gart_unmap(struct nv50_device *gpu, uint64_t address, uint32_t count);
+uint32_t nv50_fifo_begin(struct nv50_device *gpu, uint32_t words);
+void nv50_fifo_method(struct nv50_device *gpu, unsigned subchannel, uint32_t method, unsigned count,
+                      const uint32_t *data);
+int nv50_fifo_kick(struct nv50_device *gpu, uint32_t start);
+void nv50_fifo_ramht_add(struct nv50_device *gpu, uint32_t handle, uint32_t context);
+volatile uint32_t *nv50_vram_map(const struct nv50_device *gpu, uint32_t at, uint32_t bytes);
+int nv50_bar_flush(const struct nv50_device *gpu);
+int nv50_gr_start(struct nv50_device *gpu);
+void nv50_gr_selftest(struct nv50_device *gpu);
 
 int nv50_bios_read(struct nv50_device *gpu, uint8_t *image, uint32_t capacity);
 uint16_t nv50_bit_entry(const struct nv50_device *gpu, uint8_t id, uint8_t *version,

@@ -267,6 +267,7 @@ int nv50_fifo_start(struct nv50_device *gpu) {
     if (!fifo->gart_map || nv50_vram_init(&fifo->gart, 0x1000U, GART_BYTES) != 0) return -1;
     for (uint32_t at = 0; at < GART_PT_BYTES / 4U; at++) fifo->gart_map[at] = 0;
     volatile uint32_t *inst = map_vram(gpu, fifo->inst, INST_BYTES);
+    fifo->inst_map = inst;
     volatile uint32_t *runlist = map_vram(gpu, fifo->runlist, 0x1000U);
     fifo->ring_map = map_vram(gpu, fifo->ring, PUSH_BYTES + IB_BYTES);
     fifo->sema_map = map_vram(gpu, fifo->sema, 0x1000U);
@@ -378,6 +379,29 @@ int nv50_fifo_wait(struct nv50_device *gpu, uint32_t sequence, uint64_t timeout_
     }
     return 0;
 }
+
+// For the other engines' code: the channel's methods, objects and memory.
+uint32_t nv50_fifo_begin(struct nv50_device *gpu, uint32_t words) {
+    if (gpu->fifo.put + words + 8U > PUSH_BYTES / 4U) gpu->fifo.put = 0;
+    return gpu->fifo.put;
+}
+
+void nv50_fifo_method(struct nv50_device *gpu, unsigned subchannel, uint32_t method, unsigned count,
+                      const uint32_t *data) {
+    push_on(&gpu->fifo, subchannel, method, count, data);
+}
+
+int nv50_fifo_kick(struct nv50_device *gpu, uint32_t start) { return submit(gpu, start); }
+
+void nv50_fifo_ramht_add(struct nv50_device *gpu, uint32_t handle, uint32_t context) {
+    ramht_add(gpu->fifo.inst_map, handle, context);
+}
+
+volatile uint32_t *nv50_vram_map(const struct nv50_device *gpu, uint32_t at, uint32_t bytes) {
+    return map_vram(gpu, at, bytes);
+}
+
+int nv50_bar_flush(const struct nv50_device *gpu) { return bar_flush(gpu); }
 
 // ---- the copy engine -----------------------------------------------------
 

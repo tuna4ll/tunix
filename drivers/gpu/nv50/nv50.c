@@ -443,7 +443,12 @@ static void start_acceleration(void) {
         kprintf("NV50: the copy engine did not start; DRM copies with the cpu\n");
         return;
     }
-    if (boot_command_line_flag("nv50fifo")) nv50_fifo_selftest(&gpu);
+    int graphics = nv50_gr_start(&gpu) == 0;
+    if (!graphics) kprintf("NV50: the graphics engine did not start\n");
+    if (boot_command_line_flag("nv50fifo")) {
+        nv50_fifo_selftest(&gpu);
+        if (graphics) nv50_gr_selftest(&gpu);
+    }
     accelerated = 1;
     kprintf("NV50: the copy engine takes DRM's present copies\n");
 }
