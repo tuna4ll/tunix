@@ -4715,8 +4715,10 @@ struct waitid_siginfo {
     uint8_t pad1[128 - 28];
 };
 
+// INFO_USER may be NULL, as on Linux: glibc's posix_spawn reaps a child whose
+// exec failed with waitid(P_PID, pid, NULL, WEXITED, NULL).
 int64_t process_waitid_from_syscall(int64_t pid_spec, uint64_t info_user, int options) {
-    if (!current || !info_user) return -EINVAL;
+    if (!current) return -EINVAL;
     struct process *parent;
     struct waitid_siginfo info;
     memset(&info, 0, sizeof(info));
@@ -4783,7 +4785,7 @@ int64_t process_waitid_from_syscall(int64_t pid_spec, uint64_t info_user, int op
             }
         }
     }
-    if (copy_to_user(info_user, &info, sizeof(info)) != 0) return -EFAULT;
+    if (info_user && copy_to_user(info_user, &info, sizeof(info)) != 0) return -EFAULT;
     return 0;
 }
 
