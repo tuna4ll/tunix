@@ -2071,12 +2071,21 @@ static int64_t sys_accept(int fd, uint64_t user_address, uint64_t user_length, i
         struct unix_socket *accepted = unix_socket_accept(listener);
         if (!accepted) return -EAGAIN;
         (void)process_wake_io();
+        // The peer's address, as Linux gives it: AF_UNIX and no path for a
+        // client that never bound, which Rust's accept checks for.
+        struct tunix_sockaddr_un peer;
+        size_t peer_length = 0;
+        if (unix_socket_get_name(accepted, 1, &peer, &peer_length) != 0) {
+            memset(&peer, 0, sizeof(peer));
+            peer.family = TUNIX_AF_UNIX;
+            peer_length = sizeof(peer.family);
+        }
         struct file *file = file_create_socket(accepted);
         if (!file) {
             unix_socket_unref(accepted);
             return -ENOMEM;
         }
-        return install_accepted(file, flags, NULL, 0, user_address, user_length);
+        return install_accepted(file, flags, &peer, peer_length, user_address, user_length);
     }
 
     struct inet_socket *inet_listener = inet_socket_from_fd(fd);
