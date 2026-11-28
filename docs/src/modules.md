@@ -21,7 +21,10 @@ A `.ko` is an ordinary ELF relocatable object -- `cc -c` with the kernel's own
 flags, nothing linked, nothing stripped. Modules live in `drivers/` beside the
 drivers that are built in, and what makes a source file a module is the
 `MODULE_MAIN()` line in it: the build leaves every such file out of the kernel
-image and compiles it on its own instead. The drivers the aarch64 build skips
+image and compiles it on its own instead. A driver too big for one file is a
+directory listed in `MODULE_DIRS` in the makefile: each of its sources is
+compiled on its own and `ld -r` links them into one `.ko` named after the
+directory, as `drivers/gpu/nv50/` becomes `nv50.ko`. The drivers the aarch64 build skips
 (port I/O, ACPI) are skipped as modules too.
 
 The loader resolves a module's undefined symbols only when something loads it,
@@ -144,8 +147,12 @@ pci:v00008086d00002668sv00001AF4sd00001100bc04sc03i00   the device
 pci:v*d*sv*sd*bc04sc03i*                                snd_hda's alias
 ```
 
-Nothing in the kernel asks for a module. The device describes itself, and
-userspace decides what that description is worth -- which is why a module can be
+Nothing in the kernel asks for a module, with one exception made before
+userspace exists: the modules of the [initramfs](boot.md#the-initramfs) are
+loaded by the kernel itself, by the same modalias match, because a display
+driver among them has to take the console before anything is mounted. After
+that, the device describes itself, and userspace decides what that description
+is worth -- which is why a module can be
 blacklisted or given options in `/etc/modprobe.d` without the kernel having an
 opinion.
 
@@ -155,6 +162,7 @@ opinion.
 | --- | --- |
 | `virtio_net`, `rtl8139` (x86-64), `atl1c` | the network card, by its PCI id |
 | `virtio_gpu` | QEMU's virtio-gpu, by its PCI id |
+| `nv50` (x86-64) | an NVIDIA display controller, by its PCI class; from the initramfs, before the console |
 | `snd_hda` | any HD Audio controller, by its PCI class |
 | `button` | the power button and lid: `LNXPWRBN`, `PNP0C0C`, `PNP0C0D` |
 | `processor` | `LNXCPU`, `ACPI0007` |

@@ -48,6 +48,9 @@
 #include <tunix/mutex.h>
 #include <tunix/devfs.h>
 #include <tunix/block.h>
+#include <tunix/boot.h>
+#include <tunix/display.h>
+#include <tunix/drm.h>
 
 extern uint64_t __stack_chk_guard;
 extern void __stack_chk_fail(void);
@@ -56,6 +59,21 @@ extern void __stack_chk_fail(void);
 
 const struct module_export kernel_symbols[] = {
     EXPORT(kprintf),
+    EXPORT(boot_command_line_flag),
+#if defined(__x86_64__)
+    // The nv50 module's: the console it takes, DRM's buffers for nouveau's interface.
+    EXPORT(display_early_register),
+    EXPORT(display_register_flipper),
+    EXPORT(drm_buffer_lookup),
+    EXPORT(drm_buffer_map_offset),
+    EXPORT(drm_buffer_new_device),
+    EXPORT(drm_buffer_new_pages),
+    EXPORT(drm_register_render_driver),
+    EXPORT(drm_relock_after_wait),
+    EXPORT(drm_unlock_for_wait),
+    EXPORT(sysfs_publish_backlight),
+    EXPORT(vmm_map_device_write_combining),
+#endif
     EXPORT(__stack_chk_guard),
     EXPORT(__stack_chk_fail),
     EXPORT(panic),

@@ -1031,9 +1031,12 @@ static struct vfs_node *module_directory(const char *name, const char *child) {
     return vfs_mkdir_p(path);
 }
 
+static int sysfs_ready;
+
 void sysfs_module_added(struct module *module) {
+    // Modules the initramfs loads come before sysfs; sysfs_init shows them.
+    if (!module || !sysfs_ready) return;
     VFS_GUARD;
-    if (!module) return;
     struct vfs_node *root = module_directory(module->name, NULL);
     if (!root) return;
     root->mode = 0555;
@@ -1496,7 +1499,6 @@ static void backlight_attribute(struct vfs_node *parent, const char *name, uint6
 
 static struct pci_device backlight_parent;
 static int backlight_has_parent;
-static int sysfs_ready;
 
 static void publish_backlight(void) {
     const struct backlight_device *device = backlight;
@@ -1731,5 +1733,6 @@ void sysfs_init(void) {
     }
 
     sysfs_ready = 1;
+    module_for_each_live(sysfs_module_added);
     if (backlight) publish_backlight();
 }

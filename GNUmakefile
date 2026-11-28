@@ -55,13 +55,17 @@ SOURCE_PRUNE := -path ./subprojects -prune -o -path ./build -prune -o \
 find-sources = $(patsubst ./%,%,$(shell find . $1 $(SOURCE_PRUNE) \( -name '*.c' -o -name '*.S' \) -print))
 # A driver is a module when its source says so with MODULE_MAIN(); the kernel image
 # leaves it out and it is built as a .ko instead.
-MODULE_SOURCES := $(shell grep -rl --include='*.c' '^MODULE_MAIN\b' drivers)
-KERNEL_SOURCES := $(filter-out $(MODULE_SOURCES),$(call find-sources,-path ./arch/aarch64 -prune -o))
+# A directory listed here is one module of all its sources, named after it, with
+# MODULE_MAIN() in one of them: a driver too big for one file.
+MODULE_DIRS := drivers/gpu/nv50
+MODULE_DIR_SOURCES := $(foreach dir,$(MODULE_DIRS),$(wildcard $(dir)/*.c))
+MODULE_SOURCES := $(filter-out $(MODULE_DIR_SOURCES),$(shell grep -rl --include='*.c' '^MODULE_MAIN\b' drivers))
+KERNEL_SOURCES := $(filter-out $(MODULE_SOURCES) $(MODULE_DIR_SOURCES),$(call find-sources,-path ./arch/aarch64 -prune -o))
 KERNEL_OBJECTS := $(KERNEL_SOURCES:%=$(BUILD)/kernel/%.o)
 KERNEL_DEPS    := $(KERNEL_OBJECTS:.o=.d)
 
 .PHONY: all kernel fetch check clean distclean
-all: kernel modules vmlinuz
+all: kernel modules vmlinuz initramfs
 kernel: $(KERNEL)
 fetch: $(LIMINE_HEADER) $(UACPI_STAMP) $(RUST_STAMP)
 
@@ -71,6 +75,10 @@ check:
 	$(MAKE) kernel modules vmlinuz BUILD=$(BUILD)/check/timings LIMINE_DIR=$(LIMINE_DIR) UACPI_DIR=$(UACPI_DIR) RUST_HOME=$(RUST_HOME) KERNEL_CFLAGS_EXTRA=-DTUNIX_BOOT_TIMINGS=1
 
 NM ?= nm
+# make's own LD, as its CC above, is gone under -R.
+ifneq ($(filter default undefined,$(origin LD)),)
+  override LD := ld
+endif
 
 $(KERNEL): $(KERNEL_OBJECTS) $(UACPI_OBJECTS) $(RUST_X86_LIB) arch/x86_64/linker.ld
 	$(CC) $(KERNEL_LDFLAGS) $(KERNEL_OBJECTS) $(UACPI_OBJECTS) $(RUST_X86_LIB) -o $@.tmp
@@ -85,7 +93,9 @@ $(BUILD)/kernel/%.S.o: %.S | $(LIMINE_HEADER) $(UACPI_STAMP)
 	@mkdir -p $(dir $@)
 	$(CC) $(KERNEL_CFLAGS) -MMD -MP -c $< -o $@
 
-MODULES := $(patsubst drivers/%.c,$(BUILD)/modules/%.ko,$(MODULE_SOURCES))
+MODULES := $(patsubst drivers/%.c,$(BUILD)/modules/%.ko,$(MODULE_SOURCES)) \
+	$(patsubst drivers/%,$(BUILD)/modules/%.ko,$(MODULE_DIRS))
+MODULE_DIR_OBJECTS := $(patsubst drivers/%.c,$(BUILD)/modules/parts/%.o,$(MODULE_DIR_SOURCES))
 MODULE_CFLAGS = $(filter-out -ffunction-sections -fdata-sections,$(KERNEL_CFLAGS)) \
 	-DTUNIX_MODULE_NAME='"$(notdir $*)"'
 
@@ -147,6 +157,16 @@ $(BZIMAGE_OBJECTS): GNUmakefile
 .PHONY: modules
 modules: $(BUILD)/modules/symbols.ok
 
+# The initramfs: the modules that must be there before the root is, the
+# display drivers that take the console. See core/initramfs.c.
+INITRAMFS_MODULES := $(BUILD)/modules/gpu/nv50.ko
+
+.PHONY: initramfs
+initramfs: $(BUILD)/initramfs.img
+
+$(BUILD)/initramfs.img: $(INITRAMFS_MODULES) $(BUILD)/modules/symbols.ok tools/mkinitramfs
+	sh tools/mkinitramfs $@ $(INITRAMFS_MODULES)
+
 $(BUILD)/modules/symbols.ok: $(MODULES) core/ksyms.c
 	@$(call check-module-symbols,$(NM),$(MODULES))
 	@touch $@
@@ -155,9 +175,24 @@ $(BUILD)/modules/%.ko: drivers/%.c | $(LIMINE_HEADER) $(UACPI_STAMP)
 	@mkdir -p $(dir $@)
 	$(CC) $(MODULE_CFLAGS) -MMD -MP -c $< -o $@
 
-$(MODULES) $(KERNEL_OBJECTS) $(UACPI_OBJECTS): GNUmakefile $(UACPI_RECIPE)
+# A directory's module: each source compiled with the directory's name as the
+# module's, then linked into one relocatable object.
+$(BUILD)/modules/parts/%.o: drivers/%.c | $(LIMINE_HEADER) $(UACPI_STAMP)
+	@mkdir -p $(dir $@)
+	$(CC) $(filter-out -ffunction-sections -fdata-sections,$(KERNEL_CFLAGS)) \
+		-DTUNIX_MODULE_NAME='"$(notdir $(patsubst %/,%,$(dir $*)))"' -MMD -MP -c $< -o $@
+
+module-dir-objects = $(patsubst drivers/%.c,$(BUILD)/modules/parts/%.o,$(wildcard drivers/$(1)/*.c))
+.SECONDEXPANSION:
+$(patsubst drivers/%,$(BUILD)/modules/%.ko,$(MODULE_DIRS)): $(BUILD)/modules/%.ko: \
+		$$(call module-dir-objects,$$*)
+	@mkdir -p $(dir $@)
+	$(LD) -r -o $@ $(filter %.o,$^)
+
+$(MODULES) $(MODULE_DIR_OBJECTS) $(KERNEL_OBJECTS) $(UACPI_OBJECTS): GNUmakefile $(UACPI_RECIPE)
 
 -include $(MODULES:.ko=.d)
+-include $(MODULE_DIR_OBJECTS:.o=.d)
 -include $(KERNEL_DEPS)
 
 $(LIMINE_HEADER):
@@ -166,7 +201,7 @@ $(LIMINE_HEADER):
 		https://github.com/limine-bootloader/limine.git $(LIMINE_DIR)
 
 clean:
-	rm -rf $(BUILD)/kernel $(BUILD)/modules $(BUILD)/uacpi-objects $(BUILD)/rust-target $(KERNEL) \
+	rm -rf $(BUILD)/initramfs.img $(BUILD)/kernel $(BUILD)/modules $(BUILD)/uacpi-objects $(BUILD)/rust-target $(KERNEL) \
 		$(BUILD)/bzimage $(BUILD)/kernel.bin $(BUILD)/vmlinuz.elf $(BUILD)/vmlinuz
 
 distclean:
@@ -187,7 +222,8 @@ AARCH64_CORE_CFLAGS := -std=gnu11 -Wall -Wextra -Werror -ffreestanding \
 # x86-only drivers: port I/O, AMD SVM, or ACPI, which the aarch64 build does not have.
 AARCH64_SKIP := drivers/storage/ata.c drivers/net/rtl8139.c drivers/virt/kvm.c \
 	$(filter-out drivers/acpi/acpi.c,$(wildcard drivers/acpi/*.c))
-AARCH64_CORE_EXCLUDE := $(AARCH64_SKIP) $(MODULE_SOURCES)
+# The directory modules are x86-only drivers (nv50) and are not built here.
+AARCH64_CORE_EXCLUDE := $(AARCH64_SKIP) $(MODULE_SOURCES) $(MODULE_DIR_SOURCES)
 AARCH64_CORE_SOURCES := $(filter-out $(AARCH64_CORE_EXCLUDE),$(call find-sources,-path ./arch -prune -o)) \
 	$(shell find arch/aarch64 \( -name '*.c' -o -name '*.S' \) -print)
 AARCH64_CORE_OBJECTS := $(AARCH64_CORE_SOURCES:%=$(AARCH64_CORE_BUILD)/kernel/%.o)

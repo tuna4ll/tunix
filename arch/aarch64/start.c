@@ -143,7 +143,11 @@ static void collect_memory(uint64_t dtb_physical, uint64_t load_physical) {
             uint64_t last = length == 8U
                 ? ((uint64_t)fdt_read32(end) << 32) | fdt_read32((const uint8_t *)end + 4)
                 : fdt_read32(end);
-            if (last > first) reserve(first, last - first);
+            if (last > first) {
+                reserve(first, last - first);
+                info.initramfs_physical = first;
+                info.initramfs_size = last - first;
+            }
         }
     }
 }

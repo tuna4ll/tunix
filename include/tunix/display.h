@@ -40,6 +40,9 @@ struct display_flipper {
                           uint32_t rows);
 };
 
+// A driver that may take the console, until display_early_init has run;
+// -EBUSY after.
+int display_early_register(const struct display_early_driver *driver);
 int display_early_init(const struct boot_framebuffer_info *boot, struct boot_framebuffer_info *out);
 void display_late_init(void);
 void display_register_flipper(const struct display_flipper *flipper);

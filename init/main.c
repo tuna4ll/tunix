@@ -12,6 +12,7 @@
 #include <tunix/framebuffer.h>
 #include <tunix/heap.h>
 #include <tunix/hwreport.h>
+#include <tunix/initramfs.h>
 #include <tunix/display.h>
 #include <tunix/input.h>
 #include <tunix/ehci.h>
@@ -123,11 +124,13 @@ void kmain(const struct boot_info *boot) {
 #if defined(__x86_64__)
     if (!boot->framebuffer) panic("no framebuffer from the bootloader");
 #endif
+    heap_init();
+    // A display driver among the initramfs's modules takes the console from here.
+    (void)initramfs_load_modules();
     static struct boot_framebuffer_info native;
     const struct boot_framebuffer_info *console = boot->framebuffer;
     if (console && display_early_init(console, &native) == 0) console = &native;
     if (console && framebuffer_init(console) != 0) panic("framebuffer initialization failed");
-    heap_init();
     if (terminal_init() != 0) panic("framebuffer terminal initialization failed");
     vt_init();
 #if defined(TUNIX_KASAN)

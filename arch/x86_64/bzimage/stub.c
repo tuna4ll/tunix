@@ -137,6 +137,28 @@ static void finish_memory_map(void) {
     if (!handoff.memory_count) stop("the loader gave no memory map");
 }
 
+// The ramdisk the loader placed in RAM, taken out of usable memory and
+// reported as in use, as Limine reports its modules.
+static void reserve_initramfs(void) {
+    uint64_t start = handoff.initramfs_physical & ~(PAGE - 1);
+    uint64_t end = (handoff.initramfs_physical + handoff.initramfs_size + PAGE - 1) & ~(PAGE - 1);
+    if (!handoff.initramfs_size) return;
+    static struct boot_memory_region before[BOOT_MEMORY_REGIONS];
+    uint32_t count = handoff.memory_count;
+    memcpy(before, handoff.memory, sizeof(before[0]) * count);
+    handoff.memory_count = 0;
+    for (uint32_t index = 0; index < count; index++) {
+        uint64_t base = before[index].base, top = base + before[index].length;
+        if (!before[index].usable || top <= start || base >= end) {
+            emit(base, top, before[index].usable);
+            continue;
+        }
+        emit(base, start, 1);
+        emit(base > start ? base : start, top < end ? top : end, 0);
+        emit(end, top, 1);
+    }
+}
+
 // ---- page tables ----
 
 static uint64_t *table(void) {
@@ -169,6 +191,7 @@ __attribute__((noreturn)) static void enter_kernel(void) {
         stop("no 32-bit linear framebuffer, which Tunix draws its console on "
              "(with GRUB: set gfxpayload=1280x800x32, or any WIDTHxHEIGHTx32)");
     finish_memory_map();
+    reserve_initramfs();
 
     uint64_t top = (uint64_t)_init_end;
     for (uint32_t index = 0; index < handoff.memory_count; index++) {
@@ -349,6 +372,12 @@ __attribute__((noreturn)) void stub_linux_main(const uint8_t *params) {
         for (unsigned index = 0; index + 1 < BOOT_STUB_COMMAND_LINE && text[index]; index++)
             handoff.command_line[index] = text[index];
     }
+
+    // The ramdisk, initrd to GRUB and QEMU's -initrd: the high halves are the
+    // ext_ramdisk fields.
+    handoff.initramfs_physical = u32_at(params, 0x218) | ((uint64_t)u32_at(params, 0xc0) << 32);
+    handoff.initramfs_size = u32_at(params, 0x21c) | ((uint64_t)u32_at(params, 0xc4) << 32);
+    if (!handoff.initramfs_physical) handoff.initramfs_size = 0;
 
     handoff.rsdp = u64_at(params, 0x70);
     // GRUB on UEFI says where the system table is ("EL64") rather than where the RSDP is.

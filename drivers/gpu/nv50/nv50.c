@@ -8,7 +8,8 @@
 #include <tunix/display.h>
 #include <tunix/irq.h>
 #include <tunix/lock.h>
-#include <tunix/nv50.h>
+#include <tunix/errno.h>
+#include <tunix/module.h>
 #include <tunix/pci.h>
 #include <tunix/process.h>
 #include <tunix/time.h>
@@ -96,9 +97,38 @@ static int map_gpu(void) {
     return 0;
 }
 
+// The chips this driver has run on, display and acceleration both: GT215 and
+// the two GT21x parts that share its display engine and copy engine.
+static int verified_chipset(uint32_t boot0) {
+    uint32_t chipset = (boot0 >> 20) & 0x1FFU;
+    return chipset == 0xA3U || chipset == 0xA5U || chipset == 0xA8U;
+}
+
+// The card drives the screen when the firmware left its framebuffer in the
+// card's VRAM window, as Linux's boot_vga tells the same: on a laptop whose
+// panel another GPU drives, this one is left alone.
+static int drives_boot_screen(const struct boot_framebuffer_info *boot) {
+    uint64_t window = gpu.vram_bytes > 0x10000000U ? gpu.vram_bytes : 0x10000000U;
+    return boot->physical_address >= gpu.bar1 && boot->physical_address < gpu.bar1 + window;
+}
+
+// Like Linux's nouveau, it takes the card by itself: nonv50 or nomodeset
+// leaves the firmware framebuffer, nv50 drives an nv50-family chip it has not
+// been verified on, or one the firmware's screen is not on.
 static int nv50_setup(const struct boot_framebuffer_info *boot, struct boot_framebuffer_info *out) {
-    if (!boot_command_line_flag("nv50")) return -1;
+    if (boot_command_line_flag("nonv50") || boot_command_line_flag("nomodeset")) return -1;
+    int forced = boot_command_line_flag("nv50");
     if (map_gpu() != 0) return -1;
+    if (!forced && !verified_chipset(nv50_rd32(&gpu, 0))) {
+        kprintf("NV50: chip %x has not been verified with this driver; boot with nv50 to drive it\n",
+                nv50_rd32(&gpu, 0));
+        return -1;
+    }
+    if (!forced && !drives_boot_screen(boot)) {
+        kprintf("NV50: the screen is not on this card (firmware framebuffer at %p), left alone\n",
+                (void *)(uintptr_t)boot->physical_address);
+        return -1;
+    }
     if (nv50_bios_read(&gpu, vbios_image, sizeof(vbios_image)) != 0) {
         kprintf("NV50: no video bios image\n");
         return -1;
@@ -570,8 +600,26 @@ static void nv50_late(void) {
     kprintf("NV50: page flipping between two buffers\n");
 }
 
-const struct display_early_driver nv50_display_driver = {
+static const struct display_early_driver nv50_display_driver = {
     .name = "nv50",
     .setup = nv50_setup,
     .late = nv50_late,
 };
+
+// The console is taken before anything is mounted, so the module comes from
+// the initramfs; loaded any later, by udev, it has come too late to.
+static int nv50_load(void) {
+    if (boot_command_line_flag("nonv50") || boot_command_line_flag("nomodeset")) return -ENODEV;
+    if (display_early_register(&nv50_display_driver) != 0) {
+        kprintf("NV50: loaded after the console was set up; it has to come from the initramfs\n");
+        return -ENODEV;
+    }
+    return 0;
+}
+
+// No exit: the driver may hold the screen, which nothing would take back.
+MODULE_MAIN(nv50_load, NULL);
+MODULE_ALIAS("pci:v000010DEd*sv*sd*bc03sc*i*");
+MODULE_LICENSE("MIT");
+MODULE_DESCRIPTION("NVIDIA nv50 (Tesla): display, and the GPU for Mesa's nouveau on GT21x");
+MODULE_AUTHOR("Tunix");

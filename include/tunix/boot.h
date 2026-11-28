@@ -23,6 +23,9 @@ struct boot_info {
     uint64_t kernel_physical_base;
     uint64_t kernel_virtual_base;
     uint64_t kernel_size;
+    // The initramfs the bootloader loaded, a newc cpio archive; size 0 if none.
+    uint64_t initramfs_physical;
+    uint64_t initramfs_size;
 };
 
 const struct boot_info *boot_info(void);

@@ -44,6 +44,7 @@ sit in a section of their own that the linker script keeps.
 | Framebuffer | A linear framebuffer, its address, and its pixel format |
 | Executable address | Where the image was loaded, physically and virtually |
 | Command line | `root=`, `init=` |
+| Module | The initramfs, `module_path` in `limine.conf` |
 | RSDP | Where the ACPI tables start |
 | Paging mode | Four levels, on a machine that could do five |
 
@@ -87,6 +88,52 @@ root=/dev/sda2 init=/sbin/init
   [the root filesystem](filesystem.md#a-live-root)).
 - `init=` names the first program. It defaults to `/sbin/init`; pointing it at
   something else is how a machine that will not finish booting gets debugged.
+- `rd.driver.pre=a,b` loads those modules from the initramfs whether a device
+  asks for them or not; `rd.driver.blacklist=` and `modprobe.blacklist=` keep
+  them from loading. The names are dracut's.
+
+## The initramfs
+
+The bootloader may load an initramfs beside the kernel: a newc `cpio` archive,
+uncompressed, the format Linux reads. Tunix mounts its root by itself, so the
+archive is not a root to start from; it carries the drivers that have to be
+there before the root is, which today means the display drivers that take the
+console from its first line (`nv50`).
+
+```
+/Tulpar
+    protocol: limine
+    path: boot():/boot/kernel.elf
+    module_path: boot():/boot/initramfs.img
+    cmdline: root=LABEL=tulpar-root init=/sbin/init
+```
+
+Right after the heap is up, before the console is drawn, `core/initramfs.c`
+reads every `.ko` in the archive and loads those a PCI device asks for -- the
+device's modalias against the module's `alias=` lines, the match udev makes --
+and those `rd.driver.pre=` names. A module that needs another's symbols waits
+for it: each round loads what it can until one loads nothing more. A display
+driver loaded so registers itself with `display_early_register()` and is asked
+to take the screen as a built-in one would be. The modules show in
+`/sys/module` and `lsmod` once sysfs is up, and `modprobe` then finds them
+loaded.
+
+| Loaded by | Where the archive comes from |
+| --- | --- |
+| Limine | the first `module_path` of the entry |
+| GRUB, syslinux, QEMU's `-initrd` | the boot protocol's `ramdisk_image` and `ramdisk_size`, which the stub keeps out of usable memory |
+| aarch64 | the device tree's `linux,initrd-start` and `linux,initrd-end` |
+
+`make initramfs` builds `build/initramfs.img` with `tools/mkinitramfs`, a POSIX
+shell script that writes the archive with `printf`, so it runs on the system
+too:
+
+```
+tools/mkinitramfs initramfs.img /usr/lib/modules/0.1.0/kernel/nv50.ko
+```
+
+The UEFI-application entry of `vmlinuz` takes no initramfs yet: it would have
+to read the file named by `initrd=` from the ESP itself.
 
 ## Without Limine: vmlinuz
 

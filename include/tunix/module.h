@@ -76,6 +76,8 @@ struct module {
 int module_load(const void *image, size_t bytes, const char *arguments);
 int module_unload(const char *name, unsigned flags);
 struct module *module_find(const char *name);
+// FUNCTION for every live module, the module lock held.
+void module_for_each_live(void (*function)(struct module *module));
 struct module *module_list(void);
 struct module *module_active(void);
 unsigned module_kernel_symbol_count(void);

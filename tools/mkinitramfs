@@ -1,0 +1,48 @@
+#!/bin/sh
+# mkinitramfs OUTPUT MODULE.ko...: an initramfs of the modules, a newc cpio
+# archive as Linux's is, each at lib/modules/NAME.ko. The kernel loads those a
+# device of the machine asks for before it draws the console (core/initramfs.c).
+# Written with printf alone, so that it runs wherever a POSIX shell does.
+set -e
+
+if [ $# -lt 1 ]; then
+    echo "usage: mkinitramfs OUTPUT [MODULE.ko...]" >&2
+    exit 1
+fi
+output=$1
+shift
+
+pad() { # to the next multiple of four, after N bytes
+    case $(($1 % 4)) in
+        1) printf '\000\000\000' ;;
+        2) printf '\000\000' ;;
+        3) printf '\000' ;;
+    esac
+}
+
+inode=1
+entry() { # NAME MODE [FILE]
+    size=0
+    [ -n "$3" ] && size=$(wc -c < "$3" | tr -d ' ')
+    namesize=$((${#1} + 1))
+    printf '070701%08x%08x%08x%08x%08x%08x%08x%08x%08x%08x%08x%08x%08x' \
+        "$inode" "$2" 0 0 1 0 "$size" 0 0 0 0 "$namesize" 0
+    printf '%s\000' "$1"
+    pad $((110 + namesize))
+    if [ -n "$3" ]; then
+        cat "$3"
+        pad "$size"
+    fi
+    inode=$((inode + 1))
+}
+
+tmp="${output}.tmp"
+{
+    entry lib $((0040755))
+    entry lib/modules $((0040755))
+    for module in "$@"; do
+        entry "lib/modules/$(basename "$module")" $((0100644)) "$module"
+    done
+    entry TRAILER!!! 0
+} > "$tmp"
+mv "$tmp" "$output"

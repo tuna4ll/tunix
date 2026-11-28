@@ -24,6 +24,8 @@ struct boot_stub_handoff {
     struct boot_memory_region memory[BOOT_MEMORY_REGIONS];
     struct boot_framebuffer_info framebuffer;
     char command_line[BOOT_STUB_COMMAND_LINE];
+    uint64_t initramfs_physical; // the boot protocol's ramdisk, 0 if none
+    uint64_t initramfs_size;
 };
 
 #endif

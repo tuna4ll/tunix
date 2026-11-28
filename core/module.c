@@ -125,6 +125,12 @@ struct module *module_active(void) { return active; }
 unsigned module_kernel_symbol_count(void) { return kernel_symbol_count; }
 struct module *module_list(void) { return modules; }
 
+void module_for_each_live(void (*function)(struct module *module)) {
+    MODULES_LOCKED;
+    for (struct module *module = modules; module; module = module->next)
+        if (module->state == MODULE_STATE_LIVE) function(module);
+}
+
 struct module *module_find(const char *name) {
     MODULES_LOCKED;
     for (struct module *module = modules; module; module = module->next)

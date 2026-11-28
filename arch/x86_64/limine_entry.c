@@ -66,6 +66,14 @@ __attribute__((
     .response = NULL,
 };
 
+// module_path in limine.conf: the initramfs.
+__attribute__((
+    used, section(".limine_requests"))) static volatile struct limine_module_request module_request = {
+    .id = LIMINE_MODULE_REQUEST,
+    .revision = 0,
+    .response = NULL,
+};
+
 __attribute__((used,
                section(".limine_requests_start"))) static volatile LIMINE_REQUESTS_START_MARKER;
 
@@ -154,6 +162,14 @@ __attribute__((no_stack_protector)) void limine_start(void) {
         : "";
     info.rsdp = rsdp_request.response ? rsdp_request.response->address : 0;
 
+    // The first module is the initramfs; its memory stays the bootloader's
+    // (not usable in the memory map), so nothing overwrites it.
+    const struct limine_module_response *modules = module_request.response;
+    if (modules && modules->module_count && modules->modules[0]->size) {
+        info.initramfs_physical = (uint64_t)modules->modules[0]->address - info.hhdm_offset;
+        info.initramfs_size = modules->modules[0]->size;
+    }
+
     kmain(&info);
 }
 
@@ -188,6 +204,8 @@ __attribute__((no_stack_protector)) void stub_start(const struct boot_stub_hando
         command_line[index] = handoff->command_line[index];
     info.command_line = command_line;
     info.rsdp = handoff->rsdp;
+    info.initramfs_physical = handoff->initramfs_physical;
+    info.initramfs_size = handoff->initramfs_size;
 
     kmain(&info);
 }

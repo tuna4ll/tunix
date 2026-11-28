@@ -12,8 +12,10 @@ nothing to fix in it.
 
 ## Where it comes from
 
-`mkfs.ext4 -d` on the build host, from a root directory. There is no initramfs
-and there is no format code in the kernel; the group descriptors are read and
+`mkfs.ext4 -d` on the build host, from a root directory. The kernel finds and
+mounts it itself, with no initramfs in between (the one there is carries
+drivers, not a root; see [Boot](boot.md#the-initramfs)), and there is no format
+code in the kernel; the group descriptors are read and
 believed, and what is checked is that each one points inside the filesystem
 and carries the right checksum.
 

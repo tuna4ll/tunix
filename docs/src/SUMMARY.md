@@ -16,6 +16,7 @@
 - [Networking](networking.md)
 - [USB](usb.md)
 - [virtio-gpu](virtio-gpu.md)
+- [NVIDIA nv50](nv50.md)
 - [KVM](kvm.md)
 - [Sound](sound.md)
 - [Sandboxing](sandboxing.md)

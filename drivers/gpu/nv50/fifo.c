@@ -258,7 +258,8 @@ static int build_vm(struct nv50_device *gpu, volatile uint32_t *inst) {
 // them when the controller says so.
 static uint32_t vram_rblock(struct nv50_device *gpu) {
     uint32_t r4 = nv50_rd32(gpu, 0x100204U);
-    uint32_t parts = (uint32_t)__builtin_popcount((nv50_rd32(gpu, 0x001540U) >> 16) & 0xFFU);
+    uint32_t parts = 0;
+    for (uint32_t mask = (nv50_rd32(gpu, 0x001540U) >> 16) & 0xFFU; mask; mask &= mask - 1U) parts++;
     uint32_t colbits = (r4 >> 12) & 0xFU, banks = 1U << (((r4 >> 24) & 3U) + 2U);
     uint32_t rblock = parts * banks * (1U << colbits) * 8U;
     if (nv50_rd32(gpu, 0x100250U) & 1U) rblock *= 3U;
