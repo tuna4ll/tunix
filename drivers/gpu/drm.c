@@ -8,6 +8,7 @@
 #include <tunix/file.h>
 #include <tunix/framebuffer.h>
 #include <tunix/heap.h>
+#include <tunix/boot.h>
 #include <tunix/time.h>
 #include <tunix/timer.h>
 #include <tunix/kstring.h>
@@ -1051,7 +1052,8 @@ static int64_t ioctl_atomic(const struct file *client, uint64_t user_argument) {
         int touched;
         uint32_t fb, crtc;
         int32_t x, y;
-    } cursor = {0, cursor_fb, cursor_fb ? DRM_CRTC_ID : 0, cursor_x, cursor_y};
+        int size_ok; // its source and CRTC sizes those of the cursor image
+    } cursor = {0, cursor_fb, cursor_fb ? DRM_CRTC_ID : 0, cursor_x, cursor_y, 1};
     const struct drm_property_blob *damage_blob = NULL;
     int new_active = active_fb_id != 0;
     int mode_cleared = 0;
@@ -1067,8 +1069,9 @@ static int64_t ioctl_atomic(const struct file *client, uint64_t user_argument) {
                 if (id == DRM_PROP_PLANE_FB_ID) {
                     const struct drm_framebuffer *fb =
                         value > UINT32_MAX ? NULL : framebuffer_of(client, (uint32_t)value);
-                    if (value && (!fb || fb->width != DRM_CURSOR_SIZE ||
-                                  fb->height != DRM_CURSOR_SIZE))
+                    if (value > UINT32_MAX ||
+                        (value && (!fb || fb->width != DRM_CURSOR_SIZE ||
+                                   fb->height != DRM_CURSOR_SIZE)))
                         return -EINVAL;
                     cursor.fb = (uint32_t)value;
                 } else if (id == DRM_PROP_PLANE_CRTC_ID) {
@@ -1080,11 +1083,13 @@ static int64_t ioctl_atomic(const struct file *client, uint64_t user_argument) {
                     if (id == DRM_PROP_PLANE_CRTC_X) cursor.x = (int32_t)at;
                     else cursor.y = (int32_t)at;
                 } else if (id == DRM_PROP_PLANE_CRTC_W || id == DRM_PROP_PLANE_CRTC_H) {
-                    if (value != DRM_CURSOR_SIZE) return -EINVAL;
+                    // Checked below, once it is known whether the plane is on:
+                    // a plane being turned off has them all zero.
+                    if (value != DRM_CURSOR_SIZE) cursor.size_ok = 0;
                 } else if (id == DRM_PROP_PLANE_SRC_X || id == DRM_PROP_PLANE_SRC_Y) {
-                    if (value != 0) return -EINVAL;
+                    if (value != 0) cursor.size_ok = 0;
                 } else if (id == DRM_PROP_PLANE_SRC_W || id == DRM_PROP_PLANE_SRC_H) {
-                    if (value != (uint64_t)DRM_CURSOR_SIZE << 16) return -EINVAL;
+                    if (value != (uint64_t)DRM_CURSOR_SIZE << 16) cursor.size_ok = 0;
                 } else if (id != DRM_PROP_PLANE_FB_DAMAGE_CLIPS) {
                     return -EINVAL;
                 }
@@ -1129,6 +1134,7 @@ static int64_t ioctl_atomic(const struct file *client, uint64_t user_argument) {
             }
         }
     }
+    if (cursor.touched && cursor.fb && cursor.crtc && !cursor.size_ok) return -EINVAL;
     if (mode_cleared) new_active = 0;
     if (request.flags & DRM_MODE_ATOMIC_TEST_ONLY) return 0;
 
@@ -2777,9 +2783,30 @@ static int64_t ioctl_virtgpu_wait(const struct file *client, uint64_t user_argum
 int64_t drm_file_ioctl(struct file *file, unsigned long request, uint64_t user_argument) {
     if (!drm_ready) return -ENOTTY;
     if (IOCTL_TYPE(request) != (unsigned)DRM_IOCTL_TYPE) return -ENOTTY;
+    // drmtrace on the command line: every failing or slow ioctl, and the
+    // first few hundred of each process, with who asked and how long it took.
+    static int trace = -1;
+    static unsigned traced;
+    if (trace < 0) trace = boot_command_line_flag("drmtrace");
+    uint64_t start = trace ? time_uptime_ns() : 0;
     drm_enter();
     int64_t answer = drm_dispatch_ioctl(file, request, user_argument);
     drm_leave();
+    if (trace) {
+        uint64_t took = (time_uptime_ns() - start) / 1000U;
+        // The budget starts again for each new process, so a later one is seen too.
+        static uint64_t traced_pid;
+        if (process_current_pid() != traced_pid) {
+            traced_pid = process_current_pid();
+            traced = 0;
+        }
+        if (traced < 400U || answer < 0 || took > 5000U) {
+            traced++;
+            kprintf("drm: pid %u ioctl %x size %u -> %d in %u us\n",
+                    (unsigned)process_current_pid(), (unsigned)IOCTL_NR(request),
+                    (unsigned)((request >> 16) & 0x3FFFU), (int)answer, (unsigned)took);
+        }
+    }
     return answer;
 }
 

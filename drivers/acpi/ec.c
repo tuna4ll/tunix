@@ -134,7 +134,12 @@ static void run_query(uint8_t query) {
     __atomic_add_fetch(&ec.events, 1U, __ATOMIC_RELAXED);
     uacpi_namespace_node *target = NULL;
     if (uacpi_namespace_node_find(ec.node, method, &target) != UACPI_STATUS_OK) {
-        kprintf("ACPI: ec event %x has no %s method\n", query, method);
+        // Firmware raises events it has no handler for, some of them often:
+        // each is told of once, as Linux only debug-logs them.
+        static uint32_t told[8];
+        if (!(__atomic_fetch_or(&told[query / 32U], 1U << (query % 32U), __ATOMIC_RELAXED) &
+              (1U << (query % 32U))))
+            kprintf("ACPI: ec event %x has no %s method\n", query, method);
         return;
     }
     uacpi_status status = uacpi_execute(ec.node, method, NULL);
