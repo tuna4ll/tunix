@@ -549,6 +549,8 @@ struct drm_dumb_buffer {
     uint32_t blob_mem;
     uint64_t host_physical;
     uint32_t map_info;
+    // A render driver's buffer in device memory, mapped write-combined.
+    uint8_t device_memory;
 };
 
 struct drm_import {
@@ -611,6 +613,7 @@ static const struct file *master_file;
 static const struct file *dropped_masters[DROPPED_MASTERS];
 
 static struct drm_dumb_buffer **buffers;
+static const struct drm_render_driver *render_driver;
 static uint32_t buffer_capacity;
 static struct drm_framebuffer *framebuffers;
 static int framebuffer_capacity;
@@ -1209,6 +1212,7 @@ static void buffer_release(struct drm_dumb_buffer *buffer) {
         buffer->refs--;
         return;
     }
+    if (render_driver && render_driver->buffer_gone) render_driver->buffer_gone(buffer->handle);
     const struct display_flipper *flipper = display_flipper();
     if (flipper && flipper->forget_pages && buffer->pages) flipper->forget_pages(buffer->pages);
     if (buffer->host_blob && buffer->host_physical) virtgpu_unmap_blob(buffer->virtio_resource);
@@ -1309,11 +1313,19 @@ static int64_t ioctl_version(uint64_t user_argument) {
     const char *name = rendering ? virtio_name : plain_name;
     size_t name_size = (rendering ? sizeof(virtio_name) : sizeof(plain_name)) - 1;
     static const char date[] = "20260721";
-    static const char desc[] = "Tunix framebuffer KMS";
+    const char *desc = "Tunix framebuffer KMS";
 
     version.version_major = rendering ? 0 : 1;
     version.version_minor = 0;
     version.version_patchlevel = 0;
+    if (render_driver) {
+        name = render_driver->name;
+        name_size = strlen(name);
+        desc = render_driver->desc;
+        version.version_major = render_driver->major;
+        version.version_minor = render_driver->minor;
+        version.version_patchlevel = render_driver->patchlevel;
+    }
 
     struct {
         uint64_t pointer;
@@ -1323,7 +1335,7 @@ static int64_t ioctl_version(uint64_t user_argument) {
     } fields[] = {
         {version.name, &version.name_len, name, name_size},
         {version.date, &version.date_len, date, sizeof(date) - 1},
-        {version.desc, &version.desc_len, desc, sizeof(desc) - 1},
+        {version.desc, &version.desc_len, desc, strlen(desc)},
     };
     for (int index = 0; index < 3; index++) {
         uint64_t room = *fields[index].length;
@@ -1571,6 +1583,21 @@ static int64_t map_buffer(struct drm_dumb_buffer *buffer, uint64_t cr3, uint64_t
                           uint64_t length, uint64_t offset, uint64_t page_flags) {
     uint64_t flags = page_flags | PAGE_USER | PAGE_PRESENT | PAGE_NX;
     uint64_t mapped = 0;
+    if (buffer->device_memory) {
+        flags |= PAGE_DEVICE |
+            (vmm_write_combining_available() ? PAGE_WRITE_COMBINING : PAGE_UNCACHED);
+        for (; mapped < length; mapped += 4096ULL) {
+            if (vmm_map_page_in(cr3, virtual_address + mapped,
+                                buffer->host_physical + offset + mapped, flags) != 0) {
+                while (mapped) {
+                    mapped -= 4096ULL;
+                    (void)vmm_unmap_page_in(cr3, virtual_address + mapped);
+                }
+                return -EINVAL;
+            }
+        }
+        return 0;
+    }
     if (buffer->host_blob) {
         if (!buffer->host_physical) return -EINVAL;
         uint32_t cache = buffer->map_info & VIRTIO_GPU_MAP_CACHE_MASK;
@@ -1914,6 +1941,16 @@ static int present_via_flipper(const struct display_flipper *flipper,
     uint32_t row_bytes = fb->pitch < screen_pitch ? fb->pitch : screen_pitch;
     if (flipper->present_pages && buffer->pages &&
         flipper->present_pages(buffer->pages, buffer->page_count, fb->pitch, row_bytes, rows) == 0) {
+        scanout_current = 1;
+        return 0;
+    }
+    if (buffer->device_memory) {
+        // Device memory has no pages for the CPU's copy below.
+        if (!flipper->present_device ||
+            flipper->present_device(buffer->host_physical, fb->pitch,
+                                    fb->width < framebuffer_width() ? fb->width : framebuffer_width(),
+                                    row_bytes, rows) != 0)
+            return -EINVAL;
         scanout_current = 1;
         return 0;
     }
@@ -2833,6 +2870,10 @@ static int modesetting_request(unsigned nr) {
 static int64_t drm_dispatch_ioctl(struct file *file, unsigned long request,
                                   uint64_t user_argument) {
     retired_reap();
+    // Driver ioctls are 0x40..0x9F; the mode-setting ones start at 0xA0.
+    if (render_driver && IOCTL_NR(request) >= DRM_COMMAND_BASE && IOCTL_NR(request) < 0xA0U)
+        return render_driver->ioctl(file, IOCTL_NR(request) - DRM_COMMAND_BASE,
+                                    (unsigned)((request >> 16) & 0x3FFFU), user_argument);
     if (modesetting_request(IOCTL_NR(request))) {
         int64_t status = require_master(file);
         if (status != 0) return status;
@@ -2965,6 +3006,7 @@ void drm_file_close(struct file *file) {
     DRM_LOCKED;
     if (!file) return;
     drm_enter();
+    if (render_driver && render_driver->file_close) render_driver->file_close(file);
     forget_master(file);
     for (int index = 0; index < framebuffer_capacity; index++) {
         if (!framebuffers[index].id || framebuffers[index].owner != file) continue;
@@ -3022,3 +3064,50 @@ void drm_display_resume(void) {
     (void)present_framebuffer(NULL, active_fb_id, NULL);
     drm_leave();
 }
+
+// At boot, from the display driver's late setup, before any client opens DRM.
+void drm_register_render_driver(const struct drm_render_driver *driver) {
+    __atomic_store_n(&render_driver, driver, __ATOMIC_RELEASE);
+}
+
+const struct drm_render_driver *drm_render_driver(void) { return render_driver; }
+
+int drm_buffer_new_pages(struct file *file, uint64_t size, uint32_t *handle) {
+    struct drm_dumb_buffer *buffer = buffer_new(file, size);
+    if (!buffer) return -ENOMEM;
+    *handle = buffer->handle;
+    return 0;
+}
+
+int drm_buffer_new_device(struct file *file, uint64_t physical, uint64_t size, uint32_t *handle) {
+    if (!size || size > (1ULL << 32)) return -EINVAL;
+    uint32_t slot_handle = 0;
+    struct drm_dumb_buffer *slot = buffer_slot(&slot_handle);
+    if (!slot) return -ENOMEM;
+    slot->owner = file;
+    slot->refs = 1;
+    slot->size = (size + 4095ULL) & ~4095ULL;
+    slot->device_memory = 1;
+    slot->host_physical = physical;
+    slot->handle = slot_handle;
+    *handle = slot_handle;
+    return 0;
+}
+
+int drm_buffer_lookup(struct file *file, uint32_t handle, struct drm_buffer_view *view) {
+    struct drm_dumb_buffer *buffer = buffer_of(file, handle);
+    if (!buffer) return -ENOENT;
+    view->pages = buffer->pages;
+    view->page_count = buffer->page_count;
+    view->device_physical = buffer->device_memory ? buffer->host_physical : 0;
+    view->size = buffer->size;
+    return 0;
+}
+
+uint64_t drm_buffer_map_offset(uint32_t handle) {
+    return DRM_MAP_OFFSET_BASE + (uint64_t)handle * 4096ULL;
+}
+
+void drm_unlock_for_wait(void) { drm_leave(); }
+
+void drm_relock_after_wait(void) { drm_enter(); }

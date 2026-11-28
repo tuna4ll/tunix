@@ -33,6 +33,11 @@ struct display_flipper {
     int (*present_pages)(const uint64_t *pages, uint64_t page_count, uint32_t pitch,
                          uint32_t row_bytes, uint32_t rows);
     void (*forget_pages)(const uint64_t *pages);
+    // The same for a buffer in the device's own memory, at PHYSICAL as the
+    // CPU sees it (a render driver's GEM buffer, in BAR1).
+    // WIDTH is in pixels: a block-linear buffer's layout depends on it.
+    int (*present_device)(uint64_t physical, uint32_t pitch, uint32_t width, uint32_t row_bytes,
+                          uint32_t rows);
 };
 
 int display_early_init(const struct boot_framebuffer_info *boot, struct boot_framebuffer_info *out);

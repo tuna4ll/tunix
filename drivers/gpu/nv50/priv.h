@@ -77,7 +77,17 @@ struct nv50_lvds {
     uint16_t on_int3;
 };
 
-#define NV50_VRAM_RANGES 32U
+// A channel's 64 KiB instance block, as the channels' code lays it out.
+#define NV50_INST_BYTES   0x10000U
+#define NV50_INST_PD      0x0200U
+#define NV50_INST_DMA_VM  0x5500U
+#define NV50_INST_OBJECTS 0x5700U // engine objects and DMA objects, up to the RAMHT
+#define NV50_INST_RAMHT   0x8000U
+#define NV50_ENGINE_GR    1U
+#define NV50_ENGINE_CE    3U
+#define NV50_USERD(id)    (0xC00000U + (id) * 0x2000U)
+
+#define NV50_VRAM_RANGES 1024U
 
 struct nv50_vram_range {
     uint32_t start;
@@ -98,7 +108,12 @@ struct nv50_fifo {
     volatile uint32_t *ring_map;
     volatile uint32_t *sema_map;
     volatile uint32_t *inst_map;
+    volatile uint32_t *runlist_map;
+    uint32_t runlist_half;
     uint32_t gart_pt;
+    uint32_t tiled_pt;
+    volatile uint32_t *tiled_map;
+    struct nv50_vram tiled;
     volatile uint32_t *gart_map;
     struct nv50_vram gart;
     int copy_ready;
@@ -111,6 +126,11 @@ struct nv50_device {
     uint64_t bar0;
     uint64_t bar1;
     uint32_t vram_bytes;
+    // The memory controller's row block: VRAM of a tiled kind and of another
+    // never share one (nv50_fb_vram_rblock).
+    uint32_t rblock;
+    uint16_t pci_device_id;
+    uint8_t pci_bus, pci_slot, pci_function;
     uint32_t pramin_saved;
     const uint8_t *vbios;
     uint32_t vbios_bytes;
@@ -176,6 +196,24 @@ void nv50_fifo_ramht_add(struct nv50_device *gpu, uint32_t handle, uint32_t cont
 volatile uint32_t *nv50_vram_map(const struct nv50_device *gpu, uint32_t at, uint32_t bytes);
 int nv50_bar_flush(const struct nv50_device *gpu);
 int nv50_gr_start(struct nv50_device *gpu);
+void nv50_channel_layout(volatile uint32_t *inst, uint32_t inst_addr, uint64_t ib);
+void nv50_channel_ramht_add(volatile uint32_t *inst, uint32_t handle, uint32_t context);
+int nv50_channel_on(struct nv50_device *gpu, uint32_t id, uint32_t inst_addr);
+void nv50_channel_off(struct nv50_device *gpu, uint32_t id, uint32_t inst_addr);
+void nv50_mmu_flush(struct nv50_device *gpu);
+void nv50_nouveau_register(struct nv50_device *device);
+uint64_t nv50_tiled_map(struct nv50_device *gpu, uint32_t vram, uint32_t bytes, uint32_t kind);
+void nv50_tiled_unmap(struct nv50_device *gpu, uint64_t address, uint32_t bytes);
+uint32_t nv50_gr_blit(struct nv50_device *gpu, uint32_t dst, uint32_t dst_pitch, uint64_t src,
+                      uint32_t tile_mode, uint32_t width, uint32_t height);
+int nv50_nouveau_layout(uint32_t vram, uint32_t *kind, uint32_t *tile_mode, uint32_t *bytes);
+void nv50_present_forget_vram(uint32_t vram);
+int nv50_gr_pending(const struct nv50_device *gpu);
+void nv50_gr_recover(struct nv50_device *gpu);
+uint32_t nv50_gr_context_new(struct nv50_device *gpu);
+void nv50_gr_context_free(struct nv50_device *gpu, uint32_t context);
+void nv50_gr_context_bind(volatile uint32_t *inst, uint32_t context);
+uint32_t nv50_gr_context_bytes(void);
 void nv50_gr_selftest(struct nv50_device *gpu);
 
 int nv50_bios_read(struct nv50_device *gpu, uint8_t *image, uint32_t capacity);

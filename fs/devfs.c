@@ -464,7 +464,7 @@ void devfs_init(void) {
                 card->close = drm_device_close;
             }
 
-            devfs_publish_render_node(virtgpu_virgl_available());
+            devfs_publish_render_node(virtgpu_virgl_available() || drm_render_driver());
         }
     }
 

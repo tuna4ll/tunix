@@ -27,10 +27,10 @@ int nv50_vram_init(struct nv50_vram *vram, uint32_t start, uint32_t end) {
 }
 
 uint32_t nv50_vram_alloc(struct nv50_vram *vram, uint32_t bytes, uint32_t align) {
-    if (!bytes || !align || (align & (align - 1U))) return 0;
+    if (!bytes || !align) return 0;
     for (unsigned index = 0; index < vram->count; index++) {
         struct nv50_vram_range *range = &vram->ranges[index];
-        uint32_t at = (range->start + align - 1U) & ~(align - 1U);
+        uint32_t at = range->start + (align - range->start % align) % align;
         if (at < range->start || at >= range->end || range->end - at < bytes) continue;
         uint32_t head = range->start, tail = at + bytes, end = range->end;
         if (head == at && tail == end) {
@@ -143,6 +143,9 @@ uint32_t nv50_vram_free_bytes(const struct nv50_vram *vram) {
 #define GART_BYTES     0x20000000U
 #define GART_PT_BYTES  0x100000U
 #define PDE_4K_VRAM    0x00000003U
+// Clients' tiled buffers, mapped again here with their kind for the 2D
+// engine to read: 512 MiB of 4 KiB pages in the fourth PDE.
+#define TILED_BASE     0x60000000ULL
 #define PMMU_FLUSH     0x100C80U
 #define PMMU_ENGINE_CE 0x0DU
 
@@ -251,24 +254,42 @@ static int build_vm(struct nv50_device *gpu, volatile uint32_t *inst) {
     return 0;
 }
 
+// nv50_fb_vram_rblock: one row across every partition and bank, three of
+// them when the controller says so.
+static uint32_t vram_rblock(struct nv50_device *gpu) {
+    uint32_t r4 = nv50_rd32(gpu, 0x100204U);
+    uint32_t parts = (uint32_t)__builtin_popcount((nv50_rd32(gpu, 0x001540U) >> 16) & 0xFFU);
+    uint32_t colbits = (r4 >> 12) & 0xFU, banks = 1U << (((r4 >> 24) & 3U) + 2U);
+    uint32_t rblock = parts * banks * (1U << colbits) * 8U;
+    if (nv50_rd32(gpu, 0x100250U) & 1U) rblock *= 3U;
+    return rblock ? rblock : 0x10000U;
+}
+
 int nv50_fifo_start(struct nv50_device *gpu) {
     struct nv50_fifo *fifo = &gpu->fifo;
+    gpu->rblock = vram_rblock(gpu);
+    kprintf("NV50: fifo: vram row block %u bytes\n", gpu->rblock);
     fifo->inst = nv50_vram_alloc(&gpu->vram, INST_BYTES, 0x10000U);
-    fifo->runlist = nv50_vram_alloc(&gpu->vram, 0x1000U, 0x1000U);
+    // Two runlists, a page each: PFIFO takes a runlist's address in pages.
+    fifo->runlist = nv50_vram_alloc(&gpu->vram, 0x2000U, 0x1000U);
     fifo->ring = nv50_vram_alloc(&gpu->vram, PUSH_BYTES + IB_BYTES, 0x1000U);
     fifo->sema = nv50_vram_alloc(&gpu->vram, 0x1000U, 0x1000U);
     fifo->pt[0] = nv50_vram_alloc(&gpu->vram, PT_BYTES, 0x1000U);
     fifo->pt[1] = nv50_vram_alloc(&gpu->vram, PT_BYTES, 0x1000U);
     fifo->gart_pt = nv50_vram_alloc(&gpu->vram, GART_PT_BYTES, 0x1000U);
+    fifo->tiled_pt = nv50_vram_alloc(&gpu->vram, GART_PT_BYTES, 0x1000U);
     if (!fifo->inst || !fifo->runlist || !fifo->ring || !fifo->sema || !fifo->pt[1] ||
-        !fifo->gart_pt)
+        !fifo->gart_pt || !fifo->tiled_pt)
         return -1;
+    fifo->tiled_map = map_vram(gpu, fifo->tiled_pt, GART_PT_BYTES);
+    if (!fifo->tiled_map || nv50_vram_init(&fifo->tiled, 0x1000U, GART_BYTES) != 0) return -1;
+    for (uint32_t at = 0; at < GART_PT_BYTES / 4U; at++) fifo->tiled_map[at] = 0;
     fifo->gart_map = map_vram(gpu, fifo->gart_pt, GART_PT_BYTES);
     if (!fifo->gart_map || nv50_vram_init(&fifo->gart, 0x1000U, GART_BYTES) != 0) return -1;
     for (uint32_t at = 0; at < GART_PT_BYTES / 4U; at++) fifo->gart_map[at] = 0;
     volatile uint32_t *inst = map_vram(gpu, fifo->inst, INST_BYTES);
     fifo->inst_map = inst;
-    volatile uint32_t *runlist = map_vram(gpu, fifo->runlist, 0x1000U);
+    volatile uint32_t *runlist = map_vram(gpu, fifo->runlist, 0x2000U);
     fifo->ring_map = map_vram(gpu, fifo->ring, PUSH_BYTES + IB_BYTES);
     fifo->sema_map = map_vram(gpu, fifo->sema, 0x1000U);
     if (!inst || !runlist || !fifo->ring_map || !fifo->sema_map) return -1;
@@ -277,8 +298,31 @@ int nv50_fifo_start(struct nv50_device *gpu) {
     fifo->sema_map[0] = 0;
     if (build_vm(gpu, inst) != 0) return -1;
     wr64(inst, INST_PD + (uint32_t)(GART_BASE / PDE_SPAN) * 8U, (uint64_t)fifo->gart_pt | PDE_4K_VRAM);
+    wr64(inst, INST_PD + (uint32_t)(TILED_BASE / PDE_SPAN) * 8U, (uint64_t)fifo->tiled_pt | PDE_4K_VRAM);
 
-    // A DMA object over the whole space, for the push buffer and semaphores.
+    nv50_channel_layout(inst, fifo->inst, (uint64_t)fifo->ring + PUSH_BYTES);
+    ramht_add(inst, HANDLE_VM, INST_DMA_VM >> 4);
+    ramht_add(inst, HANDLE_COPY, (ENGINE_CE << 20) | (0x40U >> 4));
+    fifo->runlist_map = runlist;
+    (void)inst[0];
+    if (bar_flush(gpu) != 0) return -1;
+
+    fifo_init(gpu);
+    if (nv50_channel_on(gpu, CHANNEL, fifo->inst) != 0) {
+        report_fifo(gpu, "runlist did not take");
+        return -1;
+    }
+    fifo->put = 0;
+    fifo->ib_put = 0;
+    fifo->sequence = 0;
+    return 0;
+}
+
+// A channel's instance block, laid out as nouveau's g84 channel lays it out:
+// the DMA object over its whole space, the copy engine's context, and the
+// RAMFC with its indirect buffer at IB in its space. Its page directory and
+// RAMHT entries are the caller's.
+void nv50_channel_layout(volatile uint32_t *inst, uint32_t inst_addr, uint64_t ib) {
     uint64_t limit = 0xFFFFFFFFFFULL; // the 40-bit space, as nouveau's
     inst[(INST_DMA_VM + 0x00U) / 4U] = DMA_OBJECT_VM;
     inst[(INST_DMA_VM + 0x04U) / 4U] = (uint32_t)limit;
@@ -286,19 +330,14 @@ int nv50_fifo_start(struct nv50_device *gpu) {
     inst[(INST_DMA_VM + 0x0CU) / 4U] = (uint32_t)(limit >> 32) << 24;
     inst[(INST_DMA_VM + 0x10U) / 4U] = 0;
     inst[(INST_DMA_VM + 0x14U) / 4U] = 0;
-    ramht_add(inst, HANDLE_VM, INST_DMA_VM >> 4);
-    // The copy object: no instance of its own (0x40, as nvkm_ramht_update has
-    // it), run by the copy engine with its context bound as g84_ectx_bind does.
-    ramht_add(inst, HANDLE_COPY, (ENGINE_CE << 20) | (0x40U >> 4));
-    uint32_t ce_context = fifo->inst + INST_CE_CTX;
+    // The copy engine's context, bound as g84_ectx_bind binds it.
+    uint32_t ce_context = inst_addr + INST_CE_CTX;
     inst[(INST_ENG + ENG_CE + 0x00U) / 4U] = 0x00190000U;
     inst[(INST_ENG + ENG_CE + 0x04U) / 4U] = ce_context + 0xFFU;
     inst[(INST_ENG + ENG_CE + 0x08U) / 4U] = ce_context;
     inst[(INST_ENG + ENG_CE + 0x0CU) / 4U] = ce_context;
     inst[(INST_ENG + ENG_CE + 0x10U) / 4U] = 0;
     inst[(INST_ENG + ENG_CE + 0x14U) / 4U] = 0;
-
-    uint64_t ib = (uint64_t)fifo->ring + PUSH_BYTES;
     const uint32_t ramfc = INST_RAMFC / 4U;
     inst[ramfc + 0x3CU / 4U] = 0x403F6078U;
     inst[ramfc + 0x44U / 4U] = 0x01003FFFU;
@@ -309,25 +348,86 @@ int nv50_fifo_start(struct nv50_device *gpu) {
     inst[ramfc + 0x78U / 4U] = 0;
     inst[ramfc + 0x7CU / 4U] = 0x30000FFFU;
     inst[ramfc + 0x80U / 4U] = ((RAMHT_BITS - 9U) << 27) | (4U << 24) | (INST_RAMHT >> 4);
-    inst[ramfc + 0x88U / 4U] = (fifo->inst + INST_CACHE) >> 10;
-    inst[ramfc + 0x98U / 4U] = fifo->inst >> 12;
-    runlist[0] = CHANNEL;
-    (void)inst[0];
-    if (bar_flush(gpu) != 0) return -1;
+    inst[ramfc + 0x88U / 4U] = (inst_addr + INST_CACHE) >> 10;
+    inst[ramfc + 0x98U / 4U] = inst_addr >> 12;
+}
 
-    fifo_init(gpu);
-    nv50_wr32(gpu, PFIFO_CHAN(CHANNEL), (fifo->inst + INST_RAMFC) >> 8);
-    nv50_mask(gpu, PFIFO_CHAN(CHANNEL), PFIFO_CHAN_ON, PFIFO_CHAN_ON);
-    nv50_wr32(gpu, PFIFO_RUNLIST_BASE, fifo->runlist >> 12);
-    nv50_wr32(gpu, PFIFO_RUNLIST_COUNT, 1);
-    if (nv50_wait_clear(gpu, PFIFO_RUNLIST_COUNT, PFIFO_RUNLIST_BUSY) != 0) {
-        report_fifo(gpu, "runlist did not take");
-        return -1;
+void nv50_channel_ramht_add(volatile uint32_t *inst, uint32_t handle, uint32_t context) {
+    ramht_add(inst, handle, context);
+}
+
+// The channels PFIFO runs, rebuilt into the half of the runlist page it is
+// not reading, as nv50_runl_update alternates its segments.
+static uint32_t channels_on[4];
+
+static int runlist_commit(struct nv50_device *gpu) {
+    struct nv50_fifo *fifo = &gpu->fifo;
+    fifo->runlist_half ^= 1U;
+    volatile uint32_t *list = fifo->runlist_map + fifo->runlist_half * 1024U;
+    uint32_t count = 0;
+    for (uint32_t id = 0; id < 128U; id++)
+        if (channels_on[id / 32U] & (1U << (id % 32U))) list[count++] = id;
+    (void)list[0];
+    if (bar_flush(gpu) != 0) return -1;
+    nv50_wr32(gpu, PFIFO_RUNLIST_BASE, (fifo->runlist + fifo->runlist_half * 0x1000U) >> 12);
+    nv50_wr32(gpu, PFIFO_RUNLIST_COUNT, count);
+    return nv50_wait_clear(gpu, PFIFO_RUNLIST_COUNT, PFIFO_RUNLIST_BUSY);
+}
+
+int nv50_channel_on(struct nv50_device *gpu, uint32_t id, uint32_t inst_addr) {
+    nv50_wr32(gpu, PFIFO_CHAN(id), (inst_addr + INST_RAMFC) >> 8);
+    nv50_mask(gpu, PFIFO_CHAN(id), PFIFO_CHAN_ON, PFIFO_CHAN_ON);
+    channels_on[id / 32U] |= 1U << (id % 32U);
+    return runlist_commit(gpu);
+}
+
+// Off the runlist, its engines' contexts saved out (g84_ectx_bind with no
+// context), then unbound: the order nouveau takes a channel down in.
+void nv50_channel_off(struct nv50_device *gpu, uint32_t id, uint32_t inst_addr) {
+    nv50_mask(gpu, PFIFO_CHAN(id), PFIFO_CHAN_ON, 0);
+    channels_on[id / 32U] &= ~(1U << (id % 32U));
+    (void)runlist_commit(gpu);
+    static const uint32_t engines[] = {1U << (1U - 1U), 1U << (ENGINE_CE - 1U)};
+    for (unsigned index = 0; index < 2U; index++) {
+        uint32_t save = nv50_rd32(gpu, 0x002520U);
+        nv50_wr32(gpu, 0x002520U, (save & ~0x3FU) | engines[index]);
+        nv50_wr32(gpu, 0x0032FCU, inst_addr >> 12);
+        uint64_t deadline = time_uptime_ns() + 2000000000ULL;
+        while (nv50_rd32(gpu, 0x0032FCU) == 0xFFFFFFFFU && time_uptime_ns() < deadline)
+            cpu_relax();
+        nv50_wr32(gpu, 0x002520U, save);
     }
-    fifo->put = 0;
-    fifo->ib_put = 0;
-    fifo->sequence = 0;
-    return 0;
+    nv50_wr32(gpu, PFIFO_CHAN(id), 0);
+}
+
+// What the copy engine and PGRAPH hold of the page tables, gone: PGRAPH's
+// only once it is idle, as g84_gr_tlb_flush does it.
+void nv50_mmu_flush(struct nv50_device *gpu) {
+    // A PGRAPH that stayed busy once (a hung channel) is not waited for again
+    // until it is seen idle, or tearing a client down would take minutes.
+    static int busy_before;
+    nv50_mask(gpu, 0x400500U, 0x00000001U, 0);
+    uint64_t deadline = time_uptime_ns() + (busy_before ? 0 : 2000000000ULL);
+    for (;;) {
+        int idle = 1;
+        for (uint32_t reg = 0x400380U; reg <= 0x400388U && idle; reg += 4U)
+            for (uint32_t status = nv50_rd32(gpu, reg); status && idle; status >>= 3)
+                if ((status & 7U) == 1U) idle = 0;
+        if (idle) busy_before = 0;
+        if (idle || time_uptime_ns() > deadline) {
+            if (!idle && !busy_before) {
+                busy_before = 1;
+                kprintf("NV50: PGRAPH stayed busy through a TLB flush\n");
+            }
+            break;
+        }
+        cpu_relax();
+    }
+    nv50_wr32(gpu, PMMU_FLUSH, 0x00000001U);
+    (void)nv50_wait_clear(gpu, PMMU_FLUSH, 1U);
+    nv50_mask(gpu, 0x400500U, 0x00000001U, 0x00000001U);
+    nv50_wr32(gpu, PMMU_FLUSH, (PMMU_ENGINE_CE << 16) | 1U);
+    (void)nv50_wait_clear(gpu, PMMU_FLUSH, 1U);
 }
 
 static void push_on(struct nv50_fifo *fifo, unsigned subchannel, uint32_t method, unsigned count,
@@ -545,6 +645,30 @@ uint64_t nv50_gart_map(struct nv50_device *gpu, const uint64_t *pages, uint32_t 
     (void)fifo->gart_map[0];
     if (bar_flush(gpu) != 0) return 0;
     return GART_BASE + at;
+}
+
+// VRAM at VRAM, BYTES of it, in the kernel channel's space with KIND.
+uint64_t nv50_tiled_map(struct nv50_device *gpu, uint32_t vram, uint32_t bytes, uint32_t kind) {
+    struct nv50_fifo *fifo = &gpu->fifo;
+    if (!fifo->tiled_map || !bytes) return 0;
+    uint32_t at = nv50_vram_alloc(&fifo->tiled, bytes, 0x1000U);
+    if (!at) return 0;
+    for (uint32_t page = 0; page < bytes / 4096U; page++)
+        wr64(fifo->tiled_map, (at / 4096U + page) * 8U,
+             ((uint64_t)(vram + page * 4096U)) | ((uint64_t)kind << 40) | PTE_VALID);
+    (void)fifo->tiled_map[0];
+    if (bar_flush(gpu) != 0) return 0;
+    return TILED_BASE + at;
+}
+
+void nv50_tiled_unmap(struct nv50_device *gpu, uint64_t address, uint32_t bytes) {
+    struct nv50_fifo *fifo = &gpu->fifo;
+    uint32_t at = (uint32_t)(address - TILED_BASE);
+    for (uint32_t page = 0; page < bytes / 4096U; page++) wr64(fifo->tiled_map, (at / 4096U + page) * 8U, 0);
+    (void)fifo->tiled_map[0];
+    (void)bar_flush(gpu);
+    nv50_mmu_flush(gpu);
+    nv50_vram_free(&fifo->tiled, at, bytes);
 }
 
 // No copy may still read the pages: their PTEs go and the copy engine forgets them.

@@ -490,9 +490,28 @@ static void publish_pci_bus(void) {
     pci_for_each_device(publish_pci_device, NULL);
 }
 
+// The PCI function behind the DRM nodes: virtio-gpu's, or a render driver's.
+static int render_pci_identity(struct virtgpu_pci_identity *id, const char **driver) {
+    const struct drm_render_driver *render = drm_render_driver();
+    if (render) {
+        id->bus = render->pci_bus;
+        id->slot = render->pci_slot;
+        id->function = render->pci_function;
+        id->vendor = render->pci_vendor;
+        id->device = render->pci_device;
+        *driver = render->name;
+        return 0;
+    }
+    *driver = "virtio-pci";
+    return virtgpu_pci_identity(id);
+}
+
+static int render_nodes(void) { return virtgpu_virgl_available() || drm_render_driver(); }
+
 static void publish_pci_parent(const char *name) {
     struct virtgpu_pci_identity id;
-    if (virtgpu_pci_identity(&id) != 0) return;
+    const char *driver;
+    if (render_pci_identity(&id, &driver) != 0) return;
 
     char path[192];
     size_t used = 0;
@@ -512,7 +531,9 @@ static void publish_pci_parent(const char *name) {
 
     char uevent[192];
     size_t length = 0;
-    append_string(uevent, sizeof(uevent), &length, "DRIVER=virtio-pci\nPCI_ID=");
+    append_string(uevent, sizeof(uevent), &length, "DRIVER=");
+    append_string(uevent, sizeof(uevent), &length, driver);
+    append_string(uevent, sizeof(uevent), &length, "\nPCI_ID=");
     append_hex(uevent, sizeof(uevent), &length, id.vendor, 4);
     append_string(uevent, sizeof(uevent), &length, ":");
     append_hex(uevent, sizeof(uevent), &length, id.device, 4);
@@ -667,14 +688,22 @@ static void publish_device(const char *name, const char *devname, const char *su
 
 static void publish_drm(void) {
     if (!drm_available()) return;
-    int rendering = virtgpu_virgl_available();
-    publish_device("card0", "dri/card0", "drm",
-                   rendering ? "DRIVER=virtio_gpu\nDEVTYPE=drm_minor\n"
-                             : "DRIVER=tunixdrm\nDEVTYPE=drm_minor\n",
-                   DEV_MAJOR_DRM, DEV_MINOR_DRM_CARD0);
+    int rendering = render_nodes();
+    const struct drm_render_driver *render = drm_render_driver();
+    const char *driver = render ? render->name : rendering ? "virtio_gpu" : "tunixdrm";
+    char card[64], node[64];
+    size_t card_length = 0, node_length = 0;
+    append_string(card, sizeof(card), &card_length, "DRIVER=");
+    append_string(card, sizeof(card), &card_length, driver);
+    append_string(card, sizeof(card), &card_length, "\nDEVTYPE=drm_minor\n");
+    card[card_length] = '\0';
+    append_string(node, sizeof(node), &node_length, "DRIVER=");
+    append_string(node, sizeof(node), &node_length, driver);
+    append_string(node, sizeof(node), &node_length, "\nDEVTYPE=drm_render_minor\n");
+    node[node_length] = '\0';
+    publish_device("card0", "dri/card0", "drm", card, DEV_MAJOR_DRM, DEV_MINOR_DRM_CARD0);
     if (rendering) {
-        publish_device("renderD128", "dri/renderD128", "drm",
-                       "DRIVER=virtio_gpu\nDEVTYPE=drm_render_minor\n", DEV_MAJOR_DRM,
+        publish_device("renderD128", "dri/renderD128", "drm", node, DEV_MAJOR_DRM,
                        DEV_MINOR_DRM_RENDER0);
         publish_drm_nodes("card0", 2);
         publish_drm_nodes("renderD128", 2);
@@ -1325,7 +1354,7 @@ void sysfs_publish_drm(void) {
     VFS_GUARD;
     publish_drm();
     announce("card0");
-    if (virtgpu_virgl_available()) announce("renderD128");
+    if (render_nodes()) announce("renderD128");
 }
 
 void sysfs_remove_drm(void) {

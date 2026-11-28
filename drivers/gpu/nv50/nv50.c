@@ -87,6 +87,10 @@ static int map_gpu(void) {
         return -1;
     }
     gpu.vram_bytes = nv50_rd32(&gpu, VRAM_SIZE_REG) & 0xFFFFFF00U;
+    gpu.pci_device_id = (uint16_t)(pci_config_read32(bus, slot, function, 0) >> 16);
+    gpu.pci_bus = bus;
+    gpu.pci_slot = slot;
+    gpu.pci_function = function;
     kprintf("NV50: chip %x at %u:%u.%u, %u MiB vram\n", boot0, bus, slot, function,
             gpu.vram_bytes >> 20);
     return 0;
@@ -216,6 +220,77 @@ static int present_pages(const uint64_t *pages, uint64_t page_count, uint32_t pi
     return status;
 }
 
+// Clients' tiled VRAM buffers, mapped again with their kind for the 2D
+// engine, until their buffer goes.
+#define TILED_MAPPINGS 8U
+static struct {
+    uint32_t vram;
+    uint32_t bytes;
+    uint64_t address;
+} tiled_mappings[TILED_MAPPINGS];
+static unsigned next_tiled;
+
+static uint64_t tiled_mapping_for(uint32_t vram, uint32_t bytes, uint32_t kind) {
+    for (unsigned index = 0; index < TILED_MAPPINGS; index++)
+        if (tiled_mappings[index].vram == vram) return tiled_mappings[index].address;
+    unsigned slot = next_tiled++ % TILED_MAPPINGS;
+    if (tiled_mappings[slot].vram)
+        nv50_tiled_unmap(&gpu, tiled_mappings[slot].address, tiled_mappings[slot].bytes);
+    tiled_mappings[slot].vram = 0;
+    uint64_t address = nv50_tiled_map(&gpu, vram, bytes, kind);
+    if (!address) return 0;
+    tiled_mappings[slot].vram = vram;
+    tiled_mappings[slot].bytes = bytes;
+    tiled_mappings[slot].address = address;
+    return address;
+}
+
+// A buffer in VRAM: the copy engine copies a linear one into the back
+// buffer, the 2D engine a block-linear one; idle() flips once it is done.
+static int present_device(uint64_t physical, uint32_t pitch, uint32_t width, uint32_t row_bytes,
+                          uint32_t rows) {
+    if (!accelerated || !rows || physical < gpu.bar1 || physical - gpu.bar1 >= gpu.vram_bytes)
+        return -1;
+    uint32_t vram = (uint32_t)(physical - gpu.bar1);
+    uint32_t kind = 0, tile_mode = 0, bytes = 0;
+    if (nv50_nouveau_layout(vram, &kind, &tile_mode, &bytes) != 0) return -1;
+    if (kind == 0 && (uint64_t)pitch * (rows - 1U) + row_bytes > bytes) return -1;
+    lock_acquire(&display_lock);
+    int status = -1;
+    uint32_t target = buffer_vram[back_index];
+    uint32_t fence = 0;
+    if (!copy_fence) {
+        if (kind == 0) {
+            fence = nv50_copy_rect(&gpu, target, gpu.pitch, vram, pitch, row_bytes, rows);
+        } else {
+            uint64_t source = tiled_mapping_for(vram, bytes, kind);
+            if (source) fence = nv50_gr_blit(&gpu, target, gpu.pitch, source, tile_mode, width, rows);
+        }
+    }
+    if (fence) {
+        copy_fence = fence;
+        copy_target = target;
+        back_index = (back_index + 1U) % DRM_BUFFERS;
+        status = 0;
+    }
+    lock_release(&display_lock);
+    return status;
+}
+
+void nv50_present_forget_vram(uint32_t vram) {
+    lock_acquire(&display_lock);
+    uint64_t deadline = time_uptime_ns() + 100000000ULL;
+    while (copy_fence && !nv50_fifo_done(&gpu, copy_fence) && time_uptime_ns() < deadline)
+        cpu_relax();
+    finish_copy_locked();
+    for (unsigned index = 0; index < TILED_MAPPINGS; index++) {
+        if (tiled_mappings[index].vram != vram) continue;
+        nv50_tiled_unmap(&gpu, tiled_mappings[index].address, tiled_mappings[index].bytes);
+        tiled_mappings[index].vram = 0;
+    }
+    lock_release(&display_lock);
+}
+
 static void forget_pages(const uint64_t *pages) {
     lock_acquire(&display_lock);
     for (unsigned index = 0; index < MAPPINGS; index++) {
@@ -327,6 +402,7 @@ static const struct display_flipper flipper = {
     .gamma_set = gamma_set,
     .present_pages = present_pages,
     .forget_pages = forget_pages,
+    .present_device = present_device,
 };
 
 static int pci_probe(const struct pci_device *device) {
@@ -355,6 +431,13 @@ static void vblank_wake(void *unused) {
 }
 
 static struct work vblank_work = WORK_INITIALIZER(vblank_wake, NULL);
+
+static void gr_recover(void *unused) {
+    (void)unused;
+    nv50_gr_recover(&gpu);
+}
+
+static struct work gr_work = WORK_INITIALIZER(gr_recover, NULL);
 
 // The supervisor's steps, answered in process context as the display raises
 // them (a flip through the core channel raises all three), and whoever waits
@@ -391,6 +474,7 @@ static void interrupt(void *context) {
     __atomic_store_n(&vblank_ns, time_uptime_ns(), __ATOMIC_RELEASE);
     __atomic_add_fetch(&vblank_count, 1, __ATOMIC_ACQ_REL);
     if (gpu.flip_pending || copy_fence) work_queue(&vblank_work);
+    if (accelerated && nv50_gr_pending(&gpu)) work_queue(&gr_work);
 }
 
 static void start_vblank_interrupt(void) {
@@ -451,6 +535,8 @@ static void start_acceleration(void) {
     }
     accelerated = 1;
     kprintf("NV50: the copy engine takes DRM's present copies\n");
+    // Mesa's nv50 driver, once PGRAPH runs; without it Mesa stays on llvmpipe.
+    if (graphics) nv50_nouveau_register(&gpu);
 }
 
 static void nv50_late(void) {
