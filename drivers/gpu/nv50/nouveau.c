@@ -277,6 +277,9 @@ struct channel {
     uint32_t sequence;
     uint32_t gr_context;
     uint32_t next_object;
+    // Faulted or never finishing: what waits on it returns, and it takes no
+    // more work, as nouveau kills a channel.
+    volatile int dead;
 };
 
 struct bo {
@@ -296,6 +299,9 @@ struct bo {
         struct client *client;
         uint64_t va;
     } maps[MAPS];
+    // When and how it came, for the report of a client that lost track of it.
+    uint64_t born_ns;
+    const char *born_as;
 };
 
 static struct nv50_device *gpu;
@@ -307,6 +313,11 @@ static uint32_t bo_capacity;
 // BAR1, mapped once write-combined: all the CPU writes of this file go
 // through it, and are fenced before the GPU is told of them.
 static volatile uint8_t *bar1;
+// VRAM past BAR1, which only the GPU reaches: tiled buffers go there first,
+// cleared by the copy engine from ZERO_PAGE, once the selftest at register
+// time has seen the engine write and clear it.
+static int vram_high;
+static uint32_t zero_page;
 
 static volatile uint32_t *map(uint32_t at, uint32_t bytes) {
     if (!bar1 || !at || (uint64_t)at + bytes > BAR1_BYTES) return NULL;
@@ -349,7 +360,40 @@ static struct channel *channel_of(struct client *client, uint32_t id) {
 // ---- address spaces --------------------------------------------------------
 
 static int fence_done(const struct channel *channel, uint32_t sequence) {
-    return !channel || !channel->client || (int32_t)(channel->fence_map[0] - sequence) >= 0;
+    return !channel || !channel->client || channel->dead ||
+           (int32_t)(channel->fence_map[0] - sequence) >= 0;
+}
+
+static void report_stall(const struct channel *channel);
+
+static void channel_kill(struct channel *channel) {
+    if (!channel || !channel->client || channel->dead) return;
+    report_stall(channel);
+    channel->dead = 1;
+    kprintf("NV50: channel %u is dead: its work is refused from now on\n", channel->id);
+}
+
+// From PGRAPH's trap, in an interrupt: the channel of INSTANCE is dead.
+void nv50_nouveau_fault(uint32_t instance) {
+    for (unsigned index = 0; index < CHANNELS; index++) {
+        struct channel *channel = &channels[index];
+        if (!channel->client || channel->inst != instance || channel->dead) continue;
+        channel->dead = 1;
+        kprintf("NV50: channel %u faulted and is dead: its work is refused from now on\n",
+                channel->id);
+    }
+}
+
+// Waits up to NS for SEQUENCE; a channel that never gets there is killed.
+static void fence_wait(struct channel *channel, uint32_t sequence, uint64_t ns) {
+    uint64_t deadline = time_uptime_ns() + ns;
+    while (!fence_done(channel, sequence)) {
+        if (time_uptime_ns() >= deadline) {
+            channel_kill(channel);
+            return;
+        }
+        nv50_relax();
+    }
 }
 
 static int write_pdes(struct client *client, unsigned pde) {
@@ -458,6 +502,8 @@ static struct bo *bo_adopt(struct file *file, uint32_t handle) {
     bo->size = view.page_count * 4096ULL;
     bo->pages = view.pages;
     bo->tile_flags = TILE_NONCONTIG;
+    bo->born_ns = time_uptime_ns();
+    bo->born_as = "shared in";
     if (bo_track(bo) != 0) {
         kfree(bo);
         return NULL;
@@ -466,9 +512,7 @@ static struct bo *bo_adopt(struct file *file, uint32_t handle) {
 }
 
 static void bo_wait(struct bo *bo) {
-    uint64_t deadline = time_uptime_ns() + 2000000000ULL;
-    while (!fence_done(bo->busy_channel, bo->busy_sequence) && time_uptime_ns() < deadline)
-        cpu_relax();
+    fence_wait(bo->busy_channel, bo->busy_sequence, 2000000000ULL);
 }
 
 // What KMS needs to show one of the clients' VRAM buffers: its layout.
@@ -476,6 +520,13 @@ int nv50_nouveau_layout(uint32_t vram, uint32_t *kind, uint32_t *tile_mode, uint
     for (uint32_t handle = 0; handle < bo_capacity; handle++) {
         struct bo *bo = bos[handle];
         if (!bo || !bo->vram || bo->vram_addr != vram) continue;
+        // KMS shows a buffer once the GPU has done drawing it, as Linux's
+        // drm_gem_plane_helper_prepare_fb waits for its implicit fences: a
+        // compositor without IN_FENCE_FD flips as soon as it has queued a
+        // frame, and under load the frame was shown half drawn.
+        uint64_t deadline = time_uptime_ns() + 100000000ULL;
+        while (!fence_done(bo->busy_channel, bo->busy_sequence) && time_uptime_ns() < deadline)
+            nv50_relax();
         *kind = bo->kind;
         *tile_mode = bo->tile_mode;
         *bytes = (uint32_t)bo->size;
@@ -530,6 +581,8 @@ static int64_t gem_new(struct file *file, uint64_t argument) {
     memset(bo, 0, sizeof(*bo));
     bo->size = size;
     bo->align = align;
+    bo->born_ns = time_uptime_ns();
+    bo->born_as = "new";
     // nv50's memtype: bits 8-14 its kind, 16-17 compression, which is not done here.
     bo->kind = (request.info.tile_flags >> 8) & 0x7FU;
     bo->tile_mode = request.info.tile_mode;
@@ -537,22 +590,39 @@ static int64_t gem_new(struct file *file, uint64_t argument) {
     int status = -ENOMEM;
     bo->vram = (request.info.domain & DOMAIN_VRAM) || !(request.info.domain & DOMAIN_GART);
     if (bo->vram) {
-        bo->vram_addr = nv50_vram_alloc(&gpu->vram, (uint32_t)size, vram_align);
-        // shortcut: clients' VRAM stays inside BAR1, which every buffer is
-        // mapped through; buffers beyond it want a CPU map of their own.
-        volatile uint32_t *words = bo->vram_addr ? map(bo->vram_addr, (uint32_t)size) : NULL;
-        if (!words) {
+        // A tiled buffer, which no client maps, goes past BAR1 first and
+        // leaves BAR1 to those that are; any goes past it once BAR1 is full.
+        uint32_t at = 0;
+        if (vram_high && bo->kind)
+            at = nv50_vram_alloc_in(&gpu->vram, (uint32_t)size, vram_align, BAR1_BYTES, 0xFFFFFFFFU);
+        if (!at) at = nv50_vram_alloc_in(&gpu->vram, (uint32_t)size, vram_align, 0, BAR1_BYTES);
+        if (!at && vram_high)
+            at = nv50_vram_alloc_in(&gpu->vram, (uint32_t)size, vram_align, BAR1_BYTES, 0xFFFFFFFFU);
+        bo->vram_addr = at;
+        volatile uint32_t *words = at ? map(at, (uint32_t)size) : NULL;
+        // Fresh VRAM holds what its last owner left in it: the CPU clears
+        // what it reaches, the copy engine the rest.
+        int cleared = words != NULL;
+        if (at && !words)
+            cleared = nv50_engine_copy(at, 4096U, zero_page, 0, 4096U, (uint32_t)(size / 4096U)) == 0;
+        if (!cleared) {
             if (bo->vram_addr) nv50_vram_free(&gpu->vram, bo->vram_addr, (uint32_t)size);
             bo->vram_addr = 0;
             bo->vram = 0;
             if (!(request.info.domain & DOMAIN_GART)) {
+                static unsigned told;
+                if (told++ < 32U)
+                    kprintf("NV50: no VRAM for %u KiB (kind %x), %u KiB free\n",
+                            (unsigned)(size >> 10), (request.info.tile_flags >> 8) & 0x7FU,
+                            nv50_vram_free_bytes(&gpu->vram) >> 10);
                 kfree(bo);
                 return -ENOMEM;
             }
         } else {
-            // Fresh VRAM holds what its last owner left in it.
-            for (uint64_t word = 0; word < size / 4U; word++) words[word] = 0;
-            status = drm_buffer_new_device(file, gpu->bar1 + bo->vram_addr, size, &bo->handle);
+            if (words)
+                for (uint64_t word = 0; word < size / 4U; word++) words[word] = 0;
+            status = drm_buffer_new_device(file, gpu->bar1 + bo->vram_addr, size, words != NULL,
+                                           &bo->handle);
         }
     }
     if (!bo->vram) {
@@ -571,7 +641,19 @@ static int64_t gem_new(struct file *file, uint64_t argument) {
         return status;
     }
     bo_report(bo, client, &request.info);
-    if (!request.info.offset) return -ENOMEM;
+    if (!request.info.offset) {
+        static unsigned told;
+        if (told++ < 32U)
+            kprintf("NV50: no GPU address space for %u KiB\n", (unsigned)(size >> 10));
+        return -ENOMEM;
+    }
+    // VRAM running out, told once at each step down.
+    static uint32_t low_told = 512U;
+    uint32_t free_mib = nv50_vram_free_bytes(&gpu->vram) >> 20;
+    while (low_told > 16U && free_mib < low_told / 2U) {
+        low_told /= 2U;
+        kprintf("NV50: under %u MiB of VRAM free (%u MiB)\n", low_told, free_mib);
+    }
     return copy_to_user(argument, &request, sizeof(request)) == 0 ? 0 : -EFAULT;
 }
 
@@ -627,12 +709,14 @@ static int64_t gem_cpu_prep(struct file *file, uint64_t argument) {
     drm_unlock_for_wait();
     uint64_t deadline = time_uptime_ns() + 15000000000ULL;
     int done;
-    while (!(done = (int32_t)(semaphore[0] - sequence) >= 0) && time_uptime_ns() < deadline)
-        cpu_relax();
+    while (!(done = (int32_t)(semaphore[0] - sequence) >= 0) && !channel->dead &&
+           time_uptime_ns() < deadline)
+        nv50_relax();
     drm_relock_after_wait();
     // The buffer may have gone meanwhile; the channel, a static slot, has not.
-    if (!done && channel->client) report_stall(channel);
-    return done ? 0 : -EBUSY;
+    if (!done && channel->client) channel_kill(channel);
+    // A dead channel's fences count as signalled, as nouveau's do once killed.
+    return done || channel->dead ? 0 : -EBUSY;
 }
 
 // ---- channels -------------------------------------------------------------
@@ -641,8 +725,7 @@ static int64_t gem_cpu_prep(struct file *file, uint64_t argument) {
 
 static void channel_free(struct channel *channel) {
     if (!channel->client) return;
-    uint64_t deadline = time_uptime_ns() + 2000000000ULL;
-    while (!fence_done(channel, channel->sequence) && time_uptime_ns() < deadline) cpu_relax();
+    fence_wait(channel, channel->sequence, 2000000000ULL);
     nv50_channel_off(gpu, channel->id, channel->inst);
     unmap_range(channel->client, channel->ring_va, PUSH_BYTES + IB_BYTES);
     unmap_range(channel->client, channel->fence_va, 0x1000U);
@@ -859,7 +942,7 @@ static int64_t nvif(struct file *file, unsigned size, uint64_t argument) {
             info.revision = (uint8_t)boot0;
             info.family = 0x06; // TESLA
             info.ram_size = gpu->vram_bytes;
-            info.ram_user = BAR1_BYTES;
+            info.ram_user = vram_high ? gpu->vram_bytes : BAR1_BYTES;
             strncpy(info.chip, "NVA3", sizeof(info.chip) - 1);
             strncpy(info.name, "GT215", sizeof(info.name) - 1);
             memcpy(arguments, &info, sizeof(info));
@@ -887,8 +970,11 @@ static int ib_room(struct channel *channel) {
     for (;;) {
         uint32_t get = nv50_rd32(gpu, NV50_USERD(channel->id) + 0x88U);
         if (((channel->ib_put + 1U) % IB_ENTRIES) != get) return 0;
-        if (time_uptime_ns() > deadline) return -EBUSY;
-        cpu_relax();
+        if (time_uptime_ns() > deadline) {
+            channel_kill(channel);
+            return -ENODEV;
+        }
+        nv50_relax();
     }
 }
 
@@ -905,8 +991,8 @@ static int ib_queue(struct channel *channel, uint64_t va, uint32_t bytes, int no
 static int fence_emit(struct channel *channel) {
     // The kernel's own part of the ring is reused once the GPU is past it.
     if (channel->put + 8U > PUSH_BYTES / 4U) {
-        uint64_t deadline = time_uptime_ns() + 2000000000ULL;
-        while (!fence_done(channel, channel->sequence) && time_uptime_ns() < deadline) cpu_relax();
+        fence_wait(channel, channel->sequence, 2000000000ULL);
+        if (channel->dead) return -ENODEV;
         channel->put = 0;
     }
     uint32_t start = channel->put;
@@ -934,6 +1020,7 @@ static int64_t gem_pushbuf(struct file *file, uint64_t argument) {
     struct client *client = client_of(file, 0);
     struct channel *channel = channel_of(client, request.channel);
     if (!channel) return -ENOENT;
+    if (channel->dead) return -ENODEV;
     request.suffix0 = 0;
     request.suffix1 = 0;
     request.vram_available = nv50_vram_free_bytes(&gpu->vram);
@@ -955,6 +1042,48 @@ static int64_t gem_pushbuf(struct file *file, uint64_t argument) {
         status = -EFAULT;
         goto out;
     }
+    // Implicit sync, as nouveau_gem_pushbuf_validate gives it: a buffer
+    // another channel still has work on -- a client's frame the compositor is
+    // about to draw, a buffer the compositor still reads that the client
+    // draws into again -- is waited for before this work is queued. Each
+    // buffer keeps only its last user's fence, enough because that user had
+    // waited for the one before. DRM's lock is let go of meanwhile, so the
+    // other client goes on; the wait is bounded and kills nothing.
+    {
+        uint32_t want[CHANNELS] = {0};
+        int waiting = 0;
+        for (uint32_t index = 0; index < request.nr_buffers; index++) {
+            struct bo *bo = bo_find(buffers[index].handle);
+            struct channel *other = bo ? bo->busy_channel : NULL;
+            if (!other || other == channel || fence_done(other, bo->busy_sequence)) continue;
+            unsigned slot = (unsigned)(other - channels);
+            if (!want[slot] || (int32_t)(bo->busy_sequence - want[slot]) > 0)
+                want[slot] = bo->busy_sequence;
+            waiting = 1;
+        }
+        if (waiting) {
+            drm_unlock_for_wait();
+            uint64_t deadline = time_uptime_ns() + 2000000000ULL;
+            for (unsigned slot = 0; slot < CHANNELS; slot++) {
+                if (!want[slot]) continue;
+                // A channel freed meanwhile has signalled all it was given.
+                for (;;) {
+                    struct channel *other = &channels[slot];
+                    volatile uint32_t *semaphore = other->fence_map;
+                    if (!other->client || other->dead || !semaphore ||
+                        (int32_t)(semaphore[0] - want[slot]) >= 0 || time_uptime_ns() >= deadline)
+                        break;
+                    nv50_relax();
+                }
+            }
+            drm_relock_after_wait();
+            // This client's channel may have gone while the lock was let go.
+            if (channel_of(client, request.channel) != channel || channel->dead) {
+                status = channel->dead ? -ENODEV : -ENOENT;
+                goto out;
+            }
+        }
+    }
     int relocate = 0;
     for (uint32_t index = 0; index < request.nr_buffers; index++) {
         list[index] = bo_adopt(file, buffers[index].handle);
@@ -964,6 +1093,22 @@ static int64_t gem_pushbuf(struct file *file, uint64_t argument) {
             goto out;
         }
         uint32_t domain = list[index]->vram ? DOMAIN_VRAM : DOMAIN_GART;
+        // A client's own idea of a buffer's address comes from GEM_NEW,
+        // GEM_INFO or the last pushbuf; one outside every client's space
+        // means its copy of it went wrong, which the GPU then faults on.
+        if (buffers[index].presumed.valid && buffers[index].presumed.offset != vas[index] &&
+            (buffers[index].presumed.offset < VA_BASE || buffers[index].presumed.offset >= VA_END)) {
+            static unsigned told;
+            if (told++ < 32U)
+                kprintf("NV50: channel %u: buffer %u (%u KiB, %s, %s %u ms ago) presumed at %p,"
+                        " is at %p\n",
+                        channel->id, buffers[index].handle, (unsigned)(list[index]->size >> 10),
+                        list[index]->vram ? "vram" : "gart",
+                        list[index]->born_as ? list[index]->born_as : "?",
+                        (unsigned)((time_uptime_ns() - list[index]->born_ns) / 1000000U),
+                        (void *)(uintptr_t)buffers[index].presumed.offset,
+                        (void *)(uintptr_t)vas[index]);
+        }
         if (!buffers[index].presumed.valid || buffers[index].presumed.offset != vas[index] ||
             buffers[index].presumed.domain != domain) {
             buffers[index].presumed.valid = 0;
@@ -1045,7 +1190,9 @@ static int64_t getparam(uint64_t argument) {
     case GETPARAM_PCI_VENDOR:    request.value = 0x10DE; break;
     case GETPARAM_PCI_DEVICE:    request.value = gpu->pci_device_id; break;
     case GETPARAM_BUS_TYPE:      request.value = 2; break; // PCIe
-    case GETPARAM_FB_SIZE:       request.value = BAR1_BYTES; break; // what clients can have
+    case GETPARAM_FB_SIZE: // what clients can have
+        request.value = vram_high ? gpu->vram_bytes : BAR1_BYTES;
+        break;
     case GETPARAM_AGP_SIZE:      request.value = 0x20000000ULL; break;
     case GETPARAM_CHIPSET_ID:    request.value = (nv50_rd32(gpu, 0) >> 20) & 0x1FFU; break;
     case GETPARAM_VM_VRAM_BASE:  request.value = 0; break;
@@ -1111,6 +1258,46 @@ static struct drm_render_driver nouveau_driver = {
     .buffer_gone = buffer_gone,
 };
 
+// VRAM past BAR1 is used once the copy engine is seen to reach it: a
+// pattern the CPU writes into BAR1's part is copied past BAR1 and back, then
+// cleared there from the zero page and copied back again.
+static int high_vram_selftest(void) {
+    if (gpu->vram_bytes <= BAR1_BYTES) return 0;
+    const uint32_t bytes = 0x10000U;
+    zero_page = nv50_vram_alloc_in(&gpu->vram, 4096U, 4096U, 0, BAR1_BYTES);
+    uint32_t low = nv50_vram_alloc_in(&gpu->vram, bytes, 4096U, 0, BAR1_BYTES);
+    uint32_t back = nv50_vram_alloc_in(&gpu->vram, bytes, 4096U, 0, BAR1_BYTES);
+    uint32_t high = nv50_vram_alloc_in(&gpu->vram, bytes, 4096U, BAR1_BYTES, 0xFFFFFFFFU);
+    volatile uint32_t *zero = zero_page ? map(zero_page, 4096U) : NULL;
+    volatile uint32_t *low_map = low ? map(low, bytes) : NULL;
+    volatile uint32_t *back_map = back ? map(back, bytes) : NULL;
+    int ok = zero && low_map && back_map && high;
+    unsigned wrong_copy = 0, wrong_clear = 0;
+    if (ok) {
+        for (uint32_t word = 0; word < 1024U; word++) zero[word] = 0;
+        for (uint32_t word = 0; word < bytes / 4U; word++) {
+            low_map[word] = 0x5EED0000U ^ (word * 2654435761U);
+            back_map[word] = 0xFFFFFFFFU;
+        }
+        ok = flush() == 0 &&
+             nv50_engine_copy(high, 4096U, low, 4096U, 4096U, bytes / 4096U) == 0 &&
+             nv50_engine_copy(back, 4096U, high, 4096U, 4096U, bytes / 4096U) == 0;
+        for (uint32_t word = 0; ok && word < bytes / 4U; word++)
+            wrong_copy += back_map[word] != (0x5EED0000U ^ (word * 2654435761U));
+        ok = ok && nv50_engine_copy(high, 4096U, zero_page, 0, 4096U, bytes / 4096U) == 0 &&
+             nv50_engine_copy(back, 4096U, high, 4096U, 4096U, bytes / 4096U) == 0;
+        for (uint32_t word = 0; ok && word < bytes / 4U; word++) wrong_clear += back_map[word] != 0;
+    }
+    if (low) nv50_vram_free(&gpu->vram, low, bytes);
+    if (back) nv50_vram_free(&gpu->vram, back, bytes);
+    if (high) nv50_vram_free(&gpu->vram, high, bytes);
+    ok = ok && !wrong_copy && !wrong_clear;
+    kprintf("NV50: vram past bar1 (%u MiB): %s, %u words wrong copied, %u cleared\n",
+            (unsigned)((gpu->vram_bytes - BAR1_BYTES) >> 20), ok ? "in use" : "left alone",
+            wrong_copy, wrong_clear);
+    return ok;
+}
+
 void nv50_nouveau_register(struct nv50_device *device) {
     gpu = device;
     nouveau_driver.pci_bus = device->pci_bus;
@@ -1123,6 +1310,7 @@ void nv50_nouveau_register(struct nv50_device *device) {
         kprintf("NV50: BAR1 could not be mapped; no nouveau interface\n");
         return;
     }
+    vram_high = high_vram_selftest();
     drm_register_render_driver(&nouveau_driver);
     kprintf("NV50: DRM speaks nouveau 1.3.1 for Mesa\n");
 }

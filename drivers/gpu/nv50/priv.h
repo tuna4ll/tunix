@@ -3,6 +3,20 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <tunix/cpu.h>
+#include <tunix/smp.h>
+
+void process_preempt_point(void);
+
+// One turn of a spin waiting on the GPU. System calls run with interrupts
+// off, so the spin answers the other processors' TLB flushes itself and lets
+// another task run once its time is up (docs: multiprocessor.md); a GPU that
+// stops answering otherwise stops the machine.
+static inline void nv50_relax(void) {
+    smp_service_flush();
+    process_preempt_point();
+    cpu_relax();
+}
 
 #define PBUS_PRAMIN_BASE  0x001700U
 #define PBUS_FLUSH        0x070000U
@@ -175,6 +189,10 @@ int nv50_wait_clear(const struct nv50_device *gpu, uint32_t offset, uint32_t mas
 
 int nv50_vram_init(struct nv50_vram *vram, uint32_t start, uint32_t end);
 uint32_t nv50_vram_alloc(struct nv50_vram *vram, uint32_t bytes, uint32_t align);
+uint32_t nv50_vram_alloc_in(struct nv50_vram *vram, uint32_t bytes, uint32_t align, uint32_t lo,
+                            uint32_t hi);
+int nv50_engine_copy(uint64_t dst, uint32_t dst_pitch, uint64_t src, uint32_t src_pitch,
+                     uint32_t line_bytes, uint32_t lines);
 void nv50_vram_free(struct nv50_vram *vram, uint32_t at, uint32_t bytes);
 uint32_t nv50_vram_free_bytes(const struct nv50_vram *vram);
 int nv50_fifo_start(struct nv50_device *gpu);
@@ -202,6 +220,7 @@ int nv50_channel_on(struct nv50_device *gpu, uint32_t id, uint32_t inst_addr);
 void nv50_channel_off(struct nv50_device *gpu, uint32_t id, uint32_t inst_addr);
 void nv50_mmu_flush(struct nv50_device *gpu);
 void nv50_nouveau_register(struct nv50_device *device);
+void nv50_nouveau_fault(uint32_t instance);
 uint64_t nv50_tiled_map(struct nv50_device *gpu, uint32_t vram, uint32_t bytes, uint32_t kind);
 void nv50_tiled_unmap(struct nv50_device *gpu, uint64_t address, uint32_t bytes);
 uint32_t nv50_gr_blit(struct nv50_device *gpu, uint32_t dst, uint32_t dst_pitch, uint64_t src,

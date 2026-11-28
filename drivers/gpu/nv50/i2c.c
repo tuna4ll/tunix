@@ -31,7 +31,7 @@ struct bus {
 
 static void delay_us(unsigned us) {
     uint64_t until = time_uptime_ns() + (uint64_t)us * 1000ULL;
-    while (time_uptime_ns() < until) cpu_relax();
+    while (time_uptime_ns() < until) nv50_relax();
 }
 
 static void drive_scl(struct bus *bus, int high) {

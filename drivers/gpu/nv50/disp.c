@@ -130,7 +130,7 @@ int nv50_wait_clear(const struct nv50_device *gpu, uint32_t offset, uint32_t mas
     uint64_t deadline = time_uptime_ns() + TIMEOUT_NS;
     while (nv50_rd32(gpu, offset) & mask) {
         if (time_uptime_ns() > deadline) return -1;
-        cpu_relax();
+        nv50_relax();
     }
     return 0;
 }
@@ -260,7 +260,7 @@ static int kick(struct nv50_device *gpu) {
     uint64_t deadline = time_uptime_ns() + TIMEOUT_NS;
     while (nv50_rd32(gpu, PDISP_CORE_GET) != gpu->push_at) {
         if (time_uptime_ns() > deadline) return -1;
-        cpu_relax();
+        nv50_relax();
     }
     return 0;
 }
@@ -346,7 +346,7 @@ static int service_supervisors(struct nv50_device *gpu) {
         if (vram_rd32(gpu, VRAM_SYNC) & 1U) return 0;
         uint32_t pending = nv50_rd32(gpu, PDISP_INTR_1) & 0x70U;
         if (!pending) {
-            cpu_relax();
+            nv50_relax();
             continue;
         }
         nv50_wr32(gpu, PDISP_INTR_1, pending);
@@ -439,7 +439,7 @@ int nv50_disp_cursor_start(struct nv50_device *gpu) {
     uint64_t deadline = time_uptime_ns() + TIMEOUT_NS;
     while ((nv50_rd32(gpu, CURSOR_CTRL) & 0x00030000U) != 0x00010000U) {
         if (time_uptime_ns() > deadline) return -1;
-        cpu_relax();
+        nv50_relax();
     }
     return 0;
 }
@@ -457,7 +457,7 @@ int nv50_disp_cursor_move(struct nv50_device *gpu, int32_t x, int32_t y) {
     uint64_t deadline = time_uptime_ns() + 100000000ULL;
     while ((nv50_rd32(gpu, CURSOR_USER + CURSOR_FREE) & 0x3FU) < 4U) {
         if (time_uptime_ns() > deadline) return -1;
-        cpu_relax();
+        nv50_relax();
     }
     nv50_wr32(gpu, CURSOR_USER + CURSOR_POINT, ((uint32_t)y << 16) | ((uint32_t)x & 0xFFFFU));
     nv50_wr32(gpu, CURSOR_USER + CURSOR_GO, 0);

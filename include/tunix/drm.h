@@ -55,7 +55,9 @@ struct drm_buffer_view {
     uint64_t size;
 };
 int drm_buffer_new_pages(struct file *file, uint64_t size, uint32_t *handle);
-int drm_buffer_new_device(struct file *file, uint64_t physical, uint64_t size, uint32_t *handle);
+// CPU_MAPPABLE 0: device memory only the device reaches; mmap refuses it.
+int drm_buffer_new_device(struct file *file, uint64_t physical, uint64_t size, int cpu_mappable,
+                          uint32_t *handle);
 int drm_buffer_lookup(struct file *file, uint32_t handle, struct drm_buffer_view *view);
 uint64_t drm_buffer_map_offset(uint32_t handle);
 void drm_unlock_for_wait(void);

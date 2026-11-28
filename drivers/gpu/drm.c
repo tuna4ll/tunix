@@ -550,8 +550,10 @@ struct drm_dumb_buffer {
     uint32_t blob_mem;
     uint64_t host_physical;
     uint32_t map_info;
-    // A render driver's buffer in device memory, mapped write-combined.
+    // A render driver's buffer in device memory, mapped write-combined,
+    // unless it lies where the CPU cannot reach it.
     uint8_t device_memory;
+    uint8_t device_hidden;
 };
 
 struct drm_import {
@@ -1590,6 +1592,7 @@ static int64_t map_buffer(struct drm_dumb_buffer *buffer, uint64_t cr3, uint64_t
     uint64_t flags = page_flags | PAGE_USER | PAGE_PRESENT | PAGE_NX;
     uint64_t mapped = 0;
     if (buffer->device_memory) {
+        if (buffer->device_hidden) return -EINVAL;
         flags |= PAGE_DEVICE |
             (vmm_write_combining_available() ? PAGE_WRITE_COMBINING : PAGE_UNCACHED);
         for (; mapped < length; mapped += 4096ULL) {
@@ -1939,6 +1942,7 @@ static int present_via_flipper(const struct display_flipper *flipper,
     uint64_t deadline = time_uptime_ns() + FLIP_WAIT_NS;
     while (!flipper->idle(1)) {
         if (time_uptime_ns() > deadline) return -EBUSY;
+        smp_service_flush();
         cpu_relax();
     }
     uint32_t screen_height = framebuffer_height();
@@ -2794,14 +2798,24 @@ int64_t drm_file_ioctl(struct file *file, unsigned long request, uint64_t user_a
     drm_leave();
     if (trace) {
         uint64_t took = (time_uptime_ns() - start) / 1000U;
-        // The budget starts again for each new process, so a later one is seen too.
-        static uint64_t traced_pid;
-        if (process_current_pid() != traced_pid) {
-            traced_pid = process_current_pid();
-            traced = 0;
+        // Each process has a budget of its own, so a later one is seen too:
+        // the last few processes' counts, the oldest given up for a new one.
+        static struct {
+            uint64_t pid;
+            unsigned count;
+        } budgets[8];
+        static unsigned next_budget;
+        uint64_t pid = process_current_pid();
+        unsigned slot = 0;
+        while (slot < 8U && budgets[slot].pid != pid) slot++;
+        if (slot == 8U) {
+            slot = next_budget++ % 8U;
+            budgets[slot].pid = pid;
+            budgets[slot].count = 0;
         }
+        traced = budgets[slot].count;
         if (traced < 400U || answer < 0 || took > 5000U) {
-            traced++;
+            budgets[slot].count++;
             kprintf("drm: pid %u ioctl %x size %u -> %d in %u us\n",
                     (unsigned)process_current_pid(), (unsigned)IOCTL_NR(request),
                     (unsigned)((request >> 16) & 0x3FFFU), (int)answer, (unsigned)took);
@@ -3106,7 +3120,8 @@ int drm_buffer_new_pages(struct file *file, uint64_t size, uint32_t *handle) {
     return 0;
 }
 
-int drm_buffer_new_device(struct file *file, uint64_t physical, uint64_t size, uint32_t *handle) {
+int drm_buffer_new_device(struct file *file, uint64_t physical, uint64_t size, int cpu_mappable,
+                          uint32_t *handle) {
     if (!size || size > (1ULL << 32)) return -EINVAL;
     uint32_t slot_handle = 0;
     struct drm_dumb_buffer *slot = buffer_slot(&slot_handle);
@@ -3115,6 +3130,7 @@ int drm_buffer_new_device(struct file *file, uint64_t physical, uint64_t size, u
     slot->refs = 1;
     slot->size = (size + 4095ULL) & ~4095ULL;
     slot->device_memory = 1;
+    slot->device_hidden = !cpu_mappable;
     slot->host_physical = physical;
     slot->handle = slot_handle;
     *handle = slot_handle;

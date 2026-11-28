@@ -71,6 +71,7 @@ const struct module_export kernel_symbols[] = {
     EXPORT(drm_register_render_driver),
     EXPORT(drm_relock_after_wait),
     EXPORT(drm_unlock_for_wait),
+    EXPORT(smp_service_flush),
     EXPORT(sysfs_publish_backlight),
     EXPORT(vmm_map_device_write_combining),
 #endif

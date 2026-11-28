@@ -27,11 +27,20 @@ int nv50_vram_init(struct nv50_vram *vram, uint32_t start, uint32_t end) {
 }
 
 uint32_t nv50_vram_alloc(struct nv50_vram *vram, uint32_t bytes, uint32_t align) {
+    return nv50_vram_alloc_in(vram, bytes, align, 0, 0xFFFFFFFFU);
+}
+
+// First fit, the block wholly inside [LO, HI).
+uint32_t nv50_vram_alloc_in(struct nv50_vram *vram, uint32_t bytes, uint32_t align, uint32_t lo,
+                            uint32_t hi) {
     if (!bytes || !align) return 0;
     for (unsigned index = 0; index < vram->count; index++) {
         struct nv50_vram_range *range = &vram->ranges[index];
-        uint32_t at = range->start + (align - range->start % align) % align;
-        if (at < range->start || at >= range->end || range->end - at < bytes) continue;
+        uint32_t from = range->start > lo ? range->start : lo;
+        uint32_t to = range->end < hi ? range->end : hi;
+        if (from >= to) continue;
+        uint32_t at = from + (align - from % align) % align;
+        if (at < from || at >= to || to - at < bytes) continue;
         uint32_t head = range->start, tail = at + bytes, end = range->end;
         if (head == at && tail == end) {
             for (unsigned move = index; move + 1U < vram->count; move++)
@@ -395,7 +404,7 @@ void nv50_channel_off(struct nv50_device *gpu, uint32_t id, uint32_t inst_addr) 
         nv50_wr32(gpu, 0x0032FCU, inst_addr >> 12);
         uint64_t deadline = time_uptime_ns() + 2000000000ULL;
         while (nv50_rd32(gpu, 0x0032FCU) == 0xFFFFFFFFU && time_uptime_ns() < deadline)
-            cpu_relax();
+            nv50_relax();
         nv50_wr32(gpu, 0x002520U, save);
     }
     nv50_wr32(gpu, PFIFO_CHAN(id), 0);
@@ -422,7 +431,7 @@ void nv50_mmu_flush(struct nv50_device *gpu) {
             }
             break;
         }
-        cpu_relax();
+        nv50_relax();
     }
     nv50_wr32(gpu, PMMU_FLUSH, 0x00000001U);
     (void)nv50_wait_clear(gpu, PMMU_FLUSH, 1U);
@@ -476,7 +485,7 @@ int nv50_fifo_wait(struct nv50_device *gpu, uint32_t sequence, uint64_t timeout_
     uint64_t deadline = time_uptime_ns() + timeout_ns;
     while ((int32_t)(gpu->fifo.sema_map[0] - sequence) < 0) {
         if (time_uptime_ns() > deadline) return -1;
-        cpu_relax();
+        nv50_relax();
     }
     return 0;
 }
@@ -729,7 +738,7 @@ static void copy_selftest(struct nv50_device *gpu) {
             fenced ? "signalled" : "missing", (unsigned)(took / 1000ULL), wrong, first,
             to[first], from[first]);
     uint64_t until = time_uptime_ns() + 100000000ULL;
-    while (time_uptime_ns() < until) cpu_relax();
+    while (time_uptime_ns() < until) nv50_relax();
     wrong = copy_mismatches(from, to, &first);
     kprintf("NV50: copy: 100 ms later %u differ\n", wrong);
     report_copy_engine(gpu);

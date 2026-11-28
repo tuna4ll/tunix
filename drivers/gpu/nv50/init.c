@@ -85,7 +85,7 @@ static void mask_reg(struct init *init, uint32_t reg, uint32_t mask, uint32_t va
 
 static void delay_us(uint64_t us) {
     uint64_t until = time_uptime_ns() + us * 1000ULL;
-    while (time_uptime_ns() < until) cpu_relax();
+    while (time_uptime_ns() < until) nv50_relax();
 }
 
 // The BIT 'I' table: the script table and the condition table, at fixed

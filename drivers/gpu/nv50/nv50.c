@@ -210,6 +210,34 @@ static struct {
 static unsigned next_mapping;
 static int accelerated;
 
+// A copy for the nouveau interface, VRAM to VRAM in the kernel channel's
+// space, in turn with the presents: LINES of LINE_BYTES, waited for. A
+// source pitch of 0 repeats one line, which is how a block is cleared.
+int nv50_engine_copy(uint64_t dst, uint32_t dst_pitch, uint64_t src, uint32_t src_pitch,
+                     uint32_t line_bytes, uint32_t lines) {
+    if (!accelerated) return -1;
+    lock_acquire(&display_lock);
+    uint64_t deadline = time_uptime_ns() + 100000000ULL;
+    while (copy_fence && !nv50_fifo_done(&gpu, copy_fence) && time_uptime_ns() < deadline)
+        nv50_relax();
+    finish_copy_locked();
+    int status = copy_fence ? -1 : 0;
+    uint32_t fence = 0;
+    while (!status && lines) {
+        uint32_t now = lines > 8191U ? 8191U : lines;
+        fence = nv50_copy_rect(&gpu, dst, dst_pitch, src, src_pitch, line_bytes, now);
+        if (!fence) status = -1;
+        dst += (uint64_t)dst_pitch * now;
+        src += (uint64_t)src_pitch * now;
+        lines -= now;
+    }
+    deadline = time_uptime_ns() + 2000000000ULL;
+    while (fence && !nv50_fifo_done(&gpu, fence) && time_uptime_ns() < deadline) nv50_relax();
+    if (fence && !nv50_fifo_done(&gpu, fence)) status = -1;
+    lock_release(&display_lock);
+    return status;
+}
+
 static uint64_t mapping_for(const uint64_t *pages, uint64_t count) {
     for (unsigned index = 0; index < MAPPINGS; index++)
         if (mappings[index].pages == pages && mappings[index].count == count)
@@ -311,7 +339,7 @@ void nv50_present_forget_vram(uint32_t vram) {
     lock_acquire(&display_lock);
     uint64_t deadline = time_uptime_ns() + 100000000ULL;
     while (copy_fence && !nv50_fifo_done(&gpu, copy_fence) && time_uptime_ns() < deadline)
-        cpu_relax();
+        nv50_relax();
     finish_copy_locked();
     for (unsigned index = 0; index < TILED_MAPPINGS; index++) {
         if (tiled_mappings[index].vram != vram) continue;
@@ -328,7 +356,7 @@ static void forget_pages(const uint64_t *pages) {
         // The engine may still be reading them for the last present.
         uint64_t deadline = time_uptime_ns() + 100000000ULL;
         while (copy_fence && !nv50_fifo_done(&gpu, copy_fence) && time_uptime_ns() < deadline)
-            cpu_relax();
+            nv50_relax();
         finish_copy_locked();
         nv50_gart_unmap(&gpu, mappings[index].address, (uint32_t)mappings[index].count);
         mappings[index].pages = NULL;

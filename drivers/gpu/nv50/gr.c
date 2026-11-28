@@ -150,6 +150,22 @@ void nv50_gr_recover(struct nv50_device *gpu) {
                 status, trap, (address >> 16) & 7U, address & 0x1FFCU, nv50_rd32(gpu, 0x400708U),
                 nv50_rd32(gpu, 0x400814U), (nv50_rd32(gpu, 0x40032CU) & 0x0FFFFFFFU) << 12);
     }
+    if (trap & 0x2U) {
+        // M2MF stays wedged after a trap, and PGRAPH with it, until it is
+        // reset, as nv50_gr_trap_handler does.
+        if (reported <= 16U)
+            kprintf("NV50: M2MF trap %x: %x %x %x %x\n", nv50_rd32(gpu, 0x406800U),
+                    nv50_rd32(gpu, 0x406804U), nv50_rd32(gpu, 0x406808U),
+                    nv50_rd32(gpu, 0x40680CU), nv50_rd32(gpu, 0x406810U));
+        nv50_wr32(gpu, 0x400040U, 2U);
+        nv50_wr32(gpu, 0x400040U, 0);
+    }
+    if (trap & 0x8U) { // the stream-out unit, likewise
+        nv50_wr32(gpu, 0x400040U, 0x80U);
+        nv50_wr32(gpu, 0x400040U, 0);
+    }
+    // A client's channel that traps is done for, as nouveau kills it.
+    if (trap) nv50_nouveau_fault((nv50_rd32(gpu, 0x40032CU) & 0x0FFFFFFFU) << 12);
     if (trap) {
         static const uint32_t units[] = {0x400804U, 0x406800U, 0x400C04U,
                                          0x401800U, 0x405018U, 0x402000U};
